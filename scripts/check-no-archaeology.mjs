@@ -83,6 +83,7 @@ const ROOTS = [
   '.github/workflows', // the WHOLE workflows dir (every workflow file), not just ci.yml
   'examples/acme-notes',
   'examples/acme-notes-backend',
+  'examples/lead-qualifier',
   'examples/invoice-intake',
   'examples/contract-intake',
   'examples/support-intake-chat',
