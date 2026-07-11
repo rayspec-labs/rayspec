@@ -5,16 +5,19 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.0] - 2026-07-11
+## [1.1.0] - 2026-07-12
 
 ### Added
 
-- **`rayspec-serve` boots a backend-profile spec with agents directly.** Point
-  `RAYSPEC_SPEC_PATH` at a backend-profile document that declares agents and the
-  shipped entrypoint builds each declared agent's backend instance from the ambient
-  environment (for example the `openai` backend from `OPENAI_API_KEY`) — no
-  hand-written `AgentBackendsFactory` wrapper. A missing or misconfigured credential
-  fails the boot fast, naming the backend and the agent(s) that select it.
+- **`rayspec-serve` and `rayspec deploy` boot a backend-profile spec with agents
+  directly.** Point either entrypoint at a backend-profile document that declares
+  agents — `rayspec-serve` reads `RAYSPEC_SPEC_PATH`, and `rayspec deploy <spec>`
+  sets it for you — and the shipped boot builds each declared agent's backend
+  instance from the ambient environment (for example the `openai` backend from
+  `OPENAI_API_KEY`), with no hand-written `AgentBackendsFactory` wrapper. Both paths
+  assemble their deployer seams through the same shared builder, so `deploy` and
+  `serve` are the same boot for a spec with agents. A missing or misconfigured
+  credential fails the boot fast, naming the backend and the agent(s) that select it.
 - **A worked backend-profile example with a live agent.** `examples/lead-qualifier`
   is a backend-profile spec whose declared agent runs off-request on the durable
   worker and records its verdict through a persist tool — a runnable end-to-end
@@ -24,16 +27,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `details.missing_permission`, so a client can tell which scope it is missing. A
   membership-failure 403 and an unauthenticated 401 stay bare (no scope leak).
 
+### Changed
+
+- **`LICENSE` copyright holder is now RaySpec Labs.** The FSL-1.1-ALv2 notice
+  attributes copyright to RaySpec Labs.
+- Internal tidy-ups: `pnpm lint` is warning-free, and the dev-harness scratch
+  directory `.dev-blobs/` is now gitignored.
+
+### Fixed
+
+- **`@rayspec/local-boot` drops the derived DBOS system database on a fresh-database
+  re-provision.** When the local dev harness re-provisions its throwaway database
+  (`DROP`+`CREATE`), it now also drops the sibling `<db>_dbos_sys` durable-worker
+  system database, so a fresh-empty app database never pairs with orphaned
+  workflow/queue state auto-created by a previous run.
+
 ### Documentation
 
 - Clarified four onboarding points: a backend-profile spec with agents boots
-  directly (no wrapper); a returning user calls `POST /v1/auth/login` (which returns
+  directly (no wrapper) — via either `rayspec-serve` or the equivalent `rayspec
+  deploy`; a returning user calls `POST /v1/auth/login` (which returns
   `activeOrgId: null`) then `POST /v1/orgs/{id}/switch` to obtain an org-scoped
   token; the Anthropic subscription path needs `CLAUDE_CODE_OAUTH_TOKEN` in the
   server process's own environment; and the declarative `store` `list` op is
   unfiltered, unsorted, and uncounted (capped, with an `X-Result-Truncated` header)
   — a filtered, sorted, paged, or counted read drops to a `store:write`-gated
   `handler` route.
+- `.env.example` now documents `RAYSPEC_PRODUCT_TENANT_ID` and
+  `RAYSPEC_EXTRACTION_MODE`, the two variables a product-profile `deploy` requires.
 
 ## [1.0.0] - 2026-07-11
 
