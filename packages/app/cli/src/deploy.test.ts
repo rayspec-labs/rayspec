@@ -9,6 +9,8 @@
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { registerProductStores } from '@rayspec/db/composition';
+import { assembleOptsFromEnv, loadServerConfig } from '@rayspec/server';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DeployCliError, runDeploy } from './deploy.js';
 
@@ -98,11 +100,15 @@ describe('rayspec deploy — structural guards (stays on the sanctioned path)', 
   // call-site checks below (we assert the CODE never calls it, not that the file never names it).
   const code = rawSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
 
-  it('NEVER builds product tables itself (its only registration surface is the assembleServer callback)', () => {
-    // A CLI that called buildProductTables would over-register / pollute SCOPED — its sole registration
-    // path must be `registerProductTables: registerProductStores` passed to assembleServer.
+  it('NEVER builds product tables itself; it wires the SHARED opts builder (assembleOptsFromEnv), not a bare registrar', () => {
+    // A CLI that called buildProductTables would over-register / pollute SCOPED. Its registration flows
+    // through the SAME `assembleOptsFromEnv` builder rayspec-serve uses (which wires registerProductStores
+    // + the env-driven agent-backend factory) — NOT a hand-rolled bare `{ registerProductTables }`, which
+    // would DROP the agent factory so a backend-profile spec WITH agents would boot without its agents.
     expect(code).not.toMatch(/buildProductTables/);
-    expect(code).toMatch(/registerProductTables:\s*registerProductStores/);
+    expect(code).toMatch(/assembleServer\(\s*config,\s*assembleOptsFromEnv\(config\)\s*\)/);
+    // REDs if the CLI reverts to the pre-parity bare registrar (the form that dropped the agent factory).
+    expect(code).not.toMatch(/registerProductTables:\s*registerProductStores/);
   });
 
   it('wraps assembleServer, NOT the kill-set deploy()', () => {
@@ -114,5 +120,35 @@ describe('rayspec deploy — structural guards (stays on the sanctioned path)', 
 
   it('seals the sanctioned door after boot', () => {
     expect(code).toMatch(/sealProductStores\s*\(\s*\)/);
+  });
+});
+
+/**
+ * The FUNCTIONAL fail-the-fix for the agent-boot parity: `serveDeployment` composes
+ * `assembleServer(config, assembleOptsFromEnv(config))` (asserted structurally above). Here we prove the
+ * builder the CLI hands to assembleServer actually yields the env-driven agent factory for a
+ * backend-profile spec WITH agents — so `rayspec deploy <such-spec>` boots its declared agents (parity
+ * with rayspec-serve). DB-free: `assembleOptsFromEnv` only reads the spec file + constructs the adapter
+ * (no network, no DB); `loadServerConfig` shape-checks three dummy boot secrets.
+ */
+describe('rayspec deploy — wires the agent-backend factory for a backend-profile spec with agents', () => {
+  // A committed backend-profile example that declares an `openai` agent (the same doc the README/smoke use).
+  const LEAD_QUALIFIER = join(repoRoot, 'examples/lead-qualifier/lead-qualifier.rayspec.yaml');
+  const baseConfig = loadServerConfig({
+    DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+    RAYSPEC_JWT_SIGNING_KEY: 'dummy-not-a-real-pem',
+    RAYSPEC_API_KEY_PEPPER: 'dummy-pepper',
+  });
+
+  it('a backend-profile spec WITH an agent → the sanctioned validating registrar + an agent factory', () => {
+    const opts = assembleOptsFromEnv(
+      { ...baseConfig, specPath: LEAD_QUALIFIER },
+      { OPENAI_API_KEY: 'sk-dummy-not-a-real-key' },
+    );
+    // The SAME sanctioned validating registrar (registerProductStores) rayspec-serve wires — by identity.
+    expect(opts.registerProductTables).toBe(registerProductStores);
+    // The env-driven agent-backend factory — the whole point of the parity fix; a bare
+    // `{ registerProductTables }` (the pre-fix CLI form) would leave this undefined.
+    expect(opts.agentBackendsFactory).toBeTypeOf('function');
   });
 });
