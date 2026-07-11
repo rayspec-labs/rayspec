@@ -212,6 +212,29 @@ curl -s -X POST http://localhost:8080/v1/orgs/<ORG_ID>/switch \
 # → {"accessToken":"<ORG_TOKEN>","tokenType":"Bearer","expiresIn":480,"activeOrgId":"<ORG_ID>"}
 ```
 
+`register` **auto-created** the org because the request passed an `orgName`, so its
+response's `activeOrgId` is the new org. A **returning** user who already has an
+account signs in instead — and sign-in never creates an org, so its `activeOrgId`
+is `null`:
+
+```bash
+# A returning user logs in — no org is auto-created, so activeOrgId is null
+curl -s -X POST http://localhost:8080/v1/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"owner@example.com","password":"a-long-passphrase"}'
+# → {"accessToken":"<JWT>","tokenType":"Bearer","expiresIn":480,"activeOrgId":null}
+
+# Then switch into one of their orgs to get an org-scoped token (as above)
+curl -s -X POST http://localhost:8080/v1/orgs/<ORG_ID>/switch \
+  -H 'authorization: Bearer <JWT>'
+# → {"accessToken":"<ORG_TOKEN>","tokenType":"Bearer","expiresIn":480,"activeOrgId":"<ORG_ID>"}
+```
+
+Because `login` returns `activeOrgId: null`, a returning client must call
+`POST /v1/orgs/{id}/switch` to obtain an org-scoped token before it can use any
+tenant route. A user can look up their org ids from `GET /v1/auth/me`, which lists
+their memberships.
+
 ---
 
 ## 5. Make an authenticated request
@@ -252,6 +275,12 @@ routes. To serve the **routes, stores, and agents a spec declares**, use
 declared routes on the authenticated surface, and serves them from one file, until
 `SIGINT` / `SIGTERM`.
 
+> **`rayspec deploy <spec>` and `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` are the
+> same boot** — `deploy` just sets `RAYSPEC_SPEC_PATH` for you. Either one serves a
+> declared spec, and a **backend-profile spec that declares agents boots directly**
+> this way, with no hand-written wrapper — see [the backend
+> profile](#the-backend-profile-direct-agent-boot) below.
+
 The repo ships a ready-to-run **product-profile** document — one declarative YAML
 with **zero custom code** — at `examples/acme-notes/acme-notes.product.yaml`. It
 declares an audio + speech-to-text + note-extraction product, so it demands a few
@@ -286,20 +315,41 @@ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/sessions
 #   `Authorization: Bearer <ORG_TOKEN>` (from step 4) to read it.
 ```
 
-### Custom handlers: the backend profile
+### The backend profile: direct agent boot
 
 The product profile above carries no code. The other example shape — a
-**backend-profile** document (`examples/acme-notes-backend/rayspec.yaml`) — is the
-advanced escape hatch: it ships custom `.ts` handler modules. The production serve
-runtime imports **compiled** modules, so deploying a backend document that
-references `.ts` handlers fails closed at roll-out:
+**backend-profile** document (`examples/acme-notes-backend/rayspec.yaml` is a
+minimal one) — declares its data, HTTP surface, and **agents** explicitly. A
+backend-profile spec that declares agents **boots directly**: point `rayspec-serve`
+at it and the shipped entrypoint builds each declared agent's backend instance from
+the ambient environment (for example the `openai` backend from `OPENAI_API_KEY`),
+with **no hand-written `AgentBackendsFactory` wrapper**.
+
+```bash
+RAYSPEC_SPEC_PATH=<your-backend-spec>.yaml $RAYSPEC_SERVE
+```
+
+A missing or misconfigured credential fails the boot fast, naming the backend and
+the agent(s) that select it — never deep inside a request.
+
+`examples/lead-qualifier/` is the runnable worked example: a backend-profile spec
+whose declared agent runs **off-request** on the durable worker and records its
+verdict by calling a persist tool. Its README walks the full register → org → POST
+a lead → poll loop end to end. (`examples/local-boot/` is now only a dev
+convenience — it provisions a throwaway dev database and drives the redeploy/update
+flow — **not** a requirement for running agents.)
+
+**Custom handlers ship compiled.** A backend-profile document may also point at
+custom escape-hatch handler modules. The production serve runtime imports
+**compiled** modules, so deploying a backend document that references `.ts`
+handlers fails closed at roll-out:
 
 ```
 handler '…': failed to import module 'handlers/….ts': Unknown file extension ".ts"
 ```
 
-Compile such handlers to `.js` before deploying — the deploy runtime ships no
-turnkey `.ts` loader. Use [`rayspec gen-handler`](./cli-reference.md#gen-handler)
+Compile such handlers to `.js`/`.mjs` before deploying — the deploy runtime ships
+no turnkey `.ts` loader. Use [`rayspec gen-handler`](./cli-reference.md#gen-handler)
 to scaffold a handler, and `doctor` to validate any spec before you deploy it.
 
 For the security boundaries that apply before you expose any of this beyond a

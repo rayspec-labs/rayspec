@@ -380,7 +380,14 @@ deployment sets its configuration through its orchestrator or secret manager.
   [SECURITY](../SECURITY.md).
 - With no spec configured it is an **auth-only** boot — accounts, authentication,
   OIDC, and a `/health` probe, with no product routes. Point `RAYSPEC_SPEC_PATH`
-  at a spec to deploy the declared product on top.
+  at a spec to deploy the declared product on top. A **backend-profile** spec that
+  declares agents boots **directly** this way: the entrypoint builds each declared
+  agent's backend instance from the ambient environment (for example the `openai`
+  backend from `OPENAI_API_KEY`) — no hand-written `AgentBackendsFactory` wrapper,
+  and a missing credential fails the boot fast, naming the backend and the agent(s)
+  that select it. (`rayspec deploy <spec>` is the same boot with `RAYSPEC_SPEC_PATH`
+  set for you; see
+  [getting-started](./getting-started.md#serving-your-declared-backend).)
 
 It listens on `PORT` (default `8080`) and shuts down gracefully on `SIGINT` /
 `SIGTERM`. The full set of environment variables is documented in
