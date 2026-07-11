@@ -5,7 +5,7 @@
 If you believe you have found a security vulnerability in RaySpec, please report
 it privately. **Do not open a public issue for a security report.**
 
-Email the maintainers at **security@memovo.ai**. Please include:
+Email the maintainers at **security@rayspec.dev**. Please include:
 
 - a description of the issue and its impact,
 - the affected version or commit,

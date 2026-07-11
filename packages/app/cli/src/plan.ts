@@ -62,10 +62,10 @@ import {
 } from '@rayspec/db';
 import {
   detectSpecKind,
-  type RaySpec,
   type ProductSpec,
   parseProductSpec,
   parseSpec,
+  type RaySpec,
   type SpecError,
   type StoreSpec,
 } from '@rayspec/spec';

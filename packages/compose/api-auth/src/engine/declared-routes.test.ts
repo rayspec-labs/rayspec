@@ -22,7 +22,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type Db, TENANT_GUC } from '@rayspec/db';
 import type { DurableExecutor, EnqueueResult, RunJob } from '@rayspec/platform';
-import { type RaySpec, parseSpec } from '@rayspec/spec';
+import { parseSpec, type RaySpec } from '@rayspec/spec';
 import { sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentRegistry, AgentRegistryEntry } from '../app-context.js';

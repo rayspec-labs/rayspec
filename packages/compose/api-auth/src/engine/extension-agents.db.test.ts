@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import type { BackendId } from '@rayspec/core';
 import { forTenant, schema } from '@rayspec/db';
 import { loadExtensions, loadHandlers, type ResolvedHandler } from '@rayspec/platform';
-import { lintSpec, type RaySpec, parseSpec } from '@rayspec/spec';
+import { lintSpec, parseSpec, type RaySpec } from '@rayspec/spec';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { FakeRunBackend } from '../test-support/fake-backend.js';

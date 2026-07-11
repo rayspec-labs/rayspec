@@ -88,10 +88,10 @@ import {
 } from '@rayspec/platform';
 import {
   detectSpecKind,
-  type RaySpec,
   parseAnySpec,
   parseProductSpec,
   parseSpec,
+  type RaySpec,
 } from '@rayspec/spec';
 import type { SttAdapter } from '@rayspec/stt-port';
 import type { PgTable } from 'drizzle-orm/pg-core';

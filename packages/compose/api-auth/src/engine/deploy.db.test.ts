@@ -24,7 +24,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Backend, BackendId } from '@rayspec/core';
 import { generateProductSql } from '@rayspec/db';
-import { type RaySpec, parseSpec } from '@rayspec/spec';
+import { parseSpec, type RaySpec } from '@rayspec/spec';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FakeRunBackend } from '../test-support/fake-backend.js';
 import { createDeployHarness, type DeployHarness } from '../test-support/harness.js';

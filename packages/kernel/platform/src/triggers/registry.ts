@@ -142,10 +142,7 @@ export class TriggerRegistry {
  *
  * Empty `triggers[]` → an empty registry (a stores/api/agents-only spec). PRODUCT-AGNOSTIC.
  */
-export function registerTriggers(
-  spec: RaySpec,
-  config: RegisterTriggersConfig,
-): TriggerRegistry {
+export function registerTriggers(spec: RaySpec, config: RegisterTriggersConfig): TriggerRegistry {
   const { handlers, agentIds } = config;
   const descriptors: TriggerDescriptor[] = [];
 

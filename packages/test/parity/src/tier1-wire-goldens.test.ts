@@ -18,6 +18,8 @@
  * Tier 1 pins the OUTBOUND wire; Tier 2 (tier2-recorded-replay) pins the INBOUND derivation; Tier 3
  * (parity.test.ts + version-bump.test.ts) is the cross-backend gate + the re-record rule.
  */
+
+import { tool as openaiTool } from '@openai/agents';
 import { jsonSchemaToZodShape, jsonSchemaToZodType } from '@rayspec/adapter-anthropic';
 import {
   buildCuratedCodexEnv,
@@ -29,7 +31,6 @@ import {
 import { toOutputType } from '@rayspec/adapter-openai';
 import { piJsonInstruction, piToolAllowlist, piToolParameters } from '@rayspec/adapter-pi';
 import type { AgentSpec } from '@rayspec/core';
-import { tool as openaiTool } from '@openai/agents';
 import { describe, expect, it } from 'vitest';
 import { weatherTool } from './scenarios.js';
 

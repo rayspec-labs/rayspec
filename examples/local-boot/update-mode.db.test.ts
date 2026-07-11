@@ -46,7 +46,7 @@ import {
   loadServerConfig,
   type PlannedMigration,
 } from '@rayspec/server';
-import { type RaySpec, parseSpec } from '@rayspec/spec';
+import { parseSpec, type RaySpec } from '@rayspec/spec';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { readUpdateMigrations } from './serve.js';

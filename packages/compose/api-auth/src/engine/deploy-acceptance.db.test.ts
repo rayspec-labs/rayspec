@@ -35,7 +35,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AgentSpec, Backend, BackendId, RunContext, RunResult } from '@rayspec/core';
 import { type Db, forTenant, generateProductSql, schema, TENANT_GUC } from '@rayspec/db';
-import { type RaySpec, parseSpec } from '@rayspec/spec';
+import { parseSpec, type RaySpec } from '@rayspec/spec';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDeployHarness, type DeployHarness, jsonRequest } from '../test-support/harness.js';

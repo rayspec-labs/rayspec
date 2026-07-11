@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - 2026-07-10
+## [1.0.0] - 2026-07-11
 
 The first tagged release of RaySpec — file-deployable AI infrastructure. Describe
 a product's backend in one declarative `version: '1.0'` spec, and the platform
@@ -40,11 +40,13 @@ stands up the running backend from that single file.
 - **Reusable ingress capabilities.** A product profile can request reusable
   capabilities by name — audio/transcription, file ingest, multi-turn
   conversation, and structured records — rather than writing the ingress plumbing.
-- **The `rayspec` CLI.** Read-only diagnostics — `doctor` (static validation),
-  `plan` (a read-only deploy preview with an optional shadow-apply), `openapi`
-  (emit an OpenAPI document for a product's declared views), and `gen-handler`
-  (render a bounded escape-hatch handler) — plus a local-dev `dev` group
-  (`gen-secrets`, `db`, `bootstrap-tenant`).
+- **The `rayspec` CLI.** `deploy` stands up a product's declared backend from its
+  spec (validate → derive the required migration → plan → apply). Read-only
+  diagnostics — `doctor` (static validation), `plan` (a read-only deploy preview
+  with an optional shadow-apply), `openapi` (emit an OpenAPI document for a
+  product's declared views), and `gen-handler` (render a bounded escape-hatch
+  handler) — plus a local-dev `dev` group (`gen-secrets`, `db`,
+  `bootstrap-tenant`).
 - **The `rayspec-serve` boot server.** An environment-driven boot that fails
   closed on missing secrets, applies the committed migration chain, and serves the
   platform — with a loud banner stating its trusted, single-node, not-yet-hardened
@@ -59,4 +61,4 @@ stands up the running backend from that single file.
   untrusted, multi-tenant, public-internet hosting is a separate layer and is
   deliberately not part of the core — see [`SECURITY.md`](./SECURITY.md).
 
-[1.0.0]: https://github.com/Memovo-Labs/rayspec/releases/tag/v1.0.0
+[1.0.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.0.0

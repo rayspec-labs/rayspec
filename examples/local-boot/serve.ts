@@ -160,9 +160,7 @@ function readReviewedAllowlist(allowlistPath: string | undefined): AllowlistEntr
     }
     const { kind, match, reason } = raw as Record<string, unknown>;
     if (typeof kind !== 'string' || kind.length === 0)
-      throw new Error(
-        `[local-boot] RAYSPEC_UPDATE_ALLOWLIST entry [${i}].kind must be non-empty.`,
-      );
+      throw new Error(`[local-boot] RAYSPEC_UPDATE_ALLOWLIST entry [${i}].kind must be non-empty.`);
     if (typeof match !== 'string' || match.length === 0)
       throw new Error(
         `[local-boot] RAYSPEC_UPDATE_ALLOWLIST entry [${i}].match must be non-empty.`,
@@ -306,8 +304,7 @@ async function main(): Promise<void> {
   // 2. The injected spec path is already in RAYSPEC_SPEC_PATH; loadServerConfig reads it. The handler
   //    root defaults to the spec's directory (used only when the spec declares escape-hatch handlers);
   //    set it explicitly for clarity/parity with the platform.
-  process.env.RAYSPEC_HANDLER_ROOT =
-    process.env.RAYSPEC_HANDLER_ROOT || dirname(resolve(specPath));
+  process.env.RAYSPEC_HANDLER_ROOT = process.env.RAYSPEC_HANDLER_ROOT || dirname(resolve(specPath));
 
   // 2b. UPDATE mode: build the reviewed forward-DELTA migration(s) from the env inputs (fail-closed on a
   //     missing/unreadable delta or malformed allowlist). deploy() GATES + applies them (below).

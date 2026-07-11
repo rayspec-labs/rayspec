@@ -61,9 +61,8 @@ export const TOKENS = [
   ['dogfood', /dogfood/i],
   // ── build-history migration PHRASES (multi-word, so legitimate live architectural vocabulary like a
   // bare `donor`/`donates` inter-package relationship is NOT tripped — only the migration-log framing).
-  // Mirrors the docs-side check-prepublish-docs.mjs so the code tree and the docs surface reject the
-  // SAME vocabulary. Held to ZERO in NON-kill-set source; the byte-frozen adapter carries a few of
-  // these in comments (allowlisted as a byte-frozen residual in the gate script). ──
+  // Held to ZERO in NON-kill-set source; the frozen adapter carries a few of
+  // these in comments (allowlisted as a frozen residual in the gate script). ──
   ['build-shadow-run', /\bshadow-run\b/i],
   // `cutover stages` = the migration-pipeline framing (NOT bare `cutover`, which is legit business/
   // incident vocabulary in fixture transcripts, test labels, and real deployment bug descriptions).

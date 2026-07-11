@@ -20,7 +20,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadExtensions, loadHandlers, type ResolvedHandler } from '@rayspec/platform';
-import { type RaySpec, parseSpec } from '@rayspec/spec';
+import { parseSpec, type RaySpec } from '@rayspec/spec';
 
 const here = dirname(fileURLToPath(import.meta.url));
 // packages/api-auth/src/test-support -> repo-root/examples/stream-backend

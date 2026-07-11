@@ -48,19 +48,19 @@
  *   - Each residual bucket is TOKEN-SCOPED: it allows only the specific token TYPES that are
  *     legitimately present, so a NEW token type (e.g. a fresh `Slice 3` in an allowlisted file) still
  *     FAILS. This is what makes the gate anti-re-accretion rather than a rubber stamp.
- *   - The kill-set files are BYTE-FROZEN (a founder-signed comment-scrub cannot touch code or strings).
+ *   - The kill-set files are frozen (a maintainer-approved comment-scrub cannot touch code or strings).
  *     Their residual archaeology lives in string literals / test-name strings / DDL SQL
  *     comments-in-template-literals / audio-fixture identifiers — allowlisted as code (non-comment)
  *     only. A NEW pure-comment archaeology line in a kill-set file still FAILS (catches re-accretion in
  *     the one place already swept).
  *
- * DEFERRED residual buckets (DO NOT scrub — deferred/byte-frozen; each reaches ZERO here by allowlist;
+ * DEFERRED residual buckets (DO NOT scrub — deferred/frozen; each reaches ZERO here by allowlist;
  * named below by the verdict each produces in the --list breakdown):
- *   rf-grammar-secrefs   grammar.ts §-refs — a byte-frozen kill-set residual; a scrub needs a
- *                        founder-signed pass.
- *   rf-killset-strings   byte-frozen non-pure-comment archaeology in the kill-set files.
- *   rf-killset-buildhist byte-frozen adapter comments carrying build-migration phrases (build-* tokens)
- *                        — a byte-frozen kill-set residual; scoped to build-* tokens in a KILLSET_FILE
+ *   rf-grammar-secrefs   grammar.ts §-refs — a frozen kill-set residual; a scrub needs a
+ *                        maintainer-approved pass.
+ *   rf-killset-strings   frozen non-pure-comment archaeology in the kill-set files.
+ *   rf-killset-buildhist frozen adapter comments carrying build-migration phrases (build-* tokens)
+ *                        — a frozen kill-set residual; scoped to build-* tokens in a KILLSET_FILE
  *                        only, so a NEW build-phrase in non-kill-set source still FAILS.
  *
  *   node check-no-archaeology.mjs           # summary; exit 1 if any un-allowlisted archaeology
@@ -76,8 +76,7 @@ const repoRoot = process.cwd();
 const LIST = process.argv.includes('--list');
 
 // Exportable open-core tree ONLY: packages + scripts + the kept example gallery + ci.yml + root
-// config. OUT of scope (export-excluded, not shipped): products/memovo, deployments/memovo, sdks, docs,
-// and the CUT example dirs (never scrubbed — they are not part of the open-core release).
+// config. Any tracked path not under a ROOT below is out of scope and is not scanned.
 const ROOTS = [
   'packages',
   'scripts',
@@ -208,10 +207,10 @@ const NEUTRALITY_TEST_RE =
 // (KEEP-3) diff-product-stores migration-ALGORITHM phase labels (Phase A/B/C/D, space form, A–D only).
 const KEEP_ALGO_PHASE_FILE = /kernel\/db\/(src\/)?diff-product-stores/;
 
-// (rf-grammar-secrefs) exact file target — a byte-frozen kill-set residual.
+// (rf-grammar-secrefs) exact file target — a frozen kill-set residual.
 const GRAMMAR_TS = 'packages/kernel/spec/src/grammar.ts';
 
-// (rf-killset-strings) byte-frozen kill-set files (the 6 canonical elements, at their tiered paths).
+// (rf-killset-strings) frozen kill-set files (the 6 canonical elements, at their tiered paths).
 const KILLSET_FILE =
   /^packages\/kernel\/(core\/src\/neutral|db\/src\/tenant-db|platform\/src\/dispatch|spec\/src\/grammar)\.ts$|^packages\/compose\/api-auth\/src\/engine\/deploy\.ts$|^packages\/adapters\//;
 
@@ -241,7 +240,7 @@ function stripLineComment(line) {
 function isKillsetByteFrozen(rel, line, re) {
   if (!KILLSET_FILE.test(rel)) return false;
   // Inside the kill-set, ONLY archaeology that lives in CODE (a string/error/test-name/DDL-comment-in-
-  // template-literal/StageN identifier) is a byte-frozen residual. Archaeology that lives in a COMMENT —
+  // template-literal/StageN identifier) is a frozen residual. Archaeology that lives in a COMMENT —
   // whether a pure-comment line (leading `*`, `//`, `/*`) OR a trailing `// …` inline comment — would be
   // a missed comment-scrub and must FAIL. So: reject a pure-comment line outright, then strip a
   // quote-aware trailing line comment and re-test — if the token no longer matches the code portion, it
@@ -269,11 +268,11 @@ function classify(rel, line, token, re) {
   if (KEEP_ALGO_PHASE_FILE.test(rel) && token === 'phase-word' && /\bPhase [A-D]\b/.test(line))
     return 'keep';
 
-  // ── documented deferred/byte-frozen residuals (each token-scoped or line-specific) ──
+  // ── documented deferred/frozen residuals (each token-scoped or line-specific) ──
   if (rel === GRAMMAR_TS && token === 'section-ref') return 'rf-grammar-secrefs';
-  // The byte-frozen adapter carries build-migration phrases (build-* tokens) in its comments — a
-  // byte-frozen kill-set residual (the adapters are byte-frozen, so these cannot be scrubbed without a
-  // founder-signed pass). Scoped to the build-* phrase tokens inside a KILLSET_FILE ONLY; a NEW
+  // The frozen adapter carries build-migration phrases (build-* tokens) in its comments — a
+  // frozen kill-set residual (the adapters are frozen, so these cannot be scrubbed without a
+  // maintainer-approved pass). Scoped to the build-* phrase tokens inside a KILLSET_FILE ONLY; a NEW
   // build-phrase in NON-kill-set source (or a non-build token here) still FAILS.
   if (token.startsWith('build-') && KILLSET_FILE.test(rel)) return 'rf-killset-buildhist';
   if (isKillsetByteFrozen(rel, line, re)) return 'rf-killset-strings';

@@ -87,6 +87,19 @@
           }
         }
       }
+    },
+    {
+      "includes": [
+        "packages/adapters/**",
+        "packages/kernel/spec/src/grammar.ts",
+        "packages/kernel/core/src/neutral.ts",
+        "packages/kernel/db/src/tenant-db.ts",
+        "packages/kernel/platform/src/dispatch.ts",
+        "packages/compose/api-auth/src/engine/deploy.ts"
+      ],
+      "formatter": { "enabled": false },
+      "linter": { "enabled": false },
+      "assist": { "enabled": false }
     }
   ]
 }
