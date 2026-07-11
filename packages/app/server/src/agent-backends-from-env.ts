@@ -5,8 +5,15 @@
  * wired by the deployer. This is the generic, env-driven wiring the SHIPPED entrypoint (serve.ts) uses
  * so that `RAYSPEC_SPEC_PATH=<backend-profile-spec-with-agents> rayspec-serve` boots DIRECTLY — no
  * hand-written wrapper. It feeds `assembleServer`'s existing `agentBackendsFactory` seam, so the
- * roll-out's fail-closed-at-boot backend lookup (buildAgentRegistry) is satisfied for every declared
- * agent; the deploy pipeline itself is untouched.
+ * roll-out's fail-closed-at-boot backend lookup (buildAgentRegistry) is satisfied for every backend the
+ * spec's OWN declared agents select; the deploy pipeline itself is untouched.
+ *
+ * SCOPE (honest edge): backends are derived from the spec's OWN `agents:` (the pre-extension-merge base
+ * document `parseAnySpec` returns). An agent CONTRIBUTED by an `extensions:` pack that selects a backend
+ * NO base agent uses is NOT auto-wired here — `buildAgentRegistry` then fails closed at boot (the deploy
+ * path re-parses the MERGED spec and aborts with a named "no backend for agent" error, and serve.ts
+ * prints it as a clean one-liner). Deriving from the merged spec is the proper fix (deferred); today
+ * such a deployment fails closed rather than silently mis-wiring.
  *
  * The mapping is NOT re-implemented here: each backend is built via `makeExtractionBackend` (the ONE
  * boot-side factory that owns the per-backend env contract + the fail-closed, actionable messages, and
@@ -67,11 +74,17 @@ export function agentBackendsFactoryFromEnv(
     try {
       backends.set(backend, makeExtractionBackend(env, backend));
     } catch (err) {
-      // Reuse makeExtractionBackend's env-var/backend-named message; add which agent(s) selected it.
-      const detail = err instanceof Error ? err.message : String(err);
+      // Reuse makeExtractionBackend's env-var/backend-named message, but STRIP its own leading
+      // "Boot aborted (Product-YAML) — " / "Boot aborted — " prefix so the composed abort reads
+      // "Boot aborted — …" ONCE (not doubled / mislabelled Product-YAML on a backend-profile boot), and
+      // add which agent(s) selected the backend. "is not configured for this boot" (NOT "credentials")
+      // is accurate for BOTH a missing credential AND a missing non-credential env
+      // (RAYSPEC_ANTHROPIC_CONFIG_ROOT / CODEX_HOME).
+      const raw = err instanceof Error ? err.message : String(err);
+      const detail = raw.replace(/^Boot aborted(?: \(Product-YAML\))? — /, '');
       throw new BootConfigError(
         `Boot aborted — declared agent(s) [${selectors.join(', ')}] select backend '${backend}', ` +
-          `but its credentials are not configured: ${detail}`,
+          `which is not configured for this boot: ${detail}`,
       );
     }
   }

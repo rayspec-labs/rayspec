@@ -3,10 +3,12 @@
  * entrypoint's seams — the product-table registrar + an env/injected agent backend — with NO
  * hand-written wrapper, and a request runs the agent → its persist tool → a persisted store row.
  *
- * This is the forcing function for the fix serve.ts makes: today the shipped `serve.ts` calls
- * `assembleServer(config)` with NO opts, so a spec that declares product stores aborts at deploy()'s
- * roll-out verify (deny-by-default — the registrar was never wired) and a spec with agents has no
- * backend instances. Feeding both seams (as serve.ts now does) makes the boot work end-to-end.
+ * This exercises the SEAM the fix relies on: assembleServer with BOTH deployer seams fed (the
+ * product-table registrar + an agent backend map) boots a store+agent spec end-to-end, whereas
+ * assembleServer(config) with NO opts would abort at deploy()'s roll-out verify (the registrar was
+ * never wired) / have no agent backend instances. It calls assembleServer DIRECTLY with SUBSTITUTE opts
+ * for determinism, so it proves the SEAM — NOT serve.ts's OWN wiring of it. That serve.ts feeds
+ * `registerProductStores` + the from-env factory is covered by the DB-free `serve-opts.test.ts`.
  *
  * Arms (the ran-guard pins the count):
  *   (a) the FROM-ENV factory: `agentBackendsFactoryFromEnv(<the fixture spec>, { OPENAI_API_KEY })`
@@ -243,9 +245,12 @@ describe.skipIf(!baseUrl)('serve agent-boot — wired seam boots a backend spec 
 
   maybe('(b) the backend spec MATERIALIZES and its store + sync agent routes mount', () => {
     e2eTestsRan += 1;
-    // The registrar seam worked (a spec with stores would otherwise abort at deploy()'s verify).
+    // The registrar + backend-map seams are proven by the SUCCESSFUL BOOT (beforeAll), not by these
+    // values: a spec that declares stores would abort at deploy()'s verify-not-register step if the
+    // registrar were unwired, and an unwired agent backend would abort buildAgentRegistry — so reaching
+    // here at all means both wired. These assertions additionally confirm the schema MATERIALIZED and
+    // the declared routes/agents mounted.
     expect(server!.deployMode).toBe('materialized');
-    // The backend-map seam worked (an unwired agent backend would abort buildAgentRegistry at boot).
     expect(server!.declaredAgents.map((a) => a.id)).toContain('note_writer');
     const actions = server!.declaredRoutes.map((r) => `${r.method} ${r.path} → ${r.action}`);
     expect(actions).toContain('POST /notes/write → agent:note_writer');
