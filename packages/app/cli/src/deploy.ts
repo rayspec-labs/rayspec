@@ -12,10 +12,13 @@
  *
  * WHAT deploy IS. It is `deployments/acme-notes/serve.mts` as a first-class operator command: it wraps
  * `assembleServer` (NOT the kill-set `deploy()` — that stays inside the composition root) and injects
- * `registerProductStores` (the @rayspec/db/composition sanctioned door — validates every product
- * table's tenant predicate before it joins the deny-by-default chokepoint Set). It buys operator
- * ergonomics + the sanctioned store path; it adds NO new platform mechanism (the boot itself is the
- * same one the composition root already runs, proven by product-yaml-boot.db.test.ts).
+ * the deployer seams through the SAME shared `assembleOptsFromEnv` builder `rayspec-serve` uses — the
+ * sanctioned `registerProductStores` registrar (the @rayspec/db/composition door — validates every
+ * product table's tenant predicate before it joins the deny-by-default chokepoint Set) for any spec,
+ * PLUS an env-driven agent-backend factory for a backend-profile spec WITH agents (so those agents boot
+ * directly, parity with rayspec-serve). It buys operator ergonomics + the sanctioned store path; it adds
+ * NO new platform mechanism (the boot itself is the same one the composition root already runs, proven
+ * by product-yaml-boot.db.test.ts).
  *
  * All the heavy machinery (DBOS, Hono, the four adapters, product-yaml) is DYNAMICALLY imported inside
  * the handlers, so importing this module (which index.ts does statically) does NOT drag that weight
@@ -231,9 +234,12 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
 
 /**
  * Boot + SERVE the deployment (long-running). Wraps `assembleServer` (NOT the kill-set `deploy()`),
- * injecting `registerProductStores` (the sanctioned validating registrar) as the product-table hook,
- * then SEALS the door (deploy owns its process + boots once). On a fail-closed boot error (missing env,
- * an unreviewed destructive migration via DeployError, a product-boot misconfig) it prints an actionable
+ * building its deployer-seam opts from the SHARED `assembleOptsFromEnv` builder (the sanctioned
+ * validating registrar as the product-table hook + an env-driven agent-backend factory when the spec is
+ * a backend-profile doc WITH agents — so `rayspec deploy <backend-spec-with-agents>` boots those agents
+ * directly, parity with rayspec-serve), then SEALS the door (deploy owns its process + boots once). On a
+ * fail-closed boot error (missing env / a missing agent credential surfacing as a BootConfigError, an
+ * unreviewed destructive migration via DeployError, a product-boot misconfig) it prints an actionable
  * message + exits 1 (mirrors deployments/acme-notes/serve.mts). Returns once the server is listening;
  * the open port + SIGINT/SIGTERM handlers keep the process alive.
  */
@@ -245,14 +251,25 @@ async function serveDeployment(specPath: string, portOverride?: string): Promise
 
   // Dynamic imports: keep DBOS/Hono/the adapters + product-yaml OUT of `rayspec doctor`'s load path.
   const { serve } = await import('@hono/node-server');
-  const { assembleServer, BootConfigError, bootBanner, DeployError, loadServerConfig } =
-    await import('@rayspec/server');
-  const { registerProductStores, sealProductStores } = await import('@rayspec/db/composition');
+  const {
+    assembleOptsFromEnv,
+    assembleServer,
+    BootConfigError,
+    bootBanner,
+    DeployError,
+    loadServerConfig,
+  } = await import('@rayspec/server');
+  const { sealProductStores } = await import('@rayspec/db/composition');
 
   let server: Awaited<ReturnType<typeof assembleServer>>;
   try {
     const config = loadServerConfig();
-    server = await assembleServer(config, { registerProductTables: registerProductStores });
+    // Build the deployer-seam opts from the SAME shared builder rayspec-serve uses: the sanctioned
+    // validating registrar (registerProductStores) for ANY spec, PLUS an env-driven agentBackendsFactory
+    // when the spec is a backend-profile doc WITH agents — so `rayspec deploy <backend-spec-with-agents>`
+    // boots the declared agents directly (parity with rayspec-serve), not just the bare registrar. A
+    // missing agent credential surfaces as a fail-closed BootConfigError the catch below clean-prints.
+    server = await assembleServer(config, assembleOptsFromEnv(config));
     // Shut the sanctioned door after the ONE boot registration (deploy owns its process, boots once).
     sealProductStores();
 

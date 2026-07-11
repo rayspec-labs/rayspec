@@ -24,18 +24,10 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { DeployError } from '@rayspec/api-auth';
-import { registerProductStores } from '@rayspec/db/composition';
-import { agentBackendsFactoryFromEnv } from './agent-backends-from-env.js';
 import { bootBanner } from './banner.js';
-import {
-  type AgentBackendsFactory,
-  assembleServer,
-  BootConfigError,
-  loadServerConfig,
-  type ProductTableRegistrar,
-  type ServerConfig,
-} from './composition-root.js';
+import { assembleServer, BootConfigError, loadServerConfig } from './composition-root.js';
 import { ProductBootError } from './product-boot.js';
+import { assembleOptsFromEnv } from './serve-opts.js';
 
 /**
  * LOCAL-DX-ONLY optional `.env` loader. A real deployment sets env via its orchestrator/secret
@@ -68,32 +60,6 @@ function loadLocalDotenvIfPresent(): void {
   }
 }
 
-/**
- * Build the two deployer-seam opts `assembleServer` needs from the ambient env + the (optional) spec.
- * EXTRACTED out of `main()` so serve.ts's OWN wiring is unit-testable: the DB e2e drives assembleServer
- * with SUBSTITUTE opts (for determinism), so without this the fact that serve.ts feeds the RIGHT seams
- * would be untested — a revert that stopped wiring them would pass CI. `serve-opts.test.ts` pins this
- * by identity. Behavior is identical to the inline construction it replaces:
- *   - NO spec (auth-only boot) → {} (no registrar, no agent factory).
- *   - ANY spec → the SANCTIONED validating product-table registrar (registerProductStores VALIDATES
- *     every table before it joins the deny-by-default chokepoint Set); harmless when the spec declares
- *     no stores. deploy.ts is untouched — these are its existing opts.
- *   - a BACKEND-profile spec WITH ≥1 declared agent → additionally an `agentBackendsFactory` built from
- *     env (agentBackendsFactoryFromEnv); a PRODUCT-profile or agent-free spec needs none (undefined),
- *     and the product deploy path builds its own backends.
- */
-export function assembleOptsFromEnv(
-  config: ServerConfig,
-  env: NodeJS.ProcessEnv = process.env,
-): { registerProductTables?: ProductTableRegistrar; agentBackendsFactory?: AgentBackendsFactory } {
-  if (!config.specPath) return {};
-  const factory = agentBackendsFactoryFromEnv(readFileSync(config.specPath, 'utf8'), env);
-  return {
-    registerProductTables: registerProductStores,
-    ...(factory ? { agentBackendsFactory: factory } : {}),
-  };
-}
-
 async function main(): Promise<void> {
   loadLocalDotenvIfPresent();
   const config = loadServerConfig();
@@ -118,8 +84,8 @@ async function main(): Promise<void> {
 
 /**
  * True only when this module is the process entrypoint (`node dist/serve.js` / `tsx src/serve.ts` /
- * the `rayspec-serve` bin), NOT when it is imported (e.g. a unit test importing `assembleOptsFromEnv`).
- * Guards the top-level `main()` so importing the module has NO side effect — without it an `import`
+ * the `rayspec-serve` bin), NOT when it is imported. Guards the top-level `main()` so importing the
+ * module has NO side effect — without it an `import`
  * would boot a server and `process.exit`, killing the test runner. Both paths are realpath-normalized
  * so a bin symlink (node_modules/.bin/rayspec-serve → dist/serve.js) still matches.
  */

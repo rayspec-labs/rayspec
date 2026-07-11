@@ -48,3 +48,9 @@ export {
   resolveStructuredOutputMode,
   WIRED_EXTRACTION_BACKENDS,
 } from './product-boot.js';
+// The deployer-seam opts builder — shared by the `rayspec-serve` bin (serve.ts) AND the `rayspec deploy`
+// CLI so both boot a backend-profile spec WITH agents directly from ONE builder (the sanctioned
+// registerProductStores registrar + the env-driven agent-backend factory). Exported so the CLI
+// (packages/app/cli/src/deploy.ts) reuses it instead of duplicating the opts logic; lives in serve-opts.ts
+// (not the self-executing bin) so re-exporting it here drags in no entrypoint side effect.
+export { assembleOptsFromEnv } from './serve-opts.js';

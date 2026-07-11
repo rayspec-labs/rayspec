@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { registerProductStores } from '@rayspec/db/composition';
 import { afterAll, describe, expect, it } from 'vitest';
 import { loadServerConfig, type ServerConfig } from './composition-root.js';
-import { assembleOptsFromEnv } from './serve.js';
+import { assembleOptsFromEnv } from './serve-opts.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 // The committed backend-profile fixture (one store + one tool-using `openai` agent) — the same one the
