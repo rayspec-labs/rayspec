@@ -207,6 +207,11 @@ export function requirePermission(deps: AppDeps, permission: Permission): Middle
         if (!live) {
           c.set('principal', { ...principal, role: undefined });
           await auditDeny();
+          // Stays BARE (no `missing_permission` hint). This is a MEMBERSHIP failure, not a scope
+          // gap: a principal that was revoked/removed from the tenant since its token was minted may
+          // still HOLD `permission` via its (now-stale) role claim — labeling this `missing_permission`
+          // would mislead. The honest 403 here is the uniform bare `Forbidden.`; the scope-gap hint
+          // belongs only at the authorize()==false site below.
           throw forbidden();
         }
         effectiveRole = live.role;
@@ -232,7 +237,15 @@ export function requirePermission(deps: AppDeps, permission: Permission): Middle
     );
     if (!ok) {
       await auditDeny();
-      throw forbidden();
+      // Name the missing permission so an AUTHENTICATED operator sees a *scope/role* gap is the
+      // cause, rather than a bare `{code:"FORBIDDEN"}`. This throw is reached ONLY past the
+      // authenticated-principal (401) and tenant (404) checks above — the caller is a valid
+      // member/credential of THIS tenant — and `authorize()` returned false, i.e. the role does not
+      // grant `permission` (user) or the permission is outside the api-key's granted scope ∩
+      // grantable set (api-key). Both are a true "you lack `permission`" gap, so the hint is accurate
+      // and safe. Unauthenticated (401) and cross-tenant (404) responses never reach here, so they
+      // stay bare — no existence/scope leak.
+      throw forbidden('Forbidden.', { missing_permission: permission });
     }
     await next();
   };
