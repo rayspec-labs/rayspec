@@ -56,12 +56,17 @@ OPENAI_API_KEY="sk-…" \
 ```
 
 `RAYSPEC_HANDLER_ROOT` defaults to the spec's directory, so it is optional here — shown for clarity.
+No `PORT` is set, so it listens on **`http://localhost:8080`** (the `rayspec-serve` default); the boot
+banner prints the exact `Base URL:`. Set `PORT` to serve elsewhere.
 
 ## Drive it end-to-end (curl)
 
-Once it is serving on `$BASE` (e.g. `http://localhost:8788`):
+Point `BASE` at the URL from the boot banner (the `rayspec-serve` default is shown below), then drive
+the loop:
 
 ```bash
+BASE=http://localhost:8080   # the rayspec-serve default; use whatever the boot banner printed
+
 # 1. Register a user, create an org, and switch into it to get a scoped token.
 ACCESS=$(curl -s -X POST "$BASE/v1/auth/register" -H 'content-type: application/json' \
   -d '{"email":"me@example.com","password":"a-long-enough-password"}' | jq -r .accessToken)

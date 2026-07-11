@@ -6,10 +6,10 @@
 # register a user -> create + switch into an org (a scoped token) -> POST a lead -> poll until the
 # durable qualify run flips it to `qualified`.
 #
-# Usage:  BASE=http://localhost:8788 ./smoke.sh
+# Usage:  BASE=http://localhost:8080 ./smoke.sh     # 8080 is the rayspec-serve default (see README)
 set -euo pipefail
 
-BASE="${BASE:-http://localhost:8788}"
+BASE="${BASE:-http://localhost:8080}"
 EMAIL="smoke-$(date +%s)@example.com"
 PASSWORD="a-long-enough-password"
 

@@ -376,6 +376,9 @@ describe.skipIf(!baseUrl)('lead-qualifier acceptance — real boot + real DBOS +
 
   maybe('(d) a malformed lead body → 400, nothing persisted, nothing enqueued', async () => {
     e2eTestsRan += 1;
+    // Snapshot tenant A's leads immediately BEFORE the bad POST, so "persisted nothing" is checked
+    // order-independently — it does not assume which/how many prior arms ran.
+    const before = (await (await listLeads(tokenA)).json()) as Array<Record<string, unknown>>;
     const res = await server!.app.request('/leads', {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${tokenA}` },
@@ -383,9 +386,11 @@ describe.skipIf(!baseUrl)('lead-qualifier acceptance — real boot + real DBOS +
     });
     expect(res.status).toBe(400);
     expect(((await res.json()) as Record<string, unknown>).error).toBe('invalid_lead');
-    // The list is unchanged: exactly the two leads created above (no partial row from the bad POST).
-    const list = (await (await listLeads(tokenA)).json()) as Array<Record<string, unknown>>;
-    expect(list).toHaveLength(2);
+    // The bad POST persisted NOTHING: the list count is unchanged and carries no row from the
+    // malformed payload (a partial insert that kept the count would still surface this company).
+    const after = (await (await listLeads(tokenA)).json()) as Array<Record<string, unknown>>;
+    expect(after).toHaveLength(before.length);
+    expect(after.some((r) => r.company === 'No Contact')).toBe(false);
   });
 
   maybe('(e) an unauthenticated POST /leads → 401 — nothing persists', async () => {
