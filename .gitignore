@@ -16,6 +16,9 @@ out/
 coverage/
 .vitest/
 
+# Dev-harness scratch (throwaway blob store written by example dev-boot scripts)
+.dev-blobs/
+
 # Env / secrets — never commit real credentials
 .env
 .env.*
