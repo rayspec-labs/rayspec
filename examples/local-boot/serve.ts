@@ -1,6 +1,12 @@
 /**
  * DEV-ONLY generic, spec-driven local backend-boot wrapper.
  *
+ * NOTE: the SHIPPED entrypoint (`@rayspec/server` `rayspec-serve`) now boots a backend-profile spec
+ * WITH agents DIRECTLY — it builds each declared agent's backend from the ambient env, so a wrapper is
+ * no longer REQUIRED to run an agent spec. This wrapper remains purely a DEV CONVENIENCE: it provisions
+ * a FRESH throwaway dev DATABASE (DROP+CREATE) so the committed migration chain bootstraps it clean, and
+ * it adds the `RAYSPEC_BOOT_UPDATE` redeploy/update flow. Its behavior below is otherwise unchanged.
+ *
  * This is a thin wrapper over the REAL `@rayspec/server` composition root, PARAMETERIZED by
  * `RAYSPEC_SPEC_PATH` so it can boot ANY declarative spec (stores + CRUD api + agents +
  * tool-handler-backed agents) with NO product knowledge baked in. It:
