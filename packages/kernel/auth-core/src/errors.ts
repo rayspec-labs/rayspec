@@ -75,9 +75,14 @@ export function notFound(): ApiError {
   return new ApiError('NOT_FOUND', 'Not found.');
 }
 
-/** 403 — authenticated but not permitted. */
-export function forbidden(message = 'Forbidden.'): ApiError {
-  return new ApiError('FORBIDDEN', message);
+/**
+ * 403 — authenticated but not permitted. `details` is included in the envelope ONLY when the caller
+ * supplies it (an authenticated scope/permission gap names the missing permission — see
+ * requirePermission); a 401/404 stays bare (uniform, no info leak) and existing callers that pass no
+ * `details` are byte-for-byte unchanged.
+ */
+export function forbidden(message = 'Forbidden.', details?: Record<string, unknown>): ApiError {
+  return new ApiError('FORBIDDEN', message, details);
 }
 
 /** Build the wire envelope for a code + message + requestId. */

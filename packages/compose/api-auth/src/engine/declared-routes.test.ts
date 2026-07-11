@@ -432,6 +432,11 @@ describeDb(
         headers: auth,
       });
       expect(create2.status).toBe(403);
+      // The membership-fail 403 stays BARE — no `missing_permission` hint. A revoked-but-stale-role
+      // principal still HOLDS the permission via its (now-stale) claim, so labeling this a scope gap
+      // would mislead; that hint belongs only to the authenticated authorize()==false 403. Pin it so
+      // a future change that attaches `details` to this membership-fail throw can never regress silently.
+      expect((await create2.json()).error.details).toBeUndefined();
       const upd = await jsonRequest(h.app, 'PATCH', `/notebooks/${id}`, {
         body: { completed: true },
         headers: auth,
@@ -777,6 +782,66 @@ describeDb('declared store routes — api-key principal (programmatic/agency con
       [orgId],
     );
     expect(rows.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // --- an authenticated scope-gap 403 names the missing permission -----------------------------
+  // An authenticated 403 that is a scope/role gap carries `details.missing_permission` so an
+  // operator can see a *scope* is the cause rather than a bare `{code:"FORBIDDEN"}`; 401
+  // (unauthenticated) + 404 (missing/cross-tenant) stay BARE — uniform, no scope/existence leak.
+
+  it('an authenticated store:write scope gap NAMES the missing permission', async () => {
+    const { orgId, token } = await principal(
+      'missing-perm-write@example.com',
+      'MissingPermWriteOrg',
+    );
+    // A store:read-only key (authenticated, valid member of THIS tenant) POSTs → store:write gap.
+    const readKey = await mintApiKey(orgId, token, ['store:read']);
+    const create = await jsonRequest(h.app, 'POST', '/notebooks', {
+      body: { title: 'x', scheduledAt: '2026-07-11T09:00:00Z', completed: false },
+      headers: { authorization: `Bearer ${readKey}` },
+    });
+    expect(create.status).toBe(403);
+    const body = await create.json();
+    expect(body.error.code).toBe('FORBIDDEN');
+    expect(body.error.details).toEqual({ missing_permission: 'store:write' });
+  });
+
+  it('an authenticated agent:read scope gap on GET /v1/runs/{id} NAMES the missing permission', async () => {
+    const { orgId, token } = await principal('missing-perm-read@example.com', 'MissingPermReadOrg');
+    // A key lacking agent:read (store:read only). requirePermission('agent:read') fires BEFORE the
+    // handler resolves the run, so any run id triggers the scope gap — no real run needed.
+    const noAgentReadKey = await mintApiKey(orgId, token, ['store:read']);
+    const res = await jsonRequest(h.app, 'GET', '/v1/runs/00000000-0000-0000-0000-000000000000', {
+      headers: { authorization: `Bearer ${noAgentReadKey}` },
+    });
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error.code).toBe('FORBIDDEN');
+    expect(body.error.details).toEqual({ missing_permission: 'agent:read' });
+  });
+
+  it('an UNAUTHENTICATED request stays BARE (401, no missing_permission — no info leak)', async () => {
+    // No Authorization header → the 401 must NOT carry any authz hint (no scope/existence leak).
+    const res = await jsonRequest(h.app, 'GET', '/notebooks', {});
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error.code).toBe('UNAUTHENTICATED');
+    expect(body.error.details).toBeUndefined();
+  });
+
+  it('a 404 (authenticated, permitted, missing resource) stays BARE — the hint is scope-specific', async () => {
+    // An agent:read-scoped key (holds the permission) GETs a non-existent run → 404, NOT a 403, and
+    // carries no `missing_permission`. Proves the hint is tied to the scope gap, and the 404 path
+    // (missing/cross-tenant) is byte-identical/bare — no existence leak.
+    const { orgId, token } = await principal('bare-404@example.com', 'Bare404Org');
+    const readerKey = await mintApiKey(orgId, token, ['agent:read']);
+    const res = await jsonRequest(h.app, 'GET', '/v1/runs/00000000-0000-0000-0000-000000000000', {
+      headers: { authorization: `Bearer ${readerKey}` },
+    });
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error.code).toBe('NOT_FOUND');
+    expect(body.error.details).toBeUndefined();
   });
 });
 
