@@ -245,6 +245,9 @@ async function provisionDevDatabase(baseUrl: string, devDbName: string): Promise
   try {
     console.log(`[local-boot] provisioning fresh dev database '${devDbName}' (DROP+CREATE)…`);
     await admin.unsafe(`DROP DATABASE IF EXISTS "${devDbName}" WITH (FORCE)`);
+    // Also drop the derived DBOS system DB so a fresh-empty app DB never pairs with a stale
+    // `<devDbName>_dbos_sys` (orphaned workflow/queue state) auto-created by a durableWorker spec.
+    await admin.unsafe(`DROP DATABASE IF EXISTS "${devDbName}_dbos_sys" WITH (FORCE)`);
     await admin.unsafe(`CREATE DATABASE "${devDbName}"`);
   } finally {
     await admin.end();
