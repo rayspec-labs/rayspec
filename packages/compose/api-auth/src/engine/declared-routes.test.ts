@@ -432,6 +432,11 @@ describeDb(
         headers: auth,
       });
       expect(create2.status).toBe(403);
+      // The membership-fail 403 stays BARE — no `missing_permission` hint. A revoked-but-stale-role
+      // principal still HOLDS the permission via its (now-stale) claim, so labeling this a scope gap
+      // would mislead; that hint belongs only to the authenticated authorize()==false 403. Pin it so
+      // a future change that attaches `details` to this membership-fail throw can never regress silently.
+      expect((await create2.json()).error.details).toBeUndefined();
       const upd = await jsonRequest(h.app, 'PATCH', `/notebooks/${id}`, {
         body: { completed: true },
         headers: auth,
