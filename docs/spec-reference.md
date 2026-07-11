@@ -146,7 +146,12 @@ api:
 - `action` — a discriminated union on `kind`:
   - **`store`** — a CRUD operation over a declared store through the
     tenant-scoped data layer. Fields: `store` (a declared store name) and `op`,
-    one of `list`, `get`, `create`, `update`, `delete`.
+    one of `list`, `get`, `create`, `update`, `delete`. The declarative `list` op
+    is deliberately minimal: it returns the tenant's rows with **no filter, sort,
+    offset, or count**, capped at a fixed page size (200 rows; it sets an
+    `X-Result-Truncated: true` response header when the cap is hit). A read that
+    needs filtering, ordering, paging, or a total drops to a `handler` route (see
+    [`handlers`](#handlers) below).
   - **`agent`** — invoke a declared agent over the run surface. Field: `agent`
     (a declared agent id).
   - **`handler`** — call a declared escape-hatch handler. Field: `handler` (a
@@ -281,6 +286,19 @@ handlers:
 - `export` — required named export within that module.
 - `kind` — one of `tool`, `route`, `trigger` — the chokepoint the handler
   dispatches through.
+
+A `handler`-kind route is also the escape hatch for reads the declarative `store`
+`list` op cannot express. The injected data facade a route handler receives supports
+**equality filters, `orderBy`, `limit`/`offset` paging, and a filtered `count`** over
+the tenant-scoped store (still tenant-predicated beneath, and still equality-only —
+no `>`/`<`/`like` operators). One authorization consequence to know: **every
+`handler`-kind route is gated on the `store:write` permission**, not `store:read`.
+The platform cannot statically prove a handler is read-only, so it fail-closes to
+the stronger gate — a handler that only reads is over-protected, never under. So a
+read implemented as a handler is reachable only by a caller (or API key) that also
+holds `store:write`; the read/write scope split that declarative `store` routes get
+(`list`/`get` → `store:read`, `create`/`update`/`delete` → `store:write`) does not
+apply to handler routes.
 
 ## `extensions`
 

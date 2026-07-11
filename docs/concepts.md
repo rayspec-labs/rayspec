@@ -111,6 +111,17 @@ they load from a path-jailed root and dispatch through the same chokepoints
 declarative actions do, so an escape hatch never escapes tenancy or the trust
 boundary.
 
+Two practical notes on the declarative surface versus the handler escape hatch.
+First, the declarative `store` `list` op is intentionally minimal — it returns the
+tenant's rows unfiltered, unsorted, and uncounted, capped at a fixed page size (it
+signals truncation with an `X-Result-Truncated` header). A read that needs
+filtering, ordering, paging, or a total is a `handler` route, whose injected data
+facade supports equality filters, ordering, `limit`/`offset`, and a filtered count.
+Second, `handler` routes are authorized on the `store:write` permission (the
+platform cannot prove a handler is read-only, so it fail-closes to the stronger
+gate) — so even a read-only handler is reachable only by a caller that holds
+`store:write`.
+
 ---
 
 ## Agents and the neutral backend
@@ -157,6 +168,15 @@ never move when a vendor SDK changes shape. Where a backend genuinely can't do
 something (for example, a backend without native structured output being asked to
 guarantee it), the spec can require the capability and the mismatch is rejected at
 validation time rather than failing at runtime.
+
+Each backend reads its credential from the **server process's own environment** —
+`OPENAI_API_KEY` for `openai` and `pi`, an `ANTHROPIC_API_KEY` or
+`CLAUDE_CODE_OAUTH_TOKEN` for `anthropic`, and `CODEX_HOME` for `codex` — and the
+boot fails closed if the backend a spec declares has no credential. The Anthropic
+subscription path in particular needs `CLAUDE_CODE_OAUTH_TOKEN` in *this* process's
+environment: the adapter runs under a fresh per-tenant `CLAUDE_CONFIG_DIR` that does
+not inherit a machine-level `claude` login. See [`.env.example`](../.env.example)
+for the full per-backend credential contract.
 
 ---
 

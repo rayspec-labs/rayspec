@@ -5,6 +5,36 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-07-11
+
+### Added
+
+- **`rayspec-serve` boots a backend-profile spec with agents directly.** Point
+  `RAYSPEC_SPEC_PATH` at a backend-profile document that declares agents and the
+  shipped entrypoint builds each declared agent's backend instance from the ambient
+  environment (for example the `openai` backend from `OPENAI_API_KEY`) — no
+  hand-written `AgentBackendsFactory` wrapper. A missing or misconfigured credential
+  fails the boot fast, naming the backend and the agent(s) that select it.
+- **A worked backend-profile example with a live agent.** `examples/lead-qualifier`
+  is a backend-profile spec whose declared agent runs off-request on the durable
+  worker and records its verdict through a persist tool — a runnable end-to-end
+  example (with deterministic and live test suites), not just a grammar showcase.
+- **Scope-gap 403s name the missing permission.** An authenticated request that
+  lacks the required permission now returns a `403` whose error body carries
+  `details.missing_permission`, so a client can tell which scope it is missing. A
+  membership-failure 403 and an unauthenticated 401 stay bare (no scope leak).
+
+### Documentation
+
+- Clarified four onboarding points: a backend-profile spec with agents boots
+  directly (no wrapper); a returning user calls `POST /v1/auth/login` (which returns
+  `activeOrgId: null`) then `POST /v1/orgs/{id}/switch` to obtain an org-scoped
+  token; the Anthropic subscription path needs `CLAUDE_CODE_OAUTH_TOKEN` in the
+  server process's own environment; and the declarative `store` `list` op is
+  unfiltered, unsorted, and uncounted (capped, with an `X-Result-Truncated` header)
+  — a filtered, sorted, paged, or counted read drops to a `store:write`-gated
+  `handler` route.
+
 ## [1.0.0] - 2026-07-11
 
 The first tagged release of RaySpec — file-deployable AI infrastructure. Describe
@@ -61,4 +91,5 @@ stands up the running backend from that single file.
   untrusted, multi-tenant, public-internet hosting is a separate layer and is
   deliberately not part of the core — see [`SECURITY.md`](./SECURITY.md).
 
+[1.1.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.1.0
 [1.0.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.0.0
