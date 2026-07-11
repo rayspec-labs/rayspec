@@ -203,11 +203,7 @@ export function applyGroundingPolicy(
   closedSpans: ReadonlyMap<string, string>,
 ): GroundingApplication {
   const grounding = spec.grounding;
-  if (
-    !grounding ||
-    grounding.on_invalid_citation !== 'prune' ||
-    grounding.on_empty_evidence !== 'drop'
-  ) {
+  if (grounding?.on_invalid_citation !== 'prune' || grounding.on_empty_evidence !== 'drop') {
     // compose() front-stops this; kept fail-closed so a direct caller cannot run an undeclared policy.
     throw new MaterializeError(
       'grounding policy must be declared with on_invalid_citation: prune + on_empty_evidence: drop ' +

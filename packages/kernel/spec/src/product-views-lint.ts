@@ -402,7 +402,7 @@ export function lintProductViews(input: ViewLintInput): SpecError[] {
     // ---- pagination laws ---------------------------------------------------------------------
     if (read.mode === 'list') {
       const pg = view.pagination;
-      if (!pg || !pg.limit_param || !pg.offset_param || pg.max_limit === undefined) {
+      if (!pg?.limit_param || !pg.offset_param || pg.max_limit === undefined) {
         invalid(
           `view '${view.id}' is a list view and must declare bounded pagination ` +
             '(limit_param + offset_param + max_limit) — an unbounded list response is fail-open',
