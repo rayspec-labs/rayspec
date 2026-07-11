@@ -1,0 +1,28 @@
+# RaySpec — local Postgres.
+# Two databases on one server:
+#   - rayspec      : the main DB (run journal, conversation store, db-spike entities)
+#   - rayspec_shadow: a SEPARATE throwaway DB Atlas uses for migration dry-runs.
+# Shadow DB must be empty/disposable — Atlas drops & recreates its contents on every diff.
+services:
+  postgres:
+    image: postgres:16
+    container_name: rayspec-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rayspec
+      POSTGRES_PASSWORD: rayspec
+      POSTGRES_DB: rayspec
+    ports:
+      # Host 5433 -> container 5432, to avoid colliding with a local PG on 5432.
+      - "5433:5432"
+    volumes:
+      - rayspec-pgdata:/var/lib/postgresql/data
+      - ./scripts/init-shadow-db.sql:/docker-entrypoint-initdb.d/10-init-shadow-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rayspec -d rayspec"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  rayspec-pgdata:

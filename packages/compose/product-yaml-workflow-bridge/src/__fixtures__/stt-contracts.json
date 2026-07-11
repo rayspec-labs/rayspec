@@ -1,0 +1,12 @@
+{
+  "capability": {
+    "contracts": [
+      "stt.transcribe_session",
+      "stt.transcribe_track",
+      "stt.transcript",
+      "stt.segment",
+      "stt.word",
+      "stt.transcript_span"
+    ]
+  }
+}

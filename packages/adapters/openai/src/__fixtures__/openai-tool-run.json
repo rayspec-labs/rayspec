@@ -1,0 +1,118 @@
+{
+  "capturedAt": "2026-06-22T17:15:01.264Z",
+  "sdk": "@openai/agents@0.11.8",
+  "model": "gpt-4.1-mini",
+  "input": "What is the weather in Berlin? Answer in one short sentence.",
+  "instructions": "You are a concise assistant. Use the get_weather tool when asked about weather.",
+  "finalOutput": "The weather in Berlin is cloudy with a temperature of 18°C.",
+  "history": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": "What is the weather in Berlin? Answer in one short sentence."
+    },
+    {
+      "type": "function_call",
+      "id": "fc_0da29d9c0473f859006a396d92e08081a3a18ed4d4c1fb9123",
+      "callId": "call_OAEM0aPEoTnxkd11KGkfc3BH",
+      "name": "get_weather",
+      "status": "completed",
+      "arguments": "{\"city\":\"Berlin\"}",
+      "providerData": {
+        "id": "fc_0da29d9c0473f859006a396d92e08081a3a18ed4d4c1fb9123",
+        "type": "function_call"
+      }
+    },
+    {
+      "type": "function_call_result",
+      "name": "get_weather",
+      "callId": "call_OAEM0aPEoTnxkd11KGkfc3BH",
+      "status": "completed",
+      "output": {
+        "type": "text",
+        "text": "{\"city\":\"Berlin\",\"tempC\":18,\"condition\":\"cloudy\"}"
+      }
+    },
+    {
+      "id": "msg_0da29d9c0473f859006a396d94ed9481a3b6055661348a7737",
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "The weather in Berlin is cloudy with a temperature of 18°C.",
+          "providerData": {
+            "annotations": [],
+            "logprobs": []
+          }
+        }
+      ],
+      "status": "completed",
+      "providerData": {}
+    }
+  ],
+  "rawResponses": [
+    {
+      "responseId": "resp_0da29d9c0473f859006a396d91f32481a3ad71360b12ab79f7",
+      "requestId": "req_8c35996a06b146c7a9f40aebe9c419f6",
+      "usage": {
+        "requests": 1,
+        "inputTokens": 72,
+        "outputTokens": 15,
+        "totalTokens": 87,
+        "inputTokensDetails": [
+          {
+            "cached_tokens": 0
+          }
+        ],
+        "outputTokensDetails": [
+          {
+            "reasoning_tokens": 0
+          }
+        ]
+      }
+    },
+    {
+      "responseId": "resp_0da29d9c0473f859006a396d93396481a3af1be2a812ac138a",
+      "requestId": "req_95269a44419b40c5baf59f34b014b663",
+      "usage": {
+        "requests": 1,
+        "inputTokens": 110,
+        "outputTokens": 16,
+        "totalTokens": 126,
+        "inputTokensDetails": [
+          {
+            "cached_tokens": 0
+          }
+        ],
+        "outputTokensDetails": [
+          {
+            "reasoning_tokens": 0
+          }
+        ]
+      }
+    }
+  ],
+  "stateUsage": {
+    "requests": 2,
+    "inputTokens": 182,
+    "outputTokens": 31,
+    "totalTokens": 213,
+    "inputTokensDetails": [
+      {
+        "cached_tokens": 0
+      },
+      {
+        "cached_tokens": 0
+      }
+    ],
+    "outputTokensDetails": [
+      {
+        "reasoning_tokens": 0
+      },
+      {
+        "reasoning_tokens": 0
+      }
+    ]
+  }
+}

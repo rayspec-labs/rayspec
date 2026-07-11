@@ -1,0 +1,79 @@
+{
+  "stage": "3",
+  "status": "runtime",
+  "package": "@rayspec/audio-runtime",
+  "capabilities": [
+    {
+      "id": "audio_input",
+      "tier": "B",
+      "runtime_status": "available",
+      "contracts": [
+        "audio_input.session",
+        "audio_input.track",
+        "audio_input.chunk",
+        "audio_input.upload_status",
+        "audio_input.finalize_track",
+        "audio_input.finalized_session"
+      ],
+      "events": [
+        {
+          "id": "session_finalized",
+          "contract": "audio_input.finalized_session",
+          "idempotency": "session_scoped",
+          "payload_keys": ["session_id", "tenant_id", "tracks", "source_capability"],
+          "idempotency_key_field": "session_id"
+        }
+      ]
+    },
+    {
+      "id": "media_playback",
+      "tier": "B",
+      "runtime_status": "available",
+      "contracts": ["media_playback.token", "media_playback.stream"],
+      "events": []
+    }
+  ],
+  "stores": ["audio_sessions", "audio_tracks"],
+  "routes": [
+    {
+      "id": "chunk_ingest",
+      "method": "POST",
+      "path": "/{session_id}/{track}/chunks/{chunk_index}",
+      "contract": "audio_input.chunk",
+      "auth": "bearer",
+      "kind": "stream_ingest"
+    },
+    {
+      "id": "upload_status",
+      "method": "GET",
+      "path": "/{session_id}/{track}/upload-status",
+      "contract": "audio_input.upload_status",
+      "auth": "bearer",
+      "kind": "handler"
+    },
+    {
+      "id": "finalize_track",
+      "method": "POST",
+      "path": "/{session_id}/{track}/finalize",
+      "contract": "audio_input.finalize_track",
+      "auth": "bearer",
+      "kind": "handler"
+    },
+    {
+      "id": "play_token",
+      "method": "POST",
+      "path": "/{session_id}/{track}/play-token",
+      "contract": "media_playback.token",
+      "auth": "bearer",
+      "kind": "handler"
+    },
+    {
+      "id": "playback",
+      "method": "GET",
+      "path": "/{session_id}/{track}/playback",
+      "contract": "media_playback.stream",
+      "auth": "media_token",
+      "kind": "stream_playback"
+    }
+  ]
+}

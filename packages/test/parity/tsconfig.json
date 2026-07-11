@@ -1,0 +1,17 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist"
+  },
+  "references": [
+    { "path": "../../kernel/core" },
+    { "path": "../../kernel/platform" },
+    { "path": "../../adapters/openai" },
+    { "path": "../../adapters/anthropic" },
+    { "path": "../../adapters/pi" },
+    { "path": "../../adapters/codex" }
+  ],
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "node_modules", "**/*.test.ts"]
+}

@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "category": { "type": "string" },
+    "severity": { "type": "string" },
+    "summary": { "type": "string" },
+    "suggested_routing": { "type": "string" }
+  },
+  "required": ["category", "severity", "summary", "suggested_routing"]
+}

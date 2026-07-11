@@ -1,0 +1,47 @@
+version: '1.0'
+metadata:
+  name: full
+  description: a fully cross-referenced backend
+deployment:
+  durableWorker: true
+stores:
+  - name: parents
+    columns:
+      - { name: label, type: text }
+  - name: children
+    columns:
+      - { name: parent_id, type: uuid }
+      - { name: note, type: text, nullable: true }
+    foreignKeys:
+      - { column: parent_id, references: parents, onDelete: cascade }
+api:
+  - { method: GET, path: '/parents', action: { kind: store, store: parents, op: list } }
+  - { method: POST, path: '/run', action: { kind: agent, agent: worker } }
+  - { method: POST, path: '/custom', action: { kind: handler, handler: route_h } }
+agents:
+  - id: worker
+    name: worker
+    backend: anthropic
+    model: claude-sonnet-4-6
+    instructions: work
+    tools: [fetch_thing]
+tooling:
+  - id: fetch_thing
+    name: fetch_thing
+    description: fetch
+    parameters: { type: object }
+    handler: tool_h
+    idempotent: true
+    timeoutMs: 2000
+triggers:
+  - name: nightly
+    kind: cron
+    schedule: '0 2 * * *'
+    action: { kind: agent, agent: worker }
+  - name: t1
+    kind: event
+    event: thing.created
+    action: { kind: agent, agent: worker }
+handlers:
+  - { id: tool_h, module: handlers/a.ts, export: a, kind: tool }
+  - { id: route_h, module: handlers/b.ts, export: b, kind: route }

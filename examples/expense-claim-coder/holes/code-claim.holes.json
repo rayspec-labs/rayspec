@@ -1,0 +1,27 @@
+{
+  "template": "persist",
+  "exportName": "codeClaim",
+  "store": "expense_claims",
+  "mode": "update-by-id",
+  "idArg": "claim_id",
+  "successStatus": "coded",
+  "columns": [
+    { "col": "category_code", "jsonType": "text", "required": true, "nullable": false },
+    { "col": "gl_code", "jsonType": "text", "required": true, "nullable": false },
+    { "col": "coding_summary", "jsonType": "text", "required": true, "nullable": false },
+    {
+      "col": "policy_flag",
+      "jsonType": "text",
+      "required": true,
+      "nullable": false,
+      "enumValues": ["ok", "review", "violation"]
+    }
+  ],
+  "fixedValues": { "status": "coded" },
+  "fkRevalidate": {
+    "codeArg": "category_code",
+    "lookupStore": "expense_categories",
+    "lookupColumn": "code",
+    "lookupFixedFilter": { "active": true }
+  }
+}

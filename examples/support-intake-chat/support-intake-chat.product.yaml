@@ -1,0 +1,311 @@
+# Support Intake Chat — a product composing the WHOLE conversational chain in ONE document:
+#   • the conversation_input capability (conversation identity + a per-turn ledger) and the
+#          `turn_submitted` trigger event (a per-turn idempotency key; the message TEXT rides the payload).
+#   • the conditional conversation mount + the responder demand (this doc demands
+#          RAYSPEC_RESPONDER_MODE and — because it declares a workflow agent — RAYSPEC_EXTRACTION_MODE;
+#          NO blob/media/STT env: a chat turn moves no bytes and runs no transcription).
+#   • the in-request multi-turn responder: each user turn assembles a bounded, trust-boundary-framed
+#          input (the history window + a bounded store-context read of the seeded catalog) and produces
+#          a REAL grounded reply through runAgent.
+#   • content-negotiated SSE streaming egress on the SAME turn route (per-backend cardinality) +
+#          the async-follow-up seam: every accepted turn ALSO emits `turn_submitted`, on which this doc
+#          declares an async extraction workflow.
+#   • the async workflow: read the seeded known-issues/routing catalog (bounded
+#          store_read) → extract a structured ticket {category, severity, summary, suggested_routing}
+#          from the turn text + the catalog (agent) → validation.check → store_write UPSERT into
+#          support_tickets (keyed on conversation_id — the conversation IS the ticket) → GET views.
+#
+# PIPELINE (per user turn): submit turn → the multi-turn responder replies grounded in the seeded
+# catalog (agent-side matching; NOT retrieval — KB/retrieval is out of scope by design) → the turn
+# ledger persists → the declared async workflow reads the catalog, extracts+classifies the ticket,
+# validates it, and UPSERTs the conversation's ticket → the detail + list views serve it.
+#
+# HONEST SCOPE (v1): SINGLE SCOPE (conversation) — every persisted artifact scopes on the conversation;
+# reads are GET views; product writes flow through the conversation ingress + the workflow ONLY (no
+# product-declared write/admin surface — `assertProductScope` enforces it). The ticket is UPSERTED per
+# turn and reflects the LATEST turn's extraction (the async workflow's model input is ONE turn's text +
+# the catalog — accumulating multi-turn context INTO the extraction is a named follow-on; the sync
+# REPLY is what carries the bounded history window). The grammar has no transform/project node, so the
+# extracted fields land as ONE jsonb column (`ticket`); the scalar columns come from the event's
+# server-derived turn facts (the same posture the support-ticket-triage example uses). The catalog
+# store_read is a BOUNDED UNFILTERED read: store_read filters are equality-over-event-fields only and a
+# turn event carries no business field to filter on — the category→routing matching is the AGENT's job
+# against the provided catalog rows (the same posture the invoice-intake example uses). The
+# DETERMINISTIC path (responder + extractor) is the merge-gated e2e proof; the LIVE path (real gpt-5
+# through the responder + the generic extraction branch) is proven by a self-skipping smoke (needs
+# OPENAI_API_KEY).
+version: "1.0"
+
+product:
+  id: support_intake_chat
+  name: Support Intake Chat
+  description: >-
+    A first-line support intake CHAT: the user describes their issue over a multi-turn conversation,
+    an assistant replies grounded in a seeded known-issues/routing catalog, and an async workflow
+    classifies the conversation into a structured, routed ticket the support desk can read.
+  owners:
+    - support-platform
+
+requires:
+  capabilities:
+    - conversation_input
+    - validation
+
+capabilities:
+  # The generic Tier-B conversational-ingress capability. `available` + runtime-backed ⇒
+  # it MOUNTS (PUT /conversations/{conversation_id} + POST /conversations/{conversation_id}/turns) — the
+  # boot demands no product code for it, only a responder config (conversation/<agent_id>.responder.json).
+  - id: conversation_input
+    tier: B
+    status: available
+    contracts:
+      - conversation_input.turn_submitted
+  # The declarative shape-validation capability (validation.check is always runtime-wired at compose).
+  - id: validation
+    tier: B
+    status: available
+    contracts:
+      - validation.check
+      - validation.result
+
+contracts:
+  # The bounded known-issues/routing catalog the workflow reads (store_read output; the extractor's
+  # declared input AND the persisted snapshot). The SAME store the responder grounds its reply in.
+  support.catalog_rows:
+    type: array
+    items: { type: object }
+
+  # The extractor's structured output (the extraction contract): the ticket classified from the turn
+  # text + the routing assigned from the catalog.
+  support.ticket:
+    type: object
+    additional_properties: false
+    properties:
+      category: { type: string }
+      severity: { type: string }
+      summary: { type: string }
+      suggested_routing: { type: string }
+    required: [category, severity, summary, suggested_routing]
+
+  # The store_write output row handle.
+  support.ticket_row:
+    type: object
+
+  # The ticket-detail read DTO (single view).
+  support.ticket_response:
+    type: object
+    additional_properties: false
+    properties:
+      ticket_ref: { type: string }
+      conversation_id: { type: [string, "null"] }
+      last_message_id: { type: [string, "null"] }
+      status: { type: [string, "null"] }
+      ticket: { type: [object, "null"] }
+    required: [ticket_ref, conversation_id, last_message_id, status, ticket]
+
+  # The ticket-list read DTO (paged list view).
+  support.ticket_list_response:
+    type: object
+    additional_properties: false
+    properties:
+      tickets:
+        type: array
+        items:
+          type: object
+          additional_properties: false
+          properties:
+            ticket_ref: { type: string }
+            status: { type: string }
+          required: [ticket_ref, status]
+    required: [tickets]
+
+stores:
+  # A seeded reference catalog the deployment provisions: one row per known issue category (keywords →
+  # owning team + default severity + suggested routing), plus the 'other' fallback for unmatched turns.
+  # Read by BOTH the responder (bounded store-context grounding) AND the async extraction workflow.
+  - name: support_catalog
+    description: >-
+      Reference known-issues/routing rows (category → keywords + owning team + default severity +
+      suggested routing) seeded by the deployment; the 'other' row is the fallback for turns that
+      match no known category.
+    columns:
+      - { name: category, type: text }
+      - { name: keywords, type: text, nullable: true }
+      - { name: owning_team, type: text, nullable: true }
+      - { name: default_severity, type: text, nullable: true }
+      - { name: suggested_routing, type: text, nullable: true }
+    key: [category]
+  # The workflow's idempotent write target — ONE ticket per CONVERSATION (the conversation IS the
+  # ticket), UPSERTed per turn on the declared conflict key (ticket_ref = conversation_id). The scalar
+  # columns come from the event's server-derived turn facts; the classified fields land in `ticket`.
+  - name: support_tickets
+    description: One row per conversation ticket — the workflow's UPSERT target (conflict key = ticket_ref).
+    columns:
+      - { name: ticket_ref, type: text }
+      - { name: conversation_id, type: text }
+      - { name: last_message_id, type: text, nullable: true }
+      - { name: last_turn_seq, type: integer, nullable: true }
+      - { name: last_message, type: text, nullable: true }
+      - { name: ticket, type: jsonb, nullable: true }
+      - { name: catalog_snapshot, type: jsonb, nullable: true }
+      - { name: status, type: text, nullable: true }
+    key: [ticket_ref]
+
+extractors:
+  - id: support_extractor
+    purpose: >-
+      Classify the user's support turn into a structured ticket — category, severity, a short summary,
+      and the suggested routing team — using the provided known-issues/routing catalog.
+    extraction:
+      intent: support_ticket_extraction
+      # ONE declared input artifact: the bounded known-issues/routing catalog (the store_read artifact).
+      # The turn TEXT reaches the model via the extractor config's input_context.payload_fields
+      # (`message`) — a conversation turn's business content rides the trigger payload contract,
+      # NOT an artifact from a parse step. The agent declares NO closed_source_artifacts, so its LIVE
+      # extraction runs the GENERIC branch (artifact_inputs + the config's input_context assemble the
+      # model input).
+      input_artifacts:
+        - name: catalog
+          ref: support.catalog_rows
+          kind: catalog_rows
+          required: true
+          source_step_id: read_catalog
+      output_artifacts:
+        - name: ticket
+          ref: support.ticket
+          kind: support_ticket
+          schema_ref: support.ticket
+          materialization_target: typed_artifact_ref
+      required_output_shape:
+        schema_ref: support.ticket
+        required_paths:
+          - category
+          - severity
+          - summary
+          - suggested_routing
+      acceptance_boundary:
+        type: validation_node
+        requires:
+          - validation.check
+      materialization:
+        target: typed_artifact_ref
+    extraction_constraints:
+      - Classify the turn into ONE category from the provided catalog; when no catalog category matches
+        the turn, use the catalog's 'other' fallback row. Never invent a category not in the catalog.
+      - suggested_routing MUST be the suggested_routing of the matched catalog row (the 'other' row's
+        when nothing matches). Never invent a routing team.
+      - summary is a short, faithful paraphrase of the user's turn — never fabricate details the turn
+        does not state.
+
+workflows:
+  - id: extract_ticket
+    trigger:
+      capability: conversation_input
+      event: turn_submitted
+      scope: conversation
+    steps:
+      # store_read — the bounded known-issues/routing catalog, feeding the extractor AND the persisted
+      # snapshot. UNFILTERED by design: filters are equality-over-event-fields only and a turn event
+      # carries no business field — the category match is the agent's job against the catalog rows.
+      - id: read_catalog
+        type: store_read
+        use: store.read
+        store: support_catalog
+        limit: 50
+        outputs:
+          catalog: support.catalog_rows
+      # The single-turn extraction+classification agent (deterministic in CI; live via extraction/ — S4).
+      - id: extract
+        type: agent
+        use: agent.support_extractor
+        depends_on: [read_catalog]
+        inputs:
+          catalog: support.catalog_rows
+        outputs:
+          ticket: support.ticket
+        on_error: fail
+      # Declarative shape validation of the extracted ticket (required_paths present).
+      - id: validate
+        type: validation
+        use: validation.check
+        depends_on: [extract]
+        inputs:
+          ticket: support.ticket
+        outputs:
+          validation_result: validation.result
+        on_error: fail
+      # store_write — UPSERT on the declared conflict key (ticket_ref = conversation_id). The scalar
+      # turn facts come from the SERVER-DERIVED trigger payload (`{ event: … }`); the classified fields
+      # + the catalog snapshot are the upstream artifacts.
+      - id: persist
+        type: store_write
+        use: store.write
+        store: support_tickets
+        depends_on: [validate]
+        values:
+          ticket_ref: { event: conversation_id }
+          conversation_id: { event: conversation_id }
+          last_message_id: { event: message_id }
+          last_turn_seq: { event: turn_seq }
+          last_message: { event: message }
+          ticket: { artifact: support.ticket }
+          catalog_snapshot: { artifact: support.catalog_rows }
+          status: { const: extracted }
+        outputs:
+          row: support.ticket_row
+
+views:
+  # The ticket-detail read (single row over the support_tickets store, keyed by conversation id).
+  - id: ticket_detail
+    route:
+      method: GET
+      path: "/tickets/{ticket_ref}"
+    auth: bearer_tenant
+    params:
+      ticket_ref: { in: path, shape: safe_id }
+    source: { kind: store, ref: support_tickets }
+    read:
+      mode: single
+      filter:
+        ticket_ref: { param: ticket_ref }
+      shape:
+        fields:
+          ticket_ref: { kind: param, param: ticket_ref }
+          conversation_id: { kind: column, column: conversation_id, type: string, default: "" }
+          last_message_id: { kind: column, column: last_message_id, type: string, default: "" }
+          status: { kind: column, column: status, type: string, default: "" }
+          ticket: { kind: column, column: ticket, type: object }
+      absent:
+        fields:
+          ticket_ref: { kind: param, param: ticket_ref }
+          conversation_id: { kind: const, value: null }
+          last_message_id: { kind: const, value: null }
+          status: { kind: const, value: null }
+          ticket: { kind: const, value: null }
+    absent_state: empty_200
+    response_contract: support.ticket_response
+  # The ticket-list read (paged list over the support_tickets store).
+  - id: ticket_list
+    route:
+      method: GET
+      path: /tickets
+    auth: bearer_tenant
+    source: { kind: store, ref: support_tickets }
+    pagination:
+      limit_param: limit
+      offset_param: offset
+      max_limit: 100
+      default_limit: 20
+    read:
+      mode: list
+      order_by: [{ column: created_at, dir: desc }]
+      shape:
+        fields:
+          tickets:
+            kind: page_items
+            shape:
+              fields:
+                ticket_ref: { kind: column, column: ticket_ref, type: string, default: "" }
+                status: { kind: column, column: status, type: string, default: "" }
+    absent_state: empty_200
+    response_contract: support.ticket_list_response

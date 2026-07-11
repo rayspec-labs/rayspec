@@ -1,0 +1,341 @@
+{
+  "capturedAt": "2026-06-26T01:56:03.435Z",
+  "sdkVersion": "0.142.2",
+  "sdkVersions": {
+    "openai": "0.11.8",
+    "anthropic": "0.3.185",
+    "pi": "0.79.9",
+    "codex": "0.142.2"
+  },
+  "runs": [
+    {
+      "scenario": "multi-turn-tool",
+      "backend": "codex",
+      "result": {
+        "runId": "parity-codex-multi-turn-tool",
+        "backend": "codex",
+        "authMode": "codex-subscription-oauth",
+        "status": "completed",
+        "finalText": "Berlin is cloudy and 18°C.",
+        "output": null,
+        "error": null,
+        "errorClass": null,
+        "conversation": [
+          {
+            "role": "system",
+            "index": 0,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "You are a concise assistant. You MUST use the get_weather tool to answer any weather question — never answer from your own knowledge. Call the tool, then give a one-sentence answer."
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "index": 1,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "What is the weather in Berlin? Answer in one short sentence."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 2,
+            "parts": [
+              {
+                "kind": "tool_call",
+                "toolCallId": "codex-req-2",
+                "name": "get_weather",
+                "args": {
+                  "city": "Berlin"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "index": 3,
+            "parts": [
+              {
+                "kind": "tool_result",
+                "toolCallId": "codex-req-2",
+                "name": "get_weather",
+                "result": {
+                  "kind": "tool_data",
+                  "name": "get_weather",
+                  "toolCallId": "codex-req-2",
+                  "data": {
+                    "city": "Berlin",
+                    "tempC": 18,
+                    "condition": "cloudy"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 4,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "Berlin is cloudy and 18°C."
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "inputTokens": 31441,
+          "outputTokens": 94,
+          "totalTokens": 31535,
+          "cacheReadTokens": 19968,
+          "reasoningTokens": 32
+        },
+        "costUsd": 0.04024125,
+        "stepCount": 2
+      },
+      "journal": [
+        {
+          "type": "tool",
+          "status": "ok",
+          "idempotencyKey": "codex-req-2"
+        },
+        {
+          "type": "llm",
+          "status": "ok",
+          "idempotencyKey": "llm:132c03323a3c30873f77672cfac53d4e5eab584abb8f154b2534570d74e531de:0"
+        }
+      ],
+      "events": [
+        {
+          "type": "run_started",
+          "seq": 0
+        },
+        {
+          "type": "tool_called",
+          "seq": 1
+        },
+        {
+          "type": "tool_result",
+          "seq": 2
+        },
+        {
+          "type": "text_delta",
+          "seq": 3
+        },
+        {
+          "type": "run_completed",
+          "seq": 4
+        }
+      ]
+    },
+    {
+      "scenario": "no-output",
+      "backend": "codex",
+      "result": {
+        "runId": "parity-codex-no-output",
+        "backend": "codex",
+        "authMode": "codex-subscription-oauth",
+        "status": "completed",
+        "finalText": "ok",
+        "output": null,
+        "error": null,
+        "errorClass": null,
+        "conversation": [
+          {
+            "role": "system",
+            "index": 0,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "You are a concise assistant. You MUST use the get_weather tool to answer any weather question — never answer from your own knowledge. Call the tool, then give a one-sentence answer."
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "index": 1,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "Say the single word: ok."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 2,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "ok"
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "inputTokens": 9892,
+          "outputTokens": 30,
+          "totalTokens": 9922,
+          "reasoningTokens": 23
+        },
+        "costUsd": 0.012665,
+        "stepCount": 1
+      },
+      "journal": [
+        {
+          "type": "llm",
+          "status": "ok",
+          "idempotencyKey": "llm:6f4d4df3e8d1fefd160b27d44db751f2d7ea0dd5178f6308a176bd1e32c0b997:0"
+        }
+      ],
+      "events": [
+        {
+          "type": "run_started",
+          "seq": 0
+        },
+        {
+          "type": "text_delta",
+          "seq": 1
+        },
+        {
+          "type": "run_completed",
+          "seq": 2
+        }
+      ]
+    },
+    {
+      "scenario": "error",
+      "backend": "codex",
+      "result": {
+        "runId": "parity-codex-error",
+        "backend": "codex",
+        "authMode": "codex-subscription-oauth",
+        "status": "error",
+        "finalText": "",
+        "output": null,
+        "error": "Error: Codex Exec exited with code 1: Reading prompt from stdin...\n",
+        "errorClass": "internal",
+        "conversation": [],
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "totalTokens": 0
+        },
+        "costUsd": 0,
+        "stepCount": 1
+      },
+      "journal": [
+        {
+          "type": "llm",
+          "status": "error",
+          "idempotencyKey": "llm:56f375f882d4709da630597aa234d3d0cdbbe65fe8e8dbaca2c1930a6ac6be1c:0"
+        }
+      ],
+      "events": [
+        {
+          "type": "run_started",
+          "seq": 0
+        },
+        {
+          "type": "run_completed",
+          "seq": 1
+        }
+      ]
+    },
+    {
+      "scenario": "structured-output",
+      "backend": "codex",
+      "result": {
+        "runId": "parity-codex-structured-output",
+        "backend": "codex",
+        "authMode": "codex-subscription-oauth",
+        "status": "completed",
+        "finalText": "{\"city\":\"Berlin\",\"condition\":\"unknown\"}",
+        "output": {
+          "city": "Berlin",
+          "condition": "unknown"
+        },
+        "error": null,
+        "errorClass": null,
+        "conversation": [
+          {
+            "role": "system",
+            "index": 0,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "You extract structured data. Return the city and a short condition for the requested place."
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "index": 1,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "Give the weather for Berlin: a city name and a one-word condition."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 2,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "{\"city\":\"Berlin\",\"condition\":\"unknown\"}"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 3,
+            "parts": [
+              {
+                "kind": "output",
+                "value": {
+                  "city": "Berlin",
+                  "condition": "unknown"
+                }
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "inputTokens": 9912,
+          "outputTokens": 225,
+          "totalTokens": 10137,
+          "reasoningTokens": 204
+        },
+        "costUsd": 0.01464,
+        "stepCount": 1
+      },
+      "journal": [
+        {
+          "type": "llm",
+          "status": "ok",
+          "idempotencyKey": "llm:531f0545f2bc2b9ed1be84b6cede5590510ac75448d2809fa56a368eea42cfa4:0"
+        }
+      ],
+      "events": [
+        {
+          "type": "run_started",
+          "seq": 0
+        },
+        {
+          "type": "text_delta",
+          "seq": 1
+        },
+        {
+          "type": "run_completed",
+          "seq": 2
+        }
+      ]
+    }
+  ]
+}

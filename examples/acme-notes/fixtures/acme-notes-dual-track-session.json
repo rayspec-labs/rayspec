@@ -1,0 +1,52 @@
+{
+  "fixture_id": "acme-notes-dual-track-session",
+  "description": "Dual-track fixture for the session-scoped processor contract (neutral acme-notes).",
+  "session_id": "acme-dual",
+  "tracks": [
+    {
+      "track": "mic",
+      "status": "completed",
+      "word_count": 5,
+      "segments": [
+        {
+          "span_id": "mic:s0",
+          "text": "Let's keep the upload API stable."
+        }
+      ]
+    },
+    {
+      "track": "system",
+      "status": "completed",
+      "word_count": 6,
+      "segments": [
+        {
+          "span_id": "system:s0",
+          "text": "Agreed, the client can move later."
+        }
+      ]
+    }
+  ],
+  "processor": {
+    "agent_id": "note_processor",
+    "input": {
+      "session_id": "acme-dual"
+    },
+    "idempotency_key_scope": "tenant:session",
+    "expected_runs_for_concurrent_dual_finalize": 1
+  },
+  "combined_transcript_lines": "[mic:s0] (mic) Let's keep the upload API stable.\n[system:s0] (system) Agreed, the client can move later.",
+  "grounded_notes": {
+    "digest": {
+      "headline": "The group kept the current upload API stable.",
+      "detail": "Both tracks support freezing the current upload API before moving it into the client.",
+      "output_language": "en",
+      "evidence_span_ids": ["mic:s0", "system:s0"]
+    },
+    "items": [
+      {
+        "text": "Keep the upload API stable until the client cutover.",
+        "evidence": ["mic:s0", "system:s0"]
+      }
+    ]
+  }
+}

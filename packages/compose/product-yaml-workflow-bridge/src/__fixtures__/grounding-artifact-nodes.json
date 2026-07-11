@@ -1,0 +1,11 @@
+{
+  "capability_nodes": {
+    "operations": [
+      { "id": "grounding.check", "outputs": ["grounding.result"] },
+      { "id": "validation.check", "outputs": ["validation.result"] },
+      { "id": "artifact.persist", "outputs": ["artifact.handle"] },
+      { "id": "artifact.read", "outputs": ["artifact"] }
+    ],
+    "events": [{ "id": "artifact.handle_ready" }]
+  }
+}

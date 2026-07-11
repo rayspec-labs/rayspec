@@ -1,0 +1,35 @@
+{
+  "name": "@rayspec/conversation-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "description": "The generic Tier-B conversational-ingress capability (conversation_input) — an idempotent client-keyed conversation create plus a bounded JSON turn submit that persists the user turn in a capability-owned ledger and emits a durable workflow trigger. Product-neutral; a record×file hybrid (record_input donates the JSON-payload discipline, file_input donates the manifest/handler/mount template).",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./rayspec": {
+      "types": "./dist/rayspec/index.d.ts",
+      "default": "./dist/rayspec/index.js"
+    },
+    "./manifest.json": "./manifest.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rayspec/handler-sdk": "workspace:*",
+    "@rayspec/spec": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "22.12.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

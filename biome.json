@@ -1,0 +1,92 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.0/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "includes": [
+      "**",
+      "!**/dist",
+      "!**/node_modules",
+      "!**/*.gen.ts",
+      "!**/drizzle",
+      "!packages/kernel/spec/spec.schema.json",
+      "!packages/kernel/spec/product.schema.json",
+      "!packages/kernel/spec/version-1.0.schema.json"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "suspicious": {
+        "noExplicitAny": "warn"
+      },
+      "style": {
+        "noNonNullAssertion": "off"
+      }
+    }
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "always",
+      "trailingCommas": "all"
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["packages/**/src/**/*.ts", "!**/*.test.ts", "!**/test-support/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@rayspec/db/testing": "Raw, tenant-UNSCOPED Drizzle handle (makeDb/makeDbWithSchema). Shipped request/orchestration code must hold only a TenantDb via forTenant(...) from @rayspec/db. The /testing subpath is for the composition root + test seam (test-support/** and *.test.ts) only."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "packages/kernel/platform/src/**/*.ts",
+        "packages/compose/api-auth/src/**/*.ts",
+        "packages/workflow/durable-dbos/src/**/*.ts",
+        "!**/*.test.ts",
+        "!**/test-support/**"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@rayspec/db/testing": "Raw, tenant-UNSCOPED Drizzle handle (makeDb/makeDbWithSchema) + the gate-only Set mutators. Shipped request/orchestration code must hold only a TenantDb via forTenant(...) from @rayspec/db. The /testing subpath is for the composition root + test seam (test-support/** and *.test.ts) only. (Biome overrides REPLACE — not merge — a rule's options, so this ban is RE-DECLARED here alongside the makeDb + composition bans; without it this scoped root would silently lose the packages/**/src /testing ban.)",
+                  "@rayspec/db/composition": "registerProductStores/sealProductStores is the SANCTIONED product-store registrar (the boot-time door onto the tenant chokepoint Set). A scoped request/orchestration root is NOT a composition root — it must NEVER register product tables (that could defeat deny-by-default). Only the boot composition root (@rayspec/server/src) + the CLI deploy entrypoint (@rayspec/cli/src) may import it. This mirrors the tenant-chokepoint gate's registerProductStores token ban.",
+                  "@rayspec/db": {
+                    "importNames": ["makeDb"],
+                    "message": "makeDb is the raw, tenant-UNSCOPED production handle factory, now on the MAIN @rayspec/db surface (the boot composition root needs it). It may be named ONLY in the composition root (@rayspec/server/src, NOT in this scoped-root override). Scoped request/orchestration code must hold a TenantDb via forTenant(db, tenantId) — the `Db` TYPE + forTenant from @rayspec/db remain allowed. This is the 2nd barrier behind the import-source-agnostic tenant-chokepoint grep gate (scripts/check-tenant-chokepoint.mjs), restoring the module-boundary double-guard the /testing-only ban no longer provides for makeDb."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

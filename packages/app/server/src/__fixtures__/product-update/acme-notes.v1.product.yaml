@@ -1,0 +1,832 @@
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# acme-notes.v1 — a NEUTRAL 0.2 Product-YAML TEST FIXTURE (env-driven update-apply seam acceptance).
+#
+# NOT the shipped examples/acme-notes/acme-notes.product.yaml — a distinct, strictly domain-neutral
+# test product that shares the anchor's composable SHAPE (the six wired audio/note capabilities + the
+# session workflow + grounded note extraction + the read views) so it boots through the REAL
+# deployProductYamlSpec. It is authored purely to exercise the ENV-DRIVEN update-apply seam:
+# v2 (acme-notes.v2.product.yaml) ADDS two artifact kinds whose new collections materialize two NEW
+# Tier-A stores (`pinned_moments`, `highlights`) — the derived-store delta the 0.2 update boot applies.
+# The two stores let the acceptance drive a faithful "applies-part-but-under-reconciles" incomplete
+# delta arm (create one of the two → residual drift → the post-update drift gate fires). Fake
+# providers only.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+version: "1.0"
+
+product:
+  id: acme_notes
+  name: Acme Notes
+  description: A neutral test product exercising the env-driven update-apply seam with fake providers.
+  owners:
+    - product
+  metadata:
+    stage: product_yaml_v1
+
+requires:
+  capabilities:
+    - audio_input
+    - media_playback
+    - stt
+    - grounding
+    - validation
+    - artifact
+
+# ── Tier-B capability requirements (runtime-backed; the deploy composition serves each) ──────────
+capabilities:
+  - id: audio_input
+    tier: B
+    status: available
+    contracts:
+      - audio_input.session
+      - audio_input.track
+      - audio_input.chunk
+      - audio_input.finalize_track
+      - audio_input.finalized_session
+      - audio_input.upload_status
+    runtime_notes: Served by the mounted Audio/Media capability (chunk ingest, upload status, finalize).
+
+  - id: media_playback
+    tier: B
+    status: available
+    contracts:
+      - media_playback.token
+      - media_playback.stream
+    runtime_notes: Playback-token mint + Range streaming are Tier-B media capability behavior.
+
+  - id: stt
+    tier: B
+    status: available
+    contracts:
+      - stt.transcribe_session
+      - stt.transcript
+      - stt.transcript_span
+    provider_policy:
+      default_provider: deepgram
+      default_model: nova-2
+      adapter_visibility: internal
+    runtime_notes: >-
+      The deployment injects the adapter instance behind the neutral SttAdapter contract; the
+      fake adapter serves the deterministic CI path, the provider adapter serves production.
+
+  - id: grounding
+    tier: B
+    status: available
+    contracts:
+      - grounding.check
+      - grounding.result
+      - grounding.citation_check
+      - grounding.closed_span_set
+    runtime_notes: Mechanical closed-span-set citation validation; the policy below is executed as declared.
+
+  - id: validation
+    tier: B
+    status: available
+    contracts:
+      - validation.check
+      - validation.result
+    runtime_notes: Required-path shape validation of the grounded candidate (the acceptance boundary).
+
+  - id: artifact
+    tier: B
+    status: available
+    contracts:
+      - artifact.persist
+      - artifact.read
+      - artifact.handle
+    runtime_notes: Typed-artifact persistence (content-addressed handles) + the declared collection rows.
+
+# ── The five artifact kinds — declaration order = persistence order ───────────────────────────────
+# digest is evidence-exempt (projection member); the other four are evidence-required (the prune /
+# empty-drop triggers). Each is a MINIMAL neutral {text, evidence} shape.
+artifacts:
+  - kind: digest
+    label: Digest
+    contract: acme.digest
+    scope: session
+    collection: note_artifacts
+    provenance:
+      source: stt.transcript_span
+      evidence_field: evidence_span_ids
+      required: false # the session-level narrative is evidence-exempt (projection member)
+    lifecycle:
+      persist: true
+      preserve_human_edits: true
+      reconcile_stale_rows: true
+
+  - kind: item
+    label: Item
+    contract: acme.item
+    scope: session
+    collection: note_artifacts
+    provenance:
+      source: stt.transcript_span
+      evidence_field: evidence
+      required: true
+    lifecycle:
+      persist: true
+      preserve_human_edits: true
+      reconcile_stale_rows: true
+
+  - kind: pointer
+    label: Pointer
+    contract: acme.pointer
+    scope: session
+    collection: note_artifacts
+    provenance:
+      source: stt.transcript_span
+      evidence_field: evidence
+      required: true
+    lifecycle:
+      persist: true
+      preserve_human_edits: true
+      reconcile_stale_rows: true
+
+  - kind: query
+    label: Query
+    contract: acme.query
+    scope: session
+    collection: note_artifacts
+    provenance:
+      source: stt.transcript_span
+      evidence_field: evidence
+      required: true
+    lifecycle:
+      persist: true
+      preserve_human_edits: true
+      reconcile_stale_rows: true
+
+  - kind: label
+    label: Label
+    contract: acme.label
+    scope: session
+    collection: note_artifacts
+    provenance:
+      source: stt.transcript_span
+      evidence_field: evidence
+      required: true
+    lifecycle:
+      persist: true
+      preserve_human_edits: true
+      reconcile_stale_rows: true
+
+# ── Contracts (payload + DTO shapes; the closed declarative vocabulary) ──────────────────────────
+contracts:
+  stt.transcript_span:
+    type: object
+    additional_properties: false
+    properties:
+      id:
+        type: string
+      track:
+        type: string
+        enum: [mic, system]
+      speaker_role:
+        type: string
+        enum: [local, remote, unknown]
+      start:
+        type: number
+      end:
+        type: number
+      text:
+        type: string
+    required: [id, track, speaker_role, start, end, text]
+
+  acme.digest:
+    type: object
+    additional_properties: false
+    properties:
+      headline:
+        type: string
+      detail:
+        type: string
+      output_language:
+        type: string
+      evidence_span_ids:
+        type: array
+        items:
+          type: string
+    required: [headline, detail, output_language, evidence_span_ids]
+
+  acme.item:
+    type: object
+    additional_properties: false
+    properties:
+      text:
+        type: string
+      evidence:
+        type: array
+        items:
+          type: string
+    required: [text, evidence]
+
+  acme.pointer:
+    type: object
+    additional_properties: false
+    properties:
+      text:
+        type: string
+      evidence:
+        type: array
+        items:
+          type: string
+    required: [text, evidence]
+
+  acme.query:
+    type: object
+    additional_properties: false
+    properties:
+      text:
+        type: string
+      evidence:
+        type: array
+        items:
+          type: string
+    required: [text, evidence]
+
+  acme.label:
+    type: object
+    additional_properties: false
+    properties:
+      text:
+        type: string
+      evidence:
+        type: array
+        items:
+          type: string
+    required: [text, evidence]
+
+  # The extraction candidate: the array properties' items.ref bind each artifact kind's members
+  # (the declaration the materializer derives per-kind rows from); the digest projects from the
+  # top-level fields (evidence-exempt); `mentions` has no artifact kind (items type: object, no ref)
+  # so it is grounded but NEVER persisted (the grounded-not-persisted trigger).
+  acme.notes:
+    type: object
+    additional_properties: false
+    properties:
+      headline:
+        type: string
+      detail:
+        type: string
+      output_language:
+        type: string
+      items:
+        type: array
+        items:
+          ref: acme.item
+      pointers:
+        type: array
+        items:
+          ref: acme.pointer
+      queries:
+        type: array
+        items:
+          ref: acme.query
+      labels:
+        type: array
+        items:
+          ref: acme.label
+      mentions:
+        type: array
+        items:
+          type: object
+    required:
+      - headline
+      - detail
+      - output_language
+      - items
+      - pointers
+      - queries
+      - labels
+      - mentions
+
+  # ── Read-view DTO contracts ────────────────────────────────────────────────────────────────
+  acme.note_counts:
+    type: object
+    additional_properties: false
+    properties:
+      item: { type: integer }
+      pointer: { type: integer }
+      query: { type: integer }
+      label: { type: integer }
+      digest: { type: integer }
+      total: { type: integer }
+    required: [item, pointer, query, label, digest, total]
+
+  acme.session_list_response:
+    type: object
+    additional_properties: false
+    properties:
+      sessions:
+        type: array
+        items:
+          type: object
+          additional_properties: false
+          properties:
+            id: { type: string }
+            status: { type: string }
+            protocol_version: { type: integer }
+            started_at: { type: [string, "null"] }
+            ended_at: { type: "null" }
+            tracks:
+              type: array
+              items:
+                type: object
+                additional_properties: false
+                properties:
+                  id: { type: string }
+                  track: { type: string }
+                  status: { type: string }
+                  sample_rate: { type: "null" }
+                  channels: { type: "null" }
+                  sample_format: { type: "null" }
+                  sample_width_bytes: { type: "null" }
+                  bytes_written: { type: integer }
+                  chunks_written: { type: integer }
+                  malformed_chunks: { type: "null" }
+                  frames_written: { type: "null" }
+                  duration_wall_seconds: { type: "null" }
+                  disconnect_reason: { type: "null" }
+                  started_at: { type: [string, "null"] }
+                  ended_at: { type: "null" }
+                  transcript_status: { type: string }
+                  transcript_word_count: { type: [integer, "null"] }
+                  transcript_language: { type: [string, "null"] }
+                required:
+                  [id, track, status, sample_rate, channels, sample_format, sample_width_bytes,
+                   bytes_written, chunks_written, malformed_chunks, frames_written,
+                   duration_wall_seconds, disconnect_reason, started_at, ended_at,
+                   transcript_status, transcript_word_count, transcript_language]
+            artifacts:
+              # The client's file-artifacts list — this product produces none (always []).
+              type: array
+            note_counts:
+              ref: acme.note_counts
+          required:
+            [id, status, protocol_version, started_at, ended_at, tracks, artifacts, note_counts]
+      total:
+        type: integer
+      next_offset:
+        type: [integer, "null"]
+    required: [sessions, total, next_offset]
+
+  acme.transcript_response:
+    type: object
+    additional_properties: false
+    properties:
+      session_id: { type: string }
+      track: { type: string }
+      status: { type: string }
+      model: { type: [string, "null"] }
+      detected_language: { type: [string, "null"] }
+      full_text: { type: [string, "null"] }
+      confidence: { type: [number, "null"] }
+      word_count: { type: integer }
+      billed_duration_seconds: { type: [number, "null"] }
+      words:
+        type: array
+        items:
+          type: object
+          additional_properties: false
+          properties:
+            word: { type: string }
+            punctuated_word: { type: string }
+            start: { type: number }
+            end: { type: number }
+            confidence: { type: number }
+            speaker: { type: [integer, "null"] }
+          required: [word, punctuated_word, start, end, confidence, speaker]
+      segments:
+        type: array
+        items:
+          type: object
+          additional_properties: false
+          properties:
+            start: { type: number }
+            end: { type: number }
+            text: { type: string }
+          required: [start, end, text]
+    required:
+      [session_id, track, status, model, detected_language, full_text, confidence,
+       word_count, billed_duration_seconds, words, segments]
+
+  acme.session_notes_response:
+    type: object
+    additional_properties: false
+    properties:
+      session_id: { type: string }
+      digest:
+        type: [object, "null"]
+        properties:
+          headline: { type: string }
+          detail: { type: string }
+          output_language: { type: string }
+        required: [headline, detail, output_language]
+      # The per-kind items are the persisted `payload` jsonb surfaced VERBATIM. HONEST BOUNDARY:
+      # they carry `additional_properties: true` (NOT closed, NO required) because the runtime
+      # surfaces the model-written payload verbatim and cannot statically prove per-item field
+      # presence; a closed/required claim here would be unenforced overselling.
+      items:
+        type: array
+        items:
+          type: object
+          additional_properties: true
+          properties:
+            text: { type: string }
+            evidence: { type: array, items: { type: string } }
+            evidence_span_ids: { type: array, items: { type: string } }
+      pointers:
+        type: array
+        items:
+          type: object
+          additional_properties: true
+          properties:
+            text: { type: string }
+            evidence: { type: array, items: { type: string } }
+            evidence_span_ids: { type: array, items: { type: string } }
+      queries:
+        type: array
+        items:
+          type: object
+          additional_properties: true
+          properties:
+            text: { type: string }
+            evidence: { type: array, items: { type: string } }
+            evidence_span_ids: { type: array, items: { type: string } }
+      labels:
+        type: array
+        items:
+          type: object
+          additional_properties: true
+          properties:
+            text: { type: string }
+            evidence: { type: array, items: { type: string } }
+            evidence_span_ids: { type: array, items: { type: string } }
+      counts:
+        ref: acme.note_counts
+    required: [session_id, digest, items, pointers, queries, labels, counts]
+
+  acme.playback_token_response:
+    type: object
+    additional_properties: false
+    properties:
+      url:
+        type: string
+      expires_at:
+        type: string
+      ttl_seconds:
+        type: integer
+    required: [url, expires_at, ttl_seconds]
+
+# ── The note-extraction agent — the extraction CONTRACT, declared ────────────────────────────────
+extractors:
+  - id: note_extractor
+    purpose: Extract grounded notes from provider-neutral transcript spans.
+    extraction:
+      intent: note_extraction
+      input_artifacts:
+        - name: transcript
+          ref: stt.transcript
+          kind: transcript
+          required: true
+          source_step_id: transcribe
+        - name: spans
+          ref: stt.transcript_span
+          kind: transcript_span_set
+          required: true
+          source_step_id: transcribe
+      output_artifacts:
+        - name: candidate_notes
+          ref: acme.notes
+          kind: note_candidate
+          schema_ref: acme.notes
+          materialization_target: typed_artifact_ref
+      required_output_shape:
+        schema_ref: acme.notes
+        additional_properties: false
+        required_paths:
+          - headline
+          - detail
+          - output_language
+          - items
+          - pointers
+          - queries
+          - labels
+          - mentions
+      acceptance_boundary:
+        type: validation_node
+        requires:
+          - grounding.check
+          - validation.check
+        closed_source_artifacts:
+          - stt.transcript_span
+      materialization:
+        target: typed_artifact_ref
+        persist_via: artifact.persist
+        handle_ref: artifact.handle
+    extraction_constraints:
+      - Empty arrays are valid when the transcript does not support a category.
+      - Evidence fields reference only closed transcript span ids.
+      - Date phrases remain raw text and are not computed to calendar dates.
+      - Output language follows the transcript language.
+
+# ── The processing workflow: finalized session → STT → extraction → grounding → validate → persist ─
+workflows:
+  - id: process_session
+    trigger:
+      capability: audio_input
+      event: session_finalized # normalized to the canonical audio_input.finalized_session
+      scope: session
+    steps:
+      - id: transcribe
+        type: capability
+        use: stt.transcribe_session
+        inputs:
+          finalized_session: audio_input.finalized_session
+        outputs:
+          transcript: stt.transcript
+          spans: stt.transcript_span
+        on_error: retry
+        retry:
+          max_attempts: 3
+
+      - id: extract
+        type: agent
+        use: agent.note_extractor
+        depends_on: [transcribe]
+        inputs:
+          transcript: stt.transcript
+          spans: stt.transcript_span
+        outputs:
+          candidate_notes: acme.notes
+        on_error: fail
+
+      - id: ground
+        type: validation
+        use: grounding.check
+        depends_on: [extract]
+        inputs:
+          candidate_notes: acme.notes
+          spans: stt.transcript_span
+        outputs:
+          grounding_result: grounding.result
+          grounded_notes: acme.notes
+        on_error: fail # the gate is load-bearing: a grounding failure must halt, never drop silently
+
+      - id: validate
+        type: validation
+        use: validation.check
+        depends_on: [ground]
+        inputs:
+          grounded_notes: acme.notes
+        outputs:
+          validation_result: validation.result
+        on_error: fail
+
+      - id: persist
+        type: artifact_persist
+        use: artifact.persist
+        depends_on: [validate]
+        inputs:
+          grounded_notes: acme.notes
+        outputs:
+          artifact_handle: artifact.handle
+        on_error: fail
+
+# ── The grounding policy — EXECUTED as declared by the deploy composition ─────────────────────────
+grounding:
+  require_source_spans: true
+  source_span_contract: stt.transcript_span
+  validation_capability: grounding.citation_check
+  on_invalid_citation: prune # out-of-set citations are removed (never repaired/repointed)
+  on_empty_evidence: drop # an evidence-less claim never persists
+  attribution_policy:
+    tracks:
+      mic: local
+      system: remote
+
+# ── The read views over the REAL composed stores (the generic view interpreter) ───────────────────
+views:
+  # GET /sessions — the client's sessions list.
+  - id: session_list
+    route: { method: GET, path: /sessions }
+    auth: bearer_tenant
+    source: { kind: store, ref: audio_sessions }
+    pagination:
+      limit_param: limit
+      offset_param: offset
+      max_limit: 200
+      default_limit: 50
+    read:
+      mode: list
+      order_by: [{ column: created_at, dir: desc }]
+      shape:
+        fields:
+          sessions:
+            kind: page_items
+            shape:
+              fields:
+                id: { kind: column, column: session_id, type: string, default: "" }
+                status: { kind: column, column: status, type: string, default: "" }
+                protocol_version: { kind: column, column: protocol_version, type: integer, default: 0 }
+                started_at: { kind: column, column: created_at, type: string }
+                ended_at: { kind: const, value: null }
+                tracks:
+                  kind: list
+                  source:
+                    store: audio_tracks
+                    match: { session_id: { column: session_id } }
+                    order_by: [{ column: track }]
+                  shape:
+                    fields:
+                      id: { kind: column, column: id, type: string, default: "" }
+                      track: { kind: column, column: track, type: string, default: "" }
+                      status: { kind: column, column: status, type: string, default: "" }
+                      sample_rate: { kind: const, value: null }
+                      channels: { kind: const, value: null }
+                      sample_format: { kind: const, value: null }
+                      sample_width_bytes: { kind: const, value: null }
+                      bytes_written: { kind: column, column: committed_byte_len, type: integer, default: 0 }
+                      chunks_written: { kind: column, column: persisted_chunk_count, type: integer, default: 0 }
+                      malformed_chunks: { kind: const, value: null }
+                      frames_written: { kind: const, value: null }
+                      duration_wall_seconds: { kind: const, value: null }
+                      disconnect_reason: { kind: const, value: null }
+                      started_at: { kind: column, column: created_at, type: string }
+                      ended_at: { kind: const, value: null }
+                      transcript_status:
+                        kind: lookup
+                        source:
+                          store: track_transcripts
+                          match:
+                            session_id: { column: session_id }
+                            track: { column: track }
+                        field: { column: status }
+                        type: string
+                        default: absent
+                      transcript_word_count:
+                        kind: lookup
+                        source:
+                          store: track_transcripts
+                          match:
+                            session_id: { column: session_id }
+                            track: { column: track }
+                        field: { column: word_count }
+                        type: integer
+                      transcript_language:
+                        kind: lookup
+                        source:
+                          store: track_transcripts
+                          match:
+                            session_id: { column: session_id }
+                            track: { column: track }
+                        field: { column: detected_language }
+                        type: string
+                artifacts: { kind: const, value: [] }
+                note_counts:
+                  kind: counts
+                  of:
+                    store: note_artifacts
+                    match: { session_id: { column: session_id } }
+                  by: artifact_kind
+                  buckets: [item, pointer, query, label, digest]
+                  total: all_rows
+          total: { kind: page_total }
+          next_offset: { kind: page_next_offset }
+    response_contract: acme.session_list_response
+
+  # GET /sessions/{session_id}/{track}/transcript — the per-track transcript.
+  - id: session_track_transcript
+    route: { method: GET, path: "/sessions/{session_id}/{track}/transcript" }
+    auth: bearer_tenant
+    params:
+      session_id: { in: path, shape: safe_id }
+      track: { in: path, shape: safe_id, enum: [mic, system] }
+    source: { kind: store, ref: track_transcripts }
+    absent_state: empty_200
+    conditional_read: etag
+    read:
+      mode: single
+      filter:
+        session_id: { param: session_id }
+        track: { param: track }
+      shape:
+        fields:
+          session_id: { kind: param, param: session_id }
+          track: { kind: param, param: track }
+          status: { kind: column, column: status, type: string, default: unknown }
+          model: { kind: column, column: model, type: string }
+          detected_language: { kind: column, column: detected_language, type: string }
+          full_text: { kind: column, column: full_text, type: string }
+          confidence: { kind: json, column: payload, path: [confidence], type: number }
+          word_count: { kind: column, column: word_count, type: integer, default: 0 }
+          billed_duration_seconds: { kind: json, column: payload, path: [duration], type: number }
+          words:
+            kind: items
+            column: payload
+            path: [words]
+            shape:
+              fields:
+                word: { kind: item, path: [word], type: string, default: "" }
+                punctuated_word: { kind: item, path: [word], type: string, default: "" }
+                start: { kind: item, path: [start], type: number, default: 0 }
+                end: { kind: item, path: [end], type: number, default: 0 }
+                confidence: { kind: item, path: [confidence], type: number, default: 0 }
+                speaker: { kind: const, value: null }
+          segments:
+            kind: items
+            column: payload
+            path: [segments]
+            shape:
+              fields:
+                start: { kind: item, path: [start], type: number, default: 0 }
+                end: { kind: item, path: [end], type: number, default: 0 }
+                text: { kind: item, path: [text], type: string, default: "" }
+      absent:
+        fields:
+          session_id: { kind: param, param: session_id }
+          track: { kind: param, param: track }
+          status: { kind: const, value: absent }
+          model: { kind: const, value: null }
+          detected_language: { kind: const, value: null }
+          full_text: { kind: const, value: null }
+          confidence: { kind: const, value: null }
+          word_count: { kind: const, value: 0 }
+          billed_duration_seconds: { kind: const, value: null }
+          words: { kind: const, value: [] }
+          segments: { kind: const, value: [] }
+    response_contract: acme.transcript_response
+
+  # GET /sessions/{session_id}/notes — the grounded notes.
+  - id: session_notes
+    route: { method: GET, path: "/sessions/{session_id}/notes" }
+    auth: bearer_tenant
+    params:
+      session_id: { in: path, shape: safe_id }
+    source: { kind: artifact_query, ref: note_artifacts }
+    read:
+      mode: collect
+      filter:
+        session_id: { param: session_id }
+      exclude:
+        - { column: dismissed, equals: true }
+      order_by: [{ column: created_at }]
+      shape:
+        fields:
+          session_id: { kind: param, param: session_id }
+          digest:
+            kind: group
+            column: artifact_kind
+            equals: digest
+            mode: last
+            shape:
+              fields:
+                headline: { kind: json, column: payload, path: [headline], type: string, default: "" }
+                detail: { kind: json, column: payload, path: [detail], type: string, default: "" }
+                output_language: { kind: json, column: payload, path: [output_language], type: string, default: "" }
+          items:
+            kind: group
+            column: artifact_kind
+            equals: item
+            mode: list
+            value: { column: payload, type: object, default: {} }
+          pointers:
+            kind: group
+            column: artifact_kind
+            equals: pointer
+            mode: list
+            value: { column: payload, type: object, default: {} }
+          queries:
+            kind: group
+            column: artifact_kind
+            equals: query
+            mode: list
+            value: { column: payload, type: object, default: {} }
+          labels:
+            kind: group
+            column: artifact_kind
+            equals: label
+            mode: list
+            value: { column: payload, type: object, default: {} }
+          counts:
+            kind: counts
+            by: artifact_kind
+            buckets: [item, pointer, query, label, digest]
+            total: bucket_rows
+    response_contract: acme.session_notes_response
+
+  # POST /sessions/{session_id}/{track}/play-token — the playback token (capability-delegated:
+  # the view declares the read contract; the Tier-B media capability's own handler serves it).
+  - id: session_playback_token
+    route: { method: POST, path: "/sessions/{session_id}/{track}/play-token" }
+    auth: bearer_tenant
+    source: { kind: capability, ref: media_playback.token }
+    absent_state: not_ready_409
+    response_contract: acme.playback_token_response
+
+# ── Narrow provider bindings (names only — never secret values) ──────────────────────────────────
+deployment_overrides:
+  providers:
+    deepgram:
+      default_model: nova-2
+    openai:
+      default_model: gpt-5

@@ -1,0 +1,22 @@
+{
+  "capabilities": [
+    {
+      "contracts": [
+        { "id": "audio_input.session", "kind": "resource" },
+        { "id": "audio_input.track", "kind": "resource" },
+        { "id": "audio_input.chunk", "kind": "command" },
+        { "id": "audio_input.upload_status", "kind": "query_output" },
+        { "id": "audio_input.finalize_track", "kind": "command" },
+        { "id": "audio_input.finalized_session", "kind": "event" },
+        { "id": "media_playback.token", "kind": "command_output" },
+        { "id": "media_playback.stream", "kind": "stream" },
+        { "id": "stt.transcribe_session", "kind": "operation" },
+        { "id": "stt.transcribe_track", "kind": "operation" },
+        { "id": "stt.transcript", "kind": "artifact" },
+        { "id": "stt.transcript_span", "kind": "artifact_fragment" },
+        { "id": "stt.word", "kind": "artifact_fragment" },
+        { "id": "stt.segment", "kind": "artifact_fragment" }
+      ]
+    }
+  ]
+}

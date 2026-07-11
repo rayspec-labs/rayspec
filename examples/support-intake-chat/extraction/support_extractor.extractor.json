@@ -1,0 +1,13 @@
+{
+  "agent_id": "support_extractor",
+  "backend": "openai",
+  "model": "gpt-5",
+  "prompt_file": "support_extractor.prompt.md",
+  "schema_file": "support_extractor.schema.json",
+  "output_schema_name": "support_ticket",
+  "structured_output_mode": "native",
+  "input_context": {
+    "payload_fields": ["message"],
+    "artifact_inputs": true
+  }
+}

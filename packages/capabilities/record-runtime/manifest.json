@@ -1,0 +1,38 @@
+{
+  "status": "runtime",
+  "package": "@rayspec/record-runtime",
+  "capabilities": [
+    {
+      "id": "record_input",
+      "tier": "B",
+      "runtime_status": "available",
+      "contracts": ["record_input.record", "record_input.submit", "record_input.record_submitted"],
+      "events": [
+        {
+          "id": "record_submitted",
+          "contract": "record_input.record_submitted",
+          "idempotency": "record_scoped",
+          "payload_keys": ["record_id", "tenant_id", "source_capability"],
+          "idempotency_key_field": "record_id"
+        }
+      ]
+    }
+  ],
+  "stores": ["record_submissions"],
+  "routes": [
+    {
+      "id": "record_submit",
+      "method": "POST",
+      "path": "/{record_id}/submit",
+      "contract": "record_input.submit",
+      "auth": "bearer",
+      "kind": "handler"
+    }
+  ],
+  "payload_contract": {
+    "merged_into_event_payload": true,
+    "reserved_keys": ["record_id", "tenant_id", "source_capability"],
+    "max_record_bytes": 65536,
+    "max_record_depth": 64
+  }
+}

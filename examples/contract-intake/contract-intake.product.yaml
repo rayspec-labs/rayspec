@@ -1,0 +1,310 @@
+# Contract Metadata Intake — a file-declaring product (a DIFFERENT
+# file product from the invoice-intake acceptance). Legal-ops back office: a contract document is
+# UPLOADED, parsed to text, its metadata extracted, the contract_type classified against a seeded
+# retention-policy catalog, one coded record persisted, and the reads served.
+#
+# PIPELINE: upload contract (text or text-layer PDF) → parse_text → read the contract-type retention
+# catalog → extract metadata + assign retention policy (retention_years + review_owner MUST come from
+# the catalog; the seeded 'other' row is the fallback) → validate the load-bearing fields → persist one
+# row per contract → serve detail + list reads.
+#
+# HONEST SCOPE (v1) — the same hard-won file-product limits as the invoice acceptance:
+#   • single scope (file); reads are GET views; writes flow through the file ingress + workflow ONLY.
+#   • the DETERMINISTIC path is the merge-gated proof; the LIVE path (real gpt through the generic
+#     branch, via extraction/) is proven by a self-skipping smoke — NOT merge-gated.
+#   • the grammar has no transform/project node → the coded metadata lands as ONE jsonb column
+#     (`coded`); scalar store columns come from the event's SERVER-DERIVED byte metadata.
+#   • the contract-type→retention match is the AGENT's job over a BOUNDED UNFILTERED store_read
+#     (store_read filters are equality-over-event-fields only, and a file event carries no business
+#     fields) — the seeded 'other' row is the suspense fallback.
+#   • the CLIENT FILENAME IS NOT PERSISTED — `x-file-name` is optional + attacker-influenced, and the
+#     `{event:}` resolver fail-closes on a null value; `file_id` + `sha256` identify the file. A
+#     filename-less upload completes end-to-end.
+#   • NO OCR (a scanned/image PDF fails `scanned_pdf_no_text_layer`); NO original-file download.
+version: "1.0"
+
+product:
+  id: contract_intake
+  name: Contract Metadata Intake
+  description: >-
+    Accept an uploaded contract document (text or text-layer PDF), parse it to text, extract the
+    contract metadata, classify the contract type against a seeded retention-policy catalog, validate
+    the load-bearing fields, persist one coded record per contract, and serve contract reads.
+  owners:
+    - legal-ops
+
+requires:
+  capabilities:
+    - file_input
+    - validation
+
+capabilities:
+  - id: file_input
+    tier: B
+    status: available
+    contracts:
+      - file_input.file_submitted
+  - id: validation
+    tier: B
+    status: available
+    contracts:
+      - validation.check
+      - validation.result
+
+contracts:
+  # The parse step's output — the contract document as bounded extracted text (S3).
+  contract.extracted_text:
+    type: string
+
+  # The bounded contract-type retention catalog the workflow reads (store_read output).
+  contract.catalog_rows:
+    type: array
+    items: { type: object }
+
+  # The coder's structured output (the extraction contract): the contract metadata extracted from the
+  # document text + the retention policy assigned from the catalog.
+  contract.coded:
+    type: object
+    additional_properties: true
+    properties:
+      counterparty_name: { type: string }
+      contract_type: { type: string, enum: [nda, msa, sow, dpa, other] }
+      effective_date: { type: string }
+      term_months: { type: [integer, "null"] }
+      auto_renews: { type: [boolean, "null"] }
+      notice_period_days: { type: [integer, "null"] }
+      governing_law: { type: [string, "null"] }
+      total_value_cents: { type: [integer, "null"] }
+      retention_years: { type: integer }
+      review_owner: { type: string }
+    required:
+      - counterparty_name
+      - contract_type
+      - effective_date
+      - retention_years
+      - review_owner
+
+  # The store_write output row handle.
+  contract.coded_row:
+    type: object
+
+  # The contract-detail read DTO (single view).
+  contract.contract_response:
+    type: object
+    additional_properties: false
+    properties:
+      contract_ref: { type: string }
+      file_id: { type: [string, "null"] }
+      content_type: { type: [string, "null"] }
+      status: { type: [string, "null"] }
+      coded: { type: [object, "null"] }
+    required: [contract_ref, file_id, content_type, status, coded]
+
+  # The contract-list read DTO (paged list view).
+  contract.contract_list_response:
+    type: object
+    additional_properties: false
+    properties:
+      contracts:
+        type: array
+        items:
+          type: object
+          additional_properties: false
+          properties:
+            contract_ref: { type: string }
+            status: { type: string }
+            content_type: { type: string }
+          required: [contract_ref, status, content_type]
+    required: [contracts]
+
+stores:
+  # A seeded reference catalog the workflow reads (bounded store_read; one row per contract type,
+  # incl. the 'other' fallback row the deployment seeds).
+  - name: contract_type_catalog
+    description: >-
+      Reference retention rows (contract_type → default retention_years + review_owner) seeded by the
+      deployment; the 'other' row is the fallback for an unclassifiable contract.
+    columns:
+      - { name: contract_type, type: text }
+      - { name: retention_years, type: integer }
+      - { name: review_owner, type: text }
+    key: [contract_type]
+  # The workflow's idempotent write target — one coded row per submitted contract document.
+  - name: coded_contracts
+    description: One row per coded contract — the workflow's UPSERT target (conflict key = contract_ref).
+    columns:
+      - { name: contract_ref, type: text }
+      - { name: file_id, type: text }
+      - { name: sha256, type: text, nullable: true }
+      - { name: size_bytes, type: integer, nullable: true }
+      - { name: content_type, type: text, nullable: true }
+      - { name: coded, type: jsonb, nullable: true }
+      - { name: catalog_snapshot, type: jsonb, nullable: true }
+      - { name: status, type: text, nullable: true }
+    key: [contract_ref]
+
+extractors:
+  - id: contract_extractor
+    purpose: >-
+      Extract the contract metadata (counterparty, type, dates, term, value) from the parsed document
+      text and assign the retention policy for the classified contract type from the provided catalog.
+    extraction:
+      intent: contract_coding
+      input_artifacts:
+        - name: document_text
+          ref: contract.extracted_text
+          kind: extracted_text
+          required: true
+          source_step_id: parse
+        - name: catalog
+          ref: contract.catalog_rows
+          kind: catalog_rows
+          required: true
+          source_step_id: read_catalog
+      output_artifacts:
+        - name: coded
+          ref: contract.coded
+          kind: coded_contract
+          schema_ref: contract.coded
+          materialization_target: typed_artifact_ref
+      required_output_shape:
+        schema_ref: contract.coded
+        required_paths:
+          - counterparty_name
+          - contract_type
+          - effective_date
+          - retention_years
+          - review_owner
+      acceptance_boundary:
+        type: validation_node
+        requires:
+          - validation.check
+      materialization:
+        target: typed_artifact_ref
+    extraction_constraints:
+      - Extract counterparty_name, contract_type, effective_date, term_months, auto_renews,
+        notice_period_days, governing_law and total_value_cents from the document text ONLY; never
+        invent a field the document does not state (use null for an absent optional field).
+      - contract_type MUST be one of nda, msa, sow, dpa, other — pick 'other' when none clearly fits.
+      - total_value_cents is the contract's total monetary value as an INTEGER number of cents when the
+        document states one, else null. Never a float, never a formatted string.
+      - retention_years and review_owner MUST be taken from the catalog row whose contract_type matches
+        the classified contract_type; when no row matches, use the catalog's 'other' row. Never invent
+        a retention policy that is not in the catalog.
+
+workflows:
+  - id: code_contract
+    trigger:
+      capability: file_input
+      event: file_submitted
+      scope: file
+    steps:
+      - id: parse
+        type: capability
+        use: file_input.parse_text
+        outputs:
+          text: contract.extracted_text
+      # BOUNDED UNFILTERED store_read — the contract-type retention catalog, feeding the coder AND the
+      # persisted snapshot. The contract_type→retention match is the agent's job (filters are
+      # equality-over-event-fields only; the file event carries no business fields).
+      - id: read_catalog
+        type: store_read
+        use: store.read
+        store: contract_type_catalog
+        limit: 20
+        outputs:
+          catalog: contract.catalog_rows
+      - id: extract
+        type: agent
+        use: agent.contract_extractor
+        depends_on: [parse, read_catalog]
+        inputs:
+          document_text: contract.extracted_text
+          catalog: contract.catalog_rows
+        outputs:
+          coded: contract.coded
+        on_error: fail
+      - id: validate
+        type: validation
+        use: validation.check
+        depends_on: [extract]
+        inputs:
+          coded: contract.coded
+        outputs:
+          validation_result: validation.result
+        on_error: fail
+      # store_write UPSERT on the declared conflict key (contract_ref). The byte metadata comes from
+      # the SERVER-DERIVED trigger payload (`{ event: … }` — always-present fields ONLY; the optional
+      # original_filename is deliberately NOT persisted, since the value resolver fail-closes on a
+      # null payload field); the coded output + the catalog snapshot are the upstream artifacts.
+      - id: persist
+        type: store_write
+        use: store.write
+        store: coded_contracts
+        depends_on: [validate]
+        values:
+          contract_ref: { event: file_id }
+          file_id: { event: file_id }
+          sha256: { event: sha256 }
+          size_bytes: { event: size_bytes }
+          content_type: { event: content_type }
+          coded: { artifact: contract.coded }
+          catalog_snapshot: { artifact: contract.catalog_rows }
+          status: { const: coded }
+        outputs:
+          row: contract.coded_row
+
+views:
+  - id: contract_detail
+    route:
+      method: GET
+      path: "/contracts/{contract_ref}"
+    auth: bearer_tenant
+    params:
+      contract_ref: { in: path, shape: safe_id }
+    source: { kind: store, ref: coded_contracts }
+    read:
+      mode: single
+      filter:
+        contract_ref: { param: contract_ref }
+      shape:
+        fields:
+          contract_ref: { kind: param, param: contract_ref }
+          file_id: { kind: column, column: file_id, type: string, default: "" }
+          content_type: { kind: column, column: content_type, type: string, default: "" }
+          status: { kind: column, column: status, type: string, default: "" }
+          coded: { kind: column, column: coded, type: object }
+      absent:
+        fields:
+          contract_ref: { kind: param, param: contract_ref }
+          file_id: { kind: const, value: null }
+          content_type: { kind: const, value: null }
+          status: { kind: const, value: null }
+          coded: { kind: const, value: null }
+    absent_state: empty_200
+    response_contract: contract.contract_response
+  - id: contract_list
+    route:
+      method: GET
+      path: /contracts
+    auth: bearer_tenant
+    source: { kind: store, ref: coded_contracts }
+    pagination:
+      limit_param: limit
+      offset_param: offset
+      max_limit: 100
+      default_limit: 20
+    read:
+      mode: list
+      order_by: [{ column: created_at, dir: desc }]
+      shape:
+        fields:
+          contracts:
+            kind: page_items
+            shape:
+              fields:
+                contract_ref: { kind: column, column: contract_ref, type: string, default: "" }
+                status: { kind: column, column: status, type: string, default: "" }
+                content_type: { kind: column, column: content_type, type: string, default: "" }
+    absent_state: empty_200
+    response_contract: contract.contract_list_response

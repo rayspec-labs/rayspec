@@ -1,0 +1,10 @@
+{
+  "$comment": "Deployment config for the live note-extraction executor. The boot composition reads this to build rollout.liveAgent: it runs the declared agent.note_extractor through the REAL runAgent path (usage/cost journaled) with the donor backend+model, native strict structured output over the schema_file, and the prompt_file composed with the YAML's declared extraction_constraints. Paths are relative to this file's directory. Prompt+schema live here (runtime-side) because prompt text is banned from the executable acme-notes.product.yaml graph.",
+  "agent_id": "note_extractor",
+  "backend": "openai",
+  "model": "gpt-5",
+  "prompt_file": "note-extraction.prompt.md",
+  "schema_file": "note-extraction.schema.json",
+  "output_schema_name": "acme_notes",
+  "require_native_structured_output": true
+}

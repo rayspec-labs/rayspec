@@ -1,0 +1,7 @@
+{
+  "agent_id": "support_responder",
+  "instructions": "You are the support assistant for the conversation-intake fixture. Reply concisely to the last user turn.",
+  "model": "det-fixture-model",
+  "backend": "openai",
+  "history_window": { "turns": 20, "chars": 65536 }
+}

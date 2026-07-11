@@ -1,0 +1,89 @@
+
+version: "1.0"
+product:
+  id: fileintake
+  name: FileIntake
+  description: A neutral file-ingest product used to prove the file-ingest wiring (file_input only — no audio, no record, no stt, no agents).
+requires:
+  capabilities: [file_input]
+capabilities:
+  - id: file_input
+    tier: B
+    status: available
+    contracts: [file_input.file_submitted]
+contracts:
+  fileintake.row:
+    type: object
+  fileintake.extracted_text:
+    type: string
+  fileintake.file_response:
+    type: object
+    additional_properties: false
+    properties:
+      file_id: { type: string }
+      content_type: { type: [string, "null"] }
+      extracted_text: { type: [string, "null"] }
+    required: [file_id, content_type, extracted_text]
+stores:
+  - name: ingested_files
+    columns:
+      - { name: ingest_ref, type: text }
+      - { name: file_id, type: text }
+      - { name: sha256, type: text }
+      - { name: size_bytes, type: integer }
+      - { name: content_type, type: text }
+      - { name: extracted_text, type: text }
+      - { name: status, type: text }
+    key: [ingest_ref]
+workflows:
+  - id: log_file
+    trigger:
+      capability: file_input
+      event: file_submitted
+      scope: file
+    steps:
+      - id: parse
+        type: capability
+        use: file_input.parse_text
+        outputs:
+          text: fileintake.extracted_text
+      - id: log
+        type: store_write
+        use: store.write
+        store: ingested_files
+        depends_on: [parse]
+        values:
+          ingest_ref: { event: file_id }
+          file_id: { event: file_id }
+          sha256: { event: sha256 }
+          size_bytes: { event: size_bytes }
+          content_type: { event: content_type }
+          extracted_text: { artifact: fileintake.extracted_text }
+          status: { const: stored }
+        outputs:
+          row: fileintake.row
+views:
+  - id: file_detail
+    route:
+      method: GET
+      path: "/views/files/{file_id}"
+    auth: bearer_tenant
+    params:
+      file_id: { in: path, shape: safe_id }
+    source: { kind: store, ref: ingested_files }
+    read:
+      mode: single
+      filter:
+        ingest_ref: { param: file_id }
+      shape:
+        fields:
+          file_id: { kind: column, column: file_id, type: string, default: "" }
+          content_type: { kind: column, column: content_type, type: string, default: "" }
+          extracted_text: { kind: column, column: extracted_text, type: string, default: "" }
+      absent:
+        fields:
+          file_id: { kind: param, param: file_id }
+          content_type: { kind: const, value: null }
+          extracted_text: { kind: const, value: null }
+    absent_state: empty_200
+    response_contract: fileintake.file_response

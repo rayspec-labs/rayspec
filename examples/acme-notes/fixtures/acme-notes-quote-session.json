@@ -1,0 +1,31 @@
+{
+  "_comment": "Non-blind oracle for OPT-IN quote-text grounding (provenance.quote_field). The excerpt kind carries a verbatim quote checked against the cited spans' text; the item kind carries NO quote_field (a paraphrase still passes). Deliberately separate from acme-notes-grounding-session.json so the existing default-off oracle stays byte-untouched.",
+  "session_id": "acme-quote-sess-1",
+  "closed_spans": [
+    { "id": "sp-1", "text": "we shipped the release on friday" },
+    { "id": "sp-2", "text": "the budget was approved by the board" }
+  ],
+  "candidate_notes": {
+    "headline": "Weekly review",
+    "detail": "A neutral note set exercising opt-in quote verification.",
+    "output_language": "en",
+    "items": [{ "text": "the team delivered the update", "evidence": ["sp-1"] }],
+    "pointers": [],
+    "queries": [],
+    "labels": [],
+    "excerpts": [
+      { "text": "a faithful excerpt", "quote": "shipped the release", "evidence": ["sp-1"] },
+      {
+        "text": "a fabricated excerpt",
+        "quote": "cancelled the release entirely",
+        "evidence": ["sp-1"]
+      }
+    ],
+    "mentions": []
+  },
+  "expected": {
+    "excerpt_verbatim_quote": "shipped the release",
+    "excerpt_invented_quote": "cancelled the release entirely",
+    "item_paraphrase_text": "the team delivered the update"
+  }
+}

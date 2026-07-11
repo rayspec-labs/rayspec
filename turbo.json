@@ -1,0 +1,31 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^build"]
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": [],
+      "env": [
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CODEX_HOME",
+        "CODEX_MODEL",
+        "DATABASE_URL",
+        "DEEPGRAM_API_KEY",
+        "RAYSPEC_API_KEY_PEPPER",
+        "RAYSPEC_JWT_SIGNING_KEY",
+        "RAYSPEC_LIVE_BACKENDS",
+        "RAYSPEC_REQUIRE_DB_TESTS",
+        "RAYSPEC_REQUIRE_LIVE_TESTS",
+        "OPENAI_API_KEY",
+        "OPENAI_MODEL",
+        "SHADOW_DATABASE_URL"
+      ]
+    }
+  }
+}

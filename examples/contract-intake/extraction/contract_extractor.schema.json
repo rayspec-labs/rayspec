@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "counterparty_name": { "type": "string" },
+    "contract_type": { "type": "string", "enum": ["nda", "msa", "sow", "dpa", "other"] },
+    "effective_date": { "type": "string" },
+    "term_months": { "type": ["integer", "null"] },
+    "auto_renews": { "type": ["boolean", "null"] },
+    "notice_period_days": { "type": ["integer", "null"] },
+    "governing_law": { "type": ["string", "null"] },
+    "total_value_cents": { "type": ["integer", "null"] },
+    "retention_years": { "type": "integer" },
+    "review_owner": { "type": "string" }
+  },
+  "required": [
+    "counterparty_name",
+    "contract_type",
+    "effective_date",
+    "term_months",
+    "auto_renews",
+    "notice_period_days",
+    "governing_law",
+    "total_value_cents",
+    "retention_years",
+    "review_owner"
+  ]
+}

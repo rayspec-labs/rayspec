@@ -1,0 +1,29 @@
+{
+  "name": "@rayspec/local-boot",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "description": "DEV-ONLY generic, spec-driven local backend-boot wrapper. A thin wrapper over @rayspec/server (the supported LOCAL boot) parameterized by RAYSPEC_SPEC_PATH: provisions a fresh dev DB, injects the spec, runs the REAL deploy() pipeline, registers product tables, wires the OpenAI backend, and serves any declarative spec (stores + CRUD api + agents) over curl. Lives OUTSIDE packages/ — zero product code in the platform. Local/internal-only: the external-exposure hardening layer gates untrusted traffic.",
+  "scripts": {
+    "serve": "tsx serve.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.0.6",
+    "@rayspec/adapter-openai": "workspace:*",
+    "@rayspec/core": "workspace:*",
+    "@rayspec/db": "workspace:*",
+    "@rayspec/server": "workspace:*",
+    "@rayspec/spec": "workspace:*",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "@types/node": "22.12.0",
+    "drizzle-orm": "0.45.2",
+    "tsx": "4.22.4",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

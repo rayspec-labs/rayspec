@@ -1,0 +1,13 @@
+{
+  "name": "@spike/agent-pack",
+  "version": "1.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "description": "A SYNTHETIC extension PACK contributing an `agents` fragment — the platform's own forcing-function for a pack shipping its own OOTB agent. A @spike/* package so the CI `--filter='!@spike/*'` excludes it; a workspace member only so pnpm links @rayspec/platform (the pack ENTRY imports defineExtension from it) — mirroring how a real pack ships in its own repo with the platform as a dependency. NO build/typecheck/test: it is loaded at deploy/test time by loadExtensions (the importer transforms the .ts).",
+  "main": "./index.ts",
+  "dependencies": {
+    "@rayspec/handler-sdk": "workspace:*",
+    "@rayspec/platform": "workspace:*"
+  }
+}

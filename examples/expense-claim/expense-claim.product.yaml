@@ -1,0 +1,283 @@
+# Expense-Claim Auto-Coder — a product document. It is the product-declared counterpart of the
+# `examples/expense-claim-coder/` backend: a submitted expense claim is auto-coded (category + GL
+# account) against a seeded policy catalog, validated, persisted, and served through read views.
+#
+# It is NON-AUDIO (no audio_input / media_playback / stt.* step) and exercises the full document
+# surface, in ONE composable+bootable doc:
+#   • the shared trigger-event registry: the `record_submitted` event (a record-scoped idempotency key).
+#   • declared typed stores + the store_read / store_write step runtime (two stores; a bounded
+#          catalog read that feeds a snapshot column; an UPSERT on the declared conflict key).
+#   • the generic Tier-B ingress capability `record_input` (POST /records/{record_id}/submit).
+#   • conditional composition: NO audio, so the boot demands NEITHER blob/media NOR stt env;
+#          it demands ONLY RAYSPEC_EXTRACTION_MODE (one agent).
+#   • a single-turn extraction agent (its own extraction contract; deterministic in CI, and a
+#          live per-agent extractor config under `extraction/` for a real deploy).
+#
+# HONEST SCOPE (v1): reads are GET views; product writes flow through the ingress capability + the
+# workflow ONLY (there is no product-declared write/admin surface — `assertProductScope` enforces it).
+# The extraction is proven end-to-end in DETERMINISTIC mode (the merge-gated e2e); a real LIVE run uses
+# the `extraction/expense_coder.*` config through the GENERIC (non-transcript) branch of the live
+# node (no `closed_source_artifacts` ⇒ the compiled artifact_inputs + the extractor config's
+# `input_context` payload-field allowlist assemble the model input — unit-proven; the composed-stack
+# LIVE e2e is a merge-gated acceptance product's proof).
+version: "1.0"
+
+product:
+  id: expense_claim_coder
+  name: Expense Claim Auto-Coder
+  description: >-
+    Auto-code a submitted expense claim (category + GL account) against a seeded policy catalog,
+    validate the coded output, persist it, and serve claim reads.
+  owners:
+    - finance-platform
+
+requires:
+  capabilities:
+    - record_input
+    - validation
+
+capabilities:
+  # The generic Tier-B submit-ingress capability (S3). `available` + runtime-backed ⇒ it MOUNTS
+  # (POST /records/{record_id}/submit) — the boot demands no product code for it.
+  - id: record_input
+    tier: B
+    status: available
+    contracts:
+      - record_input.record_submitted
+  # The declarative shape-validation capability (validation.check is always runtime-wired at compose).
+  - id: validation
+    tier: B
+    status: available
+    contracts:
+      - validation.check
+      - validation.result
+
+contracts:
+  # The submitted claim shape (the ingress payload; also the coder's business context). The submitter
+  # POSTs these business fields; they merge top-level into the record_submitted trigger payload, so a
+  # store_write `{ event: <field> }` source reads them directly.
+  expense_claim.submission:
+    type: object
+    additional_properties: true
+    properties:
+      merchant: { type: string }
+      amount_cents: { type: integer }
+      description: { type: [string, "null"] }
+      incurred_on: { type: [string, "null"] }
+    required: [merchant, amount_cents]
+
+  # The bounded catalog the workflow reads (store_read output; also the coder's declared input).
+  expense_claim.policy_rows:
+    type: array
+    items: { type: object }
+
+  # The coder's structured output (the extraction contract): the assigned category + GL code + a
+  # policy verdict and a short rationale.
+  expense_claim.coded:
+    type: object
+    additional_properties: true
+    properties:
+      category: { type: string }
+      gl_code: { type: string }
+      policy_ok: { type: boolean }
+      rationale: { type: [string, "null"] }
+    required: [category, gl_code]
+
+  # The store_write output row handle.
+  expense_claim.coded_row:
+    type: object
+
+  # The claim-detail read DTO (single view).
+  expense_claim.claim_response:
+    type: object
+    additional_properties: false
+    properties:
+      claim_ref: { type: string }
+      record_id: { type: [string, "null"] }
+      merchant: { type: [string, "null"] }
+      amount_cents: { type: [integer, "null"] }
+      coded: { type: [object, "null"] }
+    required: [claim_ref, record_id, merchant, amount_cents, coded]
+
+  # The claim-list read DTO (list view).
+  expense_claim.claim_list_response:
+    type: object
+    additional_properties: false
+    properties:
+      claims:
+        type: array
+        items:
+          type: object
+          additional_properties: false
+          properties:
+            claim_ref: { type: string }
+            record_id: { type: string }
+            amount_cents: { type: integer }
+          required: [claim_ref, record_id, amount_cents]
+    required: [claims]
+
+stores:
+  # A seeded reference catalog the workflow reads (bounded store_read).
+  - name: expense_policies
+    description: Reference policy rows (category → GL code → daily limit) seeded by the deployment.
+    columns:
+      - { name: category, type: text }
+      - { name: gl_code, type: text }
+      - { name: daily_limit_cents, type: integer, nullable: true }
+    key: [category]
+  # The workflow's idempotent write target — one coded row per submitted claim.
+  - name: coded_claims
+    description: One row per coded claim — the workflow's UPSERT target (conflict key = claim_ref).
+    columns:
+      - { name: claim_ref, type: text }
+      - { name: record_id, type: text }
+      - { name: merchant, type: text, nullable: true }
+      - { name: amount_cents, type: integer, nullable: true }
+      - { name: coded, type: jsonb, nullable: true }
+      - { name: policies_snapshot, type: jsonb, nullable: true }
+    key: [claim_ref]
+
+extractors:
+  - id: expense_coder
+    purpose: Assign an expense category + GL account to a submitted claim against the policy catalog.
+    extraction:
+      intent: expense_coding
+      # The coder's declared input is the bounded policy catalog produced by the store_read step
+      # (an in-journal upstream artifact). The submitted claim's raw fields reach the persisted row
+      # directly via the store_write `{ event: <field> }` sources.
+      input_artifacts:
+        - name: catalog
+          ref: expense_claim.policy_rows
+          kind: policy_rows
+          required: true
+          source_step_id: read_policies
+      output_artifacts:
+        - name: coded
+          ref: expense_claim.coded
+          kind: coded_claim
+          schema_ref: expense_claim.coded
+          materialization_target: typed_artifact_ref
+      required_output_shape:
+        schema_ref: expense_claim.coded
+        required_paths:
+          - category
+          - gl_code
+      acceptance_boundary:
+        type: validation_node
+        requires:
+          - validation.check
+      materialization:
+        target: typed_artifact_ref
+    extraction_constraints:
+      - Assign exactly one category and one GL account code per claim.
+      - The GL account code must come from the policy catalog; never invent a code.
+
+workflows:
+  - id: code_claim
+    trigger:
+      capability: record_input
+      event: record_submitted
+      scope: record
+    steps:
+      # S2 store_read — a bounded catalog lookup feeding both the coder and the persisted snapshot.
+      - id: read_policies
+        type: store_read
+        use: store.read
+        store: expense_policies
+        limit: 50
+        outputs:
+          catalog: expense_claim.policy_rows
+      # S5 single-turn extraction — codes the claim (deterministic in CI; live via extraction/).
+      - id: code
+        type: agent
+        use: agent.expense_coder
+        depends_on: [read_policies]
+        inputs:
+          catalog: expense_claim.policy_rows
+        outputs:
+          coded: expense_claim.coded
+        on_error: fail
+      # Declarative shape validation of the coded output (required_paths present).
+      - id: validate
+        type: validation
+        use: validation.check
+        depends_on: [code]
+        inputs:
+          coded: expense_claim.coded
+        outputs:
+          validation_result: validation.result
+        on_error: fail
+      # S2 store_write — UPSERT on the declared conflict key (claim_ref). The raw claim fields come
+      # from the trigger payload (`{ event: … }`); the coded output + the catalog snapshot are the
+      # upstream artifacts.
+      - id: persist
+        type: store_write
+        use: store.write
+        store: coded_claims
+        depends_on: [validate]
+        values:
+          claim_ref: { event: record_id }
+          record_id: { event: record_id }
+          merchant: { event: merchant }
+          amount_cents: { event: amount_cents }
+          coded: { artifact: expense_claim.coded }
+          policies_snapshot: { artifact: expense_claim.policy_rows }
+        outputs:
+          row: expense_claim.coded_row
+
+views:
+  # The claim-detail read (single row over the coded_claims store).
+  - id: claim_detail
+    route:
+      method: GET
+      path: "/claims/{claim_ref}"
+    auth: bearer_tenant
+    params:
+      claim_ref: { in: path, shape: safe_id }
+    source: { kind: store, ref: coded_claims }
+    read:
+      mode: single
+      filter:
+        claim_ref: { param: claim_ref }
+      shape:
+        fields:
+          claim_ref: { kind: param, param: claim_ref }
+          record_id: { kind: column, column: record_id, type: string, default: "" }
+          merchant: { kind: column, column: merchant, type: string, default: "" }
+          amount_cents: { kind: column, column: amount_cents, type: integer, default: 0 }
+          coded: { kind: column, column: coded, type: object }
+      absent:
+        fields:
+          claim_ref: { kind: param, param: claim_ref }
+          record_id: { kind: const, value: null }
+          merchant: { kind: const, value: null }
+          amount_cents: { kind: const, value: null }
+          coded: { kind: const, value: null }
+    absent_state: empty_200
+    response_contract: expense_claim.claim_response
+  # The claim-list read (paged list over the coded_claims store).
+  - id: claim_list
+    route:
+      method: GET
+      path: /claims
+    auth: bearer_tenant
+    source: { kind: store, ref: coded_claims }
+    pagination:
+      limit_param: limit
+      offset_param: offset
+      max_limit: 100
+      default_limit: 20
+    read:
+      mode: list
+      order_by: [{ column: created_at, dir: desc }]
+      shape:
+        fields:
+          claims:
+            kind: page_items
+            shape:
+              fields:
+                claim_ref: { kind: column, column: claim_ref, type: string, default: "" }
+                record_id: { kind: column, column: record_id, type: string, default: "" }
+                amount_cents: { kind: column, column: amount_cents, type: integer, default: 0 }
+    absent_state: empty_200
+    response_contract: expense_claim.claim_list_response

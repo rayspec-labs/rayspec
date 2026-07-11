@@ -1,0 +1,40 @@
+packages:
+  - "packages/kernel/*"
+  - "packages/adapters/*"
+  - "packages/capabilities/*"
+  - "packages/workflow/*"
+  - "packages/workflow/nodes/*"
+  - "packages/compose/*"
+  - "packages/app/*"
+  - "packages/test/*"
+  # examples/* hosts DEV-ONLY harnesses (e.g. the @spike/dev-server curl-demo server). Any package
+  # here is named @spike/* so turbo's --filter='!@spike/*' EXCLUDES it from CI build/test/
+  # typecheck. The throwaway example backend under examples/ has NO package.json, so pnpm does not
+  # treat it as a workspace member (it stays a pure YAML+TS fixture).
+  - "examples/*"
+  # The synthetic stream/blob extension pack is its OWN @spike/* package (mirroring how a REAL
+  # pack — e.g. an extension pack — ships in its own repo with @rayspec/platform as a dependency). It is
+  # a workspace member SO pnpm links @rayspec/platform into its node_modules (the pack ENTRY imports
+  # `defineExtension` from @rayspec/platform at runtime); it ships NO build/typecheck/test scripts +
+  # is named @spike/* so the `--filter='!@spike/*'` CI excludes it (a pure loaded-at-deploy fixture).
+  - "examples/stream-backend/packs/*"
+  # The synthetic agent-pack (a pack contributing an `agents` fragment) is the
+  # same kind of @spike/* workspace-member fixture as the stream pack: a member ONLY so pnpm links
+  # @rayspec/platform into its node_modules (the pack ENTRY imports `defineExtension`); NO build/
+  # typecheck/test, excluded from CI by `--filter='!@spike/*'`; loaded at deploy/test time.
+  - "examples/agent-pack-deployment/packs/*"
+
+onlyBuiltDependencies:
+  - "@biomejs/biome"
+  - "argon2"
+  - "esbuild"
+
+ignoredBuiltDependencies:
+  - "@google/genai"
+  - "protobufjs"
+
+allowBuilds:
+  "@google/genai": false
+  "argon2": true
+  "esbuild": true
+  "protobufjs": false

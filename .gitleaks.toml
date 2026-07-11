@@ -1,0 +1,45 @@
+# gitleaks config (no-plaintext-secrets enforcement on the diff).
+#
+# Uses the default rule set PLUS a NARROW allowlist for the documented DEV/TEST placeholders that are
+# deliberately NOT secrets: the CI dev pepper, the .env.example template values, and the ONE committed
+# test-DB-password fixture. Real secrets live ONLY in .env (gitignored) + the secret manager; a
+# committed real secret has no allowlist entry and fails the scan — INCLUDING a real secret committed
+# into a test file. The exemptions here are keyed to EXACT non-secret VALUES, never to a blanket "every
+# test file is exempt" path wildcard: a path allowlist skips the whole file, so a real secret dropped
+# into that file would pass silently. A value regex waves only the one known-non-secret string, so any
+# OTHER secret in the same file is still caught.
+#
+# ANCHORING IS LOAD-BEARING: gitleaks matches every `regexes` entry UNANCHORED against the captured
+# secret, so a bare literal waves ANY secret that merely CONTAINS it — e.g. an unanchored
+# `correct-horse-battery-staple-9` would wave `correct-horse-battery-staple-9<real-key-tail>`. Every
+# exact-value exemption is therefore wrapped in `^…$` so it waves ONLY that whole exact value. The one
+# non-exact entry is the env-CLEARING shape matcher below (already end-anchored with `=$`), left as a
+# heuristic pattern by design.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documented dev/test placeholders that are not real secrets."
+paths = [
+  # The .env.example TEMPLATE file is placeholders end to end — the whole file is a non-secret.
+  '''\.env\.example$''',
+]
+regexes = [
+  # The CI dev pepper (an explicit non-secret placeholder wired into ci.yml). Anchored: exact value only.
+  '''^ci-dev-pepper-not-a-real-secret$''',
+  '''^dev-pepper-for-tests-only$''',
+  '''^dev-local-pepper-change-me$''',
+  '''^spike-(client|secret|cookie-key)$''',
+  # The CI "live creds EMPTY" env-CLEARING idiom (documented verbatim in the CI recipes
+  # + PM-workspace docs, e.g. `OPENAI_API_KEY= ANTHROPIC_API_KEY= … pnpm test`). generic-api-key's
+  # heuristic parses the FIRST empty assignment's "value" as the next `<VAR>=` token — but an env var
+  # assigned to EMPTY is the OPPOSITE of a secret (a real key value never captures as `<VAR>=$`). This
+  # is a shape matcher, not an exact value; its trailing `=$` already anchors the end.
+  '''(OPENAI_API_KEY|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|DEEPGRAM_API_KEY)=$''',
+  # The ONE committed test-DB-password fixture: a throwaway Postgres password the boot/stream test
+  # harnesses share. Anchored to its EXACT value, so it is waved wherever the harnesses set it — while a
+  # DIFFERENT secret in a test file (or a longer secret that merely begins with this value) does NOT
+  # match and is still caught. This replaces the old blanket "*.test.ts + test-support/ paths are exempt"
+  # allowlist, under which any real secret dropped into a test file passed silently.
+  '''^correct-horse-battery-staple-9$''',
+]

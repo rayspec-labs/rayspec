@@ -1,0 +1,13 @@
+{
+  "agent_id": "contract_extractor",
+  "backend": "openai",
+  "model": "gpt-5",
+  "prompt_file": "contract_extractor.prompt.md",
+  "schema_file": "contract_extractor.schema.json",
+  "output_schema_name": "contract_coded",
+  "structured_output_mode": "native",
+  "input_context": {
+    "payload_fields": ["content_type"],
+    "artifact_inputs": true
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "category": { "type": "string" },
+    "gl_code": { "type": "string" },
+    "policy_ok": { "type": "boolean" },
+    "rationale": { "type": ["string", "null"] }
+  },
+  "required": ["category", "gl_code", "policy_ok", "rationale"]
+}

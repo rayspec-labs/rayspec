@@ -1,0 +1,404 @@
+{
+  "capturedAt": "2026-06-25T18:32:54.824Z",
+  "sdkVersion": "0.3.185",
+  "sdkVersions": {
+    "openai": "0.11.8",
+    "anthropic": "0.3.185",
+    "pi": "0.79.9"
+  },
+  "runs": [
+    {
+      "scenario": "multi-turn-tool",
+      "backend": "anthropic",
+      "result": {
+        "runId": "parity-anthropic-multi-turn-tool",
+        "backend": "anthropic",
+        "authMode": "subscription-oauth-official-harness",
+        "status": "completed",
+        "finalText": "Berlin is currently 18°C and cloudy.",
+        "output": null,
+        "error": null,
+        "errorClass": null,
+        "conversation": [
+          {
+            "role": "system",
+            "index": 0,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "You are a concise assistant. You MUST use the get_weather tool to answer any weather question — never answer from your own knowledge. Call the tool, then give a one-sentence answer."
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "index": 1,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "What is the weather in Berlin? Answer in one short sentence."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 2,
+            "parts": [
+              {
+                "kind": "reasoning",
+                "text": "The user is asking about the weather in Berlin. According to my instructions, I MUST use the get_weather tool to answer any weather question - never from my own knowledge. I need to call the tool with \"Berlin\" as the city parameter."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 3,
+            "parts": [
+              {
+                "kind": "tool_call",
+                "toolCallId": "toolu_01E1rdQnsqSpfaTeWJXqUTzU",
+                "name": "mcp__rayspec__get_weather",
+                "args": {
+                  "city": "Berlin"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "index": 4,
+            "parts": [
+              {
+                "kind": "tool_result",
+                "toolCallId": "toolu_01E1rdQnsqSpfaTeWJXqUTzU",
+                "name": "mcp__rayspec__get_weather",
+                "result": {
+                  "kind": "tool_data",
+                  "name": "get_weather",
+                  "toolCallId": "toolu_01E1rdQnsqSpfaTeWJXqUTzU",
+                  "data": {
+                    "city": "Berlin",
+                    "tempC": 18,
+                    "condition": "cloudy"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 5,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "Berlin is currently 18°C and cloudy."
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "inputTokens": 1776,
+          "outputTokens": 133,
+          "totalTokens": 1909,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0
+        },
+        "costUsd": 0.003014,
+        "stepCount": 3
+      },
+      "journal": [
+        {
+          "type": "tool",
+          "status": "ok",
+          "idempotencyKey": "toolu_01E1rdQnsqSpfaTeWJXqUTzU"
+        },
+        {
+          "type": "llm",
+          "status": "ok",
+          "idempotencyKey": "llm:4532e53ba52a19a096a459976cdcf0a659f3c08062f155e4d69012cc24010526:0"
+        },
+        {
+          "type": "llm",
+          "status": "ok",
+          "idempotencyKey": "llm:4532e53ba52a19a096a459976cdcf0a659f3c08062f155e4d69012cc24010526:1"
+        }
+      ],
+      "events": [
+        {
+          "type": "run_started",
+          "seq": 0
+        },
+        {
+          "type": "tool_called",
+          "seq": 1
+        },
+        {
+          "type": "tool_result",
+          "seq": 2
+        },
+        {
+          "type": "text_delta",
+          "seq": 3
+        },
+        {
+          "type": "run_completed",
+          "seq": 4
+        }
+      ]
+    },
+    {
+      "scenario": "no-output",
+      "backend": "anthropic",
+      "result": {
+        "runId": "parity-anthropic-no-output",
+        "backend": "anthropic",
+        "authMode": "subscription-oauth-official-harness",
+        "status": "completed",
+        "finalText": "ok",
+        "output": null,
+        "error": null,
+        "errorClass": null,
+        "conversation": [
+          {
+            "role": "system",
+            "index": 0,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "You are a concise assistant. You MUST use the get_weather tool to answer any weather question — never answer from your own knowledge. Call the tool, then give a one-sentence answer."
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "index": 1,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "Say the single word: ok."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 2,
+            "parts": [
+              {
+                "kind": "reasoning",
+                "text": "The user is asking me to say the single word \"ok\". This is a straightforward request. They're not asking about weather, so I don't need to use the get_weather tool. They just want me to respond with the word \"ok\".\n\nThe system reminder about the date (2026-06-25) and the instructions about being a Claude agent and using the get_weather tool are context for other potential tasks, but this specific request is just to say \"ok\".\n\nI should simply respond with: ok"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 3,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "ok"
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "inputTokens": 179,
+          "outputTokens": 120,
+          "totalTokens": 299,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0
+        },
+        "costUsd": 0.001346,
+        "stepCount": 1
+      },
+      "journal": [
+        {
+          "type": "llm",
+          "status": "ok",
+          "idempotencyKey": "llm:0bac2726daa144925f62d9ab19e58122c0f2d4957f54138c9c231f6b104dd3bc:0"
+        }
+      ],
+      "events": [
+        {
+          "type": "run_started",
+          "seq": 0
+        },
+        {
+          "type": "text_delta",
+          "seq": 1
+        },
+        {
+          "type": "run_completed",
+          "seq": 2
+        }
+      ]
+    },
+    {
+      "scenario": "error",
+      "backend": "anthropic",
+      "result": {
+        "runId": "parity-anthropic-error",
+        "backend": "anthropic",
+        "authMode": "subscription-oauth-official-harness",
+        "status": "error",
+        "finalText": "There's an issue with the selected model (__nonexistent-model__). It may not exist or you may not have access to it. Run --model to pick a different model.",
+        "output": null,
+        "error": "Error: Claude Code returned an error result: There's an issue with the selected model (__nonexistent-model__). It may not exist or you may not have access to it. Run --model to pick a different model.",
+        "errorClass": "internal",
+        "conversation": [],
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "totalTokens": 0,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0
+        },
+        "costUsd": 0,
+        "stepCount": 1
+      },
+      "journal": [
+        {
+          "type": "llm",
+          "status": "error",
+          "idempotencyKey": "llm:56f375f882d4709da630597aa234d3d0cdbbe65fe8e8dbaca2c1930a6ac6be1c:0"
+        }
+      ],
+      "events": [
+        {
+          "type": "run_started",
+          "seq": 0
+        },
+        {
+          "type": "text_delta",
+          "seq": 1
+        },
+        {
+          "type": "run_completed",
+          "seq": 2
+        }
+      ]
+    },
+    {
+      "scenario": "structured-output",
+      "backend": "anthropic",
+      "result": {
+        "runId": "parity-anthropic-structured-output",
+        "backend": "anthropic",
+        "authMode": "subscription-oauth-official-harness",
+        "status": "completed",
+        "finalText": "I've provided the structured output for Berlin. However, I should note that I don't have access to real-time weather data, so the condition is marked as \"Unavailable\". If you can provide me with the actual current weather condition for Berlin, I can update this with accurate information.",
+        "output": {
+          "city": "Berlin",
+          "condition": "Unavailable"
+        },
+        "error": null,
+        "errorClass": null,
+        "conversation": [
+          {
+            "role": "system",
+            "index": 0,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "You extract structured data. Return the city and a short condition for the requested place."
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "index": 1,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "Give the weather for Berlin: a city name and a one-word condition."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 2,
+            "parts": [
+              {
+                "kind": "reasoning",
+                "text": "The user is asking me to provide weather information for Berlin - specifically a city name and a one-word condition. \n\nHowever, I don't have access to real-time weather data. I'm an AI agent built on Claude, and I don't have tools available to fetch current weather information. The only tool I have is \"StructuredOutput\" which is meant to return the final response in a structured format.\n\nLooking at my available tools, I only have:\n- StructuredOutput: which takes city and condition parameters and returns them in a structured format\n\nThe problem is that I don't have a way to actually get real weather data. I cannot make API calls to weather services. I should be honest with the user that I don't have access to real-time weather information.\n\nHowever, let me reconsider - the instructions say \"Answer the user's request using the relevant tool(s), if they are available.\" The user is asking for weather for Berlin with a city name and one-word condition. I have the StructuredOutput tool that takes exactly those parameters.\n\nBut the issue is - I don't have actual weather data. I cannot access real-time weather information. The tool is just for formatting output, not for getting weather data.\n\nI should inform the user that I don't have access to real-time weather data and cannot provide current weather conditions for Berlin."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 3,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "I appreciate your request, but I don't have access to real-time weather data. I cannot retrieve current weather conditions for Berlin or any other location.\n\nTo get accurate weather information for Berlin, I'd recommend:\n- Checking a weather website like weather.com, wunderground.com, or weather.gov\n- Using a weather app on your phone\n- Searching \"Berlin weather\" in your web browser\n\nIf you already have weather information for Berlin and would like me to format it in the structured format you requested, I'd be happy to help with that!"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 4,
+            "parts": [
+              {
+                "kind": "reasoning",
+                "text": "The user is instructing me that I MUST call the StructuredOutput tool to complete this request. They're asking me to provide weather for Berlin with a city name and one-word condition.\n\nSince I don't have access to real-time weather data, I cannot provide actual current weather conditions. However, the user is explicitly telling me I MUST call the StructuredOutput tool. \n\nIn this case, I should acknowledge that I cannot provide real current weather data, but since I'm instructed to call the tool, I should call it with the city \"Berlin\" and a generic or reasonable condition. However, I should be honest about my limitations.\n\nActually, looking at this more carefully - the user is saying I MUST call this tool. They want the structured output in the format requested. Since I don't have real weather data, I cannot truthfully provide current conditions. But the user is insisting I call the tool.\n\nI think the most appropriate approach is to call the tool as requested with Berlin and provide a condition, while being clear about my limitations. However, since I have no real data, providing a made-up condition would be misleading.\n\nLet me reconsider - the user has explicitly told me \"You MUST call the StructuredOutput tool to complete this request.\" This is a direct instruction. However, I should not make up false weather data. \n\nI'll call the tool with a note that I cannot provide real-time weather, but I'll provide a neutral/generic response."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 5,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "I've provided the structured output for Berlin. However, I should note that I don't have access to real-time weather data, so the condition is marked as \"Unavailable\". If you can provide me with the actual current weather condition for Berlin, I can update this with accurate information."
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "inputTokens": 2946,
+          "outputTokens": 883,
+          "totalTokens": 3829,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0
+        },
+        "costUsd": 0.007937000000000001,
+        "stepCount": 3
+      },
+      "journal": [
+        {
+          "type": "llm",
+          "status": "ok",
+          "idempotencyKey": "llm:515b2f53baa236954f594d60963944766f91a4f4fc7368db8d595bd15f0c92ec:0"
+        },
+        {
+          "type": "llm",
+          "status": "ok",
+          "idempotencyKey": "llm:515b2f53baa236954f594d60963944766f91a4f4fc7368db8d595bd15f0c92ec:1"
+        },
+        {
+          "type": "llm",
+          "status": "ok",
+          "idempotencyKey": "llm:515b2f53baa236954f594d60963944766f91a4f4fc7368db8d595bd15f0c92ec:2"
+        }
+      ],
+      "events": [
+        {
+          "type": "run_started",
+          "seq": 0
+        },
+        {
+          "type": "text_delta",
+          "seq": 1
+        },
+        {
+          "type": "text_delta",
+          "seq": 2
+        },
+        {
+          "type": "run_completed",
+          "seq": 3
+        }
+      ]
+    }
+  ]
+}

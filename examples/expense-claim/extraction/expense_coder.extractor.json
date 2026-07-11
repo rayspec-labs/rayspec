@@ -1,0 +1,13 @@
+{
+  "agent_id": "expense_coder",
+  "backend": "openai",
+  "model": "gpt-5",
+  "prompt_file": "expense_coder.prompt.md",
+  "schema_file": "expense_coder.schema.json",
+  "output_schema_name": "expense_coded_claim",
+  "structured_output_mode": "native",
+  "input_context": {
+    "payload_fields": ["merchant", "amount_cents", "description", "incurred_on"],
+    "artifact_inputs": true
+  }
+}

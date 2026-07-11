@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "vendor": { "type": "string" },
+    "amount_cents": { "type": "integer" },
+    "invoice_date": { "type": ["string", "null"] },
+    "currency": { "type": ["string", "null"] },
+    "gl_code": { "type": "string" },
+    "line_items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "description": { "type": "string" },
+          "quantity": { "type": ["number", "null"] },
+          "amount_cents": { "type": ["integer", "null"] }
+        },
+        "required": ["description", "quantity", "amount_cents"]
+      }
+    }
+  },
+  "required": ["vendor", "amount_cents", "invoice_date", "currency", "gl_code", "line_items"]
+}

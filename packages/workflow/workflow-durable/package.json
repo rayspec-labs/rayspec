@@ -1,0 +1,36 @@
+{
+  "name": "@rayspec/workflow-durable",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "description": "The Tier A DURABLE workflow execution engine — wires the reviewed @rayspec/foundation foundation onto the real platform primitives (TenantDb-journaled workflow_runs/workflow_node_states/workflow_artifacts, the DBOS durable path via @rayspec/durable-dbos, failure semantics retry/repair/drop/quarantine/fail, and real agent/capability/validate/store node execution). Product-free.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rayspec/core": "workspace:*",
+    "@rayspec/db": "workspace:*",
+    "@rayspec/grounding-runtime": "workspace:*",
+    "@rayspec/platform": "workspace:*",
+    "@rayspec/foundation": "workspace:*",
+    "drizzle-orm": "0.45.2"
+  },
+  "devDependencies": {
+    "@types/node": "22.12.0",
+    "dotenv": "17.4.2",
+    "postgres": "3.4.9",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

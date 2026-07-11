@@ -1,0 +1,46 @@
+{
+  "name": "@rayspec/db",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    },
+    "./composition": {
+      "types": "./dist/composition.d.ts",
+      "default": "./dist/composition.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push",
+    "gen:product-schema": "tsx scripts/gen-product-schema.ts",
+    "gate:migrations": "tsx scripts/scan-migrations.ts",
+    "gate:shadow-dryrun": "bash scripts/shadow-dryrun.sh",
+    "gate:migrate-clean": "bash scripts/migrate-clean.sh"
+  },
+  "dependencies": {
+    "@rayspec/spec": "workspace:*",
+    "drizzle-orm": "0.45.2",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "dotenv": "17.4.2",
+    "drizzle-kit": "0.31.10",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

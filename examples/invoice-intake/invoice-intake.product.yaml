@@ -1,0 +1,317 @@
+# Invoice Intake & GL Coder — a product composing the WHOLE file chain in ONE document:
+#   • the bounded file upload/submit ingress (`PUT /files/{file_id}` + POST submit) and the
+#          `file_submitted` trigger event (a file-scoped idempotency key; payload = server-derived
+#          metadata only).
+#   • the conditional file mount + blob-env demand (this doc demands RAYSPEC_BLOB_ROOT and the
+#          extraction mode — NO media key, NO STT env).
+#   • the durable `file_input.parse_text` step (text pass-through + PDF text-layer, no OCR).
+#   • the GENERIC (non-transcript) live-extraction branch: the agent declares NO
+#          closed_source_artifacts, so a live run assembles its model input from the compiled
+#          artifact_inputs + the `extraction/invoice_extractor.extractor.json` input_context.
+#   • store_read (the seeded vendor→GL catalog) feeding BOTH the agent and the
+#          persisted snapshot, `validation.check`, a store_write UPSERT, and two GET views.
+#
+# PIPELINE: upload invoice (text or text-layer PDF) → parse_text → read the vendor→GL catalog →
+# extract+code (vendor, amount_cents, invoice_date, line_items, gl_code — the GL code MUST come from
+# the catalog; the seeded 'unmatched' suspense row is the fallback) → validate required fields →
+# persist one row per invoice → serve detail + list reads.
+#
+# HONEST SCOPE (v1): single scope (file); reads are GET views; product writes flow through the file
+# ingress + the workflow ONLY. The DETERMINISTIC path is the merge-gated e2e proof; the LIVE path
+# (real gpt-5 through the generic branch) is proven by a self-skipping smoke (needs OPENAI_API_KEY).
+# The grammar has no transform/project node, so the coded fields land as ONE jsonb column (`coded`) —
+# scalar store columns come from the event's server-derived byte metadata (the same posture the
+# support-ticket-triage example uses).
+# The catalog read is a BOUNDED UNFILTERED read: store_read filters are equality-over-event-fields
+# only, and a file event carries no business fields — the vendor→GL matching is the AGENT's job
+# against the provided catalog (the same posture the expense-claim example uses).
+# The CLIENT FILENAME IS NOT PERSISTED: the `x-file-name` header is OPTIONAL and attacker-influenced
+# DATA (stored only as escaped data, never in a key), and the `{event:}` value resolver is
+# fail-closed on a null payload value — so v1 keeps it OUT of the coded_invoices row entirely;
+# `file_id` + `sha256` identify the file. A filename-less upload completes end-to-end.
+version: "1.0"
+
+product:
+  id: invoice_intake
+  name: Invoice Intake & GL Coder
+  description: >-
+    Accept an uploaded invoice document (text or text-layer PDF), parse it to text, extract the
+    invoice fields and code the vendor against a seeded vendor→GL catalog, validate the coded
+    output, persist one row per invoice, and serve invoice reads.
+  owners:
+    - finance-platform
+
+requires:
+  capabilities:
+    - file_input
+    - validation
+
+capabilities:
+  # The generic Tier-B file-ingest capability. `available` + runtime-backed ⇒ it MOUNTS
+  # (PUT /files/{file_id} + POST /files/{file_id}/submit) — the boot demands no product code for it.
+  - id: file_input
+    tier: B
+    status: available
+    contracts:
+      - file_input.file_submitted
+  # The declarative shape-validation capability (validation.check is always runtime-wired at compose).
+  - id: validation
+    tier: B
+    status: available
+    contracts:
+      - validation.check
+      - validation.result
+
+contracts:
+  # The parse step's output — the invoice document as bounded extracted text (S3).
+  invoice.extracted_text:
+    type: string
+
+  # The bounded vendor→GL catalog the workflow reads (store_read output; the coder's declared input).
+  invoice.catalog_rows:
+    type: array
+    items: { type: object }
+
+  # The coder's structured output (the extraction contract): the invoice fields extracted from the
+  # document text + the GL code assigned from the catalog.
+  invoice.coded:
+    type: object
+    additional_properties: true
+    properties:
+      vendor: { type: string }
+      amount_cents: { type: integer }
+      invoice_date: { type: [string, "null"] }
+      currency: { type: [string, "null"] }
+      gl_code: { type: string }
+      line_items:
+        type: array
+        items: { type: object }
+    required: [vendor, amount_cents, gl_code, line_items]
+
+  # The store_write output row handle.
+  invoice.coded_row:
+    type: object
+
+  # The invoice-detail read DTO (single view).
+  invoice.invoice_response:
+    type: object
+    additional_properties: false
+    properties:
+      invoice_ref: { type: string }
+      file_id: { type: [string, "null"] }
+      content_type: { type: [string, "null"] }
+      status: { type: [string, "null"] }
+      coded: { type: [object, "null"] }
+    required: [invoice_ref, file_id, content_type, status, coded]
+
+  # The invoice-list read DTO (paged list view).
+  invoice.invoice_list_response:
+    type: object
+    additional_properties: false
+    properties:
+      invoices:
+        type: array
+        items:
+          type: object
+          additional_properties: false
+          properties:
+            invoice_ref: { type: string }
+            status: { type: string }
+            content_type: { type: string }
+          required: [invoice_ref, status, content_type]
+    required: [invoices]
+
+stores:
+  # A seeded reference catalog the workflow reads (bounded store_read; one row per known vendor,
+  # plus the 'unmatched' suspense fallback row the deployment seeds).
+  - name: vendor_gl_catalog
+    description: >-
+      Reference vendor→GL rows (vendor → GL account code + name) seeded by the deployment; the
+      'unmatched' row is the suspense fallback for vendors not in the catalog.
+    columns:
+      - { name: vendor, type: text }
+      - { name: gl_code, type: text }
+      - { name: gl_account_name, type: text, nullable: true }
+    key: [vendor]
+  # The workflow's idempotent write target — one coded row per submitted invoice document.
+  - name: coded_invoices
+    description: One row per coded invoice — the workflow's UPSERT target (conflict key = invoice_ref).
+    columns:
+      - { name: invoice_ref, type: text }
+      - { name: file_id, type: text }
+      - { name: sha256, type: text, nullable: true }
+      - { name: size_bytes, type: integer, nullable: true }
+      - { name: content_type, type: text, nullable: true }
+      - { name: coded, type: jsonb, nullable: true }
+      - { name: catalog_snapshot, type: jsonb, nullable: true }
+      - { name: status, type: text, nullable: true }
+    key: [invoice_ref]
+
+extractors:
+  - id: invoice_extractor
+    purpose: >-
+      Extract the invoice fields (vendor, total in cents, date, line items) from the parsed document
+      text and assign the vendor's GL account code from the provided catalog.
+    extraction:
+      intent: invoice_coding
+      # TWO declared inputs: the parsed document text (the S3 parse step's artifact) and the bounded
+      # vendor→GL catalog (the store_read artifact). The agent declares NO closed_source_artifacts,
+      # so its LIVE extraction runs the S4 GENERIC branch (artifact_inputs + the extractor config's
+      # input_context assemble the model input).
+      input_artifacts:
+        - name: document_text
+          ref: invoice.extracted_text
+          kind: extracted_text
+          required: true
+          source_step_id: parse
+        - name: catalog
+          ref: invoice.catalog_rows
+          kind: catalog_rows
+          required: true
+          source_step_id: read_catalog
+      output_artifacts:
+        - name: coded
+          ref: invoice.coded
+          kind: coded_invoice
+          schema_ref: invoice.coded
+          materialization_target: typed_artifact_ref
+      required_output_shape:
+        schema_ref: invoice.coded
+        required_paths:
+          - vendor
+          - amount_cents
+          - gl_code
+          - line_items
+      acceptance_boundary:
+        type: validation_node
+        requires:
+          - validation.check
+      materialization:
+        target: typed_artifact_ref
+    extraction_constraints:
+      - Extract vendor, amount_cents, invoice_date and line_items from the document text ONLY; never
+        invent a field the document does not state.
+      - amount_cents is the invoice total as an INTEGER number of cents.
+      - The gl_code MUST be the catalog row whose vendor matches the extracted vendor; when no row
+        matches, use the catalog's 'unmatched' suspense row. Never invent a GL code.
+
+workflows:
+  - id: code_invoice
+    trigger:
+      capability: file_input
+      event: file_submitted
+      scope: file
+    steps:
+      # S3 — the durable blob→text parse (magic-byte sniffed; text pass-through / PDF text-layer).
+      - id: parse
+        type: capability
+        use: file_input.parse_text
+        outputs:
+          text: invoice.extracted_text
+      # S2 (unlock) store_read — the bounded vendor→GL catalog, feeding the coder AND the persisted
+      # snapshot. UNFILTERED by design: filters are equality-over-event-fields only and the file
+      # event carries no business fields — the vendor match is the agent's job.
+      - id: read_catalog
+        type: store_read
+        use: store.read
+        store: vendor_gl_catalog
+        limit: 50
+        outputs:
+          catalog: invoice.catalog_rows
+      # The single-turn extraction+coding agent (deterministic in CI; live via extraction/ — S4).
+      - id: extract
+        type: agent
+        use: agent.invoice_extractor
+        depends_on: [parse, read_catalog]
+        inputs:
+          document_text: invoice.extracted_text
+          catalog: invoice.catalog_rows
+        outputs:
+          coded: invoice.coded
+        on_error: fail
+      # Declarative shape validation of the coded output (required_paths present).
+      - id: validate
+        type: validation
+        use: validation.check
+        depends_on: [extract]
+        inputs:
+          coded: invoice.coded
+        outputs:
+          validation_result: validation.result
+        on_error: fail
+      # S2 (unlock) store_write — UPSERT on the declared conflict key (invoice_ref). The byte
+      # metadata comes from the SERVER-DERIVED trigger payload (`{ event: … }` — a file event has no
+      # client business fields); the coded output + the catalog snapshot are the upstream artifacts.
+      - id: persist
+        type: store_write
+        use: store.write
+        store: coded_invoices
+        depends_on: [validate]
+        values:
+          invoice_ref: { event: file_id }
+          file_id: { event: file_id }
+          sha256: { event: sha256 }
+          size_bytes: { event: size_bytes }
+          content_type: { event: content_type }
+          coded: { artifact: invoice.coded }
+          catalog_snapshot: { artifact: invoice.catalog_rows }
+          status: { const: coded }
+        outputs:
+          row: invoice.coded_row
+
+views:
+  # The invoice-detail read (single row over the coded_invoices store).
+  - id: invoice_detail
+    route:
+      method: GET
+      path: "/invoices/{invoice_ref}"
+    auth: bearer_tenant
+    params:
+      invoice_ref: { in: path, shape: safe_id }
+    source: { kind: store, ref: coded_invoices }
+    read:
+      mode: single
+      filter:
+        invoice_ref: { param: invoice_ref }
+      shape:
+        fields:
+          invoice_ref: { kind: param, param: invoice_ref }
+          file_id: { kind: column, column: file_id, type: string, default: "" }
+          content_type: { kind: column, column: content_type, type: string, default: "" }
+          status: { kind: column, column: status, type: string, default: "" }
+          coded: { kind: column, column: coded, type: object }
+      absent:
+        fields:
+          invoice_ref: { kind: param, param: invoice_ref }
+          file_id: { kind: const, value: null }
+          content_type: { kind: const, value: null }
+          status: { kind: const, value: null }
+          coded: { kind: const, value: null }
+    absent_state: empty_200
+    response_contract: invoice.invoice_response
+  # The invoice-list read (paged list over the coded_invoices store).
+  - id: invoice_list
+    route:
+      method: GET
+      path: /invoices
+    auth: bearer_tenant
+    source: { kind: store, ref: coded_invoices }
+    pagination:
+      limit_param: limit
+      offset_param: offset
+      max_limit: 100
+      default_limit: 20
+    read:
+      mode: list
+      order_by: [{ column: created_at, dir: desc }]
+      shape:
+        fields:
+          invoices:
+            kind: page_items
+            shape:
+              fields:
+                invoice_ref: { kind: column, column: invoice_ref, type: string, default: "" }
+                status: { kind: column, column: status, type: string, default: "" }
+                content_type: { kind: column, column: content_type, type: string, default: "" }
+    absent_state: empty_200
+    response_contract: invoice.invoice_list_response

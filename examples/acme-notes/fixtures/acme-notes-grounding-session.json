@@ -1,0 +1,90 @@
+{
+  "fixture_id": "acme-notes-grounding-session",
+  "description": "Deterministic grounding-gate oracle for the neutral acme-notes product. A fixed candidate note-set over a known closed span set, and exactly which artifacts survive: valid kept, one out-of-set citation pruned (artifact kept with its remaining in-set evidence), empty/ungrounded dropped, and one mention grounded-but-never-persisted. The acme-notes e2e loads this to drive the deterministic extractor and to assert the served read model. Drives the REAL open-core enforcers only (closedReferenceGroundingChecker set-membership + on_empty_evidence: drop + grounded-not-persisted) — there is NO verbatim-quote or attribution validator in open-core, so no such field is load-bearing.",
+  "session_id": "acme-grounding",
+  "tenant_id": "tenant-acme",
+  "closed_span_set": ["mic:s0", "mic:s1", "system:s0"],
+  "transcripts": [
+    {
+      "track": "mic",
+      "status": "completed",
+      "segments": [
+        { "text": "We selected the second option for the layout.", "start": 0 },
+        { "text": "Sam will handle the export.", "start": 5 }
+      ]
+    },
+    {
+      "track": "system",
+      "status": "completed",
+      "segments": [{ "text": "That estimate looks optimistic to me.", "start": 10 }]
+    }
+  ],
+  "candidate_notes": {
+    "headline": "Layout notes captured.",
+    "detail": "The session settled the layout option and named an owner for the export.",
+    "output_language": "en",
+    "items": [
+      { "text": "Select the second option.", "evidence": ["mic:s0"] },
+      { "text": "Assign the export.", "evidence": ["mic:s1", "mic:s7"] },
+      { "text": "Adopt an unstated rule.", "evidence": ["system:s9"] }
+    ],
+    "pointers": [{ "text": "Own the export.", "evidence": ["mic:s1"] }],
+    "queries": [{ "text": "What is the budget?", "evidence": [] }],
+    "labels": [{ "text": "The estimate may be optimistic.", "evidence": ["system:s0"] }],
+    "mentions": [{ "name": "Sam", "evidence": ["mic:s1"] }]
+  },
+  "expected_persisted": {
+    "artifact_count": 5,
+    "counts": { "item": 2, "pointer": 1, "query": 0, "label": 1, "digest": 1, "total": 5 },
+    "artifacts": [
+      { "artifact_kind": "digest", "evidence_span_ids": [] },
+      {
+        "artifact_kind": "item",
+        "text": "Select the second option.",
+        "evidence_span_ids": ["mic:s0"]
+      },
+      { "artifact_kind": "item", "text": "Assign the export.", "evidence_span_ids": ["mic:s1"] },
+      { "artifact_kind": "pointer", "text": "Own the export.", "evidence_span_ids": ["mic:s1"] },
+      {
+        "artifact_kind": "label",
+        "text": "The estimate may be optimistic.",
+        "evidence_span_ids": ["system:s0"]
+      }
+    ]
+  },
+  "expected_pruned_citations": [
+    {
+      "kind": "item",
+      "text": "Assign the export.",
+      "removed_span": "mic:s7",
+      "kept_evidence_span_ids": ["mic:s1"]
+    }
+  ],
+  "expected_dropped": [
+    {
+      "kind": "item",
+      "text": "Adopt an unstated rule.",
+      "reason": "all cited spans (system:s9) are outside the closed set -> pruned to empty -> dropped"
+    },
+    {
+      "kind": "query",
+      "text": "What is the budget?",
+      "reason": "no evidence spans -> dropped (never persisted)"
+    }
+  ],
+  "expected_entities_not_persisted": ["Sam"],
+  "expected_read_model": {
+    "digest_present": true,
+    "items": 2,
+    "pointers": 1,
+    "queries": 0,
+    "labels": 1,
+    "counts": { "item": 2, "pointer": 1, "query": 0, "label": 1, "digest": 1, "total": 5 }
+  },
+  "notes": [
+    "Span ids derive from segments order as `${track}:s${index}` (the STT normalizer).",
+    "An item survives only if at least one cited span is in the closed span set (closedReferenceGroundingChecker); out-of-set citations are pruned, and an evidence-required member pruned to empty is dropped (on_empty_evidence: drop).",
+    "The digest is evidence-exempt (provenance.required: false) — a projection member that always persists with empty evidence.",
+    "Mentions are grounded but NEVER flattened into note_artifacts (no artifact kind references them)."
+  ]
+}

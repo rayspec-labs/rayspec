@@ -1,0 +1,17 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist"
+  },
+  "references": [
+    { "path": "../audio-runtime" },
+    { "path": "../conversation-runtime" },
+    { "path": "../file-runtime" },
+    { "path": "../record-runtime" },
+    { "path": "../../workflow/workflow-durable" },
+    { "path": "../../workflow/foundation" }
+  ],
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "node_modules", "**/*.test.ts"]
+}

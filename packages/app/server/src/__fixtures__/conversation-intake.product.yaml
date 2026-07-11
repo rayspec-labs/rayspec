@@ -1,0 +1,52 @@
+# The CONVERSATION-only e2e fixture (conversation_input, no
+# audio/record/file/stt/agents): the minimal composed-stack doc for the conversation e2e.
+# One declared store fed by a deterministic store_write off the `turn_submitted` trigger,
+# sourcing the envelope keys, the NUMERIC turn_seq, and the bounded message TEXT (the
+# message-in-payload contract consumed through the existing `{ event: <field> }` path).
+# Byte-identical in shape to the product-yaml CONVERSATION_INTAKE_YAML fixture — the two
+# layers share one doc shape on purpose.
+version: "1.0"
+product:
+  id: convintake
+  name: ConvIntake
+  description: A neutral conversational-ingress product used to test the conversation_input composition.
+requires:
+  capabilities: [conversation_input]
+capabilities:
+  - id: conversation_input
+    tier: B
+    status: available
+    contracts: [conversation_input.turn_submitted]
+contracts:
+  convintake.row:
+    type: object
+stores:
+  - name: turn_log
+    columns:
+      - { name: log_ref, type: text }
+      - { name: conversation_id, type: text }
+      - { name: message_id, type: text }
+      - { name: turn_seq, type: integer }
+      - { name: message, type: text }
+      - { name: status, type: text }
+    key: [log_ref]
+workflows:
+  - id: log_turn
+    trigger:
+      capability: conversation_input
+      event: turn_submitted
+      scope: conversation
+    steps:
+      - id: log
+        type: store_write
+        use: store.write
+        store: turn_log
+        values:
+          log_ref: { event: turn_ref }
+          conversation_id: { event: conversation_id }
+          message_id: { event: message_id }
+          turn_seq: { event: turn_seq }
+          message: { event: message }
+          status: { const: received }
+        outputs:
+          row: convintake.row

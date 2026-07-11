@@ -1,0 +1,11 @@
+{
+  "template": "lookup",
+  "exportName": "lookupCategories",
+  "store": "expense_categories",
+  "filterCols": [],
+  "fixedFilter": { "active": true },
+  "projectCols": ["code", "name", "description"],
+  "maxRows": 200,
+  "substringArg": "query",
+  "substringCol": "name"
+}

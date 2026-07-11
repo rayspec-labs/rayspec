@@ -1,0 +1,65 @@
+{
+  "status": "runtime",
+  "package": "@rayspec/file-runtime",
+  "capabilities": [
+    {
+      "id": "file_input",
+      "tier": "B",
+      "runtime_status": "available",
+      "contracts": [
+        "file_input.file",
+        "file_input.upload",
+        "file_input.submit",
+        "file_input.file_submitted"
+      ],
+      "events": [
+        {
+          "id": "file_submitted",
+          "contract": "file_input.file_submitted",
+          "idempotency": "file_scoped",
+          "payload_keys": [
+            "file_id",
+            "tenant_id",
+            "source_capability",
+            "sha256",
+            "size_bytes",
+            "content_type",
+            "original_filename",
+            "blob_key"
+          ],
+          "idempotency_key_field": "file_id"
+        }
+      ]
+    }
+  ],
+  "stores": ["file_uploads"],
+  "routes": [
+    {
+      "id": "file_upload",
+      "method": "PUT",
+      "path": "/{file_id}",
+      "contract": "file_input.upload",
+      "auth": "bearer",
+      "kind": "stream_ingest"
+    },
+    {
+      "id": "file_submit",
+      "method": "POST",
+      "path": "/{file_id}/submit",
+      "contract": "file_input.submit",
+      "auth": "bearer",
+      "kind": "handler"
+    }
+  ],
+  "ingest_contract": {
+    "bytes_in_event_payload": false,
+    "max_file_bytes": 26214400,
+    "allowed_content_types": [
+      "text/plain",
+      "text/markdown",
+      "text/csv",
+      "application/json",
+      "application/pdf"
+    ]
+  }
+}

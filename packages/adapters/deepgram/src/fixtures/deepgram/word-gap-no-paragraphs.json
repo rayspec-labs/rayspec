@@ -1,0 +1,51 @@
+{
+  "metadata": {
+    "request_id": "00000000-0000-4000-8000-000000000002",
+    "duration": 2.6,
+    "channels": 1,
+    "models": ["nova-2"]
+  },
+  "results": {
+    "channels": [
+      {
+        "detected_language": "en",
+        "alternatives": [
+          {
+            "transcript": "hello there we shipped",
+            "confidence": 0.95,
+            "words": [
+              {
+                "word": "hello",
+                "start": 0.1,
+                "end": 0.4,
+                "confidence": 0.99,
+                "punctuated_word": "hello"
+              },
+              {
+                "word": "there",
+                "start": 0.4,
+                "end": 0.8,
+                "confidence": 0.98,
+                "punctuated_word": "there"
+              },
+              {
+                "word": "we",
+                "start": 2.0,
+                "end": 2.2,
+                "confidence": 0.97,
+                "punctuated_word": "we"
+              },
+              {
+                "word": "shipped",
+                "start": 2.2,
+                "end": 2.6,
+                "confidence": 0.96,
+                "punctuated_word": "shipped"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

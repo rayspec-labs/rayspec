@@ -1,0 +1,243 @@
+{
+  "full-crossref.yaml": {
+    "ok": true,
+    "value": {
+      "version": "1.0",
+      "metadata": {
+        "name": "full",
+        "description": "a fully cross-referenced backend"
+      },
+      "stores": [
+        {
+          "name": "parents",
+          "columns": [
+            {
+              "name": "label",
+              "type": "text",
+              "nullable": false,
+              "unique": false
+            }
+          ],
+          "foreignKeys": []
+        },
+        {
+          "name": "children",
+          "columns": [
+            {
+              "name": "parent_id",
+              "type": "uuid",
+              "nullable": false,
+              "unique": false
+            },
+            {
+              "name": "note",
+              "type": "text",
+              "nullable": true,
+              "unique": false
+            }
+          ],
+          "foreignKeys": [
+            {
+              "column": "parent_id",
+              "references": "parents",
+              "onDelete": "cascade"
+            }
+          ]
+        }
+      ],
+      "api": [
+        {
+          "method": "GET",
+          "path": "/parents",
+          "action": {
+            "kind": "store",
+            "store": "parents",
+            "op": "list"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/run",
+          "action": {
+            "kind": "agent",
+            "agent": "worker"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/custom",
+          "action": {
+            "kind": "handler",
+            "handler": "route_h"
+          }
+        }
+      ],
+      "agents": [
+        {
+          "name": "worker",
+          "instructions": "work",
+          "model": "claude-sonnet-4-6",
+          "maxTurns": 8,
+          "id": "worker",
+          "backend": "anthropic",
+          "tools": ["fetch_thing"],
+          "requireNativeStructuredOutput": false
+        }
+      ],
+      "tooling": [
+        {
+          "name": "fetch_thing",
+          "description": "fetch",
+          "parameters": {
+            "type": "object"
+          },
+          "id": "fetch_thing",
+          "handler": "tool_h",
+          "idempotent": true,
+          "timeoutMs": 2000
+        }
+      ],
+      "triggers": [
+        {
+          "name": "nightly",
+          "kind": "cron",
+          "schedule": "0 2 * * *",
+          "action": {
+            "kind": "agent",
+            "agent": "worker"
+          }
+        },
+        {
+          "name": "t1",
+          "kind": "event",
+          "event": "thing.created",
+          "action": {
+            "kind": "agent",
+            "agent": "worker"
+          }
+        }
+      ],
+      "handlers": [
+        {
+          "id": "tool_h",
+          "module": "handlers/a.ts",
+          "export": "a",
+          "kind": "tool"
+        },
+        {
+          "id": "route_h",
+          "module": "handlers/b.ts",
+          "export": "b",
+          "kind": "route"
+        }
+      ],
+      "extensions": [],
+      "deployment": {
+        "durableWorker": true
+      }
+    }
+  },
+  "minimal.yaml": {
+    "ok": true,
+    "value": {
+      "version": "1.0",
+      "metadata": {
+        "name": "minimal"
+      },
+      "stores": [],
+      "api": [],
+      "agents": [],
+      "tooling": [],
+      "triggers": [],
+      "handlers": [],
+      "extensions": []
+    }
+  },
+  "stream-extensions.yaml": {
+    "ok": true,
+    "value": {
+      "version": "1.0",
+      "metadata": {
+        "name": "stream-and-extensions"
+      },
+      "stores": [
+        {
+          "name": "recordings",
+          "columns": [
+            {
+              "name": "title",
+              "type": "text",
+              "nullable": false,
+              "unique": false
+            }
+          ],
+          "foreignKeys": []
+        }
+      ],
+      "api": [
+        {
+          "method": "PUT",
+          "path": "/recordings/{id}/upload",
+          "action": {
+            "kind": "stream",
+            "handler": "ingest_h",
+            "mode": "ingest"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/recordings/{id}/media",
+          "action": {
+            "kind": "stream",
+            "handler": "playback_h",
+            "mode": "playback"
+          }
+        }
+      ],
+      "agents": [
+        {
+          "name": "emu",
+          "instructions": "produce json",
+          "model": "pi-model",
+          "outputSchema": {
+            "name": "result",
+            "schema": {
+              "type": "object"
+            }
+          },
+          "maxTurns": 8,
+          "id": "emu",
+          "backend": "pi",
+          "tools": [],
+          "requireNativeStructuredOutput": false
+        }
+      ],
+      "tooling": [],
+      "triggers": [],
+      "handlers": [
+        {
+          "id": "ingest_h",
+          "module": "handlers/ingest.ts",
+          "export": "ingest",
+          "kind": "route"
+        },
+        {
+          "id": "playback_h",
+          "module": "handlers/playback.ts",
+          "export": "playback",
+          "kind": "route"
+        }
+      ],
+      "extensions": [
+        {
+          "id": "audio_stream",
+          "module": "packs/audio_stream",
+          "version": "1.2.3",
+          "config": {
+            "deepgramModel": "nova-2"
+          }
+        }
+      ]
+    }
+  }
+}

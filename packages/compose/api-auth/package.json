@@ -1,0 +1,49 @@
+{
+  "name": "@rayspec/api-auth",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rayspec/auth-core": "workspace:*",
+    "@rayspec/core": "workspace:*",
+    "@rayspec/db": "workspace:*",
+    "@rayspec/platform": "workspace:*",
+    "@rayspec/product-yaml": "workspace:*",
+    "@rayspec/spec": "workspace:*",
+    "@hono/node-server": "2.0.6",
+    "@hono/zod-openapi": "1.4.0",
+    "drizzle-orm": "0.45.2",
+    "hono": "4.12.26",
+    "jose": "6.2.3",
+    "oidc-provider": "9.8.5",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@rayspec/agent-runtime": "workspace:*",
+    "@rayspec/audio-runtime": "workspace:*",
+    "@rayspec/capability-bridges": "workspace:*",
+    "@rayspec/file-runtime": "workspace:*",
+    "@rayspec/stt-port": "workspace:*",
+    "@rayspec/views-runtime": "workspace:*",
+    "@rayspec/workflow-durable": "workspace:*",
+    "@rayspec/foundation": "workspace:*",
+    "@types/node": "22.12.0",
+    "@types/oidc-provider": "9.5.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

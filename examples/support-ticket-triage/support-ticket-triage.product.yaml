@@ -1,0 +1,205 @@
+# Support Ticket Intake & Triage — a NON-AUDIO document product (a DIFFERENT product than the
+# expense-claim-coder acceptance example).
+#
+# It is the FULLY-WORKING LIVE path: a submitted ticket is routed against a seeded routing-policy catalog
+# and persisted — with NO extraction agent, so it runs end-to-end with real data and NO deterministic-only
+# caveat (the non-audio LIVE-extraction generalization is a named follow-on; this product simply doesn't
+# need it). It exercises the platform's data-plane components in one composable+bootable doc:
+#   • the shared trigger-event registry: the `record_submitted` event (a record-scoped idempotency key).
+#   • declared typed stores + store_read / store_write (a bounded catalog read filtered by the
+#          submitted product_area; an UPSERT on the declared conflict key `ticket_ref`).
+#   • the generic Tier-B ingress capability `record_input` (POST /records/{record_id}/submit).
+#   • conditional composition: NO audio AND NO agent, so the boot demands NO blob/media/STT env AND
+#          NO RAYSPEC_EXTRACTION_MODE — the leanest possible non-audio boot.
+#
+# HONEST SCOPE (v1): single scope (record); reads are GET views; product writes flow through the ingress
+# capability + the workflow ONLY (no product-declared write/admin surface — `assertProductScope` enforces
+# it). The routing lookup lands as a whole jsonb snapshot on the ticket row — there is no transform/project
+# node to decompose it into scalar columns (the grammar has no such node).
+version: "1.0"
+
+product:
+  id: support_ticket_triage
+  name: Support Ticket Intake & Triage
+  description: >-
+    Accept a submitted support ticket, route it against a seeded routing-policy catalog
+    (product_area → owning team + default priority), persist the triaged ticket, and serve ticket reads.
+  owners:
+    - support-platform
+
+requires:
+  capabilities:
+    - record_input
+
+capabilities:
+  # The generic Tier-B submit-ingress capability (S3). `available` + runtime-backed ⇒ it MOUNTS
+  # (POST /records/{record_id}/submit) — the boot demands no product code for it.
+  - id: record_input
+    tier: B
+    status: available
+    contracts:
+      - record_input.record_submitted
+
+contracts:
+  # The submitted ticket shape (the ingress payload). The submitter POSTs these business fields; they
+  # merge top-level into the record_submitted trigger payload, so a store_write / store_read
+  # `{ event: <field> }` source reads them directly.
+  ticket.submission:
+    type: object
+    additional_properties: true
+    properties:
+      requester_email: { type: string }
+      subject: { type: string }
+      body: { type: [string, "null"] }
+      product_area: { type: string }
+    required: [requester_email, subject, product_area]
+
+  # The bounded routing catalog the workflow reads (store_read output — written as a jsonb snapshot).
+  ticket.routing_rows:
+    type: array
+    items: { type: object }
+
+  # The ticket-detail read DTO (single view).
+  ticket.ticket_response:
+    type: object
+    additional_properties: false
+    properties:
+      ticket_ref: { type: string }
+      requester_email: { type: [string, "null"] }
+      subject: { type: [string, "null"] }
+      product_area: { type: [string, "null"] }
+      status: { type: [string, "null"] }
+      routing: { type: [array, "null"] }
+    required: [ticket_ref, requester_email, subject, product_area, status, routing]
+
+  # The ticket-list read DTO (list view).
+  ticket.ticket_list_response:
+    type: object
+    additional_properties: false
+    properties:
+      tickets:
+        type: array
+        items:
+          type: object
+          additional_properties: false
+          properties:
+            ticket_ref: { type: string }
+            product_area: { type: string }
+            status: { type: string }
+          required: [ticket_ref, product_area, status]
+    required: [tickets]
+
+stores:
+  # A seeded reference catalog the workflow reads (bounded store_read; one row per product area).
+  - name: routing_policies
+    description: Reference routing rows (product_area → owning team + default priority) seeded by the deployment.
+    columns:
+      - { name: product_area, type: text }
+      - { name: owning_team, type: text }
+      - { name: default_priority, type: text }
+    key: [product_area]
+  # The workflow's idempotent write target — one triaged row per submitted ticket.
+  - name: triaged_tickets
+    description: One row per triaged ticket — the workflow's UPSERT target (conflict key = ticket_ref).
+    columns:
+      - { name: ticket_ref, type: text }
+      - { name: requester_email, type: text, nullable: true }
+      - { name: subject, type: text, nullable: true }
+      - { name: product_area, type: text, nullable: true }
+      - { name: status, type: text, nullable: true }
+      - { name: routing, type: jsonb, nullable: true }
+    key: [ticket_ref]
+
+workflows:
+  - id: triage_ticket
+    trigger:
+      capability: record_input
+      event: record_submitted
+      scope: record
+    steps:
+      # S2 store_read — a bounded routing lookup filtered by the submitted product_area.
+      - id: read_routing
+        type: store_read
+        use: store.read
+        store: routing_policies
+        filter:
+          product_area: { event: product_area }
+        limit: 10
+        outputs:
+          routing: ticket.routing_rows
+      # S2 store_write — UPSERT on the declared conflict key (ticket_ref). The raw ticket fields come from
+      # the trigger payload (`{ event: … }`); the matched routing rows are the upstream store_read artifact;
+      # the status is a server-stamped constant.
+      - id: persist
+        type: store_write
+        use: store.write
+        store: triaged_tickets
+        depends_on: [read_routing]
+        values:
+          ticket_ref: { event: record_id }
+          requester_email: { event: requester_email }
+          subject: { event: subject }
+          product_area: { event: product_area }
+          status: { const: triaged }
+          routing: { artifact: ticket.routing_rows }
+        outputs:
+          row: ticket.ticket_response
+
+views:
+  # The ticket-detail read (single row over the triaged_tickets store).
+  - id: ticket_detail
+    route:
+      method: GET
+      path: "/tickets/{ticket_ref}"
+    auth: bearer_tenant
+    params:
+      ticket_ref: { in: path, shape: safe_id }
+    source: { kind: store, ref: triaged_tickets }
+    read:
+      mode: single
+      filter:
+        ticket_ref: { param: ticket_ref }
+      shape:
+        fields:
+          ticket_ref: { kind: param, param: ticket_ref }
+          requester_email: { kind: column, column: requester_email, type: string, default: "" }
+          subject: { kind: column, column: subject, type: string, default: "" }
+          product_area: { kind: column, column: product_area, type: string, default: "" }
+          status: { kind: column, column: status, type: string, default: "" }
+          routing: { kind: column, column: routing, type: array }
+      absent:
+        fields:
+          ticket_ref: { kind: param, param: ticket_ref }
+          requester_email: { kind: const, value: null }
+          subject: { kind: const, value: null }
+          product_area: { kind: const, value: null }
+          status: { kind: const, value: null }
+          routing: { kind: const, value: null }
+    absent_state: empty_200
+    response_contract: ticket.ticket_response
+  # The ticket-list read (paged list over the triaged_tickets store).
+  - id: ticket_list
+    route:
+      method: GET
+      path: /tickets
+    auth: bearer_tenant
+    source: { kind: store, ref: triaged_tickets }
+    pagination:
+      limit_param: limit
+      offset_param: offset
+      max_limit: 100
+      default_limit: 20
+    read:
+      mode: list
+      order_by: [{ column: created_at, dir: desc }]
+      shape:
+        fields:
+          tickets:
+            kind: page_items
+            shape:
+              fields:
+                ticket_ref: { kind: column, column: ticket_ref, type: string, default: "" }
+                product_area: { kind: column, column: product_area, type: string, default: "" }
+                status: { kind: column, column: status, type: string, default: "" }
+    absent_state: empty_200
+    response_contract: ticket.ticket_list_response

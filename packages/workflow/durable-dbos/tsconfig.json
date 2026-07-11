@@ -1,0 +1,16 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist"
+  },
+  "references": [
+    { "path": "../../kernel/core" },
+    { "path": "../../kernel/db" },
+    { "path": "../../kernel/platform" },
+    { "path": "../foundation" },
+    { "path": "../workflow-durable" }
+  ],
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "node_modules", "**/*.test.ts", "src/test-support/**"]
+}

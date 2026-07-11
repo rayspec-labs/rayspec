@@ -1,0 +1,91 @@
+{
+  "metadata": {
+    "request_id": "00000000-0000-4000-8000-000000000001",
+    "duration": 6.42,
+    "channels": 1,
+    "models": ["nova-2"]
+  },
+  "results": {
+    "channels": [
+      {
+        "detected_language": "en",
+        "alternatives": [
+          {
+            "transcript": "Hello there. We shipped the baseline today.",
+            "confidence": 0.981,
+            "words": [
+              {
+                "word": "hello",
+                "start": 0.1,
+                "end": 0.4,
+                "confidence": 0.99,
+                "punctuated_word": "Hello"
+              },
+              {
+                "word": "there",
+                "start": 0.4,
+                "end": 0.8,
+                "confidence": 0.98,
+                "punctuated_word": "there."
+              },
+              {
+                "word": "we",
+                "start": 2.0,
+                "end": 2.2,
+                "confidence": 0.97,
+                "punctuated_word": "We"
+              },
+              {
+                "word": "shipped",
+                "start": 2.2,
+                "end": 2.6,
+                "confidence": 0.98,
+                "punctuated_word": "shipped"
+              },
+              {
+                "word": "the",
+                "start": 2.6,
+                "end": 2.7,
+                "confidence": 0.99,
+                "punctuated_word": "the"
+              },
+              {
+                "word": "baseline",
+                "start": 2.7,
+                "end": 3.2,
+                "confidence": 0.96,
+                "punctuated_word": "baseline"
+              },
+              {
+                "word": "today",
+                "start": 3.2,
+                "end": 3.6,
+                "confidence": 0.97,
+                "punctuated_word": "today."
+              }
+            ],
+            "paragraphs": {
+              "transcript": "Hello there. We shipped the baseline today.",
+              "paragraphs": [
+                {
+                  "start": 0.1,
+                  "end": 0.8,
+                  "num_words": 2,
+                  "sentences": [{ "text": "Hello there.", "start": 0.1, "end": 0.8 }]
+                },
+                {
+                  "start": 2.0,
+                  "end": 3.6,
+                  "num_words": 5,
+                  "sentences": [
+                    { "text": "We shipped the baseline today.", "start": 2.0, "end": 3.6 }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

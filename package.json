@@ -1,0 +1,59 @@
+{
+  "name": "rayspec",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "description": "RaySpec — file-deployable AI infrastructure platform",
+  "packageManager": "pnpm@10.12.4",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "//spike-filter": "The '!@spike/*' filter EXCLUDES the @spike/* DEV-ONLY fixtures under examples/ (dev-server, the synthetic stream/agent packs) from CI build/test/typecheck. The @rayspec/local-boot spec-driven boot wrapper is a @rayspec/* member and IS covered by CI.",
+    "build": "turbo run build --filter='!@spike/*'",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "//test": "`--concurrency=1` serializes turbo's package-level test tasks (one package's vitest at a time). WHY: `@rayspec/durable-dbos` + `@rayspec/server` are the only two packages that boot a REAL DBOS engine (DBOS.launch) and, run concurrently against the one shared local Postgres, cause catalog/pool pressure (deadlocks, CREATE/DROP-DATABASE lock races); separately, `@rayspec/cli`'s gen-handler typecheck test writes throwaway files into packages/kernel/platform/src and a concurrent `tsc -b` of platform/api-auth globs them mid-delete (TS6053). Serializing the turbo task graph removes both cross-package races. NOT MASKING A PROD BUG: this is a TEST-HARNESS artifact of N throwaway DBs + two engine-booting packages sharing ONE local Postgres; prod uses ONE app DB + ONE sys DB. Intra-package parallelism is unchanged (each vitest config still controls its own files); isolated `pnpm --filter X test` runs are unaffected (no `--concurrency` there). build/typecheck untouched. (Companion fix: `packages/app/cli/vitest.config.ts` raises the cli testTimeout to 60s so `cli/index.test.ts`'s in-process `plan` cold-start cannot trip the 5000ms default under full-suite CPU load — TEST-FLAKE-1's cli half. The remaining api-auth refresh grace-window flake stays TEST-FLAKE-1, a separate security-code follow-up.)",
+    "test": "turbo run test --filter='!@spike/*' --concurrency=1",
+    "typecheck": "turbo run typecheck --filter='!@spike/*'",
+    "gate:chokepoint": "node scripts/check-tenant-chokepoint.mjs",
+    "gate:adapter-handlers": "node scripts/check-adapter-no-handlers.mjs",
+    "gate:handler-imports": "node scripts/check-handler-imports.mjs",
+    "gate:extension-capability": "node scripts/check-extension-capability.mjs",
+    "gate:spec-schema": "node scripts/check-spec-schema.mjs",
+    "gate:no-pack": "node scripts/check-no-pack-imports.mjs",
+    "gate:fixture-neutrality": "node scripts/check-fixture-neutrality.mjs",
+    "gate:byte-identity": "node scripts/check-compose-byte-identity.mjs",
+    "gate:no-archaeology": "node scripts/check-no-archaeology.mjs",
+    "gate:sbom-fresh": "node scripts/check-sbom-fresh.mjs",
+    "gen:dependency-sbom": "node scripts/gen-dependency-sbom.mjs",
+    "check:deploy-entrypoint": "node scripts/check-deploy-entrypoint-imports.mjs",
+    "gate:migrations": "pnpm --filter @rayspec/db gate:migrations",
+    "gate:shadow-dryrun": "pnpm --filter @rayspec/db gate:shadow-dryrun",
+    "gate:migrate-clean": "pnpm --filter @rayspec/db gate:migrate-clean",
+    "gate:parity": "pnpm --filter @rayspec/parity test",
+    "gate": "pnpm gate:chokepoint && pnpm gate:adapter-handlers && pnpm gate:handler-imports && pnpm gate:extension-capability && pnpm gate:spec-schema && pnpm gate:no-pack && pnpm gate:fixture-neutrality && pnpm gate:byte-identity && pnpm gate:sbom-fresh && pnpm gate:migrations && pnpm gate:shadow-dryrun && pnpm gate:migrate-clean && pnpm gate:parity && pnpm gate:no-archaeology",
+    "bench:tool-latency": "pnpm --filter @rayspec/platform build && node scripts/bench-tool-latency.mjs",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.0.6",
+    "@rayspec/db": "workspace:*",
+    "@rayspec/server": "workspace:*",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.0",
+    "@types/node": "22.12.0",
+    "tsx": "4.22.4",
+    "turbo": "2.9.18",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  },
+  "pnpm": {
+    "overrides": {
+      "@esbuild-kit/core-utils>esbuild": ">=0.25.0"
+    }
+  }
+}

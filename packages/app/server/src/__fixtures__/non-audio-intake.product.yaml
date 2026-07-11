@@ -1,0 +1,74 @@
+version: "1.0"
+product:
+  id: intake
+  name: Intake
+  description: A neutral submit-ingress product used to prove the S4 conditional-mount boot (no audio, no stt, no agents).
+requires:
+  capabilities: [record_input]
+capabilities:
+  - id: record_input
+    tier: B
+    status: available
+    contracts: [record_input.record_submitted]
+contracts:
+  intake.request_row:
+    type: object
+  intake.status_response:
+    type: object
+    additional_properties: false
+    properties:
+      record_id: { type: string }
+      title: { type: [string, "null"] }
+      status: { type: [string, "null"] }
+    required: [record_id, title, status]
+stores:
+  - name: intake_requests
+    columns:
+      - { name: request_ref, type: text }
+      - { name: record_id, type: text }
+      - { name: title, type: text }
+      - { name: status, type: text }
+    key: [request_ref]
+workflows:
+  - id: log_request
+    trigger:
+      capability: record_input
+      event: record_submitted
+      scope: record
+    steps:
+      - id: log
+        type: store_write
+        use: store.write
+        store: intake_requests
+        values:
+          request_ref: { event: record_id }
+          record_id: { event: record_id }
+          title: { event: title }
+          status: { const: received }
+        outputs:
+          row: intake.request_row
+views:
+  - id: request_status_view
+    route:
+      method: GET
+      path: "/intake/{record_id}/status"
+    auth: bearer_tenant
+    params:
+      record_id: { in: path, shape: safe_id }
+    source: { kind: store, ref: intake_requests }
+    read:
+      mode: single
+      filter:
+        record_id: { param: record_id }
+      shape:
+        fields:
+          record_id: { kind: param, param: record_id }
+          title: { kind: column, column: title, type: string }
+          status: { kind: column, column: status, type: string }
+      absent:
+        fields:
+          record_id: { kind: param, param: record_id }
+          title: { kind: const, value: null }
+          status: { kind: const, value: null }
+    absent_state: empty_200
+    response_contract: intake.status_response

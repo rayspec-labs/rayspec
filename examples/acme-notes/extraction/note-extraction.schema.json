@@ -1,0 +1,80 @@
+{
+  "$comment": "The native strict structured-output JSON-Schema for the live note-extraction executor. Discipline: additionalProperties:false on every object (a hallucinated field fails the native parse); NO minItems/min_length anywhere (OpenAI strict structured output forbids array-cardinality; 'evidence >= 1' is the grounding-prune code invariant); every property is required (OpenAI strict SO lists every key in required; the model emits [] for empty sections). This file is DEPLOYMENT config the boot composition reads; prompt+schema stay runtime-side (banned from the executable YAML graph).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "headline": { "type": "string" },
+    "detail": { "type": "string" },
+    "output_language": { "type": "string" },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["text", "evidence"]
+      }
+    },
+    "pointers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["text", "evidence"]
+      }
+    },
+    "queries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["text", "evidence"]
+      }
+    },
+    "labels": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["text", "evidence"]
+      }
+    },
+    "mentions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["name", "evidence"]
+      }
+    }
+  },
+  "required": [
+    "headline",
+    "detail",
+    "output_language",
+    "items",
+    "pointers",
+    "queries",
+    "labels",
+    "mentions"
+  ]
+}

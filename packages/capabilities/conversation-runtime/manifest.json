@@ -1,0 +1,60 @@
+{
+  "status": "runtime",
+  "package": "@rayspec/conversation-runtime",
+  "capabilities": [
+    {
+      "id": "conversation_input",
+      "tier": "B",
+      "runtime_status": "available",
+      "contracts": [
+        "conversation_input.conversation",
+        "conversation_input.create",
+        "conversation_input.submit_turn",
+        "conversation_input.turn_submitted"
+      ],
+      "events": [
+        {
+          "id": "turn_submitted",
+          "contract": "conversation_input.turn_submitted",
+          "idempotency": "turn_scoped",
+          "payload_keys": [
+            "conversation_id",
+            "message_id",
+            "turn_ref",
+            "tenant_id",
+            "source_capability",
+            "turn_seq",
+            "role",
+            "message"
+          ],
+          "idempotency_key_field": "turn_ref"
+        }
+      ]
+    }
+  ],
+  "stores": ["conversations", "conversation_turns"],
+  "routes": [
+    {
+      "id": "conversation_create",
+      "method": "PUT",
+      "path": "/{conversation_id}",
+      "contract": "conversation_input.create",
+      "auth": "bearer",
+      "kind": "handler"
+    },
+    {
+      "id": "conversation_turn_submit",
+      "method": "POST",
+      "path": "/{conversation_id}/turns",
+      "contract": "conversation_input.submit_turn",
+      "auth": "bearer",
+      "kind": "handler"
+    }
+  ],
+  "turn_contract": {
+    "message_in_event_payload": true,
+    "max_message_bytes": 32768,
+    "max_history_turns": 20,
+    "max_history_chars": 65536
+  }
+}

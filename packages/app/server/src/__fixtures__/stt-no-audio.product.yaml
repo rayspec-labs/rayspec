@@ -1,0 +1,71 @@
+version: "1.0"
+product:
+  id: sttnoaudio
+  name: SttNoAudio
+  description: >-
+    A MISCONFIGURED doc that declares an `stt.*` workflow step but NO audio capability. The real
+    STT media resolver reads the audio capability's blob-backed chunks, so an stt.* step without the
+    audio capability (audio_input/media_playback) is a fail-closed boot misconfiguration — the boot must
+    reject it with a NAMED ProductBootError at step 5 (BEFORE any DBOS launch), never a raw TypeError on
+    an absent blob factory. usesStt=true, withAudio=false, hasAgents=false. The `track_transcripts`
+    transcript-sink view lets the doc pass step-1 store derivation so the boot REACHES the step-5 guard.
+requires:
+  capabilities: [record_input, stt]
+capabilities:
+  - id: record_input
+    tier: B
+    status: available
+    contracts: [record_input.record_submitted]
+  - id: stt
+    tier: B
+    status: available
+    contracts: [stt.transcript]
+contracts:
+  sttnoaudio.finalized:
+    type: object
+  sttnoaudio.transcript:
+    type: object
+  sttnoaudio.transcript_response:
+    type: object
+    additional_properties: false
+    properties:
+      session_id: { type: string }
+      status: { type: [string, "null"] }
+    required: [session_id, status]
+workflows:
+  - id: transcribe_flow
+    trigger:
+      capability: record_input
+      event: record_submitted
+      scope: record
+    steps:
+      - id: transcribe
+        type: capability
+        use: stt.transcribe_session
+        inputs:
+          finalized_session: sttnoaudio.finalized
+        outputs:
+          transcript: sttnoaudio.transcript
+views:
+  - id: transcript_view
+    route:
+      method: GET
+      path: "/transcripts/{session_id}"
+    auth: bearer_tenant
+    params:
+      session_id: { in: path, shape: safe_id }
+    source: { kind: store, ref: track_transcripts }
+    read:
+      mode: single
+      filter:
+        session_id: { param: session_id }
+      shape:
+        fields:
+          session_id: { kind: param, param: session_id }
+          status: { kind: column, column: status, type: string }
+      absent:
+        fields:
+          session_id: { kind: param, param: session_id }
+          status: { kind: const, value: null }
+    absent_state: empty_200
+    response_contract: sttnoaudio.transcript_response

@@ -1,0 +1,12 @@
+# A grammar-VALID (parseProductSpec-clean) doc that is OUT OF SCOPE: it persists artifacts under
+# TWO distinct scopes (ticket + account). It parses + lints, so the ONLY thing that rejects it is the
+# boot-scope gate `assertProductScope` — used by expense-claim-e2e.db.test.ts to prove the gate
+# is wired fail-closed at boot (the ProductBootError names 'multi-scope persistence').
+version: "1.0"
+product: { id: multiscope, name: MultiScope }
+contracts:
+  a.c: { type: object }
+  b.c: { type: object }
+artifacts:
+  - { kind: alpha, contract: a.c, scope: ticket, collection: coll_a, lifecycle: { persist: true } }
+  - { kind: beta, contract: b.c, scope: account, collection: coll_b, lifecycle: { persist: true } }

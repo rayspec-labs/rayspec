@@ -1,0 +1,415 @@
+# Compatibility fixture (test-only): the neutral acme-notes read surface — session-list,
+# transcript-get, notes-get — declared as INTERPRETED Product-YAML views. The runtime
+# package contains ZERO product concepts; this fixture is where the product shapes live. The golden
+# expectations these views must reproduce are the neutral read-surface goldens the compat + seam
+# suites assert.
+#
+# Source separation: session_list + session_track_transcript read STORES;
+# session_notes reads the note_artifacts ARTIFACT COLLECTION (bound to its backing store at mount
+# time). Each response_contract is a separate declaration the shape is conformance-checked against.
+version: "1.0"
+
+product:
+  id: acme_notes_views_fixture
+  name: Acme Notes read views (compatibility fixture)
+
+artifacts:
+  - kind: digest
+    contract: acme_notes_views.artifact_payload
+    collection: note_artifacts
+  - kind: item
+    contract: acme_notes_views.artifact_payload
+    collection: note_artifacts
+  - kind: pointer
+    contract: acme_notes_views.artifact_payload
+    collection: note_artifacts
+  - kind: query
+    contract: acme_notes_views.artifact_payload
+    collection: note_artifacts
+  - kind: label
+    contract: acme_notes_views.artifact_payload
+    collection: note_artifacts
+
+contracts:
+  acme_notes_views.artifact_payload:
+    type: object
+
+  # The per-kind counts tally (session-list `note_counts` + notes `counts`).
+  # CLOSED: the runtime's counts tally emits EXACTLY the declared buckets + the grand-total key.
+  acme_notes_views.note_counts:
+    type: object
+    additional_properties: false
+    properties:
+      item: { type: integer }
+      pointer: { type: integer }
+      query: { type: integer }
+      label: { type: integer }
+      digest: { type: integer }
+      total: { type: integer }
+    required: [item, pointer, query, label, digest, total]
+
+  # The session/track nodes are CLOSED (full SessionSummary/TrackSummary DTO shapes) — the
+  # shape⊆contract conformance pass constrains the richest golden projection end-to-end, and an SDK
+  # consumer sees real types, not `object[]`.
+  acme_notes_views.session_list_response:
+    type: object
+    additional_properties: false
+    properties:
+      sessions:
+        type: array
+        items:
+          type: object
+          additional_properties: false
+          properties:
+            id: { type: string }
+            status: { type: string }
+            protocol_version: { type: integer }
+            started_at: { type: [string, "null"] }
+            ended_at: { type: "null" }
+            tracks:
+              type: array
+              items:
+                type: object
+                additional_properties: false
+                properties:
+                  id: { type: string }
+                  track: { type: string }
+                  status: { type: string }
+                  sample_rate: { type: "null" }
+                  channels: { type: "null" }
+                  sample_format: { type: "null" }
+                  sample_width_bytes: { type: "null" }
+                  bytes_written: { type: integer }
+                  chunks_written: { type: integer }
+                  malformed_chunks: { type: "null" }
+                  frames_written: { type: "null" }
+                  duration_wall_seconds: { type: "null" }
+                  disconnect_reason: { type: "null" }
+                  started_at: { type: [string, "null"] }
+                  ended_at: { type: "null" }
+                  transcript_status: { type: string }
+                  transcript_word_count: { type: [integer, "null"] }
+                  transcript_language: { type: [string, "null"] }
+                required:
+                  [id, track, status, sample_rate, channels, sample_format, sample_width_bytes,
+                   bytes_written, chunks_written, malformed_chunks, frames_written,
+                   duration_wall_seconds, disconnect_reason, started_at, ended_at,
+                   transcript_status, transcript_word_count, transcript_language]
+            artifacts:
+              # The client's file-artifacts list — this product produces none (always []).
+              type: array
+            note_counts:
+              ref: acme_notes_views.note_counts
+          required:
+            [id, status, protocol_version, started_at, ended_at, tracks, artifacts,
+             note_counts]
+      total:
+        type: integer
+      next_offset:
+        type: [integer, "null"]
+    required: [sessions, total, next_offset]
+
+  acme_notes_views.transcript_response:
+    type: object
+    additional_properties: false
+    properties:
+      session_id: { type: string }
+      track: { type: string }
+      status: { type: string }
+      model: { type: [string, "null"] }
+      detected_language: { type: [string, "null"] }
+      full_text: { type: [string, "null"] }
+      confidence: { type: [number, "null"] }
+      word_count: { type: integer }
+      billed_duration_seconds: { type: [number, "null"] }
+      words:
+        type: array
+        items:
+          type: object
+          additional_properties: false
+          properties:
+            word: { type: string }
+            punctuated_word: { type: string }
+            start: { type: number }
+            end: { type: number }
+            confidence: { type: number }
+            speaker: { type: [integer, "null"] }
+          required: [word, punctuated_word, start, end, confidence, speaker]
+      segments:
+        type: array
+        items:
+          type: object
+          additional_properties: false
+          properties:
+            start: { type: number }
+            end: { type: number }
+            text: { type: string }
+          required: [start, end, text]
+    required:
+      [session_id, track, status, model, detected_language, full_text, confidence,
+       word_count, billed_duration_seconds, words, segments]
+
+  acme_notes_views.notes_response:
+    type: object
+    additional_properties: false
+    properties:
+      session_id: { type: string }
+      digest:
+        type: [object, "null"]
+        properties:
+          headline: { type: string }
+          detail: { type: string }
+          output_language: { type: string }
+        required: [headline, detail, output_language]
+      # The per-kind items are the persisted `payload` jsonb surfaced VERBATIM. HONEST BOUNDARY: they
+      # carry `additional_properties: true` (NOT closed, NO required) because the runtime surfaces the
+      # model-written payload verbatim and cannot statically prove per-item field presence; a closed/
+      # required claim here would be unenforced overselling.
+      items:
+        type: array
+        items:
+          type: object
+          additional_properties: true
+          properties:
+            text: { type: string }
+            evidence: { type: array, items: { type: string } }
+            evidence_span_ids: { type: array, items: { type: string } }
+      pointers:
+        type: array
+        items:
+          type: object
+          additional_properties: true
+          properties:
+            text: { type: string }
+            evidence: { type: array, items: { type: string } }
+            evidence_span_ids: { type: array, items: { type: string } }
+      queries:
+        type: array
+        items:
+          type: object
+          additional_properties: true
+          properties:
+            text: { type: string }
+            evidence: { type: array, items: { type: string } }
+            evidence_span_ids: { type: array, items: { type: string } }
+      labels:
+        type: array
+        items:
+          type: object
+          additional_properties: true
+          properties:
+            text: { type: string }
+            evidence: { type: array, items: { type: string } }
+            evidence_span_ids: { type: array, items: { type: string } }
+      counts:
+        ref: acme_notes_views.note_counts
+    required: [session_id, digest, items, pointers, queries, labels, counts]
+
+views:
+  # GET /sessions — the client's sessions list (golden: session-list behavior).
+  - id: session_list
+    route: { method: GET, path: /sessions }
+    auth: bearer_tenant
+    source: { kind: store, ref: note_sessions }
+    pagination:
+      limit_param: limit
+      offset_param: offset
+      max_limit: 200
+      default_limit: 50
+    read:
+      mode: list
+      order_by: [{ column: created_at, dir: desc }]
+      shape:
+        fields:
+          sessions:
+            kind: page_items
+            shape:
+              fields:
+                id: { kind: column, column: session_id, type: string, default: "" }
+                status: { kind: column, column: status, type: string, default: "" }
+                protocol_version: { kind: column, column: protocol_version, type: integer, default: 0 }
+                started_at: { kind: column, column: created_at, type: string }
+                ended_at: { kind: const, value: null }
+                tracks:
+                  kind: list
+                  source:
+                    store: note_tracks
+                    match: { session_id: { column: session_id } }
+                    order_by: [{ column: track }]
+                  shape:
+                    fields:
+                      id: { kind: column, column: id, type: string, default: "" }
+                      track: { kind: column, column: track, type: string, default: "" }
+                      status: { kind: column, column: status, type: string, default: "" }
+                      sample_rate: { kind: const, value: null }
+                      channels: { kind: const, value: null }
+                      sample_format: { kind: const, value: null }
+                      sample_width_bytes: { kind: const, value: null }
+                      bytes_written: { kind: column, column: committed_byte_len, type: integer, default: 0 }
+                      chunks_written: { kind: column, column: persisted_chunk_count, type: integer, default: 0 }
+                      malformed_chunks: { kind: const, value: null }
+                      frames_written: { kind: const, value: null }
+                      duration_wall_seconds: { kind: const, value: null }
+                      disconnect_reason: { kind: const, value: null }
+                      started_at: { kind: column, column: created_at, type: string }
+                      ended_at: { kind: const, value: null }
+                      transcript_status:
+                        kind: lookup
+                        source:
+                          store: track_transcripts
+                          match:
+                            session_id: { column: session_id }
+                            track: { column: track }
+                        field: { column: status }
+                        type: string
+                        default: absent
+                      transcript_word_count:
+                        kind: lookup
+                        source:
+                          store: track_transcripts
+                          match:
+                            session_id: { column: session_id }
+                            track: { column: track }
+                        field: { column: word_count }
+                        type: integer
+                      transcript_language:
+                        kind: lookup
+                        source:
+                          store: track_transcripts
+                          match:
+                            session_id: { column: session_id }
+                            track: { column: track }
+                        field: { column: detected_language }
+                        type: string
+                artifacts: { kind: const, value: [] }
+                note_counts:
+                  kind: counts
+                  of:
+                    store: note_artifacts
+                    match: { session_id: { column: session_id } }
+                  by: artifact_kind
+                  buckets: [item, pointer, query, label, digest]
+                  total: all_rows
+          total: { kind: page_total }
+          next_offset: { kind: page_next_offset }
+    response_contract: acme_notes_views.session_list_response
+
+  # GET /sessions/{session_id}/{track}/transcript — the per-track transcript.
+  - id: session_track_transcript
+    route: { method: GET, path: "/sessions/{session_id}/{track}/transcript" }
+    auth: bearer_tenant
+    params:
+      session_id: { in: path, shape: safe_id }
+      track: { in: path, shape: safe_id, enum: [mic, system] }
+    source: { kind: store, ref: track_transcripts }
+    absent_state: empty_200
+    conditional_read: etag
+    read:
+      mode: single
+      filter:
+        session_id: { param: session_id }
+        track: { param: track }
+      shape:
+        fields:
+          session_id: { kind: param, param: session_id }
+          track: { kind: param, param: track }
+          status: { kind: column, column: status, type: string, default: unknown }
+          model: { kind: column, column: model, type: string }
+          detected_language: { kind: column, column: detected_language, type: string }
+          full_text: { kind: column, column: full_text, type: string }
+          confidence: { kind: json, column: payload, path: [confidence], type: number }
+          word_count: { kind: column, column: word_count, type: integer, default: 0 }
+          billed_duration_seconds: { kind: json, column: payload, path: [duration], type: number }
+          words:
+            kind: items
+            column: payload
+            path: [words]
+            shape:
+              fields:
+                word: { kind: item, path: [word], type: string, default: "" }
+                punctuated_word: { kind: item, path: [word], type: string, default: "" }
+                start: { kind: item, path: [start], type: number, default: 0 }
+                end: { kind: item, path: [end], type: number, default: 0 }
+                confidence: { kind: item, path: [confidence], type: number, default: 0 }
+                speaker: { kind: const, value: null }
+          segments:
+            kind: items
+            column: payload
+            path: [segments]
+            shape:
+              fields:
+                start: { kind: item, path: [start], type: number, default: 0 }
+                end: { kind: item, path: [end], type: number, default: 0 }
+                text: { kind: item, path: [text], type: string, default: "" }
+      absent:
+        fields:
+          session_id: { kind: param, param: session_id }
+          track: { kind: param, param: track }
+          status: { kind: const, value: absent }
+          model: { kind: const, value: null }
+          detected_language: { kind: const, value: null }
+          full_text: { kind: const, value: null }
+          confidence: { kind: const, value: null }
+          word_count: { kind: const, value: 0 }
+          billed_duration_seconds: { kind: const, value: null }
+          words: { kind: const, value: [] }
+          segments: { kind: const, value: [] }
+    response_contract: acme_notes_views.transcript_response
+
+  # GET /sessions/{session_id}/notes — grounded notes (golden: notes behavior).
+  - id: session_notes
+    route: { method: GET, path: "/sessions/{session_id}/notes" }
+    auth: bearer_tenant
+    params:
+      session_id: { in: path, shape: safe_id }
+    source: { kind: artifact_query, ref: note_artifacts }
+    read:
+      mode: collect
+      filter:
+        session_id: { param: session_id }
+      exclude:
+        - { column: dismissed, equals: true }
+      order_by: [{ column: created_at }]
+      shape:
+        fields:
+          session_id: { kind: param, param: session_id }
+          digest:
+            kind: group
+            column: artifact_kind
+            equals: digest
+            mode: last
+            shape:
+              fields:
+                headline: { kind: json, column: payload, path: [headline], type: string, default: "" }
+                detail: { kind: json, column: payload, path: [detail], type: string, default: "" }
+                output_language: { kind: json, column: payload, path: [output_language], type: string, default: "" }
+          items:
+            kind: group
+            column: artifact_kind
+            equals: item
+            mode: list
+            value: { column: payload, type: object, default: {} }
+          pointers:
+            kind: group
+            column: artifact_kind
+            equals: pointer
+            mode: list
+            value: { column: payload, type: object, default: {} }
+          queries:
+            kind: group
+            column: artifact_kind
+            equals: query
+            mode: list
+            value: { column: payload, type: object, default: {} }
+          labels:
+            kind: group
+            column: artifact_kind
+            equals: label
+            mode: list
+            value: { column: payload, type: object, default: {} }
+          counts:
+            kind: counts
+            by: artifact_kind
+            buckets: [item, pointer, query, label, digest]
+            total: bucket_rows
+    response_contract: acme_notes_views.notes_response

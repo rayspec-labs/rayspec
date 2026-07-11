@@ -1,0 +1,322 @@
+# A product-neutral Product-YAML spec (neutrality proof). No domain-specific voice/transcription
+# concepts — proves the real Product-YAML grammar/lint are product-neutral. Support-ticket triage:
+# ingest a ticket, classify + extract structured intelligence, ground it against the ticket text,
+# persist, and expose a read view.
+#
+# DELIBERATE fixture update (never silent): the `ticket_triage` view was upgraded from the
+# earlier declaration-only form (whose `source.ref` CONFLATED the response contract with the backing
+# data) to the full INTERPRETED form: a kind-aware `source` (the ticket_artifacts
+# collection), declared `params`, and a `read` projection that is conformance-checked against
+# `support.triage_response`. The `classification` contract property became nullable ([object, "null"])
+# because an async pipeline's read view is legitimately empty before the first artifact persists.
+#
+# DELIBERATE fixture update: the fixture now SHOWCASES the
+# declared-stores vocabulary — a `stores:` section (two typed stores with REQUIRED single-column
+# conflict keys) plus a store_read step (bounded equality lookup feeding the pipeline) and a
+# store_write step (an UPSERT on the declared key, snapshotting the read's rows into a jsonb column).
+version: "1.0"
+
+product:
+  id: support_triage
+  name: Support Triage
+  description: Classify inbound support tickets and extract grounded, actionable intelligence.
+  owners:
+    - support-platform
+  metadata:
+    stage: py_d1_neutrality_fixture
+
+requires:
+  capabilities:
+    - ticket_input
+    - grounding
+    - validation
+    - artifact
+
+capabilities:
+  - id: ticket_input
+    tier: B
+    status: reserved
+    contracts:
+      - ticket_input.ticket
+      - ticket_input.ticket_received
+    runtime_notes: A future Tier B capability for inbound ticket ingestion and normalization.
+
+  - id: grounding
+    tier: B
+    status: reserved
+    contracts:
+      - grounding.check
+      - grounding.result
+
+  - id: validation
+    tier: B
+    status: reserved
+    contracts:
+      - validation.check
+      - validation.result
+
+  - id: artifact
+    tier: B
+    status: not_yet_runtime
+    contracts:
+      - artifact.persist
+      - artifact.handle
+
+artifacts:
+  - kind: triage_classification
+    label: Triage classification
+    contract: support.triage_classification
+    scope: ticket
+    collection: ticket_artifacts
+    provenance:
+      source: ticket_input.ticket
+      evidence_field: evidence
+      required: true
+    lifecycle:
+      persist: true
+      preserve_human_edits: true
+
+  - kind: suggested_reply
+    label: Suggested reply
+    contract: support.suggested_reply
+    scope: ticket
+    collection: ticket_artifacts
+
+stores:
+  - name: reply_templates
+    description: Canned reply templates the triage pipeline reads (seeded by the deployment).
+    columns:
+      - { name: template_code, type: text }
+      - { name: category, type: text }
+      - { name: body_text, type: text, nullable: true }
+    key: [template_code]
+  - name: triage_log
+    description: One row per triaged ticket — the workflow's idempotent write target.
+    columns:
+      - { name: log_ref, type: text }
+      - { name: ticket_id, type: text }
+      - { name: outcome, type: text }
+      - { name: templates_snapshot, type: jsonb, nullable: true }
+    key: [log_ref]
+
+contracts:
+  ticket_input.ticket:
+    type: object
+    additional_properties: false
+    properties:
+      id:
+        type: string
+      subject:
+        type: string
+      body:
+        type: string
+      locale:
+        type: [string, "null"]
+    required: [id, subject, body, locale]
+
+  support.triage_classification:
+    type: object
+    additional_properties: false
+    properties:
+      category:
+        type: string
+        enum: [billing, technical, account, other]
+      priority:
+        type: string
+        enum: [low, normal, high, urgent]
+      needs_human:
+        type: boolean
+      evidence:
+        type: array
+        items:
+          type: string
+    required: [category, priority, needs_human, evidence]
+
+  support.suggested_reply:
+    type: object
+    additional_properties: false
+    properties:
+      text:
+        type: string
+      confidence:
+        type: [number, "null"]
+    required: [text, confidence]
+
+  support.triage_intelligence:
+    type: object
+    additional_properties: false
+    properties:
+      classification:
+        ref: support.triage_classification
+      suggested_reply:
+        ref: support.suggested_reply
+    required: [classification, suggested_reply]
+
+  support.reply_template_rows:
+    type: array
+    items:
+      type: object
+
+  support.triage_log_row:
+    type: object
+
+  support.triage_response:
+    type: object
+    additional_properties: false
+    properties:
+      ticket_id:
+        type: string
+      classification:
+        type: [object, "null"]
+        ref: support.triage_classification
+      suggested_reply:
+        type: [object, "null"]
+        ref: support.suggested_reply
+    required: [ticket_id, classification, suggested_reply]
+
+extractors:
+  - id: triage_extractor
+    purpose: Classify a support ticket and draft a grounded suggested reply from ticket evidence.
+    extraction:
+      intent: support_triage
+      input_artifacts:
+        - name: ticket
+          ref: ticket_input.ticket
+          kind: ticket
+          required: true
+          source_step_id: receive
+      output_artifacts:
+        - name: candidate_triage
+          ref: support.triage_intelligence
+          kind: triage_candidate
+          schema_ref: support.triage_intelligence
+          materialization_target: typed_artifact_ref
+      required_output_shape:
+        schema_ref: support.triage_intelligence
+        additional_properties: false
+        required_paths:
+          - classification
+          - suggested_reply
+      acceptance_boundary:
+        type: validation_node
+        requires:
+          - grounding.check
+          - validation.check
+        closed_source_artifacts:
+          - ticket_input.ticket
+      materialization:
+        target: typed_artifact_ref
+        persist_via: artifact.persist
+        handle_ref: artifact.handle
+    extraction_constraints:
+      - Evidence fields reference only spans present in the ticket body.
+      - Priority is inferred from ticket meaning, never from external signals.
+
+workflows:
+  - id: process_ticket
+    trigger:
+      capability: ticket_input
+      event: ticket_received
+      scope: ticket
+    steps:
+      - id: templates
+        type: store_read
+        use: store.read
+        store: reply_templates
+        filter:
+          category: { const: billing }
+        limit: 20
+        outputs:
+          templates: support.reply_template_rows
+      - id: extract
+        type: agent
+        use: agent.triage_extractor
+        inputs:
+          ticket: ticket_input.ticket
+        outputs:
+          candidate_triage: support.triage_intelligence
+        on_error: fail
+      - id: ground
+        type: validation
+        use: grounding.check
+        depends_on: [extract]
+        inputs:
+          candidate_triage: support.triage_intelligence
+        outputs:
+          grounding_result: grounding.result
+        on_error: drop
+      - id: validate
+        type: validation
+        use: validation.check
+        depends_on: [ground]
+        inputs:
+          candidate_triage: support.triage_intelligence
+        outputs:
+          validation_result: validation.result
+        on_error: fail
+      - id: persist
+        type: artifact_persist
+        use: artifact.persist
+        depends_on: [validate]
+        inputs:
+          candidate_triage: support.triage_intelligence
+        outputs:
+          artifact_handle: artifact.handle
+        on_error: fail
+      - id: record
+        type: store_write
+        use: store.write
+        store: triage_log
+        depends_on: [persist]
+        values:
+          log_ref: { event: ticket_id }
+          ticket_id: { event: ticket_id }
+          outcome: { const: triaged }
+          templates_snapshot: { artifact: support.reply_template_rows }
+        outputs:
+          log_entry: support.triage_log_row
+
+grounding:
+  require_source_spans: true
+  source_span_contract: ticket_input.ticket
+  validation_capability: grounding.check
+  on_invalid_citation: prune
+  on_empty_evidence: drop
+
+views:
+  # The INTERPRETED form: source = BACKING DATA (the ticket_artifacts collection), read.shape
+  # = the DTO projection, response_contract = the DTO contract it must conform to. Backing data
+  # and response contract are kept separate.
+  - id: ticket_triage
+    route:
+      method: GET
+      path: /tickets/{ticket_id}/triage
+    auth: bearer_tenant
+    params:
+      ticket_id:
+        in: path
+        shape: safe_id
+    source:
+      kind: artifact_query
+      ref: ticket_artifacts
+    read:
+      mode: collect
+      filter:
+        ticket_id: { param: ticket_id }
+      shape:
+        fields:
+          ticket_id: { kind: param, param: ticket_id }
+          classification:
+            kind: group
+            column: artifact_kind
+            equals: triage_classification
+            mode: first
+            value: { column: payload, type: object }
+          suggested_reply:
+            kind: group
+            column: artifact_kind
+            equals: suggested_reply
+            mode: first
+            value: { column: payload, type: object }
+    absent_state: empty_200
+    response_contract: support.triage_response

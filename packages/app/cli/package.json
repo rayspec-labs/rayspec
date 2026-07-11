@@ -1,0 +1,41 @@
+{
+  "name": "@rayspec/cli",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "description": "The RaySpec CLI — a READ-ONLY diagnostic floor (`rayspec doctor` static parseSpec, `rayspec plan` read-only deploy front-half, `rayspec gen-handler`; never mutates a real/target DB, never prints secrets) PLUS a clearly-separated LOCAL-DEV, MUTATING `dev` group (`dev gen-secrets` writes the 3 platform boot secrets to a .env idempotently without ever echoing a value, `dev db` creates the dev DB if absent, `dev bootstrap-tenant` creates the first tenant+owner via the shipped auth API). The diagnostic floor wraps already-shipped functions and adds NO new platform mechanism.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "rayspec": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "cli": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.0.6",
+    "@rayspec/db": "workspace:*",
+    "@rayspec/product-yaml": "workspace:*",
+    "@rayspec/server": "workspace:*",
+    "@rayspec/spec": "workspace:*",
+    "@rayspec/views-runtime": "workspace:*",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "@types/node": "22.12.0",
+    "jose": "6.2.3",
+    "tsx": "4.22.4",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

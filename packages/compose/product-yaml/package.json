@@ -1,0 +1,48 @@
+{
+  "name": "@rayspec/product-yaml",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "description": "The Product-YAML deploy COMPOSITION. Turns a validated ProductSpec + a deployer-supplied rollout (STT adapter, agent handlers, workflow enqueuer, store bindings) into the deployable engine fragments: audio capability mount + bridge-compiled durable workflows + trigger wiring + declarative views + the tenant-bound node registry. Product-free: every product concept comes from the YAML declarations; unsupported sections fail closed.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rayspec/agent-runtime": "workspace:*",
+    "@rayspec/audio-runtime": "workspace:*",
+    "@rayspec/capability-bridges": "workspace:*",
+    "@rayspec/conversation-runtime": "workspace:*",
+    "@rayspec/core": "workspace:*",
+    "@rayspec/db": "workspace:*",
+    "@rayspec/file-runtime": "workspace:*",
+    "@rayspec/grounding-runtime": "workspace:*",
+    "@rayspec/handler-sdk": "workspace:*",
+    "@rayspec/platform": "workspace:*",
+    "@rayspec/product-yaml-workflow-bridge": "workspace:*",
+    "@rayspec/record-runtime": "workspace:*",
+    "@rayspec/spec": "workspace:*",
+    "@rayspec/adapter-deepgram": "workspace:*",
+    "@rayspec/stt-port": "workspace:*",
+    "@rayspec/views-runtime": "workspace:*",
+    "@rayspec/workflow-durable": "workspace:*",
+    "@rayspec/foundation": "workspace:*",
+    "drizzle-orm": "0.45.2",
+    "unpdf": "1.6.2"
+  },
+  "devDependencies": {
+    "@types/node": "22.12.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

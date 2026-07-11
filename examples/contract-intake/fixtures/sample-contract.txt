@@ -1,0 +1,14 @@
+MUTUAL NON-DISCLOSURE AGREEMENT
+
+This Mutual Non-Disclosure Agreement ("Agreement") is entered into by and between
+Nordwind Robotics GmbH and our company.
+
+Effective Date: 2026-05-01
+Initial Term: 24 months
+Auto-Renewal: This Agreement renews automatically for successive 12-month terms unless
+either party gives written notice of non-renewal at least 30 days before the end of the
+then-current term.
+Governing Law: Germany
+Total Contract Value: none stated.
+
+The parties agree to protect Confidential Information disclosed under this Agreement.

@@ -1,0 +1,31 @@
+# Agent-pack backend — a SYNTHETIC forcing function for a pack-contributed `agents`
+# FRAGMENT, delivered via the `extensions[]` pack mechanism.
+#
+# This is a tiny, SYNTHETIC backend declared purely in the RaySpec format. It lives OUTSIDE packages/
+# (it is not a workspace package, never built/typechecked/tested by turbo). It is the platform's OWN
+# forcing-function for an extension pack contributing an `agents` fragment (not just stores/handlers/
+# tooling/api) — NOT a real product pack (those ship as product code in their own repos).
+#
+# The whole product surface (a `notes` store + a `lookup_note` tool + its handler + a `note_summarizer`
+# agent that references the tool) lives in a `defineExtension` pack under ./packs/agent-pack, loaded via
+# the `extensions[]` section below. At boot `loadExtensions` resolves the pack (DIRECTORY-ONLY
+# path-jailed; version-pin FAIL-CLOSED), jails each pack handler against the pack root, and MERGES the
+# pack's store/handler/tooling/api/AGENTS fragments into this spec so the UNCHANGED `deploy()`
+# materializes the store, the lint resolves the agent's tool ref against the merged tooling,
+# `buildAgentRegistry` registers the agent, and the run surface resolves + runs it. Zero product code
+# enters the platform.
+
+version: '1.0'
+
+metadata:
+  name: agent-pack-backend
+  description: A synthetic backend whose OOTB agent is contributed by a defineExtension pack.
+
+# --- extensions -------------------------------------------------------------------------------
+# The synthetic agent PACK (the whole product surface, incl. the agents fragment). `module` is the pack
+# DIRECTORY, resolved + path-jailed RELATIVE TO this deployment dir (DIRECTORY-ONLY). `version` MUST be
+# the EXACT pin the pack's manifest declares — a SKEW aborts the deploy, never a silent skip.
+extensions:
+  - id: agent_pack
+    module: ./packs/agent-pack
+    version: 1.0.0

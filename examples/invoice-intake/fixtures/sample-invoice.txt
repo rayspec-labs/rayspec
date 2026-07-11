@@ -1,0 +1,6 @@
+INVOICE INV-2026-047
+Vendor: Acme Papierwerke GmbH
+Date: 2026-06-14
+Item: A4 copy paper (10 reams) | 1990 cents
+Item: Toner cartridge black | 23000 cents
+Total (EUR cents): 24990

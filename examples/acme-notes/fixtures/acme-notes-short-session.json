@@ -1,0 +1,78 @@
+{
+  "fixture_id": "acme-notes-short-session",
+  "description": "Small deterministic single-track fixture for the neutral acme-notes STT contract checks.",
+  "session": {
+    "session_id": "acme-short",
+    "track": "mic",
+    "protocol_version": 2,
+    "chunks": [
+      {
+        "index": 0,
+        "content_type": "audio/ogg",
+        "byte_length": 8,
+        "sha256": "acme-synthetic-not-a-real-audio-hash"
+      }
+    ]
+  },
+  "upload_status": {
+    "session_id": "acme-short",
+    "track": "mic",
+    "next_expected_index": 1,
+    "committed_byte_len": 8,
+    "status": "recording"
+  },
+  "finalize": {
+    "request": {
+      "total_chunks": 1
+    },
+    "response": {
+      "session_id": "acme-short",
+      "track": "mic",
+      "status": "completed",
+      "total_chunks": 1,
+      "committed_byte_len": 8,
+      "transcription_run_id": "run-acme-short"
+    }
+  },
+  "transcript": {
+    "session_id": "acme-short",
+    "track": "mic",
+    "status": "completed",
+    "model": "nova-2",
+    "detected_language": "en",
+    "full_text": "We selected the second option for the layout.",
+    "confidence": 0.97,
+    "word_count": 8,
+    "billed_duration_seconds": 12.5,
+    "words": [
+      {
+        "word": "We",
+        "punctuated_word": "We",
+        "start": 0,
+        "end": 0.2,
+        "confidence": 0.98,
+        "speaker": null
+      }
+    ],
+    "segments": [
+      {
+        "start": 0,
+        "end": 12.5,
+        "text": "We selected the second option for the layout."
+      }
+    ]
+  },
+  "playback": {
+    "token_response_shape": {
+      "url": "/sessions/acme-short/mic/playback?token=<media-jwt>",
+      "expires_at": "2026-07-01T12:00:00.000Z",
+      "ttl_seconds": 900
+    },
+    "range_request": {
+      "range": "bytes=2-5",
+      "status": 206,
+      "content_range": "bytes 2-5/8",
+      "content_length": 4
+    }
+  }
+}

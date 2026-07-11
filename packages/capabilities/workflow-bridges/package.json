@@ -1,0 +1,34 @@
+{
+  "name": "@rayspec/capability-bridges",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "description": "The durable-workflow ↔ capability composition seams for the four ingress capabilities (audio · conversation · file · record), merged into one package. Each capability's canonical event → WorkflowInputEvent adapter + the fail-closed *Sink a deployment injects to enqueue a durable workflow run on ingress. Homed here so neither the neutral Tier A engine nor the Tier B capabilities depend on the other.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rayspec/audio-runtime": "workspace:*",
+    "@rayspec/conversation-runtime": "workspace:*",
+    "@rayspec/file-runtime": "workspace:*",
+    "@rayspec/record-runtime": "workspace:*",
+    "@rayspec/workflow-durable": "workspace:*",
+    "@rayspec/foundation": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "22.12.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

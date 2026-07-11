@@ -1,0 +1,25 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/kernel/core" },
+    { "path": "./packages/kernel/db" },
+    { "path": "./packages/kernel/auth-core" },
+    { "path": "./packages/compose/api-auth" },
+    { "path": "./packages/app/server" },
+    { "path": "./packages/kernel/platform" },
+    { "path": "./packages/workflow/durable-dbos" },
+    { "path": "./packages/kernel/spec" },
+    { "path": "./packages/kernel/handler-sdk" },
+    { "path": "./packages/kernel/stt-port" },
+    { "path": "./packages/adapters/deepgram" },
+    { "path": "./packages/capabilities/audio-runtime" },
+    { "path": "./packages/compose/product-yaml-workflow-bridge" },
+    { "path": "./packages/workflow/workflow-durable" },
+    { "path": "./packages/capabilities/workflow-bridges" },
+    { "path": "./packages/adapters/openai" },
+    { "path": "./packages/adapters/anthropic" },
+    { "path": "./packages/adapters/pi" },
+    { "path": "./packages/test/parity" },
+    { "path": "./packages/app/cli" }
+  ]
+}

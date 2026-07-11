@@ -1,0 +1,62 @@
+{
+  "metadata": {
+    "request_id": "00000000-0000-4000-8000-000000000005",
+    "duration": 1.0,
+    "channels": 2,
+    "models": ["nova-2"]
+  },
+  "results": {
+    "channels": [
+      {
+        "detected_language": "en",
+        "alternatives": [
+          {
+            "transcript": "first channel only",
+            "confidence": 0.9,
+            "words": [
+              {
+                "word": "first",
+                "start": 0.0,
+                "end": 0.3,
+                "confidence": 0.9,
+                "punctuated_word": "First"
+              },
+              {
+                "word": "channel",
+                "start": 0.3,
+                "end": 0.7,
+                "confidence": 0.9,
+                "punctuated_word": "channel"
+              },
+              {
+                "word": "only",
+                "start": 0.7,
+                "end": 1.0,
+                "confidence": 0.9,
+                "punctuated_word": "only."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "detected_language": "es",
+        "alternatives": [
+          {
+            "transcript": "segundo canal ignorado",
+            "confidence": 0.8,
+            "words": [
+              {
+                "word": "segundo",
+                "start": 0.0,
+                "end": 0.5,
+                "confidence": 0.8,
+                "punctuated_word": "Segundo"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+# Stream backend — a SYNTHETIC stream/blob forcing function, delivered via the PACK MECHANISM.
+#
+# This is a tiny, SYNTHETIC backend declared purely in the RaySpec format. It lives OUTSIDE
+# packages/ (it is not a workspace package, never built/typechecked/tested by turbo). It is the
+# platform's OWN forcing-function for the `stream` RouteAction primitive + the `extensions[]` pack
+# mechanism — NOT a real product pack (those ship as product code in their own repos).
+#
+# The whole stream surface (stores + ingest/playback/mint handlers + routes) lives in a
+# `defineExtension` pack under ./packs/stream-pack, loaded via the `extensions[]` section below. This
+# deployment spec is THIN — `version` + `metadata` + one `extensions[]` ref. At boot,
+# `loadExtensions` resolves the pack (DIRECTORY-ONLY path-jailed; version-pin FAIL-CLOSED), jails each
+# pack handler against the pack root, and MERGES the pack's store/handler/route fragments into this
+# spec so the UNCHANGED `deploy()` materializes the store (UNCHANGED migration gate + chokepoint probe
+# — NO new migration path), the api interpreter serves the routes, and the path-jailed loader loads
+# the handlers. Zero product code enters the platform.
+
+version: '1.0'
+
+metadata:
+  name: stream-backend
+  description: A synthetic blob/stream backend — delivered as a defineExtension pack via extensions[].
+
+# --- extensions -------------------------------------------------------------------------------
+# The synthetic stream/blob PACK (the whole stream surface). `module` is the pack DIRECTORY, resolved
+# + path-jailed RELATIVE TO this deployment dir (DIRECTORY-ONLY — the npm-module branch is not
+# exercised here; a `..`/absolute/outside-root escape is rejected fail-closed). `version` MUST be the
+# EXACT pin the pack's manifest declares — a SKEW aborts the deploy, never a silent skip. `config` is
+# opaque pack-validated passthrough (this pack needs none).
+extensions:
+  - id: stream_pack
+    module: ./packs/stream-pack
+    version: 1.0.0

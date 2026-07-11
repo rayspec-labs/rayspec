@@ -1,0 +1,13 @@
+{
+  "agent_id": "invoice_extractor",
+  "backend": "openai",
+  "model": "gpt-5",
+  "prompt_file": "invoice_extractor.prompt.md",
+  "schema_file": "invoice_extractor.schema.json",
+  "output_schema_name": "invoice_coded",
+  "structured_output_mode": "native",
+  "input_context": {
+    "payload_fields": ["original_filename", "content_type"],
+    "artifact_inputs": true
+  }
+}

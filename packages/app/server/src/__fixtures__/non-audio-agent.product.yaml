@@ -1,0 +1,103 @@
+version: "1.0"
+product:
+  id: docintel
+  name: DocIntel
+  description: >-
+    A NON-audio doc that DECLARES an extraction agent — used to prove the four env-demand
+    predicates are each coupled to their OWN spec predicate at a NON-collinear point: this doc has an
+    agent (hasAgents=true) but NO audio capability (withAudio=false) and NO stt.* step (usesStt=false),
+    so the boot must demand ONLY RAYSPEC_EXTRACTION_MODE and NEITHER RAYSPEC_BLOB_ROOT nor
+    RAYSPEC_MEDIA_SIGNING_KEY nor STT_PROVIDER. A refactor that nested the extraction demand under
+    `withAudio && hasAgents` would leave a full-capability doc (all-on) and non-audio-intake (all-off) both green while
+    THIS doc boots without RAYSPEC_EXTRACTION_MODE and fails at first extraction — the gap this fixture
+    forces. Parses + lints + composes clean (product-yaml compose test); it would boot in
+    deterministic mode with an injected agent registry.
+requires:
+  capabilities: [record_input, grounding, validation, artifact]
+capabilities:
+  - id: record_input
+    tier: B
+    status: available
+    contracts: [record_input.record_submitted]
+  - id: grounding
+    tier: B
+    status: available
+    contracts: [grounding.check]
+  - id: validation
+    tier: B
+    status: available
+    contracts: [validation.check]
+  - id: artifact
+    tier: B
+    status: available
+    contracts: [artifact.persist, artifact.handle]
+contracts:
+  docintel.doc:
+    type: object
+  docintel.intelligence:
+    type: object
+    additional_properties: false
+    properties:
+      summary: { type: string }
+    required: [summary]
+stores:
+  - name: extracted_artifacts
+    columns:
+      - { name: record_id, type: text }
+      - { name: artifact_kind, type: text }
+      - { name: payload, type: jsonb }
+      - { name: artifact_ref, type: text, unique: true }
+    key: [artifact_ref]
+extractors:
+  - id: doc_intelligence_extractor
+    purpose: Extract grounded intelligence from a submitted record.
+    extraction:
+      intent: doc_intelligence
+      input_artifacts:
+        - name: doc
+          ref: docintel.doc
+          kind: document
+          required: true
+      output_artifacts:
+        - name: candidate
+          ref: docintel.intelligence
+          kind: intelligence_candidate
+          schema_ref: docintel.intelligence
+          materialization_target: typed_artifact_ref
+      required_output_shape:
+        schema_ref: docintel.intelligence
+        additional_properties: false
+        required_paths: [summary]
+      acceptance_boundary:
+        type: validation_node
+        requires:
+          - grounding.check
+          - validation.check
+      materialization:
+        target: typed_artifact_ref
+        persist_via: artifact.persist
+        handle_ref: artifact.handle
+workflows:
+  - id: process_record
+    trigger:
+      capability: record_input
+      event: record_submitted
+      scope: record
+    steps:
+      - id: extract
+        type: agent
+        use: agent.doc_intelligence_extractor
+        inputs:
+          doc: docintel.doc
+        outputs:
+          candidate: docintel.intelligence
+        on_error: fail
+      - id: persist
+        type: artifact_persist
+        use: artifact.persist
+        depends_on: [extract]
+        inputs:
+          candidate: docintel.intelligence
+        outputs:
+          artifact_handle: artifact.handle
+        on_error: fail

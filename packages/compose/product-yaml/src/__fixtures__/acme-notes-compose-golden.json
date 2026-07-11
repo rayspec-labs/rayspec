@@ -1,0 +1,312 @@
+{
+  "engineSpec": {
+    "version": "0.1",
+    "metadata": {
+      "name": "product:acme_notes",
+      "description": "Audio capture, speech-to-text over transcript spans, playback, grounded note extraction."
+    },
+    "stores": [
+      {
+        "name": "audio_sessions",
+        "columns": [
+          {
+            "name": "session_id",
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "session_ref",
+            "type": "text",
+            "nullable": false,
+            "unique": true
+          },
+          {
+            "name": "status",
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "protocol_version",
+            "type": "integer",
+            "nullable": false,
+            "unique": false
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "name": "audio_tracks",
+        "columns": [
+          {
+            "name": "session_pk",
+            "type": "uuid",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "session_id",
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "track",
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "status",
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "storage_key_prefix",
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "persisted_chunk_count",
+            "type": "integer",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "committed_byte_len",
+            "type": "integer",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "track_ref",
+            "type": "text",
+            "nullable": false,
+            "unique": true
+          },
+          {
+            "name": "media_artifact_key",
+            "type": "text",
+            "nullable": true,
+            "unique": false
+          },
+          {
+            "name": "media_content_type",
+            "type": "text",
+            "nullable": true,
+            "unique": false
+          },
+          {
+            "name": "media_duration_seconds",
+            "type": "integer",
+            "nullable": true,
+            "unique": false
+          }
+        ],
+        "foreignKeys": [
+          {
+            "column": "session_pk",
+            "references": "audio_sessions",
+            "onDelete": "cascade"
+          }
+        ]
+      },
+      {
+        "name": "note_artifacts",
+        "columns": [
+          {
+            "name": "session_id",
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "artifact_kind",
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "payload",
+            "type": "jsonb",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "human_edited",
+            "type": "boolean",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "dismissed",
+            "type": "boolean",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "artifact_ref",
+            "type": "text",
+            "nullable": false,
+            "unique": true
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "name": "track_transcripts",
+        "columns": [
+          {
+            "name": "session_id",
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "track",
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "track_ref",
+            "type": "text",
+            "nullable": false,
+            "unique": true
+          },
+          {
+            "name": "status",
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          {
+            "name": "model",
+            "type": "text",
+            "nullable": true,
+            "unique": false
+          },
+          {
+            "name": "detected_language",
+            "type": "text",
+            "nullable": true,
+            "unique": false
+          },
+          {
+            "name": "full_text",
+            "type": "text",
+            "nullable": true,
+            "unique": false
+          },
+          {
+            "name": "word_count",
+            "type": "integer",
+            "nullable": true,
+            "unique": false
+          },
+          {
+            "name": "payload",
+            "type": "jsonb",
+            "nullable": true,
+            "unique": false
+          }
+        ],
+        "foreignKeys": []
+      }
+    ],
+    "api": [
+      {
+        "method": "GET",
+        "path": "/sessions",
+        "action": {
+          "kind": "handler",
+          "handler": "view_session_list"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/sessions/{session_id}/{track}/transcript",
+        "action": {
+          "kind": "handler",
+          "handler": "view_session_track_transcript"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/sessions/{session_id}/notes",
+        "action": {
+          "kind": "handler",
+          "handler": "view_session_notes"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/sessions/{session_id}/{track}/play-token",
+        "action": {
+          "kind": "handler",
+          "handler": "view_session_playback_token"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/sessions/{session_id}/{track}/chunks/{chunk_index}",
+        "action": {
+          "kind": "stream",
+          "handler": "audio_input_chunk_ingest",
+          "mode": "ingest"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/sessions/{session_id}/{track}/upload-status",
+        "action": {
+          "kind": "handler",
+          "handler": "audio_input_upload_status"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/sessions/{session_id}/{track}/finalize",
+        "action": {
+          "kind": "handler",
+          "handler": "audio_input_finalize_track"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/sessions/{session_id}/{track}/playback",
+        "action": {
+          "kind": "stream",
+          "handler": "media_playback_stream",
+          "mode": "playback"
+        }
+      }
+    ],
+    "agents": [],
+    "tooling": [],
+    "triggers": [],
+    "handlers": [],
+    "extensions": []
+  },
+  "handlerIds": [
+    "audio_input_chunk_ingest",
+    "audio_input_finalize_track",
+    "audio_input_upload_status",
+    "media_playback_stream",
+    "media_playback_token",
+    "view_session_list",
+    "view_session_notes",
+    "view_session_playback_token",
+    "view_session_track_transcript"
+  ],
+  "triggerEvents": ["audio_input.finalized_session"],
+  "viewRoutes": [
+    "GET /sessions",
+    "GET /sessions/{session_id}/{track}/transcript",
+    "GET /sessions/{session_id}/notes",
+    "POST /sessions/{session_id}/{track}/play-token"
+  ]
+}

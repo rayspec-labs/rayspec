@@ -1,0 +1,33 @@
+{
+  "name": "@rayspec/adapter-openai",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rayspec/core": "workspace:*",
+    "@openai/agents": "0.11.8",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@rayspec/db": "workspace:*",
+    "@rayspec/platform": "workspace:*",
+    "dotenv": "17.4.2",
+    "drizzle-orm": "0.45.2",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

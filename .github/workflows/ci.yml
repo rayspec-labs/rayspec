@@ -1,0 +1,488 @@
+name: CI
+
+# ────────────────────────────────────────────────────────────────────────────────────────────────
+# THREE LANES. Every check runs in EXACTLY ONE lane; nothing is silently dropped.
+#
+#   lane1-deterministic  — no Postgres, no secrets. install → typecheck → lint → build →
+#                          gitleaks → the non-DB platform gates → check:deploy-entrypoint →
+#                          gate:parity → the deterministic test subset (the 20 non-DB packages).
+#                          REQUIRED merge check. Fast, hermetic.
+#
+#   lane2-db             — ephemeral Postgres service. install → build → the DB gates
+#                          (migrations / shadow-dryrun / migrate-clean) → the DB test subset
+#                          (the 9 Postgres-backed packages: 8 platform + the local-boot example) with
+#                          RAYSPEC_REQUIRE_DB_TESTS=true so a DB suite can NEVER silently self-skip.
+#                          --concurrency=1 keeps the two real-DBOS packages off each other on one
+#                          Postgres. REQUIRED merge check.
+#
+#   lane3-live           — OPT-IN. Runs ONLY on a manual workflow_dispatch (never on push /
+#                          pull_request, and never automatically), so it is NOT a required merge
+#                          check and can never block a PR when live creds are absent. It exercises
+#                          real providers for real money, so it is hand-triggered only — you invoke
+#                          it when you want a live smoke, never on its own. Runs the FULL suite
+#                          against real providers with RAYSPEC_REQUIRE_LIVE_TESTS=true so a live
+#                          suite can never silently self-skip either.
+#
+# The test split is by TURBO --filter, not self-skip: GitHub sets CI=true, which arms the
+# un-skippable DB ran-guards (they hard-FAIL, they do not skip, when DATABASE_URL is absent). So the
+# 9 Postgres-backed packages MUST be excluded from lane 1 at the filter level — they run only in
+# lane 2 (with a DB). lane1 ∪ lane2 == every @rayspec/* package, with no package in both.
+#
+# Intentionally NOT run in CI:
+#   • gate:tracker-hygiene — scans PM-workspace tracker docs that are not part of this repo; it is a
+#     workspace-doc invariant, not a code invariant. Run locally via `pnpm gate:workspace`.
+#   • a Rust-SDK job — the in-repo Rust client SDK is developed and tested outside this repo's CI.
+# ────────────────────────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main, p0-foundations]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_codex:
+        description: >-
+          Also exercise the Codex backend in the live lane. Off by default: Codex's ONLY credential is
+          a personal ChatGPT subscription OAuth session, and using it may rotate the developer's local
+          Codex login — so it is opt-in, never on by default.
+        type: boolean
+        default: false
+
+jobs:
+  # ══════════════════════════════════════════════════════════════════════════════════════════════
+  # LANE 1 — deterministic (no Postgres, no secrets). REQUIRED.
+  # ══════════════════════════════════════════════════════════════════════════════════════════════
+  lane1-deterministic:
+    name: Lane 1 — deterministic
+    runs-on: ubuntu-latest
+    env:
+      # The api-key HMAC pepper is a boot-required config value; a few deterministic suites construct
+      # app config. DEV/TEST-ONLY, an explicit NON-secret placeholder (allowlisted in .gitleaks.toml).
+      RAYSPEC_API_KEY_PEPPER: ci-dev-pepper-not-a-real-secret
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks (dir mode) scans the working tree; full history is fetched so a future
+          # history-mode scan / PR-range diff has what it needs.
+          fetch-depth: 0
+
+      # No-plaintext-secrets: scan the checked-out tree for committed secrets (a finding fails the
+      # lane). Runs the gitleaks CLI DIRECTLY (no GitHub API) — gitleaks-action@v2 calls the
+      # PR-comment API the default token can't reach ("403 Resource not accessible by integration").
+      # The .env / *-key.txt / *.pem baseline stays gitignored; the dev pepper above is an explicit
+      # non-secret placeholder allowlisted in .gitleaks.toml.
+      - name: Secret scan (gitleaks)
+        run: |
+          GL=8.24.3
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GL}/gitleaks_${GL}_linux_x64.tar.gz" | tar -xz -C /tmp gitleaks
+          /tmp/gitleaks dir . --redact --no-banner --exit-code 1
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.12.4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Dependency vulnerability audit — turns CVE detection into a gate instead of luck. Runs against
+      # the frozen lockfile (no build needed), so a dependency carrying a known-exploitable advisory
+      # fails the lane instead of shipping silently.
+      #
+      # Threshold is high/critical, NOT moderate, on purpose: the npm ecosystem continuously surfaces
+      # MODERATE advisories in transitive DEV-ONLY tooling that never executes in the deployed artifact
+      # (build/migration/test tools), and hard-blocking every merge on those produces constant noise for
+      # issues with no production reach. Gating on high/critical blocks the severities that genuinely
+      # warrant stopping a merge; a moderate is still printed by the audit and is triaged deliberately
+      # (e.g. pinned or overridden) rather than wedging CI on an unreachable dev-tool finding.
+      - name: Dependency audit (high/critical)
+        run: pnpm audit --audit-level high
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      # Build produces the authoritative dist BEFORE any gate/test that imports it. typecheck above
+      # is `tsc --noEmit` everywhere, so build is the sole dist producer (a partial dist can never
+      # leak out of an emitting typecheck). Keep this step ahead of every gate + the test run.
+      - name: Build
+        run: pnpm build
+
+      # ── Non-DB platform gates (the members of `pnpm gate` that need no Postgres) ──────────────────
+      # The tenant-chokepoint gate forbids raw-db imports / .unscoped() in the request path +
+      # packages/kernel/platform.
+      - name: Tenant-chokepoint gate
+        run: pnpm gate:chokepoint
+
+      # Adapters are anti-corruption layers that hold NO tool handlers — the ONLY tool path is
+      # ctx.dispatchTool (the validate/opaque-wrap/journal chokepoint).
+      - name: Adapter-no-handlers gate
+        run: pnpm gate:adapter-handlers
+
+      # An escape-hatch handler module may import ONLY @rayspec/handler-sdk — never a platform
+      # internal or an agent SDK, and may not '..'-tunnel into platform source.
+      - name: Handler-imports gate
+        run: pnpm gate:handler-imports
+
+      # An escape-hatch / extension-pack handler must receive every capability by injection (the
+      # tenant-bound init.db / init.blob) — it may NEVER self-construct a raw DB or blob backend.
+      - name: Extension-capability gate
+        run: pnpm gate:extension-capability
+
+      # The spec.schema.json drift gate — re-derives the JSON Schema from the grammar and byte-compares
+      # to the checked-in packages/kernel/spec/spec.schema.json, failing on drift. Needs the Build.
+      - name: Spec-schema drift gate
+        run: pnpm gate:spec-schema
+
+      # The composed product stack must be self-sufficient with any customer product ABSENT — no
+      # rayspec source statically imports a product path; the deploy kit builds from THIS repo only.
+      - name: No-pack regression gate
+        run: pnpm gate:no-pack
+
+      # The neutral reference product (examples/acme-notes/**) must carry ZERO product-domain meaning —
+      # a forcing function on the fixtures the platform gates/goldens/e2e are pinned against.
+      - name: Fixture-neutrality gate
+        run: pnpm gate:fixture-neutrality
+
+      # The version-merge forcing-function: the unified version:'1.0' front-end must NOT perturb the
+      # engine lowering — the neutral acme-notes.product.yaml @ 1.0 must still lower to the byte-identical
+      # frozen compose golden. Imports the BUILT dist, so it runs AFTER Build.
+      - name: Compose byte-identity gate
+        run: pnpm gate:byte-identity
+
+      # The anti-re-accretion gate: the exportable tree must read as ONE product with no build-evolution
+      # archaeology (phase/slice/wave labels, decision D-numbers, §-refs, leaked product names).
+      - name: Anti-re-accretion (no-archaeology) gate
+        run: pnpm gate:no-archaeology
+
+      # The third-party inventory backing THIRD-PARTY-NOTICES.md must describe the lockfile that
+      # actually ships. Hashes pnpm-lock.yaml and compares it to the hash the SBOM recorded, so a pin
+      # that moves without a regenerated SBOM fails here instead of silently invalidating a legal
+      # document. Deterministic + host-independent: reads two files, no install/build/network needed.
+      - name: Dependency-SBOM freshness gate
+        run: pnpm gate:sbom-fresh
+
+      # The single-repo VPS boot entrypoint (deployments/acme-notes/serve.mts) lives OUTSIDE any
+      # workspace package, so Node resolves its BARE imports from the repo-root node_modules. This gate
+      # asserts every non-type runtime import there is declared in the ROOT package.json deps AND
+      # resolves from the root — catching the ERR_MODULE_NOT_FOUND crash-loop `docker compose build`
+      # (compile-only) misses. Runs after Build so @rayspec/* subpath resolution sees dist.
+      - name: Deploy-entrypoint import gate
+        run: pnpm check:deploy-entrypoint
+
+      # The Tier-1 wire-golden / replay-parity gate (@rayspec/parity). Deterministic: its live-smoke
+      # self-skips with no creds + no RAYSPEC_REQUIRE_LIVE_TESTS (that suite runs in lane 3). Run as
+      # its own step here, so @rayspec/parity is EXCLUDED from the deterministic test filter below —
+      # it must run exactly once.
+      - name: Parity wire-golden / replay gate
+        run: pnpm gate:parity
+
+      # ── Deterministic test subset — the 20 non-DB, non-parity packages ────────────────────────────
+      # Split by turbo --filter (NOT self-skip): under CI=true the DB ran-guards HARD-FAIL when
+      # DATABASE_URL is absent, so the 9 Postgres-backed packages are excluded here and run only in
+      # lane 2. @rayspec/parity is excluded because it ran as the gate step above. No DATABASE_URL is
+      # set → this lane touches no Postgres. @spike/* is auto-excluded (the base filter is @rayspec/*).
+      - name: Test (deterministic subset)
+        run: |
+          pnpm exec turbo run test \
+            --filter='@rayspec/*' \
+            --filter='!@rayspec/adapter-openai' \
+            --filter='!@rayspec/cli' \
+            --filter='!@rayspec/server' \
+            --filter='!@rayspec/api-auth' \
+            --filter='!@rayspec/db' \
+            --filter='!@rayspec/platform' \
+            --filter='!@rayspec/durable-dbos' \
+            --filter='!@rayspec/workflow-durable' \
+            --filter='!@rayspec/local-boot' \
+            --filter='!@rayspec/parity'
+
+  # ══════════════════════════════════════════════════════════════════════════════════════════════
+  # LANE 2 — DB (ephemeral Postgres). REQUIRED.
+  # ══════════════════════════════════════════════════════════════════════════════════════════════
+  lane2-db:
+    name: Lane 2 — DB
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: rayspec
+          POSTGRES_PASSWORD: rayspec
+          POSTGRES_DB: rayspec
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U rayspec -d rayspec"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgres://rayspec:rayspec@localhost:5433/rayspec
+      SHADOW_DATABASE_URL: postgres://rayspec:rayspec@localhost:5433/rayspec_shadow
+      # DEV/TEST-ONLY, an explicit NON-secret placeholder. Production injects a real pepper from a
+      # secret manager; the JWT signing key is generated fresh per run by the step below.
+      RAYSPEC_API_KEY_PEPPER: ci-dev-pepper-not-a-real-secret
+      # DB suites can NOT silently self-skip: the un-skippable ran-guards hard-fail if the DB is absent.
+      RAYSPEC_REQUIRE_DB_TESTS: 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create shadow DB
+        run: |
+          PGPASSWORD=rayspec psql -h localhost -p 5433 -U rayspec -d postgres \
+            -c "CREATE DATABASE rayspec_shadow OWNER rayspec;"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.12.4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # Boot-required secret: a REAL RS256 PKCS#8 key generated per run (never committed) so the
+      # api-auth app boots. DEV/TEST-ONLY — production injects a real key from a secret store.
+      # Written to $GITHUB_ENV so subsequent steps see RAYSPEC_JWT_SIGNING_KEY.
+      - name: Generate dev JWT signing key
+        run: |
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/jwt_dev.pem
+          # A private key must never reach a log, even an ephemeral per-run one — this workflow is a
+          # template others copy. A $GITHUB_ENV write echoes the value into the log, so register every
+          # line of the PEM as a log mask BEFORE writing it. `::add-mask::` accepts ONE value per call
+          # and does not handle multi-line input, so emit one call per line.
+          while IFS= read -r key_line; do
+            echo "::add-mask::${key_line}"
+          done < /tmp/jwt_dev.pem
+          {
+            echo 'RAYSPEC_JWT_SIGNING_KEY<<RAYSPEC_KEY_EOF'
+            cat /tmp/jwt_dev.pem
+            echo 'RAYSPEC_KEY_EOF'
+          } >> "$GITHUB_ENV"
+          rm -f /tmp/jwt_dev.pem
+
+      - run: pnpm install --frozen-lockfile
+
+      # Build produces dist that the DB tests + gates import (typecheck/lint are lane-1's job).
+      - name: Build
+        run: pnpm build
+
+      # DB migration gates: the destructive-SQL scan, then the "scan -> shadow-DB dry-run" apply, then
+      # the from-clean-DB bootstrap oracle (applies the full committed chain via `drizzle-kit migrate`
+      # and asserts the live schema == schema.ts with zero drift).
+      - name: Migration destructive-scan gate
+        run: pnpm gate:migrations
+
+      - name: Migration shadow-DB dry-run gate
+        run: pnpm gate:shadow-dryrun
+
+      - name: Migration from-clean-DB gate
+        run: pnpm gate:migrate-clean
+
+      # ── DB test subset — the 9 Postgres-backed packages (8 platform + the local-boot example) ─────
+      # --concurrency=1: @rayspec/durable-dbos + @rayspec/server both boot a REAL DBOS engine; run
+      # concurrently against one Postgres they deadlock / race on CREATE/DROP DATABASE. The two
+      # real-engine packages must not overlap on a single database.
+      # RAYSPEC_REQUIRE_DB_TESTS=true (job env) makes every DB suite hard-fail rather than skip.
+      - name: Test (DB subset)
+        run: |
+          pnpm exec turbo run test \
+            --concurrency=1 \
+            --filter='@rayspec/adapter-openai' \
+            --filter='@rayspec/cli' \
+            --filter='@rayspec/server' \
+            --filter='@rayspec/api-auth' \
+            --filter='@rayspec/db' \
+            --filter='@rayspec/platform' \
+            --filter='@rayspec/durable-dbos' \
+            --filter='@rayspec/workflow-durable' \
+            --filter='@rayspec/local-boot'
+
+  # ══════════════════════════════════════════════════════════════════════════════════════════════
+  # LANE 3 — live providers (OPT-IN, non-blocking). Runs ONLY on a manual workflow_dispatch, so it
+  # is never a required PR check and can never block a merge when live creds are absent. It calls
+  # real providers that cost real money, so it never fires on its own — you dispatch it by hand.
+  # ══════════════════════════════════════════════════════════════════════════════════════════════
+  lane3-live:
+    name: Lane 3 — live (opt-in)
+    # Never on push / pull_request, and never automatically: opt-in only. A manual dispatch runs it
+    # against real providers — real API spend, which is exactly why it is hand-triggered only. If
+    # creds are missing there, RAYSPEC_REQUIRE_LIVE_TESTS=true makes it fail LOUDLY (the point) —
+    # but as a non-required check it blocks nothing.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    # The provider secrets live on the `live` environment, so they are structurally invisible to lanes 1
+    # and 2 — only a job that opts INTO this environment can read them.
+    environment: live
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: rayspec
+          POSTGRES_PASSWORD: rayspec
+          POSTGRES_DB: rayspec
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U rayspec -d rayspec"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgres://rayspec:rayspec@localhost:5433/rayspec
+      SHADOW_DATABASE_URL: postgres://rayspec:rayspec@localhost:5433/rayspec_shadow
+      RAYSPEC_API_KEY_PEPPER: ci-dev-pepper-not-a-real-secret
+      RAYSPEC_REQUIRE_DB_TESTS: 'true'
+      # Makes the credential-guarded live suites hard-FAIL instead of self-skipping: the parity live
+      # smoke and the three server intake live smokes throw when their required LLM credential is
+      # absent, so a missing key can never green-skip them. It does NOT cover the speech-to-text live
+      # test (deepgram-adapter.live.test.ts), which gates ONLY on DEEPGRAM_API_KEY and self-skips when
+      # that key is absent regardless of this flag — the credential preflight below is what stands
+      # between an absent key and a silently unexercised STT adapter.
+      RAYSPEC_REQUIRE_LIVE_TESTS: 'true'
+      # The exact set of backends this run must exercise (the live smoke fails if any named backend's
+      # credential is absent, so a missing cred can never green-skip). Codex is added only when opted in.
+      RAYSPEC_LIVE_BACKENDS: ${{ inputs.run_codex && 'openai,pi,anthropic,codex' || 'openai,pi,anthropic' }}
+      # Live provider creds from the `live` environment. `pi` runs on OPENAI_API_KEY; anthropic runs on
+      # the subscription OAuth token.
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+      # ANTHROPIC_API_KEY is deliberately NOT set. The anthropic adapter treats a present ANTHROPIC_API_KEY
+      # as api-key auth (SDK credential precedence: ANTHROPIC_API_KEY > CLAUDE_CODE_OAUTH_TOKEN), which
+      # BILLS the API instead of using the $0 subscription harness — and its stray-key self-check would
+      # flag it. The subscription OAuth token above is the only anthropic credential this lane provides.
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail-fast credential preflight, before the minutes of install/build/live calls. It proves the
+      # required live credentials are PRESENT — not that any test ran. For the LLM backends, that a
+      # credential actually drives a live call is separately enforced by the parity live smoke's
+      # required-backend guard. For the speech-to-text live test — whose ONLY skip trigger is an absent
+      # DEEPGRAM_API_KEY — presence is the sole thing standing between a green lane and an unexercised
+      # STT adapter, so this step is that suite's backstop. It does NOT protect against an
+      # environment-forwarding regression downstream. It reports only WHICH variables are missing,
+      # never any value, length, or prefix.
+      - name: Live credential preflight
+        env:
+          RUN_CODEX: ${{ inputs.run_codex }}
+          CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON_B64 }}
+        run: |
+          missing=()
+          [ -n "${OPENAI_API_KEY:-}" ] || missing+=(OPENAI_API_KEY)
+          [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || missing+=(CLAUDE_CODE_OAUTH_TOKEN)
+          [ -n "${DEEPGRAM_API_KEY:-}" ] || missing+=(DEEPGRAM_API_KEY)
+          if [ "${RUN_CODEX}" = "true" ] && [ -z "${CODEX_AUTH_JSON_B64:-}" ]; then
+            missing+=(CODEX_AUTH_JSON_B64)
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Live credential preflight FAILED — missing/empty: ${missing[*]}" >&2
+            exit 1
+          fi
+          echo "Live credential preflight OK — required credentials present."
+
+      - name: Create shadow DB
+        run: |
+          PGPASSWORD=rayspec psql -h localhost -p 5433 -U rayspec -d postgres \
+            -c "CREATE DATABASE rayspec_shadow OWNER rayspec;"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.12.4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Generate dev JWT signing key
+        run: |
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/jwt_dev.pem
+          # A private key must never reach a log, even an ephemeral per-run one — this workflow is a
+          # template others copy. A $GITHUB_ENV write echoes the value into the log, so register every
+          # line of the PEM as a log mask BEFORE writing it. `::add-mask::` accepts ONE value per call
+          # and does not handle multi-line input, so emit one call per line.
+          while IFS= read -r key_line; do
+            echo "::add-mask::${key_line}"
+          done < /tmp/jwt_dev.pem
+          {
+            echo 'RAYSPEC_JWT_SIGNING_KEY<<RAYSPEC_KEY_EOF'
+            cat /tmp/jwt_dev.pem
+            echo 'RAYSPEC_KEY_EOF'
+          } >> "$GITHUB_ENV"
+          rm -f /tmp/jwt_dev.pem
+
+      # Codex authenticates ONLY via a personal ChatGPT subscription OAuth session (no API key). Its
+      # credential is provided as a SINGLE-LINE, base64-encoded copy of that auth.json. GitHub registers
+      # EACH line of a multi-line secret as its OWN log-mask token, so a multi-line JSON document — whose
+      # first and last lines are literally `{` and `}` — would mask every unrelated `{`/`}` in this job's
+      # log as `***`, making the one lane that triages real-provider failures unreadable. A single base64
+      # line masks as ONE opaque token and leaves the rest of the log intact. Decode it to
+      # $HOME/.codex/auth.json (HOME survives turbo's strict env; CODEX_HOME need not be set — the adapter
+      # defaults to $HOME/.codex), then VALIDATE it has the subscription/OAuth shape the adapter requires:
+      # a non-empty tokens.access_token, no API key baked into the file, and a non-api-key auth_mode. A
+      # wrong-shaped (api-key) file fails HERE, so the codex live block can never pass with zero
+      # assertions. Only OK/error lines are printed — never the file or any field.
+      - name: Materialise Codex subscription credential
+        if: ${{ inputs.run_codex }}
+        env:
+          CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON_B64 }}
+        run: |
+          set -o pipefail
+          if [ -z "${CODEX_AUTH_JSON_B64}" ]; then
+            echo "run_codex was requested but the CODEX_AUTH_JSON_B64 secret is empty — cannot exercise the codex backend." >&2
+            exit 1
+          fi
+          install -d -m 700 "${HOME}/.codex"
+          umask 077
+          if ! printf '%s' "${CODEX_AUTH_JSON_B64}" | base64 -d > "${HOME}/.codex/auth.json"; then
+            echo "CODEX_AUTH_JSON_B64 did not decode as base64 — cannot exercise the codex backend." >&2
+            exit 1
+          fi
+          chmod 600 "${HOME}/.codex/auth.json"
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const file = join(process.env.HOME, '.codex', 'auth.json');
+          let raw;
+          try {
+            raw = JSON.parse(readFileSync(file, 'utf8'));
+          } catch {
+            console.error('Codex auth.json is not valid JSON.');
+            process.exit(1);
+          }
+          const tokens = raw?.tokens;
+          const hasTokens =
+            tokens !== null &&
+            typeof tokens === 'object' &&
+            typeof tokens.access_token === 'string' &&
+            tokens.access_token.length > 0;
+          const fileApiKey = raw?.OPENAI_API_KEY;
+          const hasRealApiKeyInFile = typeof fileApiKey === 'string' && fileApiKey.length > 0;
+          const apiKeyMode = raw?.auth_mode === 'apikey' || raw?.auth_mode === 'api_key';
+          const isSubscriptionOauth = hasTokens && !hasRealApiKeyInFile && !apiKeyMode;
+          if (!isSubscriptionOauth) {
+            console.error(
+              'Codex auth.json is NOT the subscription/OAuth form (needs a non-empty tokens.access_token, no baked-in API key, non-api-key auth_mode).',
+            );
+            process.exit(1);
+          }
+          console.log('Codex subscription credential OK.');
+          NODE
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # The FULL suite against real providers (--concurrency=1 via the root script for the two
+      # real-DBOS packages). RAYSPEC_REQUIRE_LIVE_TESTS + RAYSPEC_REQUIRE_DB_TESTS make both the
+      # live and DB suites un-skippable, so a missing cred / DB fails loudly instead of green-skipping.
+      - name: Test (full, live)
+        run: pnpm test

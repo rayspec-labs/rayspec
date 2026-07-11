@@ -1,0 +1,28 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist"
+  },
+  "references": [
+    { "path": "../../workflow/nodes/agent-runtime" },
+    { "path": "../../capabilities/audio-runtime" },
+    { "path": "../../capabilities/workflow-bridges" },
+    { "path": "../../capabilities/conversation-runtime" },
+    { "path": "../../kernel/db" },
+    { "path": "../../capabilities/file-runtime" },
+    { "path": "../../workflow/nodes/grounding-runtime" },
+    { "path": "../../kernel/handler-sdk" },
+    { "path": "../../kernel/platform" },
+    { "path": "../product-yaml-workflow-bridge" },
+    { "path": "../../capabilities/record-runtime" },
+    { "path": "../../kernel/spec" },
+    { "path": "../../adapters/deepgram" },
+    { "path": "../../kernel/stt-port" },
+    { "path": "../../workflow/nodes/views-runtime" },
+    { "path": "../../workflow/workflow-durable" },
+    { "path": "../../workflow/foundation" }
+  ],
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "node_modules", "**/*.test.ts"]
+}

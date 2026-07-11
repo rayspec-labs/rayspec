@@ -1,0 +1,329 @@
+{
+  "capturedAt": "2026-06-23T20:20:04.669Z",
+  "sdkVersion": "0.11.8",
+  "sdkVersions": {
+    "openai": "0.11.8",
+    "anthropic": "0.3.185",
+    "pi": "0.79.9"
+  },
+  "runs": [
+    {
+      "scenario": "multi-turn-tool",
+      "backend": "openai",
+      "result": {
+        "runId": "parity-openai-multi-turn-tool",
+        "backend": "openai",
+        "authMode": "api-key",
+        "status": "completed",
+        "finalText": "The weather in Berlin is currently cloudy with a temperature of 18°C.",
+        "output": null,
+        "error": null,
+        "errorClass": null,
+        "conversation": [
+          {
+            "role": "system",
+            "index": 0,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "You are a concise assistant. You MUST use the get_weather tool to answer any weather question — never answer from your own knowledge. Call the tool, then give a one-sentence answer."
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "index": 1,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "What is the weather in Berlin? Answer in one short sentence."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 2,
+            "parts": [
+              {
+                "kind": "tool_call",
+                "toolCallId": "call_bkqdOLpEi2AqA1wuJJ9LT6og",
+                "name": "get_weather",
+                "args": {
+                  "city": "Berlin"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "index": 3,
+            "parts": [
+              {
+                "kind": "tool_result",
+                "toolCallId": "call_bkqdOLpEi2AqA1wuJJ9LT6og",
+                "name": "get_weather",
+                "result": {
+                  "kind": "tool_data",
+                  "name": "get_weather",
+                  "toolCallId": "call_bkqdOLpEi2AqA1wuJJ9LT6og",
+                  "data": {
+                    "city": "Berlin",
+                    "tempC": 18,
+                    "condition": "cloudy"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 4,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "The weather in Berlin is currently cloudy with a temperature of 18°C."
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "inputTokens": 261,
+          "outputTokens": 32,
+          "totalTokens": 293
+        },
+        "costUsd": 0.00015560000000000001,
+        "stepCount": 3
+      },
+      "journal": [
+        {
+          "type": "tool",
+          "status": "ok",
+          "idempotencyKey": "call_bkqdOLpEi2AqA1wuJJ9LT6og"
+        },
+        {
+          "type": "llm",
+          "status": "ok",
+          "idempotencyKey": "llm:b7dad50f017d8beef22728e3c37e8577168aaefcb6d9bf963c66fea3d6bc9599:0"
+        },
+        {
+          "type": "llm",
+          "status": "ok",
+          "idempotencyKey": "llm:b7dad50f017d8beef22728e3c37e8577168aaefcb6d9bf963c66fea3d6bc9599:1"
+        }
+      ],
+      "events": [
+        {
+          "type": "run_started",
+          "seq": 0
+        },
+        {
+          "type": "tool_called",
+          "seq": 1
+        },
+        {
+          "type": "tool_result",
+          "seq": 2
+        },
+        {
+          "type": "run_completed",
+          "seq": 3
+        }
+      ]
+    },
+    {
+      "scenario": "no-output",
+      "backend": "openai",
+      "result": {
+        "runId": "parity-openai-no-output",
+        "backend": "openai",
+        "authMode": "api-key",
+        "status": "completed",
+        "finalText": "ok",
+        "output": null,
+        "error": null,
+        "errorClass": null,
+        "conversation": [
+          {
+            "role": "system",
+            "index": 0,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "You are a concise assistant. You MUST use the get_weather tool to answer any weather question — never answer from your own knowledge. Call the tool, then give a one-sentence answer."
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "index": 1,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "Say the single word: ok."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 2,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "ok"
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "inputTokens": 56,
+          "outputTokens": 2,
+          "totalTokens": 58
+        },
+        "costUsd": 0.000025600000000000002,
+        "stepCount": 1
+      },
+      "journal": [
+        {
+          "type": "llm",
+          "status": "ok",
+          "idempotencyKey": "llm:62b520a2739c93c7e8b0dbecb96032d5bf349741fdda446fcac4fc26c7f8a25b:0"
+        }
+      ],
+      "events": [
+        {
+          "type": "run_started",
+          "seq": 0
+        },
+        {
+          "type": "run_completed",
+          "seq": 1
+        }
+      ]
+    },
+    {
+      "scenario": "error",
+      "backend": "openai",
+      "result": {
+        "runId": "parity-openai-error",
+        "backend": "openai",
+        "authMode": "api-key",
+        "status": "error",
+        "finalText": "",
+        "output": null,
+        "error": "Error: 400 The requested model '__nonexistent-model__' does not exist.",
+        "errorClass": "upstream_4xx",
+        "conversation": [],
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "totalTokens": 0
+        },
+        "costUsd": 0,
+        "stepCount": 1
+      },
+      "journal": [
+        {
+          "type": "llm",
+          "status": "error",
+          "idempotencyKey": "llm:56f375f882d4709da630597aa234d3d0cdbbe65fe8e8dbaca2c1930a6ac6be1c:0"
+        }
+      ],
+      "events": [
+        {
+          "type": "run_started",
+          "seq": 0
+        },
+        {
+          "type": "run_completed",
+          "seq": 1
+        }
+      ]
+    },
+    {
+      "scenario": "structured-output",
+      "backend": "openai",
+      "result": {
+        "runId": "parity-openai-structured-output",
+        "backend": "openai",
+        "authMode": "api-key",
+        "status": "completed",
+        "finalText": "{\"city\":\"Berlin\",\"condition\":\"Cloudy\"}",
+        "output": {
+          "city": "Berlin",
+          "condition": "Cloudy"
+        },
+        "error": null,
+        "errorClass": null,
+        "conversation": [
+          {
+            "role": "system",
+            "index": 0,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "You extract structured data. Return the city and a short condition for the requested place."
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "index": 1,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "Give the weather for Berlin: a city name and a one-word condition."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 2,
+            "parts": [
+              {
+                "kind": "text",
+                "text": "{\"city\":\"Berlin\",\"condition\":\"Cloudy\"}"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "index": 3,
+            "parts": [
+              {
+                "kind": "output",
+                "value": {
+                  "city": "Berlin",
+                  "condition": "Cloudy"
+                }
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "inputTokens": 73,
+          "outputTokens": 11,
+          "totalTokens": 84
+        },
+        "costUsd": 0.000046800000000000006,
+        "stepCount": 1
+      },
+      "journal": [
+        {
+          "type": "llm",
+          "status": "ok",
+          "idempotencyKey": "llm:4b9762ae5c21081838cf4ed073373b4d691fb9300e274392e2eb5cf25b0f7def:0"
+        }
+      ],
+      "events": [
+        {
+          "type": "run_started",
+          "seq": 0
+        },
+        {
+          "type": "run_completed",
+          "seq": 1
+        }
+      ]
+    }
+  ]
+}
