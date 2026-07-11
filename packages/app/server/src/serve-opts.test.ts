@@ -2,9 +2,14 @@
  * Unit coverage for `assembleOptsFromEnv` — the opts-building serve.ts (the SHIPPED entrypoint) hands
  * to `assembleServer`. This closes the blind-test gap the DB e2e leaves open: `serve-agent-boot.db.test`
  * drives `assembleServer` DIRECTLY with SUBSTITUTE opts (a test registrar + an injected fake backend),
- * so it proves the SEAM but never that serve.ts wires the RIGHT things into it — a revert that stopped
- * serve.ts feeding the validating registrar / the from-env factory would pass CI. These assertions RED
- * on exactly that.
+ * so it proves the SEAM but never that the opts BUILDER assembles the RIGHT things — a revert of
+ * `assembleOptsFromEnv`'s BODY that stopped it feeding the validating registrar / the from-env factory
+ * would pass the DB e2e. These assertions RED on exactly such a body revert.
+ *
+ * SCOPE (honest): they pin the opts-BUILDER, not its one-line forwarding at the `main()` call site
+ * (`assembleServer(config, assembleOptsFromEnv(config))`), which no test exercises — `main()` is fenced
+ * by `isProcessEntrypoint`, so covering it directly would require spawning/mocking the process
+ * entrypoint (disproportionate). That one-line call-site wiring is left to review.
  *
  * DB-free / process.env-free: `loadServerConfig` is fed an EXPLICIT env (three dummy boot secrets — it
  * only shape-checks them, never parses the PEM or touches the DB), and `assembleOptsFromEnv` is passed an
@@ -70,9 +75,12 @@ describe('assembleOptsFromEnv — serve.ts wires the RIGHT deployer seams', () =
   });
 
   it('a PRODUCT-profile spec → the VALIDATING registrar, but NO agent factory (product builds its own)', () => {
+    // A MINIMAL VALID product-profile doc (parses {ok:true, kind:'product'}) so the factory returns
+    // undefined via the genuine `kind !== 'rayspec'` PRODUCT branch — NOT via a parse failure (which a
+    // malformed BACKEND doc would satisfy identically, proving nothing about product-profile handling).
     const productSpec = writeTempSpec(
       'product.rayspec.yaml',
-      "version: '1.0'\nproduct:\n  archetype: notes\nmetadata:\n  name: opts-product\n",
+      "version: '1.0'\nproduct:\n  id: opts_product\n  name: opts-product\n",
     );
     const opts = assembleOptsFromEnv(configWithSpec(productSpec), {});
     expect(opts.registerProductTables).toBe(registerProductStores);
