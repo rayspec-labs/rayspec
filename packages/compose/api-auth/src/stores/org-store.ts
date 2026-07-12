@@ -51,33 +51,43 @@ export class OrgStore {
    *    previously-removed user can be re-added; the `memberships` UNIQUE(user_id, org_id) is not
    *    partial, so the tombstone occupies the slot and must be revived rather than re-inserted);
    *  - no row exists → a fresh `member` row is inserted.
-   * The read-then-write runs in ONE transaction so a concurrent add cannot observe a half state.
+   *
+   * ATOMIC single-flight — one `INSERT … ON CONFLICT (user_id, org_id) DO UPDATE` statement, NOT a
+   * read-then-insert: two CONCURRENT fresh adds would both read "no row" and both INSERT, the second
+   * violating the non-partial UNIQUE(user_id, org_id) → 23505 → HTTP 500, breaking the promised
+   * idempotency. The upsert makes the DB's own row-level atomicity the single-flight point (the C10
+   * lesson — the platform's atomicity, not a TOCTOU read-then-insert). The role CASE preserves the
+   * semantics EXACTLY: a fresh row and a reactivated TOMBSTONE become `member`, while an already-
+   * ACTIVE row keeps its stored role (`deleted_at IS NULL` ⇒ an owner/admin re-add is never demoted).
+   * `activated` is derived from the PRE-image (read in the SAME statement via the `prior` CTE, so
+   * there is no separate read to race) so the route still returns 201 on a fresh add or a
+   * reactivation and 200 on an idempotent no-op.
    */
   async addMember(orgId: string, userId: string): Promise<{ role: string; activated: boolean }> {
-    return this.db.transaction(async (tx) => {
-      const current = await tx
-        .select()
-        .from(schema.memberships)
-        .where(and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.userId, userId)))
-        .limit(1);
-      const row = current[0];
-      if (row) {
-        if (row.status === 'active' && row.deletedAt === null) {
-          return { role: row.role, activated: false };
-        }
-        const reactivated = await tx
-          .update(schema.memberships)
-          .set({ role: 'member', status: 'active', deletedAt: null })
-          .where(and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.userId, userId)))
-          .returning();
-        return { role: reactivated[0]?.role ?? 'member', activated: true };
-      }
-      const inserted = await tx
-        .insert(schema.memberships)
-        .values({ orgId, userId, role: 'member', status: 'active' })
-        .returning();
-      return { role: inserted[0]?.role ?? 'member', activated: true };
-    });
+    const rows = (await this.db.execute(sql`
+      WITH prior AS (
+        SELECT ${schema.memberships.status} AS status, ${schema.memberships.deletedAt} AS deleted_at
+        FROM ${schema.memberships}
+        WHERE ${schema.memberships.userId} = ${userId} AND ${schema.memberships.orgId} = ${orgId}
+      ),
+      upserted AS (
+        INSERT INTO ${schema.memberships} (user_id, org_id, role, status, deleted_at)
+        VALUES (${userId}, ${orgId}, 'member', 'active', NULL)
+        ON CONFLICT (user_id, org_id) DO UPDATE
+          SET deleted_at = NULL,
+              status = 'active',
+              role = CASE
+                WHEN ${schema.memberships.deletedAt} IS NOT NULL THEN 'member'
+                ELSE ${schema.memberships.role}
+              END
+        RETURNING role
+      )
+      SELECT upserted.role AS role,
+             (prior.status IS NULL OR prior.status <> 'active' OR prior.deleted_at IS NOT NULL) AS activated
+      FROM upserted LEFT JOIN prior ON true
+    `)) as unknown as Array<{ role: string; activated: boolean }>;
+    const row = rows[0];
+    return { role: row?.role ?? 'member', activated: row?.activated ?? true };
   }
 
   /** Active members of an org (id + email + role), joined to users; excludes soft-deleted rows. */

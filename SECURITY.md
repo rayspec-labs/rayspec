@@ -69,8 +69,13 @@ distinct hardening layer:
 
 - per-tenant data encryption with wrapped data-encryption keys,
 - database row-level security as a second, in-database enforcement of tenancy,
-- per-tenant execution sandboxing, and
-- cryptographic binding of tokens to their client.
+- per-tenant execution sandboxing,
+- cryptographic binding of tokens to their client, and
+- an out-of-band org-invite flow. In the core, adding a member by email returns a
+  one-time password only when the call provisions a *new* account, so the response
+  shape reveals to an org owner whether an address already has a platform account.
+  This is accepted for the trusted single-node posture; the invite-token flow in
+  the hardening layer closes that account-existence signal.
 
 **The core does not ship these, and it says so loudly at boot. Do not place a
 core deployment on a public address for untrusted traffic without that layer.**
