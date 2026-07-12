@@ -1,6 +1,6 @@
 /**
- * TEST-ONLY minimal deterministic PDF builder (S3). Builds tiny, valid, SELF-MADE PDF bytes
- * (no downloaded/internet fixtures — licensing/PII/determinism, the founder-confirmed posture) for
+ * TEST-ONLY minimal deterministic PDF builder. Builds tiny, valid, SELF-MADE PDF bytes
+ * (no downloaded/internet fixtures — licensing/PII/determinism, the intended posture) for
  * the parse-node arms: text-layer pages, empty-content (no-text-layer) pages, many-page bomb
  * shapes, and an encrypted shape pdf.js must refuse without a password. The committed
  * `__fixtures__/text-layer.pdf` / `__fixtures__/no-text-layer.pdf` were generated with exactly

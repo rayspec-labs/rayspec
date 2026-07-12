@@ -240,7 +240,7 @@ export async function createHarness(
      */
     engineSpec?: RaySpec;
     /**
-     * DX-v1.2: the per-store conflict-key carve-out threaded to `generateProductSql`/`buildProductTables`
+     * The per-store conflict-key carve-out threaded to `generateProductSql`/`buildProductTables`
      * so a durable `ON CONFLICT` target column keeps a single-column unique index (a product-composed
      * engineSpec passes `deriveConflictKeys(spec, stores)`). Omit ⇒ every author `unique: true` column is
      * tenant-scoped compound (the backend-profile default).
@@ -348,7 +348,7 @@ export async function createHarness(
     engine = {
       spec: opts.engineSpec,
       productTables,
-      // DX-v1.2: thread the conflict-key carve-out onto the engine (mirroring product-boot) so the
+      // Thread the conflict-key carve-out onto the engine (mirroring product-boot) so the
       // store-route 409 mapper treats a global-unique key column as unnameable. Omit ⇒ backend-profile
       // default (every author `unique` column tenant-scoped, safe to name).
       ...(opts.conflictKeys ? { conflictKeys: opts.conflictKeys } : {}),
@@ -501,7 +501,7 @@ export async function createDeployHarness(opts: {
   stores: RaySpec['stores'];
   schema?: string;
   wrapDb?: (db: Db) => Db;
-  /** DX-v1.2 conflict-key carve-out for the pre-registered product tables (see createHarness.opts). */
+  /** Conflict-key carve-out for the pre-registered product tables (see createHarness.opts). */
   conflictKeys?: StoreConflictKeys;
 }): Promise<DeployHarness> {
   const url = process.env.DATABASE_URL;

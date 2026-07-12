@@ -8,11 +8,11 @@
  * and BLOCKS unless every destructive statement is matched by an explicit reviewed allowlist
  * entry.
  *
- * An earlier version left the scan as a narrow bash regex (DROP COLUMN|TABLE|TRUNCATE) that the adversarial
- * review proved waved through DROP SCHEMA CASCADE, DROP CONSTRAINT/INDEX, DELETE FROM,
- * RENAME TO, newline-split DROP\nCOLUMN, and — critically for the identity migration —
- * a bare TRUNCATE in a multi-statement file and a column-type-change `USING`-cast. This scan
- * is broadened to catch all of those AND specifically TRUNCATE + the text→uuid USING-cast.
+ * The scan deliberately covers the FULL destructive vocabulary — DROP SCHEMA CASCADE, DROP
+ * CONSTRAINT/INDEX, DELETE FROM, RENAME TO, newline-split DROP\nCOLUMN, and — critically for the
+ * identity migration — a bare TRUNCATE in a multi-statement file and a column-type-change `USING`-cast —
+ * not merely a narrow `DROP COLUMN|TABLE|TRUNCATE` match. It catches all of those AND specifically
+ * TRUNCATE + the text→uuid USING-cast.
  *
  * Comment-strip + statement-split are LITERAL-AWARE (a small tokenizer): a `--` or a `;` that
  * appears INSIDE a single-quoted string or a dollar-quoted ($tag$...$tag$) body is NOT treated

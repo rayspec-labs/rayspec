@@ -24,11 +24,11 @@
  *   - GLOBAL/auth tables (sessions / api_keys / auth_audit / the OIDC store) — predicate-exempt, not
  *     tenant-scoped via the chokepoint; their lifecycle is the auth/cleanup surface, not data-erasure.
  *
- * It is OPERATOR/founder-triggered (an on-demand control seam — `BootedServer.eraseTenantNow`), NOT a
+ * It is OPERATOR-triggered (an on-demand control seam — `BootedServer.eraseTenantNow`), NOT a
  * tenant self-service HTTP route (that is a later, external-exposure hardening-adjacent decision). Pre-external-exposure hardening / LOCAL.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * THE INVARIANTS (the adversarial review attacks exactly these).
+ * THE INVARIANTS (the security-critical guarantees).
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  *  - NEVER CROSS-TENANT. Every product-row delete goes through the `forTenant(db, tenantId)` CHOKEPOINT
  *    (`TenantDb.delete` auto-injects `eq(tenant_id, tenantId)`), so a delete can only ever touch THIS

@@ -265,8 +265,8 @@ export interface ServerConfig {
    * RAYSPEC_ERASURE_ENABLED is EXACTLY the string `"true"`; ANYTHING else (unset, "1", "yes", "TRUE",
    * whitespace) is `false` (DISABLED → the seam returns a DRY-RUN preview, ZERO deletes). Deliberately
    * NOT a spec flag — a spec author must never be able to enable irreversible deletion. Default DISABLED.
-   * Mirrors the M1 GDPR-purge gate (`RAYSPEC_GDPR_PURGE_ENABLED`) — the irreversible action is
-   * fail-closed and ENABLING it for real deletes is a deliberate founder/operator step.
+   * Mirrors the GDPR-purge gate (`RAYSPEC_GDPR_PURGE_ENABLED`) — the irreversible action is
+   * fail-closed and ENABLING it for real deletes is a deliberate operator step.
    */
   erasureEnabled: boolean;
   /**

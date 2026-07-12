@@ -134,7 +134,7 @@ export class IdentityStore {
   // TENANT_SCOPED_TABLES and is UNREACHABLE through the `forTenant`/`TenantDb` chokepoint by design. It
   // is therefore reached via the raw, INJECTED `this.db` — the EXACT whitelisted global-table-module
   // pattern the soft-delete `deleteUser` already uses (this file is on the chokepoint gate whitelist for
-  // precisely that reason). The mission's "tenant-predicated chokepoint" language assumed tenant-scoped
+  // precisely that reason). The platform's "tenant-predicated chokepoint" invariant assumed tenant-scoped
   // product tables; the actual tombstone is on a GLOBAL table, so the sanctioned global-module pattern is
   // the correct (and only) seam — not a tenant predicate that cannot exist on a tenant-less table.
   //

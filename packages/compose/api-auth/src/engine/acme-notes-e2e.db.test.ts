@@ -294,7 +294,7 @@ describe.skipIf(!hasDb)('acme-notes fake-provider e2e through the REAL deploy pa
   const enqueuer = new DrainEnqueuer();
   const extractorCounter = { invocations: 0 };
   const composedStores = [...audioCapabilityStores(), ...PRODUCT_STORES];
-  // DX-v1.2: every store here is durable (the audio `*_ref` idiom + the note_artifacts collection's
+  // Every store here is durable (the audio `*_ref` idiom + the note_artifacts collection's
   // artifact_ref) — each unique column is an ON CONFLICT target → keep its unique index SINGLE-column
   // (a compound one would 42P10 the upsert).
   const conflictKeys = new Map(

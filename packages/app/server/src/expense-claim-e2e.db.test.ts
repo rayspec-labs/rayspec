@@ -1,5 +1,5 @@
 /**
- * THE ACCEPTANCE E2E (the mission capstone). The greenfield NON-audio
+ * THE ACCEPTANCE E2E. The greenfield NON-audio
  * Expense-Claim Auto-Coder product, authored in `examples/expense-claim/`, boots through
  * the REAL server entrypoint (`assembleServer` from `RAYSPEC_SPEC_PATH`) on a throwaway DATABASE + a
  * real DBOS launch, and is driven end-to-end over REAL HTTP against MATERIALIZED ground truth

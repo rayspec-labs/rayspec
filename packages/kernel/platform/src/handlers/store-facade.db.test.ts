@@ -649,7 +649,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────────
-  // FIX ROUND (C1/C11 hardening) — empty DO-UPDATE SET (F1), sanitized unique-violation (XT-1),
+  // Store-facade hardening — empty DO-UPDATE SET (F1), sanitized unique-violation (XT-1),
   // limit/offset guard (F2), concurrency (TQ-1), composite/tenant-scoped/empty-IN edge cases.
   // ─────────────────────────────────────────────────────────────────────────────────────────────────
 

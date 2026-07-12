@@ -273,7 +273,7 @@ export type ShadowBaselineResult =
  * `baselineSql`/`deltaSql` are `generateProductSql` / `diffProductStores` output (Drizzle-style with
  * `--> statement-breakpoint` markers), which we strip before running each as one transaction.
  *
- * `newConflictKeys` (DX-v1.2, optional) ARMS the post-apply oracle: supplied ⇒ `detectDrift` is STRICT
+ * `newConflictKeys` (optional) ARMS the post-apply oracle: supplied ⇒ `detectDrift` is STRICT
  * about the unique-index shape (a non-key author-unique column with a stale single-column GLOBAL index
  * where a tenant-scoped compound is now expected is flagged `stale_global_unique`); omitted ⇒ LENIENT
  * (the boot posture — any covering unique index satisfies, so a working legacy deployment is never
@@ -320,7 +320,7 @@ export async function shadowApplyBaselineUpdate(
       // product tables in `public`; zero drift vs `newStores` = the delta produced the target schema.
       const query: QueryFn = async (sql, params) =>
         (await work.unsafe(sql, params as never[])) as unknown as Record<string, unknown>[];
-      // DX-v1.2 FINDING-2: when `newConflictKeys` is supplied (the `plan` path arms it), the oracle is
+      // When `newConflictKeys` is supplied (the `plan` path arms it), the oracle is
       // STRICT about the unique-index shape — a NON-key author-unique column with a stale single-column
       // GLOBAL index (where a tenant-scoped compound is now expected) is flagged `stale_global_unique`.
       // Omitted (a direct/legacy caller) ⇒ LENIENT: any covering unique index satisfies (boot posture).

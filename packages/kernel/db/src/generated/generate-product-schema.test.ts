@@ -123,7 +123,7 @@ describe('generator golden', () => {
     flipped[1].foreignKeys[0].onDelete = 'restrict'; // project_id cascade -> restrict
     const out = generateProductSchema(flipped);
     expect(out).not.toBe(golden);
-    // P3S1-GEN-4: assert the SPECIFIC flipped FK line (project_id -> projects, now restrict), not a
+    // GEN-4: assert the SPECIFIC flipped FK line (project_id -> projects, now restrict), not a
     // bare `.toContain("restrict")` that any restrict FK in the spec would satisfy.
     expect(out).toContain("    .references(() => projects.id, { onDelete: 'restrict' }),");
     // ...and the golden's cascade form of THAT line is gone.

@@ -784,7 +784,7 @@ describe('composeProductDeploy — the wiring SOURCES the vocabulary (TB-2 rever
     // reverts are netted elsewhere: the trigger-registration wiring by the descriptor-derived-key
     // arm above; the CC-1 per-event FUNCTION logic by event-vocabulary.test.ts's union test (which
     // calls requirePersistScopeInTriggerPayload directly — compose's `descriptors:` ARGUMENT wiring
-    // at the CC-1 call site is itself not compose-level netted; honest residual, re-review FQ-1:
+    // at the CC-1 call site is itself not compose-level netted; honest residual:
     // the single `eventDescriptors` var feeds all three consumers and arm 1 proves it is
     // registry-sourced, so an isolated CC-1-argument hardcode has no natural revert target).
     vocabularyMock.override = () => new Map();

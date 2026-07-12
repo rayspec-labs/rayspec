@@ -6,8 +6,8 @@
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * A `BlobStore` does NOT traverse the `TenantDb` chokepoint (it is bytes on disk — no SQL, no tenant
  * predicate). So this impl is the ONLY line of defense for blob tenant isolation, and it enforces it
- * STRUCTURALLY, in two independent layers (defense-in-depth; the adversarial review attacks exactly
- * this):
+ * STRUCTURALLY, in two independent layers (defense-in-depth; these are the security-critical
+ * guarantees):
  *
  *   1. TENANT-BOUND BY CONSTRUCTION. `makeFsBlobStore` is given a `tenantId` and closes over a
  *      per-tenant root `<root>/<tenantId>/`. A handler receives the already-bound handle and supplies

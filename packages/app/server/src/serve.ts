@@ -30,7 +30,7 @@ import { ProductBootError } from './product-boot.js';
 import { assembleOptsFromEnv } from './serve-opts.js';
 
 /**
- * LOCAL-DX-ONLY optional `.env` loader. A real deployment sets env via its orchestrator/secret
+ * Local-development-only optional `.env` loader. A real deployment sets env via its orchestrator/secret
  * manager and this file is absent. We load the repo-root `.env` (gitignored) ONLY IF it exists, and
  * NEVER override an already-set process.env var (an explicit shell/orchestrator value always wins).
  * PEMs are stored with literal `\n` in this repo's `.env`; we unescape them so importPKCS8 accepts

@@ -328,7 +328,7 @@ describe.skipIf(!hasDb)('record submit-ingress e2e (the composed stack)', () => 
     const capability = composeCapabilityStores(spec);
     const derived = deriveProductStores(spec, capability.names);
     const composedStores = [...capability.stores, ...derived.stores];
-    // DX-v1.2: the capability `*_ref` durable conflict keys (record_ref/request_ref) keep a
+    // The capability `*_ref` durable conflict keys (record_ref/request_ref) keep a
     // SINGLE-column unique index (a compound one would 42P10 the upsert + break the pin below).
     const conflictKeys = deriveConflictKeys(spec, composedStores);
 

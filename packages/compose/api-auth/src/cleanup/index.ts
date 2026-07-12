@@ -11,7 +11,7 @@
  *   1. OIDC PRUNE — LIVE, no gate. Hard-delete EXPIRED `oidc_models` rows (`pruneExpired`). Already-
  *      expired OAuth artifacts: no PII, no irreversibility beyond the token's own expiry → always runs.
  *
- *   2. GDPR HARD-DELETE PURGE — BUILT but DISABLED-BY-DEFAULT / operator-gated (a LOCKED founder
+ *   2. GDPR HARD-DELETE PURGE — BUILT but DISABLED-BY-DEFAULT / operator-gated (a LOCKED design
  *      decision: the irreversible PII erasure NEVER auto-runs). The soft-delete already tombstones a
  *      user/membership (`deleted_at`); this purges the tombstone once it is older than retention.
  *
