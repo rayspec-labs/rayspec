@@ -5,6 +5,32 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-07-12
+
+### Changed
+
+- **An author-declared store column `unique: true` is now TENANT-SCOPED.** The
+  generated unique index is a compound `(tenant_id, <col>)` index rather than a
+  global one, so two tenants may hold the same value (uniqueness is enforced
+  within a tenant) and a duplicate never reveals another tenant's data. A durable
+  product-store `key` column keeps its single-column index (its `ON CONFLICT`
+  upsert target is unchanged).
+
+### Fixed
+
+- **A same-tenant uniqueness violation on a REST store write now returns `409
+  CONFLICT` instead of a bare `500`.** The response names the violated column and
+  never echoes the offending value or any foreign-tenant data; it applies to both
+  `create` and `update` store routes.
+- **Every `5xx` response now emits one server-side log line** — carrying the request
+  id and status, plus the error code and message when the failure was a thrown error.
+  This covers both a thrown error (mapped by the global handler) and a directly
+  returned upstream `502`/`504` (the live sync-run path), each logged exactly once.
+  The previous `500` branch was a silent swallow; a `4xx` (including the new `409`)
+  still logs nothing. The line is server-side only (the client still gets the bare
+  envelope); the log path does no database write and never throws, so it is safe
+  during an outage.
+
 ## [1.1.0] - 2026-07-12
 
 ### Added

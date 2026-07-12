@@ -128,7 +128,9 @@ stores:
     on it fails loudly (Postgres 42P10). A durable conflict/idempotency key must be
     a product-store `key` column (single-column index — see below) or the
     tenant-prefixed `*_ref` idiom; use those for upserts, and `unique: true` for
-    plain uniqueness.
+    plain uniqueness. A REST `create`/`update` that duplicates a same-tenant value
+    on such a column returns **`409 CONFLICT`** (the message names the column, never
+    the value — see [`api`](#api)).
 - `foreignKeys` — optional list of child→parent foreign keys, default `[]`. Each:
   - `column` — the local business column carrying the FK (must be a declared
     column).
@@ -162,7 +164,11 @@ api:
     offset, or count**, capped at a fixed page size (200 rows; it sets an
     `X-Result-Truncated: true` response header when the cap is hit). A read that
     needs filtering, ordering, paging, or a total drops to a `handler` route (see
-    [`handlers`](#handlers) below).
+    [`handlers`](#handlers) below). A `create` or `update` that violates a
+    [`unique`](#stores) column returns **`409 CONFLICT`** — a same-tenant
+    uniqueness violation (never cross-tenant, because the index is tenant-scoped).
+    The error message names the violated column but never echoes the offending
+    value; a non-conflict failure is unaffected.
   - **`agent`** — invoke a declared agent over the run surface. Field: `agent`
     (a declared agent id).
   - **`handler`** — call a declared escape-hatch handler. Field: `handler` (a

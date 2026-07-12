@@ -39,6 +39,7 @@
 
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { Permission } from '@rayspec/auth-core';
+import type { StoreConflictKeys } from '@rayspec/db';
 import type { BlobStoreFactory, ResolvedHandler } from '@rayspec/platform';
 import type { HttpMethod, RaySpec, StoreOp } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
@@ -132,6 +133,15 @@ export interface DeclaredRoutesConfig {
   /** Declared store name → its runtime Drizzle `PgTable` (built via @rayspec/db buildProductTables). */
   productTables: ReadonlyMap<string, PgTable>;
   /**
+   * DX-v1.2: declared store name → its CONFLICT-KEY column set (the GLOBAL single-column unique /
+   * durable `ON CONFLICT` targets, from `deriveConflictKeys`). Threaded ONLY on the PRODUCT-profile
+   * registration path; a store's set is passed to `makeStoreHandler` so a 23505 on a global-unique
+   * key column falls to the GENERIC 409 message (never a cross-tenant existence oracle), while a
+   * tenant-scoped author-`unique` column is still named. Absent (backend-profile / auth-only) ⇒ every
+   * author-`unique` column is tenant-scoped, so any violated unique column is safe to name.
+   */
+  conflictKeys?: StoreConflictKeys;
+  /**
    * the BOOT-LOADED escape-hatch handlers (id → resolved fn + kind). A
    * `{handler}` route resolves its declared handler here + invokes it through the platform's
    * `invokeRouteHandler` (inside a `TenantDb.transaction()` — A2/A3). Absent ⇒ a `{handler}` route
@@ -215,7 +225,16 @@ export function registerDeclaredRoutes(
         );
       }
       const perm = storePermission(action.op);
-      const handler = makeStoreHandler({ store, table, op: action.op, deps });
+      // DX-v1.2: pass this store's conflict-key set (product-profile only) so a global-unique key
+      // column is never named in a 409 (cross-tenant oracle); absent ⇒ name any tenant-scoped unique.
+      const storeConflictKeys = config.conflictKeys?.get(action.store);
+      const handler = makeStoreHandler({
+        store,
+        table,
+        op: action.op,
+        deps,
+        ...(storeConflictKeys ? { conflictKeys: storeConflictKeys } : {}),
+      });
       registerOn(app, route.method, honoPath, auth, tenant, requirePermission(deps, perm), handler);
       continue;
     }

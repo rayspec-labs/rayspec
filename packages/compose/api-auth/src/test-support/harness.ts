@@ -348,6 +348,10 @@ export async function createHarness(
     engine = {
       spec: opts.engineSpec,
       productTables,
+      // DX-v1.2: thread the conflict-key carve-out onto the engine (mirroring product-boot) so the
+      // store-route 409 mapper treats a global-unique key column as unnameable. Omit ⇒ backend-profile
+      // default (every author `unique` column tenant-scoped, safe to name).
+      ...(opts.conflictKeys ? { conflictKeys: opts.conflictKeys } : {}),
       ...(opts.engineHandlers ? { handlers: opts.engineHandlers } : {}),
       ...(opts.agentBackends ? { agentBackends: opts.agentBackends } : {}),
       // the tenant-bound blob backend for declared `stream` routes (omit ⇒ no blob backend

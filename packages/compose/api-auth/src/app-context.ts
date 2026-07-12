@@ -12,7 +12,7 @@
 import type { HttpBindings } from '@hono/node-server';
 import type { JwksProvider, RateLimiter, TokenSigner } from '@rayspec/auth-core';
 import type { AgentSpec, Backend, BackendId, NeutralTool } from '@rayspec/core';
-import type { Db } from '@rayspec/db';
+import type { Db, StoreConflictKeys } from '@rayspec/db';
 import type {
   BlobStoreFactory,
   DurableExecutor,
@@ -90,6 +90,16 @@ export interface DeclarativeEngine {
    * stays product-empty.
    */
   productTables: ReadonlyMap<string, PgTable>;
+  /**
+   * DX-v1.2: declared store name → its CONFLICT-KEY column set (the GLOBAL single-column unique /
+   * durable `ON CONFLICT` targets, from `@rayspec/product-yaml` `deriveConflictKeys`). Supplied ONLY on
+   * the PRODUCT-profile boot path (`product-boot`); `createAuthApp` threads each store's set into its
+   * store-route handler so a 23505 on a global-unique key column falls to the GENERIC 409 message
+   * (never a cross-tenant existence oracle), while a tenant-scoped author-`unique` column is still
+   * named. Absent (backend-profile / auth-only) ⇒ every author-`unique` column is tenant-scoped, so any
+   * violated unique column is safe to name — the secure default.
+   */
+  conflictKeys?: StoreConflictKeys;
   /**
    * the BOOT-LOADED escape-hatch handlers — handler id → resolved function +
    * kind, produced by `@rayspec/platform`'s `loadHandlers(escapeHatchRoot, spec.handlers)` at
@@ -223,4 +233,18 @@ export interface AppDeps {
    * adapter lives in @rayspec/durable-dbos; api-auth carries no DBOS dependency).
    */
   durableExecutor?: DurableExecutor;
+  /**
+   * OPTIONAL server-side error logger (DI seam). `createAuthApp`'s OUTERMOST middleware emits exactly
+   * ONE line for EVERY 5xx response through this — both a THROWN error (mapped by `onError`) AND a
+   * directly-RETURNED 5xx (e.g. the sync-run 502/504), carrying requestId + status + (for a thrown
+   * error) code + message/stack. ABSENT ⇒ the default `console.error` (the codebase's operational-log
+   * style). A test injects a spy to assert one 5xx line fired (and that a 4xx fires none). It is called
+   * SERVER-SIDE ONLY — this line is NEVER sent to the client (the client still gets the bare envelope).
+   * A curated error (an `ApiError`, incl. the 409) carries only a code + a static message and never a
+   * row value; a RAW unexpected-error message/stack (the uncontrolled-500 path) MAY embed caller input
+   * (standard operational logging, acceptable because it stays server-side). It MUST NOT throw or do a
+   * DB write — the middleware guards the call (a 5xx may be happening DURING an outage), and a thrown
+   * logger is swallowed so a failed log never turns a 5xx into a crash.
+   */
+  logError?: (line: string, detail?: unknown) => void;
 }

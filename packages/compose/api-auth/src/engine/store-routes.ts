@@ -22,7 +22,7 @@
  */
 
 import { ApiError } from '@rayspec/auth-core';
-import { forTenant } from '@rayspec/db';
+import { forTenant, isUniqueViolation, uniqueViolationConstraintName } from '@rayspec/db';
 import type { StoreOp, StoreSpec } from '@rayspec/spec';
 import { eq, getTableColumns } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
@@ -58,6 +58,59 @@ function requireUuidId(c: Context<AppEnv>): string {
   return id;
 }
 
+/**
+ * Build a TENANT-SAFE 409 for a store-write uniqueness violation (Postgres 23505). The message NAMES
+ * the violated column ONLY when its index is TENANT-SCOPED (a compound `(tenant_id, col)` author-
+ * `unique` index — the S1 secure default, so naming it leaks nothing cross-tenant: a 23505 there is a
+ * SAME-tenant duplicate, the caller's OWN row). A CONFLICT-KEY column (a GLOBAL single-column unique —
+ * e.g. a product-profile `key` column, the durable `ON CONFLICT` target) is NEVER named: a global
+ * unique can collide ACROSS tenants, so naming it would be a cross-tenant existence oracle — exactly
+ * what `store-facade.ts`'s `sanitizeDbError` strips at the model boundary. Such a column falls to the
+ * GENERIC message. `conflictKeys` is this store's conflict-key column set (threaded from the product
+ * route-registration path via `deriveConflictKeys`); absent (a backend-profile store) ⇒ every author-
+ * `unique` column is tenant-scoped, so any resolved column is safe to name.
+ */
+function storeConflict(
+  store: StoreSpec,
+  err: unknown,
+  conflictKeys?: ReadonlySet<string>,
+): ApiError {
+  const col = conflictColumn(store, err, conflictKeys);
+  const message = col
+    ? `A record with this '${col}' already exists.`
+    : 'A record with a conflicting unique value already exists.';
+  return new ApiError('CONFLICT', message);
+}
+
+/**
+ * Resolve the violated unique column NAME tenant-safely, or `undefined` (⇒ a generic message) if it
+ * cannot be pinned to a TENANT-SCOPED declared business-unique column. Prefer the Postgres constraint
+ * name (`<store>_<col>_unique`, derived from the schema — never a row value) mapped to a declared
+ * `unique` column; when the error carries no constraint name, fall back to the single declared unique
+ * column (unambiguous). A constraint that is NOT a declared business-unique index (e.g. the injected
+ * PK) yields `undefined`. FINALLY, a resolved column that is a CONFLICT-KEY (in `conflictKeys` — a
+ * GLOBAL single-column unique that can collide cross-tenant) also yields `undefined`, so a global-
+ * unique column is NEVER named on the wire (no cross-tenant existence oracle). Absent `conflictKeys`
+ * ⇒ name any resolved unique column (correct for a backend-profile store: every author-`unique` there
+ * is tenant-scoped compound).
+ */
+function conflictColumn(
+  store: StoreSpec,
+  err: unknown,
+  conflictKeys?: ReadonlySet<string>,
+): string | undefined {
+  const uniqueCols = store.columns.filter((c) => c.unique).map((c) => c.name);
+  const constraint = uniqueViolationConstraintName(err);
+  const candidate = constraint
+    ? uniqueCols.find((name) => constraint === `${store.name}_${name}_unique`)
+    : uniqueCols.length === 1
+      ? uniqueCols[0]
+      : undefined;
+  // A conflict-key column is GLOBAL-unique → never name it (cross-tenant oracle); fall to generic.
+  if (candidate !== undefined && conflictKeys?.has(candidate)) return undefined;
+  return candidate;
+}
+
 /** Resolve the injected `id` PK column object for an `eq()` predicate on a runtime product table. */
 function idColumn(table: PgTable): Parameters<typeof eq>[0] {
   const col = (getTableColumns(table) as Record<string, unknown>).id;
@@ -76,8 +129,16 @@ export function makeStoreHandler(args: {
   table: PgTable;
   op: StoreOp;
   deps: AppDeps;
+  /**
+   * DX-v1.2: this store's CONFLICT-KEY columns (the GLOBAL single-column unique / durable `ON CONFLICT`
+   * targets). A 23505 on one of these is NOT named in the 409 (a global unique can collide cross-tenant
+   * → an existence oracle) — it falls to the generic message. Threaded ONLY from the product route-
+   * registration path (`deriveConflictKeys`). Absent (backend-profile) ⇒ every author-`unique` column
+   * is tenant-scoped, so any resolved unique column is safe to name.
+   */
+  conflictKeys?: ReadonlySet<string>;
 }): (c: Context<AppEnv>) => Promise<Response> {
-  const { store, table, op, deps } = args;
+  const { store, table, op, deps, conflictKeys } = args;
   const createSchema = createBodySchema(store);
   const updateSchema = updateBodySchema(store);
 
@@ -116,10 +177,19 @@ export function makeStoreHandler(args: {
           const body = createSchema.parse(raw); // VALIDATION_ERROR on unknown/bad field (defaultHook/onError)
           const values = toDbValues(store, body as Record<string, unknown>);
           // TenantDb.insert auto-stamps tenant_id; id/created_at/region carry DB defaults.
-          const inserted = (await tx.insert(table as never, values).returning()) as Record<
-            string,
-            unknown
-          >[];
+          // A same-tenant uniqueness violation (23505) → 409 CONFLICT (tenant-safe), never a bare 500.
+          // Detect → map → rethrow with NO further in-tx statement: the transaction rolls back cleanly
+          // (an in-tx 23505 poisons the tx, so we never touch it again before the rollback).
+          let inserted: Record<string, unknown>[];
+          try {
+            inserted = (await tx.insert(table as never, values).returning()) as Record<
+              string,
+              unknown
+            >[];
+          } catch (err) {
+            if (isUniqueViolation(err)) throw storeConflict(store, err, conflictKeys);
+            throw err;
+          }
           const row = inserted[0];
           if (!row) throw new ApiError('INTERNAL', 'Internal server error.');
           return c.json(serializeRow(store, row), 201);
@@ -134,10 +204,18 @@ export function makeStoreHandler(args: {
           if (Object.keys(values).length === 0) {
             throw new ApiError('VALIDATION_ERROR', 'Update body must set at least one field.');
           }
-          const updated = (await tx
-            .update(table as never, values)
-            .where(eq(idColumn(table), id))
-            .returning()) as Record<string, unknown>[];
+          // An update that sets a `unique` column to a value another same-tenant row holds is the same
+          // 23505 → 409 CONFLICT (tenant-safe) as create; map it identically (no in-tx recovery).
+          let updated: Record<string, unknown>[];
+          try {
+            updated = (await tx
+              .update(table as never, values)
+              .where(eq(idColumn(table), id))
+              .returning()) as Record<string, unknown>[];
+          } catch (err) {
+            if (isUniqueViolation(err)) throw storeConflict(store, err, conflictKeys);
+            throw err;
+          }
           const row = updated[0];
           // No row updated ⇒ cross-tenant/absent ⇒ uniform 404 (tenant predicate AND-combined).
           if (!row) throw new ApiError('NOT_FOUND', 'Not found.');

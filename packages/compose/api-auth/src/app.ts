@@ -86,6 +86,30 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
     },
   });
 
+  // --- every-5xx server-side log line (the OUTERMOST middleware) ----------------------------
+  // Registered FIRST so it wraps EVERY request — the auth chain, every declared/auth/run route, and
+  // the OIDC mount. After `await next()` it inspects the FINAL response status and emits ONE
+  // server-side log line for a 5xx (requestId + status + error). This is the SINGLE 5xx-log site: it
+  // catches BOTH a THROWN error (Hono's `onError` produces the 5xx response, then every ancestor
+  // middleware's `await next()` resolves normally — verified doc-first against hono@4.12.26 compose,
+  // where the throw is caught at the failing frame and does not re-propagate) AND a DIRECTLY-RETURNED
+  // 5xx (e.g. the live sync-run endpoint's `return c.json(result, 502|504)`, which never reaches
+  // `onError`). `onError` therefore does NOT log — consolidating here means each 5xx logs EXACTLY once
+  // (no thrown/returned double-count). FAIL-SAFE: the whole post-`next` block is guarded (a 5xx may be
+  // happening DURING an outage) so a logging failure can never turn a response into a crash, and it
+  // does NO DB write. NO-LEAK: server-side only (the client still gets the bare envelope).
+  app.use('*', async (c, next) => {
+    await next();
+    try {
+      const status = c.res?.status ?? 0;
+      if (status >= 500) {
+        logServerError(deps, c.get('requestId') ?? 'unknown', status, c.error);
+      }
+    } catch {
+      /* the log path must never turn a response into a crash */
+    }
+  });
+
   // --- the shared middleware prefix (order is load-bearing) ---------------------------------
   app.use('*', requestId);
   app.use('*', securityHeaders);
@@ -181,6 +205,11 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
     registerDeclaredRoutes(app, effectiveDeps, {
       spec: effectiveDeps.engine.spec,
       productTables: effectiveDeps.engine.productTables,
+      // DX-v1.2: the per-store conflict-key carve-out (product-profile only) — a global-unique key
+      // column is never named in a 409 (cross-tenant oracle). Absent on a backend/auth-only deploy.
+      ...(effectiveDeps.engine.conflictKeys
+        ? { conflictKeys: effectiveDeps.engine.conflictKeys }
+        : {}),
       handlers: effectiveDeps.engine.handlers,
       // the tenant-bound blob backend the `stream` arm injects as `init.blob`. Absent ⇒
       // a declared `stream` route fails closed at BOOT (the interpreter requires a blob backend).
@@ -236,6 +265,9 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
   // --- global error handler → the closed envelope ------------------------------------------
   app.onError((err, c) => {
     const rid = c.get('requestId') ?? 'unknown';
+    // NOTE: the 5xx server-side log line is emitted by the OUTERMOST middleware above (it sees the
+    // FINAL status, so it covers BOTH a thrown error mapped here AND a directly-returned 502/504 that
+    // never reaches onError). onError itself does NOT log — that keeps each 5xx logged EXACTLY once.
     if (err instanceof ApiError) {
       return c.json(
         errorEnvelope(err.code, err.message, rid, err.details),
@@ -248,7 +280,7 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
         400,
       );
     }
-    // Unexpected → 500, no internals leaked.
+    // Unexpected → 500, no internals leaked (the outermost middleware logs the detail server-side).
     return c.json(errorEnvelope('INTERNAL', 'Internal server error.', rid), 500);
   });
 
@@ -294,6 +326,44 @@ function withDeclaredAgents(deps: AppDeps): AppDeps {
   const merged = new Map(deps.agentRegistry ?? []);
   for (const [id, entry] of declared) merged.set(id, entry);
   return { ...deps, agentRegistry: merged };
+}
+
+/**
+ * Emit exactly ONE server-side log line for a 5xx response — carrying the requestId, the response
+ * status, and (when the 5xx came from a THROWN error) the closed error code + message, with the stack
+ * as a second console argument. When the 5xx was DIRECTLY RETURNED by a handler (e.g. the sync-run
+ * endpoint's `return c.json(result, 502|504)`), there is no thrown error, so the line carries just the
+ * status + requestId.
+ *
+ * SERVER-SIDE ONLY: this line is never sent to the client — the client still gets the bare closed
+ * envelope. HONESTY: a CURATED error (an `ApiError`, incl. the 409 conflict, or a returned run
+ * envelope) carries only a code + a static message and never a row value; but a RAW unexpected-error
+ * `message`/`stack` (the uncontrolled-500 path) MAY embed caller input (e.g. a Postgres
+ * `Key (col)=(val) already exists` detail) — this is standard operational logging, acceptable because
+ * it stays server-side. Fail-safe: a 5xx may be happening DURING a DB/logging outage, so the log path
+ * does NO DB write and NEVER throws — a thrown/absent logger is swallowed so a failed log can never
+ * turn a 5xx into a crash.
+ */
+function logServerError(deps: AppDeps, requestId: string, status: number, err: unknown): void {
+  try {
+    const code: ErrorCode | undefined =
+      err instanceof ApiError ? err.code : err instanceof Error ? 'INTERNAL' : undefined;
+    const message = err instanceof Error ? err.message : undefined;
+    const codePart = code !== undefined ? ` code=${code}` : '';
+    const messagePart = message !== undefined ? `: ${message}` : '';
+    const line = `[api-auth] 5xx status=${status} requestId=${requestId}${codePart}${messagePart}`;
+    const stack = err instanceof Error ? err.stack : undefined;
+    const log = deps.logError ?? defaultLogError;
+    log(line, stack);
+  } catch {
+    /* the error path must never throw — a failed log must not turn a 5xx into a crash */
+  }
+}
+
+/** Default 5xx logger: the codebase's operational `console.error('[prefix] …')` style. */
+function defaultLogError(line: string, detail?: unknown): void {
+  if (detail !== undefined) console.error(line, detail);
+  else console.error(line);
 }
 
 /** Compact, non-leaky Zod error detail (field paths + messages only). */
