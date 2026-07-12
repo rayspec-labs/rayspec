@@ -29,8 +29,8 @@ import { type SpecError, specError } from './errors.js';
 // The RESERVED (injected tenancy/GDPR) column names — the SAME set the backend store lint enforces
 // (lint.ts). A declared product store column may not shadow one: the SQL generator INJECTS them.
 // `toJsIdentifier` is the spec-side snake→camel copy (KEEP-IN-SYNC docstring at its definition)
-// used by the FIX-REG-2 column-collision check below.
-import { RESERVED_COLUMN_NAMES, toJsIdentifier } from './lint.js';
+// used by the column-collision check below.
+import { RESERVED_COLUMN_NAMES, RESERVED_QUERY_KEYWORDS, toJsIdentifier } from './lint.js';
 import { normalizeProductTriggerEvent } from './product-events.js';
 import type { ProductSpec } from './product-grammar.js';
 import { lintProductViews } from './product-views-lint.js';
@@ -575,6 +575,20 @@ export function checkProductStores(
             `${base}.columns[${ci}].name`,
           ),
         );
+      } else if (RESERVED_QUERY_KEYWORDS.has(col.name)) {
+        // A column named after a list-query control keyword (order/after/limit) would be
+        // un-filterable AND would emit a duplicate OpenAPI query parameter on a list route — reject at
+        // config with a rename hint (symmetric with the backend store lint).
+        errors.push(
+          specError(
+            'reserved_query_keyword',
+            `store '${store.name}' declares column '${col.name}', which collides with a reserved ` +
+              'list-query control keyword (order/after/limit) used for sorting/keyset pagination — the ' +
+              'column would be un-filterable and would emit a duplicate OpenAPI query parameter; rename ' +
+              'the business column',
+            `${base}.columns[${ci}].name`,
+          ),
+        );
       } else if (STORE_COLUMN_DENYLIST.has(col.name)) {
         inv(
           `store '${store.name}' column '${col.name}' collides with a banned graph key — it could ` +
@@ -584,7 +598,7 @@ export function checkProductStores(
         );
       }
     });
-    // FIX-REG-2 (re-review converged): two DECLARED column names mapping to the SAME camelCase
+    // Two DECLARED column names mapping to the SAME camelCase
     // runtime key would silently resolve to ONE runtime column — the table builder keys the PgTable
     // by camelCase (build-product-tables.ts) and the facade maps names with the same rule
     // (store-facade.ts snakeToCamel), while the store NODE classifies its DO-UPDATE/DO-NOTHING
@@ -592,7 +606,7 @@ export function checkProductStores(
     // independent classifications could diverge. SafeIdentifier does NOT prevent it: the rule's
     // `_([a-z0-9])` uppercases DIGITS as a NO-OP, so `col_1` and `col1` BOTH map to `col1` (letters
     // are safe: `a_bc`→`aBc` ≠ `ab_c`→`abC` — the underscore survives as case). Mirrors the backend
-    // lint's TEN-3 check (lint.ts) with an explaining both-columns message.
+    // lint's column-collision check (lint.ts) with an explaining both-columns message.
     //
     // The map is SEEDED with the INJECTED tenancy/GDPR camels — HONESTY NOTE: with the CURRENT
     // injected set this seed arm is provably unreachable (no injected name contains a digit, and an

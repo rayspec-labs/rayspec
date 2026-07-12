@@ -46,6 +46,20 @@ const BASE_ALLOW_HEADERS = [
   'last-event-id',
 ];
 
+/**
+ * The `exposeHeaders` set `app.ts` mounts: the request-id echo plus the store surface —
+ * `X-Next-Cursor` + `X-Result-Truncated` (keyset pagination) and `Idempotency-Replay` (idempotent replay).
+ * None is a CORS-safelisted response header, so each must be exposed or a `fetch` client cannot read it.
+ * The suite below asserts these are ACTUALLY present in `Access-Control-Expose-Headers` on the REAL app —
+ * dropping any one from app.ts turns it RED.
+ */
+const EXPECTED_EXPOSE_HEADERS = [
+  'x-request-id',
+  'x-next-cursor',
+  'x-result-truncated',
+  'idempotency-replay',
+];
+
 /** Parse an `Access-Control-Allow-Headers` value into a lowercased Set of header names. */
 function parseAllowHeaders(value: string | null): Set<string> {
   return new Set(
@@ -231,6 +245,37 @@ describe('— security headers still applied (inv.8)', () => {
   });
 });
 
+describe('— expose-headers: the pagination/replay response headers are readable cross-origin', () => {
+  it('an allowlisted response exposes X-Request-Id + X-Next-Cursor + X-Result-Truncated + Idempotency-Replay (fail-the-fix)', async () => {
+    // Drive the REAL createAuthApp (not the synthetic mirror), so this pins app.ts directly: dropping any
+    // one of the exposed headers from app.ts's `exposeHeaders` makes the set assertion below RED.
+    // hono/cors sets `Access-Control-Expose-Headers` on the actual response (before the OPTIONS branch),
+    // so a normal allowlisted GET carries it.
+    const app = buildApp([ALLOWED]);
+    const res = await app.request('/health', { method: 'GET', headers: { origin: ALLOWED } });
+    const exposed = parseAllowHeaders(res.headers.get('access-control-expose-headers'));
+    for (const h of EXPECTED_EXPOSE_HEADERS) expect(exposed.has(h)).toBe(true);
+    // The pagination/replay headers specifically — spelled out so a regression is unmissable.
+    expect(exposed.has('x-next-cursor')).toBe(true);
+    expect(exposed.has('x-result-truncated')).toBe(true);
+    expect(exposed.has('idempotency-replay')).toBe(true);
+  });
+
+  it('the preflight (OPTIONS) response ALSO carries the exposed headers (hono sets them before the OPTIONS branch)', async () => {
+    const app = buildApp([ALLOWED]);
+    const res = await app.request('/health', {
+      method: 'OPTIONS',
+      headers: {
+        origin: ALLOWED,
+        'access-control-request-method': 'GET',
+        'access-control-request-headers': 'authorization',
+      },
+    });
+    const exposed = parseAllowHeaders(res.headers.get('access-control-expose-headers'));
+    for (const h of EXPECTED_EXPOSE_HEADERS) expect(exposed.has(h)).toBe(true);
+  });
+});
+
 /**
  * TV-3 / TV-4 — pin the CORS grant on a GENUINE 200 (the `createAuthApp` suite above only probes a
  * non-registered path that 404s) AND on an SSE response (inv.9 — the real cross-origin client path is
@@ -243,7 +288,11 @@ describe('— CORS grant carries on a real 200 + on SSE (TV-3 / TV-4 / inv.9)', 
   function buildSyntheticApp(): Hono {
     const app = new Hono();
     // The SAME cors options app.ts mounts (array origin → echo-on-match; bearer-only; no credentials).
-    // Mirrors app.ts's platform BASE set (no product-specific header — deployer headers are injected).
+    // Mirrors app.ts's platform BASE `allowHeaders` set (no product-specific header — deployer headers
+    // are injected) AND its `exposeHeaders` set (X-Request-Id + the pagination headers +
+    // the replay signal). KEEP the exposeHeaders list in parity with app.ts; the real fail-the-fix
+    // for app.ts's exposeHeaders lives in the `— expose-headers` suite below, which drives the
+    // REAL createAuthApp.
     app.use(
       '*',
       cors({
@@ -256,7 +305,12 @@ describe('— CORS grant carries on a real 200 + on SSE (TV-3 / TV-4 / inv.9)', 
           'Idempotency-Key',
           'Last-Event-Id',
         ],
-        exposeHeaders: ['X-Request-Id'],
+        exposeHeaders: [
+          'X-Request-Id',
+          'X-Next-Cursor',
+          'X-Result-Truncated',
+          'Idempotency-Replay',
+        ],
         maxAge: 600,
       }),
     );

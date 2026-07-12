@@ -354,6 +354,37 @@ describe('negative — reserved column name (fix #9)', () => {
   });
 });
 
+describe('negative — reserved list-query control keyword as a column name', () => {
+  // A business column named `order`/`after`/`limit` collides with the declarative list route's control
+  // query keys — it would be silently un-equality-filterable AND emit a DUPLICATE OpenAPI query param
+  // (control param + per-column filter param, same name+location) → an invalid OpenAPI 3.1 doc.
+  // Fail-the-fix: without the RESERVED_QUERY_KEYWORDS check the spec parses+lints CLEAN (the keyword is a
+  // valid safe-identifier), so each rejection below goes RED.
+  for (const kw of ['order', 'after', 'limit'] as const) {
+    it(`rejects a business column named '${kw}'`, () => {
+      const yaml = BASE.replace(
+        '      - { name: label, type: text }',
+        `      - { name: label, type: text }\n      - { name: ${kw}, type: text }`,
+      );
+      expectRejection(yaml, 'reserved_query_keyword');
+    });
+  }
+
+  it('a column named `ordering` (a non-keyword) is NOT rejected — the check is exact, not substring', () => {
+    const yaml = BASE.replace(
+      '      - { name: label, type: text }',
+      '      - { name: label, type: text }\n      - { name: ordering, type: text }',
+    );
+    const res = parseSpec(yaml);
+    // No reserved_query_keyword for a merely keyword-adjacent name (exact-match set, not substring).
+    if (!res.ok) {
+      expect(res.errors.map((e) => e.code)).not.toContain('reserved_query_keyword');
+    } else {
+      expect(res.ok).toBe(true);
+    }
+  });
+});
+
 describe('negative — FK onDelete set null on a NOT NULL column (fix #8)', () => {
   it('rejects set-null on a non-nullable FK column', () => {
     const yaml = `

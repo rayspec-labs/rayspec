@@ -242,13 +242,13 @@ function emitStore(store: StoreSpec, conflictKeys?: ReadonlySet<string>): string
 
   // TENANT-SCOPED (compound) uniques: a `unique: true` column that is NOT a conflict key is emitted as
   // a table-level `uniqueIndex('<table>_<col>_unique').on(t.tenant_id, t.<col>)` (compound), so two
-  // tenants can hold the same value with no cross-tenant existence leak (DX-v1.2). A conflict-key unique
+  // tenants can hold the same value with no cross-tenant existence leak. A conflict-key unique
   // stayed column-level `.unique()` (single) above.
   const compoundUnique = store.columns.filter(
     (c) => c.unique && !(conflictKeys?.has(c.name) ?? false),
   );
   if (compoundUnique.length === 0) {
-    // 2-arg form — byte-identical to the pre-DX-v1.2 output (no compound unique index).
+    // 2-arg form — the base output (no compound unique index).
     return [
       banner,
       `export const ${tableConst} = pgTable('${store.name}', {`,
@@ -312,8 +312,8 @@ export function generateProductSchema(
     ' * GENERATED product schema — DO NOT EDIT BY HAND.',
     ' *',
     ' * Produced by @rayspec/db generate-product-schema from a validated RaySpec `stores[]`.',
-    ' * The tenancy/GDPR columns (id, tenant_id->orgs ON DELETE CASCADE,',
-    ' * created_at, deleted_at, retention_days, region) are INJECTED to match schema.ts exactly;',
+    ' * The tenancy/GDPR columns (id, tenant_id->orgs ON DELETE CASCADE, created_at, deleted_at,',
+    ' * retention_days, region, created_by, idempotency_key) are INJECTED to match schema.ts exactly;',
     ' * authors declare business columns only. PRODUCT_TENANT_SCOPED_TABLES is the type-enforced',
     ' * seam schema.ts composes into TENANT_SCOPED_TABLES — a generated table is',
     ' * reachable through the TenantDb chokepoint, an unregistered one throws (deny-by-default).',

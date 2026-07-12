@@ -28,6 +28,7 @@ import type { ApiRouteSpec, ColumnType, RaySpec, StoreOp, StoreSpec } from '@ray
 import { z } from 'zod';
 import { StartRunRequest } from '../routes/runs.js';
 import { INJECTED_COLUMN_TS_NAMES } from './injected-columns-view.js';
+import { CONTROL_KEYS } from './store-query.js';
 import { createBodySchema, updateBodySchema } from './store-validation.js';
 
 /** A minimal OpenAPI 3.1 document shape (only the parts we emit — no external type dependency). */
@@ -52,15 +53,28 @@ interface OpenApiOperation {
   responses: Record<string, OpenApiResponse>;
 }
 
+/**
+ * One OpenAPI parameter — a `path` param (every declared `{param}`), a `query` param (the
+ * `list` filters + order/after/limit), or a `header` param (the `create` `Idempotency-Key`).
+ * `required` defaults to false for the query/header params (all optional); path params set it `true`.
+ */
 interface OpenApiParameter {
   name: string;
-  in: 'path';
-  required: true;
+  in: 'path' | 'query' | 'header';
+  required?: boolean;
+  description?: string;
+  schema: Record<string, unknown>;
+}
+
+/** A documented response header (X-Next-Cursor/X-Result-Truncated/Idempotency-Replay). */
+interface OpenApiHeader {
+  description: string;
   schema: { type: 'string' };
 }
 
 interface OpenApiResponse {
   description: string;
+  headers?: Record<string, OpenApiHeader>;
   content?: { 'application/json': { schema: Record<string, unknown> } };
 }
 
@@ -122,6 +136,9 @@ const INJECTED_RESPONSE_PROPS: Record<string, Record<string, unknown>> = {
   deleted_at: { type: ['string', 'null'], format: 'date-time' },
   retention_days: { type: ['integer', 'null'] },
   region: { type: 'string' },
+  // The actor stamp + the store.create idempotency key (both nullable server-controlled).
+  created_by: { type: ['string', 'null'] },
+  idempotency_key: { type: ['string', 'null'] },
 };
 
 /**
@@ -268,6 +285,92 @@ function assertNever(action: never): undefined {
   return undefined;
 }
 
+/**
+ * The bounded `list` page size (mirrors store-query.ts `MAX_LIMIT`). Documented as the `limit` param's
+ * maximum; kept in sync by the `list` query-param test (a doc, not a runtime bound — the runtime cap
+ * lives in store-query.ts).
+ */
+const LIST_MAX_LIMIT = 200;
+
+/** Map a declared ColumnType to a JSON-Schema fragment for a `list` equality-filter QUERY parameter. */
+function filterParamSchema(type: ColumnType): Record<string, unknown> {
+  switch (type) {
+    case 'integer':
+      return { type: 'integer' };
+    case 'boolean':
+      return { type: 'boolean' };
+    case 'uuid':
+      return { type: 'string', format: 'uuid' };
+    case 'timestamp':
+      return { type: 'string', format: 'date-time' };
+    case 'text':
+      return { type: 'string' };
+    case 'jsonb':
+      return { type: 'string' }; // unreachable — jsonb columns are excluded from filter params below
+  }
+}
+
+/**
+ * Build the `list` QUERY parameters DERIVED from the StoreSpec — the SAME surface store-query.ts accepts:
+ *  - control params `order` / `after` / `limit`;
+ *  - one equality-filter param per declared BUSINESS column (a `jsonb` column is NOT filterable at
+ *    runtime, so it is excluded — documenting it would over-claim), keyed by the AUTHOR snake name;
+ *  - the injected `created_by` equality filter.
+ * All optional. Product-agnostic: every name is derived from the spec, none is hard-coded.
+ */
+function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
+  const params: OpenApiParameter[] = [
+    {
+      name: 'order',
+      in: 'query',
+      required: false,
+      description:
+        "Sort as '<column>.asc' or '<column>.desc' over a NON-nullable column (id, created_at, or a " +
+        'non-nullable declared column). Default: id.asc.',
+      schema: { type: 'string' },
+    },
+    {
+      name: 'after',
+      in: 'query',
+      required: false,
+      description:
+        'Opaque keyset cursor from a prior page (the X-Next-Cursor response header); must match the ' +
+        'current order.',
+      schema: { type: 'string' },
+    },
+    {
+      name: 'limit',
+      in: 'query',
+      required: false,
+      description: `Page size (1..${LIST_MAX_LIMIT}). Default ${LIST_MAX_LIMIT}.`,
+      schema: { type: 'integer', minimum: 1, maximum: LIST_MAX_LIMIT },
+    },
+  ];
+  for (const col of store.columns) {
+    if (col.type === 'jsonb') continue; // jsonb is not filterable — omit rather than over-claim
+    // Defense-in-depth: a column named after a control key (order/after/limit) is already
+    // rejected at config by the linter (@rayspec/spec RESERVED_QUERY_KEYWORDS), but skip it here too so a
+    // code-built spec that bypassed the parser can never emit a DUPLICATE query parameter (control param
+    // + filter param sharing name+in) → keeping the emitted document a VALID OpenAPI 3.1 doc.
+    if (CONTROL_KEYS.has(col.name)) continue;
+    params.push({
+      name: col.name,
+      in: 'query',
+      required: false,
+      description: `Equality filter on '${col.name}'.`,
+      schema: filterParamSchema(col.type),
+    });
+  }
+  params.push({
+    name: 'created_by',
+    in: 'query',
+    required: false,
+    description: 'Equality filter on the injected created_by actor stamp.',
+    schema: { type: 'string' },
+  });
+  return params;
+}
+
 /** Build the operation for a `{store}` route from its op + the StoreSpec-derived schemas. */
 function storeOperation(
   store: StoreSpec,
@@ -284,9 +387,24 @@ function storeOperation(
       return {
         ...base,
         summary: `List '${store.name}' rows (tenant-scoped).`,
+        // The declared filters + order/after/limit query surface (plus any path params from base).
+        parameters: [...(base.parameters ?? []), ...listQueryParameters(store)],
         responses: {
           '200': {
             description: `An array of '${store.name}' rows (bounded; X-Result-Truncated on a full page).`,
+            headers: {
+              'X-Next-Cursor': {
+                description:
+                  'Opaque keyset cursor for the next page — present only on a full/truncated page. ' +
+                  'Pass it back as ?after=.',
+                schema: { type: 'string' },
+              },
+              'X-Result-Truncated': {
+                description:
+                  "Present as 'true' when the page hit the row cap and more rows may exist (page with ?after=).",
+                schema: { type: 'string' },
+              },
+            },
             content: { 'application/json': { schema: { type: 'array', items: row } } },
           },
         },
@@ -304,11 +422,39 @@ function storeOperation(
       return {
         ...base,
         summary: `Create a '${store.name}' row.`,
+        // The optional Idempotency-Key request header: a repeat CREATE with the same key returns
+        // the ORIGINAL row (200 + Idempotency-Replay) instead of creating a duplicate.
+        parameters: [
+          ...(base.parameters ?? []),
+          {
+            name: 'Idempotency-Key',
+            in: 'header',
+            required: false,
+            description:
+              'Optional idempotency key. A repeat CREATE with the same key returns the ORIGINAL row ' +
+              '(200, Idempotency-Replay: true) regardless of body — no duplicate is created.',
+            schema: { type: 'string' },
+          },
+        ],
         requestBody: {
           required: true,
           content: { 'application/json': { schema: toJsonSchema(createBodySchema(store)) } },
         },
-        responses: { '201': rowResponse },
+        responses: {
+          '201': rowResponse,
+          // Idempotent replay: a repeated Idempotency-Key returns the prior row (no duplicate created).
+          '200': {
+            description: `Idempotent replay — the original '${store.name}' row for a repeated Idempotency-Key (no duplicate created).`,
+            headers: {
+              'Idempotency-Replay': {
+                description:
+                  "Present as 'true' when this response is an idempotent replay of a prior create.",
+                schema: { type: 'string' },
+              },
+            },
+            content: { 'application/json': { schema: row } },
+          },
+        },
       };
     case 'update':
       return {

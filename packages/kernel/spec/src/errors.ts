@@ -31,6 +31,13 @@ import { z } from 'zod';
  *                               tenancy/GDPR column the Slice-1 generator injects (`id`,
  *                               `tenant_id`, `created_at`, `deleted_at`, `retention_days`,
  *                               `region`) — fail-closed against a shadow/tenancy collision.
+ *  - `reserved_query_keyword` — a store declares a business column whose name is one of the
+ *                               list-query CONTROL keywords (`order`, `after`, `limit`). Those keys
+ *                               steer the declarative `list` route's sorting + keyset pagination, so a
+ *                               column of that name would be silently un-equality-filterable AND would
+ *                               emit a DUPLICATE OpenAPI query parameter (control param + per-column
+ *                               filter param, same name+location) → an invalid OpenAPI 3.1 document.
+ *                               Rename the business column.
  *
  * PRODUCT-YAML codes — used ONLY by the Product-YAML validation path (`parseProductSpec`,
  * `product-lint.ts`). They share this closed envelope so a fresh session sees ONE error vocabulary
@@ -87,6 +94,7 @@ export const SpecErrorCode = z.enum([
   'capability_violation',
   'invalid_embedded_schema',
   'reserved_column_name',
+  'reserved_query_keyword',
   'no_code_in_yaml',
   'provider_native_leak',
   'invalid_capability_status',

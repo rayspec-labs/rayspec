@@ -1091,3 +1091,347 @@ describeDb('A3 — app.current_tenant GUC is populated INSIDE the store-handler 
     expect(captured.guc).toBe(orgId);
   });
 });
+
+/** Read a single scalar column off a table for the exact-value assertions below. */
+async function scalar(sql: string, params: unknown[]): Promise<string> {
+  const rows = (await h.db.$client.unsafe(sql, params as never[])) as unknown as Array<{
+    v: string;
+  }>;
+  const v = rows[0]?.v;
+  if (v === undefined) throw new Error(`scalar query returned no row: ${sql}`);
+  return v;
+}
+
+describeDb('injected created_by actor stamp', () => {
+  it('CREATE stamps user:<userId> for a JWT principal; UPDATE never re-stamps; a body cannot set it', async () => {
+    const { token } = await principal('actor-user@example.com', 'ActorUserOrg');
+    const userId = await scalar('SELECT id AS v FROM users WHERE email = $1', [
+      'actor-user@example.com',
+    ]);
+    const auth = { authorization: `Bearer ${token}` };
+
+    const created = await jsonRequest(h.app, 'POST', '/notebooks', {
+      body: { title: 'stamped', scheduledAt: '2026-07-01T09:00:00Z', completed: false },
+      headers: auth,
+    });
+    expect(created.status).toBe(201);
+    const nb = await created.json();
+    // FAIL-THE-FIX: without the server-side stamp this is null, not `user:<id>`.
+    expect(nb.created_by).toBe(`user:${userId}`);
+    const id = nb.id as string;
+
+    // UPDATE NEVER re-stamps created_by (it stays the CREATE-time actor).
+    const upd = await jsonRequest(h.app, 'PATCH', `/notebooks/${id}`, {
+      body: { completed: true },
+      headers: auth,
+    });
+    expect(upd.status).toBe(200);
+    expect((await upd.json()).created_by).toBe(`user:${userId}`);
+
+    // A body can NEVER set created_by (reserved + strict) — snake OR camel → 400 (no spoof).
+    for (const key of ['created_by', 'createdBy']) {
+      const spoof = await jsonRequest(h.app, 'POST', '/notebooks', {
+        body: {
+          title: 'spoof',
+          scheduledAt: '2026-07-01T09:00:00Z',
+          completed: false,
+          [key]: 'user:evil',
+        },
+        headers: auth,
+      });
+      expect(spoof.status).toBe(400);
+      expect((await spoof.json()).error.code).toBe('VALIDATION_ERROR');
+    }
+  });
+
+  it('CREATE via an api-key stamps key:<apiKeyId> (no api-key name exists)', async () => {
+    const { orgId, token } = await principal('actor-key@example.com', 'ActorKeyOrg');
+    const writeKey = await mintApiKey(orgId, token, ['store:read', 'store:write']);
+    const apiKeyId = await scalar('SELECT id AS v FROM api_keys WHERE org_id = $1', [orgId]);
+
+    const created = await jsonRequest(h.app, 'POST', '/notebooks', {
+      body: { title: 'via-key', scheduledAt: '2026-07-01T09:00:00Z', completed: false },
+      headers: { authorization: `Bearer ${writeKey}` },
+    });
+    expect(created.status).toBe(201);
+    expect((await created.json()).created_by).toBe(`key:${apiKeyId}`);
+  });
+});
+
+describeDb('tolerant body casing', () => {
+  it('accepts snake_case OR camelCase per declared column; both variants of one column → 400', async () => {
+    const { token } = await principal('casing@example.com', 'CasingOrg');
+    const auth = { authorization: `Bearer ${token}` };
+
+    // snake_case declared name (scheduled_at) is accepted + mapped to the camelCase schema key.
+    const snake = await jsonRequest(h.app, 'POST', '/notebooks', {
+      body: { title: 'snake', scheduled_at: '2026-07-01T09:00:00Z', completed: false },
+      headers: auth,
+    });
+    expect(snake.status).toBe(201);
+    expect((await snake.json()).scheduled_at).toBeTruthy();
+
+    // camelCase (today's) is unchanged.
+    const camel = await jsonRequest(h.app, 'POST', '/notebooks', {
+      body: { title: 'camel', scheduledAt: '2026-07-02T09:00:00Z', completed: false },
+      headers: auth,
+    });
+    expect(camel.status).toBe(201);
+    const camelId = (await camel.json()).id as string;
+
+    // BOTH the snake AND camel variant of the SAME column → ambiguous → 400.
+    const both = await jsonRequest(h.app, 'POST', '/notebooks', {
+      body: {
+        title: 'both',
+        scheduled_at: '2026-07-01T09:00:00Z',
+        scheduledAt: '2026-07-02T09:00:00Z',
+        completed: false,
+      },
+      headers: auth,
+    });
+    expect(both.status).toBe(400);
+    expect((await both.json()).error.code).toBe('VALIDATION_ERROR');
+
+    // The UPDATE path is tolerant too (snake_case scheduled_at accepted).
+    const upd = await jsonRequest(h.app, 'PATCH', `/notebooks/${camelId}`, {
+      body: { scheduled_at: '2026-08-01T09:00:00Z' },
+      headers: auth,
+    });
+    expect(upd.status).toBe(200);
+    expect((await upd.json()).scheduled_at).toContain('2026-08-01');
+  });
+});
+
+describeDb('list query power (filters/order/keyset)', () => {
+  async function seed(token: string): Promise<void> {
+    const auth = { authorization: `Bearer ${token}` };
+    for (const [title, completed] of [
+      ['n1', true],
+      ['n2', false],
+      ['n3', true],
+    ] as const) {
+      const r = await jsonRequest(h.app, 'POST', '/notebooks', {
+        body: { title, scheduledAt: '2026-07-01T09:00:00Z', completed },
+        headers: auth,
+      });
+      expect(r.status).toBe(201);
+    }
+  }
+
+  it('equality filter (declared col) narrows; an UNKNOWN query param → 400 (fail-closed)', async () => {
+    const { token } = await principal('filter@example.com', 'FilterOrg');
+    const auth = { authorization: `Bearer ${token}` };
+    await seed(token);
+
+    const filtered = await jsonRequest(h.app, 'GET', '/notebooks?completed=true', {
+      headers: auth,
+    });
+    expect(filtered.status).toBe(200);
+    const rows = await filtered.json();
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r: { completed: boolean }) => r.completed === true)).toBe(true);
+
+    // FAIL-CLOSED: a param that is not a control key or a filterable column → 400 (never ignored).
+    const bad = await jsonRequest(h.app, 'GET', '/notebooks?bogus=1', { headers: auth });
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).error.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('order=<col>.desc sorts; keyset pagination (limit + after) walks the pages deterministically', async () => {
+    const { token } = await principal('order-scenario@example.com', 'OrderScenarioOrg');
+    const auth = { authorization: `Bearer ${token}` };
+    await seed(token);
+
+    const desc = await jsonRequest(h.app, 'GET', '/notebooks?order=title.desc', { headers: auth });
+    expect((await desc.json()).map((r: { title: string }) => r.title)).toEqual(['n3', 'n2', 'n1']);
+
+    // Page 1 (asc, limit 1) → truncated + a next cursor; page 2 via `after` advances strictly.
+    const p1 = await jsonRequest(h.app, 'GET', '/notebooks?order=title.asc&limit=1', {
+      headers: auth,
+    });
+    expect(p1.headers.get('X-Result-Truncated')).toBe('true');
+    const cursor = p1.headers.get('X-Next-Cursor');
+    expect(cursor).toBeTruthy();
+    const p1rows = await p1.json();
+    expect(p1rows.map((r: { title: string }) => r.title)).toEqual(['n1']);
+
+    const p2 = await jsonRequest(
+      h.app,
+      'GET',
+      `/notebooks?order=title.asc&limit=1&after=${encodeURIComponent(cursor as string)}`,
+      { headers: auth },
+    );
+    const p2rows = await p2.json();
+    expect(p2rows.map((r: { title: string }) => r.title)).toEqual(['n2']);
+    expect(p2rows[0].id).not.toBe(p1rows[0].id);
+
+    // A malformed order column → 400 (fail-closed, never a silent unordered result).
+    const badOrder = await jsonRequest(h.app, 'GET', '/notebooks?order=ghost.asc', {
+      headers: auth,
+    });
+    expect(badOrder.status).toBe(400);
+  });
+
+  it('ordering by a NULLABLE column (or the nullable injected created_by) → 400; keyset never drops rows across a NULL boundary', async () => {
+    const { token } = await principal('null-order@example.com', 'NullOrderOrg');
+    const auth = { authorization: `Bearer ${token}` };
+    // Seed rows, some WITHOUT the nullable `subtitle` (so a NULL-ordered keyset page would straddle a
+    // NULL boundary and silently drop rows if a nullable column were an allowed order column).
+    for (const [i, sub] of [
+      ['a', 'sub-a'],
+      ['b', undefined],
+      ['c', 'sub-c'],
+    ].entries()) {
+      await jsonRequest(h.app, 'POST', '/notebooks', {
+        body: {
+          title: `t${i}`,
+          scheduledAt: '2026-07-01T09:00:00Z',
+          completed: false,
+          ...(sub[1] ? { subtitle: sub[1] } : {}),
+        },
+        headers: auth,
+      });
+    }
+
+    // RED-first (pre-fix these were accepted, and a keyset page across a NULL value dropped rows):
+    // a NULLABLE declared business column can never be an order column.
+    const nullableOrder = await jsonRequest(h.app, 'GET', '/notebooks?order=subtitle.asc', {
+      headers: auth,
+    });
+    expect(nullableOrder.status).toBe(400);
+    expect((await nullableOrder.json()).error.message).toContain('nullable');
+
+    // The nullable injected `created_by` is FILTERABLE but no longer SORTABLE → 400 as an order column.
+    const createdByOrder = await jsonRequest(h.app, 'GET', '/notebooks?order=created_by.asc', {
+      headers: auth,
+    });
+    expect(createdByOrder.status).toBe(400);
+
+    // But `created_by` is STILL a valid equality FILTER (only sortability was removed) — a real value
+    // returns its rows; the point is it is NOT a 400 "unknown parameter".
+    const byCreatedBy = await jsonRequest(
+      h.app,
+      'GET',
+      `/notebooks?created_by=${encodeURIComponent('user:nobody')}`,
+      { headers: auth },
+    );
+    expect(byCreatedBy.status).toBe(200);
+    expect(await byCreatedBy.json()).toHaveLength(0);
+
+    // A NON-nullable declared column (title) + the injected id/created_at REMAIN sortable, and a full
+    // keyset walk over the non-null order returns EVERY seeded row (no NULL-boundary drop).
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 5; page++) {
+      const url = `/notebooks?order=title.asc&limit=1${cursor ? `&after=${encodeURIComponent(cursor)}` : ''}`;
+      const res = await jsonRequest(h.app, 'GET', url, { headers: auth });
+      const rows = (await res.json()) as Array<{ title: string }>;
+      if (rows.length === 0) break;
+      seen.push(rows[0].title);
+      cursor = res.headers.get('X-Next-Cursor');
+      if (!cursor) break;
+    }
+    expect(seen).toEqual(['t0', 't1', 't2']); // all three rows, including the NULL-subtitle t1
+  });
+
+  it('CRITICAL: a filter/order/keyset issued by tenant B NEVER returns tenant A rows', async () => {
+    const a = await principal('iso-a@example.com', 'IsoOrgA');
+    const b = await principal('iso-b@example.com', 'IsoOrgB');
+    const A_SECRET = 'A-confidential-note';
+
+    await jsonRequest(h.app, 'POST', '/notebooks', {
+      body: { title: A_SECRET, scheduledAt: '2026-07-01T09:00:00Z', completed: true },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    await jsonRequest(h.app, 'POST', '/notebooks', {
+      body: { title: 'B-note', scheduledAt: '2026-07-01T09:00:00Z', completed: true },
+      headers: { authorization: `Bearer ${b.token}` },
+    });
+    const bAuth = { authorization: `Bearer ${b.token}` };
+
+    // B filters completed=true → sees ONLY its own row (the tenant predicate is AND-combined).
+    const byFlag = await jsonRequest(h.app, 'GET', '/notebooks?completed=true', { headers: bAuth });
+    const flagRows = await byFlag.json();
+    expect(flagRows).toHaveLength(1);
+    expect(JSON.stringify(flagRows)).not.toContain(A_SECRET);
+
+    // B filters by A's EXACT title → 0 rows (cannot reach across the tenant boundary via a filter).
+    const byTitle = await jsonRequest(
+      h.app,
+      'GET',
+      `/notebooks?title=${encodeURIComponent(A_SECRET)}`,
+      { headers: bAuth },
+    );
+    expect(await byTitle.json()).toHaveLength(0);
+
+    // B orders + keyset-paginates → still only B's rows, never A's secret.
+    const paged = await jsonRequest(h.app, 'GET', '/notebooks?order=created_at.asc&limit=1', {
+      headers: bAuth,
+    });
+    expect(JSON.stringify(await paged.json())).not.toContain(A_SECRET);
+  });
+});
+
+describeDb('Idempotency-Key replay on store.create', () => {
+  it('same key → replay (200 + Idempotency-Replay, ONE row); different key → new; same key other tenant → independent', async () => {
+    const a = await principal('replay-a@example.com', 'ReplayOrgA');
+    const b = await principal('replay-b@example.com', 'ReplayOrgB');
+    const body = { title: 'idem', scheduledAt: '2026-07-01T09:00:00Z', completed: false };
+
+    const first = await jsonRequest(h.app, 'POST', '/notebooks', {
+      body,
+      headers: { authorization: `Bearer ${a.token}`, 'idempotency-key': 'req-123' },
+    });
+    expect(first.status).toBe(201);
+    const firstId = (await first.json()).id as string;
+
+    // Same key → REPLAY: 200 + Idempotency-Replay:true, the SAME row id, NO duplicate.
+    const second = await jsonRequest(h.app, 'POST', '/notebooks', {
+      body,
+      headers: { authorization: `Bearer ${a.token}`, 'idempotency-key': 'req-123' },
+    });
+    expect(second.status).toBe(200);
+    expect(second.headers.get('Idempotency-Replay')).toBe('true');
+    expect((await second.json()).id).toBe(firstId);
+
+    // Exactly ONE row exists for A (the replay did not insert a duplicate).
+    const list = await jsonRequest(h.app, 'GET', '/notebooks', {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(await list.json()).toHaveLength(1);
+
+    // A DIFFERENT key → a genuinely NEW row (201).
+    const third = await jsonRequest(h.app, 'POST', '/notebooks', {
+      body: { title: 'idem2', scheduledAt: '2026-07-01T09:00:00Z', completed: false },
+      headers: { authorization: `Bearer ${a.token}`, 'idempotency-key': 'req-999' },
+    });
+    expect(third.status).toBe(201);
+    expect((await third.json()).id).not.toBe(firstId);
+
+    // The SAME key in a DIFFERENT tenant is INDEPENDENT (a fresh 201 for B, not A's row replayed).
+    const bCreate = await jsonRequest(h.app, 'POST', '/notebooks', {
+      body: { title: 'b-idem', scheduledAt: '2026-07-01T09:00:00Z', completed: false },
+      headers: { authorization: `Bearer ${b.token}`, 'idempotency-key': 'req-123' },
+    });
+    expect(bCreate.status).toBe(201);
+    expect((await bCreate.json()).title).toBe('b-idem');
+  });
+
+  it('a create WITHOUT an Idempotency-Key never collides (two creates → two distinct rows)', async () => {
+    const { token } = await principal('nokey-replay@example.com', 'NoKeyReplayOrg');
+    const auth = { authorization: `Bearer ${token}` };
+    const one = await jsonRequest(h.app, 'POST', '/notebooks', {
+      body: { title: 'nk1', scheduledAt: '2026-07-01T09:00:00Z', completed: false },
+      headers: auth,
+    });
+    const two = await jsonRequest(h.app, 'POST', '/notebooks', {
+      body: { title: 'nk2', scheduledAt: '2026-07-01T09:00:00Z', completed: false },
+      headers: auth,
+    });
+    expect(one.status).toBe(201);
+    expect(two.status).toBe(201);
+    expect((await one.json()).id).not.toBe((await two.json()).id);
+    const list = await jsonRequest(h.app, 'GET', '/notebooks', { headers: auth });
+    expect(await list.json()).toHaveLength(2);
+  });
+});

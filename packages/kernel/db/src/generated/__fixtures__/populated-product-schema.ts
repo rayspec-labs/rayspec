@@ -7,8 +7,8 @@
  * GENERATED product schema — DO NOT EDIT BY HAND.
  *
  * Produced by @rayspec/db generate-product-schema from a validated RaySpec `stores[]`.
- * The tenancy/GDPR columns (id, tenant_id->orgs ON DELETE CASCADE,
- * created_at, deleted_at, retention_days, region) are INJECTED to match schema.ts exactly;
+ * The tenancy/GDPR columns (id, tenant_id->orgs ON DELETE CASCADE, created_at, deleted_at,
+ * retention_days, region, created_by, idempotency_key) are INJECTED to match schema.ts exactly;
  * authors declare business columns only. PRODUCT_TENANT_SCOPED_TABLES is the type-enforced
  * seam schema.ts composes into TENANT_SCOPED_TABLES — a generated table is
  * reachable through the TenantDb chokepoint, an unregistered one throws (deny-by-default).
@@ -31,6 +31,8 @@ export const notebooks = pgTable('notebooks', {
   deletedAt: timestamp('deleted_at', { withTimezone: true }),
   retentionDays: integer('retention_days'),
   region: text('region').notNull().default('eu'),
+  createdBy: text('created_by'),
+  idempotencyKey: text('idempotency_key'),
 });
 
 /** Generated product store 'entries'. Tenant-scoped by construction (tenant_id -> orgs). */
@@ -49,6 +51,8 @@ export const entries = pgTable('entries', {
   deletedAt: timestamp('deleted_at', { withTimezone: true }),
   retentionDays: integer('retention_days'),
   region: text('region').notNull().default('eu'),
+  createdBy: text('created_by'),
+  idempotencyKey: text('idempotency_key'),
 });
 
 /**

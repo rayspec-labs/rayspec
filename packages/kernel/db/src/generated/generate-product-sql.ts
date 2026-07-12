@@ -33,7 +33,7 @@ import {
 import { INJECTED_AFTER, INJECTED_BEFORE } from './injected-columns.js';
 
 /**
- * The per-store CONFLICT-KEY carve-out (DX-v1.2 / Option B). A store's conflict keys are the columns
+ * The per-store CONFLICT-KEY carve-out. A store's conflict keys are the columns
  * that a durable `ON CONFLICT (<col>)` upsert targets (the product-profile `key` column, and the
  * capability/collection/transcript `*_ref` idiom). Such a column MUST keep a SINGLE-column `(col)`
  * unique index — a compound `(tenant_id, col)` index does not satisfy `ON CONFLICT (col)` (Postgres
@@ -130,7 +130,7 @@ export function emitStoreSql(store: StoreSpec, conflictKeys?: ReadonlySet<string
   // drift-detect + the DROP counterpart key off the stable name). A conflict-key column keeps a
   // SINGLE-column `(col)` index (the durable `ON CONFLICT (col)` target — a compound index would
   // 42P10); every other unique column is TENANT-SCOPED compound `("tenant_id", col)` so two tenants
-  // can hold the same value with no cross-tenant existence leak (DX-v1.2). Secure default (no
+  // can hold the same value with no cross-tenant existence leak. Secure default (no
   // conflict-key set) = compound.
   for (const col of store.columns) {
     if (col.unique) {
@@ -140,6 +140,18 @@ export function emitStoreSql(store: StoreSpec, conflictKeys?: ReadonlySet<string
       statements.push(
         `CREATE UNIQUE INDEX "${store.name}_${col.name}_unique" ON "${store.name}" ` +
           `USING btree (${indexColumns})`,
+      );
+    }
+  }
+  // INJECTED unique indexes (idempotency_key): a tenant-scoped compound `(tenant_id, col)`
+  // unique index for every injected column marked `uniqueIndex:'tenant-scoped'`. DDL-only (the ORM twins
+  // carry the column, not the index — like the tenant_idx below); Postgres NULLs never collide, so a row
+  // without the key is unconstrained. Index NAME mirrors the business `<table>_<col>_unique` convention.
+  for (const inj of INJECTED_AFTER) {
+    if (inj.uniqueIndex === 'tenant-scoped') {
+      statements.push(
+        `CREATE UNIQUE INDEX "${store.name}_${inj.sqlName}_unique" ON "${store.name}" ` +
+          `USING btree ("tenant_id", "${inj.sqlName}")`,
       );
     }
   }

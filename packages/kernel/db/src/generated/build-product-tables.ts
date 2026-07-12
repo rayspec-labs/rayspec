@@ -108,7 +108,7 @@ function buildStoreTable(
       let b = businessBuilder(col.type, col.name);
       if (!col.nullable) b = b.notNull();
       // A conflict-key unique keeps a SINGLE-column `.unique()`; a NON-key unique becomes a
-      // TENANT-SCOPED compound `uniqueIndex` table-extra below (DX-v1.2). Secure default = compound.
+      // TENANT-SCOPED compound `uniqueIndex` table-extra below. Secure default = compound.
       if (col.unique && (conflictKeys?.has(col.name) ?? false)) b = b.unique();
       columns[camel] = b;
     }
@@ -120,6 +120,11 @@ function buildStoreTable(
   columns.deletedAt = chain(timestamp('deleted_at', { withTimezone: true }));
   columns.retentionDays = chain(integer('retention_days'));
   columns.region = chain(text('region')).notNull().default('eu');
+  // Injected columns (nullable): the actor stamp (created_by) + the store.create
+  // Idempotency-Key (idempotency_key). The idempotency uniqueness is a DB-level index the migration
+  // owns (see generate-product-sql / the tenant_idx precedent), NOT an ORM uniqueIndex here.
+  columns.createdBy = chain(text('created_by'));
+  columns.idempotencyKey = chain(text('idempotency_key'));
 
   // Tenant-scoped (compound) unique indexes for NON-key `unique: true` columns: the runtime twin mirrors
   // the DDL — `uniqueIndex('<table>_<col>_unique').on(tenant_id, col)` — so a test/gate that inspects the

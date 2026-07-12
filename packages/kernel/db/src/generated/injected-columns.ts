@@ -33,6 +33,26 @@ export interface InjectedColumn {
   position: InjectedPosition;
   /** True for the tenant_id FK column (the only FK-to-core; emitted as a separate ALTER, not here). */
   isTenantFk?: boolean;
+  /**
+   * True for an injected column ADDED AFTER the first release, so a store MATERIALIZED before it existed
+   * (an older deployment) lacks it. The surviving-table backfill (`injectedBackfillSql`, opt-in
+   * via `diffProductStores({ backfillInjectedColumns: true })`) emits `ADD COLUMN IF NOT EXISTS` ONLY for
+   * these — NOT for the always-present injected columns (id/tenant_id/created_at/deleted_at/
+   * retention_days/region), which every materialized store already carries, so `rayspec plan --against`
+   * on an unchanged spec never prints spurious backfill DDL for them. Set on the `created_by`
+   * + `idempotency_key` columns.
+   */
+  backfill?: boolean;
+  /**
+   * If set, the SQL generator emits a UNIQUE INDEX for this injected column. `'tenant-scoped'` = a
+   * compound `(tenant_id, col)` index (so the SAME value is independent across tenants, and Postgres
+   * NULLs never collide → rows that leave the column NULL are unconstrained). DDL-ONLY, exactly like
+   * the injected `<table>_tenant_idx` secondary index: it is emitted by the SQL generator (and the
+   * surviving-table backfill) but is NOT represented in the Drizzle ORM twins — the constraint is a
+   * DB-level index the migration owns, not an ORM object (the twins carry the column, the DB owns the
+   * index). Used by the `idempotency_key` column (store.create Idempotency-Key replay).
+   */
+  uniqueIndex?: 'tenant-scoped';
 }
 
 /**
@@ -97,6 +117,35 @@ export const INJECTED_COLUMNS: readonly InjectedColumn[] = [
     tsSource: "text('region').notNull().default('eu')",
     sqlDef: `"region" text DEFAULT 'eu' NOT NULL`,
     position: 'after',
+  },
+  {
+    // The actor who CREATEd the row — stamped server-side from the request principal
+    // (`user:<userId>` for a JWT principal, `key:<apiKeyId>` for an API key). NEVER client-settable
+    // (reserved + server-stamped on CREATE only, never on UPDATE). Nullable: a legacy row (created
+    // before this column existed) carries NULL, and the CREATE path fills it going forward.
+    sqlName: 'created_by',
+    tsName: 'createdBy',
+    type: 'text',
+    nullable: true,
+    tsSource: "text('created_by')",
+    sqlDef: '"created_by" text',
+    position: 'after',
+    backfill: true,
+  },
+  {
+    // The store.create `Idempotency-Key` header value (opaque). Nullable — Postgres
+    // treats NULLs as distinct, so requests WITHOUT the header never collide on the unique index. The
+    // tenant-scoped compound `(tenant_id, idempotency_key)` unique index makes the SAME key independent
+    // across tenants and lets the create path REPLAY the prior row on a 23505 (no duplicate, no 409).
+    sqlName: 'idempotency_key',
+    tsName: 'idempotencyKey',
+    type: 'text',
+    nullable: true,
+    tsSource: "text('idempotency_key')",
+    sqlDef: '"idempotency_key" text',
+    position: 'after',
+    uniqueIndex: 'tenant-scoped',
+    backfill: true,
   },
 ];
 

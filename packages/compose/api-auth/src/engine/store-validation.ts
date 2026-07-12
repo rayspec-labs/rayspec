@@ -21,9 +21,45 @@
  * table, column, or name is hard-coded. The platform stays product-free.
  */
 
+import { ApiError } from '@rayspec/auth-core';
 import type { ColumnType, StoreColumn, StoreSpec } from '@rayspec/spec';
 import { z } from 'zod';
 import { INJECTED_COLUMN_TS_NAMES, snakeToCamel } from './injected-columns-view.js';
+
+/**
+ * Tolerant body-casing. The create/update Zod schemas key on the camelCase twin of each
+ * declared column (`snakeToCamel(col.name)`). This normalizer lets a client send EITHER the camelCase
+ * key (today's) OR the snake_case DECLARED name for a declared column: a snake key is renamed to its
+ * camelCase twin BEFORE the strict Zod parse. A body carrying BOTH the snake AND the camel variant of
+ * the SAME column is AMBIGUOUS → VALIDATION_ERROR (we refuse to silently pick a winner). Purely
+ * additive: an all-camelCase body is returned unchanged, and a non-object body passes straight through
+ * (the strict schema rejects it). Only DECLARED business columns are remapped — an injected/reserved key
+ * (e.g. `created_by`) is left as-is, so `.strict()` still rejects it and it can never be smuggled in via
+ * casing. Responses stay snake_case (serializeRow is unchanged).
+ */
+export function normalizeBodyCasing(store: StoreSpec, raw: unknown): unknown {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const body = raw as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...body };
+  for (const col of store.columns) {
+    const snake = col.name;
+    const camel = snakeToCamel(snake);
+    if (snake === camel) continue; // single-word column: no snake/camel distinction
+    const hasSnake = Object.hasOwn(out, snake);
+    const hasCamel = Object.hasOwn(out, camel);
+    if (hasSnake && hasCamel) {
+      throw new ApiError(
+        'VALIDATION_ERROR',
+        `Ambiguous body: both '${snake}' and '${camel}' were provided for the same field.`,
+      );
+    }
+    if (hasSnake) {
+      out[camel] = out[snake];
+      delete out[snake];
+    }
+  }
+  return out;
+}
 
 /** Map a declared ColumnType to the Zod validator for a CREATE/UPDATE body value. */
 function zodForColumn(type: ColumnType): z.ZodType {

@@ -202,6 +202,19 @@ contracts:
     );
   });
 
+  it('a reserved list-query control keyword (order/after/limit) as a column name is rejected', () => {
+    // Symmetric with the backend store lint: a column named after a list-query control key would be
+    // un-filterable + would emit a duplicate OpenAPI query param. Fail-the-fix: without the
+    // RESERVED_QUERY_KEYWORDS check these parse+lint clean (valid safe-identifiers).
+    for (const kw of ['order', 'after', 'limit']) {
+      expectCode(
+        FIELDLOG_YAML.replace('{ name: label, type: text', `{ name: ${kw}, type: text`),
+        'reserved_query_keyword',
+        new RegExp(kw),
+      );
+    }
+  });
+
   it('a column name on the graph key denylist is rejected AT DECLARATION (it could never be referenced from a step)', () => {
     expectCode(
       FIELDLOG_YAML.replace('{ name: label, type: text', '{ name: model, type: text'),
@@ -215,7 +228,7 @@ contracts:
     );
   });
 
-  it('FIX-REG-2: two column names that COLLIDE under the snake→camel runtime mapping are rejected, naming BOTH columns (digits are the real vector: col_1 ≡ col1)', () => {
+  it('two column names that COLLIDE under the snake→camel runtime mapping are rejected, naming BOTH columns (digits are the real vector: col_1 ≡ col1)', () => {
     // `_([a-z0-9])` uppercases the char after the underscore — a DIGIT uppercases to ITSELF, so
     // `rev_1` and `rev1` both map to runtime column key `rev1`: the built PgTable would key ONE
     // column for two declared names, and the node's snake-based vs the facade's camel-based
@@ -231,7 +244,7 @@ contracts:
     );
   });
 
-  it('FIX-REG-2 negative: LETTER underscore-placement variants do NOT collide (a_bc→aBc ≠ ab_c→abC) — no false positive', () => {
+  it('negative: LETTER underscore-placement variants do NOT collide (a_bc→aBc ≠ ab_c→abC) — no false positive', () => {
     const spec = parseOk(
       FIELDLOG_YAML.replace(
         '- { name: label, type: text, nullable: true }',
@@ -243,7 +256,7 @@ contracts:
     expect(checkProductStores(spec)).toEqual([]);
   });
 
-  it('FIX-REG-2 pin: the spec-local snake→camel copy matches the facade/table-builder rule on literal examples (KEEP-IN-SYNC guard)', () => {
+  it('snake→camel pin: the spec-local snake→camel copy matches the facade/table-builder rule on literal examples (KEEP-IN-SYNC guard)', () => {
     // Literal pins of the ONE rule (`/_([a-z0-9])/g` → uppercase) replicated in
     // packages/platform/src/handlers/store-facade.ts (snakeToCamel),
     // packages/api-auth/src/engine/injected-columns-view.ts (snakeToCamel), and

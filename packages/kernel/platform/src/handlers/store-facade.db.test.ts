@@ -112,7 +112,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
         metadata jsonb,
         business_key text,
         created_at timestamptz NOT NULL DEFAULT now(),
-        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu',
+        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text,
         -- GLOBAL (NOT tenant-scoped) unique — the worst case for an upsert conflict target: two tenants
         -- can collide on the SAME business_key, so C1's tenant-scoped DO-UPDATE setWhere is what stops a
         -- cross-tenant overwrite. (Multiple NULL business_keys are allowed — Postgres NULLs are distinct.)
@@ -124,7 +124,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
         tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
         name text NOT NULL,
         created_at timestamptz NOT NULL DEFAULT now(),
-        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu',
+        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text,
         CONSTRAINT tags_name_global_unique UNIQUE (name)
       );
       -- XT-1 fixture: TWO individual global uniques (a conflict on vendor while the ON CONFLICT target
@@ -136,7 +136,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
         business_key text,
         vendor text,
         created_at timestamptz NOT NULL DEFAULT now(),
-        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu',
+        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text,
         CONSTRAINT gizmos_business_key_unique UNIQUE (business_key),
         CONSTRAINT gizmos_vendor_unique UNIQUE (vendor)
       );
@@ -148,7 +148,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
         business_key text NOT NULL,
         vendor text NOT NULL,
         created_at timestamptz NOT NULL DEFAULT now(),
-        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu',
+        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text,
         CONSTRAINT pairs_bk_vendor_unique UNIQUE (business_key, vendor)
       );
       -- TQ-4 fixture: a TENANT-SCOPED unique (tenant_id, business_key) — the recommended secure pattern.
@@ -158,7 +158,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
         title text NOT NULL,
         business_key text NOT NULL,
         created_at timestamptz NOT NULL DEFAULT now(),
-        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu',
+        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text,
         CONSTRAINT scoped_tenant_bk_unique UNIQUE (tenant_id, business_key)
       );
       INSERT INTO orgs (id, name) VALUES ('${TENANT_A}', 'A'), ('${TENANT_B}', 'B');
