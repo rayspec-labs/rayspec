@@ -236,6 +236,12 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
   // --- global error handler → the closed envelope ------------------------------------------
   app.onError((err, c) => {
     const rid = c.get('requestId') ?? 'unknown';
+    // Every 5xx emits ONE server-side log line (requestId + error) — the 500 branch was a silent
+    // swallow. A 4xx (incl. the 409 conflict + 400/401/403/404/429) emits NONE. The status is the
+    // SAME one the response below returns, so the two never diverge.
+    const status =
+      err instanceof ApiError ? STATUS_BY_CODE[err.code] : err instanceof ZodError ? 400 : 500;
+    if (status >= 500) logServerError(deps, rid, err);
     if (err instanceof ApiError) {
       return c.json(
         errorEnvelope(err.code, err.message, rid, err.details),
@@ -248,7 +254,7 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
         400,
       );
     }
-    // Unexpected → 500, no internals leaked.
+    // Unexpected → 500, no internals leaked (the log line above already carried the detail server-side).
     return c.json(errorEnvelope('INTERNAL', 'Internal server error.', rid), 500);
   });
 
@@ -294,6 +300,33 @@ function withDeclaredAgents(deps: AppDeps): AppDeps {
   const merged = new Map(deps.agentRegistry ?? []);
   for (const [id, entry] of declared) merged.set(id, entry);
   return { ...deps, agentRegistry: merged };
+}
+
+/**
+ * Emit exactly ONE server-side log line for a 5xx response. SERVER-SIDE only (the client still gets
+ * the bare envelope) — carries the requestId, the closed error code, and the error message; the stack
+ * rides as a second argument for the console. It NEVER carries a request body, secret, or
+ * foreign-tenant value. Fail-safe: a 5xx may be happening DURING a DB/logging outage, so the log path
+ * does NO DB write and NEVER throws — a thrown/absent logger is swallowed so a failed log can never
+ * turn a 5xx into a crash.
+ */
+function logServerError(deps: AppDeps, requestId: string, err: unknown): void {
+  try {
+    const code: ErrorCode = err instanceof ApiError ? err.code : 'INTERNAL';
+    const message = err instanceof Error ? err.message : String(err);
+    const line = `[api-auth] 5xx requestId=${requestId} code=${code}: ${message}`;
+    const stack = err instanceof Error ? err.stack : undefined;
+    const log = deps.logError ?? defaultLogError;
+    log(line, stack);
+  } catch {
+    /* the error path must never throw — a failed log must not turn a 5xx into a crash */
+  }
+}
+
+/** Default 5xx logger: the codebase's operational `console.error('[prefix] …')` style. */
+function defaultLogError(line: string, detail?: unknown): void {
+  if (detail !== undefined) console.error(line, detail);
+  else console.error(line);
 }
 
 /** Compact, non-leaky Zod error detail (field paths + messages only). */

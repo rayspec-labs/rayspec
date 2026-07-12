@@ -223,4 +223,14 @@ export interface AppDeps {
    * adapter lives in @rayspec/durable-dbos; api-auth carries no DBOS dependency).
    */
   durableExecutor?: DurableExecutor;
+  /**
+   * OPTIONAL server-side error logger (DI seam). `createAuthApp`'s `onError` emits exactly ONE line
+   * for EVERY 5xx response (requestId + the closed error code + the error message/stack) through this;
+   * ABSENT ⇒ the default `console.error` (the codebase's operational-log style). A test injects a spy to
+   * assert one 5xx line fired (and that a 4xx fires none). It is called SERVER-SIDE only (the client
+   * still gets the bare envelope) and NEVER with a request body, secret, or foreign-tenant value. It
+   * MUST NOT throw or do a DB write — `onError` guards the call (a 5xx may be happening DURING an
+   * outage), and a thrown logger is swallowed so a failed log never turns a 5xx into a crash.
+   */
+  logError?: (line: string, detail?: unknown) => void;
 }
