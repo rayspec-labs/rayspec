@@ -236,7 +236,7 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
-# (e) THE IT.2 ACCEPTANCE — GET the claim and ASSERT the WRITTEN row (status flipped + catalog code +
+# (e) THE ACCEPTANCE CHECK — GET the claim and ASSERT the WRITTEN row (status flipped + catalog code +
 #     gl_code/coding_summary/policy_flag filled). A pure structured-output agent cannot produce this.
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 printf '\n\033[1;35m═══ (e) Verify the WRITTEN row (the acceptance) ═══\033[0m\n'

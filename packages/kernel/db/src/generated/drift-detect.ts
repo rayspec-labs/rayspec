@@ -37,8 +37,9 @@ export interface DriftFinding {
     | 'column_nullability'
     | 'missing_unique'
     /**
-     * DX-v1.2 diff-scanner flag: a NON-key `unique: true` column whose live unique index is a STALE
-     * single-column GLOBAL `(col)` index (a legacy v1.0/v1.1 deployment) where a TENANT-SCOPED compound
+     * A diff-scanner flag: a NON-key `unique: true` column whose live unique index is a STALE
+     * single-column GLOBAL `(col)` index (a legacy deployment materialized before the conflict-key
+     * carve-out) where a TENANT-SCOPED compound
      * `(tenant_id, col)` is now expected. Reported so an operator knows to migrate — this module NEVER
      * auto-migrates (reconciliation goes through the reviewed forward-migration gate). Only reachable
      * when the caller supplies `conflictKeys` (the boot/deploy paths use the lenient default and accept
@@ -83,7 +84,7 @@ const EXPECTED_DATA_TYPE: Record<ColumnType, string> = {
 
 /**
  * The injected tenancy/GDPR columns + their expected (data_type, nullable), DERIVED from the single
- * shared INJECTED_COLUMNS descriptor (fix P3S1-02) so a descriptor change propagates to drift too.
+ * shared INJECTED_COLUMNS descriptor so a descriptor change propagates to drift too.
  */
 const INJECTED_COLUMNS: { name: string; dataType: string; nullable: boolean }[] =
   INJECTED_DESCRIPTOR.map((c) => ({
@@ -140,8 +141,8 @@ export async function detectDrift(
     [schemaName, tableNames],
   )) as unknown as FkRow[];
 
-  // --- UNIQUE indexes, FULL ordered column lists (GEN-2 + DX-v1.2) ---------------------------
-  // A dropped `unique:true` is otherwise invisible drift; and DX-v1.2 makes a NON-key author-unique a
+  // --- UNIQUE indexes, FULL ordered column lists (GEN-2) ---------------------------
+  // A dropped `unique:true` is otherwise invisible drift; and a NON-key author-unique is a
   // TENANT-SCOPED compound `(tenant_id, col)` index (a conflict key stays single `(col)`), so we can no
   // longer read only single-column indexes. Read EVERY unique index with its ORDERED column list
   // (`unnest(indkey) WITH ORDINALITY`) so we can tell a single `(col)` from a compound `(tenant_id, col)`.
@@ -226,7 +227,7 @@ export async function detectDrift(
           actual: liveNullable ? 'nullable' : 'not null',
         });
       }
-      // (GEN-2 + DX-v1.2) A declared `unique:true` column must have a live UNIQUE index.
+      // (GEN-2) A declared `unique:true` column must have a live UNIQUE index.
       if (col.unique) {
         const singleOnCol = hasUniqueIndexOn(store.name, [col.name]);
         const compoundTenantCol = hasUniqueIndexOn(store.name, ['tenant_id', col.name]);

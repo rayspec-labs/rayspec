@@ -872,7 +872,7 @@ export function resolveInputContext(
     );
   }
   const fields = (payloadFields as string[] | undefined) ?? [];
-  // GB-1 (S4 fix round): the vacuous-config guard is SYMMETRIC across BOTH channels. The payload
+  // GB-1: the vacuous-config guard is SYMMETRIC across BOTH channels. The payload
   // channel is open iff payload_fields is non-empty; the artifact channel is open iff
   // artifact_inputs !== false AND the extractor DECLARES at least one input artifact — the compiler
   // mirrors `extraction.input_artifacts` 1:1 into the compiled step's `artifact_inputs`
@@ -1531,7 +1531,7 @@ export async function deployProductYamlSpec(
   const capabilityStores = composeCapabilityStores(spec);
   const derived = deriveProductStores(spec, capabilityStores.names);
   const composedStores = [...capabilityStores.stores, ...derived.stores];
-  // DX-v1.2: the durable `ON CONFLICT` target columns (declared `key` + the capability/collection/
+  // The durable `ON CONFLICT` target columns (declared `key` + the capability/collection/
   // transcript `*_ref` idiom) keep a SINGLE-column unique index; any other author `unique: true` column
   // is TENANT-SCOPED compound. Threaded to every product-store materializer below.
   const conflictKeys = deriveConflictKeys(spec, composedStores);
@@ -1811,7 +1811,7 @@ export async function deployProductYamlSpec(
         // (both `undefined` otherwise — DeclarativeEngine.blobFactory/mediaTokenService are optional).
         const engineWithByteMovers: DeclarativeEngine = {
           ...engine,
-          // DX-v1.2: thread the product-profile conflict-key carve-out (computed above from
+          // Thread the product-profile conflict-key carve-out (computed above from
           // `deriveConflictKeys`) onto the engine so a store-route 409 on a GLOBAL-unique key column
           // uses the generic message (no cross-tenant existence oracle), while a tenant-scoped author-
           // `unique` column is still named. deploy() builds `engine` WITHOUT this (kill-set, byte-frozen);

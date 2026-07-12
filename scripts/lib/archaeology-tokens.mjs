@@ -11,7 +11,7 @@
  *
  * Token families: phase labels in both delimiter forms (`Phase C` / `Phase-C`, and `P3`), slice labels
  * (`Slice 2` + the abbreviated `S2 F1` / hyphenated `S2-F1`), wave (`wave 3`, `W3FI`), iteration
- * (`It.2`), decision numbers (`D41`, `PY-D4`), plan/mission/goal labels (`GOAL2`, `Goal-3`, `S5.0`,
+ * (`It.2`), decision numbers (`D41`, `PY-D4`), mission/version build-labels (`DX-v<n>`), plan/mission/goal labels (`GOAL2`, `Goal-3`, `S5.0`,
  * `Fork #2`, `M5-…`), §-section cross-refs, `stage#` pipeline labels, leaked product-domain names,
  * authoring-tool / process-narration references, and build-history migration phrases.
  *
@@ -36,6 +36,10 @@ export const TOKENS = [
   // `unknownStage8` would otherwise slip through).
   ['stage#', /\bstage[- ]?\d|[a-z]Stage\d/i],
   ['D-number', /(?<![\w-])D\d{1,3}\b/], // standalone decision number; excludes the PY-D<n> form (own token)
+  // Mission/version build-labels: the hyphen forms `DX-v<n>` / `DX-<n>` and the glued `DX<nn>` (≥2
+  // digits). Leading lookbehind guards a letter-prefixed collision (`IDX-…`); `DX` as a bare
+  // developer-experience word (no adjacent digit — `LOCAL-DX-…`) is NOT tokenized.
+  ['DX-label', /(?<![A-Za-z])DX(?:-v?\d|\d\d)/],
   ['wave#', /\bwave[ -]?\d/i],
   ['wave-code', /\bW\d(?:FI|CV|S\d)/],
   ['It.#', /\bIt\.\d|\bIteration\s?\d/],

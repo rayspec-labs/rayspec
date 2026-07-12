@@ -133,7 +133,7 @@ export interface DeclaredRoutesConfig {
   /** Declared store name → its runtime Drizzle `PgTable` (built via @rayspec/db buildProductTables). */
   productTables: ReadonlyMap<string, PgTable>;
   /**
-   * DX-v1.2: declared store name → its CONFLICT-KEY column set (the GLOBAL single-column unique /
+   * Declared store name → its CONFLICT-KEY column set (the GLOBAL single-column unique /
    * durable `ON CONFLICT` targets, from `deriveConflictKeys`). Threaded ONLY on the PRODUCT-profile
    * registration path; a store's set is passed to `makeStoreHandler` so a 23505 on a global-unique
    * key column falls to the GENERIC 409 message (never a cross-tenant existence oracle), while a
@@ -225,7 +225,7 @@ export function registerDeclaredRoutes(
         );
       }
       const perm = storePermission(action.op);
-      // DX-v1.2: pass this store's conflict-key set (product-profile only) so a global-unique key
+      // Pass this store's conflict-key set (product-profile only) so a global-unique key
       // column is never named in a 409 (cross-tenant oracle); absent ⇒ name any tenant-scoped unique.
       const storeConflictKeys = config.conflictKeys?.get(action.store);
       const handler = makeStoreHandler({

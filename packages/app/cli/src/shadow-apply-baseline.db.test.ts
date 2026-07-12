@@ -104,7 +104,7 @@ describe.skipIf(!hasDb)(
       scenariosRan++;
     }, 60_000);
 
-    it('DX-v1.2 FINDING-2: the ARMED plan-time oracle flags a stale single-column GLOBAL unique index (stale_global_unique); the LENIENT boot oracle does NOT refuse it', async () => {
+    it('the ARMED plan-time oracle flags a stale single-column GLOBAL unique index (stale_global_unique); the LENIENT boot oracle does NOT refuse it', async () => {
       // A LEGACY deployment: `code` was a durable conflict KEY, so its unique index is a single-column
       // GLOBAL `(code)`. The NEW spec makes `code` a plain author-unique (tenant-scoped compound now
       // expected). Seed the live shape by materializing the baseline WITH `code` as a conflict key.
@@ -150,7 +150,7 @@ stores:
       scenariosRan++;
     }, 60_000);
 
-    it('DX-v1.2 FINDING-1/2: the CORRECT old→new reindex delta (baseline seeded with OLD keys) ends DRIFT-CLEAN under the armed oracle', async () => {
+    it('the CORRECT old→new reindex delta (baseline seeded with OLD keys) ends DRIFT-CLEAN under the armed oracle', async () => {
       // The seeding companion: baseline is generated with the OLD conflict keys (single, live shape); the
       // delta is computed with BOTH old+new keys → a real DROP+CREATE reindex → the armed oracle passes.
       const legacy = stores(`

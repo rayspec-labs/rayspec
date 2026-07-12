@@ -30,7 +30,7 @@
  * DBOS scheduled-workflows only fire after `DBOS.launch()`, and the ONLY boot path that launches DBOS is
  * the durable-worker wiring in the composition root. So an AUTH-ONLY boot (no durable worker) does NOT run
  * this cleanup — expired OIDC rows + GDPR tombstones would accumulate there until a worker boot. This is
- * the accepted LOCAL posture: the mission rides on the durable worker by design (the composition root
+ * the accepted LOCAL posture: the cleanup rides on the durable worker by design (the composition root
  * registers this whenever the executor exists, INDEPENDENT of whether the spec declares cron triggers).
  * A future auth-only-also-cleans path (e.g. a lightweight in-process timer) is a build-on-demand follow-up.
  */

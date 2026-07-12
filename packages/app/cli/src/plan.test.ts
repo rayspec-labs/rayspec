@@ -603,7 +603,7 @@ describe('plan — Product-YAML (0.2) projections + update mode', () => {
     expect(rev.breakingChangeBlocked).toBe(true);
   });
 
-  it('DX-v1.2 FINDING-2: a PRODUCT update THREADS the derived conflict keys to the baseline-seeded shadow (arms the plan-time oracle)', async () => {
+  it('a PRODUCT update THREADS the derived conflict keys to the baseline-seeded shadow (arms the plan-time oracle)', async () => {
     // Minimal product with a declared store: `serial_no` is a plain author-unique (tenant-scoped
     // compound), `sku` is the durable `key` (single-column). deriveConflictKeys ⇒ {catalog: {sku}} — the
     // exact set the plan MUST pass to shadowApplyBaselineUpdate so its oracle enforces the right index
@@ -647,7 +647,7 @@ stores:
     expect(cat ? [...cat] : []).toEqual(['sku']);
   });
 
-  it('DX-v1.2 FINDING-B: a product update that FLIPS a surviving unique column carve-class REINDEXES it through `rayspec plan` (the plan.ts old/new-key split is fail-the-fix)', async () => {
+  it('a product update that FLIPS a surviving unique column carve-class REINDEXES it through `rayspec plan` (the plan.ts old/new-key split is fail-the-fix)', async () => {
     // A REAL product UPDATE where two SURVIVING `unique: true` columns swap carve-out class — the exact
     // MAJOR blindness the FINDING-1 fix closes, exercised end-to-end through `runPlan`'s product-update
     // path (NOT hand-built diff maps). `catalog` keeps both columns `unique: true` across the update:

@@ -1,5 +1,5 @@
 /**
- * LOCAL-DX-ONLY optional `.env` auto-loader for the `rayspec` CLI (a local-DX convenience).
+ * Local-development-only optional `.env` auto-loader for the `rayspec` CLI (a local development convenience).
  *
  * `rayspec plan`'s OPTIONAL shadow-apply only runs when `SHADOW_DATABASE_URL` is set, and the RO-1
  * same-DB guard can only fire when it has a `DATABASE_URL` to compare against. Without auto-loading

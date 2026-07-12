@@ -59,7 +59,7 @@
  *   (h)  the concurrent double-fire converges on EXACTLY ONE reply row (the honest at-least-once
  *        note: BOTH racers may invoke the model once — end-state asserts only);
  *   (i)  erasure covers the assistant reply rows too (RAW PII — the ledger count doubles);
- *   (j)  TF-F1 (the fix round): a terminally-FAILED first reply attempt → typed 502 carrying the
+ *   (j)  TF-F1: a terminally-FAILED first reply attempt → typed 502 carrying the
  *        attempt-0 run id; the same-message_id re-POST walks onto the FRESH deterministic
  *        attempt-1 id (clean header chain: attempt 0 stays 'error', attempt 1 completes; the
  *        reply row records the succeeding attempt) — never a re-run under the failed id.
@@ -842,7 +842,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
         turn_seq: 6,
         run_id: expectedReplyRunId(TENANT, CONV_ID, MSG_3),
       };
-      // (fix round): EXACT-SHAPE body assertions restored — the ONLY legitimately-varying
+      // EXACT-SHAPE body assertions — the ONLY legitimately-varying
       // key is reply.usage (fresh-run vs ledger-served presence), so it is stripped and the
       // REST is toEqual'd (an extra/renamed body key fails here; toMatchObject would let one ride).
       const exactBody = (o: { body: Record<string, unknown> }): Record<string, unknown> => {

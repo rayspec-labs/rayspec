@@ -244,7 +244,7 @@ describe('diffProductStores — golden per-shape deltas', () => {
     const plain = [store({ name: 'items', columns: [{ name: 'a', type: 'text' }] })];
     const uniq = [store({ name: 'items', columns: [{ name: 'a', type: 'text', unique: true }] })];
     const add = diffProductStores(plain, uniq);
-    // DX-v1.2: a non-key author `unique: true` is TENANT-SCOPED — the index is compound (tenant_id, a).
+    // A non-key author `unique: true` is TENANT-SCOPED — the index is compound (tenant_id, a).
     expect(add.statements).toEqual([
       'CREATE UNIQUE INDEX "items_a_unique" ON "items" USING btree ("tenant_id", "a")',
     ]);
@@ -255,7 +255,7 @@ describe('diffProductStores — golden per-shape deltas', () => {
     expect(remove.findings[0]?.destructiveKinds).toEqual(['drop-index']);
   });
 
-  it('DX-v1.2 CARVE-OUT: a conflict-key column keeps a SINGLE-column unique index', () => {
+  it('a conflict-key column keeps a SINGLE-column unique index', () => {
     const plain = [store({ name: 'items', columns: [{ name: 'a', type: 'text' }] })];
     const uniq = [store({ name: 'items', columns: [{ name: 'a', type: 'text', unique: true }] })];
     // Mark `a` as a durable conflict key → the durable `ON CONFLICT (a)` target MUST stay single-column
@@ -268,7 +268,7 @@ describe('diffProductStores — golden per-shape deltas', () => {
     expect(add.destructive).toBe(false);
   });
 
-  it('DX-v1.2 FINDING-1(a): a demoted conflict-key → author-unique column REINDEXES single → compound (DROP + CREATE)', () => {
+  it('a demoted conflict-key → author-unique column REINDEXES single → compound (DROP + CREATE)', () => {
     // The column STAYS `unique: true` across the update; only its durable-conflict-key status changes.
     // Old: `code` was a durable key (single-column `(code)` index). New: `code` is a plain author-unique
     // (tenant-scoped compound `(tenant_id, code)` expected) — the cross-tenant-leak fix must APPLY on the
@@ -296,7 +296,7 @@ describe('diffProductStores — golden per-shape deltas', () => {
     expect(r.notes.join('\n')).toMatch(/REINDEXED/);
   });
 
-  it('DX-v1.2 FINDING-1(b): a promoted author-unique → conflict-key column REINDEXES compound → single (DROP + CREATE)', () => {
+  it('a promoted author-unique → conflict-key column REINDEXES compound → single (DROP + CREATE)', () => {
     const oldStore = [
       store({ name: 'catalog', columns: [{ name: 'code', type: 'text', unique: true }] }),
     ];
@@ -315,7 +315,7 @@ describe('diffProductStores — golden per-shape deltas', () => {
     expect(scanMigrationSql(r.migrationSql, r.proposedAllowlist).pass).toBe(true);
   });
 
-  it('DX-v1.2 FINDING-1: a SAME carve-class survivor is a no-op (no spurious reindex)', () => {
+  it('a SAME carve-class survivor is a no-op (no spurious reindex)', () => {
     // `code` is author-unique in BOTH old and new (not a key either side) → no carve-class change → the
     // diff emits nothing. Guards against a reindex firing on every diff.
     const s = [store({ name: 'catalog', columns: [{ name: 'code', type: 'text', unique: true }] })];
@@ -342,7 +342,7 @@ describe('diffProductStores — golden per-shape deltas', () => {
     ];
     const r = diffProductStores(base, next);
     // Before the fix the added-column loop ignored `unique`, so the index was silently dropped.
-    // DX-v1.2: a non-key author unique on the new column → TENANT-SCOPED compound index.
+    // A non-key author unique on the new column → TENANT-SCOPED compound index.
     expect(r.statements).toEqual([
       'ALTER TABLE "items" ADD COLUMN "b" text',
       'CREATE UNIQUE INDEX "items_b_unique" ON "items" USING btree ("tenant_id", "b")',

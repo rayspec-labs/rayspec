@@ -14,7 +14,7 @@ stores:
     columns:
       # NOTE: NO `unique: true` on `code` here — but ONLY because this catalog is admin-curated and the
       # agent FK-revalidates the chosen code against it, so a DB-enforced unique is simply unnecessary.
-      # (Since DX-v1.2 a `unique: true` catalog code would be TENANT-SCOPED — a compound
+      # (A `unique: true` catalog code would be TENANT-SCOPED — a compound
       # (tenant_id, code) index — so two tenants CAN hold the same code with no cross-tenant collision;
       # it is no longer global/"wrong for a per-tenant catalog". The tenant-namespaced *_ref idiom is a
       # SEPARATE mechanism, only needed for a durable ON CONFLICT key that must stay single-column.)

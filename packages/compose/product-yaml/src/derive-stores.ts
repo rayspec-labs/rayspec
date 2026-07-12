@@ -190,7 +190,7 @@ export function deriveProductStores(
 }
 
 /**
- * Compute the per-store CONFLICT-KEY carve-out for a PRODUCT deployment (DX-v1.2 / Option B). Threaded
+ * Compute the per-store CONFLICT-KEY carve-out for a PRODUCT deployment. Threaded
  * to the store generators / diff / build-tables (`@rayspec/db`) so a durable `ON CONFLICT (<col>)` target
  * column keeps a SINGLE-column `(col)` unique index, while a NON-key author-declared `unique: true`
  * column becomes a TENANT-SCOPED compound `(tenant_id, col)` index (secure default — a store with no
@@ -202,8 +202,8 @@ export function deriveProductStores(
  *  - every OTHER store (capability-owned / artifact-collection / transcript sink) → ALL its `unique`
  *    columns. These are the tenant-prefixed `*_ref` idiom — each a durable `ON CONFLICT` target that
  *    embeds the tenant in the VALUE, so a single-column index is both REQUIRED (a compound one would
- *    42P10 the upsert) and tenant-safe (no cross-tenant leak). This keeps their DDL byte-identical to
- *    the pre-DX-v1.2 output.
+ *    42P10 the upsert) and tenant-safe (no cross-tenant leak). This keeps their DDL byte-identical
+ *    whether or not a conflict-key carve-out is supplied.
  */
 export function deriveConflictKeys(
   spec: ProductSpec,

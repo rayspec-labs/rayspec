@@ -485,7 +485,7 @@ describe('drift-detect (report-only)', () => {
   });
 });
 
-describe('P3S1-05 — all three FK onDelete policies apply + the live delete_rule matches', () => {
+describe('FK onDelete policies apply + the live delete_rule matches', () => {
   it('cascade / restrict / set null each land with the right live delete_rule', async () => {
     // A code-built stores set exercising all three policies against a DB (the throwaway only has
     // cascade). set null requires a nullable FK column.

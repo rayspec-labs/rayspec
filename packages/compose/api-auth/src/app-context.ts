@@ -91,7 +91,7 @@ export interface DeclarativeEngine {
    */
   productTables: ReadonlyMap<string, PgTable>;
   /**
-   * DX-v1.2: declared store name → its CONFLICT-KEY column set (the GLOBAL single-column unique /
+   * Declared store name → its CONFLICT-KEY column set (the GLOBAL single-column unique /
    * durable `ON CONFLICT` targets, from `@rayspec/product-yaml` `deriveConflictKeys`). Supplied ONLY on
    * the PRODUCT-profile boot path (`product-boot`); `createAuthApp` threads each store's set into its
    * store-route handler so a 23505 on a global-unique key column falls to the GENERIC 409 message

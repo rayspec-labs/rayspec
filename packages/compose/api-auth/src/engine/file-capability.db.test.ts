@@ -83,7 +83,7 @@ describe.skipIf(!hasDb)('the first-submit emit-fault posture (real engine tx)', 
     };
     blobDir = mkdtempSync(join(tmpdir(), 'rayspec-w2fi-dp1-'));
     blobFactory = makeFsBlobStoreFactory(blobDir);
-    // DX-v1.2: every capability-store unique (here file_uploads.file_ref) is a durable ON CONFLICT
+    // Every capability-store unique (here file_uploads.file_ref) is a durable ON CONFLICT
     // target → keep its unique index SINGLE-column (a compound one would 42P10 the upsert).
     const conflictKeys = new Map(
       spec.stores.map((s) => [
