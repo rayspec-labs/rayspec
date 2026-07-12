@@ -188,3 +188,35 @@ export function deriveProductStores(
 
   return { stores, ...(transcripts ? { transcripts } : {}), artifactCollections };
 }
+
+/**
+ * Compute the per-store CONFLICT-KEY carve-out for a PRODUCT deployment (DX-v1.2 / Option B). Threaded
+ * to the store generators / diff / build-tables (`@rayspec/db`) so a durable `ON CONFLICT (<col>)` target
+ * column keeps a SINGLE-column `(col)` unique index, while a NON-key author-declared `unique: true`
+ * column becomes a TENANT-SCOPED compound `(tenant_id, col)` index (secure default — a store with no
+ * entry makes every unique column compound; see `@rayspec/db` `StoreConflictKeys`).
+ *
+ * The rule, per store in `stores` (the capability + derived composed set the deployment materializes):
+ *  - a DECLARED product store (name ∈ `spec.stores`) → its declared `key` columns (the durable upsert
+ *    targets). A NON-key `unique: true` author column is NOT a conflict key → tenant-scoped compound.
+ *  - every OTHER store (capability-owned / artifact-collection / transcript sink) → ALL its `unique`
+ *    columns. These are the tenant-prefixed `*_ref` idiom — each a durable `ON CONFLICT` target that
+ *    embeds the tenant in the VALUE, so a single-column index is both REQUIRED (a compound one would
+ *    42P10 the upsert) and tenant-safe (no cross-tenant leak). This keeps their DDL byte-identical to
+ *    the pre-DX-v1.2 output.
+ */
+export function deriveConflictKeys(
+  spec: ProductSpec,
+  stores: StoreSpec[],
+): Map<string, ReadonlySet<string>> {
+  const declaredKeys = new Map(spec.stores.map((s) => [s.name, new Set<string>(s.key)]));
+  const result = new Map<string, ReadonlySet<string>>();
+  for (const store of stores) {
+    const declared = declaredKeys.get(store.name);
+    result.set(
+      store.name,
+      declared ?? new Set(store.columns.filter((c) => c.unique).map((c) => c.name)),
+    );
+  }
+  return result;
+}

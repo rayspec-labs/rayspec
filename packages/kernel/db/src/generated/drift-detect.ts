@@ -23,6 +23,7 @@
  * schema (tests use an isolated schema; a deployment uses `public`).
  */
 import type { ColumnType, StoreSpec } from '@rayspec/spec';
+import type { StoreConflictKeys } from './generate-product-sql.js';
 import { INJECTED_COLUMNS as INJECTED_DESCRIPTOR } from './injected-columns.js';
 
 /** A single drift finding (report-only). `expected`/`actual` are human-readable. */
@@ -35,6 +36,15 @@ export interface DriftFinding {
     | 'column_type'
     | 'column_nullability'
     | 'missing_unique'
+    /**
+     * DX-v1.2 diff-scanner flag: a NON-key `unique: true` column whose live unique index is a STALE
+     * single-column GLOBAL `(col)` index (a legacy v1.0/v1.1 deployment) where a TENANT-SCOPED compound
+     * `(tenant_id, col)` is now expected. Reported so an operator knows to migrate — this module NEVER
+     * auto-migrates (reconciliation goes through the reviewed forward-migration gate). Only reachable
+     * when the caller supplies `conflictKeys` (the boot/deploy paths use the lenient default and accept
+     * either shape, so a working legacy deployment is never refused).
+     */
+    | 'stale_global_unique'
     | 'missing_tenant_fk'
     | 'tenant_fk_not_cascade'
     | 'missing_product_fk'
@@ -97,6 +107,7 @@ export async function detectDrift(
   stores: StoreSpec[],
   schemaName: string,
   query: QueryFn,
+  conflictKeys?: StoreConflictKeys,
 ): Promise<DriftFinding[]> {
   const findings: DriftFinding[] = [];
   const tableNames = stores.map((s) => s.name);
@@ -129,26 +140,45 @@ export async function detectDrift(
     [schemaName, tableNames],
   )) as unknown as FkRow[];
 
-  // --- single-column UNIQUE indexes (GEN-2) -------------------------------------------------
-  // A dropped author `unique:true` is otherwise invisible drift. Read pg_index for single-column
-  // UNIQUE indexes (the generator emits a 1-col unique index per `unique` column). We key by
-  // (table, column) so a missing unique on a still-present column is reported.
+  // --- UNIQUE indexes, FULL ordered column lists (GEN-2 + DX-v1.2) ---------------------------
+  // A dropped `unique:true` is otherwise invisible drift; and DX-v1.2 makes a NON-key author-unique a
+  // TENANT-SCOPED compound `(tenant_id, col)` index (a conflict key stays single `(col)`), so we can no
+  // longer read only single-column indexes. Read EVERY unique index with its ORDERED column list
+  // (`unnest(indkey) WITH ORDINALITY`) so we can tell a single `(col)` from a compound `(tenant_id, col)`.
   const uniqueRows = (await query(
-    `SELECT t.relname AS table_name, a.attname AS column_name
+    `SELECT t.relname AS table_name, c.relname AS index_name, a.attname AS column_name, k.ord
        FROM pg_index ix
        JOIN pg_class t ON t.oid = ix.indrelid
+       JOIN pg_class c ON c.oid = ix.indexrelid
        JOIN pg_namespace ns ON ns.oid = t.relnamespace
-       JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+       CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord)
+       JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
       WHERE ix.indisunique = true
         AND ns.nspname = $1 AND t.relname = ANY($2)
-        AND array_length(ix.indkey, 1) = 1`,
+      ORDER BY t.relname, c.relname, k.ord`,
     [schemaName, tableNames],
-  )) as unknown as { table_name: string; column_name: string }[];
-  const uniqueByTable = new Map<string, Set<string>>();
+  )) as unknown as { table_name: string; index_name: string; column_name: string; ord: number }[];
+  // table -> index name -> ordered column list.
+  const indexColumns = new Map<string, Map<string, string[]>>();
   for (const r of uniqueRows) {
-    if (!uniqueByTable.has(r.table_name)) uniqueByTable.set(r.table_name, new Set());
-    uniqueByTable.get(r.table_name)?.add(r.column_name);
+    let byIndex = indexColumns.get(r.table_name);
+    if (!byIndex) {
+      byIndex = new Map();
+      indexColumns.set(r.table_name, byIndex);
+    }
+    const cols = byIndex.get(r.index_name) ?? [];
+    cols.push(r.column_name);
+    byIndex.set(r.index_name, cols);
   }
+  // Does `table` have a unique index whose columns are EXACTLY `expected` (ordered)?
+  const hasUniqueIndexOn = (table: string, expected: string[]): boolean => {
+    const byIndex = indexColumns.get(table);
+    if (!byIndex) return false;
+    for (const cols of byIndex.values()) {
+      if (cols.length === expected.length && cols.every((c, i) => c === expected[i])) return true;
+    }
+    return false;
+  };
 
   for (const store of stores) {
     const cols = colByTable.get(store.name);
@@ -196,15 +226,45 @@ export async function detectDrift(
           actual: liveNullable ? 'nullable' : 'not null',
         });
       }
-      // (GEN-2) A declared `unique:true` column must have a live single-column UNIQUE index.
-      if (col.unique && !(uniqueByTable.get(store.name)?.has(col.name) ?? false)) {
-        findings.push({
-          table: store.name,
-          kind: 'missing_unique',
-          column: col.name,
-          expected: 'UNIQUE index present',
-          actual: 'no unique index',
-        });
+      // (GEN-2 + DX-v1.2) A declared `unique:true` column must have a live UNIQUE index.
+      if (col.unique) {
+        const singleOnCol = hasUniqueIndexOn(store.name, [col.name]);
+        const compoundTenantCol = hasUniqueIndexOn(store.name, ['tenant_id', col.name]);
+        const isConflictKey = conflictKeys?.get(store.name)?.has(col.name);
+        if (conflictKeys === undefined || isConflictKey) {
+          // LENIENT (deploy.ts frozen + boot classify): any covering unique index (single OR the
+          // tenant-scoped compound) satisfies — never false drift, and a conflict key's single index is
+          // accepted. A truly-missing index is still reported.
+          if (!singleOnCol && !compoundTenantCol) {
+            findings.push({
+              table: store.name,
+              kind: 'missing_unique',
+              column: col.name,
+              expected: 'UNIQUE index present',
+              actual: 'no unique index',
+            });
+          }
+        } else if (compoundTenantCol) {
+          // A NON-key author-unique column with the expected tenant-scoped compound index — no drift.
+        } else if (singleOnCol) {
+          // A stale single-column GLOBAL unique where a tenant-scoped compound is now expected
+          // (a legacy v1.0/v1.1 deployment) — report so an operator migrates (NEVER auto-migrate).
+          findings.push({
+            table: store.name,
+            kind: 'stale_global_unique',
+            column: col.name,
+            expected: 'tenant-scoped UNIQUE index (tenant_id, col)',
+            actual: 'stale single-column GLOBAL unique index (col)',
+          });
+        } else {
+          findings.push({
+            table: store.name,
+            kind: 'missing_unique',
+            column: col.name,
+            expected: 'tenant-scoped UNIQUE index (tenant_id, col)',
+            actual: 'no unique index',
+          });
+        }
       }
     }
 

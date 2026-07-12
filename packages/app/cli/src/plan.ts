@@ -58,6 +58,7 @@ import {
   formatFindings,
   generateProductSql,
   type ScanResult,
+  type StoreConflictKeys,
   scanMigrationSql,
 } from '@rayspec/db';
 import {
@@ -351,13 +352,17 @@ function parseAllowlist(text: string): AllowlistEntry[] {
  */
 async function deriveStoresForCli(
   spec: ProductSpec,
-): Promise<{ ok: true; stores: StoreSpec[] } | { ok: false; error: string }> {
+): Promise<
+  { ok: true; stores: StoreSpec[]; conflictKeys: StoreConflictKeys } | { ok: false; error: string }
+> {
   try {
-    const { composeCapabilityStores, deriveProductStores } = await import('@rayspec/product-yaml');
-    return {
-      ok: true,
-      stores: deriveProductStores(spec, composeCapabilityStores(spec).names).stores,
-    };
+    const { composeCapabilityStores, deriveConflictKeys, deriveProductStores } = await import(
+      '@rayspec/product-yaml'
+    );
+    const stores = deriveProductStores(spec, composeCapabilityStores(spec).names).stores;
+    // DX-v1.2: the derived collection/transcript conflict keys (`*_ref`) + declared `key` columns stay
+    // single-column; any other author unique is tenant-scoped compound.
+    return { ok: true, stores, conflictKeys: deriveConflictKeys(spec, stores) };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
@@ -382,6 +387,19 @@ interface StorePlanInputs {
   readonly product?: PlanProduct;
   /** First-materialization SQL thunk (backend uses the `generateSql` seam; product uses the derived stores). */
   readonly firstMaterializeSql: () => string;
+  /**
+   * DX-v1.2 per-store conflict-key carve-out for the NEW stores (the index shape to emit + the shape the
+   * plan-time shadow oracle enforces). Present for the product profile (durable `ON CONFLICT` targets
+   * stay single-column); ABSENT for the backend profile → every author `unique: true` column is
+   * tenant-scoped compound (the secure default).
+   */
+  readonly newConflictKeys?: StoreConflictKeys;
+  /**
+   * DX-v1.2 per-store conflict-key carve-out for the OLD (baseline) stores — the shape the LIVE indexes
+   * have. Seeds the update-mode shadow baseline so it reproduces the real old→new reindex; used by
+   * `diffProductStores` to detect a surviving column's carve-out change. Product profile only.
+   */
+  readonly oldConflictKeys?: StoreConflictKeys;
 }
 
 /**
@@ -398,11 +416,17 @@ async function planStores(inp: StorePlanInputs): Promise<PlanResult> {
   let notes: string[] = [];
   let baselineSql = '';
   if (inp.oldStores !== undefined) {
-    const diff = diffProductStores(inp.oldStores, inp.newStores);
+    const diff = diffProductStores(inp.oldStores, inp.newStores, {
+      newConflictKeys: inp.newConflictKeys,
+      oldConflictKeys: inp.oldConflictKeys,
+    });
     migrationSql = diff.migrationSql;
     proposedAllowlist = diff.proposedAllowlist;
     notes = diff.notes;
-    baselineSql = generateProductSql(inp.oldStores);
+    // FINDING-1 seeding: the shadow baseline reproduces the LIVE (OLD) index shape, so it MUST use the
+    // OLD stores' OWN conflict keys — never the NEW ones — or a genuine old→new reindex is not reproduced
+    // (a demoted `key`→author-unique column would seed a compound index the diff then can't reindex).
+    baselineSql = generateProductSql(inp.oldStores, inp.oldConflictKeys);
   } else {
     migrationSql = inp.firstMaterializeSql();
   }
@@ -458,7 +482,16 @@ async function planStores(inp: StorePlanInputs): Promise<PlanResult> {
 
   if (updateMode) {
     const run = inp.opts.shadowApplyBaselineUpdate ?? defaultShadowApplyBaselineUpdate;
-    const shadow = await run(target.url, baselineSql, migrationSql, inp.newStores);
+    // FINDING-2: ARM the plan-time drift oracle — thread the NEW conflict keys so the baseline-seeded
+    // shadow's `detectDrift` flags a stale single-column GLOBAL unique index where a tenant-scoped
+    // compound one is now expected (`stale_global_unique`, report-only). Boot/deploy stay LENIENT.
+    const shadow = await run(
+      target.url,
+      baselineSql,
+      migrationSql,
+      inp.newStores,
+      inp.newConflictKeys,
+    );
     if (!shadow.ok) {
       return {
         ok: false,
@@ -545,8 +578,15 @@ async function planProduct(
   const derivedNew = await deriveStoresForCli(parsed.value);
   let projectionNote: string | undefined;
   let newStores: StoreSpec[] = [];
+  // DX-v1.2: the per-store conflict-key carve-out for the derived product stores — kept SEPARATE for the
+  // OLD and NEW sides (a surviving store's conflict keys CAN change across an update, e.g. a column
+  // demoted from a durable `key` to a plain author-unique), so a single merged map cannot seed the
+  // baseline's live shape nor let the diff detect a reindex. (FINDING-1 fix.)
+  let newConflictKeys: StoreConflictKeys | undefined;
+  let oldConflictKeys: StoreConflictKeys | undefined;
   if (derivedNew.ok) {
     newStores = derivedNew.stores;
+    newConflictKeys = derivedNew.conflictKeys;
   } else if (oldText === undefined) {
     // Projection-only: the doc VALIDATED — surface the derivation gap as a note, project no stores.
     projectionNote = `derived-store projection unavailable: ${derivedNew.error}`;
@@ -594,6 +634,7 @@ async function planProduct(
       };
     }
     oldStores = derivedOld.stores;
+    oldConflictKeys = derivedOld.conflictKeys; // the OLD (live) carve-out shape — seeds the baseline
   }
 
   const result = await planStores({
@@ -604,7 +645,10 @@ async function planProduct(
     routes: [], // a product doc materializes no Tier-A routes in the deploy front-half
     agents: [], // product extractors are counted in `product.extractors`, not projected as backend/model
     product,
-    firstMaterializeSql: () => (newStores.length > 0 ? generateProductSql(newStores) : ''),
+    newConflictKeys,
+    oldConflictKeys,
+    firstMaterializeSql: () =>
+      newStores.length > 0 ? generateProductSql(newStores, newConflictKeys) : '',
   });
   // Weave a projection-only derivation note (never in update mode, where a gap is fatal above).
   if (projectionNote !== undefined) {

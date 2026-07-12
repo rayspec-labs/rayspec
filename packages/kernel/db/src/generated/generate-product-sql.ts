@@ -32,6 +32,23 @@ import {
 } from '@rayspec/spec';
 import { INJECTED_AFTER, INJECTED_BEFORE } from './injected-columns.js';
 
+/**
+ * The per-store CONFLICT-KEY carve-out (DX-v1.2 / Option B). A store's conflict keys are the columns
+ * that a durable `ON CONFLICT (<col>)` upsert targets (the product-profile `key` column, and the
+ * capability/collection/transcript `*_ref` idiom). Such a column MUST keep a SINGLE-column `(col)`
+ * unique index — a compound `(tenant_id, col)` index does not satisfy `ON CONFLICT (col)` (Postgres
+ * 42P10). Every OTHER `unique: true` column (author-declared on a plain column, written via a plain
+ * REST INSERT with no `ON CONFLICT`) becomes a TENANT-SCOPED compound `(tenant_id, col)` unique so two
+ * tenants can hold the same value with no cross-tenant existence leak.
+ *
+ * Keyed by store name → the set of conflict-key column names for that store. SECURE BY DEFAULT: a
+ * store with NO entry (or an omitted map) makes EVERY unique column compound (tenant-safe) — forgetting
+ * to mark a durable key fails the durable upsert LOUD (42P10), never a silent global-unique leak. Only
+ * a product-profile materialization passes this (see `@rayspec/product-yaml` `deriveConflictKeys`); a
+ * backend-profile materialization passes nothing → all author-unique columns are tenant-scoped.
+ */
+export type StoreConflictKeys = ReadonlyMap<string, ReadonlySet<string>>;
+
 /** Map the closed ColumnType vocabulary to its Postgres column type (deterministic). */
 const PG_TYPE: Record<ColumnType, string> = {
   text: 'text',
@@ -79,8 +96,12 @@ function emitColumnSql(col: StoreColumn): string {
  * Exported so the delta-diff core (`diffProductStores`) materializes an ADDED table with
  * the byte-identical CREATE path — same injected tenancy/GDPR columns, tenant FK, product FKs, and
  * indexes as a first materialization — instead of duplicating (and drifting from) this DDL style.
+ *
+ * `conflictKeys` is this store's conflict-key column set (see {@link StoreConflictKeys}): a unique
+ * column IN it → single-column `(col)` index (the durable `ON CONFLICT` target); a unique column NOT
+ * in it (or an omitted set) → tenant-scoped compound `(tenant_id, col)` index (secure default).
  */
-export function emitStoreSql(store: StoreSpec): string[] {
+export function emitStoreSql(store: StoreSpec, conflictKeys?: ReadonlySet<string>): string[] {
   assertStoreSafeSql(store);
   const statements: string[] = [];
   const colLines: string[] = [];
@@ -105,12 +126,20 @@ export function emitStoreSql(store: StoreSpec): string[] {
     statements.push(emitFkSql(store.name, fk));
   }
 
-  // UNIQUE indexes for author `unique: true` columns (drizzle name `<table>_<col>_unique`).
+  // UNIQUE indexes for `unique: true` columns (drizzle name `<table>_<col>_unique`, UNCHANGED so
+  // drift-detect + the DROP counterpart key off the stable name). A conflict-key column keeps a
+  // SINGLE-column `(col)` index (the durable `ON CONFLICT (col)` target — a compound index would
+  // 42P10); every other unique column is TENANT-SCOPED compound `("tenant_id", col)` so two tenants
+  // can hold the same value with no cross-tenant existence leak (DX-v1.2). Secure default (no
+  // conflict-key set) = compound.
   for (const col of store.columns) {
     if (col.unique) {
+      const indexColumns = conflictKeys?.has(col.name)
+        ? `"${col.name}"`
+        : `"tenant_id", "${col.name}"`;
       statements.push(
         `CREATE UNIQUE INDEX "${store.name}_${col.name}_unique" ON "${store.name}" ` +
-          `USING btree ("${col.name}")`,
+          `USING btree (${indexColumns})`,
       );
     }
   }
@@ -137,7 +166,7 @@ function emitFkSql(table: string, fk: StoreForeignKey): string {
  * the markers) and `drizzle-kit migrate` both apply it identically. An EMPTY `stores[]` produces an
  * empty string (the product-empty baseline adds NO platform migration).
  */
-export function generateProductSql(stores: StoreSpec[]): string {
+export function generateProductSql(stores: StoreSpec[], conflictKeys?: StoreConflictKeys): string {
   if (stores.length === 0) return '';
   const header = [
     '-- GENERATED product migration — review before applying (read the SQL, never blind-apply).',
@@ -148,7 +177,7 @@ export function generateProductSql(stores: StoreSpec[]): string {
     '',
   ].join('\n');
 
-  const allStatements = stores.flatMap(emitStoreSql);
+  const allStatements = stores.flatMap((s) => emitStoreSql(s, conflictKeys?.get(s.name)));
   // Drizzle terminates each statement with `;` then the breakpoint marker (the FINAL statement
   // gets a trailing `;` too); shadow-dryrun strips the markers and runs the file.
   const body = allStatements.map((s) => `${s};`).join('\n--> statement-breakpoint\n');

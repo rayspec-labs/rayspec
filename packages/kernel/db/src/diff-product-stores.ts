@@ -38,7 +38,11 @@ import {
   type StoreForeignKey,
   type StoreSpec,
 } from '@rayspec/spec';
-import { emitStoreSql, generateProductSql } from './generated/generate-product-sql.js';
+import {
+  emitStoreSql,
+  generateProductSql,
+  type StoreConflictKeys,
+} from './generated/generate-product-sql.js';
 import type { AllowlistEntry, DestructiveKind } from './migration-scan.js';
 import { scanMigrationSql } from './migration-scan.js';
 
@@ -74,6 +78,23 @@ export interface DiffProductStoresOptions {
    * SQL comment, never scanned). Sanitized to a safe slug; defaults to `update`.
    */
   readonly label?: string;
+  /**
+   * The NEW stores' per-store conflict-key carve-out (DX-v1.2 — see {@link StoreConflictKeys}) — the
+   * index shape to EMIT. A unique column IN its store's set → single-column `(col)` index (the durable
+   * `ON CONFLICT` target); a unique column NOT in it → tenant-scoped compound `(tenant_id, col)`. Secure
+   * default (omitted) = compound. Drives every added-table CREATE and every surviving-table
+   * CREATE UNIQUE INDEX.
+   */
+  readonly newConflictKeys?: StoreConflictKeys;
+  /**
+   * The OLD (live) stores' per-store conflict-key carve-out — the shape the EXISTING indexes have. Used
+   * ONLY to detect a SURVIVING `unique: true` column whose carve-out class CHANGED (single↔compound):
+   * when its old-set membership ≠ its new-set membership the live index columns differ, so the diff emits
+   * a DROP + CREATE REINDEX pair (the index NAME is stable, so it is a genuine reindex). Omitted ⇒ assume
+   * the old class equals the new (no reindex) — correct for a first materialization and for any caller
+   * that never changes a column's durable-conflict-key status.
+   */
+  readonly oldConflictKeys?: StoreConflictKeys;
 }
 
 /** The structured result of diffing two declared-store sets into a forward migration. */
@@ -149,9 +170,15 @@ function dropNotNullSql(table: string, column: string): string {
   return `ALTER TABLE "${table}" ALTER COLUMN "${column}" DROP NOT NULL`;
 }
 
-/** CREATE UNIQUE INDEX (additive to the scan; NB it can still fail on duplicate data — noted). */
-function createUniqueIndexSql(table: string, column: string): string {
-  return `CREATE UNIQUE INDEX "${table}_${column}_unique" ON "${table}" USING btree ("${column}")`;
+/**
+ * CREATE UNIQUE INDEX (additive to the scan; NB it can still fail on duplicate data — noted). `compound`
+ * → tenant-scoped `("tenant_id", col)` (a NON-key `unique: true` column); otherwise single `(col)` (a
+ * conflict-key column — the durable `ON CONFLICT` target). The index NAME is unchanged in both cases, so
+ * `dropUniqueIndexSql` (name-keyed) and drift-detect key off the stable name (DX-v1.2).
+ */
+function createUniqueIndexSql(table: string, column: string, compound: boolean): string {
+  const indexColumns = compound ? `"tenant_id", "${column}"` : `"${column}"`;
+  return `CREATE UNIQUE INDEX "${table}_${column}_unique" ON "${table}" USING btree (${indexColumns})`;
 }
 
 /** DROP INDEX for a column that lost `unique` (destructive — the scan flags `drop-index`). */
@@ -252,7 +279,12 @@ interface SurvivingTablePlan {
   notes: string[];
 }
 
-function planSurvivingTable(oldStore: StoreSpec, newStore: StoreSpec): SurvivingTablePlan {
+function planSurvivingTable(
+  oldStore: StoreSpec,
+  newStore: StoreSpec,
+  newConflictKeys?: ReadonlySet<string>,
+  oldConflictKeys?: ReadonlySet<string>,
+): SurvivingTablePlan {
   const table = newStore.name;
   const oldCols = columnsByName(oldStore);
   const newCols = columnsByName(newStore);
@@ -269,7 +301,10 @@ function planSurvivingTable(oldStore: StoreSpec, newStore: StoreSpec): Surviving
     additive.push(addColumnSql(table, col)); // may be scan-destructive when NOT NULL w/ no default
     // A brand-new `unique` column also needs its unique index (a NEW column holds no duplicate data,
     // so the CREATE UNIQUE INDEX is additive — no de-dup caveat, unlike a survivor gaining uniqueness).
-    if (col.unique) additive.push(createUniqueIndexSql(table, col.name));
+    if (col.unique)
+      additive.push(
+        createUniqueIndexSql(table, col.name, !(newConflictKeys?.has(col.name) ?? false)),
+      );
     if (!col.nullable) {
       notes.push(
         `added non-nullable column "${table}"."${col.name}" has no default — it FAILS on a ` +
@@ -308,9 +343,11 @@ function planSurvivingTable(oldStore: StoreSpec, newStore: StoreSpec): Surviving
         );
       }
     }
+    const newIsKey = newConflictKeys?.has(col.name) ?? false;
+    const oldIsKey = oldConflictKeys?.has(col.name) ?? false;
     if (prev.unique !== col.unique) {
       if (col.unique) {
-        additive.push(createUniqueIndexSql(table, col.name));
+        additive.push(createUniqueIndexSql(table, col.name, !newIsKey));
         notes.push(
           `unique index added on "${table}"."${col.name}" — CREATE UNIQUE INDEX FAILS if existing ` +
             'rows hold duplicate values; de-duplicate first.',
@@ -318,6 +355,25 @@ function planSurvivingTable(oldStore: StoreSpec, newStore: StoreSpec): Surviving
       } else {
         destructive.push(dropUniqueIndexSql(table, col.name));
       }
+    } else if (col.unique && oldIsKey !== newIsKey) {
+      // The column STAYS `unique: true` but its durable-conflict-key status changed, so its live index
+      // columns change (single `(col)` ↔ tenant-scoped compound `(tenant_id, col)`). The index NAME is
+      // stable, so this is a genuine REINDEX: DROP the old-shape index + CREATE the new-shape one,
+      // ADJACENT in the DESTRUCTIVE segment (DROP first — an ADD before the DROP of the same-named index
+      // would collide on a real DB), mirroring the FK-replace pattern below. Threading `oldConflictKeys`
+      // is what makes this reachable: without the OLD carve-out class the diff cannot see the change and
+      // silently leaves the wrong index shape (the DX-v1.2 update/diff blindness this closes).
+      destructive.push(
+        dropUniqueIndexSql(table, col.name),
+        createUniqueIndexSql(table, col.name, !newIsKey),
+      );
+      notes.push(
+        `unique index on "${table}"."${col.name}" is REINDEXED (` +
+          `${oldIsKey ? 'single-column (col)' : 'tenant-scoped compound (tenant_id, col)'} → ` +
+          `${newIsKey ? 'single-column (col)' : 'tenant-scoped compound (tenant_id, col)'}) because its ` +
+          'durable-conflict-key status changed — DROP + CREATE; the CREATE FAILS if existing rows now ' +
+          'violate the new uniqueness scope.',
+      );
     }
   }
 
@@ -363,9 +419,11 @@ export function diffProductStores(
   const survivingStores = newStores.filter((s) => oldByName.has(s.name)); // newStores order
 
   const notes: string[] = [];
+  const newConflictKeys = opts.newConflictKeys;
+  const oldConflictKeys = opts.oldConflictKeys;
 
   // Phase A — added tables (byte-identical CREATE path: injected tenancy cols + FK + indexes).
-  const addedStatements = addedStores.flatMap((s) => emitStoreSql(s));
+  const addedStatements = addedStores.flatMap((s) => emitStoreSql(s, newConflictKeys?.get(s.name)));
 
   // Phases B/C — surviving-table alters, split additive-first / destructive-last.
   const survivingAdditive: string[] = [];
@@ -373,7 +431,12 @@ export function diffProductStores(
   for (const store of survivingStores) {
     const oldStore = oldByName.get(store.name);
     if (!oldStore) continue; // unreachable (survivingStores are in oldByName) — narrows the type
-    const plan = planSurvivingTable(oldStore, store);
+    const plan = planSurvivingTable(
+      oldStore,
+      store,
+      newConflictKeys?.get(store.name),
+      oldConflictKeys?.get(store.name),
+    );
     survivingAdditive.push(...plan.additive);
     survivingDestructive.push(...plan.destructive);
     notes.push(...plan.notes);
@@ -471,7 +534,8 @@ function assembleMigrationSql(
   if (allStatements.length === 0) return '';
   // Purely additive (only added tables, no surviving-table alters, no drops): identical to the
   // CREATE-only generator — including the first-materialization case `diffProductStores([], new)`.
-  if (deltaStatements.length === 0) return generateProductSql(addedStores as StoreSpec[]);
+  if (deltaStatements.length === 0)
+    return generateProductSql(addedStores as StoreSpec[], opts.newConflictKeys);
 
   const label = sanitizeLabel(opts.label ?? 'update');
   const header = [

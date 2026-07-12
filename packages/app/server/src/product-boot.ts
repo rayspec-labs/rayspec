@@ -77,6 +77,7 @@ import {
   declaresAudio,
   declaresConversationInput,
   declaresFileInput,
+  deriveConflictKeys,
   deriveProductStores,
   type LiveExtractionInputContext,
   makeLiveExtractionNode,
@@ -1530,7 +1531,11 @@ export async function deployProductYamlSpec(
   const capabilityStores = composeCapabilityStores(spec);
   const derived = deriveProductStores(spec, capabilityStores.names);
   const composedStores = [...capabilityStores.stores, ...derived.stores];
-  const productTables = buildProductTables(composedStores);
+  // DX-v1.2: the durable `ON CONFLICT` target columns (declared `key` + the capability/collection/
+  // transcript `*_ref` idiom) keep a SINGLE-column unique index; any other author `unique: true` column
+  // is TENANT-SCOPED compound. Threaded to every product-store materializer below.
+  const conflictKeys = deriveConflictKeys(spec, composedStores);
+  const productTables = buildProductTables(composedStores, conflictKeys);
   opts.registerProductTables?.(productTables);
 
   // ── 2. reboot-safety: mount-vs-materialize (existing data survives a reboot) ──────────
@@ -1590,7 +1595,7 @@ export async function deployProductYamlSpec(
         ? [
             {
               name: '0000_product_stores.sql',
-              sql: generateProductSql(composedStores),
+              sql: generateProductSql(composedStores, conflictKeys),
               allowlist: [],
             },
           ]

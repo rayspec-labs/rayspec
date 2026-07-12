@@ -54,7 +54,7 @@ export {
   generateProductSchema,
   INJECTED_COLUMN_NAMES,
 } from './generated/generate-product-schema.js';
-export { generateProductSql } from './generated/generate-product-sql.js';
+export { generateProductSql, type StoreConflictKeys } from './generated/generate-product-sql.js';
 export { PRODUCT_TENANT_SCOPED_TABLES } from './generated/product-schema.js';
 export { MIGRATION_ALLOWLIST } from './migration-scan.allowlist.js';
 export {

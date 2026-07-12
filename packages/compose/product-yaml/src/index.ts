@@ -20,6 +20,7 @@ export {
 export {
   type DerivedProductStores,
   DeriveStoresError,
+  deriveConflictKeys,
   deriveProductStores,
 } from './derive-stores.js';
 export { isProductComposeError, ProductComposeError } from './errors.js';

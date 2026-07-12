@@ -38,7 +38,13 @@
  * additionally responsible for never echoing the URL, and this module never puts the URL in the error.
  */
 import { randomBytes } from 'node:crypto';
-import { type DriftFinding, detectDrift, formatDrift, type QueryFn } from '@rayspec/db';
+import {
+  type DriftFinding,
+  detectDrift,
+  formatDrift,
+  type QueryFn,
+  type StoreConflictKeys,
+} from '@rayspec/db';
 import type { StoreSpec } from '@rayspec/spec';
 import postgres from 'postgres';
 
@@ -266,12 +272,19 @@ export type ShadowBaselineResult =
  *
  * `baselineSql`/`deltaSql` are `generateProductSql` / `diffProductStores` output (Drizzle-style with
  * `--> statement-breakpoint` markers), which we strip before running each as one transaction.
+ *
+ * `newConflictKeys` (DX-v1.2, optional) ARMS the post-apply oracle: supplied ⇒ `detectDrift` is STRICT
+ * about the unique-index shape (a non-key author-unique column with a stale single-column GLOBAL index
+ * where a tenant-scoped compound is now expected is flagged `stale_global_unique`); omitted ⇒ LENIENT
+ * (the boot posture — any covering unique index satisfies, so a working legacy deployment is never
+ * refused). The `plan` path passes it; direct callers omit it.
  */
 export async function shadowApplyBaselineUpdate(
   shadowDatabaseUrl: string,
   baselineSql: string,
   deltaSql: string,
   newStores: StoreSpec[],
+  newConflictKeys?: StoreConflictKeys,
 ): Promise<ShadowBaselineResult> {
   const dbName = throwawayDbName();
   const admin = postgres(shadowDatabaseUrl, { max: 1, onnotice: () => {} });
@@ -307,7 +320,11 @@ export async function shadowApplyBaselineUpdate(
       // product tables in `public`; zero drift vs `newStores` = the delta produced the target schema.
       const query: QueryFn = async (sql, params) =>
         (await work.unsafe(sql, params as never[])) as unknown as Record<string, unknown>[];
-      const drift = await detectDrift(newStores, 'public', query);
+      // DX-v1.2 FINDING-2: when `newConflictKeys` is supplied (the `plan` path arms it), the oracle is
+      // STRICT about the unique-index shape — a NON-key author-unique column with a stale single-column
+      // GLOBAL index (where a tenant-scoped compound is now expected) is flagged `stale_global_unique`.
+      // Omitted (a direct/legacy caller) ⇒ LENIENT: any covering unique index satisfies (boot posture).
+      const drift = await detectDrift(newStores, 'public', query, newConflictKeys);
       if (drift.length > 0) {
         return {
           ok: false,

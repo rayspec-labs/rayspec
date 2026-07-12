@@ -602,6 +602,164 @@ describe('plan — Product-YAML (0.2) projections + update mode', () => {
     expect(rev.ok).toBe(false); // destructive without an allowlist — BLOCKED (the gate)
     expect(rev.breakingChangeBlocked).toBe(true);
   });
+
+  it('DX-v1.2 FINDING-2: a PRODUCT update THREADS the derived conflict keys to the baseline-seeded shadow (arms the plan-time oracle)', async () => {
+    // Minimal product with a declared store: `serial_no` is a plain author-unique (tenant-scoped
+    // compound), `sku` is the durable `key` (single-column). deriveConflictKeys ⇒ {catalog: {sku}} — the
+    // exact set the plan MUST pass to shadowApplyBaselineUpdate so its oracle enforces the right index
+    // shape. Fail-the-fix: drop the `inp.newConflictKeys` passthrough in planStores and the spy sees
+    // `undefined` → RED.
+    const catOld = `version: '1.0'
+product:
+  id: catalog_app
+  name: Catalog App
+stores:
+  - name: catalog
+    columns:
+      - { name: serial_no, type: text, unique: true }
+      - { name: sku, type: text }
+    key: [sku]
+`;
+    // An ADDITIVE delta (a new nullable column) → not gate-blocked → the shadow spy is reached.
+    const catNew = catOld.replace(
+      '    key: [sku]\n',
+      '      - { name: label, type: text, nullable: true }\n    key: [sku]\n',
+    );
+    writeFileSync(join(dir, 'cat-old.yaml'), catOld, 'utf8');
+    writeFileSync(join(dir, 'cat-new.yaml'), catNew, 'utf8');
+    let seenConflictKeys: unknown = 'NOT_CALLED';
+    const r = await runPlan(['cat-new.yaml'], {
+      against: 'cat-old.yaml',
+      databaseUrl: 'postgres://u:p@db.internal:5432/rayspec',
+      shadowDatabaseUrl: 'postgres://u:p@db.internal:5432/rayspec_shadow',
+      shadowApplyBaselineUpdate: async (_url, _base, _delta, _stores, newConflictKeys) => {
+        seenConflictKeys = newConflictKeys;
+        return { ok: true, dbName: 'x', drift: [] };
+      },
+    });
+    expect(r.ok).toBe(true);
+    expect(r.shadowApplied).toBe(true);
+    expect(r.breakingChangeBlocked).toBe(false);
+    // The plan THREADED the derived per-store conflict keys (durable `sku` stays a single-column target).
+    expect(seenConflictKeys).toBeInstanceOf(Map);
+    const cat = (seenConflictKeys as Map<string, ReadonlySet<string>>).get('catalog');
+    expect(cat).toBeDefined();
+    expect(cat ? [...cat] : []).toEqual(['sku']);
+  });
+
+  it('DX-v1.2 FINDING-B: a product update that FLIPS a surviving unique column carve-class REINDEXES it through `rayspec plan` (the plan.ts old/new-key split is fail-the-fix)', async () => {
+    // A REAL product UPDATE where two SURVIVING `unique: true` columns swap carve-out class — the exact
+    // MAJOR blindness the FINDING-1 fix closes, exercised end-to-end through `runPlan`'s product-update
+    // path (NOT hand-built diff maps). `catalog` keeps both columns `unique: true` across the update:
+    //   • `sku`      : durable `key` → plain author-unique   ⇒ single `(sku)` → compound `(tenant_id, sku)`
+    //   • `serial_no`: plain author-unique → durable `key`   ⇒ compound `(tenant_id, serial_no)` → single `(serial_no)`
+    // Both specs parse/lint (`parseProductSpec` + `deriveProductStores`/`deriveConflictKeys` succeed — a
+    // `key:` change is ACCEPTED by the product-update plan API, so this flip is genuinely REACHABLE, not
+    // rejected at validate). deriveConflictKeys ⇒ old {catalog:{sku}} vs NEW {catalog:{serial_no}}, so the
+    // OLD-vs-NEW classification reaching `diffProductStores` (NOT a merged single map) is what makes the
+    // `oldIsKey !== newIsKey` reindex branch fire.
+    //
+    // FAIL-THE-FIX (i) — the LOAD-BEARING one: if `planProduct` re-MERGES the old+new derived key maps
+    // (so a survivor's effective old==new keys), `oldIsKey === newIsKey` for every column, the reindex
+    // branch NEVER fires, and this migration loses BOTH DROP+CREATE pairs → the assertions below go RED.
+    const catOld = `version: '1.0'
+product:
+  id: catalog_app
+  name: Catalog App
+stores:
+  - name: catalog
+    columns:
+      - { name: sku, type: text }
+      - { name: serial_no, type: text, unique: true }
+    key: [sku]
+`;
+    const catNew = `version: '1.0'
+product:
+  id: catalog_app
+  name: Catalog App
+stores:
+  - name: catalog
+    columns:
+      - { name: sku, type: text, unique: true }
+      - { name: serial_no, type: text }
+    key: [serial_no]
+`;
+    writeFileSync(join(dir, 'flip-old.yaml'), catOld, 'utf8');
+    writeFileSync(join(dir, 'flip-new.yaml'), catNew, 'utf8');
+
+    // (1) The plan's DELTA migration REINDEXES both flipped columns to their NEW shape (DROP+CREATE,
+    //     stable index name). This is present in `migrationSql` even though the delta is gate-blocked.
+    const blocked = await runPlan(['flip-new.yaml'], {
+      against: 'flip-old.yaml',
+      shadowDatabaseUrl: undefined,
+    });
+    expect(blocked.updateMode).toBe(true);
+    // sku: key → author-unique  ⇒ single (sku) reindexed to compound (tenant_id, sku)
+    expect(blocked.migrationSql).toContain('DROP INDEX "catalog_sku_unique"');
+    expect(blocked.migrationSql).toContain(
+      'CREATE UNIQUE INDEX "catalog_sku_unique" ON "catalog" USING btree ("tenant_id", "sku")',
+    );
+    // serial_no: author-unique → key  ⇒ compound (tenant_id, serial_no) reindexed to single (serial_no)
+    expect(blocked.migrationSql).toContain('DROP INDEX "catalog_serial_no_unique"');
+    expect(blocked.migrationSql).toContain(
+      'CREATE UNIQUE INDEX "catalog_serial_no_unique" ON "catalog" USING btree ("serial_no")',
+    );
+    // A reindex is destructive (DROP INDEX) → the gate BLOCKS it without a reviewed allowlist.
+    expect(blocked.ok).toBe(false);
+    expect(blocked.phase).toBe('gate');
+    expect(blocked.breakingChangeBlocked).toBe(true);
+    // The machine-proposed allowlist carries exactly the two drop-index entries (byte-faithful to the gate).
+    const dropIdx = (blocked.proposedAllowlist ?? [])
+      .filter((e) => e.kind === 'drop-index')
+      .map((e) => e.match)
+      .sort();
+    expect(dropIdx).toEqual([
+      'DROP INDEX "catalog_serial_no_unique"',
+      'DROP INDEX "catalog_sku_unique"',
+    ]);
+
+    // (2) FAIL-THE-FIX (ii): reach the baseline-seeded shadow with the reviewed allowlist and assert the
+    //     baseline SEED (`generateProductSql(oldStores, oldConflictKeys)`) reproduces the LIVE (OLD) index
+    //     shapes — the load-bearing observable effect of seeding with the OLD keys rather than the NEW ones.
+    //     `migrationSql` alone cannot catch (ii) (it is computed from the diff, independent of `baselineSql`);
+    //     the seed is only observable through the shadow, so it is asserted here via the injected spy's
+    //     `base` argument. Reverting (ii) (seed with `newConflictKeys`) flips the seed's shapes → RED.
+    writeFileSync(
+      join(dir, 'flip-allow.json'),
+      JSON.stringify((blocked.proposedAllowlist ?? []).filter((e) => e.kind === 'drop-index')),
+      'utf8',
+    );
+    let seenBase = 'NOT_CALLED';
+    let seenNewKeys: unknown = 'NOT_CALLED';
+    const passed = await runPlan(['flip-new.yaml'], {
+      against: 'flip-old.yaml',
+      allowlist: 'flip-allow.json',
+      databaseUrl: 'postgres://u:p@db.internal:5432/rayspec',
+      shadowDatabaseUrl: 'postgres://u:p@db.internal:5432/rayspec_shadow',
+      shadowApplyBaselineUpdate: async (_url, base, _delta, _stores, newKeys) => {
+        seenBase = base;
+        seenNewKeys = newKeys;
+        return { ok: true, dbName: 'x', drift: [] };
+      },
+    });
+    expect(passed.ok).toBe(true);
+    expect(passed.shadowApplied).toBe(true);
+    // The seed carries the OLD (live) shapes: `sku` single-column, `serial_no` tenant-scoped compound.
+    expect(seenBase).toContain(
+      'CREATE UNIQUE INDEX "catalog_sku_unique" ON "catalog" USING btree ("sku")',
+    );
+    expect(seenBase).toContain(
+      'CREATE UNIQUE INDEX "catalog_serial_no_unique" ON "catalog" USING btree ("tenant_id", "serial_no")',
+    );
+    // …and NOT the flipped (new) shapes — seeding with newConflictKeys (revert (ii)) would produce these.
+    expect(seenBase).not.toContain(
+      'CREATE UNIQUE INDEX "catalog_sku_unique" ON "catalog" USING btree ("tenant_id", "sku")',
+    );
+    // The NEW conflict keys threaded to the drift oracle reflect the NEW classification (serial_no is the key now).
+    expect(seenNewKeys).toBeInstanceOf(Map);
+    const catKeys = (seenNewKeys as Map<string, ReadonlySet<string>>).get('catalog');
+    expect(catKeys ? [...catKeys] : []).toEqual(['serial_no']);
+  });
 });
 
 describe('plan — no --against byte-stability golden (0.1 first materialization)', () => {

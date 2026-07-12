@@ -41,7 +41,11 @@ import { forTenant, generateProductSql } from '@rayspec/db';
 import type { WorkflowInputEvent, WorkflowSpec } from '@rayspec/foundation';
 import { makeFsBlobStoreFactory } from '@rayspec/platform';
 import type { ComposedProductDeploy } from '@rayspec/product-yaml';
-import { composeCapabilityStores, deriveProductStores } from '@rayspec/product-yaml';
+import {
+  composeCapabilityStores,
+  deriveConflictKeys,
+  deriveProductStores,
+} from '@rayspec/product-yaml';
 import { type ProductSpec, parseProductSpec } from '@rayspec/spec';
 import {
   DurableWorkflowEngine,
@@ -324,8 +328,11 @@ describe.skipIf(!hasDb)('record submit-ingress e2e (the composed stack)', () => 
     const capability = composeCapabilityStores(spec);
     const derived = deriveProductStores(spec, capability.names);
     const composedStores = [...capability.stores, ...derived.stores];
+    // DX-v1.2: the capability `*_ref` durable conflict keys (record_ref/request_ref) keep a
+    // SINGLE-column unique index (a compound one would 42P10 the upsert + break the pin below).
+    const conflictKeys = deriveConflictKeys(spec, composedStores);
 
-    h = await createDeployHarness({ stores: composedStores, schema: SCHEMA });
+    h = await createDeployHarness({ stores: composedStores, schema: SCHEMA, conflictKeys });
     await h.db.$client.unsafe(WORKFLOW_JOURNAL_DDL);
     await h.db.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'Intake', 'intake')`, [
       TENANT_A,
@@ -340,7 +347,11 @@ describe.skipIf(!hasDb)('record submit-ingress e2e (the composed stack)', () => 
     result = await deploy<ReturnType<typeof createAuthApp>>({
       specSource: INTAKE_YAML,
       migrations: [
-        { name: '0000_intake.sql', sql: generateProductSql(composedStores), allowlist: [] },
+        {
+          name: '0000_intake.sql',
+          sql: generateProductSql(composedStores, conflictKeys),
+          allowlist: [],
+        },
       ],
       target: h.target,
       rollout: {

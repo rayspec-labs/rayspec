@@ -45,7 +45,7 @@ import type {
 } from '@rayspec/foundation';
 import { makeFsBlobStoreFactory } from '@rayspec/platform';
 import type { ComposedProductDeploy } from '@rayspec/product-yaml';
-import { deriveProductStores } from '@rayspec/product-yaml';
+import { deriveConflictKeys, deriveProductStores } from '@rayspec/product-yaml';
 import { type ProductSpec, parseProductSpec } from '@rayspec/spec';
 import {
   DurableWorkflowEngine,
@@ -351,8 +351,11 @@ describe.skipIf(!hasDb)('declared stores + store steps e2e (the composed stack)'
     // deriveProductStores (which now emits the two DECLARED stores).
     const derived = deriveProductStores(spec, new Set(['audio_sessions', 'audio_tracks']));
     const composedStores = [...audioCapabilityStores(), ...derived.stores];
+    // DX-v1.2: the durable conflict keys (declared `key`: item_code/entry_ref + the audio `*_ref`
+    // idiom) keep a SINGLE-column unique index; any other author unique is tenant-scoped compound.
+    const conflictKeys = deriveConflictKeys(spec, composedStores);
 
-    h = await createDeployHarness({ stores: composedStores, schema: SCHEMA });
+    h = await createDeployHarness({ stores: composedStores, schema: SCHEMA, conflictKeys });
     await h.db.$client.unsafe(WORKFLOW_JOURNAL_DDL);
     await h.db.$client.unsafe(
       `INSERT INTO orgs (id, name, slug) VALUES ($1, 'Fieldlog', 'fieldlog')`,
@@ -366,7 +369,11 @@ describe.skipIf(!hasDb)('declared stores + store steps e2e (the composed stack)'
     result = await deploy<ReturnType<typeof createAuthApp>>({
       specSource: FIELDLOG_YAML,
       migrations: [
-        { name: '0000_fieldlog.sql', sql: generateProductSql(composedStores), allowlist: [] },
+        {
+          name: '0000_fieldlog.sql',
+          sql: generateProductSql(composedStores, conflictKeys),
+          allowlist: [],
+        },
       ],
       target: h.target,
       rollout: {
@@ -561,11 +568,14 @@ describe.skipIf(!hasDb)('declared stores + store steps e2e (the composed stack)'
     testsRan += 1;
 
     // ── PIN the index decision explicitly (pg_catalog ground truth): the conflict key's unique
-    // index is SINGLE-COLUMN — deliberately WITHOUT tenant_id. This is the DOCUMENTED beta-posture
-    // cut: the StoreSpec vocabulary has no composite/table-level unique, so a tenant-scoped
-    // composite key needs kill-set grammar vocabulary (founder-gated) — tracked as BACKLOG
-    // PY-STORE-KEY-1. Until that lands, a foreign-tenant key collision is a REAL, expected state,
-    // and the runtime's job is to surface it LOUDLY (asserted below), never as a silent success.
+    // index is SINGLE-COLUMN — deliberately WITHOUT tenant_id. This is the DX-v1.2 Option-B CARVE-OUT:
+    // an author-declared `unique: true` column is now TENANT-SCOPED compound `(tenant_id, col)`, but a
+    // durable `ON CONFLICT` target (the store's `key` — here `entry_ref`) MUST stay single-column, or a
+    // compound index would 42P10 the upsert. The tenant-scoped composite KEY (a single-column key that
+    // is ALSO tenant-scoped) still needs kill-set StoreSpec vocabulary — founder-gated, BACKLOG
+    // PY-STORE-KEY-1. Until that lands, a foreign-tenant key collision is a REAL, expected state, and the
+    // runtime's job is to surface it LOUDLY (asserted below), never as a silent success. A naive
+    // compound-all (forgetting the conflict-key carve-out) would break this upsert 42P10 — the guard.
     const indexCols = (await h.db.$client.unsafe(
       `SELECT i.indisunique AS is_unique, a.attname AS column_name, k.ord
          FROM pg_index i

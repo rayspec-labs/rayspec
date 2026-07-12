@@ -43,6 +43,7 @@ import {
   type StoreForeignKey,
   type StoreSpec,
 } from '@rayspec/spec';
+import type { StoreConflictKeys } from './generate-product-sql.js';
 import {
   INJECTED_AFTER,
   INJECTED_BEFORE,
@@ -89,12 +90,21 @@ const ALWAYS_USED_SYMBOLS: readonly string[] = [
   ...[...INJECTED_BEFORE, ...INJECTED_AFTER].map((c) => COLUMN_TYPE_TO_SYMBOL[c.type]),
 ];
 
+/** Does this store carry at least one TENANT-SCOPED (compound) unique — i.e. a `unique: true` column
+ *  that is NOT a conflict key? Such a column is emitted as a table-level `uniqueIndex(...)`. */
+function hasCompoundUnique(store: StoreSpec, conflictKeys?: StoreConflictKeys): boolean {
+  const keys = conflictKeys?.get(store.name);
+  return store.columns.some((c) => c.unique && !(keys?.has(c.name) ?? false));
+}
+
 /** Compute the exact, sorted set of pg-core import symbols the generated stores use. */
-function computePgCoreImports(stores: StoreSpec[]): string[] {
+function computePgCoreImports(stores: StoreSpec[], conflictKeys?: StoreConflictKeys): string[] {
   const needed = new Set<string>(ALWAYS_USED_SYMBOLS);
   for (const store of stores) {
     for (const col of store.columns) needed.add(COLUMN_TYPE_TO_SYMBOL[col.type]);
     // An FK column is always re-emitted as `uuid(...)` (already in ALWAYS_USED_SYMBOLS via id/tenant_id).
+    // A tenant-scoped (compound) unique needs the `uniqueIndex` table-extra builder.
+    if (hasCompoundUnique(store, conflictKeys)) needed.add('uniqueIndex');
   }
   return [...needed].sort();
 }
@@ -102,6 +112,17 @@ function computePgCoreImports(stores: StoreSpec[]): string[] {
 /** Convert a store/column name to the exported Drizzle const identifier (camelCase). */
 function toCamel(name: string): string {
   return name.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
+}
+
+/**
+ * Emit the `drizzle-orm/pg-core` named import Biome-canonically: single line when it fits printWidth
+ * (100), else one symbol per 2-space line with a trailing comma (matched doc-first against Biome 2.5.0
+ * — adding `uniqueIndex` for a compound unique can push the six-type import past 100 chars).
+ */
+function emitPgCoreImport(symbols: string[]): string {
+  const single = `import { ${symbols.join(', ')} } from 'drizzle-orm/pg-core';`;
+  if (single.length <= 100) return single;
+  return ['import {', ...symbols.map((s) => `  ${s},`), "} from 'drizzle-orm/pg-core';"].join('\n');
 }
 
 /**
@@ -137,12 +158,17 @@ function assertStoreSafe(store: StoreSpec): void {
   }
 }
 
-/** Emit ONE author business column as a Drizzle builder chain (`text('x').notNull()` …). */
-function emitBusinessColumn(col: StoreColumn): string {
+/**
+ * Emit ONE author business column as a Drizzle builder chain (`text('x').notNull()` …). A conflict-key
+ * unique column keeps the column-level `.unique()` (a single-column index — the durable `ON CONFLICT`
+ * target); a NON-key `unique: true` column emits NO `.unique()` here — it is materialized as a
+ * TENANT-SCOPED table-level `uniqueIndex(...)` (compound `(tenant_id, col)`) by {@link emitStore}.
+ */
+function emitBusinessColumn(col: StoreColumn, isConflictKey: boolean): string {
   const prop = toCamel(col.name);
   let chain = DRIZZLE_BUILDER[col.type](col.name);
   if (!col.nullable) chain += '.notNull()';
-  if (col.unique) chain += '.unique()';
+  if (col.unique && isConflictKey) chain += '.unique()';
   return `  ${prop}: ${chain},`;
 }
 
@@ -193,7 +219,7 @@ function emitInjectedColumn(col: (typeof INJECTED_BEFORE)[number]): string {
 }
 
 /** Emit ONE store as a `pgTable(...)` const + push it into the tuple. */
-function emitStore(store: StoreSpec): string {
+function emitStore(store: StoreSpec, conflictKeys?: ReadonlySet<string>): string {
   assertStoreSafe(store);
   const tableConst = toCamel(store.name);
   const fkByColumn = new Map<string, StoreForeignKey>();
@@ -205,16 +231,60 @@ function emitStore(store: StoreSpec): string {
   // --- author business columns (declared order), FK columns get the .references chain ---------
   for (const col of store.columns) {
     const fk = fkByColumn.get(col.name);
-    lines.push(fk ? emitFkColumn(fk, col) : emitBusinessColumn(col));
+    lines.push(
+      fk ? emitFkColumn(fk, col) : emitBusinessColumn(col, conflictKeys?.has(col.name) ?? false),
+    );
   }
   // --- injected tenancy/GDPR columns AFTER business cols (created_at/deleted_at/…) -------------
   for (const inj of INJECTED_AFTER) lines.push(emitInjectedColumn(inj));
 
+  const banner = `/** Generated product store '${store.name}'. Tenant-scoped by construction (tenant_id -> orgs). */`;
+
+  // TENANT-SCOPED (compound) uniques: a `unique: true` column that is NOT a conflict key is emitted as
+  // a table-level `uniqueIndex('<table>_<col>_unique').on(t.tenant_id, t.<col>)` (compound), so two
+  // tenants can hold the same value with no cross-tenant existence leak (DX-v1.2). A conflict-key unique
+  // stayed column-level `.unique()` (single) above.
+  const compoundUnique = store.columns.filter(
+    (c) => c.unique && !(conflictKeys?.has(c.name) ?? false),
+  );
+  if (compoundUnique.length === 0) {
+    // 2-arg form — byte-identical to the pre-DX-v1.2 output (no compound unique index).
+    return [
+      banner,
+      `export const ${tableConst} = pgTable('${store.name}', {`,
+      ...lines,
+      '});',
+    ].join('\n');
+  }
+
+  // 3-arg form. Biome breaks `pgTable(name, { ...cols }, extras)` onto separate lines and re-indents the
+  // column object by one level (2→4 spaces, incl. wrapped chain continuation lines). Matched doc-first
+  // against Biome 2.5.0 (the same fidelity discipline as emitReferenceColumn).
+  const indentedLines = lines.map((l) =>
+    l
+      .split('\n')
+      .map((s) => `  ${s}`)
+      .join('\n'),
+  );
+  const indexExprs = compoundUnique.map(
+    (c) => `uniqueIndex('${store.name}_${c.name}_unique').on(t.tenantId, t.${toCamel(c.name)})`,
+  );
+  const inlineExtras = `  (t) => [${indexExprs.join(', ')}],`;
+  // Biome keeps the `(t) => [...]` array inline when it fits printWidth (100); else one element per
+  // 4-space line with the `[`/`]` on their own lines.
+  const extras =
+    inlineExtras.length <= 100
+      ? inlineExtras
+      : ['  (t) => [', ...indexExprs.map((e) => `    ${e},`), '  ],'].join('\n');
   return [
-    `/** Generated product store '${store.name}'. Tenant-scoped by construction (tenant_id -> orgs). */`,
-    `export const ${tableConst} = pgTable('${store.name}', {`,
-    ...lines,
-    '});',
+    banner,
+    `export const ${tableConst} = pgTable(`,
+    `  '${store.name}',`,
+    '  {',
+    ...indentedLines,
+    '  },',
+    extras,
+    ');',
   ].join('\n');
 }
 
@@ -232,7 +302,10 @@ function emitStore(store: StoreSpec): string {
  * the module are fine — but `@rayspec/spec` lint already requires `references` to resolve to a
  * declared store). For an EMPTY `stores[]` the module is the product-empty baseline.
  */
-export function generateProductSchema(stores: StoreSpec[]): string {
+export function generateProductSchema(
+  stores: StoreSpec[],
+  conflictKeys?: StoreConflictKeys,
+): string {
   const empty = stores.length === 0;
   const banner = [
     '/**',
@@ -265,13 +338,13 @@ export function generateProductSchema(stores: StoreSpec[]): string {
   const imports = empty
     ? null
     : [
-        `import { ${computePgCoreImports(stores).join(', ')} } from 'drizzle-orm/pg-core';`,
+        emitPgCoreImport(computePgCoreImports(stores, conflictKeys)),
         // The ONLY core-table reference: the injected tenant_id FK target. The generator never
         // emits or modifies a core table — it only points the tenancy FK at the existing orgs root.
         "import { orgs } from '../schema.js';",
       ].join('\n');
 
-  const tableBlocks = stores.map(emitStore);
+  const tableBlocks = stores.map((s) => emitStore(s, conflictKeys?.get(s.name)));
 
   const tupleMembers = stores.map((s) => toCamel(s.name));
   const tuple = [
