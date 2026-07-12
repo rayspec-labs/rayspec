@@ -13,7 +13,7 @@
  * UN-SKIPPABLE RAN-GUARD: a separate, NON-skipped describe hard-FAILS when the DB is
  * REQUIRED (CI / RAYSPEC_REQUIRE_DB_TESTS) but the scenarios did not run.
  */
-import { diffProductStores, generateProductSql } from '@rayspec/db';
+import { diffProductStores, generateProductSql, type StoreConflictKeys } from '@rayspec/db';
 import { parseSpec, type StoreSpec } from '@rayspec/spec';
 import { describe, expect, it } from 'vitest';
 import { shadowApplyBaselineUpdate, withDatabaseName } from './shadow-apply.js';
@@ -103,13 +103,89 @@ describe.skipIf(!hasDb)(
       }
       scenariosRan++;
     }, 60_000);
+
+    it('DX-v1.2 FINDING-2: the ARMED plan-time oracle flags a stale single-column GLOBAL unique index (stale_global_unique); the LENIENT boot oracle does NOT refuse it', async () => {
+      // A LEGACY deployment: `code` was a durable conflict KEY, so its unique index is a single-column
+      // GLOBAL `(code)`. The NEW spec makes `code` a plain author-unique (tenant-scoped compound now
+      // expected). Seed the live shape by materializing the baseline WITH `code` as a conflict key.
+      const legacy = stores(`
+version: '1.0'
+metadata: { name: shadow-stale }
+stores:
+  - name: catalog
+    columns:
+      - { name: code, type: text, unique: true }
+`);
+      const oldKeysCodeIsKey: StoreConflictKeys = new Map([['catalog', new Set(['code'])]]);
+      const newKeysCodeAuthorUnique: StoreConflictKeys = new Map([['catalog', new Set<string>()]]);
+      const baselineSingleGlobal = generateProductSql(legacy, oldKeysCodeIsKey); // single-column index
+
+      // ARMED (the `plan` path passes the NEW conflict keys): the oracle sees the stale single GLOBAL
+      // index where a tenant-scoped compound is now expected → stale_global_unique. This is the fail-the-
+      // fix: drop the `newConflictKeys` threading and the armed call falls back to lenient → ok:true → RED.
+      const armed = await shadowApplyBaselineUpdate(
+        shadowUrl(),
+        baselineSingleGlobal,
+        '',
+        legacy,
+        newKeysCodeAuthorUnique,
+      );
+      expect(armed.ok).toBe(false);
+      expect(
+        armed.drift?.some(
+          (d) => d.kind === 'stale_global_unique' && d.table === 'catalog' && d.column === 'code',
+        ),
+      ).toBe(true);
+
+      // LENIENT (no conflict keys — the boot/deploy posture): a covering unique index exists → NO drift,
+      // so a working legacy deployment is MOUNTED, never refused (the documented no-forced-migration rule).
+      const lenient = await shadowApplyBaselineUpdate(
+        shadowUrl(),
+        baselineSingleGlobal,
+        '',
+        legacy,
+      );
+      expect(lenient.ok).toBe(true);
+      if (lenient.ok) expect(lenient.drift).toEqual([]);
+      scenariosRan++;
+    }, 60_000);
+
+    it('DX-v1.2 FINDING-1/2: the CORRECT old→new reindex delta (baseline seeded with OLD keys) ends DRIFT-CLEAN under the armed oracle', async () => {
+      // The seeding companion: baseline is generated with the OLD conflict keys (single, live shape); the
+      // delta is computed with BOTH old+new keys → a real DROP+CREATE reindex → the armed oracle passes.
+      const legacy = stores(`
+version: '1.0'
+metadata: { name: shadow-reindex }
+stores:
+  - name: catalog
+    columns:
+      - { name: code, type: text, unique: true }
+`);
+      const oldKeys: StoreConflictKeys = new Map([['catalog', new Set(['code'])]]);
+      const newKeys: StoreConflictKeys = new Map([['catalog', new Set<string>()]]);
+      const baseline = generateProductSql(legacy, oldKeys); // reproduces the LIVE single-column index
+      const reindexDelta = diffProductStores(legacy, legacy, {
+        oldConflictKeys: oldKeys,
+        newConflictKeys: newKeys,
+      }).migrationSql;
+      const r = await shadowApplyBaselineUpdate(
+        shadowUrl(),
+        baseline,
+        reindexDelta,
+        legacy,
+        newKeys,
+      );
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.drift).toEqual([]);
+      scenariosRan++;
+    }, 60_000);
   },
 );
 
 describe('shadowApplyBaselineUpdate — ran-guard (the non-vacuity proofs must not silently skip in CI)', () => {
-  it('the three scenarios ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
+  it('the scenarios ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (dbRequired) {
-      expect(scenariosRan).toBe(3);
+      expect(scenariosRan).toBe(5);
     } else {
       expect(dbRequired).toBe(false);
     }

@@ -122,7 +122,13 @@ stores:
     compound `(tenant_id, <col>)` index), so two tenants may hold the same value
     (no cross-tenant collision or existence leak) while a same-tenant duplicate is
     rejected by the unique constraint. It is **not** a global unique across all
-    tenants.
+    tenants. A plain `unique: true` column is a **uniqueness constraint for REST
+    writes only** — it is **not** a durable upsert target: because its index is
+    compound, a durable `ON CONFLICT (<col>)` / `ctx.db.upsert(store, [<col>], …)`
+    on it fails loudly (Postgres 42P10). A durable conflict/idempotency key must be
+    a product-store `key` column (single-column index — see below) or the
+    tenant-prefixed `*_ref` idiom; use those for upserts, and `unique: true` for
+    plain uniqueness.
 - `foreignKeys` — optional list of child→parent foreign keys, default `[]`. Each:
   - `column` — the local business column carrying the FK (must be a declared
     column).

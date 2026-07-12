@@ -260,12 +260,74 @@ describe('diffProductStores — golden per-shape deltas', () => {
     const uniq = [store({ name: 'items', columns: [{ name: 'a', type: 'text', unique: true }] })];
     // Mark `a` as a durable conflict key → the durable `ON CONFLICT (a)` target MUST stay single-column
     // (a compound index would 42P10). The index NAME is identical to the compound case.
-    const conflictKeys = new Map([['items', new Set(['a'])]]);
-    const add = diffProductStores(plain, uniq, { conflictKeys });
+    const newConflictKeys = new Map([['items', new Set(['a'])]]);
+    const add = diffProductStores(plain, uniq, { newConflictKeys });
     expect(add.statements).toEqual([
       'CREATE UNIQUE INDEX "items_a_unique" ON "items" USING btree ("a")',
     ]);
     expect(add.destructive).toBe(false);
+  });
+
+  it('DX-v1.2 FINDING-1(a): a demoted conflict-key → author-unique column REINDEXES single → compound (DROP + CREATE)', () => {
+    // The column STAYS `unique: true` across the update; only its durable-conflict-key status changes.
+    // Old: `code` was a durable key (single-column `(code)` index). New: `code` is a plain author-unique
+    // (tenant-scoped compound `(tenant_id, code)` expected) — the cross-tenant-leak fix must APPLY on the
+    // update path, not only on a fresh materialize.
+    const oldStore = [
+      store({ name: 'catalog', columns: [{ name: 'code', type: 'text', unique: true }] }),
+    ];
+    const newStore = [
+      store({ name: 'catalog', columns: [{ name: 'code', type: 'text', unique: true }] }),
+    ];
+    const oldConflictKeys = new Map([['catalog', new Set(['code'])]]); // was a key → single
+    const newConflictKeys = new Map([['catalog', new Set<string>()]]); // now author-unique → compound
+    const r = diffProductStores(oldStore, newStore, { oldConflictKeys, newConflictKeys });
+    // A genuine reindex: DROP the stale single-column index, then CREATE the tenant-scoped compound one,
+    // ADJACENT and DROP-first (the index NAME is stable). Without the fix the diff emits NOTHING here.
+    expect(r.statements).toEqual([
+      'DROP INDEX "catalog_code_unique"',
+      'CREATE UNIQUE INDEX "catalog_code_unique" ON "catalog" USING btree ("tenant_id", "code")',
+    ]);
+    expect(r.findings.find((f) => f.sql.startsWith('DROP INDEX'))?.destructiveKinds).toEqual([
+      'drop-index',
+    ]);
+    // The reindex re-passes the REAL gate with the machine-proposed allowlist (byte-fidelity holds).
+    expect(scanMigrationSql(r.migrationSql, r.proposedAllowlist).pass).toBe(true);
+    expect(r.notes.join('\n')).toMatch(/REINDEXED/);
+  });
+
+  it('DX-v1.2 FINDING-1(b): a promoted author-unique → conflict-key column REINDEXES compound → single (DROP + CREATE)', () => {
+    const oldStore = [
+      store({ name: 'catalog', columns: [{ name: 'code', type: 'text', unique: true }] }),
+    ];
+    const newStore = [
+      store({ name: 'catalog', columns: [{ name: 'code', type: 'text', unique: true }] }),
+    ];
+    const oldConflictKeys = new Map([['catalog', new Set<string>()]]); // was author-unique → compound
+    const newConflictKeys = new Map([['catalog', new Set(['code'])]]); // now a durable key → single
+    const r = diffProductStores(oldStore, newStore, { oldConflictKeys, newConflictKeys });
+    // The durable `ON CONFLICT (code)` target now needs a SINGLE-column index (a compound one would 42P10
+    // every upsert). DROP the compound, CREATE the single.
+    expect(r.statements).toEqual([
+      'DROP INDEX "catalog_code_unique"',
+      'CREATE UNIQUE INDEX "catalog_code_unique" ON "catalog" USING btree ("code")',
+    ]);
+    expect(scanMigrationSql(r.migrationSql, r.proposedAllowlist).pass).toBe(true);
+  });
+
+  it('DX-v1.2 FINDING-1: a SAME carve-class survivor is a no-op (no spurious reindex)', () => {
+    // `code` is author-unique in BOTH old and new (not a key either side) → no carve-class change → the
+    // diff emits nothing. Guards against a reindex firing on every diff.
+    const s = [store({ name: 'catalog', columns: [{ name: 'code', type: 'text', unique: true }] })];
+    const keys = new Map([['catalog', new Set<string>()]]);
+    expect(
+      diffProductStores(s, s, { oldConflictKeys: keys, newConflictKeys: keys }).statements,
+    ).toEqual([]);
+    // And a key-both-sides survivor is likewise a no-op (single → single).
+    const keyed = new Map([['catalog', new Set(['code'])]]);
+    expect(
+      diffProductStores(s, s, { oldConflictKeys: keyed, newConflictKeys: keyed }).statements,
+    ).toEqual([]);
   });
 
   it('FIX-2: a NEWLY-ADDED unique column emits ADD COLUMN + CREATE UNIQUE INDEX (both additive)', () => {

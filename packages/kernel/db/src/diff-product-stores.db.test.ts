@@ -21,7 +21,7 @@ import { StoreSpec } from '@rayspec/spec';
 import postgres from 'postgres';
 import { describe, expect, it } from 'vitest';
 import { diffProductStores } from './diff-product-stores.js';
-import { emitStoreSql } from './generated/generate-product-sql.js';
+import { emitStoreSql, type StoreConflictKeys } from './generated/generate-product-sql.js';
 
 /** Parse a raw store object through the REAL Zod grammar so defaults (nullable/unique/onDelete) apply. */
 function store(raw: unknown): StoreSpec {
@@ -72,6 +72,7 @@ CREATE TABLE orgs (
 async function withMaterializedOld(
   oldStores: StoreSpec[],
   fn: (sql: postgres.Sql) => Promise<void>,
+  oldConflictKeys?: StoreConflictKeys,
 ): Promise<void> {
   const name = throwawayName();
   const admin = postgres(adminUrl(baseUrl as string), { max: 1, onnotice: () => {} });
@@ -83,9 +84,10 @@ async function withMaterializedOld(
   const sql = postgres(withDbName(baseUrl as string, name), { max: 1, onnotice: () => {} });
   try {
     await sql.unsafe(ORGS_ROOT_SQL);
-    // Materialize the OLD spec in DECLARED order (a parent table exists before a child's FK is added).
+    // Materialize the OLD spec in DECLARED order (a parent table exists before a child's FK is added),
+    // in the OLD conflict-key SHAPE (so a reindex scenario seeds the real live index — single vs compound).
     for (const s of oldStores) {
-      for (const stmt of emitStoreSql(s)) await sql.unsafe(stmt);
+      for (const stmt of emitStoreSql(s, oldConflictKeys?.get(s.name))) await sql.unsafe(stmt);
     }
     await fn(sql);
   } finally {
@@ -236,6 +238,95 @@ describe.skipIf(!baseUrl)(
       });
       scenariosRan++;
     }, 60_000);
+
+    it('DX-v1.2 FINDING-1(a): an update that DEMOTES a conflict-key → author-unique REINDEXES single → compound on a REAL DB (two tenants then coexist)', async () => {
+      const TA = '00000000-0000-4000-8000-0000000000d4';
+      const TB = '00000000-0000-4000-8000-0000000000e5';
+      const oldStore = store({
+        name: 'catalog',
+        columns: [{ name: 'code', type: 'text', unique: true }],
+      });
+      const newStore = store({
+        name: 'catalog',
+        columns: [{ name: 'code', type: 'text', unique: true }],
+      });
+      const oldKeys = new Map([['catalog', new Set(['code'])]]); // was a durable key → single index
+      const newKeys = new Map([['catalog', new Set<string>()]]); // now author-unique → compound expected
+      // Materialize the OLD in the SINGLE-column (global) shape — the real legacy index this fix migrates.
+      await withMaterializedOld(
+        [oldStore],
+        async (sql) => {
+          const before = await uniqueIndexColumns(sql, 'catalog_code_unique');
+          expect(before.columns).toEqual(['code']); // starts SINGLE (global)
+
+          // Apply the reindex delta IN ORDER. Without the fix the diff emits NOTHING → the index stays
+          // single → the two-tenant insert below collides (cross-tenant leak) → this scenario goes RED.
+          const diff = diffProductStores([oldStore], [newStore], {
+            oldConflictKeys: oldKeys,
+            newConflictKeys: newKeys,
+          });
+          for (const stmt of diff.statements) await sql.unsafe(stmt);
+
+          const after = await uniqueIndexColumns(sql, 'catalog_code_unique');
+          expect(after.isUnique).toBe(true);
+          expect(after.columns).toEqual(['tenant_id', 'code']); // now tenant-scoped COMPOUND
+
+          // Two tenants can now hold the SAME value with no cross-tenant collision.
+          await sql.unsafe(`INSERT INTO orgs (id, name) VALUES ($1, 'A'), ($2, 'B')`, [TA, TB]);
+          await sql.unsafe(`INSERT INTO catalog (tenant_id, code) VALUES ($1, 'DUP')`, [TA]);
+          await sql.unsafe(`INSERT INTO catalog (tenant_id, code) VALUES ($1, 'DUP')`, [TB]);
+          const rows = await sql.unsafe(`SELECT tenant_id FROM catalog WHERE code = 'DUP'`);
+          expect(rows.length).toBe(2);
+        },
+        oldKeys,
+      );
+      scenariosRan++;
+    }, 60_000);
+
+    it('DX-v1.2 FINDING-1(b): an update that PROMOTES an author-unique → conflict-key REINDEXES compound → single; a durable ON CONFLICT (col) upsert then converges (no 42P10)', async () => {
+      const TC = '00000000-0000-4000-8000-0000000000f6';
+      const oldStore = store({
+        name: 'catalog',
+        columns: [{ name: 'code', type: 'text', unique: true }],
+      });
+      const newStore = store({
+        name: 'catalog',
+        columns: [{ name: 'code', type: 'text', unique: true }],
+      });
+      const oldKeys = new Map([['catalog', new Set<string>()]]); // was author-unique → compound
+      const newKeys = new Map([['catalog', new Set(['code'])]]); // now a durable key → single expected
+      // Materialize the OLD in the COMPOUND shape (author-unique).
+      await withMaterializedOld(
+        [oldStore],
+        async (sql) => {
+          const before = await uniqueIndexColumns(sql, 'catalog_code_unique');
+          expect(before.columns).toEqual(['tenant_id', 'code']); // starts COMPOUND
+
+          const diff = diffProductStores([oldStore], [newStore], {
+            oldConflictKeys: oldKeys,
+            newConflictKeys: newKeys,
+          });
+          for (const stmt of diff.statements) await sql.unsafe(stmt);
+
+          const after = await uniqueIndexColumns(sql, 'catalog_code_unique');
+          expect(after.isUnique).toBe(true);
+          expect(after.columns).toEqual(['code']); // now SINGLE — the durable ON CONFLICT target shape
+
+          // The durable `ON CONFLICT (code)` upsert now works (a compound index would raise 42P10 here —
+          // exactly the availability break the reindex prevents). Without the fix the index stays compound.
+          await sql.unsafe(`INSERT INTO orgs (id, name) VALUES ($1, 'C')`, [TC]);
+          await sql.unsafe(`INSERT INTO catalog (tenant_id, code) VALUES ($1, 'K1')`, [TC]);
+          await sql.unsafe(
+            `INSERT INTO catalog (tenant_id, code) VALUES ($1, 'K1') ON CONFLICT (code) DO NOTHING`,
+            [TC],
+          );
+          const rows = await sql.unsafe(`SELECT code FROM catalog`);
+          expect(rows.length).toBe(1); // converged on one row
+        },
+        oldKeys,
+      );
+      scenariosRan++;
+    }, 60_000);
   },
 );
 
@@ -247,7 +338,7 @@ describe.skipIf(!baseUrl)(
 describe('diffProductStores DB apply — ran-guard (the apply proofs must not silently skip in CI)', () => {
   it('the apply scenarios ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (dbRequired) {
-      expect(scenariosRan).toBe(4);
+      expect(scenariosRan).toBe(6);
     } else {
       expect(dbRequired).toBe(false);
     }

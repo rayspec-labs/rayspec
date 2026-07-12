@@ -602,6 +602,50 @@ describe('plan — Product-YAML (0.2) projections + update mode', () => {
     expect(rev.ok).toBe(false); // destructive without an allowlist — BLOCKED (the gate)
     expect(rev.breakingChangeBlocked).toBe(true);
   });
+
+  it('DX-v1.2 FINDING-2: a PRODUCT update THREADS the derived conflict keys to the baseline-seeded shadow (arms the plan-time oracle)', async () => {
+    // Minimal product with a declared store: `serial_no` is a plain author-unique (tenant-scoped
+    // compound), `sku` is the durable `key` (single-column). deriveConflictKeys ⇒ {catalog: {sku}} — the
+    // exact set the plan MUST pass to shadowApplyBaselineUpdate so its oracle enforces the right index
+    // shape. Fail-the-fix: drop the `inp.newConflictKeys` passthrough in planStores and the spy sees
+    // `undefined` → RED.
+    const catOld = `version: '1.0'
+product:
+  id: catalog_app
+  name: Catalog App
+stores:
+  - name: catalog
+    columns:
+      - { name: serial_no, type: text, unique: true }
+      - { name: sku, type: text }
+    key: [sku]
+`;
+    // An ADDITIVE delta (a new nullable column) → not gate-blocked → the shadow spy is reached.
+    const catNew = catOld.replace(
+      '    key: [sku]\n',
+      '      - { name: label, type: text, nullable: true }\n    key: [sku]\n',
+    );
+    writeFileSync(join(dir, 'cat-old.yaml'), catOld, 'utf8');
+    writeFileSync(join(dir, 'cat-new.yaml'), catNew, 'utf8');
+    let seenConflictKeys: unknown = 'NOT_CALLED';
+    const r = await runPlan(['cat-new.yaml'], {
+      against: 'cat-old.yaml',
+      databaseUrl: 'postgres://u:p@db.internal:5432/rayspec',
+      shadowDatabaseUrl: 'postgres://u:p@db.internal:5432/rayspec_shadow',
+      shadowApplyBaselineUpdate: async (_url, _base, _delta, _stores, newConflictKeys) => {
+        seenConflictKeys = newConflictKeys;
+        return { ok: true, dbName: 'x', drift: [] };
+      },
+    });
+    expect(r.ok).toBe(true);
+    expect(r.shadowApplied).toBe(true);
+    expect(r.breakingChangeBlocked).toBe(false);
+    // The plan THREADED the derived per-store conflict keys (durable `sku` stays a single-column target).
+    expect(seenConflictKeys).toBeInstanceOf(Map);
+    const cat = (seenConflictKeys as Map<string, ReadonlySet<string>>).get('catalog');
+    expect(cat).toBeDefined();
+    expect(cat ? [...cat] : []).toEqual(['sku']);
+  });
 });
 
 describe('plan — no --against byte-stability golden (0.1 first materialization)', () => {
