@@ -12,7 +12,12 @@
 import { createSigner, JwksProvider, RateLimiter } from '@rayspec/auth-core';
 import type { Db } from '@rayspec/db';
 import { forTenant, generateProductSql } from '@rayspec/db';
-import { buildProductTables, makeDbWithSchema, registerScopedTables } from '@rayspec/db/testing';
+import {
+  buildProductTables,
+  makeDbWithSchema,
+  registerScopedTables,
+  type StoreConflictKeys,
+} from '@rayspec/db/testing';
 import type { ResolvedHandler } from '@rayspec/platform';
 import type { RaySpec } from '@rayspec/spec';
 import { sql } from 'drizzle-orm';
@@ -235,6 +240,13 @@ export async function createHarness(
      */
     engineSpec?: RaySpec;
     /**
+     * DX-v1.2: the per-store conflict-key carve-out threaded to `generateProductSql`/`buildProductTables`
+     * so a durable `ON CONFLICT` target column keeps a single-column unique index (a product-composed
+     * engineSpec passes `deriveConflictKeys(spec, stores)`). Omit ⇒ every author `unique: true` column is
+     * tenant-scoped compound (the backend-profile default).
+     */
+    conflictKeys?: StoreConflictKeys;
+    /**
      * the BOOT-LOADED escape-hatch handlers (id → ResolvedHandler) wired into
      * `deps.engine.handlers`. A test loads them via `@rayspec/platform`'s `loadHandlers(root, …)`
      * (with the real importer or an injected one) and passes the map here. Used by `{handler}` routes
@@ -323,12 +335,12 @@ export async function createHarness(
       // (makeDbWithSchema) already resolves unqualified `CREATE TABLE` to ${SCHEMA} on EVERY pooled
       // connection — so NO bare `SET search_path` here: a session-level SET drops the `, public` and
       // PERSISTS on the pooled connection (a heterogeneous pool → intermittent relation-not-found).
-      const productSql = generateProductSql(stores)
+      const productSql = generateProductSql(stores, opts.conflictKeys)
         .replace(/-->\s*statement-breakpoint/g, '')
         .replace(/"public"\./g, `"${SCHEMA}".`);
       await db.$client.unsafe(productSql);
     }
-    const productTables = buildProductTables(stores);
+    const productTables = buildProductTables(stores, opts.conflictKeys);
     unregisterTables = registerScopedTables([...productTables.values()]);
     productTableNames = stores.map((s) => s.name);
     // thread the boot-loaded escape-hatch handlers + the declared-agent backends into the
@@ -485,6 +497,8 @@ export async function createDeployHarness(opts: {
   stores: RaySpec['stores'];
   schema?: string;
   wrapDb?: (db: Db) => Db;
+  /** DX-v1.2 conflict-key carve-out for the pre-registered product tables (see createHarness.opts). */
+  conflictKeys?: StoreConflictKeys;
 }): Promise<DeployHarness> {
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error('DATABASE_URL required for api-auth deploy harness');
@@ -496,7 +510,7 @@ export async function createDeployHarness(opts: {
   // Pre-register the throwaway product tables in the REAL deny-by-default Set — this SIMULATES the
   // committed A1 tuple a real deployment ships (the platform main line is product-empty). deploy()
   // verifies-not-registers; the test owns registration via the carved-out test seam.
-  const productTables = buildProductTables([...opts.stores]);
+  const productTables = buildProductTables([...opts.stores], opts.conflictKeys);
   const unregister = registerScopedTables([...productTables.values()]);
   const productTableNames = opts.stores.map((s) => s.name);
 

@@ -117,7 +117,12 @@ stores:
   - `type` — one of the closed column-type vocabulary: `text`, `uuid`,
     `timestamp`, `integer`, `boolean`, `jsonb`.
   - `nullable` — optional boolean, default `false`.
-  - `unique` — optional boolean, default `false`.
+  - `unique` — optional boolean, default `false`. When `true`, the value is
+    **unique WITHIN a tenant**: the generated unique index is tenant-scoped (a
+    compound `(tenant_id, <col>)` index), so two tenants may hold the same value
+    (no cross-tenant collision or existence leak) while a same-tenant duplicate is
+    rejected by the unique constraint. It is **not** a global unique across all
+    tenants.
 - `foreignKeys` — optional list of child→parent foreign keys, default `[]`. Each:
   - `column` — the local business column carrying the FK (must be a declared
     column).
@@ -475,9 +480,13 @@ stores:
 - `key` — required, **exactly one** column: the conflict/idempotency identity.
   Every write to the store is an upsert on this key, because the durable engine's
   at-least-once execution may re-run a step; the key column must be a declared,
-  non-nullable column and derives a unique index. Composite keys, per-column
-  defaults, product-to-product foreign keys, and non-tenant stores are
-  deliberately not supported here.
+  non-nullable column and derives a **single-column** unique index — the durable
+  `ON CONFLICT (<key>)` target. (Unlike a plain `unique: true` column, whose index
+  is tenant-scoped/compound, a conflict-key index stays single-column so the upsert
+  matches it; the tenant isolation of a shared-keyed value comes from the
+  tenant-namespaced `*_ref` idiom and the tenant-scoped write predicate.) Composite
+  keys, per-column defaults, product-to-product foreign keys, and non-tenant stores
+  are deliberately not supported here.
 
 ## `contracts`
 

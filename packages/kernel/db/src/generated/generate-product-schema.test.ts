@@ -101,7 +101,20 @@ describe('generator golden', () => {
     flipped[0].columns[2].unique = false; // slug: unique -> not
     const out = generateProductSchema(flipped);
     expect(out).not.toBe(golden);
-    expect(out).not.toContain("slug: text('slug').notNull().unique(),");
+    // DX-v1.2: a non-key author `unique: true` emits a TENANT-SCOPED table-level uniqueIndex; flipping
+    // unique off removes it entirely (and reverts `projects` to the 2-arg pgTable form).
+    expect(golden).toContain("uniqueIndex('projects_slug_unique').on(t.tenantId, t.slug)");
+    expect(out).not.toContain('projects_slug_unique');
+    expect(out).not.toContain('uniqueIndex');
+  });
+
+  it('DX-v1.2 CARVE-OUT: a conflict-key unique stays column-level .unique() (single index)', () => {
+    // Mark `slug` as a durable conflict key → it keeps the column-level `.unique()` (single-column
+    // index — the ON CONFLICT target), NOT a tenant-scoped table-level uniqueIndex.
+    const conflictKeys = new Map([['projects', new Set(['slug'])]]);
+    const out = generateProductSchema(REPRESENTATIVE, conflictKeys);
+    expect(out).toContain("slug: text('slug').notNull().unique(),");
+    expect(out).not.toContain('uniqueIndex'); // no table-level compound index for a conflict key
   });
 
   it('an FK onDelete flip changes the output', () => {
@@ -156,10 +169,14 @@ describe('generator injection invariants', () => {
   });
 
   it('imports only the pg-core builders actually used (no unused import)', () => {
-    // REPRESENTATIVE uses text/uuid/timestamp/integer/boolean/jsonb -> all six + pgTable.
+    // REPRESENTATIVE uses text/uuid/timestamp/integer/boolean/jsonb -> all six + pgTable, plus
+    // `uniqueIndex` for the tenant-scoped compound unique on projects.slug (DX-v1.2). The full set
+    // exceeds printWidth (100) so the generator emits the Biome-canonical MULTILINE import.
     expect(out).toContain(
-      "import { boolean, integer, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';",
+      "import {\n  boolean,\n  integer,\n  jsonb,\n  pgTable,\n  text,\n  timestamp,\n  uniqueIndex,\n  uuid,\n} from 'drizzle-orm/pg-core';",
     );
+    // No unused import: `uniqueIndex` appears (compound unique) and every used builder is present.
+    expect(out).toContain('  uniqueIndex,');
   });
 
   it('emits PRODUCT_TENANT_SCOPED_TABLES with every table in declared order', () => {

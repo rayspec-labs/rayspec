@@ -23,9 +23,16 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 import { orgs } from '../schema.js';
+import type { StoreConflictKeys } from './generate-product-sql.js';
+
+/** snake_case → camelCase (mirrors generate-product-schema's toCamel — the runtime prop key). */
+function toCamel(name: string): string {
+  return name.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
+}
 
 /**
  * A drizzle column builder with the chainable modifiers we use. The pg-core builder generics are
@@ -67,7 +74,11 @@ function businessBuilder(type: ColumnType, snake: string): ChainableBuilder {
  * resolves a product->product FK parent (built earlier in declared order). The injected tenant_id
  * always references the core `orgs` root ON DELETE CASCADE.
  */
-function buildStoreTable(store: StoreSpec, tableLookup: Map<string, PgTable>): PgTable {
+function buildStoreTable(
+  store: StoreSpec,
+  tableLookup: Map<string, PgTable>,
+  conflictKeys?: ReadonlySet<string>,
+): PgTable {
   const fkByColumn = new Map(store.foreignKeys.map((fk) => [fk.column, fk]));
 
   const columns: Record<string, ChainableBuilder> = {
@@ -78,7 +89,7 @@ function buildStoreTable(store: StoreSpec, tableLookup: Map<string, PgTable>): P
   };
 
   for (const col of store.columns) {
-    const camel = col.name.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
+    const camel = toCamel(col.name);
     const fk = fkByColumn.get(col.name);
     if (fk) {
       const parent = tableLookup.get(fk.references);
@@ -96,7 +107,9 @@ function buildStoreTable(store: StoreSpec, tableLookup: Map<string, PgTable>): P
     } else {
       let b = businessBuilder(col.type, col.name);
       if (!col.nullable) b = b.notNull();
-      if (col.unique) b = b.unique();
+      // A conflict-key unique keeps a SINGLE-column `.unique()`; a NON-key unique becomes a
+      // TENANT-SCOPED compound `uniqueIndex` table-extra below (DX-v1.2). Secure default = compound.
+      if (col.unique && (conflictKeys?.has(col.name) ?? false)) b = b.unique();
       columns[camel] = b;
     }
   }
@@ -108,7 +121,24 @@ function buildStoreTable(store: StoreSpec, tableLookup: Map<string, PgTable>): P
   columns.retentionDays = chain(integer('retention_days'));
   columns.region = chain(text('region')).notNull().default('eu');
 
-  return pgTable(store.name, columns as never) as unknown as PgTable;
+  // Tenant-scoped (compound) unique indexes for NON-key `unique: true` columns: the runtime twin mirrors
+  // the DDL — `uniqueIndex('<table>_<col>_unique').on(tenant_id, col)` — so a test/gate that inspects the
+  // built table agrees with `generateProductSql`. (Enforcement is the DB index; ON CONFLICT targets are
+  // the column list db.upsert passes, not the table's declared unique.)
+  const compoundUnique = store.columns.filter(
+    (c) => c.unique && !(conflictKeys?.has(c.name) ?? false),
+  );
+  if (compoundUnique.length === 0) {
+    return pgTable(store.name, columns as never) as unknown as PgTable;
+  }
+  const extras = (t: Record<string, unknown>) =>
+    compoundUnique.map((c) =>
+      uniqueIndex(`${store.name}_${c.name}_unique`).on(
+        t.tenantId as never,
+        t[toCamel(c.name)] as never,
+      ),
+    );
+  return pgTable(store.name, columns as never, extras as never) as unknown as PgTable;
 }
 
 /**
@@ -116,10 +146,13 @@ function buildStoreTable(store: StoreSpec, tableLookup: Map<string, PgTable>): P
  * children for product->product FKs). Returns a name->table map — the input to the parameterizable
  * cross-tenant gate + the generalized shadow assertions.
  */
-export function buildProductTables(stores: StoreSpec[]): Map<string, PgTable> {
+export function buildProductTables(
+  stores: StoreSpec[],
+  conflictKeys?: StoreConflictKeys,
+): Map<string, PgTable> {
   const tables = new Map<string, PgTable>();
   for (const store of stores) {
-    tables.set(store.name, buildStoreTable(store, tables));
+    tables.set(store.name, buildStoreTable(store, tables, conflictKeys?.get(store.name)));
   }
   return tables;
 }

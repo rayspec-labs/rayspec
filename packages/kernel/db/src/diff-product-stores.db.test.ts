@@ -155,6 +155,87 @@ describe.skipIf(!baseUrl)(
       });
       scenariosRan++;
     }, 60_000);
+
+    // The ordered column list of a named unique index (pg_catalog ground truth).
+    const uniqueIndexColumns = async (
+      sql: postgres.Sql,
+      indexName: string,
+    ): Promise<{ columns: string[]; isUnique: boolean }> => {
+      const rows = (await sql.unsafe(
+        `SELECT a.attname AS column_name, i.indisunique AS is_unique
+           FROM pg_index i
+           JOIN pg_class c ON c.oid = i.indexrelid
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+           CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+           JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+          WHERE n.nspname = 'public' AND c.relname = $1
+          ORDER BY k.ord`,
+        [indexName],
+      )) as unknown as Array<{ column_name: string; is_unique: boolean }>;
+      return { columns: rows.map((r) => r.column_name), isUnique: rows[0]?.is_unique ?? false };
+    };
+
+    it('DX-v1.2: an author `unique: true` column is TENANT-SCOPED — two tenants coexist; a same-tenant dup is 23505', async () => {
+      const TA = '00000000-0000-4000-8000-0000000000a1';
+      const TB = '00000000-0000-4000-8000-0000000000b2';
+      // A plain author `unique: true` column (the finding: a per-tenant catalog code). withMaterializedOld
+      // materializes it via `emitStoreSql` with NO conflict keys → the SECURE DEFAULT (compound).
+      const catalog = store({
+        name: 'catalog',
+        columns: [{ name: 'code', type: 'text', unique: true }],
+      });
+      await withMaterializedOld([catalog], async (sql) => {
+        await sql.unsafe(`INSERT INTO orgs (id, name) VALUES ($1, 'A'), ($2, 'B')`, [TA, TB]);
+        // The SAME value under EACH tenant → BOTH succeed (no cross-tenant collision / existence leak).
+        await sql.unsafe(`INSERT INTO catalog (tenant_id, code) VALUES ($1, 'MEALS')`, [TA]);
+        await sql.unsafe(`INSERT INTO catalog (tenant_id, code) VALUES ($1, 'MEALS')`, [TB]);
+        const rows = await sql.unsafe(`SELECT tenant_id FROM catalog WHERE code = 'MEALS'`);
+        expect(rows.length).toBe(2); // two tenants hold the same value
+
+        // The SAME value TWICE under the SAME tenant → the unique STILL fires (now tenant-scoped) → 23505.
+        let sqlState: string | undefined;
+        try {
+          await sql.unsafe(`INSERT INTO catalog (tenant_id, code) VALUES ($1, 'MEALS')`, [TA]);
+        } catch (e) {
+          sqlState = (e as { code?: string }).code;
+        }
+        expect(sqlState).toBe('23505'); // unique_violation — same-tenant duplicate
+
+        // The REAL index: a COMPOUND unique on ordered columns (tenant_id, code).
+        const idx = await uniqueIndexColumns(sql, 'catalog_code_unique');
+        expect(idx.isUnique).toBe(true);
+        expect(idx.columns).toEqual(['tenant_id', 'code']);
+      });
+      scenariosRan++;
+    }, 60_000);
+
+    it('DX-v1.2 CARVE-OUT: a conflict-key column keeps a SINGLE-column unique index (the durable ON CONFLICT target)', async () => {
+      const TC = '00000000-0000-4000-8000-0000000000c3';
+      const keyed = store({
+        name: 'keyed',
+        columns: [{ name: 'ref', type: 'text', unique: true }],
+      });
+      // Materialize with `ref` marked as a CONFLICT KEY → single-column index (a compound one would 42P10
+      // an `ON CONFLICT (ref)` upsert). withMaterializedOld can't pass conflict keys, so hand-materialize.
+      await withMaterializedOld([], async (sql) => {
+        for (const stmt of emitStoreSql(keyed, new Set(['ref']))) await sql.unsafe(stmt);
+        const idx = await uniqueIndexColumns(sql, 'keyed_ref_unique');
+        expect(idx.isUnique).toBe(true);
+        expect(idx.columns).toEqual(['ref']); // SINGLE column — deliberately WITHOUT tenant_id
+
+        // Prove the durable `ON CONFLICT (ref)` works against the single-column index (a compound index
+        // would raise 42P10 here — this is the carve-out's whole reason to exist).
+        await sql.unsafe(`INSERT INTO orgs (id, name) VALUES ($1, 'C')`, [TC]);
+        await sql.unsafe(`INSERT INTO keyed (tenant_id, ref) VALUES ($1, 'R1')`, [TC]);
+        await sql.unsafe(
+          `INSERT INTO keyed (tenant_id, ref) VALUES ($1, 'R1') ON CONFLICT (ref) DO NOTHING`,
+          [TC],
+        );
+        const rows = await sql.unsafe(`SELECT ref FROM keyed`);
+        expect(rows.length).toBe(1); // the ON CONFLICT (ref) converged on ONE row (single index satisfies it)
+      });
+      scenariosRan++;
+    }, 60_000);
   },
 );
 
@@ -166,7 +247,7 @@ describe.skipIf(!baseUrl)(
 describe('diffProductStores DB apply — ran-guard (the apply proofs must not silently skip in CI)', () => {
   it('the apply scenarios ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (dbRequired) {
-      expect(scenariosRan).toBe(2);
+      expect(scenariosRan).toBe(4);
     } else {
       expect(dbRequired).toBe(false);
     }

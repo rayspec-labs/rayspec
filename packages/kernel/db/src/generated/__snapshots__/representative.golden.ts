@@ -9,27 +9,40 @@
  * reachable through the TenantDb chokepoint, an unregistered one throws (deny-by-default).
  */
 
-import { boolean, integer, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  integer,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from 'drizzle-orm/pg-core';
 import { orgs } from '../schema.js';
 
 /** Generated product store 'projects'. Tenant-scoped by construction (tenant_id -> orgs). */
-export const projects = pgTable('projects', {
-  id: uuid('id').defaultRandom().primaryKey(),
-  tenantId: uuid('tenant_id')
-    .notNull()
-    .references(() => orgs.id, { onDelete: 'cascade' }),
-  title: text('title').notNull(),
-  description: text('description'),
-  slug: text('slug').notNull().unique(),
-  priority: integer('priority').notNull(),
-  active: boolean('active').notNull(),
-  metadata: jsonb('metadata'),
-  dueAt: timestamp('due_at', { withTimezone: true }),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  deletedAt: timestamp('deleted_at', { withTimezone: true }),
-  retentionDays: integer('retention_days'),
-  region: text('region').notNull().default('eu'),
-});
+export const projects = pgTable(
+  'projects',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    description: text('description'),
+    slug: text('slug').notNull(),
+    priority: integer('priority').notNull(),
+    active: boolean('active').notNull(),
+    metadata: jsonb('metadata'),
+    dueAt: timestamp('due_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+    retentionDays: integer('retention_days'),
+    region: text('region').notNull().default('eu'),
+  },
+  (t) => [uniqueIndex('projects_slug_unique').on(t.tenantId, t.slug)],
+);
 
 /** Generated product store 'tasks'. Tenant-scoped by construction (tenant_id -> orgs). */
 export const tasks = pgTable('tasks', {

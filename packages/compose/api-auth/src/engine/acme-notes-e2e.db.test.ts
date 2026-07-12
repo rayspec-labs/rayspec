@@ -294,6 +294,15 @@ describe.skipIf(!hasDb)('acme-notes fake-provider e2e through the REAL deploy pa
   const enqueuer = new DrainEnqueuer();
   const extractorCounter = { invocations: 0 };
   const composedStores = [...audioCapabilityStores(), ...PRODUCT_STORES];
+  // DX-v1.2: every store here is durable (the audio `*_ref` idiom + the note_artifacts collection's
+  // artifact_ref) — each unique column is an ON CONFLICT target → keep its unique index SINGLE-column
+  // (a compound one would 42P10 the upsert).
+  const conflictKeys = new Map(
+    composedStores.map((s) => [
+      s.name,
+      new Set(s.columns.filter((c) => c.unique).map((c) => c.name)),
+    ]),
+  );
 
   /** Register a fresh user and return its bearer + user id (looked up by email, server truth). */
   async function registerUser(email: string): Promise<{ token: string; userId: string }> {
@@ -359,7 +368,7 @@ describe.skipIf(!hasDb)('acme-notes fake-provider e2e through the REAL deploy pa
       );
     }
 
-    h = await createDeployHarness({ stores: composedStores, schema: SCHEMA });
+    h = await createDeployHarness({ stores: composedStores, schema: SCHEMA, conflictKeys });
     await h.db.$client.unsafe(WORKFLOW_JOURNAL_DDL);
     // The deployment tenant exists BEFORE deploy (the dispatcher/sink bind to it at compose time).
     await h.db.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'Acme', 'acme')`, [
@@ -374,7 +383,11 @@ describe.skipIf(!hasDb)('acme-notes fake-provider e2e through the REAL deploy pa
     result = await deploy<ReturnType<typeof createAuthApp>>({
       specSource: yamlSource,
       migrations: [
-        { name: '0000_acme.sql', sql: generateProductSql(composedStores), allowlist: [] },
+        {
+          name: '0000_acme.sql',
+          sql: generateProductSql(composedStores, conflictKeys),
+          allowlist: [],
+        },
       ],
       target: h.target,
       rollout: {

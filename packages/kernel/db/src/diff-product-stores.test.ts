@@ -240,17 +240,32 @@ describe('diffProductStores — golden per-shape deltas', () => {
     expect(scanMigrationSql(tighten.migrationSql, tighten.proposedAllowlist).pass).toBe(true);
   });
 
-  it('adding unique is additive (CREATE UNIQUE INDEX); removing unique is destructive (DROP INDEX)', () => {
+  it('adding unique is additive (TENANT-SCOPED compound index); removing unique is destructive (DROP INDEX)', () => {
     const plain = [store({ name: 'items', columns: [{ name: 'a', type: 'text' }] })];
     const uniq = [store({ name: 'items', columns: [{ name: 'a', type: 'text', unique: true }] })];
     const add = diffProductStores(plain, uniq);
+    // DX-v1.2: a non-key author `unique: true` is TENANT-SCOPED — the index is compound (tenant_id, a).
+    expect(add.statements).toEqual([
+      'CREATE UNIQUE INDEX "items_a_unique" ON "items" USING btree ("tenant_id", "a")',
+    ]);
+    expect(add.destructive).toBe(false);
+    const remove = diffProductStores(uniq, plain);
+    // The index NAME is unchanged, so DROP keys off it unchanged (single/compound irrelevant to DROP).
+    expect(remove.statements).toEqual(['DROP INDEX "items_a_unique"']);
+    expect(remove.findings[0]?.destructiveKinds).toEqual(['drop-index']);
+  });
+
+  it('DX-v1.2 CARVE-OUT: a conflict-key column keeps a SINGLE-column unique index', () => {
+    const plain = [store({ name: 'items', columns: [{ name: 'a', type: 'text' }] })];
+    const uniq = [store({ name: 'items', columns: [{ name: 'a', type: 'text', unique: true }] })];
+    // Mark `a` as a durable conflict key → the durable `ON CONFLICT (a)` target MUST stay single-column
+    // (a compound index would 42P10). The index NAME is identical to the compound case.
+    const conflictKeys = new Map([['items', new Set(['a'])]]);
+    const add = diffProductStores(plain, uniq, { conflictKeys });
     expect(add.statements).toEqual([
       'CREATE UNIQUE INDEX "items_a_unique" ON "items" USING btree ("a")',
     ]);
     expect(add.destructive).toBe(false);
-    const remove = diffProductStores(uniq, plain);
-    expect(remove.statements).toEqual(['DROP INDEX "items_a_unique"']);
-    expect(remove.findings[0]?.destructiveKinds).toEqual(['drop-index']);
   });
 
   it('FIX-2: a NEWLY-ADDED unique column emits ADD COLUMN + CREATE UNIQUE INDEX (both additive)', () => {
@@ -265,9 +280,10 @@ describe('diffProductStores — golden per-shape deltas', () => {
     ];
     const r = diffProductStores(base, next);
     // Before the fix the added-column loop ignored `unique`, so the index was silently dropped.
+    // DX-v1.2: a non-key author unique on the new column → TENANT-SCOPED compound index.
     expect(r.statements).toEqual([
       'ALTER TABLE "items" ADD COLUMN "b" text',
-      'CREATE UNIQUE INDEX "items_b_unique" ON "items" USING btree ("b")',
+      'CREATE UNIQUE INDEX "items_b_unique" ON "items" USING btree ("tenant_id", "b")',
     ]);
     expect(r.destructive).toBe(false); // a brand-new column has no duplicate data — purely additive
     expect(scanMigrationSql(r.migrationSql, []).pass).toBe(true);

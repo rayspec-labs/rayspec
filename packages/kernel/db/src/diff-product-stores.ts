@@ -38,7 +38,11 @@ import {
   type StoreForeignKey,
   type StoreSpec,
 } from '@rayspec/spec';
-import { emitStoreSql, generateProductSql } from './generated/generate-product-sql.js';
+import {
+  emitStoreSql,
+  generateProductSql,
+  type StoreConflictKeys,
+} from './generated/generate-product-sql.js';
 import type { AllowlistEntry, DestructiveKind } from './migration-scan.js';
 import { scanMigrationSql } from './migration-scan.js';
 
@@ -74,6 +78,14 @@ export interface DiffProductStoresOptions {
    * SQL comment, never scanned). Sanitized to a safe slug; defaults to `update`.
    */
   readonly label?: string;
+  /**
+   * The per-store conflict-key carve-out (DX-v1.2 — see {@link StoreConflictKeys}). A unique column IN
+   * its store's set → single-column `(col)` index (the durable `ON CONFLICT` target); a unique column
+   * NOT in it → tenant-scoped compound `(tenant_id, col)`. Secure default (omitted) = compound. One map
+   * covers BOTH old and new stores: a surviving store's conflict keys do not change across a diff, so a
+   * name-keyed map is sufficient for the added-table CREATE path and the survivor-gains-unique path.
+   */
+  readonly conflictKeys?: StoreConflictKeys;
 }
 
 /** The structured result of diffing two declared-store sets into a forward migration. */
@@ -149,9 +161,15 @@ function dropNotNullSql(table: string, column: string): string {
   return `ALTER TABLE "${table}" ALTER COLUMN "${column}" DROP NOT NULL`;
 }
 
-/** CREATE UNIQUE INDEX (additive to the scan; NB it can still fail on duplicate data — noted). */
-function createUniqueIndexSql(table: string, column: string): string {
-  return `CREATE UNIQUE INDEX "${table}_${column}_unique" ON "${table}" USING btree ("${column}")`;
+/**
+ * CREATE UNIQUE INDEX (additive to the scan; NB it can still fail on duplicate data — noted). `compound`
+ * → tenant-scoped `("tenant_id", col)` (a NON-key `unique: true` column); otherwise single `(col)` (a
+ * conflict-key column — the durable `ON CONFLICT` target). The index NAME is unchanged in both cases, so
+ * `dropUniqueIndexSql` (name-keyed) and drift-detect key off the stable name (DX-v1.2).
+ */
+function createUniqueIndexSql(table: string, column: string, compound: boolean): string {
+  const indexColumns = compound ? `"tenant_id", "${column}"` : `"${column}"`;
+  return `CREATE UNIQUE INDEX "${table}_${column}_unique" ON "${table}" USING btree (${indexColumns})`;
 }
 
 /** DROP INDEX for a column that lost `unique` (destructive — the scan flags `drop-index`). */
@@ -252,7 +270,11 @@ interface SurvivingTablePlan {
   notes: string[];
 }
 
-function planSurvivingTable(oldStore: StoreSpec, newStore: StoreSpec): SurvivingTablePlan {
+function planSurvivingTable(
+  oldStore: StoreSpec,
+  newStore: StoreSpec,
+  conflictKeys?: ReadonlySet<string>,
+): SurvivingTablePlan {
   const table = newStore.name;
   const oldCols = columnsByName(oldStore);
   const newCols = columnsByName(newStore);
@@ -269,7 +291,8 @@ function planSurvivingTable(oldStore: StoreSpec, newStore: StoreSpec): Surviving
     additive.push(addColumnSql(table, col)); // may be scan-destructive when NOT NULL w/ no default
     // A brand-new `unique` column also needs its unique index (a NEW column holds no duplicate data,
     // so the CREATE UNIQUE INDEX is additive — no de-dup caveat, unlike a survivor gaining uniqueness).
-    if (col.unique) additive.push(createUniqueIndexSql(table, col.name));
+    if (col.unique)
+      additive.push(createUniqueIndexSql(table, col.name, !(conflictKeys?.has(col.name) ?? false)));
     if (!col.nullable) {
       notes.push(
         `added non-nullable column "${table}"."${col.name}" has no default — it FAILS on a ` +
@@ -310,7 +333,9 @@ function planSurvivingTable(oldStore: StoreSpec, newStore: StoreSpec): Surviving
     }
     if (prev.unique !== col.unique) {
       if (col.unique) {
-        additive.push(createUniqueIndexSql(table, col.name));
+        additive.push(
+          createUniqueIndexSql(table, col.name, !(conflictKeys?.has(col.name) ?? false)),
+        );
         notes.push(
           `unique index added on "${table}"."${col.name}" — CREATE UNIQUE INDEX FAILS if existing ` +
             'rows hold duplicate values; de-duplicate first.',
@@ -363,9 +388,10 @@ export function diffProductStores(
   const survivingStores = newStores.filter((s) => oldByName.has(s.name)); // newStores order
 
   const notes: string[] = [];
+  const conflictKeys = opts.conflictKeys;
 
   // Phase A — added tables (byte-identical CREATE path: injected tenancy cols + FK + indexes).
-  const addedStatements = addedStores.flatMap((s) => emitStoreSql(s));
+  const addedStatements = addedStores.flatMap((s) => emitStoreSql(s, conflictKeys?.get(s.name)));
 
   // Phases B/C — surviving-table alters, split additive-first / destructive-last.
   const survivingAdditive: string[] = [];
@@ -373,7 +399,7 @@ export function diffProductStores(
   for (const store of survivingStores) {
     const oldStore = oldByName.get(store.name);
     if (!oldStore) continue; // unreachable (survivingStores are in oldByName) — narrows the type
-    const plan = planSurvivingTable(oldStore, store);
+    const plan = planSurvivingTable(oldStore, store, conflictKeys?.get(store.name));
     survivingAdditive.push(...plan.additive);
     survivingDestructive.push(...plan.destructive);
     notes.push(...plan.notes);
@@ -471,7 +497,8 @@ function assembleMigrationSql(
   if (allStatements.length === 0) return '';
   // Purely additive (only added tables, no surviving-table alters, no drops): identical to the
   // CREATE-only generator — including the first-materialization case `diffProductStores([], new)`.
-  if (deltaStatements.length === 0) return generateProductSql(addedStores as StoreSpec[]);
+  if (deltaStatements.length === 0)
+    return generateProductSql(addedStores as StoreSpec[], opts.conflictKeys);
 
   const label = sanitizeLabel(opts.label ?? 'update');
   const header = [

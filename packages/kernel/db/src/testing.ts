@@ -43,6 +43,7 @@
  */
 export { type Db, makeDb, makeDbWithSchema } from './client.js';
 export { buildProductTables } from './generated/build-product-tables.js';
+export type { StoreConflictKeys } from './generated/generate-product-sql.js';
 export {
   assertProductTenancy,
   type ProductTenancyResult,

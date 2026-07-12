@@ -427,6 +427,60 @@ describe('drift-detect (report-only)', () => {
     ).toBe(true);
     await db.$client.unsafe(`DROP SCHEMA IF EXISTS ${ds} CASCADE;`);
   });
+
+  it('DX-v1.2: FLAGS stale_global_unique for a NON-key author-unique on a legacy single-column GLOBAL index (lenient default accepts it — no forced migration)', async () => {
+    const uniqStores = [
+      ...stores,
+      {
+        name: 'labels',
+        columns: [{ name: 'code', type: 'text' as const, nullable: false, unique: true }],
+        foreignKeys: [],
+      },
+    ];
+    const ds = `${SCHEMA}_drift_stale`;
+    await db.$client.unsafe(`
+      DROP SCHEMA IF EXISTS ${ds} CASCADE;
+      CREATE SCHEMA ${ds};
+      SET search_path TO ${ds};
+      ${ORGS_DDL}
+    `);
+    // Materialize with the SECURE DEFAULT (no conflict keys) → `code`'s index is compound (tenant_id, code).
+    await db.$client.unsafe(
+      `SET search_path TO ${ds}; ${forSchema(generateProductSql(uniqStores), ds)}`,
+    );
+    // `code` is NOT a conflict key (labels has an entry, but `code` ∉ it) → the STRICT check expects the
+    // tenant-scoped compound index.
+    const authorUnique = new Map<string, ReadonlySet<string>>([['labels', new Set<string>()]]);
+
+    // With the compound index present: the strict (conflictKeys) check reports NO drift for labels.
+    expect(
+      (await detectDrift(uniqStores, ds, driftQuery, authorUnique)).some(
+        (x) => x.table === 'labels',
+      ),
+    ).toBe(false);
+
+    // Simulate a LEGACY v1.0/v1.1 deployment: replace the compound index with a stale single-column GLOBAL one.
+    await db.$client.unsafe(
+      `DROP INDEX ${ds}.labels_code_unique;
+       CREATE UNIQUE INDEX labels_code_unique ON ${ds}.labels USING btree (code);`,
+    );
+
+    // STRICT (conflictKeys passed): the stale global is FLAGGED so an operator knows to migrate.
+    const strict = await detectDrift(uniqStores, ds, driftQuery, authorUnique);
+    expect(
+      strict.some(
+        (x) => x.table === 'labels' && x.column === 'code' && x.kind === 'stale_global_unique',
+      ),
+    ).toBe(true);
+
+    // LENIENT (no conflictKeys — the frozen deploy.ts + boot classify paths): a covering unique index
+    // exists → NO drift, so a working legacy deployment is NEVER refused (no forced migration).
+    expect((await detectDrift(uniqStores, ds, driftQuery)).some((x) => x.table === 'labels')).toBe(
+      false,
+    );
+
+    await db.$client.unsafe(`DROP SCHEMA IF EXISTS ${ds} CASCADE;`);
+  });
 });
 
 describe('P3S1-05 — all three FK onDelete policies apply + the live delete_rule matches', () => {

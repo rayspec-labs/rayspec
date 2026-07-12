@@ -58,6 +58,7 @@ import {
   formatFindings,
   generateProductSql,
   type ScanResult,
+  type StoreConflictKeys,
   scanMigrationSql,
 } from '@rayspec/db';
 import {
@@ -351,13 +352,17 @@ function parseAllowlist(text: string): AllowlistEntry[] {
  */
 async function deriveStoresForCli(
   spec: ProductSpec,
-): Promise<{ ok: true; stores: StoreSpec[] } | { ok: false; error: string }> {
+): Promise<
+  { ok: true; stores: StoreSpec[]; conflictKeys: StoreConflictKeys } | { ok: false; error: string }
+> {
   try {
-    const { composeCapabilityStores, deriveProductStores } = await import('@rayspec/product-yaml');
-    return {
-      ok: true,
-      stores: deriveProductStores(spec, composeCapabilityStores(spec).names).stores,
-    };
+    const { composeCapabilityStores, deriveConflictKeys, deriveProductStores } = await import(
+      '@rayspec/product-yaml'
+    );
+    const stores = deriveProductStores(spec, composeCapabilityStores(spec).names).stores;
+    // DX-v1.2: the derived collection/transcript conflict keys (`*_ref`) + declared `key` columns stay
+    // single-column; any other author unique is tenant-scoped compound.
+    return { ok: true, stores, conflictKeys: deriveConflictKeys(spec, stores) };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
@@ -382,6 +387,12 @@ interface StorePlanInputs {
   readonly product?: PlanProduct;
   /** First-materialization SQL thunk (backend uses the `generateSql` seam; product uses the derived stores). */
   readonly firstMaterializeSql: () => string;
+  /**
+   * DX-v1.2 per-store conflict-key carve-out (name-keyed; covers BOTH old and new stores). Present for
+   * the product profile (durable `ON CONFLICT` targets stay single-column); ABSENT for the backend
+   * profile → every author `unique: true` column is tenant-scoped compound (the secure default).
+   */
+  readonly conflictKeys?: StoreConflictKeys;
 }
 
 /**
@@ -398,11 +409,13 @@ async function planStores(inp: StorePlanInputs): Promise<PlanResult> {
   let notes: string[] = [];
   let baselineSql = '';
   if (inp.oldStores !== undefined) {
-    const diff = diffProductStores(inp.oldStores, inp.newStores);
+    const diff = diffProductStores(inp.oldStores, inp.newStores, {
+      conflictKeys: inp.conflictKeys,
+    });
     migrationSql = diff.migrationSql;
     proposedAllowlist = diff.proposedAllowlist;
     notes = diff.notes;
-    baselineSql = generateProductSql(inp.oldStores);
+    baselineSql = generateProductSql(inp.oldStores, inp.conflictKeys);
   } else {
     migrationSql = inp.firstMaterializeSql();
   }
@@ -545,8 +558,12 @@ async function planProduct(
   const derivedNew = await deriveStoresForCli(parsed.value);
   let projectionNote: string | undefined;
   let newStores: StoreSpec[] = [];
+  // DX-v1.2: the per-store conflict-key carve-out for the derived product stores. One name-keyed map
+  // covers old + new (a surviving store's conflict keys do not change); merged below when in update mode.
+  const conflictKeys = new Map<string, ReadonlySet<string>>();
   if (derivedNew.ok) {
     newStores = derivedNew.stores;
+    for (const [name, keys] of derivedNew.conflictKeys) conflictKeys.set(name, keys);
   } else if (oldText === undefined) {
     // Projection-only: the doc VALIDATED — surface the derivation gap as a note, project no stores.
     projectionNote = `derived-store projection unavailable: ${derivedNew.error}`;
@@ -594,6 +611,10 @@ async function planProduct(
       };
     }
     oldStores = derivedOld.stores;
+    // Merge the OLD stores' conflict keys (survivors agree; added/removed contribute their own).
+    for (const [name, keys] of derivedOld.conflictKeys) {
+      if (!conflictKeys.has(name)) conflictKeys.set(name, keys);
+    }
   }
 
   const result = await planStores({
@@ -604,7 +625,9 @@ async function planProduct(
     routes: [], // a product doc materializes no Tier-A routes in the deploy front-half
     agents: [], // product extractors are counted in `product.extractors`, not projected as backend/model
     product,
-    firstMaterializeSql: () => (newStores.length > 0 ? generateProductSql(newStores) : ''),
+    conflictKeys,
+    firstMaterializeSql: () =>
+      newStores.length > 0 ? generateProductSql(newStores, conflictKeys) : '',
   });
   // Weave a projection-only derivation note (never in update mode, where a gap is fatal above).
   if (projectionNote !== undefined) {

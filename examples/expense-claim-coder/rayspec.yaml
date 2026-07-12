@@ -12,12 +12,12 @@ metadata:
 stores:
   - name: expense_categories
     columns:
-      # NOTE: NO `unique: true` on `code`. The platform's generated single-column UNIQUE is GLOBAL
-      # (cross-tenant), so two tenants (or two boots against a non-fresh DB) would
-      # collide on the same code (e.g. 'MEALS') → HTTP 500. The catalog is admin-curated and the agent
-      # FK-revalidates the chosen code against it, so a DB-enforced global-unique is both unnecessary
-      # AND wrong for a per-tenant catalog. A tenant-scoped unique would need the tenant-namespaced
-      # *_ref pattern (server-derived tenant embedded in the unique value) — not exercised here.
+      # NOTE: NO `unique: true` on `code` here — but ONLY because this catalog is admin-curated and the
+      # agent FK-revalidates the chosen code against it, so a DB-enforced unique is simply unnecessary.
+      # (Since DX-v1.2 a `unique: true` catalog code would be TENANT-SCOPED — a compound
+      # (tenant_id, code) index — so two tenants CAN hold the same code with no cross-tenant collision;
+      # it is no longer global/"wrong for a per-tenant catalog". The tenant-namespaced *_ref idiom is a
+      # SEPARATE mechanism, only needed for a durable ON CONFLICT key that must stay single-column.)
       - { name: code, type: text }                 # the GL/category code the agent must pick one of
       - { name: name, type: text }
       - { name: description, type: text, nullable: true }
