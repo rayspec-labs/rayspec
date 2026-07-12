@@ -30,6 +30,7 @@ if (requireDb && !hasDb) {
 const describeDb = hasDb ? describe : describe.skip;
 
 const SCHEMA = 'rayspec_test_store_conflict';
+const SCHEMA_KEYED = 'rayspec_test_store_conflict_keyed';
 
 // A self-contained throwaway backend-profile spec: one store with an AUTHOR-declared `unique: true`
 // column (`sku`) + store CRUD routes. Backend-profile ⇒ no conflict keys ⇒ the secure default: the
@@ -50,6 +51,29 @@ api:
   - { method: GET, path: '/catalog/{id}', action: { kind: store, store: catalog, op: get } }
   - { method: PATCH, path: '/catalog/{id}', action: { kind: store, store: catalog, op: update } }
 `;
+
+// A store mirroring a PRODUCT-profile shape: `sku` is a GLOBAL conflict-key column (a durable
+// `ON CONFLICT` target — single-column unique) and `code` is a plain author-`unique` column (tenant-
+// scoped compound). The keyed carve-out is supplied to the harness as `conflictKeys = {catalog2:{sku}}`,
+// exactly what `deriveConflictKeys` produces for a declared store with `key: [sku]` + a second unique.
+const CATALOG_KEYED_YAML = `
+version: '1.0'
+metadata:
+  name: catalog-keyed-backend
+  description: A store with a global conflict-key column (sku) + a tenant-scoped author-unique column (code).
+stores:
+  - name: catalog2
+    columns:
+      - { name: sku, type: text, unique: true }
+      - { name: code, type: text, unique: true }
+api:
+  - { method: POST, path: '/catalog2', action: { kind: store, store: catalog2, op: create } }
+  - { method: GET, path: '/catalog2', action: { kind: store, store: catalog2, op: list } }
+`;
+
+// The per-store conflict-key carve-out: `sku` is the global key column; `code` is not (tenant-scoped).
+const KEYED_CONFLICT_KEYS = new Map([['catalog2', new Set(['sku'])]]);
+const GENERIC_CONFLICT_MESSAGE = 'A record with a conflicting unique value already exists.';
 
 let testsRan = 0;
 
@@ -173,13 +197,114 @@ describeDb('store-write 409 conflict-mapping (tenant-scoped author-unique)', () 
 });
 
 /**
+ * DX-v1.2 fix-round (Finding 1): a store with a GLOBAL conflict-key column proves the carve-out — a
+ * 23505 on the key column (`sku`, a single-column global unique that can collide CROSS-tenant) uses
+ * the GENERIC 409 message (NEVER names `sku`, so the wire is not a cross-tenant existence oracle),
+ * while a 23505 on a tenant-scoped author-`unique` column (`code`) STILL names its column (the safe
+ * case — the founder's "Spaltenname ja"). The carve-out is threaded via `conflictKeys` exactly as the
+ * product route-registration path does.
+ */
+describeDb('store-write 409 — a GLOBAL conflict-key column is never named (Finding 1)', () => {
+  let h: Harness;
+
+  async function principal(email: string, orgName: string): Promise<{ token: string }> {
+    const reg = await jsonRequest(h.app, 'POST', '/v1/auth/register', {
+      body: { email, password: 'a-long-enough-password' },
+    });
+    const t0 = (await reg.json()).accessToken as string;
+    const orgRes = await jsonRequest(h.app, 'POST', '/v1/orgs', {
+      body: { name: orgName },
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    const orgId = (await orgRes.json()).id as string;
+    const sw = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/switch`, {
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    return { token: (await sw.json()).accessToken as string };
+  }
+
+  const post = (token: string, body: unknown) =>
+    jsonRequest(h.app, 'POST', '/catalog2', {
+      body,
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+  beforeAll(async () => {
+    if (!hasDb) return;
+    const parsed = parseSpec(CATALOG_KEYED_YAML);
+    if (!parsed.ok) throw new Error(`keyed fixture invalid: ${JSON.stringify(parsed.errors)}`);
+    const spec: RaySpec = parsed.value;
+    h = await createHarness({
+      engineSpec: spec,
+      conflictKeys: KEYED_CONFLICT_KEYS,
+      schema: SCHEMA_KEYED,
+    });
+  });
+  beforeEach(async () => {
+    if (!hasDb) return;
+    await h.reset();
+  });
+  afterAll(async () => {
+    if (!hasDb) return;
+    await h.close();
+  });
+
+  it('the sku index is a SINGLE-column global unique (sku) — the conflict-key carve-out precondition', async () => {
+    testsRan += 1;
+    const cols = (await h.db.$client.unsafe(
+      `SELECT a.attname AS column_name
+         FROM pg_index i
+         JOIN pg_class c ON c.oid = i.indexrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+        WHERE n.nspname = $1 AND c.relname = 'catalog2_sku_unique' AND i.indisunique
+        ORDER BY k.ord`,
+      [SCHEMA_KEYED],
+    )) as unknown as Array<{ column_name: string }>;
+    // A GLOBAL single-column unique (no tenant_id) — this is WHY naming it would leak cross-tenant.
+    expect(cols.map((c) => c.column_name)).toEqual(['sku']);
+  });
+
+  it('a 23505 on the GLOBAL key column (sku) uses the GENERIC message — never names sku', async () => {
+    testsRan += 1;
+    const a = await principal('keyed-a@example.com', 'KeyedOrgA');
+    const first = await post(a.token, { sku: 'ORBIT-CRM', code: 'C1' });
+    expect(first.status).toBe(201);
+    // Same tenant, duplicate sku (global key) → 409, but the message must NOT name the key column.
+    const dup = await post(a.token, { sku: 'ORBIT-CRM', code: 'C2' });
+    expect(dup.status).toBe(409);
+    const body = await dup.json();
+    expect(body.error.code).toBe('CONFLICT');
+    // Fail-the-fix: without the carve-out, `conflictColumn` would resolve + name `sku`.
+    expect(body.error.message).toBe(GENERIC_CONFLICT_MESSAGE);
+    expect(body.error.message).not.toContain('sku');
+    expect(JSON.stringify(body)).not.toContain('ORBIT-CRM'); // never the offending value either
+  });
+
+  it('a 23505 on a tenant-scoped author-unique column (code) STILL names its column (the safe case)', async () => {
+    testsRan += 1;
+    const a = await principal('keyed-b@example.com', 'KeyedOrgB');
+    const first = await post(a.token, { sku: 'SKU-1', code: 'DUP-CODE' });
+    expect(first.status).toBe(201);
+    // New sku (no key collision), duplicate code (tenant-scoped compound) → 409 that DOES name `code`.
+    const dup = await post(a.token, { sku: 'SKU-2', code: 'DUP-CODE' });
+    expect(dup.status).toBe(409);
+    const body = await dup.json();
+    expect(body.error.code).toBe('CONFLICT');
+    expect(body.error.message).toContain('code'); // the tenant-scoped column IS named …
+    expect(JSON.stringify(body)).not.toContain('DUP-CODE'); // … but the value is never echoed.
+  });
+});
+
+/**
  * Ran-guard: a SEPARATE, NON-skipped describe that fails when the DB is REQUIRED (CI /
  * RAYSPEC_REQUIRE_DB_TESTS) but the acceptance arms did not run (no silent false-green).
  */
 describe('store-conflict acceptance — ran-guard (must not silently skip in CI)', () => {
   it('the conflict-mapping arms ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (requireDb) {
-      expect(testsRan).toBe(3);
+      expect(testsRan).toBe(6);
     } else {
       expect(requireDb).toBe(false);
     }

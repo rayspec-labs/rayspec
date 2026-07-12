@@ -1811,6 +1811,12 @@ export async function deployProductYamlSpec(
         // (both `undefined` otherwise — DeclarativeEngine.blobFactory/mediaTokenService are optional).
         const engineWithByteMovers: DeclarativeEngine = {
           ...engine,
+          // DX-v1.2: thread the product-profile conflict-key carve-out (computed above from
+          // `deriveConflictKeys`) onto the engine so a store-route 409 on a GLOBAL-unique key column
+          // uses the generic message (no cross-tenant existence oracle), while a tenant-scoped author-
+          // `unique` column is still named. deploy() builds `engine` WITHOUT this (kill-set, byte-frozen);
+          // we add it HERE, in the deployer-owned buildApp seam, so the kill-set stays untouched.
+          conflictKeys,
           ...(blobFactory ? { blobFactory } : {}),
           ...(mediaTokenService ? { mediaTokenService } : {}),
         };

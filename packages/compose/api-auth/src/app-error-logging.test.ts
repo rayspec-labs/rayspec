@@ -6,12 +6,15 @@
  *
  *  - EVERY 5xx (unrecognized-error 500, plus any `ApiError` whose status ≥ 500 — UPSTREAM_ERROR 502,
  *    NOT_IMPLEMENTED 501) emits EXACTLY ONE server-side log line carrying the requestId + the code;
+ *  - a DIRECTLY-RETURNED 5xx (the live sync-run 502/504 shape, `return c.json(..., 5xx)`, which never
+ *    reaches `onError`) ALSO emits EXACTLY ONE line — the log lives in the OUTERMOST middleware (which
+ *    sees the FINAL status), NOT in `onError`, so thrown and returned both log once and neither doubles;
  *  - a 4xx (the new CONFLICT 409 + a 401/404) emits NO 5xx log line;
- *  - the log line NEVER leaks the caller's bearer credential (server-side, code + requestId + message).
+ *  - the log line NEVER leaks the caller's bearer credential (server-side, status + requestId + code).
  *
- * The errors are injected at the `authenticate` seam (`apiKeyStore.resolve` throws a sentinel per
- * bearer), so every branch of `onError` is reached deterministically with no DB — the SAME `onError`
- * the store-route 409 and any real 500 flow through.
+ * Thrown errors are injected at the `authenticate` seam (`apiKeyStore.resolve` throws a sentinel per
+ * bearer); returned 5xx are driven through probe routes that `return c.json(..., 5xx)` (registered on
+ * the SAME app so the outermost 5xx-logging middleware wraps them) — no DB in either case.
  */
 import { ApiError } from '@rayspec/auth-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -57,6 +60,13 @@ function buildApp(): ReturnType<typeof createAuthApp> {
 }
 
 const app = buildApp();
+
+// Probe routes that DIRECTLY RETURN a 5xx (never throw) — the `runs.ts` sync-run 502/504 shape that
+// bypasses `onError`. Registered on the SAME app AFTER the `app.use('*')` 5xx-logging middleware, so
+// that middleware wraps them (it matches every path). No auth requirement → they run with no bearer.
+app.get('/probe-returned-502', (c) => c.json({ error: { code: 'UPSTREAM_ERROR' } }, 502));
+app.get('/probe-returned-504', (c) => c.json({ error: { code: 'GATEWAY_TIMEOUT' } }, 504));
+app.get('/probe-returned-200', (c) => c.json({ ok: true }, 200));
 
 /** Drive a request with the sentinel bearer + a known request id; returns the parsed envelope. */
 async function drive(
@@ -125,6 +135,41 @@ describe('onError — a 4xx emits NO 5xx log line', () => {
     // No bearer → no principal → no route matches `/probe-any-path` → uniform 404 (a 4xx).
     const { status } = await drive(undefined, 'rid-404');
     expect(status).toBe(404);
+    expect(logError).not.toHaveBeenCalled();
+  });
+});
+
+describe('a DIRECTLY-RETURNED 5xx (bypasses onError) still logs EXACTLY ONCE', () => {
+  // Fail-the-fix: without the outermost response-level middleware — with the log left in onError only
+  // (the pre-fix S2 shape) — a RETURNED 502/504 never reaches onError, so `logError` would fire ZERO
+  // times and each `toHaveBeenCalledTimes(1)` below would go RED. It is ALSO the no-double-log guard:
+  // the thrown-500 cases above assert exactly ONE call, which fails if both middleware AND onError log.
+  it('a returned 502 (the sync-run upstream_5xx shape) logs exactly one server-side line', async () => {
+    const res = await app.request('/probe-returned-502', {
+      method: 'GET',
+      headers: { 'x-request-id': 'rid-ret502' },
+    });
+    expect(res.status).toBe(502);
+    expect(logError).toHaveBeenCalledTimes(1);
+    const [line] = logError.mock.calls[0]!;
+    expect(line).toContain('rid-ret502'); // the requestId rides the line …
+    expect(line).toContain('status=502'); // … and so does the returned status.
+  });
+
+  it('a returned 504 (the sync-run timeout shape) logs exactly one server-side line', async () => {
+    const res = await app.request('/probe-returned-504', {
+      method: 'GET',
+      headers: { 'x-request-id': 'rid-ret504' },
+    });
+    expect(res.status).toBe(504);
+    expect(logError).toHaveBeenCalledTimes(1);
+    expect(logError.mock.calls[0]![0]).toContain('status=504');
+    expect(logError.mock.calls[0]![0]).toContain('rid-ret504');
+  });
+
+  it('a returned 200 logs NOTHING (only a 5xx status triggers the line)', async () => {
+    const res = await app.request('/probe-returned-200', { method: 'GET' });
+    expect(res.status).toBe(200);
     expect(logError).not.toHaveBeenCalled();
   });
 });
