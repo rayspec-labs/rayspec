@@ -15,11 +15,15 @@ CREATE TABLE "blob_chunks" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"deleted_at" timestamp with time zone,
 	"retention_days" integer,
-	"region" text DEFAULT 'eu' NOT NULL
+	"region" text DEFAULT 'eu' NOT NULL,
+	"created_by" text,
+	"idempotency_key" text
 );
 --> statement-breakpoint
 ALTER TABLE "blob_chunks" ADD CONSTRAINT "blob_chunks_tenant_id_orgs_id_fk" FOREIGN KEY ("tenant_id") REFERENCES "public"."orgs"("id") ON DELETE cascade ON UPDATE no action;
 --> statement-breakpoint
 CREATE UNIQUE INDEX "blob_chunks_chunk_ref_unique" ON "blob_chunks" USING btree ("chunk_ref");
+--> statement-breakpoint
+CREATE UNIQUE INDEX "blob_chunks_idempotency_key_unique" ON "blob_chunks" USING btree ("tenant_id", "idempotency_key");
 --> statement-breakpoint
 CREATE INDEX "blob_chunks_tenant_idx" ON "blob_chunks" USING btree ("tenant_id");

@@ -8,10 +8,11 @@
  *  - bindRouteParams prepends a deterministic, trusted block — and is a NO-OP with no params.
  */
 
-import { lintSpec, RaySpec } from '@rayspec/spec';
+import { lintSpec, RaySpec, RESERVED_QUERY_KEYWORDS } from '@rayspec/spec';
 import { describe, expect, it } from 'vitest';
 import { bindRouteParams } from '../routes/runs.js';
-import { buildDeclaredRoutesOpenApi } from './emit-openapi.js';
+import { buildDeclaredRoutesOpenApi, type OpenApiDocument } from './emit-openapi.js';
+import { CONTROL_KEYS } from './store-query.js';
 
 /**
  * Build a validated RaySpec from a plain object by running it through the REAL production grammar
@@ -153,6 +154,8 @@ describe('buildDeclaredRoutesOpenApi — product-agnostic emission', () => {
       'deleted_at',
       'retention_days',
       'region',
+      'created_by',
+      'idempotency_key',
     ])
       expect(props).toContain(injected);
     expect(props).toContain('title');
@@ -200,8 +203,54 @@ describe('buildDeclaredRoutesOpenApi — product-agnostic emission', () => {
       required: true,
       schema: { type: 'string' },
     });
-    // A route with no path param has no parameters array.
-    expect(doc.paths['/widgets'].post.parameters).toBeUndefined();
+    // A {handler} route with no path param + no query/header params has no parameters array.
+    expect(doc.paths['/custom'].post.parameters).toBeUndefined();
+  });
+
+  it('a {store} LIST documents the list-query surface (order/after/limit + a filter per business col + created_by)', () => {
+    const doc = buildDeclaredRoutesOpenApi(richSpec());
+    const params = doc.paths['/widgets'].get.parameters ?? [];
+    const byName = new Map(params.map((p) => [p.name, p]));
+    // Control params.
+    for (const name of ['order', 'after', 'limit']) {
+      expect(byName.get(name)?.in).toBe('query');
+    }
+    expect(byName.get('limit')?.schema).toMatchObject({ type: 'integer', maximum: 200 });
+    // One equality-filter query param per declared BUSINESS column…
+    for (const name of ['title', 'note', 'count', 'active']) {
+      expect(byName.get(name)?.in).toBe('query');
+    }
+    // …plus the injected created_by filter.
+    expect(byName.get('created_by')?.in).toBe('query');
+    // Typed filter schemas mirror the column type (integer/boolean stay typed, not string).
+    expect(byName.get('count')?.schema).toMatchObject({ type: 'integer' });
+    expect(byName.get('active')?.schema).toMatchObject({ type: 'boolean' });
+    // Every list query param is OPTIONAL.
+    for (const p of params) expect(p.required ?? false).toBe(false);
+  });
+
+  it('a {store} LIST documents the pagination response headers (X-Next-Cursor + X-Result-Truncated)', () => {
+    const doc = buildDeclaredRoutesOpenApi(richSpec());
+    const res200 = doc.paths['/widgets'].get.responses['200'];
+    expect(res200.headers?.['X-Next-Cursor']?.schema).toEqual({ type: 'string' });
+    expect(res200.headers?.['X-Result-Truncated']?.schema).toEqual({ type: 'string' });
+  });
+
+  it('a {store} CREATE documents the Idempotency-Key header + the 200 replay response', () => {
+    const doc = buildDeclaredRoutesOpenApi(richSpec());
+    const create = doc.paths['/widgets'].post;
+    // The optional Idempotency-Key REQUEST header param.
+    const idem = (create.parameters ?? []).find((p) => p.name === 'Idempotency-Key');
+    expect(idem?.in).toBe('header');
+    expect(idem?.required ?? false).toBe(false);
+    // A CREATE store route carries no path param — so the ONLY parameter is the header.
+    expect((create.parameters ?? []).some((p) => p.in === 'path')).toBe(false);
+    // The 201 (fresh create) AND the 200 (idempotent replay) are both documented.
+    expect(create.responses['201']).toBeTruthy();
+    const replay = create.responses['200'];
+    expect(replay?.content?.['application/json'].schema).toBeTruthy();
+    // The Idempotency-Replay RESPONSE header on the replay branch.
+    expect(replay?.headers?.['Idempotency-Replay']?.schema).toEqual({ type: 'string' });
   });
 
   it('distinct paths get DISTINCT operationIds — a {param} segment cannot collide with a literal one', () => {
@@ -240,6 +289,121 @@ describe('buildDeclaredRoutesOpenApi — product-agnostic emission', () => {
     };
     expect(handlerBody.additionalProperties).toBe(true);
     expect(doc.paths['/uploads/{key}'].post.requestBody).toBeUndefined();
+  });
+});
+
+/**
+ * A lightweight OpenAPI-3.1 STRUCTURAL validator (no external dep — targeted assertions).
+ * It proves the emitted document is well-formed, and in particular that NO operation's
+ * `parameters` array carries a DUPLICATE (same `name`+`in`) — the control-key/filter collision defect class (a store column
+ * named after a control key emitting both a control param and a per-column filter param of the same name)
+ * plus any future structural regression that produces a duplicate parameter. Returns the list of problems
+ * (empty ⇒ structurally valid).
+ */
+function structuralOpenApiProblems(doc: OpenApiDocument): string[] {
+  const problems: string[] = [];
+  // Required top-level fields.
+  if (doc.openapi !== '3.1.0') problems.push(`openapi must be '3.1.0', got ${String(doc.openapi)}`);
+  if (typeof doc.info?.title !== 'string') problems.push('info.title must be a string');
+  if (typeof doc.info?.version !== 'string') problems.push('info.version must be a string');
+  if (doc.paths === null || typeof doc.paths !== 'object') problems.push('paths must be an object');
+
+  const seenOperationIds = new Set<string>();
+  for (const [path, item] of Object.entries(doc.paths ?? {})) {
+    for (const [method, op] of Object.entries(item)) {
+      const where = `${method.toUpperCase()} ${path}`;
+      // operationId present + globally unique (OpenAPI requires unique operationIds; codegen breaks on a clash).
+      if (typeof op.operationId !== 'string' || op.operationId.length === 0) {
+        problems.push(`${where}: missing operationId`);
+      } else if (seenOperationIds.has(op.operationId)) {
+        problems.push(`${where}: duplicate operationId '${op.operationId}'`);
+      } else {
+        seenOperationIds.add(op.operationId);
+      }
+      // At least one response is required.
+      if (op.responses === undefined || Object.keys(op.responses).length === 0) {
+        problems.push(`${where}: an operation must declare at least one response`);
+      }
+      // NO duplicate parameter (same name+in) — the no-duplicate-parameter invariant.
+      const seenParams = new Set<string>();
+      for (const p of op.parameters ?? []) {
+        const dedupKey = `${p.in} ${p.name}`;
+        if (seenParams.has(dedupKey)) {
+          problems.push(`${where}: duplicate parameter name='${p.name}' in='${p.in}'`);
+        } else {
+          seenParams.add(dedupKey);
+        }
+      }
+    }
+  }
+  return problems;
+}
+
+describe('buildDeclaredRoutesOpenApi — emitted document is STRUCTURALLY VALID', () => {
+  it('a rich spec (list+get+create+update+delete+agent+handler+stream) emits a structurally-valid doc with NO duplicate parameters', () => {
+    const doc = buildDeclaredRoutesOpenApi(richSpec());
+    expect(structuralOpenApiProblems(doc)).toEqual([]);
+  });
+
+  it('the structural validator has TEETH — it flags a hand-injected duplicate parameter', () => {
+    // Guard the guard: a doc with a duplicated query param must be REPORTED (so the validator can never silently
+    // pass on a real duplicate). This is the fail-the-fix for the validator itself.
+    const doc = buildDeclaredRoutesOpenApi(richSpec());
+    const listGet = doc.paths['/widgets'].get;
+    const cloned: OpenApiDocument = structuredClone(doc);
+    const params = cloned.paths['/widgets'].get.parameters ?? [];
+    const order = params.find((p) => p.name === 'order');
+    if (!order)
+      throw new Error('precondition: the list route must document an `order` control param');
+    cloned.paths['/widgets'].get.parameters = [...params, { ...order }]; // inject a duplicate `order`
+    expect(structuralOpenApiProblems(cloned).some((p) => /duplicate parameter/.test(p))).toBe(true);
+    // Sanity: the un-mutated real doc's list route has a unique `order` (no pre-existing duplicate).
+    expect((listGet.parameters ?? []).filter((p) => p.name === 'order')).toHaveLength(1);
+  });
+
+  it('DEFENSIVE: a store column named after a control key does NOT emit a duplicate query param, even bypassing the linter', () => {
+    // The linter (@rayspec/spec RESERVED_QUERY_KEYWORDS) rejects such a column at config, so this test
+    // builds the spec via the grammar parse ONLY (NO lintSpec) to reach the emitter with a column the
+    // parser would have blocked — proving the emit-side `CONTROL_KEYS` skip keeps the doc valid regardless.
+    // RED-first: without the skip, the `order` business column would push a SECOND `order` query param
+    // alongside the hard-coded control param → a duplicate → an invalid OpenAPI 3.1 document.
+    const spec = RaySpec.parse({
+      version: '1.0',
+      metadata: { name: 'reserved-col-backend' },
+      stores: [
+        {
+          name: 'widgets',
+          columns: [
+            { name: 'order', type: 'text' }, // collides with the `order` control key (lint would reject)
+            { name: 'title', type: 'text' },
+          ],
+        },
+      ],
+      api: [
+        {
+          method: 'GET',
+          path: '/widgets',
+          action: { kind: 'store', store: 'widgets', op: 'list' },
+        },
+      ],
+    });
+    // Sanity: the linter WOULD have rejected it (so we know we deliberately bypassed a real guard).
+    expect(lintSpec(spec).some((e) => e.code === 'reserved_query_keyword')).toBe(true);
+
+    const doc = buildDeclaredRoutesOpenApi(spec);
+    const params = doc.paths['/widgets'].get.parameters ?? [];
+    // Exactly ONE `order` query param (the control param) — the business `order` column is skipped.
+    expect(params.filter((p) => p.name === 'order' && p.in === 'query')).toHaveLength(1);
+    // …and the whole document is still structurally valid (no duplicate parameter anywhere).
+    expect(structuralOpenApiProblems(doc)).toEqual([]);
+    // The non-colliding business column IS still documented as a filter.
+    expect(params.some((p) => p.name === 'title' && p.in === 'query')).toBe(true);
+  });
+
+  it('the emit-side control keys agree with the linter keyword set (anti-drift parity)', () => {
+    // The emitter skips `CONTROL_KEYS`; the linter rejects `RESERVED_QUERY_KEYWORDS`. They MUST name the
+    // same set, or a keyword rejected by one boundary could still slip a duplicate param through the other.
+    expect([...CONTROL_KEYS].sort()).toEqual([...RESERVED_QUERY_KEYWORDS].sort());
   });
 });
 

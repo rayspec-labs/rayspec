@@ -77,7 +77,7 @@ export function buildSpineSchemaSql(schema: string): string {
  * The `cron_marks` PRODUCT table DDL for the cron-scheduler test's HANDLER action. A
  * trigger handler writes a row here so the test proves the handler ran inside the tenant tx (GUC set)
  * and exactly once. The injected tenancy/GDPR columns MATCH what `buildProductTables` emits for a
- * `StoreSpec` (id/tenant_id/created_at/deleted_at/retention_days/region) so the test's `PgTable`
+ * `StoreSpec` (id/tenant_id/created_at/deleted_at/retention_days/region/created_by/idempotency_key) so the test's `PgTable`
  * (built by `buildProductTables`) lines up with this schema. ONE business column `(note text)`.
  * `IF NOT EXISTS` so it composes onto the spine schema without re-dropping it.
  */
@@ -88,7 +88,7 @@ export function buildCronProductSchemaSql(schema: string): string {
     tenant_id uuid NOT NULL REFERENCES ${schema}.orgs(id) ON DELETE CASCADE,
     note text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
-    deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu'
+    deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text
   );
 `;
 }

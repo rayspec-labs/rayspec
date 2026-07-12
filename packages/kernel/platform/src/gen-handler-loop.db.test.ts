@@ -297,7 +297,7 @@ describe.skipIf(!hasDb)(
         tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
         code text NOT NULL, name text NOT NULL, description text, active boolean NOT NULL,
         created_at timestamptz NOT NULL DEFAULT now(), deleted_at timestamptz,
-        retention_days integer, region text NOT NULL DEFAULT 'eu'
+        retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text
       );
       CREATE TABLE expense_claims (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -306,7 +306,7 @@ describe.skipIf(!hasDb)(
         currency text NOT NULL, status text NOT NULL, category_code text, gl_code text,
         coding_summary text, policy_flag text,
         created_at timestamptz NOT NULL DEFAULT now(), deleted_at timestamptz,
-        retention_days integer, region text NOT NULL DEFAULT 'eu'
+        retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text
       );
       INSERT INTO orgs (id, name) VALUES ('${TENANT_A}', 'A'), ('${TENANT_B}', 'B');
     `);

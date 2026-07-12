@@ -227,6 +227,8 @@ describe('twin pin — runtime tables match the generated SQL AND the live DB (t
         'deleted_at',
         'retention_days',
         'region',
+        'created_by',
+        'idempotency_key',
       ]);
 
       // Three-way name agreement.
@@ -311,7 +313,7 @@ describe('drift-detect (report-only)', () => {
     expect(findings).toEqual([]);
   });
 
-  // P3S1-04: a fail-the-fix introduced-drift case for EACH drift kind (report-only, cheap).
+  // A fail-the-fix introduced-drift case for EACH drift kind (report-only, cheap).
   it('REPORTS missing_table (the whole table dropped)', async () => {
     const ds = await setupDriftSchema('drift_table');
     await db.$client.unsafe(`DROP TABLE ${ds}.entries;`);
@@ -428,7 +430,7 @@ describe('drift-detect (report-only)', () => {
     await db.$client.unsafe(`DROP SCHEMA IF EXISTS ${ds} CASCADE;`);
   });
 
-  it('DX-v1.2: FLAGS stale_global_unique for a NON-key author-unique on a legacy single-column GLOBAL index (lenient default accepts it — no forced migration)', async () => {
+  it('FLAGS stale_global_unique for a NON-key author-unique on a legacy single-column GLOBAL index (lenient default accepts it — no forced migration)', async () => {
     const uniqStores = [
       ...stores,
       {

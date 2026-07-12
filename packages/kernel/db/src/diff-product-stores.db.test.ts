@@ -2,7 +2,7 @@
  * The delta-diff core — DB-BACKED apply proofs.
  *
  * The pure golden tests pin the emitted BYTES; these prove the emitted statements ACTUALLY APPLY on a
- * real Postgres and reach the intended end-state — the applicability blind spot the review flagged (a
+ * real Postgres and reach the intended end-state — the applicability gap the byte goldens cannot catch (a
  * byte-correct migration that still fails on a real DB, e.g. an FK ADD-before-DROP → 42710
  * duplicate_object when old and new constraint names are identical).
  *
@@ -115,7 +115,7 @@ describe.skipIf(!baseUrl)(
         foreignKeys: [{ column: 'meeting_id', references: 'meetings', onDelete }],
       });
 
-    it('FIX-1: an onDelete change applies drop-then-add and ENDS with the new policy (no 42710)', async () => {
+    it('an onDelete change applies drop-then-add and ENDS with the new policy (no 42710)', async () => {
       const withFk = [store(parent), childFk('cascade')];
       const restrictFk = [store(parent), childFk('restrict')];
       await withMaterializedOld(withFk, async (sql) => {
@@ -133,7 +133,7 @@ describe.skipIf(!baseUrl)(
       scenariosRan++;
     }, 60_000);
 
-    it('FIX-2 (PC-2): a newly-added unique column materializes a REAL unique index', async () => {
+    it('a newly-added unique column materializes a REAL unique index', async () => {
       const before = [store({ name: 'items', columns: [{ name: 'a', type: 'text' }] })];
       const after = [
         store({
@@ -177,10 +177,10 @@ describe.skipIf(!baseUrl)(
       return { columns: rows.map((r) => r.column_name), isUnique: rows[0]?.is_unique ?? false };
     };
 
-    it('DX-v1.2: an author `unique: true` column is TENANT-SCOPED — two tenants coexist; a same-tenant dup is 23505', async () => {
+    it('an author `unique: true` column is TENANT-SCOPED — two tenants coexist; a same-tenant dup is 23505', async () => {
       const TA = '00000000-0000-4000-8000-0000000000a1';
       const TB = '00000000-0000-4000-8000-0000000000b2';
-      // A plain author `unique: true` column (the finding: a per-tenant catalog code). withMaterializedOld
+      // A plain author `unique: true` column (e.g. a per-tenant catalog code). withMaterializedOld
       // materializes it via `emitStoreSql` with NO conflict keys → the SECURE DEFAULT (compound).
       const catalog = store({
         name: 'catalog',
@@ -211,7 +211,7 @@ describe.skipIf(!baseUrl)(
       scenariosRan++;
     }, 60_000);
 
-    it('DX-v1.2 CARVE-OUT: a conflict-key column keeps a SINGLE-column unique index (the durable ON CONFLICT target)', async () => {
+    it('a conflict-key column keeps a SINGLE-column unique index (the durable ON CONFLICT target)', async () => {
       const TC = '00000000-0000-4000-8000-0000000000c3';
       const keyed = store({
         name: 'keyed',
@@ -239,7 +239,7 @@ describe.skipIf(!baseUrl)(
       scenariosRan++;
     }, 60_000);
 
-    it('DX-v1.2 FINDING-1(a): an update that DEMOTES a conflict-key → author-unique REINDEXES single → compound on a REAL DB (two tenants then coexist)', async () => {
+    it('an update that DEMOTES a conflict-key → author-unique REINDEXES single → compound on a REAL DB (two tenants then coexist)', async () => {
       const TA = '00000000-0000-4000-8000-0000000000d4';
       const TB = '00000000-0000-4000-8000-0000000000e5';
       const oldStore = store({
@@ -283,7 +283,7 @@ describe.skipIf(!baseUrl)(
       scenariosRan++;
     }, 60_000);
 
-    it('DX-v1.2 FINDING-1(b): an update that PROMOTES an author-unique → conflict-key REINDEXES compound → single; a durable ON CONFLICT (col) upsert then converges (no 42P10)', async () => {
+    it('an update that PROMOTES an author-unique → conflict-key REINDEXES compound → single; a durable ON CONFLICT (col) upsert then converges (no 42P10)', async () => {
       const TC = '00000000-0000-4000-8000-0000000000f6';
       const oldStore = store({
         name: 'catalog',
@@ -327,6 +327,104 @@ describe.skipIf(!baseUrl)(
       );
       scenariosRan++;
     }, 60_000);
+
+    it('the injected-column BACKFILL reconciles an older store (adds created_by + idempotency_key + the tenant-scoped idempotency index) — idempotently', async () => {
+      const TA = '00000000-0000-4000-8000-00000000a001';
+      const TB = '00000000-0000-4000-8000-00000000b002';
+      const legacy = store({ name: 'legacy_notes', columns: [{ name: 'title', type: 'text' }] });
+      // Materialize an OLDER shape by hand: the OLD injected set (NO created_by, NO
+      // idempotency_key, NO idempotency index) — exactly what a store deployed before this release has.
+      await withMaterializedOld([], async (sql) => {
+        await sql.unsafe(`
+          CREATE TABLE legacy_notes (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+            tenant_id uuid NOT NULL,
+            title text NOT NULL,
+            created_at timestamptz DEFAULT now() NOT NULL,
+            deleted_at timestamptz,
+            retention_days integer,
+            region text DEFAULT 'eu' NOT NULL
+          );
+          ALTER TABLE legacy_notes ADD CONSTRAINT legacy_notes_tenant_id_orgs_id_fk
+            FOREIGN KEY (tenant_id) REFERENCES orgs(id) ON DELETE cascade;
+          CREATE INDEX legacy_notes_tenant_idx ON legacy_notes (tenant_id);
+        `);
+
+        const hasColumn = async (name: string): Promise<boolean> =>
+          (
+            await sql.unsafe(
+              `SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'legacy_notes' AND column_name = $1`,
+              [name],
+            )
+          ).length > 0;
+
+        // Precondition: the two injected columns are ABSENT on the legacy store.
+        expect(await hasColumn('created_by')).toBe(false);
+        expect(await hasColumn('idempotency_key')).toBe(false);
+
+        // FAIL-THE-FIX: the DEFAULT diff (backfill OFF) is a NO-OP — it would leave the store drifted
+        // forever (a spec diff is blind to injected columns). Prove it emits nothing.
+        expect(diffProductStores([legacy], [legacy]).statements).toEqual([]);
+
+        // The backfill-ON delta reconciles the injected gap (idempotent — IF NOT EXISTS on each).
+        const delta = diffProductStores([legacy], [legacy], { backfillInjectedColumns: true });
+        expect(delta.statements.length).toBeGreaterThan(0);
+        // Fail-the-fix: the backfill is SCOPED to the newer injected columns
+        // (created_by + idempotency_key + its index) — it does NOT re-emit `ADD COLUMN` for the
+        // always-present injected columns (deleted_at/retention_days), which would print spurious
+        // backfill DDL on an unchanged spec. RED against an over-broad backfill.
+        expect(delta.statements.some((s) => s.includes('"created_by"'))).toBe(true);
+        expect(delta.statements.some((s) => s.includes('"idempotency_key"'))).toBe(true);
+        expect(delta.statements.some((s) => s.includes('"deleted_at"'))).toBe(false);
+        expect(delta.statements.some((s) => s.includes('"retention_days"'))).toBe(false);
+        // Exactly the two ADD COLUMNs + the one idempotency index — no extra always-present columns.
+        expect(delta.statements.filter((s) => s.includes('ADD COLUMN')).length).toBe(2);
+        // Additive only (the gate never blocks it): the real scan finds nothing destructive.
+        expect(delta.destructive).toBe(false);
+        for (const stmt of delta.statements) await sql.unsafe(stmt);
+
+        // Post: both injected columns now exist …
+        expect(await hasColumn('created_by')).toBe(true);
+        expect(await hasColumn('idempotency_key')).toBe(true);
+        // … and the tenant-scoped idempotency unique index is REAL (compound (tenant_id, idempotency_key)).
+        const idx = await uniqueIndexColumns(sql, 'legacy_notes_idempotency_key_unique');
+        expect(idx.isUnique).toBe(true);
+        expect(idx.columns).toEqual(['tenant_id', 'idempotency_key']);
+
+        // IDEMPOTENT: applying the SAME backfill delta AGAIN is a clean no-op (IF NOT EXISTS), no error.
+        for (const stmt of delta.statements) await sql.unsafe(stmt);
+
+        // The reconciled idempotency index behaves tenant-scoped: two tenants may hold the SAME key,
+        // a same-tenant duplicate key is 23505, and NULL keys never collide (Postgres NULL distinctness).
+        await sql.unsafe(`INSERT INTO orgs (id, name) VALUES ($1, 'A'), ($2, 'B')`, [TA, TB]);
+        await sql.unsafe(
+          `INSERT INTO legacy_notes (tenant_id, title, idempotency_key) VALUES ($1, 't', 'k1')`,
+          [TA],
+        );
+        await sql.unsafe(
+          `INSERT INTO legacy_notes (tenant_id, title, idempotency_key) VALUES ($1, 't', 'k1')`,
+          [TB],
+        );
+        // Two NULL-key rows for the same tenant coexist (never collide).
+        await sql.unsafe(
+          `INSERT INTO legacy_notes (tenant_id, title) VALUES ($1, 'n1'), ($1, 'n2')`,
+          [TA],
+        );
+        expect((await sql.unsafe(`SELECT 1 FROM legacy_notes`)).length).toBe(4);
+        let sqlState: string | undefined;
+        try {
+          await sql.unsafe(
+            `INSERT INTO legacy_notes (tenant_id, title, idempotency_key) VALUES ($1, 't', 'k1')`,
+            [TA],
+          );
+        } catch (e) {
+          sqlState = (e as { code?: string }).code;
+        }
+        expect(sqlState).toBe('23505'); // same-tenant duplicate idempotency key
+      });
+      scenariosRan++;
+    }, 60_000);
   },
 );
 
@@ -338,7 +436,7 @@ describe.skipIf(!baseUrl)(
 describe('diffProductStores DB apply — ran-guard (the apply proofs must not silently skip in CI)', () => {
   it('the apply scenarios ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (dbRequired) {
-      expect(scenariosRan).toBe(6);
+      expect(scenariosRan).toBe(7);
     } else {
       expect(dbRequired).toBe(false);
     }

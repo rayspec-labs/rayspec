@@ -162,7 +162,18 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
             ...(deps.allowedRequestHeaders ?? []),
           ]),
         ],
-        exposeHeaders: ['X-Request-Id'],
+        // Response headers a cross-origin browser client must be able to READ. `X-Request-Id` (the
+        // request-id echo) plus the store surface: `X-Next-Cursor` + `X-Result-Truncated`
+        // (keyset pagination — unusable cross-origin without exposure) and `Idempotency-Replay`
+        // (the idempotent-replay signal). None of these is a CORS-safelisted response header (which are only
+        // Cache-Control/Content-Language/Content-Length/Content-Type/Expires/Last-Modified/Pragma), so
+        // each must be listed here or the browser hides it from `fetch`-based clients.
+        exposeHeaders: [
+          'X-Request-Id',
+          'X-Next-Cursor',
+          'X-Result-Truncated',
+          'Idempotency-Replay',
+        ],
         maxAge: 600,
       }),
     );
@@ -205,7 +216,7 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
     registerDeclaredRoutes(app, effectiveDeps, {
       spec: effectiveDeps.engine.spec,
       productTables: effectiveDeps.engine.productTables,
-      // DX-v1.2: the per-store conflict-key carve-out (product-profile only) — a global-unique key
+      // The per-store conflict-key carve-out (product-profile only) — a global-unique key
       // column is never named in a 409 (cross-tenant oracle). Absent on a backend/auth-only deploy.
       ...(effectiveDeps.engine.conflictKeys
         ? { conflictKeys: effectiveDeps.engine.conflictKeys }

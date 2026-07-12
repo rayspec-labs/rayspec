@@ -101,14 +101,14 @@ describe('generator golden', () => {
     flipped[0].columns[2].unique = false; // slug: unique -> not
     const out = generateProductSchema(flipped);
     expect(out).not.toBe(golden);
-    // DX-v1.2: a non-key author `unique: true` emits a TENANT-SCOPED table-level uniqueIndex; flipping
+    // A non-key author `unique: true` emits a TENANT-SCOPED table-level uniqueIndex; flipping
     // unique off removes it entirely (and reverts `projects` to the 2-arg pgTable form).
     expect(golden).toContain("uniqueIndex('projects_slug_unique').on(t.tenantId, t.slug)");
     expect(out).not.toContain('projects_slug_unique');
     expect(out).not.toContain('uniqueIndex');
   });
 
-  it('DX-v1.2 CARVE-OUT: a conflict-key unique stays column-level .unique() (single index)', () => {
+  it('a conflict-key unique stays column-level .unique() (single index)', () => {
     // Mark `slug` as a durable conflict key → it keeps the column-level `.unique()` (single-column
     // index — the ON CONFLICT target), NOT a tenant-scoped table-level uniqueIndex.
     const conflictKeys = new Map([['projects', new Set(['slug'])]]);
@@ -134,7 +134,7 @@ describe('generator golden', () => {
 describe('generator injection invariants', () => {
   const out = generateProductSchema(REPRESENTATIVE);
 
-  it('injects all 6 tenancy/GDPR columns on EVERY table, tenant_id -> orgs ON DELETE CASCADE', () => {
+  it('injects all 8 tenancy/GDPR columns on EVERY table, tenant_id -> orgs ON DELETE CASCADE', () => {
     // Three tables, each must carry the injected pattern.
     const tableCount = (out.match(/= pgTable\(/g) ?? []).length;
     expect(tableCount).toBe(3);
@@ -143,13 +143,15 @@ describe('generator injection invariants', () => {
       out.match(/\.references\(\(\) => orgs\.id, \{ onDelete: 'cascade' \}\)/g) ?? []
     ).length;
     expect(tenantFk).toBe(3);
-    // id pk + created_at/deleted_at/retention_days/region present per table.
+    // id pk + created_at/deleted_at/retention_days/region/created_by/idempotency_key present per table.
     for (const frag of [
       "id: uuid('id').defaultRandom().primaryKey()",
       "createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()",
       "deletedAt: timestamp('deleted_at', { withTimezone: true })",
       "retentionDays: integer('retention_days')",
       "region: text('region').notNull().default('eu')",
+      "createdBy: text('created_by')",
+      "idempotencyKey: text('idempotency_key')",
     ]) {
       expect(
         (out.match(new RegExp(frag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) ?? []).length,
@@ -170,7 +172,7 @@ describe('generator injection invariants', () => {
 
   it('imports only the pg-core builders actually used (no unused import)', () => {
     // REPRESENTATIVE uses text/uuid/timestamp/integer/boolean/jsonb -> all six + pgTable, plus
-    // `uniqueIndex` for the tenant-scoped compound unique on projects.slug (DX-v1.2). The full set
+    // `uniqueIndex` for the tenant-scoped compound unique on projects.slug. The full set
     // exceeds printWidth (100) so the generator emits the Biome-canonical MULTILINE import.
     expect(out).toContain(
       "import {\n  boolean,\n  integer,\n  jsonb,\n  pgTable,\n  text,\n  timestamp,\n  uniqueIndex,\n  uuid,\n} from 'drizzle-orm/pg-core';",

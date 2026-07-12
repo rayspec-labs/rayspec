@@ -63,7 +63,25 @@ export const RESERVED_COLUMN_NAMES: ReadonlySet<string> = new Set([
   'deleted_at',
   'retention_days',
   'region',
+  // The injected actor + idempotency columns (server-controlled, never author-declarable).
+  'created_by',
+  'idempotency_key',
 ]);
+
+/**
+ * The list-query CONTROL keywords — the reserved query-string keys the declarative `list` route
+ * uses to steer sorting + keyset pagination (mirrors `CONTROL_KEYS` in the compose package's
+ * store-query.ts; @rayspec/spec cannot import the compose package, so this is the KEEP-IN-SYNC copy).
+ *
+ * A declared BUSINESS column of one of these names is a config error, because at the `list` route it is
+ * (a) silently un-equality-filterable — `buildListQuery` routes `?order=`/`?after=`/`?limit=` to the
+ * control parsers and never reaches the per-column equality lookup — AND (b) it makes the emitted
+ * OpenAPI document carry a DUPLICATE query parameter (the hard-coded control param + the per-column
+ * filter param share a `name`+`in`), which is an INVALID OpenAPI 3.1 doc. This is a SEPARATE set from
+ * `RESERVED_COLUMN_NAMES` on purpose — that Set is meta-test-locked to equal the injected columns
+ * (`INJECTED_COLUMN_NAMES`); these keywords are not injected columns, they are query controls.
+ */
+export const RESERVED_QUERY_KEYWORDS: ReadonlySet<string> = new Set(['order', 'after', 'limit']);
 
 /**
  * Find duplicate keys in a list, reporting each duplicate occurrence (by index) as a SpecError.
@@ -98,13 +116,13 @@ function findDuplicates<T>(
  * snake_case -> camelCase, IDENTICAL to the generator's `toCamel` (generate-product-schema.ts), so
  * the collision check here predicts the exact JS identifier the generator would emit. (TEN-3)
  *
- * EXPORTED (FIX-REG-2) for the product-store column-collision check in `product-lint.ts` —
+ * EXPORTED for the product-store column-collision check in `product-lint.ts` —
  * the ONE spec-side copy of the rule. KEEP-IN-SYNC (honest replication, dependency direction:
  * spec must not import platform/db): the SAME rule also lives in
  *  - packages/db/src/generated/generate-product-schema.ts (`toCamel`) + build-product-tables.ts,
  *  - packages/platform/src/handlers/store-facade.ts (`snakeToCamel`),
  *  - packages/api-auth/src/engine/injected-columns-view.ts (`snakeToCamel`).
- * A literal-example pin test (product-stores.test.ts, "FIX-REG-2 pin") guards this copy against
+ * A literal-example pin test (product-stores.test.ts, "snake→camel pin") guards this copy against
  * drift; if the rule ever changes, ALL copies + the pin must move together.
  */
 export function toJsIdentifier(name: string): string {
@@ -197,6 +215,19 @@ export function lintSpec(spec: RaySpec): SpecError[] {
             'reserved_column_name',
             `store '${store.name}' declares reserved column '${col.name}' — that column is injected ` +
               'by the generator (tenancy/GDPR); rename the business column',
+            `stores[${si}].columns[${ci}].name`,
+          ),
+        );
+      } else if (RESERVED_QUERY_KEYWORDS.has(col.name)) {
+        // A column named after a list-query control keyword would be un-filterable AND would emit
+        // a duplicate OpenAPI query parameter — reject at config with an explaining rename hint.
+        errors.push(
+          specError(
+            'reserved_query_keyword',
+            `store '${store.name}' declares column '${col.name}', which collides with a reserved ` +
+              'list-query control keyword (order/after/limit) the declarative list route uses for ' +
+              'sorting/keyset pagination — the column would be un-filterable and would emit a duplicate ' +
+              'OpenAPI query parameter; rename the business column',
             `stores[${si}].columns[${ci}].name`,
           ),
         );

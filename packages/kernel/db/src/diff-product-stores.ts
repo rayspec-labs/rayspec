@@ -43,6 +43,7 @@ import {
   generateProductSql,
   type StoreConflictKeys,
 } from './generated/generate-product-sql.js';
+import { INJECTED_AFTER } from './generated/injected-columns.js';
 import type { AllowlistEntry, DestructiveKind } from './migration-scan.js';
 import { scanMigrationSql } from './migration-scan.js';
 
@@ -79,7 +80,7 @@ export interface DiffProductStoresOptions {
    */
   readonly label?: string;
   /**
-   * The NEW stores' per-store conflict-key carve-out (DX-v1.2 — see {@link StoreConflictKeys}) — the
+   * The NEW stores' per-store conflict-key carve-out (see {@link StoreConflictKeys}) — the
    * index shape to EMIT. A unique column IN its store's set → single-column `(col)` index (the durable
    * `ON CONFLICT` target); a unique column NOT in it → tenant-scoped compound `(tenant_id, col)`. Secure
    * default (omitted) = compound. Drives every added-table CREATE and every surviving-table
@@ -95,6 +96,18 @@ export interface DiffProductStoresOptions {
    * that never changes a column's durable-conflict-key status.
    */
   readonly oldConflictKeys?: StoreConflictKeys;
+  /**
+   * When true, every SURVIVING table also gets an ADDITIVE, IDEMPOTENT backfill of the
+   * injected tenancy/GDPR columns (`ADD COLUMN IF NOT EXISTS` for each nullable injected column +
+   * `CREATE UNIQUE INDEX IF NOT EXISTS` for the idempotency index). This reconciles a store that was
+   * MATERIALIZED before an injected column existed (e.g. an older deployment that lacks
+   * `created_by`/`idempotency_key`): the spec diff is BLIND to injected columns (they are constant, not
+   * declared), so without this a platform-version bump would leave an old store permanently `drifted`
+   * with no reconciling migration. `IF NOT EXISTS` makes it a genuine no-op on an already-current store,
+   * so it is safe to emit unconditionally on the update path. DEFAULT off ⇒ `diff(old, old)` stays EMPTY
+   * (the NO-OP invariant) — the `rayspec plan` update path opts in; the pure golden tests do not.
+   */
+  readonly backfillInjectedColumns?: boolean;
 }
 
 /** The structured result of diffing two declared-store sets into a forward migration. */
@@ -174,7 +187,7 @@ function dropNotNullSql(table: string, column: string): string {
  * CREATE UNIQUE INDEX (additive to the scan; NB it can still fail on duplicate data — noted). `compound`
  * → tenant-scoped `("tenant_id", col)` (a NON-key `unique: true` column); otherwise single `(col)` (a
  * conflict-key column — the durable `ON CONFLICT` target). The index NAME is unchanged in both cases, so
- * `dropUniqueIndexSql` (name-keyed) and drift-detect key off the stable name (DX-v1.2).
+ * `dropUniqueIndexSql` (name-keyed) and drift-detect key off the stable name.
  */
 function createUniqueIndexSql(table: string, column: string, compound: boolean): string {
   const indexColumns = compound ? `"tenant_id", "${column}"` : `"${column}"`;
@@ -203,6 +216,36 @@ function dropFkSql(table: string, fk: StoreForeignKey): string {
 /** DROP TABLE for a removed store (destructive — the scan flags `drop-table`). */
 function dropTableSql(table: string): string {
   return `DROP TABLE "${table}"`;
+}
+
+/**
+ * The ADDITIVE, IDEMPOTENT injected-column backfill for a surviving table. Emits
+ * `ALTER TABLE … ADD COLUMN IF NOT EXISTS` ONLY for injected columns marked `backfill` (added AFTER the
+ * first release — `created_by` + `idempotency_key`; a nullable ADD is additive, the scan
+ * never flags it, and `IF NOT EXISTS` makes it a no-op when the column already exists) + a
+ * `CREATE UNIQUE INDEX IF NOT EXISTS` for each injected column carrying a `uniqueIndex` marker (the
+ * tenant-scoped idempotency index). Reconciles a store materialized before those columns existed without
+ * ever failing on an already-current one. The always-present injected columns (id/tenant_id/created_at/
+ * deleted_at/retention_days/region) are NOT re-emitted — every materialized store already carries them,
+ * so `rayspec plan --against` on an unchanged spec no longer prints spurious backfill DDL for them.
+ */
+function injectedBackfillSql(table: string): string[] {
+  const out: string[] = [];
+  for (const inj of INJECTED_AFTER) {
+    if (!inj.backfill) continue; // only columns added after the first release need a surviving-table ADD
+    out.push(
+      `ALTER TABLE "${table}" ADD COLUMN IF NOT EXISTS "${inj.sqlName}" ${PG_TYPE[inj.type]}`,
+    );
+  }
+  for (const inj of INJECTED_AFTER) {
+    if (inj.uniqueIndex === 'tenant-scoped') {
+      out.push(
+        `CREATE UNIQUE INDEX IF NOT EXISTS "${table}_${inj.sqlName}_unique" ON "${table}" ` +
+          `USING btree ("tenant_id", "${inj.sqlName}")`,
+      );
+    }
+  }
+  return out;
 }
 
 /**
@@ -284,6 +327,7 @@ function planSurvivingTable(
   newStore: StoreSpec,
   newConflictKeys?: ReadonlySet<string>,
   oldConflictKeys?: ReadonlySet<string>,
+  backfillInjected = false,
 ): SurvivingTablePlan {
   const table = newStore.name;
   const oldCols = columnsByName(oldStore);
@@ -362,7 +406,7 @@ function planSurvivingTable(
       // ADJACENT in the DESTRUCTIVE segment (DROP first — an ADD before the DROP of the same-named index
       // would collide on a real DB), mirroring the FK-replace pattern below. Threading `oldConflictKeys`
       // is what makes this reachable: without the OLD carve-out class the diff cannot see the change and
-      // silently leaves the wrong index shape (the DX-v1.2 update/diff blindness this closes).
+      // silently leaves the wrong index shape (the update/diff blindness this closes).
       destructive.push(
         dropUniqueIndexSql(table, col.name),
         createUniqueIndexSql(table, col.name, !newIsKey),
@@ -393,6 +437,10 @@ function planSurvivingTable(
   for (const fk of oldStore.foreignKeys) {
     if (!newFks.has(fk.column)) destructive.push(dropFkSql(table, fk)); // pure removal — destructive
   }
+
+  // Idempotent injected-column backfill (additive; no-op when already present). Emitted
+  // LAST in the additive segment so a real business change reads first, then the injected reconciliation.
+  if (backfillInjected) additive.push(...injectedBackfillSql(table));
 
   return { additive, destructive, notes };
 }
@@ -436,6 +484,7 @@ export function diffProductStores(
       store,
       newConflictKeys?.get(store.name),
       oldConflictKeys?.get(store.name),
+      opts.backfillInjectedColumns ?? false,
     );
     survivingAdditive.push(...plan.additive);
     survivingDestructive.push(...plan.destructive);
