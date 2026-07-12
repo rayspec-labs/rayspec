@@ -25,6 +25,7 @@ export type Permission =
   | 'store:read'
   | 'store:write'
   | 'org:read'
+  | 'org:member:add'
   | 'org:member:change'
   | 'org:switch'
   | 'apikey:read'
@@ -39,6 +40,7 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     'store:read',
     'store:write',
     'org:read',
+    'org:member:add',
     'org:member:change',
     'org:switch',
     'apikey:read',
@@ -67,6 +69,7 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
 const SENSITIVE = new Set<Permission>([
   'apikey:mint',
   'apikey:revoke',
+  'org:member:add',
   'org:member:change',
   'org:switch',
   // A declared-store MUTATION (create/update/delete) must re-check live membership — a revoked/

@@ -42,6 +42,65 @@ export class OrgStore {
     });
   }
 
+  /**
+   * Idempotently add a user to an org as a plain `member` (the org is the resolved tenant). Returns
+   * the effective role + whether the membership was activated by THIS call. Cases:
+   *  - an ACTIVE membership already exists → an idempotent no-op: the existing role is returned
+   *    UNCHANGED (never demote an owner/admin who is re-added) and `activated` is false;
+   *  - a soft-deleted (revoked) tombstone exists → it is reactivated as a plain member (a
+   *    previously-removed user can be re-added; the `memberships` UNIQUE(user_id, org_id) is not
+   *    partial, so the tombstone occupies the slot and must be revived rather than re-inserted);
+   *  - no row exists → a fresh `member` row is inserted.
+   * The read-then-write runs in ONE transaction so a concurrent add cannot observe a half state.
+   */
+  async addMember(orgId: string, userId: string): Promise<{ role: string; activated: boolean }> {
+    return this.db.transaction(async (tx) => {
+      const current = await tx
+        .select()
+        .from(schema.memberships)
+        .where(and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.userId, userId)))
+        .limit(1);
+      const row = current[0];
+      if (row) {
+        if (row.status === 'active' && row.deletedAt === null) {
+          return { role: row.role, activated: false };
+        }
+        const reactivated = await tx
+          .update(schema.memberships)
+          .set({ role: 'member', status: 'active', deletedAt: null })
+          .where(and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.userId, userId)))
+          .returning();
+        return { role: reactivated[0]?.role ?? 'member', activated: true };
+      }
+      const inserted = await tx
+        .insert(schema.memberships)
+        .values({ orgId, userId, role: 'member', status: 'active' })
+        .returning();
+      return { role: inserted[0]?.role ?? 'member', activated: true };
+    });
+  }
+
+  /** Active members of an org (id + email + role), joined to users; excludes soft-deleted rows. */
+  async listMembers(orgId: string): Promise<{ userId: string; email: string; role: string }[]> {
+    const rows = await this.db
+      .select({
+        userId: schema.memberships.userId,
+        email: schema.users.email,
+        role: schema.memberships.role,
+      })
+      .from(schema.memberships)
+      .innerJoin(schema.users, eq(schema.memberships.userId, schema.users.id))
+      .where(
+        and(
+          eq(schema.memberships.orgId, orgId),
+          eq(schema.memberships.status, 'active'),
+          isNull(schema.memberships.deletedAt),
+          isNull(schema.users.deletedAt),
+        ),
+      );
+    return rows as { userId: string; email: string; role: string }[];
+  }
+
   /** Orgs the user is an active member of, with the caller's role in each. */
   async orgsForUser(userId: string): Promise<(OrgRow & { role: string })[]> {
     const rows = await this.db

@@ -18,6 +18,7 @@ const ALL_PERMISSIONS: Permission[] = [
   'store:read',
   'store:write',
   'org:read',
+  'org:member:add',
   'org:member:change',
   'org:switch',
   'apikey:read',
@@ -34,6 +35,12 @@ describe('ROLE_PERMISSIONS matrix', () => {
     expect(roleGrants('admin', 'apikey:mint')).toBe(true);
     expect(roleGrants('admin', 'apikey:revoke')).toBe(true);
     expect(roleGrants('admin', 'org:member:change')).toBe(false);
+  });
+
+  it('adding a member is owner-only (admin and member are denied)', () => {
+    expect(roleGrants('owner', 'org:member:add')).toBe(true);
+    expect(roleGrants('admin', 'org:member:add')).toBe(false);
+    expect(roleGrants('member', 'org:member:add')).toBe(false);
   });
 
   it('member grants only the read-mostly + agent-run + store surface', () => {
@@ -60,6 +67,7 @@ describe('isSensitive', () => {
   it('marks mint/revoke/member-change/switch sensitive (live-check required)', () => {
     expect(isSensitive('apikey:mint')).toBe(true);
     expect(isSensitive('apikey:revoke')).toBe(true);
+    expect(isSensitive('org:member:add')).toBe(true);
     expect(isSensitive('org:member:change')).toBe(true);
     expect(isSensitive('org:switch')).toBe(true);
   });
@@ -144,6 +152,7 @@ describe('API_KEY_GRANTABLE — derived whole-matrix invariant (single source of
     const orgManagementSensitive: Permission[] = [
       'apikey:mint',
       'apikey:revoke',
+      'org:member:add',
       'org:member:change',
       'org:switch',
     ];

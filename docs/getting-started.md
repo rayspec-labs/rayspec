@@ -256,11 +256,11 @@ curl -s -X POST http://localhost:8080/v1/orgs/<ORG_ID>/api-keys \
   -H 'authorization: Bearer <ORG_TOKEN>' \
   -H 'content-type: application/json' \
   -d '{"scopes":["store:read","store:write"]}'
-# → {"id":"...","keyPrefix":"mk_...","plaintext":"mk_....<secret>","scopes":[...]}
+# → {"id":"...","keyPrefix":"rk_...","plaintext":"rk_....<secret>","scopes":[...]}
 ```
 
 The plaintext key is shown **once** — store it now. From here, `Authorization:
-Bearer mk_....<secret>` authenticates a client that only holds the API key.
+Bearer rk_....<secret>` authenticates a client that only holds the API key.
 
 That is a full round trip: a running RaySpec backend, a provisioned tenant, and
 authenticated requests under strict tenant scoping.

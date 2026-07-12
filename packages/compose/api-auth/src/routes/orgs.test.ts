@@ -9,6 +9,7 @@
  *    still-valid JWT → 403 (live membership check, claim not trusted);
  *  - authz matrix, api-key uniformity, idempotency (tenant-scoped), membership invariants.
  */
+import { hashApiKey } from '@rayspec/auth-core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
 
@@ -65,7 +66,7 @@ describe('full flow (the exit gate back half)', () => {
     });
     expect(mintRes.status).toBe(201);
     const mint = await mintRes.json();
-    expect(mint.plaintext).toMatch(/^mk_.+\..+/);
+    expect(mint.plaintext).toMatch(/^rk_.+\..+/);
     expect(JSON.stringify(mint)).not.toMatch(/key_hash|keyHash|\$argon2/);
     const apiKey = mint.plaintext as string;
     const keyId = mint.id as string;
@@ -461,5 +462,222 @@ describe('membership invariants', () => {
     expect(aOrgs.orgs.length).toBe(1);
     expect(aOrgs.orgs[0].id).toBe(orgA);
     expect(aOrgs.orgs[0].role).toBe('owner');
+  });
+});
+
+describe('API-key prefix: rk_ mint + permanent dual-accept', () => {
+  /**
+   * Seed an api-key row directly with a chosen prefix + secret (bypassing HTTP mint) so a legacy-
+   * form prefix and a multi-segment secret can be exercised. Returns the presented `<prefix>.<secret>`
+   * plaintext. The hash uses the same pepper the app resolves with (the suite sets it globally).
+   */
+  async function seedKey(
+    orgId: string,
+    prefix: string,
+    secret: string,
+    scopes: string[],
+  ): Promise<string> {
+    await h.deps.apiKeyStore.mint({
+      orgId,
+      keyPrefix: prefix,
+      keyHash: hashApiKey(secret),
+      scopes,
+    });
+    return `${prefix}.${secret}`;
+  }
+
+  it('a freshly minted key carries the rk_ prefix and authenticates a scope-guarded route', async () => {
+    const t0 = await registerUser('prefix-rk@example.com');
+    const orgId = await createOrg(t0, 'PrefixRkCo');
+    const orgToken = await switchOrg(t0, orgId);
+    const mint = await (
+      await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/api-keys`, {
+        body: { scopes: ['apikey:read'] },
+        headers: { authorization: `Bearer ${orgToken}` },
+      })
+    ).json();
+    expect((mint.keyPrefix as string).startsWith('rk_')).toBe(true);
+    expect((mint.plaintext as string).startsWith('rk_')).toBe(true);
+    // The rk_ key authenticates + is scope-authorized on the list route (never mis-routed to JWT).
+    const list = await jsonRequest(h.app, 'GET', `/v1/orgs/${orgId}/api-keys`, {
+      headers: { authorization: `Bearer ${mint.plaintext}` },
+    });
+    expect(list.status).toBe(200);
+  });
+
+  it('an rk_ key whose opaque secret contains a dot is resolved as an api-key, not verified as a JWT', async () => {
+    // The prefix is authoritative: a bearer carrying the rk_ prefix must resolve as an api-key even
+    // when its secret makes the whole credential 3 dot-separated segments (the JWT shape). Removing
+    // the rk_ guard in the auth middleware routes this to JWT verification → no principal → 401, so
+    // this is the guard's fail-the-fix oracle.
+    const t0 = await registerUser('prefix-dot@example.com');
+    const orgId = await createOrg(t0, 'PrefixDotCo');
+    const cred = await seedKey(orgId, 'rk_dotcarrier', 'first.second', ['apikey:read']);
+    expect(cred.split('.').length).toBe(3); // JWT-shaped segment count
+    const list = await jsonRequest(h.app, 'GET', `/v1/orgs/${orgId}/api-keys`, {
+      headers: { authorization: `Bearer ${cred}` },
+    });
+    expect(list.status).toBe(200); // authenticated as the api-key (guard prevents the JWT mis-route)
+  });
+
+  it('a legacy mk_-form key still authenticates (permanent dual-accept)', async () => {
+    const t0 = await registerUser('prefix-mk@example.com');
+    const orgId = await createOrg(t0, 'PrefixMkCo');
+    const cred = await seedKey(orgId, 'mk_legacyform', 'legacy-secret-value', ['apikey:read']);
+    const list = await jsonRequest(h.app, 'GET', `/v1/orgs/${orgId}/api-keys`, {
+      headers: { authorization: `Bearer ${cred}` },
+    });
+    expect(list.status).toBe(200);
+  });
+});
+
+describe('org membership: owner-gated add + list', () => {
+  /** POST a member add; returns the raw Response so a test can assert status + body. */
+  function addMember(orgId: string, token: string, email: string): Promise<Response> {
+    return jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/members`, {
+      body: { email },
+      headers: { authorization: `Bearer ${token}` },
+    });
+  }
+
+  /** Count ACTIVE memberships of a user in an org (direct DB read; the source of truth). */
+  async function activeMembershipCount(orgId: string, userId: string): Promise<number> {
+    const rows = (await h.db.$client.unsafe(
+      `SELECT count(*)::int AS n FROM rayspec_test_apiauth_orgs.memberships
+         WHERE org_id = $1 AND user_id = $2 AND status = 'active' AND deleted_at IS NULL`,
+      [orgId, userId],
+    )) as unknown as { n: number }[];
+    return rows[0]?.n ?? 0;
+  }
+
+  /** The userId behind a token (via /v1/auth/me). */
+  async function userIdOf(token: string): Promise<string> {
+    const me = await (
+      await jsonRequest(h.app, 'GET', '/v1/auth/me', {
+        headers: { authorization: `Bearer ${token}` },
+      })
+    ).json();
+    return me.userId as string;
+  }
+
+  it('owner adds an EXISTING user → 201 member; a second identical add is an idempotent no-op', async () => {
+    const t0 = await registerUser('add-owner@example.com');
+    const orgId = await createOrg(t0, 'AddCo');
+    const ownerToken = await switchOrg(t0, orgId);
+    // A pre-existing account with no membership in this org.
+    const existingUserToken = await registerUser('add-existing@example.com');
+    const existingUserId = await userIdOf(existingUserToken);
+
+    const first = await addMember(orgId, ownerToken, 'add-existing@example.com');
+    expect(first.status).toBe(201);
+    const firstBody = await first.json();
+    expect(firstBody.role).toBe('member');
+    expect(firstBody.userId).toBe(existingUserId);
+    expect(firstBody.oneTimePassword).toBeUndefined(); // an existing user gets no provisioned password
+    expect(await activeMembershipCount(orgId, existingUserId)).toBe(1);
+
+    // A second identical add is idempotent: 200, still exactly ONE membership row (no duplicate).
+    const second = await addMember(orgId, ownerToken, 'add-existing@example.com');
+    expect(second.status).toBe(200);
+    expect(await activeMembershipCount(orgId, existingUserId)).toBe(1);
+  });
+
+  it('owner adds a NEW email → user provisioned with a one-time password that actually logs in', async () => {
+    const t0 = await registerUser('prov-owner@example.com');
+    const orgId = await createOrg(t0, 'ProvCo');
+    const ownerToken = await switchOrg(t0, orgId);
+
+    const res = await addMember(orgId, ownerToken, 'brand-new@example.com');
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.role).toBe('member');
+    expect(typeof body.oneTimePassword).toBe('string');
+    const otp = body.oneTimePassword as string;
+
+    // The one-time password authenticates the freshly provisioned account.
+    const login = await jsonRequest(h.app, 'POST', '/v1/auth/login', {
+      body: { email: 'brand-new@example.com', password: otp },
+    });
+    expect(login.status).toBe(200);
+    expect((await login.json()).accessToken).toBeTruthy();
+  });
+
+  it('an API-key principal is REJECTED (403) and creates no membership', async () => {
+    const t0 = await registerUser('apikey-add@example.com');
+    const orgId = await createOrg(t0, 'ApiKeyAddCo');
+    const ownerToken = await switchOrg(t0, orgId);
+    // A broadly-scoped api-key still cannot add members (org:member:add is not api-key-grantable).
+    const mint = await (
+      await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/api-keys`, {
+        body: { scopes: ['org:read', 'store:write', 'apikey:read'] },
+        headers: { authorization: `Bearer ${ownerToken}` },
+      })
+    ).json();
+
+    const res = await addMember(orgId, mint.plaintext as string, 'apikey-victim@example.com');
+    expect(res.status).toBe(403);
+    // Denied at the authorization chokepoint (org:member:add is not api-key-grantable), not merely at
+    // a downstream handler guard — the missing_permission hint pins the permission gate as the layer
+    // that rejected, so weakening the route's permission to an api-key-grantable one turns this red.
+    const denied = await res.json();
+    expect(denied.error.details.missing_permission).toBe('org:member:add');
+    // No user was provisioned for the rejected request.
+    const users = (await h.db.$client.unsafe(
+      `SELECT count(*)::int AS n FROM rayspec_test_apiauth_orgs.users WHERE lower(email) = $1`,
+      ['apikey-victim@example.com'],
+    )) as unknown as { n: number }[];
+    expect(users[0]?.n).toBe(0);
+  });
+
+  it('a non-owner member is REJECTED (403)', async () => {
+    const t0 = await registerUser('nonowner-owner@example.com');
+    const orgId = await createOrg(t0, 'NonOwnerCo');
+    const ownerToken = await switchOrg(t0, orgId);
+    // Provision a plain member and let them obtain an org-scoped (role=member) token.
+    const memberToken0 = await registerUser('nonowner-member@example.com');
+    await addMember(orgId, ownerToken, 'nonowner-member@example.com');
+    const memberToken = await switchOrg(memberToken0, orgId);
+
+    const res = await addMember(orgId, memberToken, 'nonowner-victim@example.com');
+    expect(res.status).toBe(403); // member lacks org:member:add (live check, claim not trusted)
+  });
+
+  it('cross-org isolation: an org-A owner cannot add to / list org B (resolveTenant 404s)', async () => {
+    const ta = await registerUser('mem-a@example.com');
+    const orgA = await createOrg(ta, 'MemOrgA');
+    const tokenA = await switchOrg(ta, orgA);
+    const tb = await registerUser('mem-b@example.com');
+    const orgB = await createOrg(tb, 'MemOrgB');
+
+    const crossAdd = await addMember(orgB, tokenA, 'cross-victim@example.com');
+    expect(crossAdd.status).toBe(404);
+    const crossList = await jsonRequest(h.app, 'GET', `/v1/orgs/${orgB}/members`, {
+      headers: { authorization: `Bearer ${tokenA}` },
+    });
+    expect(crossList.status).toBe(404);
+  });
+
+  it('GET lists the org’s members with their roles', async () => {
+    const t0 = await registerUser('list-owner@example.com');
+    const orgId = await createOrg(t0, 'ListMembersCo');
+    const ownerToken = await switchOrg(t0, orgId);
+    const ownerId = await userIdOf(ownerToken);
+    await registerUser('list-member@example.com');
+    const addRes = await addMember(orgId, ownerToken, 'list-member@example.com');
+    const memberId = (await addRes.json()).userId as string;
+
+    const list = await jsonRequest(h.app, 'GET', `/v1/orgs/${orgId}/members`, {
+      headers: { authorization: `Bearer ${ownerToken}` },
+    });
+    expect(list.status).toBe(200);
+    const members = (await list.json()).members as {
+      userId: string;
+      email: string;
+      role: string;
+    }[];
+    const byId = new Map(members.map((m) => [m.userId, m]));
+    expect(byId.get(ownerId)?.role).toBe('owner');
+    expect(byId.get(memberId)?.role).toBe('member');
+    expect(byId.get(memberId)?.email).toBe('list-member@example.com');
   });
 });

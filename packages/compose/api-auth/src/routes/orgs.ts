@@ -14,20 +14,25 @@
  * requirePermission does a LIVE membership lookup for the sensitive ops (never the JWT claim).
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import {
+  AddOrgMemberRequest,
+  type AddOrgMemberResponse,
   ApiError,
   ChangeMemberRoleRequest,
   CreateOrgRequest,
   forbidden,
   getApiKeyPepper,
+  hashPassword,
   type MintApiKeyReplay,
   MintApiKeyRequest,
   type MintApiKeyResponse,
   mintApiKey,
   newJti,
+  normalizeEmail,
   type OrgListResponse,
+  type OrgMemberListResponse,
 } from '@rayspec/auth-core';
 import type { AppDeps, AppEnv } from '../app-context.js';
 import { requireAuth, requirePermission, resolveTenant } from '../http/middleware.js';
@@ -188,6 +193,85 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
     },
   );
 
+  // POST /v1/orgs/:orgId/members — add a user to the org by email (OWNER-ONLY; live-membership authz
+  // via the sensitive org:member:add permission, so a stale JWT claim cannot grant it, and an api-key
+  // principal is rejected because org:member:add is not api-key-grantable). If the email has no user
+  // yet, a fresh account is provisioned with a one-time password returned ONCE in the owner's response
+  // (core has no outbound mail; the operator conveys it out-of-band).
+  app.post(
+    '/v1/orgs/:orgId/members',
+    requireAuth(),
+    requireBearerForMutation(),
+    resolveTenant(deps),
+    requirePermission(deps, 'org:member:add'),
+    async (c) => {
+      const principal = c.get('principal');
+      const orgId = c.get('tenantId');
+      if (!orgId || !principal?.userId) throw forbidden();
+      const body = AddOrgMemberRequest.parse(await c.req.json());
+      let email: string;
+      try {
+        email = normalizeEmail(body.email);
+      } catch {
+        throw new ApiError('VALIDATION_ERROR', 'A valid email address is required.');
+      }
+
+      // Resolve (or provision) the target user, then idempotently attach the membership.
+      const existing = await deps.identityStore.findUserByEmail(email);
+      let userId: string;
+      let oneTimePassword: string | undefined;
+      if (existing) {
+        userId = existing.id;
+      } else {
+        // 32 URL-safe chars (256-bit) — comfortably above the login password minimum; shown ONCE.
+        oneTimePassword = randomBytes(24).toString('base64url');
+        const created = await deps.identityStore.createUser(
+          email,
+          await hashPassword(oneTimePassword),
+        );
+        userId = created.id;
+      }
+      const { role, activated } = await deps.orgStore.addMember(orgId, userId);
+
+      await deps.auditStore.append(
+        {
+          event: 'org_member_add',
+          actorUserId: principal.userId,
+          actorOrgId: orgId,
+          meta: { targetUserId: userId, provisioned: oneTimePassword !== undefined, activated },
+        },
+        c.get('requestId'),
+      );
+      const resp: AddOrgMemberResponse = {
+        userId,
+        email,
+        role: roleOf(role),
+        ...(oneTimePassword ? { oneTimePassword } : {}),
+      };
+      // 201 when this call added/activated the membership; 200 on an idempotent no-op (already a member).
+      return c.json(resp, activated ? 201 : 200);
+    },
+  );
+
+  // GET /v1/orgs/:orgId/members — list the org's active members (id + email + role). Read auth mirrors
+  // the org-read routes (owner|admin|member may list); resolveTenant scopes it to the caller's org so
+  // it cannot leak across tenants.
+  app.get(
+    '/v1/orgs/:orgId/members',
+    requireAuth(),
+    resolveTenant(deps),
+    requirePermission(deps, 'org:read'),
+    async (c) => {
+      const orgId = c.get('tenantId');
+      if (!orgId) throw new ApiError('NOT_FOUND', 'Not found.');
+      const members = await deps.orgStore.listMembers(orgId);
+      const resp: OrgMemberListResponse = {
+        members: members.map((m) => ({ userId: m.userId, email: m.email, role: roleOf(m.role) })),
+      };
+      return c.json(resp, 200);
+    },
+  );
+
   // POST /v1/orgs/:orgId/api-keys — mint (LIVE-membership authz; plaintext ONCE; Idempotency-Key).
   app.post(
     '/v1/orgs/:orgId/api-keys',
@@ -208,7 +292,7 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
       //
       // KILL-TRIGGER closure: the persisted snapshot is REDACTED — it NEVER carries the
       // plaintext secret (the snapshot column is jsonb with no TTL; a DB dump must not yield a
-      // usable `mk_prefix.secret`). The plaintext is shown EXACTLY ONCE on the original mint
+      // usable `<prefix>.<secret>`). The plaintext is shown EXACTLY ONCE on the original mint
       // below; a replay returns only `{id, keyPrefix, scopes, replayed:true}` with the secret
       // OMITTED. A retry therefore does NOT re-reveal the secret (a client that lost the original
       // 201 response must mint a NEW key) — documented replay semantics.
