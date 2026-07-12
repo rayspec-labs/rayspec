@@ -66,9 +66,13 @@ export function authenticate(deps: AppDeps): MiddlewareHandler<Env> {
       : undefined;
 
     if (bearer) {
-      // A RaySpec api-key has the `<prefix>.<secret>` shape (prefix starts `mk_`), NOT 3 dot-
-      // separated base64url JWT segments. Disambiguate: JWTs have exactly two dots.
-      const looksLikeJwt = bearer.split('.').length === 3 && !bearer.startsWith('mk_');
+      // A RaySpec api-key has the `<prefix>.<secret>` shape (the prefix is one of the accepted
+      // api-key prefixes), NOT 3 dot-separated base64url JWT segments. Disambiguate: JWTs have
+      // exactly two dots. The prefix is authoritative — any bearer that carries an api-key prefix is
+      // resolved as an api-key regardless of how many dot segments its opaque secret happens to
+      // contain, so it can never be mis-routed to JWT verification.
+      const looksLikeJwt =
+        bearer.split('.').length === 3 && !bearer.startsWith('mk_') && !bearer.startsWith('rk_');
       if (looksLikeJwt) {
         try {
           const v = await deps.jwks.verify(bearer);

@@ -14,21 +14,28 @@
  * requirePermission does a LIVE membership lookup for the sensitive ops (never the JWT claim).
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import {
+  AddOrgMemberRequest,
+  type AddOrgMemberResponse,
   ApiError,
   ChangeMemberRoleRequest,
   CreateOrgRequest,
   forbidden,
   getApiKeyPepper,
+  hashPassword,
   type MintApiKeyReplay,
   MintApiKeyRequest,
   type MintApiKeyResponse,
   mintApiKey,
   newJti,
+  normalizeEmail,
   type OrgListResponse,
+  type OrgMemberListResponse,
+  verifyPassword,
 } from '@rayspec/auth-core';
+import { isUniqueViolation } from '@rayspec/db';
 import type { AppDeps, AppEnv } from '../app-context.js';
 import { requireAuth, requirePermission, resolveTenant } from '../http/middleware.js';
 
@@ -188,6 +195,109 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
     },
   );
 
+  // POST /v1/orgs/:orgId/members — add a user to the org by email (OWNER-ONLY; live-membership authz
+  // via the sensitive org:member:add permission, so a stale JWT claim cannot grant it, and an api-key
+  // principal is rejected because org:member:add is not api-key-grantable). If the email has no user
+  // yet, a fresh account is provisioned with a one-time password returned ONCE in the owner's response
+  // (core has no outbound mail; the operator conveys it out-of-band).
+  app.post(
+    '/v1/orgs/:orgId/members',
+    requireAuth(),
+    requireBearerForMutation(),
+    resolveTenant(deps),
+    requirePermission(deps, 'org:member:add'),
+    async (c) => {
+      const principal = c.get('principal');
+      const orgId = c.get('tenantId');
+      if (!orgId || !principal?.userId) throw forbidden();
+      const body = AddOrgMemberRequest.parse(await c.req.json());
+      let email: string;
+      try {
+        email = normalizeEmail(body.email);
+      } catch {
+        throw new ApiError('VALIDATION_ERROR', 'A valid email address is required.');
+      }
+
+      // Resolve (or provision) the target user, then idempotently attach the membership.
+      //
+      // ⚠ ACCEPTED beta limitation (response-shape account-existence oracle): the response reveals to
+      // the org owner whether `email` already has a GLOBAL account — a `oneTimePassword` is present
+      // ONLY when THIS call provisioned a NEW account. This is inherent to the founder-chosen minimal
+      // design (an in-band one-time password, no invite flow), so an owner can probe whether an
+      // address is registered platform-wide. It is accepted for the trusted single-node beta and is
+      // closed by the invite-token flow in the external-hardening layer (see SECURITY.md). The
+      // AVOIDABLE second channel — argon2id timing — IS equalized here (see equalizeProvisionTiming
+      // below) so latency does not compound the oracle.
+      const existing = await deps.identityStore.findUserByEmail(email);
+      let userId: string;
+      let oneTimePassword: string | undefined;
+      if (existing) {
+        userId = existing.id;
+        // Timing equalization: the provisioning branch runs one argon2id hash. Do the SAME argon2id
+        // work here (a dummy verify, mirroring the login enumeration defense in auth-service.ts) so an
+        // existing-account response is not measurably faster than a provisioned one.
+        await equalizeProvisionTiming();
+      } else {
+        // ≥43 URL-safe chars (256-bit) — comfortably above the login password minimum; shown ONCE.
+        const otp = randomBytes(32).toString('base64url');
+        try {
+          const created = await deps.identityStore.createUser(email, await hashPassword(otp));
+          userId = created.id;
+          oneTimePassword = otp;
+        } catch (err) {
+          // A CONCURRENT add of the same NEW email (or a racing /v1/auth/register) can win the users
+          // email-unique index between the findUserByEmail miss above and this insert → 23505 → HTTP
+          // 500. Recover idempotently: the account now exists, so re-read and proceed as the existing-
+          // user path. We surface NO one-time password (this call did not create the account and must
+          // never reset an existing user's credential). createUser is a standalone statement (no open
+          // transaction), so the 23505 does not poison a tx — the re-read is safe.
+          if (!isUniqueViolation(err)) throw err;
+          const raced = await deps.identityStore.findUserByEmail(email);
+          if (!raced) throw err; // not the expected unique-violation race — surface the original error
+          userId = raced.id;
+        }
+      }
+      const { role, activated } = await deps.orgStore.addMember(orgId, userId);
+
+      await deps.auditStore.append(
+        {
+          event: 'org_member_add',
+          actorUserId: principal.userId,
+          actorOrgId: orgId,
+          meta: { targetUserId: userId, provisioned: oneTimePassword !== undefined, activated },
+        },
+        c.get('requestId'),
+      );
+      const resp: AddOrgMemberResponse = {
+        userId,
+        email,
+        role: roleOf(role),
+        ...(oneTimePassword ? { oneTimePassword } : {}),
+      };
+      // 201 when this call added/activated the membership; 200 on an idempotent no-op (already a member).
+      return c.json(resp, activated ? 201 : 200);
+    },
+  );
+
+  // GET /v1/orgs/:orgId/members — list the org's active members (id + email + role). Read auth mirrors
+  // the org-read routes (owner|admin|member may list); resolveTenant scopes it to the caller's org so
+  // it cannot leak across tenants.
+  app.get(
+    '/v1/orgs/:orgId/members',
+    requireAuth(),
+    resolveTenant(deps),
+    requirePermission(deps, 'org:read'),
+    async (c) => {
+      const orgId = c.get('tenantId');
+      if (!orgId) throw new ApiError('NOT_FOUND', 'Not found.');
+      const members = await deps.orgStore.listMembers(orgId);
+      const resp: OrgMemberListResponse = {
+        members: members.map((m) => ({ userId: m.userId, email: m.email, role: roleOf(m.role) })),
+      };
+      return c.json(resp, 200);
+    },
+  );
+
   // POST /v1/orgs/:orgId/api-keys — mint (LIVE-membership authz; plaintext ONCE; Idempotency-Key).
   app.post(
     '/v1/orgs/:orgId/api-keys',
@@ -208,7 +318,7 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
       //
       // KILL-TRIGGER closure: the persisted snapshot is REDACTED — it NEVER carries the
       // plaintext secret (the snapshot column is jsonb with no TTL; a DB dump must not yield a
-      // usable `mk_prefix.secret`). The plaintext is shown EXACTLY ONCE on the original mint
+      // usable `<prefix>.<secret>`). The plaintext is shown EXACTLY ONCE on the original mint
       // below; a replay returns only `{id, keyPrefix, scopes, replayed:true}` with the secret
       // OMITTED. A retry therefore does NOT re-reveal the secret (a client that lost the original
       // 201 response must mint a NEW key) — documented replay semantics.
@@ -352,6 +462,22 @@ function hashBody(body: unknown): string {
   return createHash('sha256')
     .update(JSON.stringify(body ?? {}))
     .digest('hex');
+}
+
+/**
+ * A fixed argon2id hash to verify against so member-add's existing-user branch performs the SAME
+ * argon2id work as the new-user provisioning branch (which runs `hashPassword` on the one-time
+ * password). Without it, an already-registered email would return measurably faster — a timing side-
+ * channel on top of the (accepted) response-shape account-existence oracle. Mirrors the dummy-argon2id
+ * enumeration defense in auth-service.ts: the hash is computed once; the per-request cost is the
+ * constant-work verify.
+ */
+let DUMMY_PROVISION_HASH: string | undefined;
+async function equalizeProvisionTiming(): Promise<void> {
+  if (!DUMMY_PROVISION_HASH) {
+    DUMMY_PROVISION_HASH = await hashPassword('provision-timing-equalizer-never-matches');
+  }
+  await verifyPassword(DUMMY_PROVISION_HASH, 'provision-timing-equalizer-presented-never-matches');
 }
 
 /** Opaque hash of an attempted cross-tenant target org (never a target-org FK). Mirrors middleware.ts. */

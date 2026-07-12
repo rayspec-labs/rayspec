@@ -42,6 +42,75 @@ export class OrgStore {
     });
   }
 
+  /**
+   * Idempotently add a user to an org as a plain `member` (the org is the resolved tenant). Returns
+   * the effective role + whether the membership was activated by THIS call. Cases:
+   *  - an ACTIVE membership already exists → an idempotent no-op: the existing role is returned
+   *    UNCHANGED (never demote an owner/admin who is re-added) and `activated` is false;
+   *  - a soft-deleted (revoked) tombstone exists → it is reactivated as a plain member (a
+   *    previously-removed user can be re-added; the `memberships` UNIQUE(user_id, org_id) is not
+   *    partial, so the tombstone occupies the slot and must be revived rather than re-inserted);
+   *  - no row exists → a fresh `member` row is inserted.
+   *
+   * ATOMIC single-flight — one `INSERT … ON CONFLICT (user_id, org_id) DO UPDATE` statement, NOT a
+   * read-then-insert: two CONCURRENT fresh adds would both read "no row" and both INSERT, the second
+   * violating the non-partial UNIQUE(user_id, org_id) → 23505 → HTTP 500, breaking the promised
+   * idempotency. The upsert makes the DB's own row-level atomicity the single-flight point (the C10
+   * lesson — the platform's atomicity, not a TOCTOU read-then-insert). The role CASE preserves the
+   * semantics EXACTLY: a fresh row and a reactivated TOMBSTONE become `member`, while an already-
+   * ACTIVE row keeps its stored role (`deleted_at IS NULL` ⇒ an owner/admin re-add is never demoted).
+   * `activated` is derived from the PRE-image (read in the SAME statement via the `prior` CTE, so
+   * there is no separate read to race) so the route still returns 201 on a fresh add or a
+   * reactivation and 200 on an idempotent no-op.
+   */
+  async addMember(orgId: string, userId: string): Promise<{ role: string; activated: boolean }> {
+    const rows = (await this.db.execute(sql`
+      WITH prior AS (
+        SELECT ${schema.memberships.status} AS status, ${schema.memberships.deletedAt} AS deleted_at
+        FROM ${schema.memberships}
+        WHERE ${schema.memberships.userId} = ${userId} AND ${schema.memberships.orgId} = ${orgId}
+      ),
+      upserted AS (
+        INSERT INTO ${schema.memberships} (user_id, org_id, role, status, deleted_at)
+        VALUES (${userId}, ${orgId}, 'member', 'active', NULL)
+        ON CONFLICT (user_id, org_id) DO UPDATE
+          SET deleted_at = NULL,
+              status = 'active',
+              role = CASE
+                WHEN ${schema.memberships.deletedAt} IS NOT NULL THEN 'member'
+                ELSE ${schema.memberships.role}
+              END
+        RETURNING role
+      )
+      SELECT upserted.role AS role,
+             (prior.status IS NULL OR prior.status <> 'active' OR prior.deleted_at IS NOT NULL) AS activated
+      FROM upserted LEFT JOIN prior ON true
+    `)) as unknown as Array<{ role: string; activated: boolean }>;
+    const row = rows[0];
+    return { role: row?.role ?? 'member', activated: row?.activated ?? true };
+  }
+
+  /** Active members of an org (id + email + role), joined to users; excludes soft-deleted rows. */
+  async listMembers(orgId: string): Promise<{ userId: string; email: string; role: string }[]> {
+    const rows = await this.db
+      .select({
+        userId: schema.memberships.userId,
+        email: schema.users.email,
+        role: schema.memberships.role,
+      })
+      .from(schema.memberships)
+      .innerJoin(schema.users, eq(schema.memberships.userId, schema.users.id))
+      .where(
+        and(
+          eq(schema.memberships.orgId, orgId),
+          eq(schema.memberships.status, 'active'),
+          isNull(schema.memberships.deletedAt),
+          isNull(schema.users.deletedAt),
+        ),
+      );
+    return rows as { userId: string; email: string; role: string }[];
+  }
+
   /** Orgs the user is an active member of, with the caller's role in each. */
   async orgsForUser(userId: string): Promise<(OrgRow & { role: string })[]> {
     const rows = await this.db

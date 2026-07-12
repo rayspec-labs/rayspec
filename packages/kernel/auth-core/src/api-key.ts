@@ -67,7 +67,7 @@ export interface MintedApiKey {
  * (256-bit) of CSPRNG, base64url-encoded.
  */
 export function mintApiKey(pepper: string = getApiKeyPepper()): MintedApiKey {
-  const prefix = `mk_${randomBytes(6).toString('base64url')}`;
+  const prefix = `rk_${randomBytes(6).toString('base64url')}`;
   const secret = randomBytes(32).toString('base64url'); // 256-bit
   const plaintext = `${prefix}.${secret}`;
   return { plaintext, prefix, hash: hashApiKey(secret, pepper) };

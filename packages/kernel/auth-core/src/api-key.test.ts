@@ -56,7 +56,7 @@ describe('hashApiKey / verifyApiKey', () => {
 describe('mintApiKey', () => {
   it('returns a prefix + ≥128-bit secret whose hash verifies and whose plaintext is prefix.secret', () => {
     const minted = mintApiKey(TEST_PEPPER);
-    expect(minted.prefix.startsWith('mk_')).toBe(true);
+    expect(minted.prefix.startsWith('rk_')).toBe(true);
     expect(minted.plaintext.startsWith(`${minted.prefix}.`)).toBe(true);
     const secret = minted.plaintext.slice(minted.prefix.length + 1);
     // 32 random bytes base64url-encoded ⇒ comfortably ≥128-bit of entropy.

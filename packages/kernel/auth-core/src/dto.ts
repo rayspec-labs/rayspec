@@ -113,6 +113,40 @@ export type OrgListResponse = z.infer<typeof OrgListResponse>;
 export const ChangeMemberRoleRequest = z.object({ role: Role });
 export type ChangeMemberRoleRequest = z.infer<typeof ChangeMemberRoleRequest>;
 
+/**
+ * Add a user to an org by email (owner-only). `org_id`/`role`/`user_id` are NEVER body-bindable —
+ * the org is the server-derived tenant and the added user always joins as a plain `member`. Only
+ * the email is client-supplied; it is normalized server-side before any lookup/write.
+ */
+export const AddOrgMemberRequest = z.object({ email: emailField });
+export type AddOrgMemberRequest = z.infer<typeof AddOrgMemberRequest>;
+
+/** One member of an org (the id + email + role) — never a hash/secret. */
+export const OrgMemberView = z.object({
+  userId: z.string().uuid(),
+  email: z.string(),
+  role: Role,
+});
+export type OrgMemberView = z.infer<typeof OrgMemberView>;
+
+/**
+ * The add-member result. `oneTimePassword` is a DELIBERATE, single-shot secret-in-a-response — it
+ * is populated ONLY when the added email had no existing user, so a fresh account is provisioned
+ * with a random initial password the operator conveys out-of-band (core has no outbound mail). It
+ * is shown EXACTLY ONCE, never stored in plaintext, and never returned again (precedent:
+ * `MintApiKeyResponse.plaintext`). Absent when an existing user was added.
+ */
+export const AddOrgMemberResponse = z.object({
+  userId: z.string().uuid(),
+  email: z.string(),
+  role: Role,
+  oneTimePassword: z.string().optional(),
+});
+export type AddOrgMemberResponse = z.infer<typeof AddOrgMemberResponse>;
+
+export const OrgMemberListResponse = z.object({ members: z.array(OrgMemberView) });
+export type OrgMemberListResponse = z.infer<typeof OrgMemberListResponse>;
+
 // ---- api keys ------------------------------------------------------------------------------
 
 /**
@@ -151,7 +185,7 @@ export type MintApiKeyResponse = z.infer<typeof MintApiKeyResponse>;
  * The REDACTED mint snapshot — the ONLY shape persisted in idempotency_keys.snapshot and the
  * shape returned on an Idempotency-Key REPLAY. It NEVER carries
  * `plaintext`: the secret is shown EXACTLY ONCE on the original mint; a retry returns only the
- * non-secret metadata so a DB dump of the no-TTL snapshot column yields no usable `mk_prefix.secret`
+ * non-secret metadata so a DB dump of the no-TTL snapshot column yields no usable `<prefix>.<secret>`
  * credential. `replayed: true` signals the caller that the plaintext is not available again.
  */
 export const MintApiKeyReplay = z.object({

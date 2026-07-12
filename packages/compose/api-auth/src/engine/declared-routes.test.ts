@@ -119,7 +119,7 @@ async function principal(
   return { orgId, token };
 }
 
-/** Mint an org-scoped api-key (the owner of `orgId` mints it) with the given scopes; returns mk_… */
+/** Mint an org-scoped api-key (the owner of `orgId` mints it) with the given scopes; returns rk_… */
 async function mintApiKey(orgId: string, ownerToken: string, scopes: string[]): Promise<string> {
   const res = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/api-keys`, {
     body: { name: 'test-key', scopes },

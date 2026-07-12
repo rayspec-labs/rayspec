@@ -18,6 +18,7 @@ export type AuthEventName =
   | 'logout'
   | 'org_create'
   | 'org_switch'
+  | 'org_member_add'
   | 'org_member_change'
   | 'apikey_mint'
   | 'apikey_revoke'

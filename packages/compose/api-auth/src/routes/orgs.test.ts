@@ -9,6 +9,7 @@
  *    still-valid JWT → 403 (live membership check, claim not trusted);
  *  - authz matrix, api-key uniformity, idempotency (tenant-scoped), membership invariants.
  */
+import { hashApiKey } from '@rayspec/auth-core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
 
@@ -65,7 +66,7 @@ describe('full flow (the exit gate back half)', () => {
     });
     expect(mintRes.status).toBe(201);
     const mint = await mintRes.json();
-    expect(mint.plaintext).toMatch(/^mk_.+\..+/);
+    expect(mint.plaintext).toMatch(/^rk_.+\..+/);
     expect(JSON.stringify(mint)).not.toMatch(/key_hash|keyHash|\$argon2/);
     const apiKey = mint.plaintext as string;
     const keyId = mint.id as string;
@@ -461,5 +462,437 @@ describe('membership invariants', () => {
     expect(aOrgs.orgs.length).toBe(1);
     expect(aOrgs.orgs[0].id).toBe(orgA);
     expect(aOrgs.orgs[0].role).toBe('owner');
+  });
+});
+
+describe('API-key prefix: rk_ mint + permanent dual-accept', () => {
+  /**
+   * Seed an api-key row directly with a chosen prefix + secret (bypassing HTTP mint) so a legacy-
+   * form prefix and a multi-segment secret can be exercised. Returns the presented `<prefix>.<secret>`
+   * plaintext. The hash uses the same pepper the app resolves with (the suite sets it globally).
+   */
+  async function seedKey(
+    orgId: string,
+    prefix: string,
+    secret: string,
+    scopes: string[],
+  ): Promise<string> {
+    await h.deps.apiKeyStore.mint({
+      orgId,
+      keyPrefix: prefix,
+      keyHash: hashApiKey(secret),
+      scopes,
+    });
+    return `${prefix}.${secret}`;
+  }
+
+  it('a freshly minted key carries the rk_ prefix and authenticates a scope-guarded route', async () => {
+    const t0 = await registerUser('prefix-rk@example.com');
+    const orgId = await createOrg(t0, 'PrefixRkCo');
+    const orgToken = await switchOrg(t0, orgId);
+    const mint = await (
+      await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/api-keys`, {
+        body: { scopes: ['apikey:read'] },
+        headers: { authorization: `Bearer ${orgToken}` },
+      })
+    ).json();
+    expect((mint.keyPrefix as string).startsWith('rk_')).toBe(true);
+    expect((mint.plaintext as string).startsWith('rk_')).toBe(true);
+    // The rk_ key authenticates + is scope-authorized on the list route (never mis-routed to JWT).
+    const list = await jsonRequest(h.app, 'GET', `/v1/orgs/${orgId}/api-keys`, {
+      headers: { authorization: `Bearer ${mint.plaintext}` },
+    });
+    expect(list.status).toBe(200);
+  });
+
+  it('an rk_ key whose opaque secret contains a dot is resolved as an api-key, not verified as a JWT', async () => {
+    // The prefix is authoritative: a bearer carrying the rk_ prefix must resolve as an api-key even
+    // when its secret makes the whole credential 3 dot-separated segments (the JWT shape). Removing
+    // the rk_ guard in the auth middleware routes this to JWT verification → no principal → 401, so
+    // this is the guard's fail-the-fix oracle.
+    const t0 = await registerUser('prefix-dot@example.com');
+    const orgId = await createOrg(t0, 'PrefixDotCo');
+    const cred = await seedKey(orgId, 'rk_dotcarrier', 'first.second', ['apikey:read']);
+    expect(cred.split('.').length).toBe(3); // JWT-shaped segment count
+    const list = await jsonRequest(h.app, 'GET', `/v1/orgs/${orgId}/api-keys`, {
+      headers: { authorization: `Bearer ${cred}` },
+    });
+    expect(list.status).toBe(200); // authenticated as the api-key (guard prevents the JWT mis-route)
+  });
+
+  it('a legacy mk_-form key still authenticates (permanent dual-accept)', async () => {
+    const t0 = await registerUser('prefix-mk@example.com');
+    const orgId = await createOrg(t0, 'PrefixMkCo');
+    const cred = await seedKey(orgId, 'mk_legacyform', 'legacy-secret-value', ['apikey:read']);
+    const list = await jsonRequest(h.app, 'GET', `/v1/orgs/${orgId}/api-keys`, {
+      headers: { authorization: `Bearer ${cred}` },
+    });
+    expect(list.status).toBe(200);
+  });
+
+  it('a legacy mk_ key whose opaque secret contains a dot is resolved as an api-key, not a JWT', async () => {
+    // Mirror of the rk_ dotted-secret guard: an mk_-prefixed bearer whose secret makes the whole
+    // credential 3 dot-separated segments (the JWT shape) must still resolve as an api-key. Removing
+    // the `!bearer.startsWith('mk_')` clause in the auth middleware routes this to JWT verification →
+    // no principal → 401, so this is the mk_ guard's fail-the-fix oracle (dual-accept parity with rk_).
+    const t0 = await registerUser('prefix-mk-dot@example.com');
+    const orgId = await createOrg(t0, 'PrefixMkDotCo');
+    const cred = await seedKey(orgId, 'mk_dotcarrier', 'first.second', ['apikey:read']);
+    expect(cred.split('.').length).toBe(3); // JWT-shaped segment count
+    const list = await jsonRequest(h.app, 'GET', `/v1/orgs/${orgId}/api-keys`, {
+      headers: { authorization: `Bearer ${cred}` },
+    });
+    expect(list.status).toBe(200); // authenticated as the api-key (guard prevents the JWT mis-route)
+  });
+});
+
+describe('org membership: owner-gated add + list', () => {
+  /** POST a member add; returns the raw Response so a test can assert status + body. */
+  function addMember(orgId: string, token: string, email: string): Promise<Response> {
+    return jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/members`, {
+      body: { email },
+      headers: { authorization: `Bearer ${token}` },
+    });
+  }
+
+  /** Count ACTIVE memberships of a user in an org (direct DB read; the source of truth). */
+  async function activeMembershipCount(orgId: string, userId: string): Promise<number> {
+    const rows = (await h.db.$client.unsafe(
+      `SELECT count(*)::int AS n FROM rayspec_test_apiauth_orgs.memberships
+         WHERE org_id = $1 AND user_id = $2 AND status = 'active' AND deleted_at IS NULL`,
+      [orgId, userId],
+    )) as unknown as { n: number }[];
+    return rows[0]?.n ?? 0;
+  }
+
+  /** The userId behind a token (via /v1/auth/me). */
+  async function userIdOf(token: string): Promise<string> {
+    const me = await (
+      await jsonRequest(h.app, 'GET', '/v1/auth/me', {
+        headers: { authorization: `Bearer ${token}` },
+      })
+    ).json();
+    return me.userId as string;
+  }
+
+  it('owner adds an EXISTING user → 201 member; a second identical add is an idempotent no-op', async () => {
+    const t0 = await registerUser('add-owner@example.com');
+    const orgId = await createOrg(t0, 'AddCo');
+    const ownerToken = await switchOrg(t0, orgId);
+    // A pre-existing account with no membership in this org.
+    const existingUserToken = await registerUser('add-existing@example.com');
+    const existingUserId = await userIdOf(existingUserToken);
+
+    const first = await addMember(orgId, ownerToken, 'add-existing@example.com');
+    expect(first.status).toBe(201);
+    const firstBody = await first.json();
+    expect(firstBody.role).toBe('member');
+    expect(firstBody.userId).toBe(existingUserId);
+    expect(firstBody.oneTimePassword).toBeUndefined(); // an existing user gets no provisioned password
+    expect(await activeMembershipCount(orgId, existingUserId)).toBe(1);
+
+    // A second identical add is idempotent: 200, still exactly ONE membership row (no duplicate).
+    const second = await addMember(orgId, ownerToken, 'add-existing@example.com');
+    expect(second.status).toBe(200);
+    expect(await activeMembershipCount(orgId, existingUserId)).toBe(1);
+  });
+
+  it('owner adds a NEW email → user provisioned with a one-time password that actually logs in', async () => {
+    const t0 = await registerUser('prov-owner@example.com');
+    const orgId = await createOrg(t0, 'ProvCo');
+    const ownerToken = await switchOrg(t0, orgId);
+
+    const res = await addMember(orgId, ownerToken, 'brand-new@example.com');
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.role).toBe('member');
+    expect(typeof body.oneTimePassword).toBe('string');
+    const otp = body.oneTimePassword as string;
+
+    // The one-time password authenticates the freshly provisioned account.
+    const login = await jsonRequest(h.app, 'POST', '/v1/auth/login', {
+      body: { email: 'brand-new@example.com', password: otp },
+    });
+    expect(login.status).toBe(200);
+    expect((await login.json()).accessToken).toBeTruthy();
+  });
+
+  it('an API-key principal is REJECTED (403) and creates no membership', async () => {
+    const t0 = await registerUser('apikey-add@example.com');
+    const orgId = await createOrg(t0, 'ApiKeyAddCo');
+    const ownerToken = await switchOrg(t0, orgId);
+    // A broadly-scoped api-key still cannot add members (org:member:add is not api-key-grantable).
+    const mint = await (
+      await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/api-keys`, {
+        body: { scopes: ['org:read', 'store:write', 'apikey:read'] },
+        headers: { authorization: `Bearer ${ownerToken}` },
+      })
+    ).json();
+
+    const res = await addMember(orgId, mint.plaintext as string, 'apikey-victim@example.com');
+    expect(res.status).toBe(403);
+    // Denied at the authorization chokepoint (org:member:add is not api-key-grantable), not merely at
+    // a downstream handler guard — the missing_permission hint pins the permission gate as the layer
+    // that rejected, so weakening the route's permission to an api-key-grantable one turns this red.
+    const denied = await res.json();
+    expect(denied.error.details.missing_permission).toBe('org:member:add');
+    // No user was provisioned for the rejected request.
+    const users = (await h.db.$client.unsafe(
+      `SELECT count(*)::int AS n FROM rayspec_test_apiauth_orgs.users WHERE lower(email) = $1`,
+      ['apikey-victim@example.com'],
+    )) as unknown as { n: number }[];
+    expect(users[0]?.n).toBe(0);
+  });
+
+  it('a non-owner member is REJECTED (403)', async () => {
+    const t0 = await registerUser('nonowner-owner@example.com');
+    const orgId = await createOrg(t0, 'NonOwnerCo');
+    const ownerToken = await switchOrg(t0, orgId);
+    // Provision a plain member and let them obtain an org-scoped (role=member) token.
+    const memberToken0 = await registerUser('nonowner-member@example.com');
+    await addMember(orgId, ownerToken, 'nonowner-member@example.com');
+    const memberToken = await switchOrg(memberToken0, orgId);
+
+    const res = await addMember(orgId, memberToken, 'nonowner-victim@example.com');
+    expect(res.status).toBe(403); // member lacks org:member:add (live check, claim not trusted)
+  });
+
+  it('cross-org isolation: an org-A owner cannot add to / list org B (resolveTenant 404s)', async () => {
+    const ta = await registerUser('mem-a@example.com');
+    const orgA = await createOrg(ta, 'MemOrgA');
+    const tokenA = await switchOrg(ta, orgA);
+    const tb = await registerUser('mem-b@example.com');
+    const orgB = await createOrg(tb, 'MemOrgB');
+
+    const crossAdd = await addMember(orgB, tokenA, 'cross-victim@example.com');
+    expect(crossAdd.status).toBe(404);
+    const crossList = await jsonRequest(h.app, 'GET', `/v1/orgs/${orgB}/members`, {
+      headers: { authorization: `Bearer ${tokenA}` },
+    });
+    expect(crossList.status).toBe(404);
+  });
+
+  it('GET lists the org’s members with their roles', async () => {
+    const t0 = await registerUser('list-owner@example.com');
+    const orgId = await createOrg(t0, 'ListMembersCo');
+    const ownerToken = await switchOrg(t0, orgId);
+    const ownerId = await userIdOf(ownerToken);
+    await registerUser('list-member@example.com');
+    const addRes = await addMember(orgId, ownerToken, 'list-member@example.com');
+    const memberId = (await addRes.json()).userId as string;
+
+    const list = await jsonRequest(h.app, 'GET', `/v1/orgs/${orgId}/members`, {
+      headers: { authorization: `Bearer ${ownerToken}` },
+    });
+    expect(list.status).toBe(200);
+    const members = (await list.json()).members as {
+      userId: string;
+      email: string;
+      role: string;
+    }[];
+    const byId = new Map(members.map((m) => [m.userId, m]));
+    expect(byId.get(ownerId)?.role).toBe('owner');
+    expect(byId.get(memberId)?.role).toBe('member');
+    expect(byId.get(memberId)?.email).toBe('list-member@example.com');
+  });
+
+  it('a removed (soft-deleted) member is NOT returned by GET /members (active-only filter)', async () => {
+    const t0 = await registerUser('active-only-owner@example.com');
+    const orgId = await createOrg(t0, 'ActiveOnlyCo');
+    const ownerToken = await switchOrg(t0, orgId);
+    await registerUser('kept-member@example.com');
+    await registerUser('removed-member@example.com');
+    const keptId = (await (await addMember(orgId, ownerToken, 'kept-member@example.com')).json())
+      .userId as string;
+    const removedId = (
+      await (await addMember(orgId, ownerToken, 'removed-member@example.com')).json()
+    ).userId as string;
+
+    // Soft-delete (tombstone) one member.
+    const del = await jsonRequest(h.app, 'DELETE', `/v1/orgs/${orgId}/members/${removedId}`, {
+      headers: { authorization: `Bearer ${ownerToken}` },
+    });
+    expect(del.status).toBe(204);
+
+    const list = await jsonRequest(h.app, 'GET', `/v1/orgs/${orgId}/members`, {
+      headers: { authorization: `Bearer ${ownerToken}` },
+    });
+    expect(list.status).toBe(200);
+    const ids = ((await list.json()).members as { userId: string }[]).map((m) => m.userId);
+    expect(ids).toContain(keptId);
+    // Dropping the status='active' / deleted_at IS NULL filter in listMembers turns this RED.
+    expect(ids).not.toContain(removedId);
+  });
+
+  it('adding the SAME brand-new email twice is idempotent (no duplicate user, no 500)', async () => {
+    const t0 = await registerUser('idem-prov-owner@example.com');
+    const orgId = await createOrg(t0, 'IdemProvCo');
+    const ownerToken = await switchOrg(t0, orgId);
+
+    const first = await addMember(orgId, ownerToken, 'idem-new@example.com');
+    expect(first.status).toBe(201);
+    const firstBody = await first.json();
+    expect(typeof firstBody.oneTimePassword).toBe('string'); // provisioned once
+    const newUserId = firstBody.userId as string;
+
+    const second = await addMember(orgId, ownerToken, 'idem-new@example.com');
+    expect(second.status).toBe(200); // idempotent no-op (the user now exists)
+    const secondBody = await second.json();
+    expect(secondBody.userId).toBe(newUserId);
+    expect(secondBody.oneTimePassword).toBeUndefined(); // existing user → no OTP re-issued
+
+    const users = (await h.db.$client.unsafe(
+      `SELECT count(*)::int AS n FROM rayspec_test_apiauth_orgs.users
+         WHERE lower(email) = $1 AND deleted_at IS NULL`,
+      ['idem-new@example.com'],
+    )) as unknown as { n: number }[];
+    expect(users[0]?.n).toBe(1);
+    expect(await activeMembershipCount(orgId, newUserId)).toBe(1);
+  });
+
+  it('CONCURRENT adds of the same brand-new email provision exactly one user (no 23505/500)', async () => {
+    const t0 = await registerUser('conc-prov-owner@example.com');
+    const orgId = await createOrg(t0, 'ConcProvCo');
+    const ownerToken = await switchOrg(t0, orgId);
+
+    // Several concurrent adds of a NEW email: each misses findUserByEmail, then races createUser on
+    // the users email-unique index → the losers hit 23505. The FIX 2 catch re-reads and proceeds as
+    // the existing-user path; WITHOUT it a loser returns HTTP 500. All must be 200/201, and exactly
+    // ONE user + ONE one-time password (the single provisioner that won the index).
+    const email = 'conc-new@example.com';
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => addMember(orgId, ownerToken, email)),
+    );
+    for (const r of results) expect([200, 201]).toContain(r.status);
+    const bodies = await Promise.all(results.map((r) => r.json()));
+    const otpCount = bodies.filter((b) => typeof b.oneTimePassword === 'string').length;
+    expect(otpCount).toBe(1);
+    const userIds = new Set(bodies.map((b) => b.userId as string));
+    expect(userIds.size).toBe(1);
+    const users = (await h.db.$client.unsafe(
+      `SELECT count(*)::int AS n FROM rayspec_test_apiauth_orgs.users
+         WHERE lower(email) = $1 AND deleted_at IS NULL`,
+      [email],
+    )) as unknown as { n: number }[];
+    expect(users[0]?.n).toBe(1);
+    expect(await activeMembershipCount(orgId, [...userIds][0] as string)).toBe(1);
+  });
+});
+
+describe('OrgStore.addMember — atomicity + role invariants (store-level, fail-the-fix)', () => {
+  const SCHEMA = 'rayspec_test_apiauth_orgs';
+
+  /** Insert a bare user (no membership) and return its id. */
+  async function seedUser(email: string): Promise<string> {
+    const rows = (await h.db.$client.unsafe(
+      `INSERT INTO ${SCHEMA}.users (email, password_hash) VALUES ($1, 'x') RETURNING id`,
+      [email],
+    )) as unknown as { id: string }[];
+    return rows[0]?.id as string;
+  }
+
+  /** Seed a membership row directly, optionally as a soft-deleted tombstone. */
+  async function seedMembership(
+    orgId: string,
+    userId: string,
+    role: string,
+    opts: { tombstone?: boolean } = {},
+  ): Promise<void> {
+    if (opts.tombstone) {
+      await h.db.$client.unsafe(
+        `INSERT INTO ${SCHEMA}.memberships (org_id, user_id, role, status, deleted_at)
+           VALUES ($1, $2, $3, 'revoked', now())`,
+        [orgId, userId, role],
+      );
+    } else {
+      await h.db.$client.unsafe(
+        `INSERT INTO ${SCHEMA}.memberships (org_id, user_id, role, status)
+           VALUES ($1, $2, $3, 'active')`,
+        [orgId, userId, role],
+      );
+    }
+  }
+
+  async function membershipRow(
+    orgId: string,
+    userId: string,
+  ): Promise<{ role: string; status: string; deleted_at: string | null } | undefined> {
+    const rows = (await h.db.$client.unsafe(
+      `SELECT role, status, deleted_at FROM ${SCHEMA}.memberships WHERE org_id = $1 AND user_id = $2`,
+      [orgId, userId],
+    )) as unknown as { role: string; status: string; deleted_at: string | null }[];
+    return rows[0];
+  }
+
+  async function activeCount(orgId: string, userId: string): Promise<number> {
+    const rows = (await h.db.$client.unsafe(
+      `SELECT count(*)::int AS n FROM ${SCHEMA}.memberships
+         WHERE org_id = $1 AND user_id = $2 AND status = 'active' AND deleted_at IS NULL`,
+      [orgId, userId],
+    )) as unknown as { n: number }[];
+    return rows[0]?.n ?? 0;
+  }
+
+  /** A fresh org owned by a fresh user — returns its id. */
+  async function freshOrg(name: string, ownerEmail: string): Promise<string> {
+    const token = await registerUser(ownerEmail);
+    return createOrg(token, name);
+  }
+
+  it('CONCURRENCY: many concurrent adds of the same fresh (user, org) all resolve; exactly one active row (no 23505/500)', async () => {
+    const orgId = await freshOrg('AtomicCo', 'atomic-owner@example.com');
+    const targetId = await seedUser('atomic-target@example.com');
+
+    // Under a read-then-insert, concurrent readers all observe "no row" then INSERT → the losers
+    // violate UNIQUE(user_id, org_id) → 23505 (rejected promise). The atomic upsert makes them all
+    // converge. Every add must fulfill and exactly ONE active membership must remain.
+    const results = await Promise.allSettled(
+      Array.from({ length: 8 }, () => h.deps.orgStore.addMember(orgId, targetId)),
+    );
+    for (const r of results) expect(r.status).toBe('fulfilled');
+    expect(await activeCount(orgId, targetId)).toBe(1);
+  });
+
+  it('FTF-1 reactivation: a tombstoned membership re-added is reactivated as MEMBER (anti-escalation reset)', async () => {
+    const orgId = await freshOrg('ReactivateCo', 'reactivate-owner@example.com');
+    const targetId = await seedUser('reactivate-target@example.com');
+    // Tombstone a PRIOR OWNER membership. A naive reactivation that kept the old role would restore
+    // owner; the CASE resets a reactivated tombstone to member (the privilege reset the fix asserts).
+    await seedMembership(orgId, targetId, 'owner', { tombstone: true });
+
+    const out = await h.deps.orgStore.addMember(orgId, targetId);
+    expect(out.role).toBe('member'); // reset to member, NOT restored as owner
+    expect(out.activated).toBe(true); // a reactivation IS an activation (→ 201 at the route)
+    const row = await membershipRow(orgId, targetId);
+    expect(row?.status).toBe('active');
+    expect(row?.deleted_at).toBeNull();
+    expect(row?.role).toBe('member');
+    expect(await activeCount(orgId, targetId)).toBe(1);
+  });
+
+  it('FTF-2 no-demote: re-adding an ACTIVE owner keeps them owner (idempotent no-op, never demoted)', async () => {
+    const orgId = await freshOrg('NoDemoteCo', 'nodemote-owner@example.com');
+    // A SECOND active owner (so this is purely about addMember, independent of the last-owner rule).
+    const secondOwnerId = await seedUser('second-owner@example.com');
+    await seedMembership(orgId, secondOwnerId, 'owner');
+
+    const out = await h.deps.orgStore.addMember(orgId, secondOwnerId);
+    expect(out.role).toBe('owner'); // the CASE preserves an active row's role — NOT demoted to member
+    expect(out.activated).toBe(false); // already active → idempotent no-op (→ 200 at the route)
+    const row = await membershipRow(orgId, secondOwnerId);
+    expect(row?.role).toBe('owner');
+    expect(row?.status).toBe('active');
+    expect(await activeCount(orgId, secondOwnerId)).toBe(1);
+  });
+
+  it('a sequential second add returns the idempotent row without error (fresh → member, then no-op)', async () => {
+    const orgId = await freshOrg('SeqIdemCo', 'seq-idem-owner@example.com');
+    const targetId = await seedUser('seq-idem-target@example.com');
+
+    const first = await h.deps.orgStore.addMember(orgId, targetId);
+    expect(first).toEqual({ role: 'member', activated: true });
+    const second = await h.deps.orgStore.addMember(orgId, targetId);
+    expect(second).toEqual({ role: 'member', activated: false });
+    expect(await activeCount(orgId, targetId)).toBe(1);
   });
 });
