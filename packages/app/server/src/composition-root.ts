@@ -98,7 +98,7 @@ import type { PgTable } from 'drizzle-orm/pg-core';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { exportJWK, importPKCS8 } from 'jose';
 import { stringify as stringifyYaml } from 'yaml';
-import { deployProductYamlSpec } from './product-boot.js';
+import { deployProductYamlSpec, makeSchemaProbe, planUpdateBoot } from './product-boot.js';
 import { mountFrontend } from './serve-static.js';
 
 /** The default local port (overridable via PORT). Local DX only — not a reserved well-known port. */
@@ -1067,16 +1067,39 @@ async function deployDeclaredSpec(
   let deployMode: BootedServer['deployMode'];
   if (opts.updateMigrations !== undefined) {
     // ── The UPDATE flow: the deployer supplied a reviewed forward DELTA (old → new) ──────
-    // We DELIBERATELY bypass the materialize/mount/drifted decision: a legitimate update
-    // reconciles a schema that is intentionally 'drifted' vs the NEW spec (the delta is exactly what
-    // closes that gap — the classify step would otherwise refuse to boot, which is the dead-end this
-    // flow replaces). `deploy()` stays BYTE-UNCHANGED: it GATES each migration (scanMigrationSql over
-    // its reviewed allowlist — a destructive statement WITHOUT a covering entry BLOCKS with a
-    // DeployError at [lint/gate], never a silent apply) then applies it, evolving the live schema in
-    // place. The post-migrate drift step (report-only) then reflects the reconciled schema. An empty
-    // updateMigrations[] is a legitimate no-DDL re-deploy (validate + chokepoint-verify only).
-    migrations = opts.updateMigrations;
-    deployMode = specStores.length === 0 ? 'auth-only' : 'updated';
+    // REBOOT-SAFE by construction (mirrors the product-profile boot). `RAYSPEC_UPDATE_MIGRATION` is a
+    // PERSISTENT deployment env re-read on EVERY boot, and a delta is NON-idempotent (its ADD COLUMN /
+    // CREATE carry no IF NOT EXISTS and deploy() keeps no applied-ledger). So we CLASSIFY the live schema
+    // vs the NEW spec FIRST (the SAME read-only detectDrift the mount path below uses — NO DDL) and ROUTE
+    // through the SHARED planUpdateBoot instead of blindly re-applying the delta:
+    //   - 'drifted'          → APPLY the reviewed delta (the NORMAL update — the delta closes the gap).
+    //   - 'present-matching' → the delta ALREADY landed on a PRIOR boot: MOUNT (zero migrations, loud
+    //                          log) so a LEFTOVER --apply-migration in a process-managed unit
+    //                          (systemd/docker `Restart=always`) MOUNTS instead of re-applying + crash-
+    //                          looping on a duplicate_column (42701). planUpdateBoot's live target-probe
+    //                          discriminates a genuine leftover (MOUNT) from an UNAPPLIED pure-subset
+    //                          removal (APPLY — the reviewed drop target still exists) and REFUSES an
+    //                          undeterminable destructive delta fail-closed — parity with product-boot.
+    //   - 'absent'           → REFUSE fail-closed (update mode evolves an EXISTING schema; a first boot
+    //                          must materialize via the plain path — dropping --apply-migration).
+    // `deploy()` stays BYTE-UNCHANGED throughout: when planUpdateBoot routes APPLY it GATES each migration
+    // (scanMigrationSql over its reviewed allowlist — a destructive statement WITHOUT a covering entry
+    // BLOCKS with a DeployError at [lint/gate], never a silent apply) then applies it, evolving the live
+    // schema in place; the post-migrate drift GATE below then confirms the delta CLOSED the gap. An empty
+    // updateMigrations[] stays a legitimate no-DDL re-deploy (validate + chokepoint-verify only).
+    const preDrift = await detectDrift(specStores, 'public', queryFn);
+    const schemaState = classifyProductSchema(specStores, preDrift);
+    const plan = await planUpdateBoot(
+      schemaState,
+      opts.updateMigrations,
+      specPath,
+      (m) => console.warn(m),
+      makeSchemaProbe(queryFn, 'public'),
+    );
+    migrations = plan.migrations;
+    // A zero-store backend spec ('present-matching' by construction) keeps its 'auth-only' deployMode;
+    // otherwise take planUpdateBoot's 'mounted' (leftover env, re-applied nothing) / 'updated' (applied).
+    deployMode = specStores.length === 0 ? 'auth-only' : plan.deployMode;
   } else {
     // ── mount-without-deploy — classify the LIVE product schema → MATERIALIZE vs MOUNT ──────
     // The platform migration chain (applyMigrations) already ran in assembleServer, so the platform

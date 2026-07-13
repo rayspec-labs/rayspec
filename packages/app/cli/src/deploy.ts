@@ -137,15 +137,28 @@ export async function runDeploy(args: readonly string[]): Promise<DeployOutcome>
     return { kind: 'dry-run', result: await dryRunCompose(specPath, specText) };
   }
 
-  // Resolve + JAIL the reviewed forward-DELTA (and its optional reviewed allowlist) exactly like the
-  // spec path — both are operator-supplied filesystem paths. The resolved ABSOLUTE paths are handed to
-  // the boot via env (RAYSPEC_UPDATE_MIGRATION / RAYSPEC_UPDATE_ALLOWLIST), which the gated deploy()
-  // engine reads (product profile: directly in product-boot; backend profile: via serve-opts).
+  // Resolve + JAIL the reviewed forward-DELTA (and its optional reviewed allowlist) with the FULL spec-
+  // path jail — both are operator-supplied filesystem paths. Each gets BOTH halves the spec path gets:
+  // resolveSpecPath (the lexical `..`/absolute jail on the typed string) AND readSpecFile (the realpath
+  // symlink RE-jail + regular-file check + MAX_SPEC_BYTES cap). The pre-flight readSpecFile's returned
+  // text is DISCARDED here — the boot re-reads the file via env (RAYSPEC_UPDATE_MIGRATION /
+  // RAYSPEC_UPDATE_ALLOWLIST) through the gated deploy() engine (product profile: directly in product-
+  // boot; backend profile: via serve-opts). Its purpose is the JAIL: without it the delta/allowlist would
+  // get ONLY the lexical jail and the boot's later plain readFileSync FOLLOWS symlinks with no re-jail and
+  // no size cap — so a delta symlink whose REAL target is OUTSIDE the cwd, or an oversized file, would slip
+  // the lexical jail. This closes that gap (a symlink-escape / oversized file is refused up front with a
+  // secret-free ReadSpecError), matching the spec path exactly.
   let migrationPath: string | undefined;
   let allowlistPath: string | undefined;
   try {
-    if (applyMigration !== undefined) migrationPath = resolveSpecPath([applyMigration]);
-    if (allowlist !== undefined) allowlistPath = resolveSpecPath([allowlist]);
+    if (applyMigration !== undefined) {
+      migrationPath = resolveSpecPath([applyMigration]);
+      await readSpecFile(migrationPath);
+    }
+    if (allowlist !== undefined) {
+      allowlistPath = resolveSpecPath([allowlist]);
+      await readSpecFile(allowlistPath);
+    }
   } catch (e) {
     if (e instanceof ReadSpecError) throw new DeployCliError(e.message);
     throw e;
@@ -303,12 +316,14 @@ export async function serveDeployment(
   // assembleOptsFromEnv (serve-opts.ts).
   //
   // LEFTOVER-ENV REBOOT SEMANTICS (honest): a delta is NON-IDEMPOTENT, and this env PERSISTS in the
-  // process — a process manager (systemd/docker) that RESTARTS the command with --apply-migration still
-  // present re-enters update mode on the next boot. The PRODUCT-profile boot is reboot-safe by
-  // construction (it classifies the live schema first and MOUNTS a present-matching schema instead of
-  // re-applying). The BACKEND-profile boot BYPASSES that classify when updateMigrations is set, so a
-  // leftover --apply-migration would re-apply the delta and CRASH the boot (e.g. duplicate column).
-  // Operator contract: once the delta has landed, drop --apply-migration from the next deploy.
+  // process — a process manager (systemd/docker `Restart=always`) that RESTARTS the command with
+  // --apply-migration still present re-enters update mode on the next boot. BOTH profiles are reboot-safe
+  // by construction: they CLASSIFY the live schema FIRST and MOUNT a present-matching schema (the delta
+  // already landed on a prior boot) instead of re-applying a non-idempotent delta and crash-looping on a
+  // duplicate_column (42701) — the PRODUCT profile in product-boot, the BACKEND profile in the
+  // composition root's update branch (both route through the shared planUpdateBoot). Leaving
+  // --apply-migration in a process-managed unit is therefore SAFE (it applies once, mounts thereafter);
+  // still, drop it once the delta has landed to keep the operator intent explicit.
   if (migrationPath !== undefined) process.env.RAYSPEC_UPDATE_MIGRATION = migrationPath;
   if (allowlistPath !== undefined) process.env.RAYSPEC_UPDATE_ALLOWLIST = allowlistPath;
 

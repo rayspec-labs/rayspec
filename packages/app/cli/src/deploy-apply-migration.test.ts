@@ -7,9 +7,11 @@
  * The real APPLY (an additive delta lands + data survives; a destructive delta with no allowlist is
  * BLOCKED) is proven on ground truth through the REAL CLI in deploy-apply-migration.db.test.ts.
  */
-import { dirname, resolve } from 'node:path';
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Capture bag the hoisted `@rayspec/server` mock writes into (vi.mock is hoisted above the imports, so
 // the shared state must be declared via vi.hoisted to be visible inside the factory).
@@ -128,6 +130,58 @@ describe('runDeploy — the --apply-migration usage guards', () => {
     await expect(
       runDeploy([ANY_SPEC_REL, '--apply-migration', '../outside.sql']),
     ).rejects.toBeInstanceOf(DeployCliError);
+  });
+});
+
+describe('runDeploy — the delta/allowlist paths get the FULL spec-path jail (realpath RE-jail + size cap)', () => {
+  let jailDir = '';
+  let outsideDir = '';
+
+  beforeAll(() => {
+    // realpathSync so the CWD we chdir into is the REAL path (macOS /var → /private/var) — else the
+    // read-spec symlink jail would (correctly) reject the in-jail spec itself as escaping the CWD.
+    jailDir = realpathSync(mkdtempSync(join(tmpdir(), 'rayspec-delta-jail-')));
+    outsideDir = realpathSync(mkdtempSync(join(tmpdir(), 'rayspec-delta-outside-')));
+    // A readable regular spec INSIDE the jail (only needs to pass the pre-flight read; never composed).
+    writeFileSync(join(jailDir, 'spec.yaml'), "version: '1.0'\nmetadata: { name: x }\n");
+    // The reviewed delta's REAL target lives OUTSIDE the jail; a symlink INSIDE the jail points at it —
+    // the LEXICAL jail (resolveSpecPath) sees an in-CWD path and passes, so ONLY readSpecFile's realpath
+    // RE-jail catches the escape (this is the gap FIX-2 closes; the boot's plain readFileSync would
+    // otherwise FOLLOW the symlink out of the cwd with no re-jail).
+    writeFileSync(
+      join(outsideDir, 'secret-delta.sql'),
+      'ALTER TABLE parts ADD COLUMN note text;\n',
+    );
+    symlinkSync(join(outsideDir, 'secret-delta.sql'), join(jailDir, 'delta.sql'));
+    // An OVERSIZED in-jail delta (> MAX_SPEC_BYTES = 1 MiB) — the size cap must reject it like the spec.
+    writeFileSync(join(jailDir, 'huge.sql'), `-- ${'x'.repeat(1024 * 1024 + 16)}\n`);
+  });
+
+  afterAll(() => {
+    for (const d of [jailDir, outsideDir]) if (d) rmSync(d, { recursive: true, force: true });
+  });
+
+  it('a delta symlink whose REAL target escapes the CWD is refused (secret-free), like the spec path', async () => {
+    process.chdir(jailDir);
+    let err: unknown;
+    try {
+      await runDeploy(['spec.yaml', '--apply-migration', 'delta.sql']);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(DeployCliError);
+    const msg = (err as Error).message;
+    // The realpath RE-jail message (identical wording to the spec path's), naming only operator-known
+    // paths — no DB URL / secret. The lexical jail alone would NOT have caught this symlink.
+    expect(msg).toMatch(/resolves to a target outside the working directory/);
+    expect(msg).not.toMatch(/postgres|password|secret/i);
+  });
+
+  it('an OVERSIZED delta (> 1 MiB) is refused by the size cap, like the spec path', async () => {
+    process.chdir(jailDir);
+    await expect(runDeploy(['spec.yaml', '--apply-migration', 'huge.sql'])).rejects.toBeInstanceOf(
+      DeployCliError,
+    );
   });
 });
 

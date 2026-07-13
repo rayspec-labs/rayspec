@@ -36,10 +36,12 @@ const CLI_DIST = join(repoRoot, 'packages/app/cli/dist/index.js');
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
 let additiveRan = 0;
 let destructiveRan = 0;
+let rebootRan = 0;
 
 const TENANT = '00000000-0000-4000-8000-0000000000ad';
 const ADD_DB = `rayspec_cli_applymig_add_${process.pid}`;
 const DROP_DB = `rayspec_cli_applymig_drop_${process.pid}`;
+const REBOOT_DB = `rayspec_cli_applymig_reboot_${process.pid}`;
 const PORT_BASE = 19000 + (process.pid % 900);
 
 // A minimal AGENT-FREE backend: one store + one declarative read route (no agents, no durable worker,
@@ -188,6 +190,7 @@ describe.skipIf(!baseUrl)(
       pem = await exportPKCS8(privateKey);
       await createDb(ADD_DB);
       await createDb(DROP_DB);
+      await createDb(REBOOT_DB);
     }, 120_000);
 
     afterAll(async () => {
@@ -200,7 +203,7 @@ describe.skipIf(!baseUrl)(
       if (baseUrl) {
         const admin = postgres(adminUrl(baseUrl), { max: 1 });
         try {
-          for (const name of [ADD_DB, DROP_DB]) {
+          for (const name of [ADD_DB, DROP_DB, REBOOT_DB]) {
             await admin.unsafe(`DROP DATABASE IF EXISTS "${name}_dbos_sys" WITH (FORCE)`);
             await admin.unsafe(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
           }
@@ -310,6 +313,70 @@ describe.skipIf(!baseUrl)(
       },
       300_000,
     );
+
+    maybe(
+      'a LEFTOVER --apply-migration is REBOOT-SAFE — it applies ONCE then MOUNTS (no 42701 crash-loop)',
+      async () => {
+        rebootRan += 1;
+        const appDb = withDbName(baseUrl as string, REBOOT_DB);
+
+        // Boot 1 — materialize the v1 backend, then SEED three rows.
+        const boot1 = spawnDeploy(['v1.rayspec.yaml'], appDb, PORT_BASE + 4);
+        await waitForBoot(PORT_BASE + 4, 120_000, boot1);
+        const seed = postgres(appDb, { max: 1 });
+        try {
+          await seed.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'Org', 'org')`, [
+            TENANT,
+          ]);
+          await seed.unsafe(
+            `INSERT INTO parts (tenant_id, label) VALUES ($1,'a'),($1,'b'),($1,'c')`,
+            [TENANT],
+          );
+        } finally {
+          await seed.end();
+        }
+        await shutdown(boot1);
+
+        // Boot 2 — APPLY the reviewed additive delta via --apply-migration (the FIRST, legitimate update).
+        const boot2 = spawnDeploy(
+          ['v2.rayspec.yaml', '--apply-migration', '0001_add_note.sql'],
+          appDb,
+          PORT_BASE + 5,
+        );
+        await waitForBoot(PORT_BASE + 5, 120_000, boot2);
+        await shutdown(boot2);
+
+        // Boot 3 — the LEFTOVER-ENV REBOOT: the EXACT SAME --apply-migration command against the NOW-
+        // migrated DB (as if the operator left --apply-migration in a systemd/docker `Restart=always`
+        // unit). Re-applying the non-idempotent `ADD COLUMN note` would raise duplicate_column (42701) and
+        // CRASH the boot (exit 1) — the pre-FIX-1 backend-path behavior. FIX-1 CLASSIFIES the live schema
+        // FIRST: it now present-matches v2, so the boot MOUNTS (zero migrations) and SERVES cleanly.
+        const boot3 = spawnDeploy(
+          ['v2.rayspec.yaml', '--apply-migration', '0001_add_note.sql'],
+          appDb,
+          PORT_BASE + 6,
+        );
+        await waitForBoot(PORT_BASE + 6, 120_000, boot3); // becomes ready ⇒ NO 42701 crash-loop
+
+        const check = postgres(appDb, { max: 1 });
+        try {
+          // The delta landed EXACTLY ONCE — the column exists and the seeded rows are intact. (A re-apply
+          // would have crashed before serving; a drop+recreate would have lost the rows.)
+          const cols = (await check.unsafe(
+            `SELECT column_name FROM information_schema.columns WHERE table_name = 'parts' AND column_name = 'note'`,
+          )) as unknown as { column_name: string }[];
+          expect(cols).toHaveLength(1);
+          const rows = (await check.unsafe(`SELECT count(*)::int AS n FROM parts`)) as unknown as {
+            n: number;
+          }[];
+          expect(rows[0]?.n).toBe(3);
+        } finally {
+          await check.end();
+        }
+        await shutdown(boot3);
+      },
+      300_000,
+    );
   },
 );
 
@@ -319,10 +386,11 @@ describe.skipIf(!baseUrl)(
  * ground-truth apply-migration proof). Local dev with no DB skips ergonomically.
  */
 describe('rayspec deploy --apply-migration — ran-guard (must not silently skip in CI)', () => {
-  it('BOTH apply-migration arms ACTUALLY RAN when the DB is required', () => {
+  it('ALL apply-migration arms ACTUALLY RAN when the DB is required', () => {
     if (dbRequired) {
       expect(additiveRan).toBe(1);
       expect(destructiveRan).toBe(1);
+      expect(rebootRan).toBe(1);
     } else {
       expect(dbRequired).toBe(false);
     }
