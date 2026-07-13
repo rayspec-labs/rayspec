@@ -853,8 +853,9 @@ Notes that matter:
   with an actionable error (`rayspec doctor` reports a missing/unreadable dir too).
 - Serving is fail-closed: path traversal (incl. URL-encoded forms), dotfiles/hidden paths, and symlinks
   that escape `dir` are refused; directories are never listed.
-- **Not in v1:** SSR, template rendering, an asset build/bundle pipeline, cache/CDN headers, HTTP Range
-  requests, and the product profile — `frontend` is backend-profile only.
+- **Not in v1:** SSR, template rendering, an asset build/bundle pipeline, cache/CDN headers, and the
+  product profile — `frontend` is backend-profile only. (Range and HEAD requests ARE honored by the
+  underlying static server.)
 
 See **`examples/notes-ui/rayspec.yaml`** for a runnable agent-free example (a `notes` store + CRUD API +
 a `frontend` mount serving a bundled `web/dist/index.html`).
