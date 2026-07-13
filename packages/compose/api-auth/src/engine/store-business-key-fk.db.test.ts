@@ -37,40 +37,40 @@ const describeDb = hasDb ? describe : describe.skip;
 
 const SCHEMA = 'rayspec_test_business_key_fk_routes';
 
-// meetings(slug unique) ← notes(restrict business-key FK) + tags(cascade business-key FK). Parents are
-// declared before children (build-product-tables invariant).
+// products(sku unique) ← orders(restrict business-key FK) + reviews(cascade business-key FK). Parents
+// are declared before children (build-product-tables invariant).
 const YAML = `
 version: '1.0'
 metadata:
-  name: meetings-backend
+  name: products-backend
   description: A backend proving business-key FK behaviour + tenant-safety through the declared routes.
 stores:
-  - name: meetings
+  - name: products
     columns:
-      - { name: slug, type: text, unique: true }
+      - { name: sku, type: text, unique: true }
       - { name: title, type: text, nullable: true }
-  - name: notes
+  - name: orders
     columns:
-      - { name: meeting_slug, type: text }
-      - { name: body, type: text, nullable: true }
+      - { name: product_sku, type: text }
+      - { name: detail, type: text, nullable: true }
     foreignKeys:
-      - { column: meeting_slug, references: meetings, referencesColumn: slug, onDelete: 'restrict' }
-  - name: tags
+      - { column: product_sku, references: products, referencesColumn: sku, onDelete: 'restrict' }
+  - name: reviews
     columns:
-      - { name: meeting_slug, type: text }
+      - { name: product_sku, type: text }
       - { name: label, type: text, nullable: true }
     foreignKeys:
-      - { column: meeting_slug, references: meetings, referencesColumn: slug, onDelete: 'cascade' }
+      - { column: product_sku, references: products, referencesColumn: sku, onDelete: 'cascade' }
 api:
-  - { method: POST, path: '/meetings', action: { kind: store, store: meetings, op: create } }
-  - { method: GET, path: '/meetings', action: { kind: store, store: meetings, op: list } }
-  - { method: PATCH, path: '/meetings/{id}', action: { kind: store, store: meetings, op: update } }
-  - { method: DELETE, path: '/meetings/{id}', action: { kind: store, store: meetings, op: delete } }
-  - { method: POST, path: '/notes', action: { kind: store, store: notes, op: create } }
-  - { method: PATCH, path: '/notes/{id}', action: { kind: store, store: notes, op: update } }
-  - { method: GET, path: '/notes', action: { kind: store, store: notes, op: list } }
-  - { method: POST, path: '/tags', action: { kind: store, store: tags, op: create } }
-  - { method: GET, path: '/tags', action: { kind: store, store: tags, op: list } }
+  - { method: POST, path: '/products', action: { kind: store, store: products, op: create } }
+  - { method: GET, path: '/products', action: { kind: store, store: products, op: list } }
+  - { method: PATCH, path: '/products/{id}', action: { kind: store, store: products, op: update } }
+  - { method: DELETE, path: '/products/{id}', action: { kind: store, store: products, op: delete } }
+  - { method: POST, path: '/orders', action: { kind: store, store: orders, op: create } }
+  - { method: PATCH, path: '/orders/{id}', action: { kind: store, store: orders, op: update } }
+  - { method: GET, path: '/orders', action: { kind: store, store: orders, op: list } }
+  - { method: POST, path: '/reviews', action: { kind: store, store: reviews, op: create } }
+  - { method: GET, path: '/reviews', action: { kind: store, store: reviews, op: list } }
 `;
 
 let testsRan = 0;
@@ -122,147 +122,147 @@ describeDb('business-key FK — behaviour + tenant-safety through the declared r
   it('a child referencing an EXISTING parent value creates (201); a NON-EXISTENT value is a 400 (not 500), tenant-safe', async () => {
     testsRan += 1;
     const a = await principal('fk-a@example.com', 'FkOrgA');
-    const SLUG = 'ACME-KICKOFF-2026'; // the distinctive value that must NEVER appear in the 400 body
+    const SKU = 'ACME-WIDGET-2026'; // the distinctive value that must NEVER appear in the 400 body
 
-    const meeting = await post(a.token, '/meetings', { slug: SLUG, title: 'Kickoff' });
-    expect(meeting.status).toBe(201);
+    const product = await post(a.token, '/products', { sku: SKU, title: 'Widget' });
+    expect(product.status).toBe(201);
 
-    // reference the EXISTING slug → 201.
-    const okNote = await post(a.token, '/notes', { meeting_slug: SLUG, body: 'agenda' });
-    expect(okNote.status).toBe(201);
+    // reference the EXISTING sku → 201.
+    const okOrder = await post(a.token, '/orders', { product_sku: SKU, detail: 'line-item' });
+    expect(okOrder.status).toBe(201);
 
-    // reference a NON-EXISTENT slug → 400 VALIDATION_ERROR (NOT a 500).
-    const badNote = await post(a.token, '/notes', { meeting_slug: 'DOES-NOT-EXIST', body: 'x' });
-    expect(badNote.status).toBe(400);
-    const body = await badNote.json();
+    // reference a NON-EXISTENT sku → 400 VALIDATION_ERROR (NOT a 500).
+    const badOrder = await post(a.token, '/orders', { product_sku: 'DOES-NOT-EXIST', detail: 'x' });
+    expect(badOrder.status).toBe(400);
+    const body = await badOrder.json();
     expect(body.error.code).toBe('VALIDATION_ERROR');
     // Tenant-safe: NAMES the local FK column …
-    expect(body.error.message).toContain('meeting_slug');
+    expect(body.error.message).toContain('product_sku');
     // … and NEVER echoes the (non-existent) value the client supplied, nor any parent value.
     expect(JSON.stringify(body)).not.toContain('DOES-NOT-EXIST');
-    expect(JSON.stringify(body)).not.toContain(SLUG);
+    expect(JSON.stringify(body)).not.toContain(SKU);
   });
 
   it("deleting a parent still referenced under onDelete:'restrict' is a 409 CONFLICT (not a 500), tenant-safe", async () => {
     testsRan += 1;
     const a = await principal('fk-restrict@example.com', 'FkRestrictOrg');
-    const created = await post(a.token, '/meetings', { slug: 'M-RESTRICT' });
+    const created = await post(a.token, '/products', { sku: 'P-RESTRICT' });
     expect(created.status).toBe(201);
-    const meetingId = (await created.json()).id as string;
+    const productId = (await created.json()).id as string;
 
-    // a note (restrict FK) references it …
-    expect((await post(a.token, '/notes', { meeting_slug: 'M-RESTRICT' })).status).toBe(201);
+    // an order (restrict FK) references it …
+    expect((await post(a.token, '/orders', { product_sku: 'P-RESTRICT' })).status).toBe(201);
 
-    // … so deleting the meeting is blocked → 409 CONFLICT (NOT a 500).
-    const blocked = await del(a.token, `/meetings/${meetingId}`);
+    // … so deleting the product is blocked → 409 CONFLICT (NOT a 500).
+    const blocked = await del(a.token, `/products/${productId}`);
     expect(blocked.status).toBe(409);
     const body = await blocked.json();
     expect(body.error.code).toBe('CONFLICT');
-    expect(JSON.stringify(body)).not.toContain('M-RESTRICT'); // no value leak
+    expect(JSON.stringify(body)).not.toContain('P-RESTRICT'); // no value leak
 
-    // the meeting still exists (the blocked delete was a no-op).
-    expect(await (await list(a.token, '/meetings')).json()).toHaveLength(1);
+    // the product still exists (the blocked delete was a no-op).
+    expect(await (await list(a.token, '/products')).json()).toHaveLength(1);
   });
 
   it('renaming a referenced unique key while a child still points at the OLD value is a 409 CONFLICT (not a 400), tenant-safe', async () => {
     testsRan += 1;
     const a = await principal('fk-rename@example.com', 'FkRenameOrg');
-    const OLD = 'M-OLD-SLUG';
-    const NEW = 'M-NEW-SLUG'; // a value NO other row holds → NOT a uniqueness conflict
-    const created = await post(a.token, '/meetings', { slug: OLD });
+    const OLD = 'P-OLD-SKU';
+    const NEW = 'P-NEW-SKU'; // a value NO other row holds → NOT a uniqueness conflict
+    const created = await post(a.token, '/products', { sku: OLD });
     expect(created.status).toBe(201);
-    const meetingId = (await created.json()).id as string;
+    const productId = (await created.json()).id as string;
 
-    // a child (restrict business-key FK) references the OLD slug …
-    expect((await post(a.token, '/notes', { meeting_slug: OLD })).status).toBe(201);
+    // a child (restrict business-key FK) references the OLD sku …
+    expect((await post(a.token, '/orders', { product_sku: OLD })).status).toBe(201);
 
     // … so PATCHing the parent's referenced unique key fires the CHILD's `ON UPDATE no action`
     // restrict → a "still referenced" CONFLICT (409), NOT the bad-input 400. This is NOT a
-    // uniqueness collision (NEW is free) and NOT this store's own FK (meetings declares none) — it is
+    // uniqueness collision (NEW is free) and NOT this store's own FK (products declares none) — it is
     // a child restrict on the referenced key, so it must be a 409.
-    const blocked = await patch(a.token, `/meetings/${meetingId}`, { slug: NEW });
+    const blocked = await patch(a.token, `/products/${productId}`, { sku: NEW });
     expect(blocked.status).toBe(409);
     const body = await blocked.json();
     expect(body.error.code).toBe('CONFLICT');
-    // Tenant-safe: names NO child table/column nor either slug value.
-    expect(JSON.stringify(body)).not.toContain('notes');
+    // Tenant-safe: names NO child table/column nor either sku value.
+    expect(JSON.stringify(body)).not.toContain('orders');
     expect(JSON.stringify(body)).not.toContain(OLD);
     expect(JSON.stringify(body)).not.toContain(NEW);
 
-    // the rename was a no-op — the meeting still holds the OLD slug (the blocked UPDATE rolled back).
-    const rows = (await (await list(a.token, '/meetings')).json()) as { slug: string }[];
+    // the rename was a no-op — the product still holds the OLD sku (the blocked UPDATE rolled back).
+    const rows = (await (await list(a.token, '/products')).json()) as { sku: string }[];
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.slug).toBe(OLD);
+    expect(rows[0]?.sku).toBe(OLD);
   });
 
   it("PATCHing a child that OWNS a business-key FK to a NON-EXISTENT parent value is a 400 (its OWN FK, bad input), tenant-safe — the discriminator's 400 branch", async () => {
     testsRan += 1;
     const a = await principal('fk-own-update@example.com', 'FkOwnUpdateOrg');
-    const SLUG = 'M-OWN-UPD';
-    const MISSING = 'NO-SUCH-MEETING'; // the value that must NEVER appear in the 400 body
-    const created = await post(a.token, '/meetings', { slug: SLUG });
+    const SKU = 'P-OWN-UPD';
+    const MISSING = 'NO-SUCH-SKU'; // the value that must NEVER appear in the 400 body
+    const created = await post(a.token, '/products', { sku: SKU });
     expect(created.status).toBe(201);
 
-    // a note references the EXISTING parent slug (its own business-key FK is satisfied) …
-    const note = await post(a.token, '/notes', { meeting_slug: SLUG, body: 'agenda' });
-    expect(note.status).toBe(201);
-    const noteId = (await note.json()).id as string;
+    // an order references the EXISTING parent sku (its own business-key FK is satisfied) …
+    const order = await post(a.token, '/orders', { product_sku: SKU, detail: 'line-item' });
+    expect(order.status).toBe(201);
+    const orderId = (await order.json()).id as string;
 
-    // … now PATCH the note's OWN business-key FK column to a NON-EXISTENT parent value. This fires
-    // THIS store's own 23503 (constraint `notes_meeting_slug_meetings_slug_fk`, which resolves in
+    // … now PATCH the order's OWN business-key FK column to a NON-EXISTENT parent value. This fires
+    // THIS store's own 23503 (constraint `orders_product_sku_products_sku_fk`, which resolves in
     // `store.foreignKeys`) → bad INPUT → 400 VALIDATION_ERROR, NOT the 409 "still referenced" (that is
     // the PARENT-side rename conflict on a child's ON UPDATE no action). This is the POSITIVE half of
     // the store-route 400-vs-409 update discriminator — it goes RED if the discriminator regresses to
     // an unconditional 409.
-    const bad = await patch(a.token, `/notes/${noteId}`, { meeting_slug: MISSING });
+    const bad = await patch(a.token, `/orders/${orderId}`, { product_sku: MISSING });
     expect(bad.status).toBe(400);
     const body = await bad.json();
     expect(body.error.code).toBe('VALIDATION_ERROR');
     // Tenant-safe: NAMES the local FK column …
-    expect(body.error.message).toContain('meeting_slug');
+    expect(body.error.message).toContain('product_sku');
     // … and NEVER echoes the (non-existent) value the client supplied, nor the real parent value.
     expect(JSON.stringify(body)).not.toContain(MISSING);
-    expect(JSON.stringify(body)).not.toContain(SLUG);
+    expect(JSON.stringify(body)).not.toContain(SKU);
   });
 
   it("deleting a parent whose only children are onDelete:'cascade' succeeds (204) and cascades the children", async () => {
     testsRan += 1;
     const a = await principal('fk-cascade@example.com', 'FkCascadeOrg');
-    const created = await post(a.token, '/meetings', { slug: 'M-CASCADE' });
+    const created = await post(a.token, '/products', { sku: 'P-CASCADE' });
     expect(created.status).toBe(201);
-    const meetingId = (await created.json()).id as string;
+    const productId = (await created.json()).id as string;
 
-    // a tag (cascade FK) references it (NO restrict note this time) …
-    expect((await post(a.token, '/tags', { meeting_slug: 'M-CASCADE', label: 't' })).status).toBe(
+    // a review (cascade FK) references it (NO restrict order this time) …
+    expect((await post(a.token, '/reviews', { product_sku: 'P-CASCADE', label: 't' })).status).toBe(
       201,
     );
-    expect(await (await list(a.token, '/tags')).json()).toHaveLength(1);
+    expect(await (await list(a.token, '/reviews')).json()).toHaveLength(1);
 
-    // … deleting the meeting succeeds → 204, and the tag is cascade-removed.
-    const gone = await del(a.token, `/meetings/${meetingId}`);
+    // … deleting the product succeeds → 204, and the review is cascade-removed.
+    const gone = await del(a.token, `/products/${productId}`);
     expect(gone.status).toBe(204);
-    expect(await (await list(a.token, '/meetings')).json()).toHaveLength(0);
-    expect(await (await list(a.token, '/tags')).json()).toHaveLength(0); // cascade fired
+    expect(await (await list(a.token, '/products')).json()).toHaveLength(0);
+    expect(await (await list(a.token, '/reviews')).json()).toHaveLength(0); // cascade fired
   });
 
   it("a child in tenant B CANNOT reference tenant A's parent value (the compound FK is tenant-scoped) → 400", async () => {
     testsRan += 1;
     const a = await principal('fk-ta@example.com', 'FkTenantA');
     const b = await principal('fk-tb@example.com', 'FkTenantB');
-    const SHARED = 'SHARED-SLUG';
+    const SHARED = 'SHARED-SKU';
 
-    // tenant A owns a meeting with the slug.
-    expect((await post(a.token, '/meetings', { slug: SHARED })).status).toBe(201);
+    // tenant A owns a product with the sku.
+    expect((await post(a.token, '/products', { sku: SHARED })).status).toBe(201);
 
-    // tenant B references the SAME slug value → but A's row is invisible to B (tenant-scoped compound
+    // tenant B references the SAME sku value → but A's row is invisible to B (tenant-scoped compound
     // FK), so the target is ABSENT for B → 400 (a cross-tenant reference is structurally impossible).
-    const bNote = await post(b.token, '/notes', { meeting_slug: SHARED });
-    expect(bNote.status).toBe(400);
-    expect((await bNote.json()).error.code).toBe('VALIDATION_ERROR');
+    const bOrder = await post(b.token, '/orders', { product_sku: SHARED });
+    expect(bOrder.status).toBe(400);
+    expect((await bOrder.json()).error.code).toBe('VALIDATION_ERROR');
 
-    // tenant B CAN reference its OWN meeting with that slug (two tenants may hold the same value).
-    expect((await post(b.token, '/meetings', { slug: SHARED })).status).toBe(201);
-    expect((await post(b.token, '/notes', { meeting_slug: SHARED })).status).toBe(201);
+    // tenant B CAN reference its OWN product with that sku (two tenants may hold the same value).
+    expect((await post(b.token, '/products', { sku: SHARED })).status).toBe(201);
+    expect((await post(b.token, '/orders', { product_sku: SHARED })).status).toBe(201);
   });
 });
 
