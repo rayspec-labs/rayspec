@@ -400,6 +400,117 @@ describe('buildDeclaredRoutesOpenApi — emitted document is STRUCTURALLY VALID'
     expect(params.some((p) => p.name === 'title' && p.in === 'query')).toBe(true);
   });
 
+  it('a column literally named `<x>__in` alongside `<x>` does NOT emit a duplicate query param (equality wins)', () => {
+    // Collision (a): a store with BOTH `foo` and `foo__in`. Pre-fix the emitter unconditionally pushed a
+    // `<col>__in` companion per column, so `foo`'s companion `foo__in` collided with `foo__in`'s OWN
+    // equality param → a DUPLICATE (name+in) query parameter → an invalid OpenAPI 3.1 document. The
+    // de-dup drops the colliding companion; the EXACT-NAMED equality param wins, mirroring the runtime
+    // Precedence-1 (store-query.ts routes `?foo__in=` to the real `foo__in` column as plain equality).
+    const doc = buildDeclaredRoutesOpenApi(
+      specFromObject({
+        version: '1.0',
+        metadata: { name: 'in-collision-backend' },
+        stores: [
+          {
+            name: 'widgets',
+            columns: [
+              { name: 'foo', type: 'text' },
+              { name: 'foo__in', type: 'text' }, // literally named `<x>__in` — legal (runtime Precedence-1)
+            ],
+          },
+        ],
+        api: [
+          {
+            method: 'GET',
+            path: '/widgets',
+            action: { kind: 'store', store: 'widgets', op: 'list' },
+          },
+        ],
+      }),
+    );
+    const params = doc.paths['/widgets'].get.parameters ?? [];
+    // The whole document is structurally valid — NO duplicate parameter anywhere (fail-the-fix).
+    expect(structuralOpenApiProblems(doc)).toEqual([]);
+    // EXACTLY ONE `foo__in` query param — and it is the EQUALITY filter (the exact-named column wins),
+    // NOT `foo`'s IN-companion (which was dropped).
+    const fooIn = params.filter((p) => p.name === 'foo__in' && p.in === 'query');
+    expect(fooIn).toHaveLength(1);
+    expect(fooIn[0].description).toMatch(/Equality filter/);
+    // `foo` still has its own equality filter, AND the `foo__in` column still gets its own set filter
+    // (`foo__in__in`) — the de-dup drops ONLY the one colliding companion, nothing else.
+    expect(params.some((p) => p.name === 'foo' && p.in === 'query')).toBe(true);
+    expect(params.some((p) => p.name === 'foo__in__in' && p.in === 'query')).toBe(true);
+  });
+
+  it('a business column named `created_by__in` does NOT collide with the injected created_by IN-companion', () => {
+    // Collision (b): a business column named `created_by__in` clashes with the injected `created_by`'s
+    // auto-emitted `created_by__in` companion. The de-dup keeps the exact-named business equality param
+    // and drops the injected companion — mirroring the runtime (a real `created_by__in` column is plain
+    // equality). Pre-fix: two `created_by__in` params → invalid OpenAPI 3.1.
+    const doc = buildDeclaredRoutesOpenApi(
+      specFromObject({
+        version: '1.0',
+        metadata: { name: 'created-by-in-backend' },
+        stores: [
+          {
+            name: 'widgets',
+            columns: [{ name: 'created_by__in', type: 'text' }],
+          },
+        ],
+        api: [
+          {
+            method: 'GET',
+            path: '/widgets',
+            action: { kind: 'store', store: 'widgets', op: 'list' },
+          },
+        ],
+      }),
+    );
+    const params = doc.paths['/widgets'].get.parameters ?? [];
+    expect(structuralOpenApiProblems(doc)).toEqual([]);
+    const cbIn = params.filter((p) => p.name === 'created_by__in' && p.in === 'query');
+    expect(cbIn).toHaveLength(1);
+    expect(cbIn[0].description).toMatch(/Equality filter/);
+    // The injected created_by equality filter is still present.
+    expect(params.some((p) => p.name === 'created_by' && p.in === 'query')).toBe(true);
+  });
+
+  it('the de-dup is SURGICAL — a lone `tag__in` and a normal `x` column are UNCHANGED', () => {
+    // No spurious change: a lone `<x>__in` column (no `<x>` sibling → no collision) keeps its single
+    // equality param + its own `<x>__in__in` set filter; a normal column emits BOTH its equality param
+    // and its `<col>__in` companion — exactly as before the de-dup.
+    const doc = buildDeclaredRoutesOpenApi(
+      specFromObject({
+        version: '1.0',
+        metadata: { name: 'surgical-backend' },
+        stores: [
+          {
+            name: 'widgets',
+            columns: [
+              { name: 'tag__in', type: 'text' }, // lone `<x>__in`, no `tag` sibling
+              { name: 'x', type: 'text' }, // a normal column
+            ],
+          },
+        ],
+        api: [
+          {
+            method: 'GET',
+            path: '/widgets',
+            action: { kind: 'store', store: 'widgets', op: 'list' },
+          },
+        ],
+      }),
+    );
+    const params = doc.paths['/widgets'].get.parameters ?? [];
+    expect(structuralOpenApiProblems(doc)).toEqual([]);
+    // Lone `tag__in`: its single equality param + its own set filter `tag__in__in`.
+    expect(params.filter((p) => p.name === 'tag__in' && p.in === 'query')).toHaveLength(1);
+    expect(params.some((p) => p.name === 'tag__in__in' && p.in === 'query')).toBe(true);
+    // Normal `x`: BOTH the equality param AND the `x__in` companion (unchanged behaviour).
+    expect(params.some((p) => p.name === 'x' && p.in === 'query')).toBe(true);
+    expect(params.some((p) => p.name === 'x__in' && p.in === 'query')).toBe(true);
+  });
+
   it('the emit-side control keys agree with the linter keyword set (anti-drift parity)', () => {
     // The emitter skips `CONTROL_KEYS`; the linter rejects `RESERVED_QUERY_KEYWORDS`. They MUST name the
     // same set, or a keyword rejected by one boundary could still slip a duplicate param through the other.

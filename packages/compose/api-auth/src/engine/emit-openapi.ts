@@ -367,6 +367,10 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
       schema: { type: 'integer', minimum: 1, maximum: LIST_MAX_LIMIT },
     },
   ];
+  // The equality-filter surface: one param per declared non-jsonb business column (a control-key-named
+  // column is skipped — defense-in-depth), PLUS the injected `created_by`. Collected FIRST, with their
+  // names, so the `<col>__in` set-filter companions below can be DE-DUPLICATED against them.
+  const equalityNames = new Set<string>();
   for (const col of store.columns) {
     if (col.type === 'jsonb') continue; // jsonb is not filterable — omit rather than over-claim
     // Defense-in-depth: a column named after a control key (order/after/limit) is already
@@ -374,6 +378,7 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
     // code-built spec that bypassed the parser can never emit a DUPLICATE query parameter (control param
     // + filter param sharing name+in) → keeping the emitted document a VALID OpenAPI 3.1 doc.
     if (CONTROL_KEYS.has(col.name)) continue;
+    equalityNames.add(col.name);
     params.push({
       name: col.name,
       in: 'query',
@@ -381,9 +386,9 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
       description: `Equality filter on '${col.name}'.`,
       schema: filterParamSchema(col.type),
     });
-    // The `<col>__in` set-filter companion (same filterable columns as equality).
-    params.push(inFilterParam(col.name));
   }
+  // The injected created_by equality filter (always present on a list op).
+  equalityNames.add('created_by');
   params.push({
     name: 'created_by',
     in: 'query',
@@ -391,7 +396,17 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
     description: 'Equality filter on the injected created_by actor stamp.',
     schema: { type: 'string' },
   });
-  params.push(inFilterParam('created_by'));
+  // The `<col>__in` SET-filter companions — one per equality column, EXCEPT when the companion name is
+  // ITSELF a declared equality param. That collision arises when a column is literally named `<x>__in`
+  // (its own equality param clashes with `<x>`'s IN-companion) or a business column is named
+  // `created_by__in` (clashing with the injected `created_by`'s companion). In every such case the
+  // exact-named EQUALITY param wins — mirroring the runtime Precedence-1 (store-query.ts), which routes
+  // `?<col>__in=` to a real `<col>__in` column as plain equality — so the companion is DROPPED and the
+  // emitted document never carries a duplicate (name+in) parameter (a valid OpenAPI 3.1 doc).
+  for (const name of equalityNames) {
+    if (equalityNames.has(`${name}__in`)) continue;
+    params.push(inFilterParam(name));
+  }
   return params;
 }
 
