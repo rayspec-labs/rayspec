@@ -8,7 +8,7 @@
  *  - no secret substrings ever appear in the output (defence-in-depth — doctor takes no secrets, but
  *    the no-leak invariant is asserted so a future change cannot quietly start echoing env).
  */
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -234,6 +234,31 @@ describe('doctor — frontend static mounts (filesystem dir check)', () => {
     expect(f).toBeDefined();
     expect(f?.path).toBe('frontend[0].dir');
   });
+
+  // A dir that stat()s as a directory but is NOT readable/traversable (mode 0000) must fail closed the
+  // same as missing. Skipped as root: root bypasses POSIX permission bits, so a mode-0000 dir stays
+  // readable and the failure could not be observed (would spuriously fail / flake).
+  it.skipIf(process.getuid?.() === 0)(
+    'flags an unreadable (mode 0000) frontend.dir with code frontend_dir_missing',
+    async () => {
+      const unreadable = join(dir, 'unreadable-web');
+      mkdirSync(unreadable, { recursive: true });
+      writeFileSync(
+        join(dir, 'fe-unreadable.yaml'),
+        "version: '1.0'\nmetadata: { name: fe }\nfrontend:\n  - { route: /, dir: unreadable-web }\n",
+        'utf8',
+      );
+      chmodSync(unreadable, 0o000);
+      try {
+        const r = await runDoctor(['fe-unreadable.yaml']);
+        expect(r.ok).toBe(false);
+        expect(r.errors.map((e) => e.code)).toContain('frontend_dir_missing');
+      } finally {
+        // Restore mode so afterAll's recursive rm can traverse + remove the dir.
+        chmodSync(unreadable, 0o755);
+      }
+    },
+  );
 
   it('flags a colliding frontend route with code frontend_route_collision (reserved prefix)', async () => {
     writeFileSync(

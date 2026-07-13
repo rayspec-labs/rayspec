@@ -8,6 +8,12 @@
  * a static mount (Hono runs matching handlers in registration order; a returning handler terminates,
  * and a static miss falls through to the platform's uniform 404).
  *
+ * RESERVED NAMESPACES — even a `route: '/'` `spa:true` catch-all NEVER answers a path under a
+ * platform-reserved prefix (`/v1`, `/health`, `/oidc` — the SAME set lint.ts's frontend rule guards,
+ * imported here so the two cannot drift). Such a request is declined UP FRONT, so a registered platform
+ * route wins and an UNregistered one reaches the platform's uniform JSON 404 — never a served file or
+ * the SPA shell. Siblings (`/healthz`, `/oidc-typo`) and ordinary app deep links are unaffected.
+ *
  * SCOPE — LOCAL / single-node / NOT internet-facing (mirrors the composition root). The real byte
  * serving is delegated to `@hono/node-server`'s `serveStatic` (conservative content-types, Range/HEAD).
  * `serveStatic` rejects `..`/`\`/`//` in the request path but does NOT block dotfiles or a symlink that
@@ -27,7 +33,7 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { serveStatic } from '@hono/node-server/serve-static';
-import type { FrontendSpec } from '@rayspec/spec';
+import { type FrontendSpec, RESERVED_ROUTE_PREFIXES } from '@rayspec/spec';
 import type { Env, Hono, MiddlewareHandler, Next } from 'hono';
 
 /** Decode a request path ONCE, tolerant of a malformed escape (fall back to the raw string). */
@@ -37,6 +43,17 @@ function decodeOnce(pathname: string): string {
   } catch {
     return pathname;
   }
+}
+
+/**
+ * Is `path` (the FULL decoded request path) under a platform-reserved namespace (`/v1`, `/health`,
+ * `/oidc`)? Such a path must NEVER be answered by a static mount — decline it so a registered platform
+ * route wins and an unregistered one gets the uniform 404 (never a file / SPA shell). Uses the SAME set
+ * as lint.ts's frontend rule (imported from @rayspec/spec) so the runtime and the lint cannot drift.
+ * Matches a prefix exactly or as a path segment (`/v1`, `/v1/x`), NOT a sibling (`/healthz`).
+ */
+function isReservedRoutePath(path: string): boolean {
+  return RESERVED_ROUTE_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
 }
 
 /**
@@ -124,6 +141,10 @@ export function mountFrontend<E extends Env>(
 
     const handler: MiddlewareHandler<E> = async (c, next) => {
       const decoded = decodeOnce(c.req.path);
+      // Platform-reserved namespaces (/v1, /health, /oidc) are NEVER served statically — decline BEFORE
+      // the file/SPA server so a registered platform route wins and an unregistered one reaches the
+      // uniform 404 (a `/` spa:true catch-all must not answer `/v1/does-not-exist` with the SPA shell).
+      if (isReservedRoutePath(decoded)) return next();
       const subPath = route === '/' ? decoded : decoded.slice(route.length);
       // Fail-closed guard BEFORE serving — a refused path skips the file/SPA server entirely and
       // falls through to the platform's uniform 404 (never the SPA shell).

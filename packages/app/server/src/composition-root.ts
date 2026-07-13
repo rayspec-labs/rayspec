@@ -27,7 +27,7 @@
  * auth-only boot (no spec) is the default.
  */
 
-import { readFileSync, statSync } from 'node:fs';
+import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { AgentRuntimeRegistry } from '@rayspec/agent-runtime';
 import {
@@ -1187,6 +1187,10 @@ async function deployDeclaredSpec(
     let isDir = false;
     try {
       isDir = statSync(resolvedDir).isDirectory();
+      // isDirectory() alone does NOT test read/traverse permission — a mode-0000 dir passes stat but
+      // then every asset EACCES-misses. Require R_OK|X_OK too so an unreadable/untraversable dir is
+      // treated the same as missing (fails closed with the message below).
+      if (isDir) accessSync(resolvedDir, constants.R_OK | constants.X_OK);
     } catch {
       isDir = false;
     }

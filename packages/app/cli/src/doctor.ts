@@ -22,7 +22,7 @@
  * `frontend[]` mount has each mount's `dir` checked to resolve to a readable directory of built assets
  * (parse/lint see only the YAML; the filesystem is doctor's to check) → `frontend_dir_missing` on a miss.
  */
-import { statSync } from 'node:fs';
+import { accessSync, constants, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { parseAnySpec, type SpecError, specError } from '@rayspec/spec';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
@@ -66,6 +66,10 @@ export async function runDoctor(positionals: readonly string[]): Promise<DoctorR
       let isDir = false;
       try {
         isDir = statSync(resolvedDir).isDirectory();
+        // isDirectory() alone does NOT test read/traverse permission — a mode-0000 dir passes stat but
+        // then every asset EACCES-misses. Require R_OK|X_OK too so an unreadable/untraversable dir is
+        // treated the same as missing (fails closed as frontend_dir_missing, mirroring the boot guard).
+        if (isDir) accessSync(resolvedDir, constants.R_OK | constants.X_OK);
       } catch {
         isDir = false;
       }

@@ -7,9 +7,13 @@
  *   - REFUSES path traversal (`/../.env`, `/..%2f.env`, deep `..`), dotfiles (`/.env`), and a symlink
  *     that escapes the served directory — each returns 404 and NEVER the secret bytes or the SPA shell;
  *   - API precedence: a route registered BEFORE the `/` catch-all still returns its JSON.
+ *   - RESERVED NAMESPACES: a `/` spa:true catch-all NEVER answers `/v1/*`, `/health/*`, `/oidc/*` — an
+ *     unregistered reserved path falls through to the 404 (not the SPA shell), a registered one still
+ *     wins, and an ordinary app deep link (`/dashboard`) still gets the SPA shell.
  *
  * Fail-the-fix: remove the guard in serve-static.ts and the traversal/dotfile/symlink arms serve the
- * secret file (200) instead of 404 — the `.not.toContain(SECRET)` + status assertions go red.
+ * secret file (200) instead of 404 — the `.not.toContain(SECRET)` + status assertions go red. Remove the
+ * reserved-prefix decline and `/v1/nonexistent` serves the SPA shell (200) — its `.not.toContain` goes red.
  */
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -136,6 +140,43 @@ describe('mountFrontend — API precedence', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toMatch(/application\/json/);
     expect(await res.json()).toEqual({ pong: true });
+  });
+});
+
+describe('mountFrontend — reserved platform namespaces are never served statically', () => {
+  // A `/` spa:true catch-all registered AFTER a couple of mock platform routes (mirrors the real order:
+  // API/auth routes register first, the frontend mount last). The catch-all must decline reserved-prefix
+  // paths so a platform route wins / the uniform 404 shows — never the SPA shell.
+  function buildReservedApp(): Hono {
+    const app = new Hono();
+    app.get('/v1/registered', (c) => c.json({ registered: true }));
+    app.get('/health', (c) => c.json({ status: 'ok' }));
+    mountFrontend(app, [spaMount], specDir());
+    return app;
+  }
+
+  it('a REGISTERED /v1 route still returns its real response (not the SPA shell)', async () => {
+    const res = await buildReservedApp().request('/v1/registered');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ registered: true });
+  });
+
+  it('GET /v1/nonexistent → the platform fall-through 404, NEVER the SPA shell', async () => {
+    const res = await buildReservedApp().request('/v1/nonexistent');
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain(INDEX_SENTINEL);
+  });
+
+  it('GET /health/whatever (unmatched under /health) → not the SPA shell', async () => {
+    const res = await buildReservedApp().request('/health/whatever');
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain(INDEX_SENTINEL);
+  });
+
+  it('a normal app deep link (/dashboard) STILL returns the SPA shell (200) — only reserved namespaces are declined', async () => {
+    const res = await buildReservedApp().request('/dashboard');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain(INDEX_SENTINEL);
   });
 });
 

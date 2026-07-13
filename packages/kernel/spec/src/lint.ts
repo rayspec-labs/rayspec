@@ -84,6 +84,15 @@ export const RESERVED_COLUMN_NAMES: ReadonlySet<string> = new Set([
 export const RESERVED_QUERY_KEYWORDS: ReadonlySet<string> = new Set(['order', 'after', 'limit']);
 
 /**
+ * Route prefixes the PLATFORM owns — a declared static frontend mount may neither claim one nor nest
+ * under one (the frontend lint rule below), and the static runtime declines any request under one so a
+ * platform miss falls through to the uniform JSON 404 rather than a served file / SPA shell
+ * (serve-static.ts consumes this SAME constant so the two never drift). Root `/` is NOT here: it is a
+ * legitimate static catch-all that coexists with `/v1/*` via registration order + fall-through.
+ */
+export const RESERVED_ROUTE_PREFIXES = ['/v1', '/health', '/oidc'] as const;
+
+/**
  * Find duplicate keys in a list, reporting each duplicate occurrence (by index) as a SpecError.
  * `keyOf` extracts the dedup key; `pathOf` builds the JSON path for a violating index.
  */
@@ -398,7 +407,6 @@ export function lintSpec(spec: RaySpec): SpecError[] {
   // the other), or (c) a reserved system prefix (`/v1`, `/health`, `/oidc` — platform-owned). Root `/`
   // is EXEMPT: it never equals an api path nor nests under a reserved prefix, and a static-last `/` mount
   // legitimately coexists with `/v1/*` (registration order + a static miss fall-through).
-  const RESERVED_FRONTEND_PREFIXES = ['/v1', '/health', '/oidc'];
   const apiRoutePaths = new Set(spec.api.map((r) => r.path));
   const seenFrontendRoutes = new Set<string>();
   (spec.frontend ?? []).forEach((mount, fi) => {
@@ -427,11 +435,11 @@ export function lintSpec(spec: RaySpec): SpecError[] {
       );
     }
     // (c) EQUALS or NESTS UNDER a reserved system prefix (root `/` is exempt — it matches neither).
-    if (RESERVED_FRONTEND_PREFIXES.some((p) => route === p || route.startsWith(`${p}/`))) {
+    if (RESERVED_ROUTE_PREFIXES.some((p) => route === p || route.startsWith(`${p}/`))) {
       errors.push(
         specError(
           'frontend_route_collision',
-          `frontend route '${route}' is reserved for the platform (${RESERVED_FRONTEND_PREFIXES.join(
+          `frontend route '${route}' is reserved for the platform (${RESERVED_ROUTE_PREFIXES.join(
             ', ',
           )}); choose a different route`,
           `frontend[${fi}].route`,
