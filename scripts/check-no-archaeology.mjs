@@ -201,6 +201,10 @@ const KEEP_PRODUCT_CHECKER_FILES = new Set([
   'scripts/check-handler-imports.mjs',
   'scripts/check-extension-capability.mjs',
 ]);
+// (KEEP-1d) The skill-drift checker legitimately NAMES the authoring skill it guards (it reads that
+// skill file to assert it stays in sync with the grammar / CLI / example specs). Token-SCOPED to the
+// authoring-skill token for that ONE file — any OTHER archaeology token there still FAILS.
+const KEEP_SKILL_DRIFT_FILE = 'scripts/check-skill-drift.mjs';
 // (KEEP-2) Neutrality-denylist TEST arrays — assert product words are ABSENT; they must name them.
 // Token-scoped to product-* so a NON-product archaeology label in one of these tests still FAILS.
 const NEUTRALITY_TEST_RE =
@@ -263,6 +267,8 @@ function classify(rel, line, token, re) {
     (token.startsWith('product-') || token.startsWith('build-'))
   )
     return 'keep';
+  // The skill-drift checker names the authoring skill it guards — scoped to that token, that file only.
+  if (rel === KEEP_SKILL_DRIFT_FILE && token === 'authoring-skill') return 'keep';
   if (NEUTRALITY_TEST_RE.test(rel) && token.startsWith('product-')) return 'keep';
   // The migration-ALGORITHM's own phase labels (Phase A/B/C/D = added/renamed-additive/renamed-
   // destructive/dropped) — scoped to the SPACE form A–D. A future `Phase E`/`Phase-E` there FAILS.

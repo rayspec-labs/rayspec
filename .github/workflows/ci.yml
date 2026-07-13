@@ -160,6 +160,12 @@ jobs:
       - name: Anti-re-accretion (no-archaeology) gate
         run: pnpm gate:no-archaeology
 
+      # The skill-drift gate: the authoring skill must stay in sync with the grammar version, the CLI
+      # entrypoint path, and the example specs it cites (a stale skill silently teaches a dead interface).
+      # Runs after Build so the cited CLI dist entrypoint resolves.
+      - name: Skill-drift gate
+        run: pnpm gate:skill-drift
+
       # The third-party inventory backing THIRD-PARTY-NOTICES.md must describe the lockfile that
       # actually ships. Hashes pnpm-lock.yaml and compares it to the hash the SBOM recorded, so a pin
       # that moves without a regenerated SBOM fails here instead of silently invalidating a legal
