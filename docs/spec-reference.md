@@ -76,6 +76,7 @@ valid spec is just a version and a name.
 | `handlers`   | Escape-hatch TypeScript modules for custom logic.             |
 | `extensions` | Versioned extension packs to merge in.                        |
 | `deployment` | Deployment properties (e.g. whether a durable worker runs).   |
+| `frontend`   | Static frontend directories to serve alongside the API.       |
 
 ## `metadata`
 
@@ -431,6 +432,41 @@ deployment:
 - `durableWorker` — optional boolean. When `true`, the deployment runs a durable
   off-request worker, so an asynchronous run is enqueued rather than refused, and
   scheduled triggers fire on it.
+
+## `frontend`
+
+Optional static frontend mounts (a list — default: none). Each entry serves a
+directory of built assets alongside the API, so one document can ship a whole
+product, UI included.
+
+```yaml
+frontend:
+  - route: /            # URL prefix the mount is served under; must start with `/`
+    dir: web/dist       # directory of built assets, relative to this spec file
+    spa: true           # optional (default false): unmatched paths fall back to index.html
+```
+
+- `route` — the URL prefix (e.g. `/` or `/app`). Must start with `/`. It must not
+  duplicate another mount, equal a declared `api` route path, or target a reserved
+  platform prefix (`/v1`, `/health`, `/oidc`) — the linter rejects a collision.
+- `dir` — the directory of built static assets, resolved relative to the spec file.
+  It must exist and be a readable directory at boot, or the deploy fails closed with an
+  actionable error (`doctor` reports a missing/unreadable directory too).
+- `spa` — optional boolean (default `false`). When `true`, an unmatched path under
+  the mount returns `index.html` (History-API single-page-app routing); when
+  `false`, an unmatched path is a `404`.
+
+**Precedence and safety.** Static mounts are the last thing served: every API route,
+`/health`, `/v1/*`, and `/oidc/*` always wins over a static mount (a path under a
+reserved platform prefix is never answered by a static mount), and a static miss
+returns the platform's uniform `404`. Serving is fail-closed — path traversal
+(including URL-encoded forms), dotfiles/hidden paths, and symlinks that escape the
+directory are refused; directories are never listed. Range and HEAD requests are
+honored by the underlying static server.
+
+**Not in v1** (deliberately out of scope): server-side rendering, template rendering,
+an asset build/bundling pipeline, cache-control/CDN headers, and the product profile —
+`frontend` is backend-profile only.
 
 ---
 

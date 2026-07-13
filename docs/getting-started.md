@@ -405,6 +405,34 @@ For the security boundaries that apply before you expose any of this beyond a
 trusted local machine, read
 [ARCHITECTURE → Security model](./ARCHITECTURE.md#security-model).
 
+### Serving a static frontend (SPA)
+
+A backend-profile document can also serve its own built web UI next to the API — add
+a `frontend` mount pointing at a directory of built assets (relative to the spec
+file):
+
+```yaml
+frontend:
+  - route: /
+    dir: web/dist
+    spa: true
+```
+
+The same server that answers your API now also serves the UI. Static mounts are the
+last fallback, so platform and API routes always win:
+
+```bash
+curl -s http://localhost:8080/            # → index.html (200)
+curl -s http://localhost:8080/dashboard   # → index.html (200 — the SPA fallback)
+curl -s http://localhost:8080/health      # → the health JSON, never the UI shell
+```
+
+`/health`, `/v1/*`, and `/oidc/*` are never answered by a static mount, and a declared
+`api` route returns its own response (not the SPA shell). See the
+[`frontend`](./spec-reference.md#frontend) reference for the fields, the collision
+rules, and what static serving does **not** do in v1. A ready-to-run example lives in
+[`examples/notes-ui/`](../examples/notes-ui/).
+
 ---
 
 ## Where to go next
