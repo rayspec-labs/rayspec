@@ -10,6 +10,11 @@ build/
 out/
 *.tsbuildinfo
 
+# Exception: the notes-ui example ships a hand-written `web/dist` as a COMMITTED static fixture (the
+# frontend-serving example serves + tests it). It is an example asset, not build output — re-include it.
+!examples/notes-ui/web/dist/
+!examples/notes-ui/web/dist/**
+
 # Caches
 .turbo/
 .cache/

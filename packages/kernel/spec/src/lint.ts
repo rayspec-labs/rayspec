@@ -392,6 +392,54 @@ export function lintSpec(spec: RaySpec): SpecError[] {
     }
   });
 
+  // ---- frontend[] static mounts — route COLLISIONS (fail-closed) -------------------------------
+  // A declared static frontend mount is served alongside the API (composition-root / serve-static.ts).
+  // Its `route` must not collide with (a) another mount, (b) a declared `api[].path` (one would shadow
+  // the other), or (c) a reserved system prefix (`/v1`, `/health`, `/oidc` — platform-owned). Root `/`
+  // is EXEMPT: it never equals an api path nor nests under a reserved prefix, and a static-last `/` mount
+  // legitimately coexists with `/v1/*` (registration order + a static miss fall-through).
+  const RESERVED_FRONTEND_PREFIXES = ['/v1', '/health', '/oidc'];
+  const apiRoutePaths = new Set(spec.api.map((r) => r.path));
+  const seenFrontendRoutes = new Set<string>();
+  (spec.frontend ?? []).forEach((mount, fi) => {
+    const route = mount.route;
+    // (a) DUPLICATE mount route.
+    if (seenFrontendRoutes.has(route)) {
+      errors.push(
+        specError(
+          'frontend_route_collision',
+          `duplicate frontend route '${route}' (each frontend mount route must be unique)`,
+          `frontend[${fi}].route`,
+        ),
+      );
+    } else {
+      seenFrontendRoutes.add(route);
+    }
+    // (b) EXACTLY equals a declared api route path — a static mount and an api route cannot share a path.
+    if (apiRoutePaths.has(route)) {
+      errors.push(
+        specError(
+          'frontend_route_collision',
+          `frontend route '${route}' collides with a declared api route path — a static mount and an ` +
+            'api route cannot share a path; choose a different frontend route',
+          `frontend[${fi}].route`,
+        ),
+      );
+    }
+    // (c) EQUALS or NESTS UNDER a reserved system prefix (root `/` is exempt — it matches neither).
+    if (RESERVED_FRONTEND_PREFIXES.some((p) => route === p || route.startsWith(`${p}/`))) {
+      errors.push(
+        specError(
+          'frontend_route_collision',
+          `frontend route '${route}' is reserved for the platform (${RESERVED_FRONTEND_PREFIXES.join(
+            ', ',
+          )}); choose a different route`,
+          `frontend[${fi}].route`,
+        ),
+      );
+    }
+  });
+
   // ---- extensions[] DUPLICATE ids (cross-ref/merge resolution lands in S4) ----------------
   // The `loadExtensions` merge (S4) keys packs by `id`; two refs sharing an id would silently
   // collide (one pack lost). Reject at config time — symmetric with the other section dup checks.

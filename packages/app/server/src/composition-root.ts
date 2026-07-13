@@ -27,7 +27,7 @@
  * auth-only boot (no spec) is the default.
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { AgentRuntimeRegistry } from '@rayspec/agent-runtime';
 import {
@@ -99,6 +99,7 @@ import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { exportJWK, importPKCS8 } from 'jose';
 import { stringify as stringifyYaml } from 'yaml';
 import { deployProductYamlSpec } from './product-boot.js';
+import { mountFrontend } from './serve-static.js';
 
 /** The default local port (overridable via PORT). Local DX only — not a reserved well-known port. */
 export const DEFAULT_PORT = 8080;
@@ -733,9 +734,10 @@ export async function assembleServer(
   // `rayspec.yaml` runs the GitOps deploy() pipeline (6b); no spec ⇒ auth-only. `parseAnySpec`/
   // `detectSpecKind` key on the `product:` discriminant, and each per-profile deploy path re-parses +
   // fail-closed-validates the doc itself (deployProductYamlSpec / deployDeclaredSpec).
-  const specDispatchKind = config.specPath
-    ? parseAnySpec(readFileSync(config.specPath, 'utf8')).kind
+  const specParse = config.specPath
+    ? parseAnySpec(readFileSync(config.specPath, 'utf8'))
     : undefined;
+  const specDispatchKind = specParse?.kind;
 
   if (config.specPath && specDispatchKind === 'product') {
     // 6a. A Product-YAML document composes the product deploy END-TO-END
@@ -797,6 +799,18 @@ export async function assembleServer(
       return c.json({ status: 'degraded', db: 'unreachable' }, 503);
     }
   });
+
+  // 8. Mount the deployed spec's declared static frontend(s) — registered LAST (after every
+  //    API/auth/OIDC route + /health) so a static miss never shadows an API path: Hono runs matching
+  //    handlers in registration order, a returning handler terminates, and a static miss falls through
+  //    to the uniform 404. Only a backend-profile (`rayspec`) doc carries `frontend`; a product-profile
+  //    doc has none. `deployDeclaredSpec` already fail-closed on a missing/unreadable dir (below), so the
+  //    dirs are readable here. The spec value is the SAME `frontend` a pack merge leaves untouched.
+  const frontend =
+    specParse?.ok && specParse.kind === 'rayspec' ? specParse.spec.frontend : undefined;
+  if (config.specPath && frontend && frontend.length > 0) {
+    mountFrontend(app, frontend, dirname(config.specPath));
+  }
 
   return {
     app,
@@ -1159,6 +1173,28 @@ async function deployDeclaredSpec(
     } catch (err) {
       throw new BootConfigError(
         `Boot aborted — RAYSPEC_MEDIA_SIGNING_KEY is invalid: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  // ── The static FRONTEND deploy guard (fail-closed on a missing/unreadable assets dir) ──
+  // A declared frontend mount serves built static assets from `dir` (relative to the spec file). FAIL
+  // CLOSED at deploy if the directory is missing / not a directory / unreadable — the mount would
+  // otherwise serve nothing (every asset 404s) with no actionable signal. Mirrors the stream/playback
+  // guards above; the actual mounting runs in assembleServer AFTER deployDeclaredSpec returns.
+  for (const mount of effectiveSpec.frontend ?? []) {
+    const resolvedDir = resolve(dirname(specPath), mount.dir);
+    let isDir = false;
+    try {
+      isDir = statSync(resolvedDir).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (!isDir) {
+      throw new BootConfigError(
+        `Boot aborted — the deployed spec at ${specPath} declares a frontend at route '${mount.route}' ` +
+          `but its static directory '${mount.dir}' (resolved to ${resolvedDir}) is missing or unreadable. ` +
+          'Point frontend.dir at a readable directory of built assets. Fail-closed.',
       );
     }
   }

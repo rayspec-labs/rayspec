@@ -1,0 +1,36 @@
+# Notes UI — a backend-profile example that also serves a static web frontend.
+#
+# A small, real backend-profile document that pairs a CRUD API with a bundled single-page web UI. It
+# declares a `notes` store, three declarative store routes under `/api/notes`, and a `frontend[]` mount
+# that serves the built assets in `web/dist` at `/` (SPA fallback on). The API routes and `/health` are
+# registered first, so they always win over the static mount; any other path under `/` returns the SPA
+# shell. Zero product meaning enters the platform — this is a neutral serving showcase.
+
+version: '1.0'
+
+metadata:
+  name: notes-ui
+  description: A notes backend with a CRUD API and a bundled static web frontend served alongside it.
+
+# --- stores -----------------------------------------------------------------------------------
+# Authors declare BUSINESS columns only. The generator injects the tenancy/GDPR columns
+# (tenant_id, id, created_at, deleted_at, retention_days, region) — they are NOT declared here.
+stores:
+  - name: notes
+    columns:
+      - { name: title, type: text }
+      - { name: body, type: text, nullable: true }
+
+# --- api --------------------------------------------------------------------------------------
+# CRUD over notes (declarative store actions — no handler code). Mounted at raw paths under
+# `/api/notes`, ahead of the `/` static mount, so an API call is never answered by the SPA shell.
+api:
+  - { method: GET, path: '/api/notes', action: { kind: store, store: notes, op: list } }
+  - { method: POST, path: '/api/notes', action: { kind: store, store: notes, op: create } }
+  - { method: GET, path: '/api/notes/{id}', action: { kind: store, store: notes, op: get } }
+
+# --- frontend ---------------------------------------------------------------------------------
+# Serve the built static assets in web/dist at `/`. `spa: true` makes an unmatched deep link fall
+# back to index.html (History-API single-page routing). `dir` is resolved relative to this spec file.
+frontend:
+  - { route: /, dir: web/dist, spa: true }

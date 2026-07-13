@@ -8,7 +8,7 @@
  *  - no secret substrings ever appear in the output (defence-in-depth — doctor takes no secrets, but
  *    the no-leak invariant is asserted so a future change cannot quietly start echoing env).
  */
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -206,6 +206,44 @@ describe('doctor — fail-closed file reading', () => {
       rmSync(linkPath, { force: true });
       rmSync(outsideDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('doctor — frontend static mounts (filesystem dir check)', () => {
+  it('returns ok:true for a valid frontend spec whose dir exists', async () => {
+    mkdirSync(join(dir, 'web', 'dist'), { recursive: true });
+    writeFileSync(
+      join(dir, 'fe-ok.yaml'),
+      "version: '1.0'\nmetadata: { name: fe }\nfrontend:\n  - { route: /, dir: web/dist, spa: true }\n",
+      'utf8',
+    );
+    const r = await runDoctor(['fe-ok.yaml']);
+    expect(r.ok).toBe(true);
+    expect(r.errors).toEqual([]);
+  });
+
+  it('flags a missing frontend.dir with code frontend_dir_missing at frontend[0].dir', async () => {
+    writeFileSync(
+      join(dir, 'fe-missing.yaml'),
+      "version: '1.0'\nmetadata: { name: fe }\nfrontend:\n  - { route: /, dir: does-not-exist }\n",
+      'utf8',
+    );
+    const r = await runDoctor(['fe-missing.yaml']);
+    expect(r.ok).toBe(false);
+    const f = r.errors.find((e) => e.code === 'frontend_dir_missing');
+    expect(f).toBeDefined();
+    expect(f?.path).toBe('frontend[0].dir');
+  });
+
+  it('flags a colliding frontend route with code frontend_route_collision (reserved prefix)', async () => {
+    writeFileSync(
+      join(dir, 'fe-clash.yaml'),
+      "version: '1.0'\nmetadata: { name: fe }\nfrontend:\n  - { route: /v1, dir: web/dist }\n",
+      'utf8',
+    );
+    const r = await runDoctor(['fe-clash.yaml']);
+    expect(r.ok).toBe(false);
+    expect(r.errors.map((e) => e.code)).toContain('frontend_route_collision');
   });
 });
 

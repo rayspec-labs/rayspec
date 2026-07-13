@@ -189,3 +189,110 @@ api:
     expect(res.errors.length).toBeGreaterThanOrEqual(3);
   });
 });
+
+describe('lintSpec — frontend static-mount route collisions', () => {
+  // POSITIVE: a root `/` mount coexisting with `/api/*` routes is the common layout and must NOT be
+  // flagged (the reserved-prefix rule exempts `/`, and `/` never equals a declared api path here).
+  it('accepts a root `/` frontend mount alongside `/api/*` store routes (no false positive)', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: fe-root-ok
+stores:
+  - name: notes
+    columns:
+      - { name: title, type: text }
+api:
+  - { method: GET, path: '/api/notes', action: { kind: store, store: notes, op: list } }
+frontend:
+  - { route: /, dir: web/dist, spa: true }
+`;
+    const res = parseSpec(yaml);
+    if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.value.frontend).toHaveLength(1);
+    expect(res.value.frontend?.[0]?.route).toBe('/');
+    expect(res.value.frontend?.[0]?.spa).toBe(true);
+  });
+
+  it('accepts a non-colliding non-root mount (`/app`) alongside a distinct api path', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: fe-app-ok
+stores:
+  - name: notes
+    columns:
+      - { name: title, type: text }
+api:
+  - { method: GET, path: '/api/notes', action: { kind: store, store: notes, op: list } }
+frontend:
+  - { route: /app, dir: web/dist, spa: false }
+  - { route: /, dir: public }
+`;
+    const res = parseSpec(yaml);
+    if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.value.frontend).toHaveLength(2);
+  });
+
+  // NEGATIVE: each injects exactly one collision and asserts the closed `frontend_route_collision` code
+  // at the right path. Reverting the corresponding lint arm turns these green→red (fail-the-fix).
+  it('rejects DUPLICATE frontend routes (frontend_route_collision at the 2nd)', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: fe-dup
+frontend:
+  - { route: /app, dir: a }
+  - { route: /app, dir: b }
+`;
+    const res = parseSpec(yaml);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    const dup = res.errors.find((e) => e.code === 'frontend_route_collision');
+    expect(dup).toBeDefined();
+    expect(dup?.path).toBe('frontend[1].route');
+  });
+
+  it('rejects a frontend route that EXACTLY equals a declared api[].path', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: fe-api-clash
+stores:
+  - name: notes
+    columns:
+      - { name: title, type: text }
+api:
+  - { method: GET, path: '/dash', action: { kind: store, store: notes, op: list } }
+frontend:
+  - { route: /dash, dir: web/dist }
+`;
+    const res = parseSpec(yaml);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors.map((e) => e.code)).toContain('frontend_route_collision');
+  });
+
+  it('rejects a frontend route on/under a reserved system prefix (/v1, /health, /oidc); / is exempt', () => {
+    for (const reserved of ['/v1', '/v1/app', '/health', '/oidc/login']) {
+      const yaml = `
+version: '1.0'
+metadata:
+  name: fe-reserved
+frontend:
+  - { route: '${reserved}', dir: web/dist }
+`;
+      const res = parseSpec(yaml);
+      expect(res.ok).toBe(false);
+      if (res.ok) continue;
+      expect(res.errors.map((e) => e.code)).toContain('frontend_route_collision');
+    }
+    // `/v1foo` is NOT under `/v1/` (no boundary slash) — it must NOT be flagged.
+    const notNested = parseSpec(
+      "version: '1.0'\nmetadata:\n  name: fe-not-nested\nfrontend:\n  - { route: /v1foo, dir: web }\n",
+    );
+    if (!notNested.ok)
+      throw new Error(`expected ok:\n${JSON.stringify(notNested.errors, null, 2)}`);
+    expect(notNested.value.frontend).toHaveLength(1);
+  });
+});

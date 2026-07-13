@@ -38,6 +38,13 @@ import { z } from 'zod';
  *                               emit a DUPLICATE OpenAPI query parameter (control param + per-column
  *                               filter param, same name+location) → an invalid OpenAPI 3.1 document.
  *                               Rename the business column.
+ *  - `frontend_route_collision` — a declared static frontend mount's `route` collides with another
+ *                               mount, with a declared `api[].path`, or with a reserved system prefix
+ *                               (`/v1`, `/health`, `/oidc`) — the static mount would either shadow or be
+ *                               shadowed by that route. Root `/` is exempt (it coexists with `/v1/*` via
+ *                               registration order). Rename the frontend route.
+ *  - `frontend_dir_missing`   — a declared frontend `dir` does not resolve to a readable directory of
+ *                               built assets (surfaced by `doctor`, which checks the filesystem).
  *
  * PRODUCT-YAML codes — used ONLY by the Product-YAML validation path (`parseProductSpec`,
  * `product-lint.ts`). They share this closed envelope so a fresh session sees ONE error vocabulary
@@ -95,6 +102,8 @@ export const SpecErrorCode = z.enum([
   'invalid_embedded_schema',
   'reserved_column_name',
   'reserved_query_keyword',
+  'frontend_route_collision',
+  'frontend_dir_missing',
   'no_code_in_yaml',
   'provider_native_leak',
   'invalid_capability_status',
