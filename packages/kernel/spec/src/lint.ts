@@ -732,11 +732,12 @@ export function lintSpec(spec: RaySpec): SpecError[] {
  * Pure over an already-shape-valid `RaySpec`. `doctor`/`plan` surface these alongside the `ok` result so
  * an author sees a documented interaction without being blocked.
  *
- * Today it flags ONE interaction: a `softDelete` store that is the TARGET of a `restrict` business-key
- * (`referencesColumn`) foreign key. Soft-deleting such a parent is an `UPDATE(deleted_at)` that does NOT
- * fire the database ON DELETE restrict, so the referencing rows keep pointing at the (tombstoned) parent
- * — the restrict guarantee only binds on a HARD delete. This is a permitted, documented interaction, so
- * it is a WARNING, not a fail-closed error.
+ * Today it flags ONE interaction: a `softDelete` store that is the TARGET of a `restrict` foreign key —
+ * EITHER an id-target FK (referencing the parent's injected `id`) OR a business-key FK
+ * (`referencesColumn`). Both carry the identical footgun: soft-deleting such a parent is an
+ * `UPDATE(deleted_at)` that does NOT fire the database ON DELETE restrict, so the referencing rows keep
+ * pointing at the (tombstoned) parent — the restrict guarantee only binds on a HARD delete. This is a
+ * permitted, documented interaction, so it is a WARNING, not a fail-closed error.
  */
 export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
   const warnings: SpecWarning[] = [];
@@ -744,20 +745,21 @@ export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
     if (store.softDelete !== true) return;
     for (const other of spec.stores) {
       for (const fk of other.foreignKeys) {
-        if (
-          fk.references === store.name &&
-          fk.referencesColumn !== undefined &&
-          fk.onDelete === 'restrict'
-        ) {
+        // Fire for ANY restrict FK onto this softDelete parent — id-target OR business-key. A soft
+        // delete is an UPDATE(deleted_at), which does NOT fire ON DELETE restrict on either FK shape.
+        if (fk.references === store.name && fk.onDelete === 'restrict') {
+          const fkDesc =
+            fk.referencesColumn !== undefined
+              ? `business-key foreign key from '${other.name}.${fk.column}' (referencesColumn ` +
+                `'${fk.referencesColumn}')`
+              : `foreign key from '${other.name}.${fk.column}' (references '${store.name}.id')`;
           warnings.push(
             specWarning(
               'softdelete_fk_restrict',
-              `store '${store.name}' is softDelete AND is the target of a restrict business-key ` +
-                `foreign key from '${other.name}.${fk.column}' (referencesColumn ` +
-                `'${fk.referencesColumn}') — soft-deleting a referenced '${store.name}' row is an ` +
-                "UPDATE that does NOT fire the database ON DELETE restrict, so '" +
-                `${other.name}' rows keep pointing at the tombstoned parent; the restrict guarantee ` +
-                'only binds on a hard delete',
+              `store '${store.name}' is softDelete AND is the target of a restrict ${fkDesc} — ` +
+                `soft-deleting a referenced '${store.name}' row is an UPDATE that does NOT fire the ` +
+                `database ON DELETE restrict, so '${other.name}' rows keep pointing at the tombstoned ` +
+                'parent; the restrict guarantee only binds on a hard delete',
               `stores[${si}].softDelete`,
             ),
           );

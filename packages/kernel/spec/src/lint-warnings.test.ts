@@ -1,9 +1,9 @@
 /**
  * `lintSpecWarnings` — the NON-FATAL advisory pass. A warning is surfaced (doctor/plan) but never
  * fails a parse. These tests pin the ONE interaction it flags today: a `softDelete` store that is the
- * TARGET of a `restrict` business-key (`referencesColumn`) foreign key — soft-deleting such a parent is
- * an `UPDATE(deleted_at)` that does NOT fire the database ON DELETE restrict, so children keep pointing
- * at the tombstoned row.
+ * TARGET of a `restrict` foreign key — id-target OR business-key (`referencesColumn`) — since
+ * soft-deleting such a parent is an `UPDATE(deleted_at)` that does NOT fire the database ON DELETE
+ * restrict, so children keep pointing at the tombstoned row.
  *
  * Fail-the-fix: the positive case asserts the warning FIRES (RED if `lintSpecWarnings` misses it) AND
  * that the spec still parses `ok:true` (a warning is not an error); the negative cases assert NO warning
@@ -64,8 +64,10 @@ describe('lintSpecWarnings — softDelete × restrict business-key FK', () => {
     expect(lintSpecWarnings(value)).toEqual([]);
   });
 
-  it('does NOT fire for an ID-TARGET restrict FK (the warning is scoped to business-key FKs)', () => {
-    // No referencesColumn ⇒ an id-target FK; the local column must be uuid to parse.
+  it('FIRES for an ID-TARGET restrict FK too (a soft delete is an UPDATE — it fires NO ON DELETE restrict on either FK shape)', () => {
+    // No referencesColumn ⇒ an id-target FK (references the parent's injected `id`); the local column
+    // must be uuid to parse. A soft delete of the parent leaves this child pointing at the tombstone
+    // exactly like the business-key case → the warning must fire.
     const yaml = `
 version: '1.0'
 metadata:
@@ -80,6 +82,32 @@ stores:
       - { name: meeting_id, type: uuid }
     foreignKeys:
       - { column: meeting_id, references: meetings, onDelete: 'restrict' }
+`;
+    const warnings = lintSpecWarnings(parseOk(yaml));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.code).toBe('softdelete_fk_restrict');
+    expect(warnings[0]?.path).toBe('stores[0].softDelete');
+    // Names the parent + child so an author can act on it; references the parent's id (id-target FK).
+    expect(warnings[0]?.message).toContain('meetings');
+    expect(warnings[0]?.message).toContain('transcripts');
+    expect(warnings[0]?.message).toContain('meetings.id');
+  });
+
+  it('does NOT fire for an ID-TARGET CASCADE FK (only restrict is the flagged interaction)', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: sd-idfk-cascade
+stores:
+  - name: meetings
+    columns:
+      - { name: slug, type: text, unique: true }
+    softDelete: true
+  - name: transcripts
+    columns:
+      - { name: meeting_id, type: uuid }
+    foreignKeys:
+      - { column: meeting_id, references: meetings, onDelete: 'cascade' }
 `;
     expect(lintSpecWarnings(parseOk(yaml))).toEqual([]);
   });

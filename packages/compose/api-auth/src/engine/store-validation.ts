@@ -87,9 +87,19 @@ function zodForColumn(type: ColumnType): z.ZodType {
 /**
  * One business column wrapped for nullability (a nullable column also accepts JSON null). When a text
  * column declares an `enum` whitelist, the base validator is a `z.enum` of exactly those values instead
- * of a free `z.string()` — so a value outside the whitelist is a VALIDATION_ERROR at the create/update
- * chokepoint (server-side enforcement, 400), not merely an authoring convention. Lint guarantees `enum`
- * only appears on `type:'text'` with a non-empty, distinct member list, so the cast is sound.
+ * of a free `z.string()` — so a value outside the whitelist is a VALIDATION_ERROR (400) at THIS
+ * create/update HTTP chokepoint. Lint guarantees `enum` only appears on `type:'text'` with a non-empty,
+ * distinct member list, so the cast is sound.
+ *
+ * ENFORCEMENT SURFACE (honest scope — this `z.enum` is NOT the only enforcer): the same declared
+ * whitelist is ALSO enforced on the workflow `store.write` value-resolution path
+ * (`@rayspec/product-yaml` `makeStoreWriteNode`), so an agent's classification output cannot persist an
+ * out-of-whitelist value either. RESIDUAL (deliberately un-enforced): a custom escape-hatch TS handler
+ * that writes directly through the `HandlerDb` facade (`insert`/`upsert`/`update`) is NOT enum-checked —
+ * the facade closes over Drizzle `PgTable`s (the trust boundary), which carry no spec-level `enum`
+ * vocabulary, so enforcing it there would require plumbing the `StoreSpec` into the facade (out of scope
+ * for this change). A handler author owns its own value discipline (as it does for every other business
+ * rule); the two DECLARATIVE write surfaces (HTTP + workflow) are covered.
  */
 function columnSchema(col: StoreColumn): z.ZodType {
   const base =

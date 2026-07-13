@@ -5,6 +5,8 @@
  *   - create referencing a NON-EXISTENT parent value → 400 VALIDATION_ERROR (NOT a 500), naming the FK
  *     COLUMN but never echoing the offending value;
  *   - delete a parent still referenced under onDelete:'restrict' → 409 CONFLICT (NOT a 500), tenant-safe;
+ *   - RENAME a referenced unique key while a child still points at the old value (the child's ON UPDATE
+ *     no action fires) → 409 CONFLICT (a "still referenced" state conflict, NOT the bad-input 400);
  *   - delete a parent whose only children are onDelete:'cascade' → 204 + the children are removed;
  *   - a child in tenant B CANNOT reference tenant A's parent value (the compound FK is tenant-scoped) →
  *     the cross-tenant reference is an absent-target 400, not a cross-tenant success.
@@ -62,6 +64,7 @@ stores:
 api:
   - { method: POST, path: '/meetings', action: { kind: store, store: meetings, op: create } }
   - { method: GET, path: '/meetings', action: { kind: store, store: meetings, op: list } }
+  - { method: PATCH, path: '/meetings/{id}', action: { kind: store, store: meetings, op: update } }
   - { method: DELETE, path: '/meetings/{id}', action: { kind: store, store: meetings, op: delete } }
   - { method: POST, path: '/notes', action: { kind: store, store: notes, op: create } }
   - { method: GET, path: '/notes', action: { kind: store, store: notes, op: list } }
@@ -92,6 +95,8 @@ describeDb('business-key FK — behaviour + tenant-safety through the declared r
 
   const post = (token: string, path: string, body: unknown) =>
     jsonRequest(h.app, 'POST', path, { body, headers: { authorization: `Bearer ${token}` } });
+  const patch = (token: string, path: string, body: unknown) =>
+    jsonRequest(h.app, 'PATCH', path, { body, headers: { authorization: `Bearer ${token}` } });
   const del = (token: string, path: string) =>
     jsonRequest(h.app, 'DELETE', path, { headers: { authorization: `Bearer ${token}` } });
   const list = (token: string, path: string) =>
@@ -158,6 +163,37 @@ describeDb('business-key FK — behaviour + tenant-safety through the declared r
     expect(await (await list(a.token, '/meetings')).json()).toHaveLength(1);
   });
 
+  it('renaming a referenced unique key while a child still points at the OLD value is a 409 CONFLICT (not a 400), tenant-safe', async () => {
+    testsRan += 1;
+    const a = await principal('fk-rename@example.com', 'FkRenameOrg');
+    const OLD = 'M-OLD-SLUG';
+    const NEW = 'M-NEW-SLUG'; // a value NO other row holds → NOT a uniqueness conflict
+    const created = await post(a.token, '/meetings', { slug: OLD });
+    expect(created.status).toBe(201);
+    const meetingId = (await created.json()).id as string;
+
+    // a child (restrict business-key FK) references the OLD slug …
+    expect((await post(a.token, '/notes', { meeting_slug: OLD })).status).toBe(201);
+
+    // … so PATCHing the parent's referenced unique key fires the CHILD's `ON UPDATE no action`
+    // restrict → a "still referenced" CONFLICT (409), NOT the bad-input 400. This is NOT a
+    // uniqueness collision (NEW is free) and NOT this store's own FK (meetings declares none) — it is
+    // a child restrict on the referenced key, so it must be a 409.
+    const blocked = await patch(a.token, `/meetings/${meetingId}`, { slug: NEW });
+    expect(blocked.status).toBe(409);
+    const body = await blocked.json();
+    expect(body.error.code).toBe('CONFLICT');
+    // Tenant-safe: names NO child table/column nor either slug value.
+    expect(JSON.stringify(body)).not.toContain('notes');
+    expect(JSON.stringify(body)).not.toContain(OLD);
+    expect(JSON.stringify(body)).not.toContain(NEW);
+
+    // the rename was a no-op — the meeting still holds the OLD slug (the blocked UPDATE rolled back).
+    const rows = (await (await list(a.token, '/meetings')).json()) as { slug: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.slug).toBe(OLD);
+  });
+
   it("deleting a parent whose only children are onDelete:'cascade' succeeds (204) and cascades the children", async () => {
     testsRan += 1;
     const a = await principal('fk-cascade@example.com', 'FkCascadeOrg');
@@ -202,7 +238,7 @@ describeDb('business-key FK — behaviour + tenant-safety through the declared r
 describe('business-key FK routes acceptance — ran-guard (must not silently skip in CI)', () => {
   it('the FK-behaviour arms ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (requireDb) {
-      expect(testsRan).toBe(4);
+      expect(testsRan).toBe(5);
     } else {
       expect(requireDb).toBe(false);
     }

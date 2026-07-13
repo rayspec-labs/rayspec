@@ -221,6 +221,44 @@ export function emitFkSql(table: string, fk: StoreForeignKey): string {
 }
 
 /**
+ * (GEN-3, defense-in-depth) A BUSINESS-KEY FK emits a TENANT-SCOPED COMPOUND reference
+ * `("tenant_id", <col>) REFERENCES <parent>("tenant_id", <refcol>)` (see {@link emitFkSql}) — which is
+ * appliable ONLY when the parent's unique index on `<refcol>` is the compound `(tenant_id, refcol)`
+ * form. A parent column that is a CONFLICT KEY carries a SINGLE-column `(refcol)` unique index instead
+ * (the durable `ON CONFLICT (refcol)` target), so the compound REFERENCES has no matching unique
+ * constraint → an unappliable Postgres 42830 at deploy.
+ *
+ * This is UNREACHABLE by a valid spec today (business-key FKs materialize ONLY on the backend profile,
+ * which passes NO conflict keys → every unique column is the compound secure default; the product
+ * profile strips FKs), but lint has NO conflict-key visibility. So we re-assert it HERE — the ONE
+ * boundary where the full conflict-key map IS available — and THROW a clear config-time error naming
+ * the FK + column rather than letting a cryptic 42830 surface at deploy (mirroring the
+ * `assertSafeIdentifier` defense-in-depth posture). `conflictKeys` absent ⇒ nothing to check (every
+ * unique column is compound).
+ */
+function assertBusinessKeyFksTargetCompoundUnique(
+  stores: StoreSpec[],
+  conflictKeys?: StoreConflictKeys,
+): void {
+  if (!conflictKeys) return;
+  for (const store of stores) {
+    for (const fk of store.foreignKeys) {
+      // ID-target FK (referencesColumn absent) points at the parent's injected uuid PK — always safe.
+      if (fk.referencesColumn === undefined) continue;
+      if (conflictKeys.get(fk.references)?.has(fk.referencesColumn)) {
+        throw new Error(
+          `generate-product-sql: business-key FK '${store.name}.${fk.column}' -> ` +
+            `'${fk.references}.${fk.referencesColumn}' references a CONFLICT-KEY column (a single-column ` +
+            `unique index — the durable ON CONFLICT target). A tenant-scoped compound FK cannot ` +
+            `reference it (no matching unique constraint → Postgres 42830 at deploy); a business-key FK ` +
+            `must reference a tenant-scoped compound-unique column, not a conflict key (GEN-3).`,
+        );
+      }
+    }
+  }
+}
+
+/**
  * Generate the full product migration SQL for a set of declared stores (DECLARED order). Joins
  * statements with Drizzle's `--> statement-breakpoint` marker so `shadow-dryrun.sh` (which strips
  * the markers) and `drizzle-kit migrate` both apply it identically. An EMPTY `stores[]` produces an
@@ -228,6 +266,9 @@ export function emitFkSql(table: string, fk: StoreForeignKey): string {
  */
 export function generateProductSql(stores: StoreSpec[], conflictKeys?: StoreConflictKeys): string {
   if (stores.length === 0) return '';
+  // Defense-in-depth (GEN-3): reject an unappliable business-key FK onto a conflict-key column here,
+  // where the full conflict-key map is available, rather than at deploy as a cryptic 42830.
+  assertBusinessKeyFksTargetCompoundUnique(stores, conflictKeys);
   const header = [
     '-- GENERATED product migration — review before applying (read the SQL, never blind-apply).',
     '-- Produced by @rayspec/db generate-product-sql from a validated RaySpec `stores[]`.',

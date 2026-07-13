@@ -180,6 +180,23 @@ function fkViolationColumn(store: StoreSpec, err: unknown): string | undefined {
   return fk?.column;
 }
 
+/**
+ * A TENANT-SAFE 409 for a restrict-blocked mutation: a CHILD foreign key (with the default
+ * `ON DELETE`/`ON UPDATE no action`) still references this row, so the parent cannot be `deleted` (a
+ * restrict-blocked physical delete) OR `updated` (changing a parent's referenced unique key while a
+ * child still points at the OLD value fires the child's `ON UPDATE no action`). It is a state CONFLICT
+ * (409), not a bad-INPUT value (400). The message NAMES NO child table/column/value — a child
+ * constraint is not in THIS store's FK set, and naming a foreign relationship could leak cross-tenant
+ * existence (the same no-oracle posture as `storeConflict`). Shared by the delete + update branches so
+ * their tenant-safe phrasing never drifts.
+ */
+function stillReferencedConflict(action: 'deleted' | 'updated'): ApiError {
+  return new ApiError(
+    'CONFLICT',
+    `This record is still referenced by related records and cannot be ${action}.`,
+  );
+}
+
 /** Resolve the injected `id` PK column object for an `eq()` predicate on a runtime product table. */
 function idColumn(table: PgTable): Parameters<typeof eq>[0] {
   const col = (getTableColumns(table) as Record<string, unknown>).id;
@@ -365,9 +382,20 @@ export function makeStoreHandler(args: {
                 .returning()) as Record<string, unknown>[];
             } catch (err) {
               if (isUniqueViolation(err)) throw storeConflict(store, err, conflictKeys);
-              // Setting a business-key FK column to a NON-existent parent on UPDATE is the same
-              // bad-input 23503 → 400 as create (tenant-safe, names the column, never a foreign value).
-              if (isForeignKeyViolation(err)) throw storeFkViolation(store, err);
+              if (isForeignKeyViolation(err)) {
+                // Two distinct 23503 shapes reach here on UPDATE:
+                //  (a) THIS store's OWN business-key FK column set to a NON-existent parent — bad
+                //      INPUT → 400 (the constraint resolves to a LOCAL declared FK column, tenant-safe,
+                //      names the column, never a foreign value); versus
+                //  (b) a CHILD's `ON UPDATE no action` restrict — this store is the PARENT of a
+                //      business-key FK and the client changed the referenced unique key while a child
+                //      still points at the OLD value → a "still referenced" CONFLICT (409), NOT bad
+                //      input. The child constraint is NOT in THIS store's FK set, so `fkViolationColumn`
+                //      does not resolve it → fall to the 409 with the SAME tenant-safe phrasing the
+                //      delete branch uses (naming no child/value — no cross-tenant existence oracle).
+                if (fkViolationColumn(store, err) !== undefined) throw storeFkViolation(store, err);
+                throw stillReferencedConflict('updated');
+              }
               throw err;
             }
             const row = updated[0];
@@ -409,12 +437,7 @@ export function makeStoreHandler(args: {
                 .where(eq(idColumn(table), id))
                 .returning()) as Record<string, unknown>[];
             } catch (err) {
-              if (isForeignKeyViolation(err)) {
-                throw new ApiError(
-                  'CONFLICT',
-                  'This record is still referenced by related records and cannot be deleted.',
-                );
-              }
+              if (isForeignKeyViolation(err)) throw stillReferencedConflict('deleted');
               throw err;
             }
             if (!deleted[0]) throw new ApiError('NOT_FOUND', 'Not found.');
