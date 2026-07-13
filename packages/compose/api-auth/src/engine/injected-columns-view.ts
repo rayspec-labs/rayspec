@@ -3,7 +3,7 @@
  *.
  *
  * The single source of the injected columns is `@rayspec/db`'s `injected-columns.ts` (id, tenant_id,
- * created_at, deleted_at, retention_days, region). Its SQL (snake_case) names are re-exported on the
+ * created_at, deleted_at, retention_days, region, created_by, idempotency_key). Its SQL (snake_case) names are re-exported on the
  * main `@rayspec/db` surface as `INJECTED_COLUMN_NAMES`; the runtime table builder
  * (`buildProductTables`) keys those columns by their camelCase TS property using the SAME snake→camel
  * rule. The store interpreter needs both views: snake (the wire JSON shape it exposes) and camel (the
