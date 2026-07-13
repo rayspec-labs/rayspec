@@ -189,8 +189,11 @@ export function makeStoreReadNode(cfg: StoreNodeConfig): CapabilityNodeHandler {
 }
 
 /**
- * The `store.write` node: resolve the declared row values, then **upsert EXCLUSIVELY on the store's
- * declared conflict key** (see the module header — the C10/at-least-once law).
+ * The `store.write` node: resolve the declared row values, ENFORCE any declared column `enum`
+ * whitelist on the resolved values (the same server-side whitelist the HTTP route applies — so an
+ * out-of-whitelist value, including an agent's classification output, is rejected before the write),
+ * then **upsert EXCLUSIVELY on the store's declared conflict key** (see the module header — the
+ * C10/at-least-once law).
  *
  * THE `undefined`-RESULT LAW (SEC-TEN-1/S2-XT-WRITE-BLIND fix — loud, never silent). The facade's
  * return contract (store-facade.ts) makes `undefined` mean, per arm:
@@ -219,6 +222,36 @@ export function makeStoreWriteNode(cfg: StoreNodeConfig): CapabilityNodeHandler 
       const resolved = resolveSource(source, ctx, `store_write step '${step.id}' values.${column}`);
       if (!resolved.ok) return resolved.failure;
       values[column] = resolved.value as StoreRow[string];
+    }
+
+    // Enforce declared column ENUM whitelists on the resolved write values BEFORE the upsert — the
+    // SAME server-side whitelist the HTTP create/update route applies (store-validation.ts, a `z.enum`).
+    // A value OUTSIDE the whitelist — INCLUDING an AGENT's classification output flowing into
+    // store_write, the feature's highest-value case — is rejected LOUDLY here rather than silently
+    // persisted. The `enum` vocabulary is lint-restricted to `type:'text'` columns, so a declared member
+    // is always a STRING; a NON-STRING resolved value (a number/boolean from an {event:}/{artifact:}
+    // source) is by definition NOT a member, so it is rejected HERE regardless of JS type — matching the
+    // HTTP route's `z.enum`, which rejects a non-member number as a VALIDATION_ERROR. (This closes a real
+    // bypass: SF-1 (`assertValidValue`, store-facade.ts) does NOT reject a scalar non-string — it ACCEPTS
+    // string/number/boolean/null/Date — so without this a numeric value would slip past BOTH the enum
+    // check AND SF-1 and reach Postgres, breaking the HTTP/workflow parity.) null/undefined is a
+    // NULLABILITY concern (deferred to the column's NOT NULL / nullable enforcement at the DB, mirroring
+    // the HTTP `z.enum().nullable()` posture — not an out-of-whitelist VALUE). The failure message names
+    // the store + COLUMN, never the offending VALUE (no cross-tenant oracle).
+    const enumByColumn = new Map(
+      store.columns.filter((c) => c.enum !== undefined).map((c) => [c.name, new Set(c.enum)]),
+    );
+    for (const [column, value] of Object.entries(values)) {
+      const allowed = enumByColumn.get(column);
+      const isMember = typeof value === 'string' && allowed?.has(value) === true;
+      if (allowed && value !== null && value !== undefined && !isMember) {
+        return fail(
+          'store_write_enum_violation',
+          `store_write step '${step.id}' resolved a value for column '${column}' of store ` +
+            `'${store.name}' that is not one of the declared allowed values — rejecting before the ` +
+            'write (the enum whitelist is enforced on this workflow write path, not only the HTTP route).',
+        );
+      }
     }
 
     let row: StoreRow | undefined;

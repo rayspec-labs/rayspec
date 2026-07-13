@@ -43,8 +43,8 @@ import { type AgentSpec, type BackendId, validateSpec } from '@rayspec/core';
 // shapes and take the instance TYPE from the named class export — exactly as dispatch.ts does.
 import type { Ajv2020 as Ajv2020Class } from 'ajv/dist/2020.js';
 import * as Ajv2020Module from 'ajv/dist/2020.js';
-import { type SpecError, specError } from './errors.js';
-import type { RaySpec } from './grammar.js';
+import { type SpecError, type SpecWarning, specError, specWarning } from './errors.js';
+import { MAX_IDENTIFIER_LENGTH, type RaySpec } from './grammar.js';
 
 type AjvInstance = Ajv2020Class;
 const Ajv2020Ctor = ((Ajv2020Module as { default?: unknown }).default ?? Ajv2020Module) as new (
@@ -144,6 +144,9 @@ export function lintSpec(spec: RaySpec): SpecError[] {
 
   // ---- ID/NAME SETS (built once; reused by the cross-ref checks) ------------------------
   const storeNames = new Set(spec.stores.map((s) => s.name));
+  // name -> store, so a business-key FK (`referencesColumn`) can resolve its referenced column in the
+  // TARGET store (unique + type-match validation below).
+  const storeByName = new Map(spec.stores.map((s) => [s.name, s]));
   const agentIds = new Set(spec.agents.map((a) => a.id));
   const toolIds = new Set(spec.tooling.map((t) => t.id));
   // handlers indexed by id -> kind, so a ref can also assert the handler is the RIGHT kind.
@@ -241,9 +244,67 @@ export function lintSpec(spec: RaySpec): SpecError[] {
           ),
         );
       }
+      // (enum) An `enum` whitelist is a TEXT-column value constraint the platform enforces server-side
+      // (store-validation derives a `z.enum` → an out-of-whitelist create/update value is a 400). The
+      // grammar already pins a non-empty array of non-empty members; the lint adds the two facts Zod
+      // cannot express here: (a) it belongs ONLY on a text column; (b) the members are DISTINCT.
+      if (col.enum !== undefined) {
+        if (col.type !== 'text') {
+          errors.push(
+            specError(
+              'schema_violation',
+              `store '${store.name}' column '${col.name}' declares an enum whitelist but is type ` +
+                `'${col.type}' — enum is only valid on a 'text' column`,
+              `stores[${si}].columns[${ci}].enum`,
+            ),
+          );
+        }
+        const seenValues = new Set<string>();
+        for (const value of col.enum) {
+          if (seenValues.has(value)) {
+            errors.push(
+              specError(
+                'schema_violation',
+                `store '${store.name}' column '${col.name}' enum has a duplicate value ` +
+                  `'${value}' — enum members must be distinct`,
+                `stores[${si}].columns[${ci}].enum`,
+              ),
+            );
+            break; // one report per column is enough (the author fixes the list in one pass)
+          }
+          seenValues.add(value);
+        }
+      }
     });
 
     store.foreignKeys.forEach((fk, fi) => {
+      // (FK-NAME-LEN) The generated Postgres constraint name is a TOTAL function of
+      // `(table, column, references, refCol)` — `<table>_<column>_<references>_<refCol>_fk` — mirroring
+      // `fkConstraintName` in @rayspec/db, the single source of truth (kept in sync by this comment; the
+      // db layer cannot be imported here — @rayspec/db depends on @rayspec/spec, so the reverse edge
+      // would cycle). Each identifier is individually ≤ MAX_IDENTIFIER_LENGTH (SafeIdentifier), but their
+      // CONCATENATION is not, and Postgres SILENTLY TRUNCATES an ADD CONSTRAINT name past 63 bytes. A
+      // truncated name (a) breaks the store-route 23503 UPDATE discriminator, which matches the reported
+      // `constraint_name` EXACTLY against this full computed name to tell an own-FK bad-INPUT update (400)
+      // apart from a child-restrict conflict (409) — a truncation is a missed match → a wrongful 409; and
+      // (b) can truncate-COLLIDE two distinct long FK names into one real DDL conflict. Reject it at config
+      // time so the emitted name is never truncated (fail-closed at the source).
+      const refCol = fk.referencesColumn ?? 'id';
+      const constraintName = `${store.name}_${fk.column}_${fk.references}_${refCol}_fk`;
+      if (constraintName.length > MAX_IDENTIFIER_LENGTH) {
+        errors.push(
+          specError(
+            'schema_violation',
+            `store '${store.name}' foreign key on column '${fk.column}' generates the constraint name ` +
+              `'${constraintName}' (${constraintName.length} chars), which exceeds the ` +
+              `${MAX_IDENTIFIER_LENGTH}-char Postgres identifier limit — Postgres would SILENTLY TRUNCATE ` +
+              'it (breaking the update-conflict 400-vs-409 discriminator and risking a name collision). ' +
+              'Use shorter identifiers for the store name, the FK column, the referenced store, or the ' +
+              'referenced column',
+            `stores[${si}].foreignKeys[${fi}].column`,
+          ),
+        );
+      }
       if (!storeNames.has(fk.references)) {
         errors.push(
           specError(
@@ -262,11 +323,11 @@ export function lintSpec(spec: RaySpec): SpecError[] {
             `stores[${si}].foreignKeys[${fi}].column`,
           ),
         );
-      } else {
-        // (GEN-1) An FK local column references the parent's injected uuid PK (`id`), so it MUST be
-        // declared `type:'uuid'`. A non-uuid FK column diverges the generators (the TS generator
-        // forces uuid() while the SQL generator emits the author type) and yields an unappliable
-        // migration — reject it at config time.
+      } else if (fk.referencesColumn === undefined) {
+        // ID-TARGET FK (default): the local column references the parent's injected uuid PK (`id`), so
+        // it MUST be declared `type:'uuid'` (GEN-1). A non-uuid FK column diverges the generators (the
+        // TS generator forces uuid() while the SQL generator emits the author type) and yields an
+        // unappliable migration — reject it at config time.
         if (fkColumn.type !== 'uuid') {
           errors.push(
             specError(
@@ -287,6 +348,65 @@ export function lintSpec(spec: RaySpec): SpecError[] {
               `stores[${si}].foreignKeys[${fi}].onDelete`,
             ),
           );
+        }
+      } else {
+        // BUSINESS-KEY FK: the local column references a NAMED unique column of the target store — a
+        // TENANT-SCOPED COMPOUND FK `(tenant_id, col) -> parent(tenant_id, refcol)`.
+        //
+        // (a) onDelete:'set null' is IMPOSSIBLE on a compound FK — it would have to null `tenant_id`,
+        //     which is NOT NULL by construction. A business-key FK supports 'cascade' or 'restrict' only.
+        if (fk.onDelete === 'set null') {
+          errors.push(
+            specError(
+              'schema_violation',
+              `store '${store.name}' foreign key on column '${fk.column}' uses onDelete:'set null' with ` +
+                'referencesColumn — a business-key FK is a tenant-scoped compound key and cannot null ' +
+                "tenant_id; use onDelete:'cascade' or 'restrict'",
+              `stores[${si}].foreignKeys[${fi}].onDelete`,
+            ),
+          );
+        }
+        // (b) Resolve the referenced column in the TARGET store (skip when the target store is dangling —
+        //     the dangling_ref above already reports that).
+        const targetStore = storeByName.get(fk.references);
+        if (targetStore !== undefined) {
+          const targetCol = targetStore.columns.find((c) => c.name === fk.referencesColumn);
+          if (targetCol === undefined) {
+            errors.push(
+              specError(
+                'dangling_ref',
+                `store '${store.name}' foreign key referencesColumn '${fk.referencesColumn}' is not a ` +
+                  `declared column of the referenced store '${fk.references}'`,
+                `stores[${si}].foreignKeys[${fi}].referencesColumn`,
+              ),
+            );
+          } else {
+            // (c) A FK can only reference a UNIQUE column (Postgres requires a matching unique index).
+            if (targetCol.unique !== true) {
+              errors.push(
+                specError(
+                  'schema_violation',
+                  `store '${store.name}' foreign key referencesColumn ` +
+                    `'${fk.references}.${fk.referencesColumn}' must be declared 'unique: true' — a ` +
+                    'foreign key can only reference a unique column',
+                  `stores[${si}].foreignKeys[${fi}].referencesColumn`,
+                ),
+              );
+            }
+            // (d) The local FK column's type MUST match the referenced column's type (relaxes the
+            //     uuid-only GEN-1 rule for a non-id target — a slug FK is text, a code FK is integer, …).
+            if (fkColumn.type !== targetCol.type) {
+              errors.push(
+                specError(
+                  'schema_violation',
+                  `store '${store.name}' foreign key column '${fk.column}' is type '${fkColumn.type}' but ` +
+                    `references '${fk.references}.${fk.referencesColumn}' of type '${targetCol.type}' — ` +
+                    "an FK column's type must match its referenced column",
+                  `stores[${si}].foreignKeys[${fi}].column`,
+                ),
+              );
+            }
+          }
         }
       }
     });
@@ -632,4 +752,47 @@ export function lintSpec(spec: RaySpec): SpecError[] {
   });
 
   return errors;
+}
+
+/**
+ * The NON-FATAL semantic-warning pass — advisory findings that do NOT fail a parse (unlike `lintSpec`).
+ * Pure over an already-shape-valid `RaySpec`. `doctor`/`plan` surface these alongside the `ok` result so
+ * an author sees a documented interaction without being blocked.
+ *
+ * Today it flags ONE interaction: a `softDelete` store that is the TARGET of a `restrict` foreign key —
+ * EITHER an id-target FK (referencing the parent's injected `id`) OR a business-key FK
+ * (`referencesColumn`). Both carry the identical footgun: soft-deleting such a parent is an
+ * `UPDATE(deleted_at)` that does NOT fire the database ON DELETE restrict, so the referencing rows keep
+ * pointing at the (tombstoned) parent — the restrict guarantee only binds on a HARD delete. This is a
+ * permitted, documented interaction, so it is a WARNING, not a fail-closed error.
+ */
+export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
+  const warnings: SpecWarning[] = [];
+  spec.stores.forEach((store, si) => {
+    if (store.softDelete !== true) return;
+    for (const other of spec.stores) {
+      for (const fk of other.foreignKeys) {
+        // Fire for ANY restrict FK onto this softDelete parent — id-target OR business-key. A soft
+        // delete is an UPDATE(deleted_at), which does NOT fire ON DELETE restrict on either FK shape.
+        if (fk.references === store.name && fk.onDelete === 'restrict') {
+          const fkDesc =
+            fk.referencesColumn !== undefined
+              ? `business-key foreign key from '${other.name}.${fk.column}' (referencesColumn ` +
+                `'${fk.referencesColumn}')`
+              : `foreign key from '${other.name}.${fk.column}' (references '${store.name}.id')`;
+          warnings.push(
+            specWarning(
+              'softdelete_fk_restrict',
+              `store '${store.name}' is softDelete AND is the target of a restrict ${fkDesc} — ` +
+                `soft-deleting a referenced '${store.name}' row is an UPDATE that does NOT fire the ` +
+                `database ON DELETE restrict, so '${other.name}' rows keep pointing at the tombstoned ` +
+                'parent; the restrict guarantee only binds on a hard delete',
+              `stores[${si}].softDelete`,
+            ),
+          );
+        }
+      }
+    }
+  });
+  return warnings;
 }

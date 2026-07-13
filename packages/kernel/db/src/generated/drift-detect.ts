@@ -303,17 +303,24 @@ export async function detectDrift(
       }
     }
 
-    // The injected tenant_id FK -> orgs ON DELETE CASCADE.
+    // The injected tenant_id FK -> orgs ON DELETE CASCADE. Match the FK to `orgs` SPECIFICALLY: a
+    // business-key (compound) product FK `(tenant_id, col) -> parent(tenant_id, refcol)` ALSO surfaces a
+    // `tenant_id` FK row (foreign_table = the parent, not orgs), so a bare `column_name === 'tenant_id'`
+    // could bind to it and false-report `missing_tenant_fk`. Filtering on the orgs target isolates the
+    // injected tenant predicate FK; an id-target-only store is unaffected (its sole tenant_id FK is orgs).
     const tenantFk = fkRows.find(
-      (f) => f.table_name === store.name && f.column_name === 'tenant_id',
+      (f) =>
+        f.table_name === store.name &&
+        f.column_name === 'tenant_id' &&
+        f.foreign_table_name === 'orgs',
     );
-    if (tenantFk?.foreign_table_name !== 'orgs') {
+    if (tenantFk === undefined) {
       findings.push({
         table: store.name,
         kind: 'missing_tenant_fk',
         column: 'tenant_id',
         expected: 'FK tenant_id -> orgs',
-        actual: tenantFk ? `FK -> ${tenantFk.foreign_table_name}` : 'no FK',
+        actual: 'no FK to orgs',
       });
     } else if (tenantFk.delete_rule !== 'CASCADE') {
       findings.push({

@@ -69,7 +69,12 @@ function assertStoreSafeSql(store: StoreSpec): void {
   const fkColumns = new Map(store.foreignKeys.map((fk) => [fk.column, fk]));
   for (const col of store.columns) {
     assertSafeIdentifier(col.name, `column '${store.name}.${col.name}'`);
-    if (fkColumns.has(col.name) && col.type !== 'uuid') {
+    const fk = fkColumns.get(col.name);
+    // (GEN-1) An ID-TARGET FK column references the parent's injected uuid PK (`id`), so it MUST be
+    // uuid. A BUSINESS-KEY FK (`referencesColumn` set) references a NAMED parent column whose TYPE the
+    // lint pass matches to this column's type — the uuid rule is relaxed for it (the compound FK
+    // emitted below carries the author type verbatim, so no cross-generator divergence).
+    if (fk && fk.referencesColumn === undefined && col.type !== 'uuid') {
       throw new Error(
         `generate-product-sql: FK column '${store.name}.${col.name}' must be 'uuid', got '${col.type}' (GEN-1).`,
       );
@@ -78,6 +83,12 @@ function assertStoreSafeSql(store: StoreSpec): void {
   for (const fk of store.foreignKeys) {
     assertSafeIdentifier(fk.column, `FK column '${store.name}.${fk.column}'`);
     assertSafeIdentifier(fk.references, `FK reference '${store.name} -> ${fk.references}'`);
+    if (fk.referencesColumn !== undefined) {
+      assertSafeIdentifier(
+        fk.referencesColumn,
+        `FK referencesColumn '${store.name} -> ${fk.references}.${fk.referencesColumn}'`,
+      );
+    }
   }
 }
 
@@ -163,13 +174,88 @@ export function emitStoreSql(store: StoreSpec, conflictKeys?: ReadonlySet<string
   return statements;
 }
 
-/** Emit a product->product FK ALTER statement with the author's ON DELETE policy. */
-function emitFkSql(table: string, fk: StoreForeignKey): string {
+/**
+ * The Drizzle-style constraint name for a product->product FK. Byte-identical to the historic
+ * `<table>_<col>_<parent>_id_fk` for an ID-TARGET FK (the referenced column defaults to `id`); a
+ * BUSINESS-KEY FK encodes its referenced unique column: `<table>_<col>_<parent>_<refcol>_fk`. The
+ * name is a total function of `(table, fk)` so the generator (ADD) and the diff (ADD + DROP) agree
+ * byte-for-byte — a reviewed FK change never spuriously re-blocks at the deploy gate.
+ *
+ * Exported so `diffProductStores` names the DROP counterpart identically (single source of truth).
+ */
+export function fkConstraintName(table: string, fk: StoreForeignKey): string {
+  const refCol = fk.referencesColumn ?? 'id';
+  return `${table}_${fk.column}_${fk.references}_${refCol}_fk`;
+}
+
+/**
+ * Emit a product->product FK ALTER statement with the author's ON DELETE policy.
+ *
+ * ID-TARGET FK (`referencesColumn` absent): a single-column FK onto the parent's injected uuid PK
+ * (`id`) — the historic form, emitted BYTE-IDENTICALLY (so every existing golden/first-materialization
+ * assertion holds).
+ *
+ * BUSINESS-KEY FK (`referencesColumn` set): a TENANT-SCOPED COMPOUND FK
+ * `("tenant_id", <col>) REFERENCES <parent>("tenant_id", <refcol>)`. It MUST be compound because the
+ * parent's business-unique index is the secure-default compound `(tenant_id, refcol)` — a single-column
+ * REFERENCES onto it is Postgres 42830 (no matching unique constraint). Compounding it ALSO structurally
+ * forbids a cross-tenant reference: a child row can only point at a parent row of the SAME tenant.
+ *
+ * Exported so the diff's ADD path (`addFkSql`) reuses this exact DDL (byte-fidelity single source).
+ */
+export function emitFkSql(table: string, fk: StoreForeignKey): string {
+  const name = fkConstraintName(table, fk);
+  if (fk.referencesColumn === undefined) {
+    return (
+      `ALTER TABLE "${table}" ADD CONSTRAINT "${name}" ` +
+      `FOREIGN KEY ("${fk.column}") REFERENCES "public"."${fk.references}"("id") ` +
+      `ON DELETE ${fk.onDelete} ON UPDATE no action`
+    );
+  }
   return (
-    `ALTER TABLE "${table}" ADD CONSTRAINT "${table}_${fk.column}_${fk.references}_id_fk" ` +
-    `FOREIGN KEY ("${fk.column}") REFERENCES "public"."${fk.references}"("id") ` +
+    `ALTER TABLE "${table}" ADD CONSTRAINT "${name}" ` +
+    `FOREIGN KEY ("tenant_id", "${fk.column}") ` +
+    `REFERENCES "public"."${fk.references}"("tenant_id", "${fk.referencesColumn}") ` +
     `ON DELETE ${fk.onDelete} ON UPDATE no action`
   );
+}
+
+/**
+ * (GEN-3, defense-in-depth) A BUSINESS-KEY FK emits a TENANT-SCOPED COMPOUND reference
+ * `("tenant_id", <col>) REFERENCES <parent>("tenant_id", <refcol>)` (see {@link emitFkSql}) — which is
+ * appliable ONLY when the parent's unique index on `<refcol>` is the compound `(tenant_id, refcol)`
+ * form. A parent column that is a CONFLICT KEY carries a SINGLE-column `(refcol)` unique index instead
+ * (the durable `ON CONFLICT (refcol)` target), so the compound REFERENCES has no matching unique
+ * constraint → an unappliable Postgres 42830 at deploy.
+ *
+ * This is UNREACHABLE by a valid spec today (business-key FKs materialize ONLY on the backend profile,
+ * which passes NO conflict keys → every unique column is the compound secure default; the product
+ * profile strips FKs), but lint has NO conflict-key visibility. So we re-assert it HERE — the ONE
+ * boundary where the full conflict-key map IS available — and THROW a clear config-time error naming
+ * the FK + column rather than letting a cryptic 42830 surface at deploy (mirroring the
+ * `assertSafeIdentifier` defense-in-depth posture). `conflictKeys` absent ⇒ nothing to check (every
+ * unique column is compound).
+ */
+function assertBusinessKeyFksTargetCompoundUnique(
+  stores: StoreSpec[],
+  conflictKeys?: StoreConflictKeys,
+): void {
+  if (!conflictKeys) return;
+  for (const store of stores) {
+    for (const fk of store.foreignKeys) {
+      // ID-target FK (referencesColumn absent) points at the parent's injected uuid PK — always safe.
+      if (fk.referencesColumn === undefined) continue;
+      if (conflictKeys.get(fk.references)?.has(fk.referencesColumn)) {
+        throw new Error(
+          `generate-product-sql: business-key FK '${store.name}.${fk.column}' -> ` +
+            `'${fk.references}.${fk.referencesColumn}' references a CONFLICT-KEY column (a single-column ` +
+            `unique index — the durable ON CONFLICT target). A tenant-scoped compound FK cannot ` +
+            `reference it (no matching unique constraint → Postgres 42830 at deploy); a business-key FK ` +
+            `must reference a tenant-scoped compound-unique column, not a conflict key (GEN-3).`,
+        );
+      }
+    }
+  }
 }
 
 /**
@@ -180,6 +266,9 @@ function emitFkSql(table: string, fk: StoreForeignKey): string {
  */
 export function generateProductSql(stores: StoreSpec[], conflictKeys?: StoreConflictKeys): string {
   if (stores.length === 0) return '';
+  // Defense-in-depth (GEN-3): reject an unappliable business-key FK onto a conflict-key column here,
+  // where the full conflict-key map is available, rather than at deploy as a cryptic 42830.
+  assertBusinessKeyFksTargetCompoundUnique(stores, conflictKeys);
   const header = [
     '-- GENERATED product migration — review before applying (read the SQL, never blind-apply).',
     '-- Produced by @rayspec/db generate-product-sql from a validated RaySpec `stores[]`.',

@@ -24,13 +24,24 @@
  */
 import { accessSync, constants, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { parseAnySpec, type SpecError, specError } from '@rayspec/spec';
+import {
+  lintSpecWarnings,
+  parseAnySpec,
+  type SpecError,
+  type SpecWarning,
+  specError,
+} from '@rayspec/spec';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
 
-/** The `doctor` JSON result. Mirrors `parseSpec`'s `{ ok, errors }` shape exactly. */
+/**
+ * The `doctor` JSON result. `{ ok, errors }` is the fail-closed contract (mirrors `parseSpec`); the
+ * additive `warnings` array carries NON-FATAL advisories (`lintSpecWarnings`) — present but never
+ * affecting `ok` (a spec with only warnings is still valid, exit 0).
+ */
 export interface DoctorResult {
   readonly ok: boolean;
   readonly errors: SpecError[];
+  readonly warnings: SpecWarning[];
 }
 
 /**
@@ -48,13 +59,21 @@ export async function runDoctor(positionals: readonly string[]): Promise<DoctorR
     text = await readSpecFile(specPath);
   } catch (e) {
     if (e instanceof ReadSpecError) {
-      return { ok: false, errors: [{ code: 'yaml_parse_error', message: e.message }] };
+      return {
+        ok: false,
+        errors: [{ code: 'yaml_parse_error', message: e.message }],
+        warnings: [],
+      };
     }
     throw e;
   }
 
   const parsed = parseAnySpec(text);
   const errors: SpecError[] = parsed.ok ? [] : [...parsed.errors];
+  // NON-FATAL advisories: only a valid backend-profile (rayspec) doc has stores/FKs to inspect (the
+  // product profile has its own store handling). Warnings never affect `ok`.
+  const warnings: SpecWarning[] =
+    parsed.ok && parsed.kind === 'rayspec' ? lintSpecWarnings(parsed.spec) : [];
 
   // A valid backend-profile (rayspec) doc: additionally check each declared frontend `dir` resolves to
   // a readable directory of built assets (relative to the spec file). Route COLLISIONS already arrive
@@ -86,5 +105,5 @@ export async function runDoctor(positionals: readonly string[]): Promise<DoctorR
     });
   }
 
-  return { ok: errors.length === 0, errors };
+  return { ok: errors.length === 0, errors, warnings };
 }

@@ -413,6 +413,140 @@ stores:
   });
 });
 
+describe('negative — column enum whitelist coherence', () => {
+  it('rejects an enum on a NON-text column → schema_violation', () => {
+    const yaml = BASE.replace(
+      '      - { name: label, type: text }',
+      "      - { name: label, type: text }\n      - { name: count, type: integer, enum: ['1', '2'] }",
+    );
+    // Fail-the-fix: without the text-only enum lint the spec parses clean (grammar allows enum on any column).
+    expectRejection(yaml, 'schema_violation');
+  });
+
+  it('rejects an enum with a DUPLICATE value → schema_violation', () => {
+    const yaml = BASE.replace(
+      '      - { name: label, type: text }',
+      "      - { name: status, type: text, enum: ['open', 'open'] }",
+    );
+    expectRejection(yaml, 'schema_violation');
+  });
+
+  it('a text column with a distinct enum parses OK (isolates the two checks above)', () => {
+    const yaml = BASE.replace(
+      '      - { name: label, type: text }',
+      "      - { name: status, type: text, enum: ['open', 'closed'] }",
+    );
+    const res = parseSpec(yaml);
+    if (!res.ok)
+      throw new Error(`enum-on-text must parse:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.ok).toBe(true);
+  });
+});
+
+describe('negative — business-key FK (referencesColumn) coherence', () => {
+  // A parent with a UNIQUE `slug` (text) column; a child referencing it by a business key.
+  const withFk = (childCol: string, fk: string) => `
+version: '1.0'
+metadata:
+  name: bizfk
+stores:
+  - name: meetings
+    columns:
+      - { name: slug, type: text, unique: true }
+      - { name: title, type: text, nullable: true }
+  - name: transcripts
+    columns:
+      - ${childCol}
+    foreignKeys:
+      - ${fk}
+`;
+
+  it('the well-formed business-key FK parses OK (isolates the negatives below)', () => {
+    const res = parseSpec(
+      withFk(
+        '{ name: meeting_slug, type: text }',
+        '{ column: meeting_slug, references: meetings, referencesColumn: slug }',
+      ),
+    );
+    if (!res.ok)
+      throw new Error(`business-key FK must parse:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.ok).toBe(true);
+  });
+
+  it('referencesColumn naming an UNDECLARED target column → dangling_ref', () => {
+    expectRejection(
+      withFk(
+        '{ name: meeting_slug, type: text }',
+        '{ column: meeting_slug, references: meetings, referencesColumn: ghost }',
+      ),
+      'dangling_ref',
+    );
+  });
+
+  it('referencesColumn naming a NON-unique target column → schema_violation', () => {
+    expectRejection(
+      withFk(
+        '{ name: meeting_title, type: text }',
+        '{ column: meeting_title, references: meetings, referencesColumn: title }',
+      ),
+      'schema_violation',
+    );
+  });
+
+  it('a local FK column whose type MISMATCHES the referenced column → schema_violation', () => {
+    // meeting_slug is uuid but references meetings.slug (text) — the FK column type must match.
+    expectRejection(
+      withFk(
+        '{ name: meeting_slug, type: uuid }',
+        '{ column: meeting_slug, references: meetings, referencesColumn: slug }',
+      ),
+      'schema_violation',
+    );
+  });
+
+  it("referencesColumn with onDelete:'set null' → schema_violation (a compound FK cannot null tenant_id)", () => {
+    expectRejection(
+      withFk(
+        '{ name: meeting_slug, type: text, nullable: true }',
+        "{ column: meeting_slug, references: meetings, referencesColumn: slug, onDelete: 'set null' }",
+      ),
+      'schema_violation',
+    );
+  });
+
+  it('a FK whose generated constraint name exceeds the 63-char Postgres limit → schema_violation (never silently truncated)', () => {
+    // Each identifier is individually ≤63 (SafeIdentifier), but the constraint name
+    // `<table>_<col>_<parent>_<refcol>_fk` concatenates four of them and here overflows 63 bytes.
+    // Postgres would SILENTLY TRUNCATE such an ADD CONSTRAINT name, breaking the store-route 23503
+    // update discriminator (which matches the reported constraint_name EXACTLY) — so lint rejects it
+    // at config time. Fail-the-fix: without the FK-NAME-LEN check this spec parses clean.
+    const yaml = `
+version: '1.0'
+metadata:
+  name: longfk
+stores:
+  - name: meetings
+    columns:
+      - { name: meeting_reference_slug, type: text, unique: true }
+  - name: transcription_note_records
+    columns:
+      - { name: referenced_meeting_reference_slug, type: text }
+    foreignKeys:
+      - { column: referenced_meeting_reference_slug, references: meetings, referencesColumn: meeting_reference_slug }
+`;
+    const res = parseSpec(yaml);
+    expect(res.ok).toBe(false);
+    if (res.ok) return; // narrow
+    const hit = res.errors.find(
+      (e) => e.code === 'schema_violation' && /63-char Postgres identifier limit/.test(e.message),
+    );
+    expect(hit, JSON.stringify(res.errors, null, 2)).toBeTruthy();
+    // names the offending FK column + the generated constraint name, and its length
+    expect(hit?.message).toContain('referenced_meeting_reference_slug');
+    expect(hit?.message).toMatch(/transcription_note_records_referenced_meeting_reference_slug_/);
+  });
+});
+
 describe('negative — unquoted numeric version (fix #10; helpful diagnostic, no coercion)', () => {
   it('rejects YAML `version: 1.0` (the number) with a quote-it hint, NOT a coercion', () => {
     const yaml = 'version: 1.0\nmetadata:\n  name: numericversion\n';

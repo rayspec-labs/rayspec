@@ -26,6 +26,30 @@ export function isUniqueViolation(err: unknown): boolean {
 }
 
 /**
+ * True if `err` (or a bounded `.cause`-chain ancestor) is a Postgres FOREIGN KEY violation (SQLSTATE
+ * 23503). Detection ONLY — the caller maps it to a typed 4xx (create/update onto a non-existent target
+ * → 400; a restrict-blocked parent delete → 409) and issues NO further in-transaction statement (an
+ * in-tx error poisons the transaction).
+ */
+export function isForeignKeyViolation(err: unknown): boolean {
+  return pgErrorNode(err, '23503') !== undefined;
+}
+
+/**
+ * The Postgres constraint name a 23503 names (product FKs are `<table>_<col>_<parent>_<refcol>_fk`), or
+ * `undefined` when the error is not a 23503 / carries no constraint name.
+ *
+ * TENANT-SAFETY: the constraint name is derived from the SCHEMA (table/column identifiers), never from a
+ * row value — the offending VALUE lives on the error's `detail` field, which this NEVER reads. A caller
+ * maps the returned name to a DECLARED FK column before surfacing it (so the wire names an author column,
+ * not the raw constraint identifier, and never a foreign row value).
+ */
+export function foreignKeyViolationConstraintName(err: unknown): string | undefined {
+  const node = pgErrorNode(err, '23503') as { constraint_name?: unknown } | undefined;
+  return node && typeof node.constraint_name === 'string' ? node.constraint_name : undefined;
+}
+
+/**
  * The Postgres constraint/index name a 23505 names (drizzle emits unique indexes as
  * `<table>_<col>_unique`), or `undefined` when the error is not a 23505 / carries no constraint name.
  *

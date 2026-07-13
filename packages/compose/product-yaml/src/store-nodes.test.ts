@@ -336,4 +336,80 @@ describe('store.write node (upsert-EXCLUSIVE — the C10/at-least-once law)', ()
     if (result.status !== 'terminal_failure') throw new Error('unreachable');
     expect(result.error?.code).toBe('store_write_failed');
   });
+
+  // ── declared column ENUM enforcement on the workflow store.write path ─────────────────────────
+  // The `status` column declares an enum whitelist that EXCLUDES the runtime value; the value is
+  // EVENT-sourced (dynamic — exactly the agent/event case authoring lint CANNOT statically catch).
+  // The enum whitelist is enforced HERE (not only on the HTTP route) so an out-of-whitelist value —
+  // including an agent's classification output — can never be silently persisted.
+  const ENUM_YAML = FIELDLOG_YAML.replace(
+    '- { name: status, type: text }',
+    '- { name: status, type: text, enum: [accepted, rejected] }',
+  ).replace('status: { const: processed }', 'status: { event: status }');
+
+  it('an OUT-of-whitelist resolved enum value is a TYPED terminal failure BEFORE the upsert (fail-the-fix)', async () => {
+    const spec = parseFixture(ENUM_YAML);
+    const db = new SpyDb();
+    const node = makeStoreWriteNode({ spec, db });
+    const result = await node(
+      ctxFor(
+        'log',
+        'write',
+        { session_id: 'sess-1', status: 'processed' }, // 'processed' ∉ [accepted, rejected]
+        [catalogArtifact],
+        ['fieldlog.log_row'],
+      ),
+    );
+    expect(result.status).toBe('terminal_failure');
+    if (result.status !== 'terminal_failure') throw new Error('unreachable');
+    expect(result.error?.code).toBe('store_write_enum_violation');
+    expect(result.error?.message).toContain('status'); // names the COLUMN
+    expect(result.error?.message).toContain('session_log'); // names the STORE
+    expect(result.error?.message).not.toContain('processed'); // never echoes the offending VALUE
+    expect(db.upserts).toEqual([]); // rejected BEFORE the write — no silent persist (fail-the-fix)
+  });
+
+  it('an IN-whitelist resolved enum value upserts normally (the guard does NOT over-reject)', async () => {
+    const spec = parseFixture(ENUM_YAML);
+    const db = new SpyDb();
+    db.upsertRow = { entry_ref: 'sess-1', session_id: 'sess-1', status: 'accepted' };
+    const node = makeStoreWriteNode({ spec, db });
+    const result = await node(
+      ctxFor(
+        'log',
+        'write',
+        { session_id: 'sess-1', status: 'accepted' }, // 'accepted' ∈ [accepted, rejected]
+        [catalogArtifact],
+        ['fieldlog.log_row'],
+      ),
+    );
+    expect(result.status).toBe('completed');
+    expect(db.upserts).toHaveLength(1);
+    expect(db.upserts[0]?.values.status).toBe('accepted');
+  });
+
+  it('a NON-STRING resolved value for a text-enum column is rejected — it cannot bypass the whitelist by JS type (fail-the-fix)', async () => {
+    // A NUMBER resolved from the {event:} source for the `status` text-enum column. A non-string is by
+    // definition not a member of a text whitelist, so it must be rejected HERE — matching the HTTP
+    // route's z.enum (a non-member number is a VALIDATION_ERROR). Fail-the-fix: with the pre-fix guard
+    // (`typeof value === 'string' && …`) the number SKIPPED the whitelist and reached db.upsert (and SF-1
+    // accepts a scalar number too), so it would have upserted `completed` — a real bypass.
+    const spec = parseFixture(ENUM_YAML);
+    const db = new SpyDb();
+    const node = makeStoreWriteNode({ spec, db });
+    const result = await node(
+      ctxFor(
+        'log',
+        'write',
+        { session_id: 'sess-1', status: 123 }, // a NUMBER — not a string, not a member of [accepted, rejected]
+        [catalogArtifact],
+        ['fieldlog.log_row'],
+      ),
+    );
+    expect(result.status).toBe('terminal_failure');
+    if (result.status !== 'terminal_failure') throw new Error('unreachable');
+    expect(result.error?.code).toBe('store_write_enum_violation');
+    expect(result.error?.message).toContain('status'); // names the COLUMN
+    expect(db.upserts).toEqual([]); // rejected BEFORE the write — never reached Postgres (fail-the-fix)
+  });
 });

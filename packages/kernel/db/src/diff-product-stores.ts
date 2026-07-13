@@ -39,7 +39,9 @@ import {
   type StoreSpec,
 } from '@rayspec/spec';
 import {
+  emitFkSql,
   emitStoreSql,
+  fkConstraintName,
   generateProductSql,
   type StoreConflictKeys,
 } from './generated/generate-product-sql.js';
@@ -199,18 +201,22 @@ function dropUniqueIndexSql(table: string, column: string): string {
   return `DROP INDEX "${table}_${column}_unique"`;
 }
 
-/** ADD CONSTRAINT for a product→product FK (additive — mirrors the generator's FK naming/DDL). */
+/**
+ * ADD CONSTRAINT for a product→product FK (additive). Delegates to the generator's `emitFkSql` so the
+ * add-on-update path is BYTE-IDENTICAL to a first materialization — including the tenant-scoped compound
+ * form for a business-key FK (`referencesColumn` set). Single source of truth for the FK DDL.
+ */
 function addFkSql(table: string, fk: StoreForeignKey): string {
-  return (
-    `ALTER TABLE "${table}" ADD CONSTRAINT "${table}_${fk.column}_${fk.references}_id_fk" ` +
-    `FOREIGN KEY ("${fk.column}") REFERENCES "public"."${fk.references}"("id") ` +
-    `ON DELETE ${fk.onDelete} ON UPDATE no action`
-  );
+  return emitFkSql(table, fk);
 }
 
-/** DROP CONSTRAINT for a removed/changed FK (destructive — the scan flags `drop-constraint`). */
+/**
+ * DROP CONSTRAINT for a removed/changed FK (destructive — the scan flags `drop-constraint`). The
+ * constraint NAME comes from the shared `fkConstraintName`, so the DROP names EXACTLY what a prior ADD
+ * created (id-target `_id_fk` OR business-key `_<refcol>_fk`) — a reviewed FK change re-blocks nowhere.
+ */
 function dropFkSql(table: string, fk: StoreForeignKey): string {
-  return `ALTER TABLE "${table}" DROP CONSTRAINT "${table}_${fk.column}_${fk.references}_id_fk"`;
+  return `ALTER TABLE "${table}" DROP CONSTRAINT "${fkConstraintName(table, fk)}"`;
 }
 
 /** DROP TABLE for a removed store (destructive — the scan flags `drop-table`). */
@@ -274,6 +280,12 @@ function assertStoreIdentifiers(store: StoreSpec): void {
   for (const fk of store.foreignKeys) {
     assertSafeIdentifier(fk.column, `FK column '${store.name}.${fk.column}'`);
     assertSafeIdentifier(fk.references, `FK reference '${store.name} -> ${fk.references}'`);
+    if (fk.referencesColumn !== undefined) {
+      assertSafeIdentifier(
+        fk.referencesColumn,
+        `FK referencesColumn '${store.name} -> ${fk.references}.${fk.referencesColumn}'`,
+      );
+    }
   }
 }
 
@@ -310,9 +322,19 @@ function fksByColumn(store: StoreSpec): Map<string, StoreForeignKey> {
   return new Map(store.foreignKeys.map((fk) => [fk.column, fk]));
 }
 
-/** Do two FKs describe the SAME constraint (same target + same onDelete)? */
+/**
+ * Do two FKs describe the SAME constraint (same target store + same referenced column + same onDelete)?
+ * `referencesColumn` is part of the identity: switching an FK between the injected `id` and a named
+ * business key (or between two business keys) changes the constraint SHAPE + NAME, so it must emit a
+ * DROP + ADD REPLACE — comparing it here is what makes that reachable. `undefined === undefined` holds,
+ * so two id-target FKs still compare equal (no spurious REPLACE for an unchanged FK).
+ */
 function fkEqual(a: StoreForeignKey, b: StoreForeignKey): boolean {
-  return a.references === b.references && a.onDelete === b.onDelete;
+  return (
+    a.references === b.references &&
+    a.onDelete === b.onDelete &&
+    a.referencesColumn === b.referencesColumn
+  );
 }
 
 /** The forward statements for ONE surviving table, split into additive-first / destructive-last buckets. */
