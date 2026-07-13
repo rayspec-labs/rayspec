@@ -292,6 +292,13 @@ function assertNever(action: never): undefined {
  */
 const LIST_MAX_LIMIT = 200;
 
+/**
+ * The bounded `<col>__in` set-filter element count (mirrors store-query.ts `MAX_IN_VALUES`). Documented
+ * in the `<col>__in` param description; kept in sync by the `list` query-param test (a doc, not a
+ * runtime bound — the runtime cap lives in store-query.ts).
+ */
+const LIST_MAX_IN_VALUES = 100;
+
 /** Map a declared ColumnType to a JSON-Schema fragment for a `list` equality-filter QUERY parameter. */
 function filterParamSchema(type: ColumnType): Record<string, unknown> {
   switch (type) {
@@ -315,9 +322,23 @@ function filterParamSchema(type: ColumnType): Record<string, unknown> {
  *  - control params `order` / `after` / `limit`;
  *  - one equality-filter param per declared BUSINESS column (a `jsonb` column is NOT filterable at
  *    runtime, so it is excluded — documenting it would over-claim), keyed by the AUTHOR snake name;
- *  - the injected `created_by` equality filter.
+ *  - a `<col>__in` SET-filter param per filterable column (a comma-separated value list → SQL `IN`);
+ *  - the injected `created_by` equality + `created_by__in` set filter.
  * All optional. Product-agnostic: every name is derived from the spec, none is hard-coded.
  */
+function inFilterParam(name: string): OpenApiParameter {
+  // The `<col>__in` value is a raw comma-separated list (matches store-query.ts, which splits on `,` +
+  // coerces each element to the column type) — documented as a string, not an array, because the wire
+  // form is the literal `?<col>__in=v1,v2` (a distinct query key), not an `explode`d array param.
+  return {
+    name: `${name}__in`,
+    in: 'query',
+    required: false,
+    description: `Set filter on '${name}': a comma-separated list (1..${LIST_MAX_IN_VALUES}) of '${name}' values — matches a row whose '${name}' is ANY of them (SQL IN).`,
+    schema: { type: 'string' },
+  };
+}
+
 function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
   const params: OpenApiParameter[] = [
     {
@@ -346,6 +367,10 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
       schema: { type: 'integer', minimum: 1, maximum: LIST_MAX_LIMIT },
     },
   ];
+  // The equality-filter surface: one param per declared non-jsonb business column (a control-key-named
+  // column is skipped — defense-in-depth), PLUS the injected `created_by`. Collected FIRST, with their
+  // names, so the `<col>__in` set-filter companions below can be DE-DUPLICATED against them.
+  const equalityNames = new Set<string>();
   for (const col of store.columns) {
     if (col.type === 'jsonb') continue; // jsonb is not filterable — omit rather than over-claim
     // Defense-in-depth: a column named after a control key (order/after/limit) is already
@@ -353,6 +378,7 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
     // code-built spec that bypassed the parser can never emit a DUPLICATE query parameter (control param
     // + filter param sharing name+in) → keeping the emitted document a VALID OpenAPI 3.1 doc.
     if (CONTROL_KEYS.has(col.name)) continue;
+    equalityNames.add(col.name);
     params.push({
       name: col.name,
       in: 'query',
@@ -361,6 +387,8 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
       schema: filterParamSchema(col.type),
     });
   }
+  // The injected created_by equality filter (always present on a list op).
+  equalityNames.add('created_by');
   params.push({
     name: 'created_by',
     in: 'query',
@@ -368,6 +396,17 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
     description: 'Equality filter on the injected created_by actor stamp.',
     schema: { type: 'string' },
   });
+  // The `<col>__in` SET-filter companions — one per equality column, EXCEPT when the companion name is
+  // ITSELF a declared equality param. That collision arises when a column is literally named `<x>__in`
+  // (its own equality param clashes with `<x>`'s IN-companion) or a business column is named
+  // `created_by__in` (clashing with the injected `created_by`'s companion). In every such case the
+  // exact-named EQUALITY param wins — mirroring the runtime Precedence-1 (store-query.ts), which routes
+  // `?<col>__in=` to a real `<col>__in` column as plain equality — so the companion is DROPPED and the
+  // emitted document never carries a duplicate (name+in) parameter (a valid OpenAPI 3.1 doc).
+  for (const name of equalityNames) {
+    if (equalityNames.has(`${name}__in`)) continue;
+    params.push(inFilterParam(name));
+  }
   return params;
 }
 

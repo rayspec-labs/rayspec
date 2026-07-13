@@ -7,14 +7,19 @@
  * the tenant predicate stays STRUCTURAL (`and(tenantPredicate, extra)`) and can NEVER be dropped — a
  * filter/order/keyset from tenant B can never surface tenant A's rows.
  *
- * Fail-CLOSED: every query param must be a recognized control key (`order`/`after`/`limit`) OR a
- * filterable column (a declared business column, or the injected `created_by`). An UNKNOWN param is a
- * VALIDATION_ERROR (never silently ignored — a typo'd filter must not return the whole table).
+ * Fail-CLOSED: every query param must be a recognized control key (`order`/`after`/`limit`), a
+ * filterable column (a declared business column, or the injected `created_by`), or a `<col>__in` set
+ * filter on one such column. An UNKNOWN param is a VALIDATION_ERROR (never silently ignored — a typo'd
+ * filter must not return the whole table).
  *
- * Deliberately NARROW: equality filters (AND-combined) only — no OR, no ranges, no full-text. Order is
- * a single `order=<col>.asc|desc`; the default is a deterministic `id asc` so keyset pagination is
- * stable. Keyset (`after=<opaque cursor>` + `limit`) compares `(order_col, id)` against the cursor in
- * the sort direction, so paging is correct even when the order column has duplicate values.
+ * Deliberately NARROW: equality filters (`?col=v`, AND-combined) + a per-column set filter
+ * (`?col__in=v1,v2,…` → SQL `IN`, folded into the SAME AND-chain) — no ranges, no full-text, no
+ * cross-column OR. The distinct `__in` SUFFIX (not a bare `?col=a,b`) keeps plain equality byte-
+ * identical and unambiguous on a comma-bearing value, and a real column literally named `<x>__in` still
+ * takes precedence as plain equality. Order is a single `order=<col>.asc|desc`; the default is a
+ * deterministic `id asc` so keyset pagination is stable. Keyset (`after=<opaque cursor>` + `limit`)
+ * compares `(order_col, id)` against the cursor in the sort direction, so paging is correct even when
+ * the order column has duplicate values.
  *
  * ORDER COLUMNS ARE NON-NULLABLE ONLY: keyset pagination compares `(order_col, id)`
  * against the cursor's stored order value; a NULL order value makes `col > NULL` / `col = NULL`
@@ -27,7 +32,19 @@
 
 import { ApiError } from '@rayspec/auth-core';
 import type { ColumnType, StoreSpec } from '@rayspec/spec';
-import { and, asc, desc, eq, getTableColumns, gt, isNull, lt, or, type SQL } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  getTableColumns,
+  gt,
+  inArray,
+  isNull,
+  lt,
+  or,
+  type SQL,
+} from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import { snakeToCamel } from './injected-columns-view.js';
 
@@ -47,6 +64,14 @@ export const CONTROL_KEYS: ReadonlySet<string> = new Set(['order', 'after', 'lim
 /** Bounded page size: 1..200, default 200 (the hard cap). */
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 200;
+
+/**
+ * The `<col>__in` set-filter suffix + its bounded element count. The distinct suffix (rather than a bare
+ * `?col=a,b`) keeps plain equality byte-identical + unambiguous on a comma-bearing value. An oversized
+ * set ⇒ 400 (a bound on the SQL `IN (…)` list size — a work/DoS guard, mirrors the `limit` cap).
+ */
+const IN_SUFFIX = '__in';
+const MAX_IN_VALUES = 100;
 
 /** The injected columns that are FILTERABLE in addition to the declared business columns. */
 const INJECTED_FILTERABLE: ReadonlyMap<string, ColumnType> = new Map([['created_by', 'text']]);
@@ -247,14 +272,48 @@ export function buildListQuery(
     limit = n;
   }
 
-  // --- equality filters (unknown param ⇒ fail-closed) ---
+  // --- filters: plain equality + the `<col>__in` set filter (unknown param ⇒ fail-closed) ---
   const predicates: SQL[] = [];
   for (const [key, rawValue] of params) {
     if (CONTROL_KEYS.has(key)) continue;
-    const type = filterable.get(key);
-    if (type === undefined) validationError(`Unknown query parameter '${key}'.`);
-    const col = drizzleColumn(table, key);
-    predicates.push(eq(col, coerceValue(type, key, rawValue)) as SQL);
+    // Precedence 1 — the FULL key is itself a declared filterable column (INCLUDING one literally named
+    // `<x>__in`): plain equality, byte-identical to the pre-`__in` behaviour. A comma-bearing value on
+    // such a column stays a single literal, never silently reinterpreted as a set — the fail-closed
+    // reason `__in` is a distinct suffix rather than a bare `?col=a,b`.
+    const directType = filterable.get(key);
+    if (directType !== undefined) {
+      const col = drizzleColumn(table, key);
+      predicates.push(eq(col, coerceValue(directType, key, rawValue)) as SQL);
+      continue;
+    }
+    // Precedence 2 — `<col>__in`: a set (IN) filter on a declared filterable column. Parse the value as
+    // a comma-separated list, coerce EACH element with the SAME per-type coercion equality uses, and
+    // fold `inArray(col, values)` into the SAME AND-chain (so it composes with equality filters + the
+    // keyset predicate + the tenant chokepoint automatically). Fail-closed: an empty set / oversized set
+    // / a non-filterable (jsonb) column / an unknown prefix column each 400.
+    if (key.endsWith(IN_SUFFIX)) {
+      const prefix = key.slice(0, -IN_SUFFIX.length);
+      const inType = filterable.get(prefix);
+      if (inType !== undefined) {
+        const col = drizzleColumn(table, prefix);
+        const parts = rawValue.split(',');
+        if (parts.length > MAX_IN_VALUES) {
+          validationError(`Filter '${key}' accepts at most ${MAX_IN_VALUES} values.`);
+        }
+        const values = parts.map((part) => {
+          // A blank element (`?col__in=`, `?col__in=,,`, `a,,b`) is rejected: an empty IN set has no
+          // meaning and an empty element is almost always a typo — fail-closed rather than guess.
+          if (part === '') {
+            validationError(`Filter '${key}' has an empty value in its comma-separated list.`);
+          }
+          return coerceValue(inType, key, part);
+        });
+        predicates.push(inArray(col, values) as SQL);
+        continue;
+      }
+    }
+    // Precedence 3 — neither a filterable column nor a `<col>__in` on one: fail-closed.
+    validationError(`Unknown query parameter '${key}'.`);
   }
 
   // --- soft-delete tombstone filter (opt-in) ---
