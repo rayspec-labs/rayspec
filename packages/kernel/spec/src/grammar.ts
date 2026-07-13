@@ -469,6 +469,30 @@ export const ExtensionRef = z
 export type ExtensionRef = z.infer<typeof ExtensionRef>;
 
 // ---------------------------------------------------------------------------------------
+// frontend[] — independent grammar (static frontend mounts served alongside the API)
+// ---------------------------------------------------------------------------------------
+
+/**
+ * One static frontend mount served alongside the backend's API. A backend may declare a list of
+ * these so a spec can ship its own web UI (built assets) next to the routes it exposes.
+ *
+ *  - `route` — the URL prefix the mount is served under (e.g. `/` or `/app`); must start with `/`.
+ *  - `dir`   — the directory of built static assets, relative to the spec file.
+ *  - `spa`   — when true, an unmatched path under `route` falls back to `index.html` (the
+ *              History-API single-page-app fallback); default false (plain static file serving).
+ *
+ * `.strict()` — fail-closed unknown-key rejection, consistent with every other grammar level.
+ */
+export const FrontendSpec = z
+  .object({
+    route: z.string().min(1).regex(/^\//, 'route must start with "/"'),
+    dir: z.string().min(1),
+    spa: z.boolean().default(false),
+  })
+  .strict();
+export type FrontendSpec = z.infer<typeof FrontendSpec>;
+
+// ---------------------------------------------------------------------------------------
 // RaySpec — the whole document
 // ---------------------------------------------------------------------------------------
 
@@ -504,6 +528,13 @@ export const RaySpec = z
      * surface). A minimal spec (just `version` + `metadata`) stays valid (deployment is omittable).
      */
     deployment: DeploymentSpec.optional(),
+    /**
+     * OPTIONAL static frontend mounts. A list of `{route, dir, spa?}` entries served alongside the
+     * API (see `FrontendSpec`). `.optional()` (NOT `.default([])`) so a spec that omits `frontend`
+     * parses byte-identically — absent = NO static mounts. A minimal spec (just `version` +
+     * `metadata`) stays valid (frontend is omittable).
+     */
+    frontend: z.array(FrontendSpec).optional(),
   })
   .strict();
 export type RaySpec = z.infer<typeof RaySpec>;

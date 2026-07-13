@@ -12,7 +12,7 @@
  * the spec version — the test failure is the prompt to make that call consciously.
  */
 import { describe, expect, it } from 'vitest';
-import { AgentSpecConfig, RaySpec, RouteAction, ToolSpecConfig } from './grammar.js';
+import { AgentSpecConfig, FrontendSpec, RaySpec, RouteAction, ToolSpecConfig } from './grammar.js';
 
 describe('grammar shape pins (neutral-churn tripwire)', () => {
   it('RaySpec has exactly the expected top-level sections (extensions added)', () => {
@@ -25,6 +25,7 @@ describe('grammar shape pins (neutral-churn tripwire)', () => {
         'api',
         'deployment',
         'extensions',
+        'frontend',
         'handlers',
         'metadata',
         'stores',
@@ -75,5 +76,49 @@ describe('grammar shape pins (neutral-churn tripwire)', () => {
         'timeoutMs',
       ].sort(),
     );
+  });
+});
+
+describe('FrontendSpec (static frontend mount)', () => {
+  it('parses a valid mount', () => {
+    const res = FrontendSpec.safeParse({ route: '/', dir: 'web/dist', spa: true });
+    expect(res.success).toBe(true);
+    if (res.success) {
+      expect(res.data).toEqual({ route: '/', dir: 'web/dist', spa: true });
+    }
+  });
+
+  it('defaults spa to false when omitted', () => {
+    const res = FrontendSpec.safeParse({ route: '/app', dir: 'ui' });
+    expect(res.success).toBe(true);
+    if (res.success) expect(res.data.spa).toBe(false);
+  });
+
+  it('rejects a route without a leading slash', () => {
+    expect(FrontendSpec.safeParse({ route: 'app', dir: 'ui' }).success).toBe(false);
+  });
+
+  it('rejects an empty dir', () => {
+    expect(FrontendSpec.safeParse({ route: '/', dir: '' }).success).toBe(false);
+  });
+
+  it('rejects an unknown key (strict)', () => {
+    expect(FrontendSpec.safeParse({ route: '/', dir: 'ui', extra: true }).success).toBe(false);
+  });
+
+  it('accepts a spec carrying a frontend list, and omits it when absent (optional)', () => {
+    const withFrontend = RaySpec.safeParse({
+      version: '1.0',
+      metadata: { name: 'm' },
+      frontend: [{ route: '/', dir: 'web/dist' }],
+    });
+    expect(withFrontend.success).toBe(true);
+    if (withFrontend.success) {
+      expect(withFrontend.data.frontend).toEqual([{ route: '/', dir: 'web/dist', spa: false }]);
+    }
+    // Absent ⇒ the key is not injected (keeps a frontend-less spec byte-identical).
+    const withoutFrontend = RaySpec.safeParse({ version: '1.0', metadata: { name: 'm' } });
+    expect(withoutFrontend.success).toBe(true);
+    if (withoutFrontend.success) expect('frontend' in withoutFrontend.data).toBe(false);
   });
 });

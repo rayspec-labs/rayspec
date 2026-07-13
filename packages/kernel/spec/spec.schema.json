@@ -531,6 +531,32 @@
         }
       },
       "additionalProperties": false
+    },
+    "frontend": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "route": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\/"
+          },
+          "dir": {
+            "type": "string",
+            "minLength": 1
+          },
+          "spa": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "route",
+          "dir"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   "required": [
