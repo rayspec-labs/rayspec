@@ -241,19 +241,28 @@ output reports only which keys were written vs. already present.
 
 ```
 rayspec dev db [--database-url <url>] [--name <db>]
+rayspec dev db --reset --yes [--database-url <url>] [--name <db>]
 ```
 
-Creates the local dev database **if it is absent** — idempotent and never
-destructive (a second run is a no-op; it never drops or alters an existing
+By default, creates the local dev database **if it is absent** — idempotent and
+never destructive (a second run is a no-op; it never drops or alters an existing
 database). It connects to the maintenance database on the same host and issues a
 single `CREATE DATABASE`. The database name is validated against a strict
 identifier pattern before use, since `CREATE DATABASE` cannot be parameterized.
+
+With **`--reset --yes`** it instead **DROPs and re-CREATEs** a clean, empty
+database (and drops the sibling `<name>_dbos_sys` durable-worker system database),
+so you can wipe a corrupt or stale dev DB in one command. Because it destroys data
+it is gated on an explicit `--yes`: `--reset` **without** `--yes` refuses and
+touches nothing (the guard fires before any DB connection). Local-dev only.
 
 - **Postgres:** required (reachable on the host in the base URL).
 - **Flags:**
   - `--database-url <url>` — optional base URL; defaults to `DATABASE_URL`.
   - `--name <db>` — optional target name; defaults to the database named in the
     base URL.
+  - `--reset` — DROP + re-CREATE a clean database (destructive). Requires `--yes`.
+  - `--yes` — confirm the destructive `--reset`.
 - **Output** (value-free — the connection string is never echoed; any stray URL
   in an error message is redacted):
 
@@ -261,7 +270,8 @@ identifier pattern before use, since `CREATE DATABASE` cannot be parameterized.
   { "ok": true, "command": "dev db", "db": "rayspec", "created": true, "errors": [] }
   ```
 
-  `created` is `true` when freshly created, `false` on the idempotent no-op path.
+  `created` is `true` when freshly created, `false` on the idempotent no-op path; a
+  `--reset --yes` run reports `"created": true, "reset": true`.
 
 ---
 
@@ -351,10 +361,10 @@ checked before it joins the deny-by-default chokepoint).
   `DATABASE_URL`, then materializes the declared stores, so it expects a **clean or
   fully-migrated** database. A half-provisioned database — for example one where the
   migration bookkeeping exists but the chain was only partly applied — makes boot
-  fail with a raw migration error. There is no reset command (`dev db` creates a
-  database but never drops one); if boot fails this way, deploy against a fresh,
-  empty database instead (`rayspec dev db --name <fresh>` creates one, then point
-  `DATABASE_URL` at it).
+  fail with a raw migration error. If boot fails this way, deploy against a fresh,
+  empty database: [`rayspec dev db --reset --yes`](#dev-db) DROPs and re-CREATEs a
+  clean one, or `rayspec dev db --name <fresh>` creates a separate empty database;
+  then point `DATABASE_URL` at it.
 
 ---
 

@@ -86,6 +86,10 @@ Create the database if it doesn't exist yet:
 $RAYSPEC dev db               # idempotent: creates the DB only if absent, never destructive
 ```
 
+> To wipe a corrupt or stale dev database and start from a clean slate, `$RAYSPEC
+> dev db --reset --yes` DROPs and re-CREATEs it (destructive — the `--yes` is
+> required, and `--reset` without it refuses and touches nothing).
+
 The full set of environment variables — including the optional ones a spec only
 needs when it declares audio, media playback, cron, or blob storage — is
 documented in [`.env.example`](../.env.example). Copy variables from there as your
@@ -260,10 +264,55 @@ curl -s -X POST http://localhost:8080/v1/orgs/<ORG_ID>/api-keys \
 ```
 
 The plaintext key is shown **once** — store it now. From here, `Authorization:
-Bearer rk_....<secret>` authenticates a client that only holds the API key.
+Bearer rk_....<secret>` authenticates a client that only holds the API key. A key
+has the shape `rk_<public-prefix>.<secret>`: the prefix is a public lookup handle,
+the secret is opaque. Newly minted keys use the `rk_` prefix; keys minted before
+the prefix changed carry an `mk_` prefix and remain valid — both are accepted.
 
 That is a full round trip: a running RaySpec backend, a provisioned tenant, and
 authenticated requests under strict tenant scoping.
+
+---
+
+## Managing org members
+
+The owner you provisioned can add more members to the org. Adding a member is
+**owner-only** — a live-membership permission check, so a non-owner (or an API-key
+principal) is refused — and goes through the running server's auth API:
+
+```bash
+# Add a member by email (owner Bearer token required)
+curl -s -X POST http://localhost:8080/v1/orgs/<ORG_ID>/members \
+  -H 'authorization: Bearer <ORG_TOKEN>' \
+  -H 'content-type: application/json' \
+  -d '{"email":"teammate@example.com"}'
+```
+
+If that email already has an account, it is added to the org idempotently as a
+`member`. If it is a **new** email, the call provisions an account and returns a
+`oneTimePassword` **once** in the response — the core sends no email, so you (the
+owner) convey that password to the new user out of band, and they change it on
+first sign-in:
+
+```json
+{ "userId": "<USER_ID>", "email": "teammate@example.com", "role": "member",
+  "oneTimePassword": "<SHOWN-ONCE>" }
+```
+
+Any member can list the org's members:
+
+```bash
+curl -s http://localhost:8080/v1/orgs/<ORG_ID>/members \
+  -H 'authorization: Bearer <ORG_TOKEN>'
+# → { "members": [ { "userId": "...", "email": "...", "role": "owner" }, ... ] }
+```
+
+> **Accepted limitation (trusted-beta posture).** Because a `oneTimePassword`
+> appears only when the call provisions a *new* account, the response reveals to
+> the owner whether an email already has a platform account. This is inherent to
+> the minimal in-band design and is accepted for the trusted single-node posture;
+> the out-of-band invite flow in the hardening layer closes that signal (see
+> [`SECURITY.md`](../SECURITY.md)).
 
 ---
 
