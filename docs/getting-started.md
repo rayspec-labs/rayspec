@@ -320,9 +320,19 @@ curl -s http://localhost:8080/v1/orgs/<ORG_ID>/members \
 
 Step 4 booted the platform's own surface (auth, OIDC, `/health`) with no product
 routes. To serve the **routes, stores, and agents a spec declares**, use
-`rayspec deploy` — it applies the migration for the declared stores, mounts the
-declared routes on the authenticated surface, and serves them from one file, until
-`SIGINT` / `SIGTERM`.
+`rayspec deploy` — against a clean database it materializes the declared stores,
+mounts the declared routes on the authenticated surface, and serves them from one
+file, until `SIGINT` / `SIGTERM`.
+
+> **`deploy` is mount-only against an existing deployment.** On a clean database the
+> boot materializes the declared stores; on an up-to-date one it just mounts them. It
+> does **not** compute and apply a schema change on its own — if the live schema has
+> **drifted** from what the spec now declares, the boot **fails closed** and points
+> you at the reviewed forward-migration path. To evolve an existing deployment's
+> schema, author the delta (`rayspec plan <new-spec> --against <old-spec>`) and apply
+> it with `rayspec deploy --apply-migration <delta.sql>` (add `--allowlist <file.json>`
+> for a reviewed destructive statement). See the
+> [CLI reference](./cli-reference.md#deploy--boot-and-serve-a-declared-product).
 
 > **`rayspec deploy <spec>` and `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` are the
 > same boot** — `deploy` just sets `RAYSPEC_SPEC_PATH` for you. Either one serves a

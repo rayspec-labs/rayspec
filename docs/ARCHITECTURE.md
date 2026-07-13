@@ -184,6 +184,42 @@ distinction is intentional: the core gives a self-hoster a correct, tenant-isola
 backend for trusted use, and the hardening layer is what a public multi-tenant
 service additionally needs.
 
+### Restore and key rotation
+
+The boot secrets live in the environment, never in the database — which has a sharp
+operational consequence when you **restore a database dump under different secrets**.
+A full dump restores the rows whole — orgs, users, memberships, the argon2id password
+hashes, the API-key rows, and all tenant data — so at the DB level everything survives
+and stays reachable. The only thing a freshly-minted secret permanently breaks is the
+credential material keyed by that specific secret:
+
+- **The API-key pepper (`RAYSPEC_API_KEY_PEPPER`).** Every API-key row stores an HMAC
+  of the key computed with the pepper. Restore the dump under a **freshly-minted**
+  pepper and those stored HMACs no longer match, so the copied API keys all fail to
+  verify (`401`) — even though the rows are physically present. That is the *only* thing
+  a new pepper breaks: the copied API keys, nothing else. The data and the org
+  identities stay reachable — **user passwords are hashed with argon2id** (each hash
+  carries its own salt and params; the pepper never touches passwords), so they survive
+  the restore untouched. An org owner simply **logs in again** (password intact), gets a
+  fresh JWT minted under the current signing key, and reaches the tenant data exactly as
+  before. The fix is not to recover the old keys but to **mint new API keys** after a
+  restore. The one genuine edge, noted honestly: an org whose *sole* credential was an
+  API key (no user login at all) has nothing to log in with, so it needs a fresh
+  key/identity established out of band.
+- **The JWT/OIDC signing key (`RAYSPEC_JWT_SIGNING_KEY`).** The same class of problem:
+  tokens issued under the old key fail to verify under a new one. This one **self-heals**
+  — a user simply signs in again and gets a fresh token minted under the current key.
+  (It is the same re-login that restores API access above, because user passwords are
+  pepper-independent; only a copied API key, which cannot "log in again," must be
+  re-minted rather than self-healing.)
+
+The practical rule: **keep a restored dump paired with the secrets it was created under**
+(back up the environment/secret material alongside the database), or plan to re-mint the
+affected **API keys** after a cross-environment restore. This is stated for the **trusted,
+single-node** posture; it is not a claim that restoring a database into a public,
+multi-tenant deployment is safe — that requires the separate hardening layer above (see
+[`SECURITY.md`](../SECURITY.md)).
+
 ---
 
 ## Persistence and the run journal
@@ -197,6 +233,15 @@ automatically, and every migration is diffed against the current schema and pass
 through a safety gate (a destructive change is blocked unless explicitly allowed)
 before it is applied — including a from-clean-database check that the whole
 migration chain bootstraps an empty database correctly.
+
+A booted deploy applies this generated schema in one direction only: it materializes a
+store on a clean database and mounts it when the live schema already matches. It is
+**mount-only** against an existing deployment — a live schema that has **drifted** from
+the spec **fails the boot closed** rather than being altered implicitly. Evolving an
+existing deployment's schema is a deliberate, reviewed step: author the forward delta
+and apply it with `rayspec deploy --apply-migration <delta.sql>` (which runs it through
+the same safety gate). See the
+[CLI reference](./cli-reference.md#deploy--boot-and-serve-a-declared-product).
 
 ---
 

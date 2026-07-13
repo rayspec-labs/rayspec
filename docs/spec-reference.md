@@ -132,11 +132,62 @@ stores:
     plain uniqueness. A REST `create`/`update` that duplicates a same-tenant value
     on such a column returns **`409 CONFLICT`** (the message names the column, never
     the value — see [`api`](#api)).
+  - `enum` — optional non-empty list of allowed string values, valid **only on a
+    `text` column** (and rejected at validation on any other type, or with a
+    duplicate member). When present, the column becomes a closed whitelist that the
+    platform **enforces server-side**: an out-of-whitelist value on a `create`/`update`
+    store route is a `400 VALIDATION_ERROR`, and the same whitelist is enforced on the
+    workflow `store.write` value path. Honest residual: a custom escape-hatch handler
+    that writes directly through the `HandlerDb` facade is **not** enum-checked (the
+    facade carries no spec-level vocabulary) — a handler author owns its own value
+    discipline, as for every other business rule.
 - `foreignKeys` — optional list of child→parent foreign keys, default `[]`. Each:
   - `column` — the local business column carrying the FK (must be a declared
     column).
   - `references` — the referenced store's name (must be another declared store).
-  - `onDelete` — one of `cascade`, `restrict`, `set null`; default `cascade`.
+  - `referencesColumn` — optional. When omitted, the FK targets the parent store's
+    injected `id` primary key, and the local `column` must be `type: uuid`. When set,
+    the FK instead targets a **`unique: true`** column of the parent (a business-key
+    FK). A business-key FK materializes as a **tenant-scoped compound** key —
+    `(tenant_id, <column>) REFERENCES parent(tenant_id, <referencesColumn>)` — which
+    structurally forbids a cross-tenant reference. Validation requires that the
+    referenced column is declared `unique: true` and that the local column's type
+    matches the referenced column's type. At runtime, a `create`/`update` naming a
+    non-existent parent value is a `400`, and a `restrict`-blocked parent delete (or a
+    change to a parent's referenced value while a child still points at the old one) is
+    a `409` — both tenant-safe: the `400` names only the local column, the `409` names
+    no relationship at all, never a foreign value.
+  - `onDelete` — one of `cascade`, `restrict`, `set null`; default `cascade`. On a
+    business-key FK (one with `referencesColumn`) `set null` is **rejected** — a
+    compound FK cannot null `tenant_id` — so a business-key FK supports `cascade` or
+    `restrict` only. (For an id-target FK, `set null` additionally requires the local
+    column to be `nullable`.)
+- `softDelete` — optional boolean (default: hard delete). When `true`, a `delete`
+  stamps the injected `deleted_at` tombstone instead of physically removing the row,
+  and every read/write hides tombstoned rows, so a soft-deleted row is **uniformly
+  invisible**: `get` → `404`, `list` omits it, a second `delete` → `404`,
+  `update`/`PATCH` → `404`. Tombstone-hiding also applies on the richer read/write
+  surface (declarative views, workflow `store_read`/`store_write`, and handlers), not
+  just the CRUD routes. **Caveat:** a tombstoned row physically persists (it still holds
+  its column values), so a `unique` value from a soft-deleted row keeps occupying the
+  tenant-scoped unique index — re-creating that same value returns `409 CONFLICT`
+  rather than reusing the freed value. With `softDelete` absent/false the default is a
+  hard physical delete with no `deleted_at` filtering anywhere.
+
+```yaml
+stores:
+  - name: categories
+    columns:
+      - { name: code, type: text, unique: true }   # the business key a child FK targets
+      - { name: label, type: text }
+  - name: tickets
+    softDelete: true                                 # a delete tombstones instead of removing
+    columns:
+      - { name: category_code, type: text }
+      - { name: status, type: text, enum: [open, in_progress, done] }  # server-enforced whitelist
+    foreignKeys:
+      - { column: category_code, references: categories, referencesColumn: code, onDelete: restrict }
+```
 
 Tenancy is not optional: there is no field to opt a store out of the tenant
 predicate.
@@ -227,6 +278,16 @@ parameter is rejected (`400 VALIDATION_ERROR`).
 - **Equality filters** — `?<column>=<value>` on any declared column, plus the
   injected `created_by`. Multiple filters are AND-combined. Equality only: there
   are no range, `OR`, `LIKE`, or full-text operators.
+- **Set filters** — `?<column>__in=v1,v2,…` matches any of a comma-separated value
+  list (SQL `IN`) on a filterable column, so a "status is `open` OR `in_progress`"
+  read is one query. The distinct `__in` suffix keeps plain `?<column>=<value>`
+  equality byte-identical and unambiguous on a comma-bearing value — and a column
+  literally named `<x>__in` still routes as plain equality. Each element is coerced
+  with the same per-type rules equality uses, and the set folds into the same
+  AND-chain (so it composes with equality filters, keyset pagination, and the tenant
+  predicate). Fail-closed: an empty/blank element, more than 100 values, a
+  non-filterable (`jsonb`) column, or an unknown prefix column each return
+  `400 VALIDATION_ERROR`.
 - **Ordering** — `?order=<column>.asc|desc`. The order column must be
   **non-nullable**: a declared non-nullable column, or the injected `id` /
   `created_at`. A nullable column (and the nullable injected `created_by`) is
@@ -461,8 +522,14 @@ frontend:
 reserved platform prefix is never answered by a static mount), and a static miss
 returns the platform's uniform `404`. Serving is fail-closed — path traversal
 (including URL-encoded forms), dotfiles/hidden paths, and symlinks that escape the
-directory are refused; directories are never listed. Range and HEAD requests are
-honored by the underlying static server.
+directory are refused; directories are never listed.
+
+**Range and HEAD** are a supported feature (delegated to the underlying static
+server): a byte-`Range` GET returns `206` partial content (`Content-Range`,
+`Accept-Ranges: bytes`, and exactly the requested bytes), and a `HEAD` returns `200`
+with `Content-Length` and an empty body — useful for media seek/resume. One honest
+edge: an **unsatisfiable** range (a start past the end of the file) currently returns
+`500`, not an RFC-7233 `416` — the underlying static server has no `416` path.
 
 **Not in v1** (deliberately out of scope): server-side rendering, template rendering,
 an asset build/bundling pipeline, cache-control/CDN headers, and the product profile —

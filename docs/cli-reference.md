@@ -314,17 +314,23 @@ to obtain an org-scoped token.
 
 ```
 rayspec deploy <spec.yaml> [--port <n>]
+rayspec deploy <spec.yaml> --apply-migration <delta.sql> [--allowlist <file.json>] [--port <n>]
 rayspec deploy --dry-run <spec.yaml>
 ```
 
 **Production-mutating.** `deploy` boots the platform from the ambient environment,
-materializes the declared product's tenant-scoped stores, mounts its routes, and
-**serves** it on `PORT` (default `8080`) until `SIGINT` / `SIGTERM` — the
-GitOps-from-one-file path. It reads the same fail-closed environment as
-[`rayspec-serve`](#rayspec-serve--the-boot-server) (it sets `RAYSPEC_SPEC_PATH`
-from the positional for you) and registers the product's stores through the
-sanctioned, validating registration path (every store's tenant predicate is
+mounts the declared product's routes, and **serves** it on `PORT` (default `8080`)
+until `SIGINT` / `SIGTERM` — the GitOps-from-one-file path. It reads the same
+fail-closed environment as [`rayspec-serve`](#rayspec-serve--the-boot-server) (it sets
+`RAYSPEC_SPEC_PATH` from the positional for you) and registers the product's stores
+through the sanctioned, validating registration path (every store's tenant predicate is
 checked before it joins the deny-by-default chokepoint).
+
+**`deploy` is mount-only against an existing schema.** On a **clean** database it
+materializes the declared stores; on an **up-to-date** one it mounts them unchanged. It
+does **not** derive and apply a schema change on its own: if the live schema has
+**drifted** from the spec, the boot **fails closed** rather than altering it. A schema
+change is applied by the explicit `--apply-migration` flag below.
 
 - **`--dry-run`** is a **one-shot**, DB-free, network-free check: it validates the
   document and **composes** it against the wired runtime, emitting a JSON verdict.
@@ -336,10 +342,23 @@ checked before it joins the deny-by-default chokepoint).
   rayspec deploy --dry-run examples/acme-notes/acme-notes.product.yaml
   ```
 
-- **Postgres:** required for the serve path (it applies the migration chain and
-  materializes stores). `--dry-run` touches no database.
+- **`--apply-migration <delta.sql>`** applies a **reviewed forward migration** in
+  place before serving — the supported path for evolving an existing deployment's
+  schema (author the delta with [`plan --against`](#plan)). It reaches the same gated
+  migration engine `plan` previews: a **destructive** statement without a covering
+  reviewed **`--allowlist <file.json>`** entry is **blocked**. It is **reboot-safe** —
+  the boot classifies the live schema first and mounts a present-matching schema
+  instead of re-applying a non-idempotent delta, so a `Restart=always` unit applies the
+  delta once and mounts thereafter (still, drop the flag once it lands to keep intent
+  explicit). It is rejected with `--dry-run` (a dry-run touches no database), and a bare
+  `--allowlist` without `--apply-migration` is refused (it would be silently ignored).
+  Both file paths are jailed exactly like the spec path.
+- **Postgres:** required for the serve path (it applies the committed **platform**
+  migration chain and materializes/mounts stores). `--dry-run` touches no database.
 - **Flags:** `--port <n>` overrides `PORT` (serve path); `--dry-run` selects the
-  one-shot compose check.
+  one-shot compose check; `--apply-migration <delta.sql>` applies a reviewed forward
+  migration; `--allowlist <file.json>` (requires `--apply-migration`) covers reviewed
+  destructive statements in that delta.
 - **Exit:** the serve path stays up until a signal; a fail-closed boot error (a
   missing secret, an unreviewed destructive migration) prints an actionable
   message and exits `1`.
@@ -357,14 +376,19 @@ checked before it joins the deny-by-default chokepoint).
   Compile such handlers to `.js` before deploying — the deploy runtime ships no
   turnkey `.ts` loader. ([`gen-handler`](#gen-handler) scaffolds a handler;
   [`doctor`](#doctor) validates the spec.)
-- **Database state.** The serve path applies the committed migration chain to
-  `DATABASE_URL`, then materializes the declared stores, so it expects a **clean or
-  fully-migrated** database. A half-provisioned database — for example one where the
-  migration bookkeeping exists but the chain was only partly applied — makes boot
-  fail with a raw migration error. If boot fails this way, deploy against a fresh,
-  empty database: [`rayspec dev db --reset --yes`](#dev-db) DROPs and re-CREATEs a
-  clean one, or `rayspec dev db --name <fresh>` creates a separate empty database;
-  then point `DATABASE_URL` at it.
+- **Database state.** The serve path applies the committed **platform** migration
+  chain to `DATABASE_URL` (idempotent — it bootstraps a clean database and no-ops on an
+  up-to-date one), then materializes the declared stores on a clean database or mounts
+  them when they already match — so it expects a **clean or fully-migrated** database. A
+  half-provisioned database — for example one where the migration bookkeeping exists but
+  the chain was only partly applied — makes boot fail with a raw migration error. If
+  boot fails this way, deploy against a fresh, empty database:
+  [`rayspec dev db --reset --yes`](#dev-db) DROPs and re-CREATEs a clean one, or
+  `rayspec dev db --name <fresh>` creates a separate empty database; then point
+  `DATABASE_URL` at it. A store **schema change** against an already-materialized
+  database is **not** applied by a plain `deploy` — a drifted schema fails closed;
+  apply the change with [`--apply-migration`](#deploy--boot-and-serve-a-declared-product)
+  above.
 
 ---
 
@@ -382,8 +406,14 @@ deployment sets its configuration through its orchestrator or secret manager.
   `RAYSPEC_JWT_SIGNING_KEY` (the RS256 PKCS#8 PEM), and `RAYSPEC_API_KEY_PEPPER`
   are set — secrets live in the environment or a secret manager, never in the
   database or in git.
-- On boot it **applies the committed migration chain** to the target database
-  (idempotent — it bootstraps a clean database and no-ops on an up-to-date one).
+- On boot it **applies the committed platform migration chain** to the target
+  database (idempotent — it bootstraps a clean database and no-ops on an up-to-date
+  one), then materializes a spec's declared stores on a clean database or mounts them
+  when they already match. It does **not** auto-apply a store **schema change**: a
+  live product schema that has drifted from the spec **fails closed** — reconcile it
+  with a reviewed forward migration
+  ([`rayspec deploy --apply-migration`](#deploy--boot-and-serve-a-declared-product),
+  or the equivalent `RAYSPEC_UPDATE_MIGRATION` environment variable).
 - It prints a **loud banner** stating that this is a local, single-node,
   not-yet-hardened deployment and must not be placed behind a public address.
   See [Architecture → Security model](./ARCHITECTURE.md#security-model) and

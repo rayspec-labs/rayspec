@@ -78,8 +78,13 @@ Column types are a small, closed vocabulary: `text`, `uuid`, `timestamp`,
 `integer`, `boolean`, and `jsonb`. Store and column names are validated as safe
 identifiers, so a name can never smuggle SQL into a generated statement. A store
 may declare a child→parent foreign key to another store. From a store the platform
-generates the Drizzle schema and the migration, which is diffed and gated before
-it is applied.
+generates the Drizzle schema and the migration, which is diffed and passed through a
+safety gate before it is applied. A booted deploy materializes a store on a clean
+database and mounts it when it already matches; a **schema change** against an existing
+deployment is reconciled by an explicit reviewed forward migration (a drifted schema
+fails the boot closed rather than being altered implicitly — see
+[getting-started](./getting-started.md#serving-your-declared-backend)), never silently
+on deploy.
 
 ---
 
