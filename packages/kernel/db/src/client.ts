@@ -23,6 +23,24 @@ export type Db = ReturnType<typeof makeDb>;
 export const DEFAULT_POOL_MAX = 4;
 
 /**
+ * The boot pool's NOTICE handler: DROP the benign NOTICE-class frames, surface everything else.
+ *
+ * Postgres emits a NOTICE (`severity: 'NOTICE'`) for every idempotent DDL guard the migration chain
+ * runs — `schema "…" already exists, skipping`, `relation "…" already exists, skipping`. postgres.js's
+ * default handler `console.log`s each one, so a clean boot prints a wall of messages that READ like
+ * errors to an operator. We filter TIGHTLY on the non-localized `severity` field: only the NOTICE class
+ * is dropped; a `WARNING` (or any other severity) is still logged so a real advisory is never hidden.
+ *
+ * This CANNOT swallow a real error. A failed query is delivered by Postgres as a SEPARATE ErrorResponse
+ * frame that REJECTS the query promise (the caller sees the rejection); it never reaches `onnotice`,
+ * which only ever receives NoticeResponse frames (NOTICE/WARNING/INFO/…). Filtering here changes boot
+ * log noise only, never error handling or query behaviour.
+ */
+export function logNotice(notice: postgres.Notice): void {
+  if (notice.severity !== 'NOTICE') console.log(notice);
+}
+
+/**
  * Build the one raw, UNSCOPED Drizzle handle the deployment needs. This is the PRODUCTION
  * composition-root factory — exported on the main `@rayspec/db` surface (see index.ts) for the
  * boot entrypoint (`@rayspec/server`) and re-exported on `/testing` for tests/spikes. The
@@ -37,7 +55,7 @@ export const DEFAULT_POOL_MAX = 4;
  * default keeps the HTTP pool at 4 (backward-compatible).
  */
 export function makeDb(databaseUrl: string, maxPoolSize: number = DEFAULT_POOL_MAX) {
-  const sql = postgres(databaseUrl, { max: maxPoolSize });
+  const sql = postgres(databaseUrl, { max: maxPoolSize, onnotice: logNotice });
   const db = drizzle(sql, { schema });
   return Object.assign(db, { $client: sql });
 }

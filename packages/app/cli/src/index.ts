@@ -16,7 +16,8 @@
  * from the diagnostic floor above):
  *   rayspec dev gen-secrets …    Mint the 3 platform boot secrets into a `.env` (idempotent; never
  *                                 overwrites an existing key; NEVER echoes a value). chmod 600.
- *   rayspec dev db …             Create the dev database if absent (idempotent; never destructive).
+ *   rayspec dev db …             Create the dev database if absent (idempotent; never destructive);
+ *                                 --reset --yes DROPs + re-creates a clean one.
  *   rayspec dev bootstrap-tenant Create the first tenant+owner via the shipped auth API; emit the
  *                                 org id + the org-scoped token (a deliberate operator credential).
  *
@@ -75,9 +76,11 @@ LOCAL-DEV, MUTATING (the \`dev\` group — creates a dev DB / writes secret file
                                 media key) into a .env (default ./.env). Idempotent: never overwrites
                                 an existing key; NEVER echoes a value (prints a written/present
                                 summary only). chmod 600.
-  rayspec dev db [--database-url <url>] [--name <db>]
+  rayspec dev db [--database-url <url>] [--name <db>] [--reset --yes]
                                 Create the dev database if absent (idempotent; never destructive).
-                                Base URL from --database-url or DATABASE_URL.
+                                Base URL from --database-url or DATABASE_URL. With --reset --yes,
+                                DROP + re-create a CLEAN database (destroys all data; --reset alone
+                                refuses without --yes).
   rayspec dev bootstrap-tenant --base-url <url> [--email <e>] [--password <p>] [--org-name <n>]
                                 Create the first tenant+owner via the shipped auth API; emit ORG_ID
                                 + the org-scoped token (a deliberate operator credential).
