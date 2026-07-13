@@ -42,6 +42,7 @@ top-level `product:` section:
   | `handlers`   | Escape-hatch TypeScript modules for custom logic.             |
   | `extensions` | Versioned extension packs to merge in.                        |
   | `deployment` | Deployment properties (e.g. whether a durable worker runs).   |
+  | `frontend`   | Static frontend directories to serve alongside the API.       |
 
 - The **product profile** carries a `product:` section and describes *product
   meaning* at a higher level — identity, the reusable capabilities it needs,

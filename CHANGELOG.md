@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-07-13
+
+### Added
+
+- **Static frontend serving from the spec.** A backend-profile document may now
+  declare a `frontend` list of `{ route, dir, spa? }` mounts, and the booted server
+  serves each mount's built static assets alongside its API — one config can ship a
+  whole product, UI included. Static mounts are served last: every API route,
+  `/health`, `/v1/*`, and `/oidc/*` always wins (a path under a reserved platform
+  prefix is never answered by a static mount), and a static miss returns the uniform
+  `404`. `spa: true` falls unmatched deep links back to `index.html`; Range and HEAD
+  requests are honored. Serving is fail-closed — path traversal (including
+  URL-encoded forms), dotfiles/hidden paths, and directory-escaping symlinks are
+  refused, and directories are never listed. A missing/unreadable `dir` fails the
+  deploy closed with an actionable error, and `doctor` reports a missing directory
+  and route collisions (a `frontend` route may not duplicate another mount, equal a
+  declared `api` path, or target `/v1`/`/health`/`/oidc`). Not in v1 (documented):
+  SSR, templates, an asset pipeline, cache/CDN headers, and the product profile. See
+  `examples/notes-ui/` and the `frontend` spec reference.
+
 ## [1.2.2] - 2026-07-13
 
 ### Added
@@ -213,5 +233,9 @@ stands up the running backend from that single file.
   untrusted, multi-tenant, public-internet hosting is a separate layer and is
   deliberately not part of the core — see [`SECURITY.md`](./SECURITY.md).
 
+[1.3.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.3.0
+[1.2.2]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.2.2
+[1.2.1]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.2.1
+[1.2.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.2.0
 [1.1.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.1.0
 [1.0.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.0.0
