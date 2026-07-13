@@ -5,6 +5,95 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-07-13
+
+### Added
+
+- **Opt-in soft delete for a store.** A store may now declare `softDelete: true`.
+  When it does, a `delete` stamps the injected `deleted_at` tombstone (through the
+  tenant-scoped update chokepoint) instead of physically removing the row, and every
+  read/write hides tombstoned rows — so a soft-deleted row is uniformly invisible:
+  `get` → `404`, `list` omits it, a second `delete` → `404`, `update`/`PATCH` →
+  `404`. Tombstone-hiding is enforced on the richer read/write surface too
+  (declarative views, workflow `store_read`/`store_write`, and tool/route/trigger
+  handlers), not just the CRUD routes. Without the field the default is unchanged —
+  a `delete` is a hard physical delete with no `deleted_at` filtering. Documented
+  caveat: because a tombstoned row physically persists (holding its column values),
+  a `unique` value from a soft-deleted row still occupies the tenant-scoped unique
+  index, so re-creating that same value returns `409 CONFLICT` rather than reusing it.
+- **Server-enforced `enum` whitelists on a text column.** A `text` column may declare
+  an `enum` list of allowed values, and the platform now enforces it server-side: an
+  out-of-whitelist value on a `create`/`update` store route is a `400 VALIDATION_ERROR`
+  (a `z.enum` derived at the write chokepoint), and the same whitelist is enforced on
+  the workflow `store.write` value path. `enum` is valid only on a `text` column and
+  its members must be distinct (rejected at validation otherwise). Honest residual: a
+  custom escape-hatch handler that writes directly through the `HandlerDb` facade is
+  not enum-checked — a handler author owns its own value discipline.
+- **Foreign keys to a `unique` parent column (`referencesColumn`).** A store
+  foreign key may set `referencesColumn` to target a `unique: true` column of the
+  parent store instead of its injected `id`. It materializes as a **tenant-scoped
+  compound** foreign key — `(tenant_id, <col>) REFERENCES parent(tenant_id, <refcol>)`
+  — which structurally forbids a cross-tenant reference. A `create`/`update` naming a
+  non-existent parent value returns `400`; a `restrict`-blocked parent delete returns
+  `409` (both tenant-safe — they name the local column, never a foreign value). The
+  local column's type must match the referenced column's, the referenced column must
+  be `unique: true`, and `onDelete: 'set null'` is rejected (a compound FK cannot null
+  `tenant_id`). The id-target FK path is unchanged.
+- **A set (`IN`) filter on the declarative `list` op.** A `list` route now accepts a
+  per-column set filter `?<col>__in=v1,v2,…` that maps to SQL `IN`, so a "status is
+  open OR in_progress" read is expressible in one query. The distinct `__in` suffix
+  keeps plain `?<col>=v` equality byte-identical and unambiguous on a comma-bearing
+  value (a real column literally named `<x>__in` still routes as plain equality). It
+  folds into the same AND-chain as equality filters, keyset pagination, and the tenant
+  predicate. Fail-closed: an empty/blank element, an oversized set (> 100 values), a
+  non-filterable (`jsonb`) column, or an unknown prefix column each return `400`.
+- **`rayspec deploy --apply-migration <delta.sql>`.** `deploy` can now apply a reviewed
+  forward migration in place, reaching the existing gated migration engine — an
+  operator with a brownfield schema change no longer has to drop to the dev harness.
+  `--allowlist <file.json>` supplies the reviewed cover for a destructive statement (a
+  destructive statement without a covering entry is still blocked by the deploy gate);
+  both paths are jailed through the same path check as the spec. It is **reboot-safe**:
+  the boot classifies the live schema first and mounts a present-matching schema
+  instead of re-applying a non-idempotent delta, so leaving the flag in a
+  process-managed unit applies once and mounts thereafter. `--dry-run` rejects the flag
+  (it touches no database), and a bare `--allowlist` (without `--apply-migration`) is
+  refused. Reachable from both profiles.
+
+### Fixed
+
+- **An agent-free spec boots and updates with no provider key.** The local dev-boot
+  wrapper hard-required `OPENAI_API_KEY` up front (an unconditional check before the
+  spec was parsed, plus an always-on OpenAI factory), so applying an additive delta to
+  an agent-free spec failed closed on a credential it never uses. The wrapper now
+  routes through the shipped `assembleOptsFromEnv`, which returns an agent-backends
+  factory only when the spec declares at least one agent — so a stores/api-only backend
+  (or a product-profile document) boots and updates with no provider key, while an
+  agent-bearing spec still fail-closes naming the missing per-agent credential.
+
+### Documentation
+
+- **Corrected the "deploy applies the migration" overstatement to the mount-only
+  truth.** `rayspec deploy`/`rayspec-serve` materializes a store on a clean database
+  and mounts a present-matching one, but against an existing deployment it is
+  mount-only: it **fail-closes on a drifted schema** rather than altering it on its
+  own. A schema change is applied by the explicit `rayspec deploy --apply-migration
+  <delta.sql>` (with `--allowlist` for a reviewed destructive statement). The
+  diff/gate and from-clean-database guarantees are unchanged. Corrected across
+  getting-started, the CLI reference, concepts, ARCHITECTURE, and the README.
+- **New "Restore and key rotation" operational note** (ARCHITECTURE → security model):
+  a restored database dump survives at the row level, but its API-key rows are keyed by
+  the old `RAYSPEC_API_KEY_PEPPER` and its data is tenant-locked to org identities you
+  can no longer authenticate as — so under a freshly-minted pepper the copied keys
+  return `401` and the rows, though physically intact, are unreachable through the API.
+  Mint new keys/identities after a restore. (The JWT signing key is the same class but
+  self-heals on re-login; the pepper does not.)
+- **Documented the new store features** in the spec reference (`enum`, `softDelete`,
+  `referencesColumn`, and the `<col>__in` set filter), and pinned **Range and HEAD on
+  a static `frontend` mount** as a supported feature with tests (byte-range `206` /
+  `HEAD` `200`). Honest edge: an unsatisfiable range currently returns `500` — the
+  underlying static server (`@hono/node-server` `serveStatic`) has no RFC-7233 `416`
+  path.
+
 ## [1.3.0] - 2026-07-13
 
 ### Added
@@ -233,6 +322,7 @@ stands up the running backend from that single file.
   untrusted, multi-tenant, public-internet hosting is a separate layer and is
   deliberately not part of the core — see [`SECURITY.md`](./SECURITY.md).
 
+[1.3.1]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.3.1
 [1.3.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.3.0
 [1.2.2]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.2.2
 [1.2.1]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.2.1

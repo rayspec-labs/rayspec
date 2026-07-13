@@ -184,6 +184,33 @@ distinction is intentional: the core gives a self-hoster a correct, tenant-isola
 backend for trusted use, and the hardening layer is what a public multi-tenant
 service additionally needs.
 
+### Restore and key rotation
+
+The boot secrets live in the environment, never in the database — which has a sharp
+operational consequence when you **restore a database dump under different secrets**.
+The data survives the restore at the row level, but it stays bound to the secrets that
+created it:
+
+- **The API-key pepper (`RAYSPEC_API_KEY_PEPPER`).** Every API-key row stores an HMAC
+  of the key computed with the pepper. Restore the dump under a **freshly-minted**
+  pepper and those stored HMACs no longer match, so the copied keys all fail to verify
+  (`401`) — even though the rows are physically present. Worse, the restored data is
+  tenant-locked to org identities you can no longer authenticate as, so the rows are
+  intact on disk yet **unreachable through the API**. The fix is not to recover the old
+  keys but to **mint new API keys** (and, as needed, re-establish the org identities)
+  after a restore.
+- **The JWT/OIDC signing key (`RAYSPEC_JWT_SIGNING_KEY`).** The same class of problem:
+  tokens issued under the old key fail to verify under a new one. This one **self-heals**
+  — a user simply signs in again and gets a fresh token minted under the current key.
+  The pepper case does **not** self-heal, because an API key cannot "log in again."
+
+The practical rule: **keep a restored dump paired with the secrets it was created under**
+(back up the environment/secret material alongside the database), or plan to re-mint
+credentials after a cross-environment restore. This is stated for the **trusted,
+single-node** posture; it is not a claim that restoring a database into a public,
+multi-tenant deployment is safe — that requires the separate hardening layer above (see
+[`SECURITY.md`](../SECURITY.md)).
+
 ---
 
 ## Persistence and the run journal
@@ -197,6 +224,15 @@ automatically, and every migration is diffed against the current schema and pass
 through a safety gate (a destructive change is blocked unless explicitly allowed)
 before it is applied — including a from-clean-database check that the whole
 migration chain bootstraps an empty database correctly.
+
+A booted deploy applies this generated schema in one direction only: it materializes a
+store on a clean database and mounts it when the live schema already matches. It is
+**mount-only** against an existing deployment — a live schema that has **drifted** from
+the spec **fails the boot closed** rather than being altered implicitly. Evolving an
+existing deployment's schema is a deliberate, reviewed step: author the forward delta
+and apply it with `rayspec deploy --apply-migration <delta.sql>` (which runs it through
+the same safety gate). See the
+[CLI reference](./cli-reference.md#deploy--boot-and-serve-a-declared-product).
 
 ---
 

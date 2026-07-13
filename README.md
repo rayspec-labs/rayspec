@@ -59,7 +59,11 @@ in the platform — everything comes from the spec you inject.
   source of truth for replay, cost accounting, and audit.
 - **A real database, generated for you.** Stores become tenant-scoped
   Postgres/Drizzle tables with the tenancy and data-lifecycle columns injected
-  automatically. Migrations are diffed and gated before they apply.
+  automatically. A boot materializes stores on a clean database and mounts them when
+  they already match; migrations are diffed and gated before they apply, and a schema
+  change against a running deployment is a deliberate, reviewed forward migration
+  (`rayspec deploy --apply-migration`) — a drifted schema fails the boot closed rather
+  than being altered on its own.
 - **Security by construction, not by convention.** No plaintext secrets, a
   fail-closed tenant chokepoint, an explicit trust boundary around untrusted
   content, and an append-only audit log — from the first boot.

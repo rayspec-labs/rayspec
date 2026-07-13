@@ -86,8 +86,9 @@ RAYSPEC_SPEC_PATH="$PWD/examples/expense-claim-coder/rayspec.yaml" \
 BASE=http://127.0.0.1:8788 bash examples/expense-claim-coder/smoke.sh
 ```
 
-The wrapper provisions a FRESH throwaway dev DB (`rayspec_skill_expense-claim-coder`, DROP+CREATE on
-every boot), runs the real `deploy()` pipeline, resolves the `kind:'tool'` handlers via the path-jailed
+The wrapper provisions a FRESH throwaway dev DB (`rayspec_local_expense_claim_coder`, derived from the
+spec directory name — an explicit `RAYSPEC_DEV_DB` overrides it; DROP+CREATE on every boot), runs the
+real `deploy()` pipeline, resolves the `kind:'tool'` handlers via the path-jailed
 loader, builds the tenant-bound `HandlerDb` facade, and wires the OpenAI backend. `RAYSPEC_HANDLER_ROOT`
 defaults to the spec directory, so the relative `handlers/*.gen.ts` paths resolve.
 
