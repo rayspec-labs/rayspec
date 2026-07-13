@@ -56,7 +56,10 @@ Every branch is built on this. An It.0 PRD is DONE after step 6; It.1 adds an ag
    entry with a `ColumnType` (`text | uuid | timestamp | integer | boolean | jsonb`); "optional" →
    `nullable: true`; "no duplicates" → `unique: true`; a parent/child link → a `foreignKeys[]` entry.
    **NEVER declare the injected columns** (`tenant_id`, `id`, `created_at`, `deleted_at`,
-   `retention_days`, `region`, `created_by` — all server-managed).
+   `retention_days`, `region`, `created_by` — all server-managed). Optional refinements (see the
+   `stores[]` grammar reference): a text-column value whitelist (`enum: [...]`), opt-in tombstone-on-
+   delete (`softDelete: true`), and a business-key FK onto a parent's `unique` column
+   (`foreignKeys[].referencesColumn`).
 2. **Expose the operations.** For each "list / get / create / update / delete", write one `api[]` store
    route (`action: { kind: store, store: <name>, op: <list|get|create|update|delete> }`). Per-route
    permissions are PLATFORM-DERIVED: reads are gated on `store:read`, writes on `store:write` — you only
@@ -142,19 +145,33 @@ After `pnpm build`, the `rayspec` CLI bin is ALREADY built (so a standalone
 `pnpm --filter @rayspec/cli build` is redundant — only re-run it if you changed CLI source). For the
 examples below the CLI is invoked as `node packages/app/cli/dist/index.js <subcommand>`.
 
-**Boot secrets — `rayspec dev gen-secrets`.** The boot needs three secrets. The CLI mints them into a
-target `.env` (default `./.env`, override `--out <path>`) idempotently — it only ADDS a missing key and
-never overwrites an existing one:
+**Boot secrets — `rayspec dev gen-secrets`.** `gen-secrets` mints the platform boot secrets into a
+target `.env` (default `./.env`, override `--out <path>`) idempotently — it only APPENDS a missing key
+and never overwrites/reorders an existing one:
 
 ```
-node packages/app/cli/dist/index.js dev gen-secrets      # writes any missing of the three into .env
+node packages/app/cli/dist/index.js dev gen-secrets      # appends any missing secret to .env
 ```
 
-It mints `RAYSPEC_JWT_SIGNING_KEY` (an RS256 PKCS#8 PEM, single-line with literal `\n`),
-`RAYSPEC_API_KEY_PEPPER` (the api-key HMAC pepper), and `RAYSPEC_MEDIA_SIGNING_KEY` (a distinct HS256
-media key). You still supply `DATABASE_URL` and, for an agent branch, `OPENAI_API_KEY`. (A manual
-fallback for just the JWT key is `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048`, but you
-do not need it — `gen-secrets` provides all three.)
+It mints THREE keys — but a plain CRUD/agent backend does **not** use all three:
+- `RAYSPEC_JWT_SIGNING_KEY` — an RS256 PKCS#8 PEM (stored SINGLE-LINE with a literal `\n`, quoted). **Required by every backend** (the API auth chain).
+- `RAYSPEC_API_KEY_PEPPER` — the api-key HMAC pepper. **Required by every backend.**
+- `RAYSPEC_MEDIA_SIGNING_KEY` — a distinct HS256 media key. **NOT used by a backend-profile spec.** It is demanded ONLY when a spec declares a stream **playback** route (a media URL is authed by a signed `?token=` media-JWT); no It.0/It.1/It.2 spec declares one, so a backend-profile deploy fail-closes on none of it if the media key is absent.
+
+**So an agent-free CRUD backend needs exactly TWO secrets — the JWT signing key + the api-key pepper —
+NOT three.** You still supply `DATABASE_URL`; and — for an **agent** branch (It.1/It.2) **only** —
+`OPENAI_API_KEY` (an agent-free spec wires no agent backend, so no provider key is read). Minting all
+three is harmless (the unused media key just sits in `.env`); the point is you are never blocked waiting
+on a media key a CRUD backend does not consume.
+
+> ⚠ **NEVER `source` the gen-secrets `.env` into your shell (nor `export` the PEM by hand).** The `.env`
+> is consumed by the platform's OWN loader, which strips the surrounding quotes AND un-escapes the PEM's
+> literal `\n` back to real newlines before `jose.importPKCS8` sees it. `source`-ing it in bash does the
+> OPPOSITE — it leaves the `\n` as a literal backslash-n (⇒ an invalid PEM), and the multi-line manual
+> `openssl` PEM fallback is mangled outright by `source`. **Let `gen-secrets` WRITE the file and let the
+> boot READ it** — do not pipe / `source` / `export` the PEM yourself. (This has bitten authors twice.)
+> Manual JWT-key fallback if ever needed: `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048`
+> — but `gen-secrets` already provides it, so you should not need it.
 
 **A clean dev DB — `rayspec dev db --reset --yes`.** DROP + re-CREATE a clean dev database in one
 command (it refuses without `--yes` — it is destructive). Use it when a dev DB is stale/corrupt.
@@ -175,6 +192,13 @@ are how the generated CRUD surface behaves. Know them so your PRD assumptions an
 - **List query power** (on a `list` route). All narrow and fail-closed:
   - **Equality filters** — `?<column>=<value>`, AND-combined (no ranges / OR / full-text). Filterable
     columns are the declared business columns **plus the injected `created_by`**.
+  - **Set filter — `?<column>__in=v1,v2,…`** (a SQL `IN`, folded into the SAME AND-chain, so it composes
+    with equality filters + the keyset cursor). The **`__in` SUFFIX is distinct** (not a bare `?col=a,b`):
+    plain equality stays byte-identical and unambiguous on a comma-bearing value, and a real column
+    literally named `<x>__in` is still matched as plain equality first. Same filterable set as equality
+    (business columns + `created_by`). **Fail-closed 400** on: an EMPTY element (`?c__in=`, `a,,b`), MORE
+    than **100** values, a non-filterable (`jsonb`) column, or an unknown prefix column. Each element is
+    type-coerced exactly like an equality value.
   - **Ordering** — `?order=<column>.asc|desc`. Only **NON-nullable** columns are sortable (the declared
     non-nullable business columns + the injected `id` / `created_at`); the default is `id asc`. A nullable
     column — and `created_by` — is filterable but a **400** as an order column (keyset stability needs a
@@ -191,6 +215,11 @@ are how the generated CRUD surface behaves. Know them so your PRD assumptions an
   `unique: true`, a **duplicate** insert (or an update setting it to a value another same-tenant row
   holds) is a **409 CONFLICT**. Use `Idempotency-Key` for "retry-safe, replay the same row"; use `unique`
   for "reject a genuine duplicate."
+- **Delete is a HARD physical delete BY DEFAULT.** A `delete` op physically removes the row (a
+  `restrict` FK that still references it → **409 CONFLICT**, not a data-loss). The `deleted_at` column is
+  ALWAYS injected but is **used only when a store opts into `softDelete: true`** — then a delete STAMPS
+  `deleted_at` instead of removing the row, and every read (`get`/`update`/`list`) hides tombstoned rows
+  (a 2nd delete → 404). See `softDelete` in the `stores[]` grammar for the opt-in and its caveats.
 - **API-key format.** A minted key's prefix is **`rk_`**; older **`mk_`** keys remain valid. Treat the
   whole token as **opaque** — never parse or depend on its shape.
 
@@ -361,10 +390,12 @@ Deriving holes (the mapping from the spec):
 
 ### Phase 3 — SELF-CORRECTION LOOP (doctor / plan; It.2 also a static handler self-check)
 
-Run the shipped CLIs against your synthesized spec. **Run them from the repo root with a path INSIDE
-the repo** — the CLI jails the spec path to the current working directory (a path that escapes the
-cwd, or an absolute path outside it, is rejected). The CLI bin is **already built by the one-time
-`pnpm build`** (Prerequisites above). Then:
+Run the shipped CLIs against your synthesized spec. **Run them from the directory that CONTAINS the spec,
+with a path INSIDE it** — the CLI jails the spec path to the current working directory (a path that
+escapes the cwd via `..`, or an absolute path outside it, is rejected). If you hit this, the error itself
+names the fix — "*run rayspec from the directory that contains the spec, or move the spec inside the
+current working directory*" — so either `cd` to that directory or move the spec, then re-run. The CLI bin
+is **already built by the one-time `pnpm build`** (Prerequisites above). Then:
 
 ```
 node packages/app/cli/dist/index.js doctor examples/<product-slug>/rayspec.yaml
@@ -451,9 +482,11 @@ scope from the start.)
    `gate:extension-capability`) are TRIPWIRES, not a sandbox; the real per-tenant isolate is
    the external-exposure hardening (a per-tenant sandbox, deferred). **Never claim a generated handler is sandboxed.**
 7. A heads-up on the deploy path (Phase 5): if you will use **Path A (the `@rayspec/local-boot` dev
-   wrapper)** it **DROP+CREATEs the throwaway dev DB** `rayspec_skill_<slug>` (from the spec's directory
-   name; override with `RAYSPEC_DEV_DB`) — RESET on every boot; confirm it is not a database the user
-   cares about. **Path B (`rayspec deploy`)** instead preserves data against a persistent `DATABASE_URL`.
+   wrapper)** it **DROP+CREATEs the throwaway dev DB** `rayspec_local_<spec-dir>` (from the spec file's
+   parent directory name; override with `RAYSPEC_DEV_DB`) — RESET on every boot; confirm it is not a
+   database the user cares about. **Path B (`rayspec deploy`)** instead preserves data against a
+   persistent `DATABASE_URL` (mount-only — it fail-closes on a drifted schema rather than reconciling it;
+   an in-place forward delta goes through `rayspec deploy --apply-migration`).
 
 Only on explicit approval do you proceed to Phase 5.
 
@@ -467,29 +500,35 @@ There are **two boot paths** — pick by whether the data must survive a re-boot
 
 **Prereqs (both paths):**
 - A local Postgres: `pnpm db:up` (Docker Postgres on :5433).
-- A repo-root `.env` (gitignored). Run **`rayspec dev gen-secrets`** once to mint the three boot
-  secrets into it (see Prerequisites) — it provides `RAYSPEC_JWT_SIGNING_KEY` (RS256 PKCS#8 PEM),
-  `RAYSPEC_API_KEY_PEPPER`, and `RAYSPEC_MEDIA_SIGNING_KEY`. Then set:
+- A repo-root `.env` (gitignored). Run **`rayspec dev gen-secrets`** once to mint the boot secrets into
+  it (see Prerequisites). A backend-profile deploy uses exactly the two it always needs —
+  `RAYSPEC_JWT_SIGNING_KEY` (RS256 PKCS#8 PEM) + `RAYSPEC_API_KEY_PEPPER`; the third minted key
+  (`RAYSPEC_MEDIA_SIGNING_KEY`) is playback-only and unused here. Then set:
   - `DATABASE_URL` — the Postgres URL (the `.env.example` default points at the `pnpm db:up` instance).
-  - `OPENAI_API_KEY` — for the `openai` backend a declared agent runs on (It.1/It.2 only).
+  - `OPENAI_API_KEY` — for the `openai` backend a declared agent runs on (It.1/It.2 only; an agent-free
+    spec reads no provider key).
 
   The boot fail-closes with an actionable message on any missing required var.
 
 **Path A — the reset-on-boot dev wrapper (`@rayspec/local-boot`) — a THROWAWAY dev DB.** Best for fresh
-authoring/iteration: it DROP+CREATEs the dev DB `rayspec_skill_<slug>` (from the spec's directory name;
-override with `RAYSPEC_DEV_DB`) on EVERY boot, so the migration chain bootstraps it clean. **All data is
-LOST on each boot** — never use it for anything durable.
+authoring/iteration: it DROP+CREATEs the dev DB `rayspec_local_<spec-dir>` (derived from the spec file's
+PARENT DIRECTORY name, sanitized to a safe pg identifier; override with `RAYSPEC_DEV_DB`) on EVERY boot,
+so the migration chain bootstraps it clean. **All data is LOST on each boot** — never use it for anything
+durable, and NEVER point `RAYSPEC_DEV_DB` at a DB you care about (first-deploy mode DROP+CREATEs it).
 
 ```
 RAYSPEC_SPEC_PATH="$PWD/examples/<product-slug>/rayspec.yaml" \
   pnpm --filter @rayspec/local-boot serve
 ```
 
-**Path B — the durable command (`rayspec deploy`) — a PERSISTENT DB, data PRESERVED.** The first-class
-operator boot: it assembles the platform from the ambient env, registers the product stores through the
-sanctioned validating registrar, **applies the committed migration chain idempotently against the
-persistent `DATABASE_URL`** (materialize/mount — it does NOT drop), then serves until SIGINT/SIGTERM.
-Use this for anything whose rows must survive a re-boot.
+**Path B — the durable command (`rayspec deploy`) — a PERSISTENT DB, data PRESERVED. `rayspec deploy` is
+MOUNT-ONLY; it does NOT reconcile a drifted schema.** The first-class operator boot assembles the
+platform from the ambient env, registers the product stores through the sanctioned validating registrar,
+CLASSIFIES the live schema against the spec, and then serves until SIGINT/SIGTERM. The classify decides
+everything (it NEVER drops):
+- **ABSENT** (a clean/empty DB) → **materialize**: apply the first `0000_product_stores.sql` chain.
+- **PRESENT-MATCHING** (the live schema already equals the spec) → **MOUNT**: run NO product DDL — existing rows survive untouched.
+- **DRIFTED / partially-materialized** (the live schema diverges from the spec) → **FAIL CLOSED**. `rayspec deploy` refuses to boot a drifted schema — it never auto-materializes, drops, or silently applies a migration. Its `BootConfigError` names the fix: author the delta with `rayspec plan <new-spec> --against <old-spec>`, then boot with `rayspec deploy --apply-migration <delta.sql>` (below).
 
 ```
 node packages/app/cli/dist/index.js deploy "$PWD/examples/<product-slug>/rayspec.yaml"
@@ -497,6 +536,29 @@ node packages/app/cli/dist/index.js deploy "$PWD/examples/<product-slug>/rayspec
 # dry-run (validate + compose only, NO DB, NO network):
 node packages/app/cli/dist/index.js deploy --dry-run "$PWD/examples/<product-slug>/rayspec.yaml"
 ```
+
+**Applying a REVIEWED forward delta onto a populated DB — `rayspec deploy --apply-migration`.** This is
+the first-class way to evolve a persistent/drifted DB in place (it is what a brownfield redeploy uses —
+see the Brownfield section). Pass the reviewed forward-delta `.sql`; for a delta that carries a
+destructive statement, ALSO pass the reviewed `--allowlist <file.json>` (the human-approved allowlist —
+see Phase 7.2.B; never self-approve one):
+
+```
+# additive (or otherwise reviewed) forward delta onto the EXISTING populated DATABASE_URL:
+node packages/app/cli/dist/index.js deploy \
+  "$PWD/examples/<product-slug>/rayspec.yaml" --apply-migration "$PWD/examples/<product-slug>/migrations/<NNNN>_<label>.sql"
+# for a DESTRUCTIVE (reviewed) delta ALSO pass the approved allowlist:
+#   --allowlist "$PWD/examples/<product-slug>/migrations/<NNNN>_<label>.allowlist.json"
+```
+
+`--apply-migration` sets the boot into UPDATE mode: the gated `deploy()` engine SCANS the delta (a
+destructive statement WITHOUT a covering reviewed `--allowlist` entry is BLOCKED with a `DeployError`,
+fail-closed) and, if clean, applies it IN PLACE so existing rows survive. It is **reboot-safe**: the boot
+classifies the live schema FIRST, so a delta that ALREADY landed on a prior boot MOUNTS (the classify
+sees present-matching) instead of re-applying and crash-looping on a duplicate column — a leftover
+`--apply-migration` in a `Restart=always` unit applies once, then mounts. (`--apply-migration`/
+`--allowlist` cannot be combined with `--dry-run`, which touches no DB; a bare `--allowlist` without
+`--apply-migration` is a usage error.)
 
 Either path runs the same boot the composition root runs, registers the product tables, wires the OpenAI
 backend, and — for It.2 — resolves the `kind:'tool'` handlers via the path-jailed loader + builds the
@@ -695,6 +757,58 @@ migration file(s) written, and that the seeded rows survived.
 
 ---
 
+## Brownfield — deploying against a product repo + a populated DB you did NOT provision
+
+Phases 1–7 assume a GREENFIELD clone: you author under `examples/<slug>/`, boot a throwaway dev DB, and
+own everything. A **brownfield** setup is the common real deployment, and it inverts several defaults:
+
+- **The spec lives in a PRODUCT repo, not this one.** `rayspec` (this platform + CLI) is pulled into the
+  product repo as a **git SUBMODULE** (pinned to a released tag). The authored spec, its versioned
+  `migrations/`, the deploy config, and the built frontend assets live in the PRODUCT repo (its own
+  layout — commonly a `products/`/`deployments/` directory), NOT under this repo's `examples/`. You run
+  the CLI from the submodule (`node <submodule>/packages/app/cli/dist/index.js …`), pointing it at the
+  product repo's spec.
+- **The DB is EXISTING and POPULATED — you did NOT create it and must NEVER drop/reset it.** It holds a
+  real deployment's data. This rules out the Path-A dev wrapper's first-deploy mode entirely (it
+  DROP+CREATEs). Treat every schema change as an in-place, reviewed forward delta.
+- **Secrets come from the deployment, not a repo `.env`.** A real deployment sets env via its
+  orchestrator / secret manager (secrets are commonly mounted as FILES and exported into the process
+  environment); the repo-root `.env` auto-loader is a LOCAL-DEV-ONLY convenience the CLI loads *only if
+  the file exists*, and it is absent in a real deployment. Do not assume a `.env` — read/verify the
+  actual injected env.
+
+**The env mapping (brownfield):**
+
+| Var | Brownfield value |
+|---|---|
+| `DATABASE_URL` | the **EXTERNAL** Postgres the deployment already runs (NOT `pnpm db:up`). `rayspec deploy` uses it AS-IS (no name-swap, no drop). |
+| `RAYSPEC_JWT_SIGNING_KEY` + `RAYSPEC_API_KEY_PEPPER` | supplied by the secret manager (files/env), NOT `gen-secrets`. **These two are all an agent-free CRUD backend needs.** |
+| `RAYSPEC_MEDIA_SIGNING_KEY` | only if the spec declares a stream **playback** route — a backend-profile spec does not. |
+| `OPENAI_API_KEY` | only for an **agent** branch (It.1/It.2). **An agent-free spec reads NO provider key** — do not require one. |
+| `RAYSPEC_DEV_DB` | the real DB **name** — used ONLY if you drive the Path-A `@rayspec/local-boot` wrapper against the existing DB (it swaps `DATABASE_URL`'s db name to this). ⚠ In first-deploy mode the wrapper DROP+CREATEs this DB — so against a real DB use the wrapper's UPDATE mode ONLY (`RAYSPEC_BOOT_UPDATE=1`, which asserts-exists and never drops), or skip the wrapper entirely (below). |
+
+**The apply-onto-a-populated-DB move — use `rayspec deploy`, NEVER the reset-on-boot wrapper.** The
+first-class brownfield path is the durable `rayspec deploy` command (Phase-5 Path B), which reads
+`DATABASE_URL` directly and is mount-only:
+1. **Deploy the CURRENT spec unchanged** with `rayspec deploy <spec>` — it CLASSIFIES the live schema:
+   present-matching → **mounts** (nothing to do); absent → materializes; **drifted → fail-closed** (it
+   never drops/auto-reconciles). A drifted result means the live schema and the spec disagree — reconcile
+   with a reviewed forward delta, never by editing the DB.
+2. **Author the forward delta** from the changed spec exactly as Phase 7 does: keep the old spec as the
+   diff baseline, `rayspec plan <new-spec> --against <old-spec>` to compute the delta + read the envelope,
+   and run the Phase-4 / Phase-7.2 HITL review (a destructive statement is a HARD STOP requiring a
+   human-approved `--allowlist` — never self-approve). Write the delta as a versioned
+   `migrations/<NNNN>_<label>.sql`.
+3. **Apply it IN PLACE** with `rayspec deploy <new-spec> --apply-migration migrations/<NNNN>_<label>.sql`
+   (add `--allowlist migrations/<NNNN>_<label>.allowlist.json` for a reviewed destructive delta). The
+   gate scans the delta (unreviewed-destructive → BLOCKED), applies it, existing rows survive, and it is
+   reboot-safe (a leftover `--apply-migration` mounts once the delta has landed). See Phase-5 Path B.
+
+Everything else (the grammar, the HITL discipline, the smoke) is unchanged — brownfield only changes
+WHERE the spec/DB/secrets live and forbids the throwaway-reset boot against real data.
+
+---
+
 ## Embedded grammar reference (doc-first — derived from `packages/kernel/spec/src/grammar.ts`)
 
 > This is the authoritative shape. If anything here seems to disagree with `grammar.ts`, re-read
@@ -725,15 +839,59 @@ frontend: []              # optional — static frontend mounts served alongside
       type: <ColumnType>            # one of: text | uuid | timestamp | integer | boolean | jsonb
       nullable: <bool>              # optional, default false
       unique: <bool>                # optional, default false
+      enum: [<value>, ...]          # optional — a value whitelist. TEXT COLUMNS ONLY; >= 1 DISTINCT member.
   foreignKeys:                      # optional, default [] — child→parent (product→product) FKs.
-    - column: <safe_identifier>     #   a DECLARED business column on THIS store
-      references: <safe_identifier> #   another DECLARED store's name
-      onDelete: cascade             #   one of: cascade | restrict | set null   (default cascade)
+    - column: <safe_identifier>          #   a DECLARED business column on THIS store
+      references: <safe_identifier>      #   another DECLARED store's name
+      referencesColumn: <safe_identifier> #  optional — target a UNIQUE column of the parent (a business-key
+                                         #   FK). OMIT ⇒ the default: target the parent's injected uuid `id`.
+      onDelete: cascade                  #   one of: cascade | restrict | set null   (default cascade)
+  softDelete: <bool>                # optional — opt-in tombstone-on-delete (default: HARD physical delete).
 ```
 
 **INJECTED automatically — NEVER declare these columns:** `tenant_id`, `id`, `created_at`,
 `deleted_at`, `retention_days`, `region`. The FK to `orgs` (tenancy) is injected; `foreignKeys[]` is
 ONLY for product→product references.
+
+**`enum: [values]` — a text-column value whitelist (platform-enforced).**
+- Valid **ONLY on a `type: text` column** (an `enum` on any other type is a lint error); members must be
+  **≥ 1 and DISTINCT**. The stored value must be one of the listed members.
+- Enforced on **BOTH declarative write surfaces**: the HTTP `create`/`update` chokepoint (an
+  out-of-whitelist value → **400 VALIDATION_ERROR**, built as a `z.enum`) AND the workflow `store.write`
+  value-resolution path (so an agent's classification output cannot persist an out-of-whitelist value
+  either → `store_write_enum_violation`). RESIDUAL (be honest): a custom escape-hatch TS handler writing
+  through the `HandlerDb` facade is NOT enum-checked — the facade carries no spec-level `enum` vocabulary,
+  so a handler owns its own value discipline. The two DECLARATIVE surfaces are covered.
+
+**`softDelete: true` — opt-in soft delete (tombstone).** DEFAULT is a **HARD physical delete** (the
+`deleted_at` column is injected but unused). With `softDelete: true`:
+- a `delete` **STAMPS `deleted_at = now`** (via the update chokepoint) instead of physically removing the
+  row; it still returns **204**.
+- every read hides tombstoned rows: `get`/`update` on one → **404**; `list` folds in `deleted_at IS NULL`
+  (and `deleted_at` is NOT a filterable param, so a caller cannot widen back to tombstones); a 2nd delete
+  of the same row → **404**.
+- ⚠ **The `unique`-after-soft-delete caveat.** A tombstoned row STILL physically holds its `unique`
+  value (the tenant-scoped unique index is a plain unique, NOT a partial `WHERE deleted_at IS NULL`), so
+  **re-creating the same unique value after a soft delete is a 409 CONFLICT**. (And an idempotent-create
+  retry whose original row was soft-deleted REPLAYS the tombstoned row — the key tracks the physical
+  creation event.) Design around this if a value must be reusable after deletion.
+- A lint WARNING fires if a `softDelete` store is the TARGET of a `restrict` FK (soft-deleting such a
+  parent leaves children pointing at an invisible row).
+
+**`foreignKeys[].referencesColumn` — a business-key FK (an FK onto a parent's UNIQUE column).** OMIT it
+for the default (target the parent's injected uuid `id`; the local FK column must then be `type: uuid`).
+When set, the FK targets a NAMED column of the parent and becomes a **tenant-scoped COMPOUND key**
+`(tenant_id, col) → parent(tenant_id, referencesColumn)`:
+- the referenced parent column MUST be declared **`unique: true`** (a lint error otherwise), and the
+  local FK column's **type MUST MATCH** the referenced column's type (e.g. a `text` slug FK, an `integer`
+  code FK — relaxing the uuid-only rule of an id-target FK).
+- `onDelete` supports **`cascade` or `restrict` only** — **`set null` is REJECTED** for a business-key FK
+  (it would have to null the NOT-NULL `tenant_id`). (For an id-target FK, `set null` is allowed but
+  requires the local column to be `nullable: true`.)
+- Runtime: creating a child that references a **non-existent** parent value → **400 VALIDATION_ERROR**
+  (tenant-safe — the body never echoes the value); deleting a parent still referenced under
+  `onDelete: 'restrict'` → **409 CONFLICT**. A short identifier budget applies (the generated
+  `<table>_<col>_<refs>_<refcol>_fk` constraint name must be ≤ 63 chars).
 
 ### `api[]` — `ApiRouteSpec`
 
