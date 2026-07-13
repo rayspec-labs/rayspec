@@ -36,7 +36,7 @@
  *  - a ROUTE/TRIGGER handler's facade is built over a `TenantDb` ALREADY inside `.transaction()` (the
  *    GUC seam, A3); `db.transaction(...)` there nests onto the same tenant-scoped tx.
  */
-import { INJECTED_COLUMN_NAMES, type TenantDb } from '@rayspec/db';
+import { INJECTED_COLUMN_NAMES, isSoftDeleteTable, type TenantDb } from '@rayspec/db';
 import type { HandlerDb, SelectOptions, StoreFilter, StoreRow } from '@rayspec/handler-sdk';
 import {
   and,
@@ -46,6 +46,7 @@ import {
   eq,
   getTableColumns,
   inArray,
+  isNull,
   type SQL,
 } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
@@ -201,6 +202,38 @@ function filterPredicate(table: PgTable, filter: StoreFilter | undefined): SQL |
     return eq(col, value);
   });
   return preds.length === 1 ? preds[0] : and(...preds);
+}
+
+/**
+ * Resolve the injected `deleted_at` tombstone column of a store table (every materialized store injects
+ * it — build-product-tables / the generator). Used ONLY for a `softDelete` store: to AND
+ * `deleted_at IS NULL` into reads/updates + to stamp the tombstone on delete. Resolved the SAME way the
+ * CRUD route does (`getTableColumns(table).deletedAt`).
+ */
+function deletedAtColumn(table: PgTable): PgColumn {
+  const col = (getTableColumns(table) as Record<string, PgColumn>).deletedAt;
+  if (!col) {
+    throw new Error(
+      'HandlerDb: soft-delete store table has no deleted_at column (internal invariant — every ' +
+        'materialized store injects it).',
+    );
+  }
+  return col;
+}
+
+/**
+ * For a `softDelete` store, AND `deleted_at IS NULL` into the caller-side predicate so a tombstoned row
+ * is UNIFORMLY invisible to the handler read/write surface (declarative views, workflow
+ * store_read/store_write nodes, tool/route/trigger handlers) — the SAME contract the CRUD routes +
+ * list-query already enforce, so a view/workflow/handler read never resurfaces a tombstoned row. For the
+ * default (hard-delete) store this returns `pred` UNCHANGED (byte-behaviourally identical to the
+ * pre-soft-delete facade). It ONLY ADDS an AND-term to the caller-side predicate; the STRUCTURAL tenant
+ * predicate is AND-combined BENEATH this by the TenantDb chokepoint and is never touched here.
+ */
+function visiblePredicate(table: PgTable, pred: SQL | undefined): SQL | undefined {
+  if (!isSoftDeleteTable(table)) return pred;
+  const notDeleted = isNull(deletedAtColumn(table));
+  return pred === undefined ? notDeleted : (and(pred, notDeleted) as SQL);
 }
 
 /** True if a runtime PgColumn is a timestamp column (so an ISO-string value is coerced to Date). */
@@ -371,7 +404,8 @@ export function makeHandlerDb(
   return {
     async select(store: string, filter?: StoreFilter, opts?: SelectOptions): Promise<StoreRow[]> {
       const table = resolveTable(productTables, store);
-      const pred = filterPredicate(table, filter);
+      // A softDelete store hides tombstoned rows (deleted_at IS NULL folded in); default store unchanged.
+      const pred = visiblePredicate(table, filterPredicate(table, filter));
       // TenantDb.select<T> wants the registered table type; the runtime PgTable is admitted via the
       // chokepoint's deny-by-default Set (the deployment registered it). The `as never` bridges the
       // literal-tuple member type to the runtime PgTable (same bridge store-routes.ts uses).
@@ -410,7 +444,8 @@ export function makeHandlerDb(
       // tenant predicate beneath the filter, so a count can never see another tenant's rows. Lets a
       // paged reader total without loading the tenant's whole match set.
       const table = resolveTable(productTables, store);
-      const pred = filterPredicate(table, filter);
+      // A softDelete store excludes tombstoned rows from the count too (uniform with select).
+      const pred = visiblePredicate(table, filterPredicate(table, filter));
       const rows = (await tdb.select(table as never, { value: countRows() }).where(pred)) as Array<{
         value: number;
       }>;
@@ -506,7 +541,10 @@ export function makeHandlerDb(
       const table = resolveTable(productTables, store);
       // #3/#4: fail-closed on unknown OR server-controlled columns in the PATCH.
       const dbPatch = toDbValues(table, patch, 'update');
-      const pred = filterPredicate(table, filter);
+      // A softDelete store never modifies a tombstoned row (deleted_at IS NULL folded in) — a PATCH on a
+      // tombstoned row matches zero rows, uniform with the CRUD route. (A handler still cannot set
+      // deleted_at itself — toDbValues rejects the server-controlled column; delete() is the one stamp path.)
+      const pred = visiblePredicate(table, filterPredicate(table, filter));
       const updated = (await tdb
         .update(table as never, dbPatch)
         .where(pred)
@@ -517,6 +555,21 @@ export function makeHandlerDb(
     async delete(store: string, filter: StoreFilter): Promise<number> {
       const table = resolveTable(productTables, store);
       const pred = filterPredicate(table, filter);
+      if (isSoftDeleteTable(table)) {
+        // Soft delete (opt-in): STAMP the tombstone (`deleted_at = now`) via the EXISTING update
+        // chokepoint instead of a physical delete — parity with the CRUD delete route. `visiblePredicate`
+        // ANDs `deleted_at IS NULL`, so an ALREADY-tombstoned row matches ZERO rows → a 2nd delete is a
+        // no-op (0). The row survives at the DB level but reads as gone everywhere. Returns the count of
+        // rows tombstoned by THIS call. (TenantDb.update AND-combines the structural tenant predicate
+        // beneath — a cross-tenant delete still affects zero rows — and strips a stray tenant_id from the SET.)
+        const tombstoned = (await tdb
+          .update(table as never, { deletedAt: new Date() })
+          .where(visiblePredicate(table, pred))
+          .returning()) as Record<string, unknown>[];
+        return tombstoned.length;
+      }
+      // DEFAULT (softDelete falsy/undefined): a HARD physical delete — byte-behaviourally identical to
+      // the pre-soft-delete facade (the row is physically gone).
       const deleted = (await tdb
         .delete(table as never)
         .where(pred)

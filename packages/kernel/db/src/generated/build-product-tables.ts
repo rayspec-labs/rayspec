@@ -27,6 +27,7 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 import { orgs } from '../schema.js';
+import { markSoftDeleteTable } from '../soft-delete-registry.js';
 import type { StoreConflictKeys } from './generate-product-sql.js';
 
 /** snake_case → camelCase (mirrors generate-product-schema's toCamel — the runtime prop key). */
@@ -157,7 +158,13 @@ export function buildProductTables(
 ): Map<string, PgTable> {
   const tables = new Map<string, PgTable>();
   for (const store of stores) {
-    tables.set(store.name, buildStoreTable(store, tables, conflictKeys?.get(store.name)));
+    const table = buildStoreTable(store, tables, conflictKeys?.get(store.name));
+    // A `softDelete` store's runtime table is marked in the identity registry so the handler-db facade
+    // (makeHandlerDb — the read/write surface behind views/workflows/handlers) enforces the SAME
+    // tombstone-invisibility the CRUD routes do. Default (hard-delete) stores are never marked → their
+    // facade behaviour is byte-behaviourally unchanged.
+    if (store.softDelete === true) markSoftDeleteTable(table);
+    tables.set(store.name, table);
   }
   return tables;
 }

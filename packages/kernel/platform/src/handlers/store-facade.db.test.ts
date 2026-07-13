@@ -32,6 +32,16 @@ if (requireDb && !hasDb) {
   );
 }
 
+// Ran-counter for the un-skippable ran-guard at the BOTTOM of this file. Every DB `it()` in the main
+// (skipIf-gated) describe increments it; a SEPARATE, never-skipped describe then asserts `testsRan > 0`
+// when the DB is required. This closes the false-green the collection-throw above does NOT catch: if a
+// future edit turned every `it()` into `it.skip()` WHILE `hasDb` is true, the collection-throw never
+// fires (DATABASE_URL is present) and the suite would go green with ZERO DB assertions. (An `afterAll`
+// inside the main describe would NOT catch it: vitest marks a suite whose tests are ALL skipped as a
+// skipped FILE and does not run its afterAll — empirically verified, vitest 4.1.9 — so the guard must
+// live in an independent, always-run describe, exactly as store-soft-delete.db.test.ts does it.)
+let testsRan = 0;
+
 // A throwaway product store (declared OUTSIDE the platform — this is a TEST fixture, not platform src).
 const meetingsStore: StoreSpec = {
   name: 'meetings',
@@ -89,6 +99,36 @@ const scopedStore: StoreSpec = {
     { name: 'business_key', type: 'text', nullable: false, unique: false },
   ],
   foreignKeys: [],
+};
+
+// SOFT-DELETE fixture — a store that OPTS INTO soft delete. buildProductTables marks its runtime table
+// in the soft-delete registry, so the facade folds `deleted_at IS NULL` into reads/updates + stamps the
+// tombstone on delete (the richer read/write surface — views/workflows/handlers — matching the CRUD routes).
+const notesStore: StoreSpec = {
+  name: 'notes',
+  columns: [
+    { name: 'title', type: 'text', nullable: false, unique: false },
+    { name: 'done', type: 'boolean', nullable: false, unique: false },
+  ],
+  foreignKeys: [],
+  softDelete: true,
+};
+
+// SOFT-DELETE + UNIQUE fixture — a softDelete store that ALSO carries a `unique` column (`code`), backed
+// by a TENANT-SCOPED, NON-partial unique index `(tenant_id, code)` in the DDL below (the SAME shape the
+// platform generates for a `unique: true` store column, mirroring store-soft-delete.db.test.ts's
+// `articles`). This exercises the write-path (insert/upsert / store_write) over a tombstoned unique key —
+// the documented `unique`-vs-tombstone limitation the facade upsert path deliberately does NOT special-case
+// (the non-partial index still counts the tombstone). Pinned, not "fixed": changing the behavior is a
+// deliberate, visible decision (a partial index), never an accident.
+const docsStore: StoreSpec = {
+  name: 'docs',
+  columns: [
+    { name: 'title', type: 'text', nullable: false, unique: false },
+    { name: 'code', type: 'text', nullable: false, unique: true },
+  ],
+  foreignKeys: [],
+  softDelete: true,
 };
 
 describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', () => {
@@ -161,6 +201,27 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
         deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text,
         CONSTRAINT scoped_tenant_bk_unique UNIQUE (tenant_id, business_key)
       );
+      -- SOFT-DELETE fixture: the facade folds deleted_at IS NULL on reads/updates + stamps on delete.
+      CREATE TABLE notes (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+        title text NOT NULL,
+        done boolean NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text
+      );
+      -- SOFT-DELETE + UNIQUE fixture: a softDelete store with a TENANT-SCOPED, NON-partial unique
+      -- (tenant_id, code) — NOT a partial (no WHERE deleted_at IS NULL), so a tombstoned row STILL occupies
+      -- its unique value (the documented unique-vs-tombstone limitation exercised by the write-path test).
+      CREATE TABLE docs (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+        title text NOT NULL,
+        code text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text,
+        CONSTRAINT docs_tenant_code_unique UNIQUE (tenant_id, code)
+      );
       INSERT INTO orgs (id, name) VALUES ('${TENANT_A}', 'A'), ('${TENANT_B}', 'B');
     `);
     productTables = buildProductTables([
@@ -169,6 +230,8 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
       gizmosStore,
       pairsStore,
       scopedStore,
+      notesStore,
+      docsStore,
     ]);
     unregister = registerScopedTables([...productTables.values()]);
   });
@@ -180,11 +243,12 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
 
   beforeEach(async () => {
     await db.$client.unsafe(
-      `SET search_path TO ${SCHEMA}; TRUNCATE meetings, tags, gizmos, pairs, scoped CASCADE;`,
+      `SET search_path TO ${SCHEMA}; TRUNCATE meetings, tags, gizmos, pairs, scoped, notes, docs CASCADE;`,
     );
   });
 
   it('insert auto-stamps tenant_id; select is tenant-scoped (cross-tenant invisible)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     const bDb = makeHandlerDb(forTenant(db, TENANT_B), productTables);
     const inserted = await aDb.insert('meetings', { title: 'A-only', completed: false });
@@ -199,6 +263,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('select honors a snake_case column-equality filter (mapped to the camel Drizzle key)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     await aDb.insert('meetings', { title: 'done', completed: true });
     await aDb.insert('meetings', { title: 'pending', completed: false });
@@ -208,6 +273,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('TEN-1 count: tenant-scoped SELECT count(*) honoring the filter; fail-closed on unknown store/column', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     const bDb = makeHandlerDb(forTenant(db, TENANT_B), productTables);
     await aDb.insert('meetings', { title: 'a1', completed: true });
@@ -224,6 +290,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('update is tenant-scoped + returns the updated rows; delete returns the count', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     const row = await aDb.insert('meetings', { title: 'x', completed: false });
     const updated = await aDb.update('meetings', { id: row.id }, { completed: true });
@@ -235,6 +302,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it("B cannot update/delete A's row (tenant predicate AND-combined → zero affected)", async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     const bDb = makeHandlerDb(forTenant(db, TENANT_B), productTables);
     const aRow = await aDb.insert('meetings', { title: 'A', completed: false });
@@ -246,6 +314,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('#1 FAILS CLOSED on an undeclared store name (a handler cannot reach an unlisted table)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     await expect(aDb.select('not_a_store')).rejects.toThrow(/not a declared product store/);
     await expect(aDb.insert('also_missing', { x: 1 })).rejects.toThrow(
@@ -254,6 +323,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('#1 FAILS CLOSED on every auth/core table name (orgs/users/sessions/runs/journal_steps/…)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     const coreTables = [
       'orgs',
@@ -276,6 +346,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('#3 REJECTS a server-controlled column in insert/update VALUES (fail-closed throw)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     // A handler may NEVER set tenant_id / id / created_at / region in values — fail-closed throw.
     await expect(
@@ -295,6 +366,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('#2 defense-in-depth: even at the TenantDb layer a foreign tenant_id lands under the run tenant', async () => {
+    testsRan += 1;
     // The facade rejects tenant_id in values (#3 above). #2 proves the LAYER BENEATH — TenantDb —
     // would ALSO stamp the run's tenant if a tenant_id ever reached it (belt-and-suspenders): a raw
     // forTenant(A).insert with tenant_id=B lands under A (TenantDb auto-stamps, overwriting B).
@@ -307,6 +379,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('#4 FAILS CLOSED on an unknown column key in a filter AND in values', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     // Unknown filter column → throw (not silently ignored → would return ALL rows otherwise).
     await expect(aDb.select('meetings', { nonexistent: 'x' })).rejects.toThrow(
@@ -319,6 +392,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('#4 a FILTER may use an injected column (read-by-id) — injected cols allowed in filters', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     const row = await aDb.insert('meetings', { title: 'byid', completed: false });
     // Filtering by the injected `id` is legitimate (the throwaway lookup tool does exactly this).
@@ -328,6 +402,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('SF-1 REJECTS a non-plain-scalar VALUE (object/array/SQL-ish) in insert/update/filter', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     // A crafted object value (the shape a Drizzle SQL object / injection payload would take) → throw.
     const sqlish = { queryChunks: ['; DROP TABLE meetings; --'] };
@@ -350,6 +425,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('SF-1 ACCEPTS plain scalars (string/number/boolean/null/Date) — not over-broad', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     // A Date value is a plain scalar (allowed); null is allowed (nullable column).
     const row = await aDb.insert('meetings', {
@@ -363,6 +439,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('SF1-JSONB: a jsonb column ACCEPTS a JSON object/array (parity with the api write path)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     // The SF-1 fix is column-type-aware: a jsonb column takes free-form JSON (object/array), matching
     // the api path's z.unknown() for jsonb — the facade is no longer stricter than the api path.
@@ -384,6 +461,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('SF1-JSONB: a REAL Drizzle SQL object is STILL rejected on a jsonb AND a non-jsonb column', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     const injection = sql`(SELECT secret FROM other_tenant)`; // a genuine Drizzle SQL object
     // Even though `metadata` is jsonb (objects allowed), a SQL OBJECT is the injection vector SF-1
@@ -402,6 +480,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('SF1-JSONB: a function / class instance is STILL rejected on a jsonb column', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     // A function value → forbidden everywhere.
     await expect(
@@ -425,6 +504,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('SF1: a plain OBJECT is still rejected on a NON-jsonb column (text)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     await expect(
       aDb.insert('meetings', { title: { not: 'a string' } as unknown as string, completed: false }),
@@ -432,6 +512,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('SF-2 coerces an ISO-STRING timestamp value to a Date on insert (plain-row contract)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     // The SDK contract is "plain serializable rows" → an ISO string for a timestamp column must work
     // (drizzle's timestamp mapper wants a Date; the facade coerces). Before SF-2 this crashed.
@@ -445,6 +526,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('SF-2 REJECTS an invalid date string for a timestamp column (fail-closed)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     await expect(
       aDb.insert('meetings', { title: 'bad', completed: false, scheduled_at: 'not-a-date' }),
@@ -452,6 +534,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('TenantDb backstop: update with tenantId in the SET does NOT move the row', async () => {
+    testsRan += 1;
     // The facade rejects a server-controlled key (#3); this proves the LAYER BENEATH — a RAW
     // TenantDb.update with a tenantId in the SET is stripped, so the row's tenant is UNCHANGED (no
     // caller — run-core/api-auth/the facade — can move a row across tenants via update).
@@ -476,6 +559,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('transaction() runs the body in a tenant tx that COMMITS its writes (the GUC seam, A3)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     await aDb.transaction(async (tx) => {
       await tx.insert('meetings', { title: 'in-tx', completed: false });
@@ -487,6 +571,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('transaction() ROLLS BACK on a throw (no partial write escapes the tx)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     await expect(
       aDb.transaction(async (tx) => {
@@ -502,6 +587,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
   it('C1 CROSS-TENANT GUARD: A.upsert on a GLOBAL-unique conflict NEVER overwrites B (the setWhere line)', async () => {
+    testsRan += 1;
     // THE critical fail-the-fix test. business_key carries a GLOBAL (non-tenant-scoped) UNIQUE. B owns
     // business_key='K' with title='B'. A upserts the SAME key with title='A'. The INSERT collides with
     // B's row globally; the tenant-scoped DO-UPDATE setWhere (tenant_id = A) matches ZERO rows on B's
@@ -530,6 +616,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('C1 SAME-TENANT: upsert INSERTS then UPDATES this tenant’s row on the same key (returns it)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     // First upsert → INSERT path (no conflict). Returns the inserted row.
     const first = await aDb.upsert('meetings', ['business_key'], {
@@ -559,6 +646,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('C1 upsert runs the SF-1 / server-controlled guards (no new trust surface)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     // A server-controlled column in values → fail-closed (same as insert).
     await expect(
@@ -588,6 +676,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
   it('C11 jsonb-vs-inArray: an ARRAY value is set-membership on a SCALAR col, EQUALITY on a jsonb col', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     await aDb.insert('meetings', { title: 'alpha', completed: false });
     await aDb.insert('meetings', { title: 'beta', completed: false });
@@ -605,6 +694,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('C11 inArray elements are SF-1 guarded (a crafted non-data element is rejected fail-closed)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     // One element is a Drizzle-SQL-ish object → the whole filter is rejected (no injection via the batch).
     await expect(
@@ -615,6 +705,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('C11 orderBy + limit + offset: server-side ordering/paging, still tenant-scoped', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     const bDb = makeHandlerDb(forTenant(db, TENANT_B), productTables);
     // A's rows out of order; a B row with a title that would SORT FIRST (must never leak into A's read).
@@ -642,6 +733,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('C11 orderBy FAILS CLOSED on an unknown column (resolveColumn)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     await expect(
       aDb.select('meetings', {}, { orderBy: [{ column: 'nonexistent', dir: 'asc' }] }),
@@ -654,6 +746,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
   it('F1 ensure-exists: an upsert whose values ARE the conflict columns uses DO NOTHING (no crash)', async () => {
+    testsRan += 1;
     // values == the conflict column ONLY → setValues is genuinely EMPTY. onConflictDoUpdate({set:{}})
     // throws drizzle's synchronous "No values to set"; the facade uses onConflictDoNothing instead.
     // (Fail-the-fix: revert FIX 1 and the 1st upsert RAISES "No values to set" — this test goes RED.)
@@ -669,6 +762,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('XT-1 sanitizes a unique-violation on a DIFFERENT global unique (no constraint name leaks)', async () => {
+    testsRan += 1;
     // B holds vendor='V'. A upserts a FRESH business_key (the named target → no conflict there) but
     // vendor='V' (held by B) → the INSERT hits the DIFFERENT global unique (gizmos_vendor_unique) →
     // 23505. The facade SANITIZES it to a neutral message (the raw pg constraint name = a cross-tenant
@@ -707,6 +801,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('F2 select limit/offset fail-closed on a non-negative-integer guard (no silent over-read)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     await aDb.insert('meetings', { title: 'a', completed: false });
     await aDb.insert('meetings', { title: 'b', completed: false });
@@ -723,6 +818,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('TQ-1 concurrent same-key upserts: exactly ONE row, neither rejects with a 23505', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     // The ON CONFLICT DO UPDATE makes the race a no-crash upsert: one INSERTs, the other UPDATEs the
     // same row — neither raises a 23505. (Promise.all REJECTS if either throws → the fail-the-fix.)
@@ -736,6 +832,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('TQ-3 composite conflict target: insert-then-update the SAME row (both conflict cols excluded from SET)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     const first = await aDb.upsert('pairs', ['business_key', 'vendor'], {
       title: 'first',
@@ -756,6 +853,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('TQ-4 tenant-scoped unique (the secure pattern): per-tenant keys, scoped update, foreign key never conflicts', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     const bDb = makeHandlerDb(forTenant(db, TENANT_B), productTables);
     // (i) A and B can EACH hold business_key='K' simultaneously (UNIQUE is (tenant_id, business_key)).
@@ -798,11 +896,188 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   it('TQ-2 an empty-array IN filter matches NOTHING (never everything)', async () => {
+    testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     await aDb.insert('meetings', { title: 'a', completed: false });
     await aDb.insert('meetings', { title: 'b', completed: false });
     // title: [] → inArray(title, []) → drizzle emits `false` → 0 rows (NOT all rows). Pins the
     // 'empty IN matches nothing' invariant (a fail-OPEN bug would return every row).
     expect(await aDb.select('meetings', { title: [] })).toHaveLength(0);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────────────────────────
+  // SOFT DELETE on the FACADE (the richer read/write surface — declarative views, workflow
+  // store_read/store_write nodes, tool/route/trigger handlers). The CRUD store routes already fold
+  // `deleted_at IS NULL` + stamp the tombstone on delete; these prove `makeHandlerDb` enforces the SAME
+  // "a tombstoned row is uniformly invisible" contract, so a view/workflow/handler read never resurfaces
+  // a tombstoned row and a facade delete never HARD-deletes a softDelete store. A NON-softDelete store is
+  // byte-behaviourally unchanged (physical delete). Fail-the-fix: disable the `visiblePredicate` fold in
+  // `select` and the 'omits the tombstoned row' assertion goes RED.
+  // ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+  it('softDelete: facade delete STAMPS deleted_at (row physically survives) and hides it from select/count', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    const keep = await aDb.insert('notes', { title: 'keep', done: false });
+    const gone = await aDb.insert('notes', { title: 'soft-me', done: false });
+    expect(await aDb.count?.('notes')).toBe(2);
+
+    // Soft delete → returns 1 (one row tombstoned), NOT a hard delete.
+    expect(await aDb.delete('notes', { id: gone.id })).toBe(1);
+
+    // select OMITS the tombstoned row; count EXCLUDES it; the surviving row is untouched.
+    const rows = await aDb.select('notes');
+    expect(rows.map((r) => r.title)).toEqual(['keep']);
+    expect(rows[0]?.id).toBe(keep.id);
+    expect(await aDb.count?.('notes')).toBe(1);
+    // A direct filter for the tombstoned row also returns nothing (a caller cannot widen back to a tombstone).
+    expect(await aDb.select('notes', { id: gone.id })).toHaveLength(0);
+
+    // The row PHYSICALLY survives at the DB level with deleted_at stamped (schema-qualified raw read,
+    // bypassing the facade filter entirely — this is what "not a hard delete" means).
+    const raw = (await db.$client.unsafe(`SELECT id, deleted_at FROM ${SCHEMA}.notes;`)) as Array<{
+      id: string;
+      deleted_at: Date | null;
+    }>;
+    expect(raw).toHaveLength(2); // BOTH rows physically present
+    expect(raw.find((r) => r.id === gone.id)?.deleted_at).not.toBeNull(); // tombstoned
+    expect(raw.find((r) => r.id === keep.id)?.deleted_at).toBeNull(); // alive
+  });
+
+  it('softDelete: update on a tombstoned row is a no-op (0 rows); a 2nd delete is a no-op (0)', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    const n = await aDb.insert('notes', { title: 'x', done: false });
+    expect(await aDb.delete('notes', { id: n.id })).toBe(1);
+    // update on the tombstoned row matches ZERO rows (uniform with the CRUD PATCH-on-tombstoned → 404).
+    expect(await aDb.update('notes', { id: n.id }, { done: true })).toHaveLength(0);
+    // a 2nd delete of the SAME row is a no-op (`deleted_at IS NULL` folded in → 0 rows tombstoned).
+    expect(await aDb.delete('notes', { id: n.id })).toBe(0);
+    // Still exactly ONE physical row, still tombstoned, done still false (the no-op update never applied).
+    const raw = (await db.$client.unsafe(
+      `SELECT done, deleted_at FROM ${SCHEMA}.notes;`,
+    )) as Array<{
+      done: boolean;
+      deleted_at: Date | null;
+    }>;
+    expect(raw).toHaveLength(1);
+    expect(raw[0]?.done).toBe(false);
+    expect(raw[0]?.deleted_at).not.toBeNull();
+  });
+
+  it("softDelete: delete is still tenant-scoped (B cannot tombstone A's row)", async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    const bDb = makeHandlerDb(forTenant(db, TENANT_B), productTables);
+    const aRow = await aDb.insert('notes', { title: 'A', done: false });
+    // B's soft-delete affects ZERO rows (the structural tenant predicate is AND-combined BENEATH the
+    // tombstone filter by the TenantDb chokepoint — the soft-delete change never touched it).
+    expect(await bDb.delete('notes', { id: aRow.id })).toBe(0);
+    // A's row is untouched + still visible to A.
+    expect(await aDb.select('notes', { id: aRow.id })).toHaveLength(1);
+    const raw = (await db.$client.unsafe(`SELECT deleted_at FROM ${SCHEMA}.notes;`)) as Array<{
+      deleted_at: Date | null;
+    }>;
+    expect(raw).toHaveLength(1);
+    expect(raw[0]?.deleted_at).toBeNull(); // never tombstoned by B
+  });
+
+  it('positive control: a NON-softDelete store facade delete PHYSICALLY removes (byte-behaviourally unchanged)', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    const row = await aDb.insert('meetings', { title: 'hard', completed: false });
+    expect(await aDb.count?.('meetings')).toBe(1);
+    expect(await aDb.delete('meetings', { id: row.id })).toBe(1);
+    // select + count show it gone AND it is PHYSICALLY removed (no tombstone semantics on a default store).
+    expect(await aDb.select('meetings')).toHaveLength(0);
+    expect(await aDb.count?.('meetings')).toBe(0);
+    const raw = (await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM ${SCHEMA}.meetings;`,
+    )) as Array<{ c: number }>;
+    expect(raw[0]?.c).toBe(0); // PHYSICALLY gone — not tombstoned
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────────────────────────
+  // SOFT DELETE + UNIQUE column (the write path over a tombstoned key). The facade `delete` tombstones,
+  // but the facade `upsert`/`insert` write path was deliberately left soft-delete-UNAWARE: it resolves
+  // ON CONFLICT against the physical, NON-partial `(tenant_id, code)` unique index, which still counts a
+  // tombstoned row. This PINS the resulting `unique`-vs-tombstone behavior (a documented limitation, NOT
+  // a bug to "fix" in production here) so a future regression — or a deliberate change to a partial index
+  // — is a visible decision, and so the write path doubles as a read-path uniform-invisibility guard.
+  // Consistent with store-soft-delete.db.test.ts, which names the same limitation for the CRUD path.
+  // ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+  it('softDelete + unique: upsert/insert over a TOMBSTONED unique key PINS the non-partial-index limitation (write updates the tombstone in place / a plain insert collides; the row stays invisible)', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+
+    // (1) Insert a row holding unique code='DOC-1', then soft-delete it: the tombstone SURVIVES physically
+    //     still holding code='DOC-1' (the tenant-scoped unique (tenant_id, code) is NON-partial — it does
+    //     NOT exclude tombstones). Read-path guard: it is invisible to a plain select (uniform invisibility).
+    const original = await aDb.insert('docs', { title: 'v1', code: 'DOC-1' });
+    expect(await aDb.delete('docs', { id: original.id })).toBe(1);
+    expect(await aDb.select('docs')).toHaveLength(0);
+    expect(await aDb.select('docs', { code: 'DOC-1' })).toHaveLength(0);
+
+    // (2) WRITE PATH — facade `upsert` (the store_write conflict path) on the SAME unique key. The conflict
+    //     target is the tenant-scoped compound unique (tenant_id, code); the tombstone occupies it, so the
+    //     INSERT collides and the tenant-scoped DO-UPDATE (setWhere tenant_id = A) MATCHES the tombstone.
+    //     PINNED ACTUAL BEHAVIOR: the upsert DO-UPDATEs the tombstoned row IN PLACE (same id, title→'v2')
+    //     but does NOT clear `deleted_at` (the DO-UPDATE SET carries only the business columns; the facade
+    //     upsert is soft-delete-UNAWARE) — so the row STAYS tombstoned/INVISIBLE. i.e. an upsert against a
+    //     tombstoned key silently WRITES INTO the tombstone: it neither resurrects it nor inserts a fresh
+    //     visible row. This is the documented unique-vs-tombstone limitation, pinned (not changed).
+    const upserted = await aDb.upsert('docs', ['tenant_id', 'code'], {
+      title: 'v2',
+      code: 'DOC-1',
+    });
+    expect(upserted).toBeDefined(); // the tenant-scoped DO-UPDATE matched the tombstone → a row is returned
+    expect(upserted?.id).toBe(original.id); // it updated the SAME physical (tombstoned) row, not a new one
+    expect(upserted?.title).toBe('v2'); // the business column WAS updated…
+    expect(upserted?.deleted_at).not.toBeNull(); // …but deleted_at is UNTOUCHED — the row is still a tombstone
+    // Read-path guard AGAIN: still invisible after the upsert (the silent write did NOT resurface it).
+    expect(await aDb.select('docs')).toHaveLength(0);
+    expect(await aDb.select('docs', { code: 'DOC-1' })).toHaveLength(0);
+    // Exactly ONE physical row survives, updated in place + still tombstoned (no 2nd row was inserted).
+    const rawAfterUpsert = (await db.$client.unsafe(
+      `SELECT title, deleted_at FROM ${SCHEMA}.docs;`,
+    )) as Array<{ title: string; deleted_at: Date | null }>;
+    expect(rawAfterUpsert).toHaveLength(1);
+    expect(rawAfterUpsert[0]?.title).toBe('v2');
+    expect(rawAfterUpsert[0]?.deleted_at).not.toBeNull();
+
+    // (3) WRITE PATH — a PLAIN facade `insert` on the SAME tombstoned unique key. The tombstone still
+    //     occupies the non-partial (tenant_id, code) index, so the INSERT COLLIDES → the facade sanitizes
+    //     the 23505 to the neutral 'unique constraint violation' (no constraint name leaks). A plain insert
+    //     CANNOT reuse a tombstoned unique value — mirrors the CRUD "re-create a unique value after a soft
+    //     delete → 409" limitation (store-soft-delete.db.test.ts).
+    await expect(aDb.insert('docs', { title: 'v3', code: 'DOC-1' })).rejects.toThrow(
+      'unique constraint violation',
+    );
+    // The failed insert wrote nothing new: still exactly the one tombstoned row.
+    const rawAfterInsert = (await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM ${SCHEMA}.docs;`,
+    )) as Array<{ c: number }>;
+    expect(rawAfterInsert[0]?.c).toBe(1);
+  });
+});
+
+/**
+ * Un-skippable ran-guard (mirrors store-soft-delete.db.test.ts): a SEPARATE, NEVER-skipped describe that
+ * FAILS when the DB is REQUIRED (CI / RAYSPEC_REQUIRE_DB_TESTS) but the main (skipIf-gated) DB arms did NOT
+ * actually run — closing the false-green the collection-throw at the top does NOT catch: a future edit that
+ * turns every `it()` above into `it.skip()` WHILE `hasDb` is true (DATABASE_URL present) would otherwise go
+ * green with ZERO DB assertions. Because this describe is NOT skipIf-gated it always runs its `it()`, so the
+ * FILE is never "all skipped" and the assertion below is always evaluated — the robust equivalent of the
+ * requested guard. (An `afterAll` inside the main describe would NOT catch this: vitest treats a suite whose
+ * tests are ALL skipped as a skipped FILE and never runs its afterAll — empirically verified on vitest 4.1.9.)
+ */
+describe('makeHandlerDb ran-guard (must not silently skip in CI)', () => {
+  it('the facade DB arms ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
+    if (requireDb) {
+      expect(testsRan).toBeGreaterThan(0);
+    } else {
+      expect(requireDb).toBe(false);
+    }
   });
 });
