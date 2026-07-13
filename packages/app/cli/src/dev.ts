@@ -11,9 +11,11 @@
  *   rayspec dev gen-secrets [--out <path>]            Mint the 3 platform boot secrets into a `.env`
  *                                                      (idempotent; never overwrites; never echoes a
  *                                                      value). chmod 600.
- *   rayspec dev db [--database-url <url>] [--name <db>]
+ *   rayspec dev db [--database-url <url>] [--name <db>] [--reset --yes]
  *                                                      Create the dev database if absent (idempotent;
- *                                                      never destructive).
+ *                                                      never destructive). With --reset --yes, DROP +
+ *                                                      re-create a CLEAN database (--reset alone
+ *                                                      refuses without --yes).
  *   rayspec dev bootstrap-tenant --base-url <url> [--email …] [--password …] [--org-name …]
  *                                                      Create the first tenant+owner via the shipped
  *                                                      auth API; emit ORG_ID + the org-scoped token.
