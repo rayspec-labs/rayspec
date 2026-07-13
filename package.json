@@ -25,6 +25,7 @@
     "gate:fixture-neutrality": "node scripts/check-fixture-neutrality.mjs",
     "gate:byte-identity": "node scripts/check-compose-byte-identity.mjs",
     "gate:no-archaeology": "node scripts/check-no-archaeology.mjs",
+    "gate:skill-drift": "node scripts/check-skill-drift.mjs",
     "gate:sbom-fresh": "node scripts/check-sbom-fresh.mjs",
     "gen:dependency-sbom": "node scripts/gen-dependency-sbom.mjs",
     "check:deploy-entrypoint": "node scripts/check-deploy-entrypoint-imports.mjs",
@@ -32,7 +33,7 @@
     "gate:shadow-dryrun": "pnpm --filter @rayspec/db gate:shadow-dryrun",
     "gate:migrate-clean": "pnpm --filter @rayspec/db gate:migrate-clean",
     "gate:parity": "pnpm --filter @rayspec/parity test",
-    "gate": "pnpm gate:chokepoint && pnpm gate:adapter-handlers && pnpm gate:handler-imports && pnpm gate:extension-capability && pnpm gate:spec-schema && pnpm gate:no-pack && pnpm gate:fixture-neutrality && pnpm gate:byte-identity && pnpm gate:sbom-fresh && pnpm gate:migrations && pnpm gate:shadow-dryrun && pnpm gate:migrate-clean && pnpm gate:parity && pnpm gate:no-archaeology",
+    "gate": "pnpm gate:chokepoint && pnpm gate:adapter-handlers && pnpm gate:handler-imports && pnpm gate:extension-capability && pnpm gate:spec-schema && pnpm gate:no-pack && pnpm gate:fixture-neutrality && pnpm gate:byte-identity && pnpm gate:sbom-fresh && pnpm gate:migrations && pnpm gate:shadow-dryrun && pnpm gate:migrate-clean && pnpm gate:parity && pnpm gate:no-archaeology && pnpm gate:skill-drift",
     "bench:tool-latency": "pnpm --filter @rayspec/platform build && node scripts/bench-tool-latency.mjs",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down"
