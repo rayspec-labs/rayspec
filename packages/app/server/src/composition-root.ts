@@ -1410,7 +1410,7 @@ async function deployDeclaredSpec(
   // SCOPED to the UPDATE branch ONLY (opts.updateMigrations set + the spec has stores). deploy()'s
   // drift step (step 6) is REPORT-ONLY: it returns `result.drift` but never aborts. For a mount/
   // materialize boot that is correct (that path already fail-closed on 'drifted' BEFORE deploy, so its
-  // post-deploy drift is []); but the UPDATE branch DELIBERATELY bypassed that pre-flight classify, so
+  // post-deploy drift is []); the UPDATE branch now classifies first too, but on the APPLY route
   // deploy()'s report-only drift is the ONLY check that the reviewed delta actually CLOSED the gap. A
   // delta that applies cleanly but UNDER-reconciles (e.g. adds one of two new columns) would otherwise
   // boot GREEN as `deployMode:'updated'` — and the NEXT plain reboot (no updateMigrations) would then
