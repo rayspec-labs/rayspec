@@ -27,7 +27,7 @@
 
 import { ApiError } from '@rayspec/auth-core';
 import type { ColumnType, StoreSpec } from '@rayspec/spec';
-import { and, asc, desc, eq, getTableColumns, gt, lt, or, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, getTableColumns, gt, isNull, lt, or, type SQL } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import { snakeToCamel } from './injected-columns-view.js';
 
@@ -255,6 +255,16 @@ export function buildListQuery(
     if (type === undefined) validationError(`Unknown query parameter '${key}'.`);
     const col = drizzleColumn(table, key);
     predicates.push(eq(col, coerceValue(type, key, rawValue)) as SQL);
+  }
+
+  // --- soft-delete tombstone filter (opt-in) ---
+  // When the store opts into soft delete, fold `deleted_at IS NULL` into the predicate so `list` never
+  // surfaces a tombstoned row — uniform with get/update/delete on a soft-deleted row. On a
+  // non-softDelete store this is skipped entirely (no behavioural change). `deleted_at` is NOT a
+  // filterable column (an explicit `?deleted_at=…` still fails closed above as an unknown param), so a
+  // caller can never widen the list back to include tombstones.
+  if (store.softDelete) {
+    predicates.push(isNull(drizzleColumn(table, 'deleted_at')) as SQL);
   }
 
   // --- keyset cursor (compared against (order_col, id) in the sort direction) ---

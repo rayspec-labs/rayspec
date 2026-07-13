@@ -24,7 +24,7 @@
 import { ApiError } from '@rayspec/auth-core';
 import { forTenant, isUniqueViolation, uniqueViolationConstraintName } from '@rayspec/db';
 import type { StoreOp, StoreSpec } from '@rayspec/spec';
-import { eq, getTableColumns } from 'drizzle-orm';
+import { and, eq, getTableColumns, isNull, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { Context } from 'hono';
 import type { AppDeps, AppEnv } from '../app-context.js';
@@ -149,6 +149,32 @@ function idColumn(table: PgTable): Parameters<typeof eq>[0] {
   return col as Parameters<typeof eq>[0];
 }
 
+/**
+ * Resolve the injected `deleted_at` tombstone column object for an `isNull()` predicate. Every
+ * materialized store carries `deleted_at` (the generator injects it); on a `softDelete` store it is
+ * the tombstone the runtime writes on delete and filters `IS NULL` on every read/update.
+ */
+function deletedAtColumn(table: PgTable): Parameters<typeof eq>[0] {
+  const col = (getTableColumns(table) as Record<string, unknown>).deletedAt;
+  if (!col) {
+    throw new ApiError('INTERNAL', 'Internal server error.');
+  }
+  return col as Parameters<typeof eq>[0];
+}
+
+/**
+ * The single-row visibility predicate for get/update/delete: `id = :id`, AND — ONLY when the store
+ * opts into soft delete — `deleted_at IS NULL`. So on a `softDelete` store a tombstoned row is
+ * UNIFORMLY invisible (get → 404, update → 404) and the delete-path tombstone stamp matches only a
+ * not-yet-tombstoned row (a 2nd delete → 404). On a NON-softDelete store (the default) it is EXACTLY
+ * the id match — no `deleted_at` filtering, no behavioural change from the pre-soft-delete engine.
+ * The tenant predicate is AND-combined downstream by the `TenantDb` chokepoint, never here.
+ */
+function visibleRowPredicate(store: StoreSpec, table: PgTable, id: string): SQL {
+  const idMatch = eq(idColumn(table), id) as SQL;
+  return store.softDelete ? (and(idMatch, isNull(deletedAtColumn(table))) as SQL) : idMatch;
+}
+
 /** Resolve the injected `idempotency_key` column object for the replay-read `eq()` predicate. */
 function idempotencyKeyColumn(table: PgTable): Parameters<typeof eq>[0] {
   const col = (getTableColumns(table) as Record<string, unknown>).idempotencyKey;
@@ -217,12 +243,12 @@ export function makeStoreHandler(args: {
           }
           case 'get': {
             const id = requireUuidId(c);
-            const rows = (await tx.select(table as never).where(eq(idColumn(table), id))) as Record<
-              string,
-              unknown
-            >[];
+            const rows = (await tx
+              .select(table as never)
+              .where(visibleRowPredicate(store, table, id))) as Record<string, unknown>[];
             const row = rows[0];
-            // Cross-tenant or absent → zero rows → uniform 404 (the tenant predicate is AND-combined).
+            // Cross-tenant, absent, OR (softDelete) tombstoned → zero rows → uniform 404 (the tenant
+            // predicate is AND-combined by TenantDb; `deleted_at IS NULL` folds in for a softDelete store).
             if (!row) throw new ApiError('NOT_FOUND', 'Not found.');
             return c.json(serializeRow(store, row));
           }
@@ -291,19 +317,37 @@ export function makeStoreHandler(args: {
             try {
               updated = (await tx
                 .update(table as never, values)
-                .where(eq(idColumn(table), id))
+                .where(visibleRowPredicate(store, table, id))
                 .returning()) as Record<string, unknown>[];
             } catch (err) {
               if (isUniqueViolation(err)) throw storeConflict(store, err, conflictKeys);
               throw err;
             }
             const row = updated[0];
-            // No row updated ⇒ cross-tenant/absent ⇒ uniform 404 (tenant predicate AND-combined).
+            // No row updated ⇒ cross-tenant/absent/(softDelete) tombstoned ⇒ uniform 404 (tenant
+            // predicate AND-combined; a tombstoned row is uniformly invisible: a PATCH on it is a 404).
             if (!row) throw new ApiError('NOT_FOUND', 'Not found.');
             return c.json(serializeRow(store, row));
           }
           case 'delete': {
             const id = requireUuidId(c);
+            if (store.softDelete) {
+              // Soft delete (opt-in): STAMP the tombstone (`deleted_at = now`) via the EXISTING update
+              // chokepoint instead of a physical delete — the row survives at the DB level but reads as
+              // gone. `visibleRowPredicate` ANDs `deleted_at IS NULL`, so a row that is ALREADY
+              // tombstoned (or absent, or cross-tenant) matches ZERO rows → uniform 404 — a 2nd delete
+              // of the same row is a 404, exactly like get/update on a tombstoned row.
+              const tombstoned = (await tx
+                .update(table as never, { deletedAt: new Date() })
+                .where(visibleRowPredicate(store, table, id))
+                .returning()) as Record<string, unknown>[];
+              if (!tombstoned[0]) throw new ApiError('NOT_FOUND', 'Not found.');
+              // 204 No Content (uniform with the hard-delete path — no body leak).
+              return c.body(null, 204);
+            }
+            // DEFAULT (softDelete falsy/undefined): a HARD physical delete — behaviourally IDENTICAL to
+            // the pre-soft-delete engine (the row is physically gone, its freed sequence value reusable).
+            // No `deleted_at` filtering happens anywhere on a non-softDelete store.
             const deleted = (await tx
               .delete(table as never)
               .where(eq(idColumn(table), id))
@@ -328,6 +372,12 @@ export function makeStoreHandler(args: {
       // holds — so an external-exposure RLS policy binds to a populated GUC and this read never
       // fail-closes; a bare non-tx select would set no GUC).
       if (err instanceof IdempotencyReplayNeeded) {
+        // softDelete interaction (documented, deliberately simple): this replay read is keyed on the
+        // PHYSICAL `(tenant, idempotency_key)` row and is NOT filtered by `deleted_at IS NULL`. So a
+        // create RETRY whose original row was later soft-deleted still finds that (tombstoned) row and
+        // REPLAYS it (200 + Idempotency-Replay) — idempotency tracks the physical creation event by key,
+        // and the tombstoned row physically persists holding that key. This is consistent (the key maps
+        // to exactly one creation) and needs no over-engineering: a genuinely NEW create uses a NEW key.
         const rows = await forTenant(deps.db, tenantId).transaction(
           async (tx) =>
             (await tx
