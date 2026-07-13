@@ -161,7 +161,9 @@ These hold for EVERY declarative store route (It.0/It.1/It.2 alike). You do not 
 are how the generated CRUD surface behaves. Know them so your PRD assumptions and smokes are correct.
 
 - **Tolerant request casing.** `create` and `update` bodies accept **either snake_case OR camelCase**
-  per declared column (`due_date` or `dueDate`). **snake_case is the recommended, canonical form.**
+  per declared column (`due_date` or `dueDate`). Your column *declarations* and every *response* are
+  snake_case, while the generated OpenAPI documents the camelCase request form — both are accepted, so
+  pick one and stay consistent.
   Sending BOTH variants of the SAME column in one body is a **400** (ambiguous). **Responses are ALWAYS
   snake_case** — every exposed key (business + injected) is serialized snake_case, timestamps as ISO-8601.
 - **List query power** (on a `list` route). All narrow and fail-closed:
