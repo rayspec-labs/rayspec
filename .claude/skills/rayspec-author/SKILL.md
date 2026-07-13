@@ -72,6 +72,12 @@ A CRUD backend needs **no** `agents`/`tooling`/`handlers` — those are the It.1
 full 6-phase walkthrough below covers all three branches; the It.2-only additions are clearly marked so
 an It.0/It.1 author can skip them.
 
+**Add a frontend? (optional).** A backend can also serve its own built web UI next to the API — add a
+`frontend[]` mount (`{ route, dir, spa? }`) pointing at a directory of built static assets (relative to
+the spec file). Use `route: /` + `spa: true` for a single-page app served at the root; `api` routes,
+`/health`, and `/v1/*` always win over the static mount. See `frontend[]` in the grammar reference and
+`examples/notes-ui/rayspec.yaml`.
+
 **Out of scope for the backend profile** (It.0/It.1/It.2 — say so plainly and **STOP**, do not fake it
 with a declarative approximation; recommend it as a future iteration or the product profile):
 - **triggers / cron / background / scheduled jobs**, `deployment.durableWorker`, `async:true`
@@ -706,6 +712,7 @@ api: []                   # optional (default []) — see ApiRouteSpec
 agents: []                # optional (default []) — see AgentSpecConfig
 tooling: []               # optional (default []) — It.2 ONLY. See ToolSpec. (It.1: omit.)
 handlers: []              # optional (default []) — It.2 ONLY, kind:tool. See HandlerSpec. (It.1: omit.)
+frontend: []              # optional — static frontend mounts served alongside the API (It.0-friendly). See FrontendSpec[].
 # triggers / extensions / deployment — OUT OF SCOPE for It.1 AND It.2; do not emit.
 ```
 
@@ -827,6 +834,30 @@ Notes that matter:
 > The `.gen.ts` files are produced by `rayspec gen-handler` from the derived holes (Phase 2.5) — you
 > NEVER hand-author them. They import `@rayspec/handler-sdk` TYPE-ONLY, take ZERO npm deps, and reach
 > the DB ONLY through the injected tenant-bound `init.db`.
+
+### `frontend[]` — `FrontendSpec` (optional — serve a static UI alongside the API)
+
+```yaml
+- route: <string>     # REQUIRED — the URL prefix to serve under; MUST start with '/' (e.g. '/' or '/app').
+  dir: <string>       # REQUIRED, non-empty — directory of BUILT static assets, relative to the spec file.
+  spa: <bool>         # optional, default false — when true, an unmatched path under `route` returns
+                      #   index.html (History-API single-page-app routing); when false, it is a 404.
+```
+
+- Static mounts are served **last**: every `api` route, `/health`, `/v1/*`, and `/oidc/*` always wins,
+  and a static miss returns the platform's uniform 404. A reserved-namespace path (`/v1`/`/health`/`/oidc`)
+  is never answered by a static mount.
+- `route` must be unique, must not equal a declared `api` path, and must not target `/v1`/`/health`/`/oidc`
+  (the linter rejects a collision). Root `/` is the common single-page-app case.
+- `dir` must resolve to a readable directory of built assets at deploy — otherwise the boot fails closed
+  with an actionable error (`rayspec doctor` reports a missing/unreadable dir too).
+- Serving is fail-closed: path traversal (incl. URL-encoded forms), dotfiles/hidden paths, and symlinks
+  that escape `dir` are refused; directories are never listed.
+- **Not in v1:** SSR, template rendering, an asset build/bundle pipeline, cache/CDN headers, HTTP Range
+  requests, and the product profile — `frontend` is backend-profile only.
+
+See **`examples/notes-ui/rayspec.yaml`** for a runnable agent-free example (a `notes` store + CRUD API +
+a `frontend` mount serving a bundled `web/dist/index.html`).
 
 ### Real backend-profile examples (It.0 / It.1 shapes)
 
