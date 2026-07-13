@@ -60,7 +60,11 @@ class IdempotencyReplayNeeded extends Error {
   }
 }
 
-/** A bounded default page size for `list` (capped at 200 in v0.1; keyset pagination deferred). */
+/**
+ * The `list` default page size AND hard cap (200). A page that fills to this cap signals
+ * `X-Result-Truncated: true` and hands back an `X-Next-Cursor`; keyset pagination (`after=<cursor>`,
+ * implemented in store-query.ts) then walks the remaining rows.
+ */
 export const STORE_LIST_LIMIT = 200;
 
 /**

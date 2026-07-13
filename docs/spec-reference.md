@@ -159,16 +159,21 @@ api:
 - `action` — a discriminated union on `kind`:
   - **`store`** — a CRUD operation over a declared store through the
     tenant-scoped data layer. Fields: `store` (a declared store name) and `op`,
-    one of `list`, `get`, `create`, `update`, `delete`. The declarative `list` op
-    is deliberately minimal: it returns the tenant's rows with **no filter, sort,
-    offset, or count**, capped at a fixed page size (200 rows; it sets an
-    `X-Result-Truncated: true` response header when the cap is hit). A read that
-    needs filtering, ordering, paging, or a total drops to a `handler` route (see
-    [`handlers`](#handlers) below). A `create` or `update` that violates a
-    [`unique`](#stores) column returns **`409 CONFLICT`** — a same-tenant
-    uniqueness violation (never cross-tenant, because the index is tenant-scoped).
-    The error message names the violated column but never echoes the offending
-    value; a non-conflict failure is unaffected.
+    one of `list`, `get`, `create`, `update`, `delete`. The `list` op supports
+    equality filters, single-column ordering, and keyset pagination (all folded
+    through the tenant predicate and fail-closed on an unknown parameter), capped
+    at a fixed page size (200 rows; it sets an `X-Result-Truncated: true` header
+    and an `X-Next-Cursor` when the cap is hit). A `create` accepts an
+    `Idempotency-Key` and stamps a server-side `created_by` actor, and a request
+    body may use snake_case or camelCase column keys. All of these store-route
+    runtime behaviours are documented in full under
+    [Store route runtime semantics](#store-route-runtime-semantics) below. A read
+    that needs an **offset** page or a filtered **count** still drops to a
+    `handler` route (see [`handlers`](#handlers) below). A `create` or `update`
+    that violates a [`unique`](#stores) column returns **`409 CONFLICT`** — a
+    same-tenant uniqueness violation (never cross-tenant, because the index is
+    tenant-scoped). The error message names the violated column but never echoes
+    the offending value; a non-conflict failure is unaffected.
   - **`agent`** — invoke a declared agent over the run surface. Field: `agent`
     (a declared agent id).
   - **`handler`** — call a declared escape-hatch handler. Field: `handler` (a
@@ -179,6 +184,79 @@ api:
 
 Routes mount onto the platform's existing authenticated HTTP chain — you do not
 re-implement auth per route.
+
+## Store route runtime semantics
+
+Beyond the grammar, a declared `store` route has a few runtime behaviours worth
+knowing when you call one. They are product-agnostic — derived from the store's
+declared columns — and apply to every store route.
+
+### Request body casing
+
+A `create` or `update` body may key each declared column by **either** its
+snake_case declared name **or** its camelCase twin (`session_id` or `sessionId`
+for a declared `session_id` column). The generated OpenAPI document describes the
+camelCase request key; both forms are accepted, so neither is the sole canonical
+key. Sending **both** variants of the same column in one body is ambiguous and is
+rejected (`400 VALIDATION_ERROR`). Responses are **always** snake_case, keyed by
+your declared column names plus the injected columns.
+
+### The `created_by` actor stamp
+
+Every row carries an injected, server-stamped `created_by` column recording the
+principal that created it:
+
+- `user:<userId>` for a JWT (user) request;
+- `key:<apiKeyId>` for an API-key request.
+
+It is stamped **on create only** — never re-stamped on update — is returned in
+responses, and is **not** client-settable. `created_by` is a reserved column name
+(you cannot declare a business column called `created_by`), so sending
+`created_by` (or its camelCase `createdBy`) in a create/update body is rejected
+(`400 VALIDATION_ERROR`). It **is** filterable on a `list` route (below), which
+lets a caller list only the rows a given principal created.
+
+### `list` query power
+
+The `list` op returns the tenant's rows and supports a deliberately narrow,
+fail-closed query surface. Every filter, order, and cursor is folded **through**
+the tenant predicate, so no query can cross tenants; an unrecognized query
+parameter is rejected (`400 VALIDATION_ERROR`).
+
+- **Equality filters** — `?<column>=<value>` on any declared column, plus the
+  injected `created_by`. Multiple filters are AND-combined. Equality only: there
+  are no range, `OR`, `LIKE`, or full-text operators.
+- **Ordering** — `?order=<column>.asc|desc`. The order column must be
+  **non-nullable**: a declared non-nullable column, or the injected `id` /
+  `created_at`. A nullable column (and the nullable injected `created_by`) is
+  rejected as an order column, because a NULL order value would silently drop rows
+  across the keyset boundary — so `created_by` is filterable but **not** sortable.
+  The default order is `id asc`.
+- **Keyset pagination** — `?limit=<n>` bounds the page (`1`–`200`, default `200`),
+  and `?after=<cursor>` fetches the next page. When a page fills to the cap, the
+  response sets `X-Result-Truncated: true` and returns an opaque `X-Next-Cursor`;
+  pass that value back as `after` to page forward. The cursor is bound to the
+  order it was minted for — reusing it under a different `order` is rejected.
+
+An **offset**-paged read or a filtered total row **count** is not part of the
+declarative `list` op; a read that needs either drops to a `handler` route (see
+[`handlers`](#handlers)).
+
+### Idempotent `create`
+
+A `create` request may carry an `Idempotency-Key` header. The key is stored on the
+row, scoped per tenant and per store. A **repeat** create with the same key value
+**replays the original row** — HTTP `200` with an `Idempotency-Replay: true`
+header, no duplicate row and no `409`. Replay is keyed on the header value alone: a
+repeat with the same key returns the original row **regardless of the body** (a
+changed body under the same key neither creates a new row nor errors). A request
+without the header is never deduplicated — each is a fresh insert.
+
+This is distinct from an author-modeled uniqueness constraint. Declaring a column
+[`unique: true`](#stores) makes a duplicate value a **`409 CONFLICT`**
+(tenant-scoped uniqueness) rather than a replay. Use `Idempotency-Key` for
+safe-retry semantics on a create, and `unique: true` when a duplicate value should
+be refused.
 
 ## `agents`
 
@@ -305,10 +383,13 @@ handlers:
   dispatches through.
 
 A `handler`-kind route is also the escape hatch for reads the declarative `store`
-`list` op cannot express. The injected data facade a route handler receives supports
-**equality filters, `orderBy`, `limit`/`offset` paging, and a filtered `count`** over
-the tenant-scoped store (still tenant-predicated beneath, and still equality-only —
-no `>`/`<`/`like` operators). One authorization consequence to know: **every
+`list` op does not cover — an **offset**-paged read or a filtered **`count`**. (The
+`list` op itself handles equality filters, single-column ordering, and keyset
+pagination — see [Store route runtime semantics](#store-route-runtime-semantics).)
+The injected data facade a route handler receives supports **equality filters,
+`orderBy`, `limit`/`offset` paging, and a filtered `count`** over the tenant-scoped
+store (still tenant-predicated beneath, and still equality-only — no `>`/`<`/`like`
+operators). One authorization consequence to know: **every
 `handler`-kind route is gated on the `store:write` permission**, not `store:read`.
 The platform cannot statically prove a handler is read-only, so it fail-closes to
 the stronger gate — a handler that only reads is over-protected, never under. So a
