@@ -1585,9 +1585,10 @@ export async function deployProductYamlSpec(
     if (schemaState === 'drifted') {
       throw new ProductBootError(
         `the live product schema has DRIFTED from the spec at ${specPath}:\n${formatDrift(preDrift)}\n` +
-          'mount-without-deploy refuses a drifted schema — reconcile via a reviewed forward migration ' +
-          '(set RAYSPEC_UPDATE_MIGRATION to the delta the skill authored via `rayspec plan <new> ' +
-          '--against <old>`) or deploy against a clean DB. Fail-closed.',
+          'mount-without-deploy refuses a drifted schema — reconcile via a reviewed forward migration: ' +
+          'author the delta with `rayspec plan <new-spec> --against <old-spec>`, then boot with ' +
+          '`rayspec deploy --apply-migration <delta.sql>` (or set RAYSPEC_UPDATE_MIGRATION to that ' +
+          'delta) — or deploy against a clean DB. Fail-closed.',
       );
     }
     migrations =

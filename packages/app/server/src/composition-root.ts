@@ -1101,8 +1101,10 @@ async function deployDeclaredSpec(
         `Boot aborted — the live product schema has DRIFTED from the spec at ${specPath}:\n` +
           `${formatDrift(preDrift)}\n` +
           'mount-without-deploy refuses to boot against a drifted/partially-materialized schema — it ' +
-          'never auto-materializes or drops. Reconcile via an explicit reviewed FORWARD migration / ' +
-          're-deploy (expand-contract; the update flow), or deploy against a clean DB. Fail-closed.',
+          'never auto-materializes or drops. Reconcile via an explicit reviewed FORWARD migration: ' +
+          'author the delta with `rayspec plan <new-spec> --against <old-spec>`, then boot with ' +
+          '`rayspec deploy --apply-migration <delta.sql>` (add `--allowlist <file.json>` to cover any ' +
+          'reviewed destructive statement) — or deploy against a clean DB. Fail-closed.',
       );
     }
     migrations =

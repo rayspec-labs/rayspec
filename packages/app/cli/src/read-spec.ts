@@ -72,7 +72,8 @@ export function resolveSpecPath(positionals: readonly string[]): string {
   if (rel.startsWith('..') || isAbsolute(rel)) {
     throw new ReadSpecError(
       'path_escape',
-      `spec path ${JSON.stringify(arg)} escapes the working directory — pass a path inside it`,
+      `spec path ${JSON.stringify(arg)} escapes the working directory — run rayspec from the directory ` +
+        `that contains the spec, or move the spec inside the current working directory (${cwd})`,
     );
   }
   return resolved;
@@ -110,7 +111,8 @@ export async function readSpecFile(absPath: string): Promise<string> {
   if (relReal.startsWith('..') || isAbsolute(relReal)) {
     throw new ReadSpecError(
       'path_escape',
-      `spec file ${absPath} resolves to a target outside the working directory — pass a path inside it`,
+      `spec file ${absPath} resolves to a target outside the working directory — run rayspec from the ` +
+        `directory that contains the spec, or move the spec inside the current working directory (${process.cwd()})`,
     );
   }
   let st: ReturnType<typeof statSync>;
