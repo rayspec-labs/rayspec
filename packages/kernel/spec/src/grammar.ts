@@ -143,6 +143,8 @@ export const StoreColumn = z
     type: ColumnType,
     nullable: z.boolean().default(false),
     unique: z.boolean().default(false),
+    /** Optional whitelist of allowed values for a text column (a stored value must be one of these). */
+    enum: z.array(z.string().min(1)).min(1).optional(),
   })
   .strict();
 export type StoreColumn = z.infer<typeof StoreColumn>;
@@ -159,6 +161,8 @@ export const StoreForeignKey = z
     column: SafeIdentifier,
     /** The referenced store name (must be a declared store — lint-resolved). */
     references: SafeIdentifier,
+    /** When set, the FK targets this (unique) column of the referenced store instead of its id. */
+    referencesColumn: SafeIdentifier.optional(),
     /** ON DELETE policy; `cascade` mirrors the tenancy cascade discipline. */
     onDelete: z.enum(['cascade', 'restrict', 'set null']).default('cascade'),
   })
@@ -175,6 +179,8 @@ export const StoreSpec = z
     name: SafeIdentifier,
     columns: z.array(StoreColumn).min(1),
     foreignKeys: z.array(StoreForeignKey).default([]),
+    /** Opt-in soft delete: a delete marks the row deleted instead of removing it (default: hard delete). */
+    softDelete: z.boolean().optional(),
   })
   .strict();
 export type StoreSpec = z.infer<typeof StoreSpec>;

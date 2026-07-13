@@ -12,7 +12,16 @@
  * the spec version — the test failure is the prompt to make that call consciously.
  */
 import { describe, expect, it } from 'vitest';
-import { AgentSpecConfig, FrontendSpec, RaySpec, RouteAction, ToolSpecConfig } from './grammar.js';
+import {
+  AgentSpecConfig,
+  FrontendSpec,
+  RaySpec,
+  RouteAction,
+  StoreColumn,
+  StoreForeignKey,
+  StoreSpec,
+  ToolSpecConfig,
+} from './grammar.js';
 
 describe('grammar shape pins (neutral-churn tripwire)', () => {
   it('RaySpec has exactly the expected top-level sections (extensions added)', () => {
@@ -120,5 +129,76 @@ describe('FrontendSpec (static frontend mount)', () => {
     const withoutFrontend = RaySpec.safeParse({ version: '1.0', metadata: { name: 'm' } });
     expect(withoutFrontend.success).toBe(true);
     if (withoutFrontend.success) expect('frontend' in withoutFrontend.data).toBe(false);
+  });
+});
+
+describe('StoreColumn.enum (optional value whitelist)', () => {
+  it('parses a column carrying an enum whitelist', () => {
+    const res = StoreColumn.safeParse({ name: 'status', type: 'text', enum: ['open', 'closed'] });
+    expect(res.success).toBe(true);
+    if (res.success) expect(res.data.enum).toEqual(['open', 'closed']);
+  });
+
+  it('omits enum when absent (not injected — keeps an enum-less column byte-identical)', () => {
+    const res = StoreColumn.safeParse({ name: 'title', type: 'text' });
+    expect(res.success).toBe(true);
+    if (res.success) expect('enum' in res.data).toBe(false);
+  });
+
+  it('rejects an empty enum array (min 1)', () => {
+    expect(StoreColumn.safeParse({ name: 'status', type: 'text', enum: [] }).success).toBe(false);
+  });
+});
+
+describe('StoreForeignKey.referencesColumn (FK to a unique column)', () => {
+  it('parses an FK targeting a named column of the referenced store', () => {
+    const res = StoreForeignKey.safeParse({
+      column: 'meeting_slug',
+      references: 'meetings',
+      referencesColumn: 'slug',
+    });
+    expect(res.success).toBe(true);
+    if (res.success) expect(res.data.referencesColumn).toBe('slug');
+  });
+
+  it('omits referencesColumn when absent (not injected — keeps an id-targeted FK byte-identical)', () => {
+    const res = StoreForeignKey.safeParse({ column: 'meeting_id', references: 'meetings' });
+    expect(res.success).toBe(true);
+    if (res.success) expect('referencesColumn' in res.data).toBe(false);
+  });
+
+  it('rejects a metacharacter identifier', () => {
+    expect(
+      StoreForeignKey.safeParse({ column: 'c', references: 'r', referencesColumn: 'slug!' })
+        .success,
+    ).toBe(false);
+  });
+});
+
+describe('StoreSpec.softDelete (opt-in soft delete)', () => {
+  it('parses a store opting into soft delete', () => {
+    const res = StoreSpec.safeParse({
+      name: 'notes',
+      columns: [{ name: 'body', type: 'text' }],
+      softDelete: true,
+    });
+    expect(res.success).toBe(true);
+    if (res.success) expect(res.data.softDelete).toBe(true);
+  });
+
+  it('omits softDelete when absent (not injected — keeps a hard-delete store byte-identical)', () => {
+    const res = StoreSpec.safeParse({ name: 'notes', columns: [{ name: 'body', type: 'text' }] });
+    expect(res.success).toBe(true);
+    if (res.success) expect('softDelete' in res.data).toBe(false);
+  });
+
+  it('rejects a non-boolean softDelete', () => {
+    expect(
+      StoreSpec.safeParse({
+        name: 'notes',
+        columns: [{ name: 'body', type: 'text' }],
+        softDelete: 'yes',
+      }).success,
+    ).toBe(false);
   });
 });
