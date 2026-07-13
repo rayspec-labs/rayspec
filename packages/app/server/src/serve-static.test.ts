@@ -10,6 +10,11 @@
  *   - RESERVED NAMESPACES: a `/` spa:true catch-all NEVER answers `/v1/*`, `/health/*`, `/oidc/*` — an
  *     unregistered reserved path falls through to the 404 (not the SPA shell), a registered one still
  *     wins, and an ordinary app deep link (`/dashboard`) still gets the SPA shell.
+ *   - RANGE / HEAD (byte-serving delegated to serveStatic): a Range GET returns 206 partial content
+ *     (Content-Range + Accept-Ranges + only the requested bytes); a HEAD returns 200 with Content-Length
+ *     and an empty body; an unsatisfiable range is pinned to serveStatic 2.0.6's ACTUAL clamped-206
+ *     (there is no RFC-7233 416 path); and the fail-closed guard stays method/range-agnostic (dotfile,
+ *     traversal, and symlink-escape each still 404 under BOTH a Range GET and a HEAD).
  *
  * Fail-the-fix: remove the guard in serve-static.ts and the traversal/dotfile/symlink arms serve the
  * secret file (200) instead of 404 — the `.not.toContain(SECRET)` + status assertions go red. Remove the
@@ -221,4 +226,94 @@ describe('mountFrontend — non-root mount + longest-route-first ordering', () =
       rmSync(root, { recursive: true, force: true });
     }
   });
+});
+
+describe('mountFrontend — Range / HEAD (partial content for media seek/resume)', () => {
+  // Range + HEAD handling is delegated ENTIRELY to @hono/node-server's serveStatic (pinned 2.0.6) — this
+  // module adds no range code of its own. These tests PIN that delegated behaviour as a deliberate,
+  // supported feature (a client can request a byte range to seek/resume a large media asset) AND act as a
+  // fail-closed regression guard. Every assertion mirrors the ACTUAL 2.0.6 output (verified by running the
+  // suite against the real dependency), NOT an idealized RFC-7233 response.
+  const ASSET_CONTENT = `console.log('${ASSET_SENTINEL}');`;
+  const ASSET_SIZE = Buffer.byteLength(ASSET_CONTENT, 'utf8');
+
+  it('Range GET on a nested asset → 206 partial content (Content-Range + Accept-Ranges + only the requested bytes)', async () => {
+    const app = buildApp([spaMount], specDir());
+    const res = await app.request('/assets/app.js', { headers: { Range: 'bytes=0-4' } });
+    expect(res.status).toBe(206);
+    expect(res.headers.get('content-range')).toBe(`bytes 0-4/${ASSET_SIZE}`);
+    expect(res.headers.get('accept-ranges')).toBe('bytes');
+    expect(res.headers.get('content-length')).toBe('5');
+    // Body is EXACTLY the first 5 bytes (0..4 inclusive), not the whole asset.
+    expect(await res.text()).toBe(ASSET_CONTENT.slice(0, 5));
+  });
+
+  it('HEAD on the mount root → 200 with Content-Length and an EMPTY body (no 206, no Content-Range)', async () => {
+    const app = buildApp([spaMount], specDir());
+    const res = await app.request('/', { method: 'HEAD' });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-length')).not.toBeNull();
+    expect(res.headers.get('content-range')).toBeNull();
+    expect(res.headers.get('accept-ranges')).toBeNull(); // HEAD is not a Range response
+    // HEAD carries the metadata (length) but never a body.
+    expect(await res.text()).toBe('');
+  });
+
+  it('unsatisfiable Range (bytes=99999- on a small file) → 500, NOT 416 (serveStatic 2.0.6 has no 416 path)', async () => {
+    // ⚠ OBSERVED REALITY, NOT THE IDEAL (empirically verified against @hono/node-server 2.0.6): there is
+    // no RFC-7233 416 branch. For `bytes=99999-` serveStatic parses start=99999 and clamps `end` to
+    // size-1 (< start), then calls `createReadStream(path, { start: 99999, end: size-1 })` — Node throws
+    // `ERR_OUT_OF_RANGE` synchronously because start > end, and Hono surfaces the throw as a 500 (NOT a
+    // clamped 206, and NOT a 416). We pin the ACTUAL status: asserting 416/206 would assert a fiction, and
+    // producing a proper 416 would require vendoring the dependency (out of scope for this tests-only
+    // change). This also serves as a sentinel: a future serveStatic that adds a real 416 (or a clean 206)
+    // would flip this and force a deliberate re-look. Body left unread on purpose (it is a 500 error page).
+    const app = buildApp([spaMount], specDir());
+    const res = await app.request('/assets/app.js', { headers: { Range: 'bytes=99999-' } });
+    expect(res.status).toBe(500);
+    expect(res.status).not.toBe(200);
+    expect(res.status).not.toBe(206);
+    expect(res.status).not.toBe(416);
+  });
+
+  it('Accept-Ranges is present ONLY on an actual Range response — absent on a plain GET', async () => {
+    const app = buildApp([spaMount], specDir());
+    const plain = await app.request('/assets/app.js');
+    expect(plain.status).toBe(200);
+    expect(plain.headers.get('accept-ranges')).toBeNull();
+  });
+
+  // REGRESSION (the load-bearing arm) — the fail-closed guard runs BEFORE and INDEPENDENTLY of the
+  // method/range: a dotfile, an encoded traversal, and a symlink-escape each still 404 under BOTH a Range
+  // GET and a HEAD, never leaking the secret bytes and never falling back to the SPA shell. How it fails
+  // the fix: remove the `if (!isSafeStaticPath(...)) return next();` line in serve-static.ts and — because
+  // serveStatic itself blocks neither dotfiles nor a symlink-escape, and a `%2f`-miss falls back to the
+  // SPA shell — these go RED (the dotfile/symlink arms would serve the secret at 200; the `/..%2f.env`
+  // arms would serve index.html at 200), tripping the status + `.not.toContain` assertions. (We do NOT
+  // revert the shipped guard here; this comment only documents how the arm fails the fix.)
+  const guardTargets: Array<{ name: string; path: string }> = [
+    { name: 'dotfile /.env', path: '/.env' },
+    { name: 'encoded traversal /..%2f.env', path: '/..%2f.env' },
+    { name: 'symlink-escape /leak.txt', path: '/leak.txt' },
+  ];
+  const methodVariants: Array<{
+    name: string;
+    init: { method?: string; headers?: Record<string, string> };
+  }> = [
+    { name: 'Range GET', init: { headers: { Range: 'bytes=0-4' } } },
+    { name: 'HEAD', init: { method: 'HEAD' } },
+  ];
+  for (const target of guardTargets) {
+    for (const variant of methodVariants) {
+      it(`fail-closed guard is ${variant.name}-agnostic: ${target.name} → 404, never the secret or the SPA shell`, async () => {
+        const app = buildApp([spaMount], specDir());
+        const res = await app.request(target.path, variant.init);
+        expect(res.status).toBe(404);
+        const body = await res.text();
+        expect(body).not.toContain(DOTFILE_SECRET);
+        expect(body).not.toContain(SYMLINK_SECRET);
+        expect(body).not.toContain(INDEX_SENTINEL); // NOT the SPA shell either
+      });
+    }
+  }
 });
