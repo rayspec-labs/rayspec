@@ -100,11 +100,25 @@ function buildStoreTable(
             `'${fk.references}' (declare parents before children).`,
         );
       }
-      // The parent's injected PK is `id` (a uuid). Reference it with the author onDelete policy.
-      const parentId = (parent as unknown as { id: unknown }).id;
-      let b = chain(uuid(col.name)).references(() => parentId, { onDelete: fk.onDelete });
-      if (!col.nullable) b = b.notNull();
-      columns[camel] = b;
+      if (fk.referencesColumn === undefined) {
+        // ID-TARGET FK: the parent's injected PK is `id` (a uuid). Reference it with the author onDelete
+        // policy — the historic form, runtime twin agrees with the generator's single-column FK DDL.
+        const parentId = (parent as unknown as { id: unknown }).id;
+        let b = chain(uuid(col.name)).references(() => parentId, { onDelete: fk.onDelete });
+        if (!col.nullable) b = b.notNull();
+        columns[camel] = b;
+      } else {
+        // BUSINESS-KEY FK: a TENANT-SCOPED COMPOUND FK `(tenant_id, col) -> parent(tenant_id, refcol)`,
+        // which a single-column drizzle `.references()` cannot express — the DB constraint (emitted by
+        // generate-product-sql) is the sole enforcer, and this runtime twin only needs the column with
+        // its DECLARED type (matched to the referenced unique column's type by lint) so a select/insert
+        // round-trips correctly. NO forced uuid (the column may be text/integer/…) and NO runtime
+        // `.references()` (it would mis-model the compound FK). A `unique: true` business-key FK column
+        // still gets its compound unique index via the `compoundUnique` extras below.
+        let b = businessBuilder(col.type, col.name);
+        if (!col.nullable) b = b.notNull();
+        columns[camel] = b;
+      }
     } else {
       let b = businessBuilder(col.type, col.name);
       if (!col.nullable) b = b.notNull();

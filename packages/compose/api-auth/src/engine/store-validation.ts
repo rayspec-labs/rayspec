@@ -84,9 +84,16 @@ function zodForColumn(type: ColumnType): z.ZodType {
   }
 }
 
-/** One business column wrapped for nullability (a nullable column also accepts JSON null). */
+/**
+ * One business column wrapped for nullability (a nullable column also accepts JSON null). When a text
+ * column declares an `enum` whitelist, the base validator is a `z.enum` of exactly those values instead
+ * of a free `z.string()` — so a value outside the whitelist is a VALIDATION_ERROR at the create/update
+ * chokepoint (server-side enforcement, 400), not merely an authoring convention. Lint guarantees `enum`
+ * only appears on `type:'text'` with a non-empty, distinct member list, so the cast is sound.
+ */
 function columnSchema(col: StoreColumn): z.ZodType {
-  const base = zodForColumn(col.type);
+  const base =
+    col.enum !== undefined ? z.enum(col.enum as [string, ...string[]]) : zodForColumn(col.type);
   return col.nullable ? base.nullable() : base;
 }
 

@@ -22,7 +22,14 @@
  */
 
 import { ApiError } from '@rayspec/auth-core';
-import { forTenant, isUniqueViolation, uniqueViolationConstraintName } from '@rayspec/db';
+import {
+  fkConstraintName,
+  foreignKeyViolationConstraintName,
+  forTenant,
+  isForeignKeyViolation,
+  isUniqueViolation,
+  uniqueViolationConstraintName,
+} from '@rayspec/db';
 import type { StoreOp, StoreSpec } from '@rayspec/spec';
 import { and, eq, getTableColumns, isNull, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
@@ -138,6 +145,39 @@ function conflictColumn(
   // A conflict-key column is GLOBAL-unique → never name it (cross-tenant oracle); fall to generic.
   if (candidate !== undefined && conflictKeys?.has(candidate)) return undefined;
   return candidate;
+}
+
+/**
+ * Build a TENANT-SAFE 400 for a store-write FOREIGN-KEY violation (Postgres 23503) on CREATE/UPDATE —
+ * an inserted/updated row whose business-key FK column names a parent that does NOT exist (in THIS
+ * tenant; the compound business-key FK is tenant-scoped, so a cross-tenant parent is invisible and
+ * counts as absent). It is a 400 (not a 409) because it is a bad INPUT — the client supplied a value
+ * that references nothing, exactly like a failed value-format check — not a concurrency conflict.
+ *
+ * The message NAMES the local FK column (derived from the constraint name, which is schema-only) and
+ * says the referenced record does not exist — it NEVER echoes the offending value or any foreign row
+ * data (mirroring `storeConflict`'s no-cross-tenant-existence-leak posture). The value lives on the
+ * error's `detail` field, which the constraint-name extractor never reads.
+ */
+function storeFkViolation(store: StoreSpec, err: unknown): ApiError {
+  const col = fkViolationColumn(store, err);
+  const message = col
+    ? `The referenced record for '${col}' does not exist.`
+    : 'A referenced record does not exist.';
+  return new ApiError('VALIDATION_ERROR', message);
+}
+
+/**
+ * Resolve the local FK column NAME a 23503 names on a CREATE/UPDATE, or `undefined` (⇒ a generic
+ * message). A create/update FK violation fires THIS store's own FK constraint, so its name
+ * (`<store>_<col>_<parent>_<refcol>_fk`, derived from the SCHEMA — never a row value) reconstructs from
+ * one of `store.foreignKeys` via the shared `fkConstraintName`. Returns that FK's local column.
+ */
+function fkViolationColumn(store: StoreSpec, err: unknown): string | undefined {
+  const constraint = foreignKeyViolationConstraintName(err);
+  if (!constraint) return undefined;
+  const fk = store.foreignKeys.find((f) => fkConstraintName(store.name, f) === constraint);
+  return fk?.column;
 }
 
 /** Resolve the injected `id` PK column object for an `eq()` predicate on a runtime product table. */
@@ -294,6 +334,10 @@ export function makeStoreHandler(args: {
                 if (idemKey) throw new IdempotencyReplayNeeded(idemKey, err);
                 throw storeConflict(store, err, conflictKeys);
               }
+              // A business-key FK onto a NON-existent (or cross-tenant, hence invisible) parent → 23503
+              // → a 400 VALIDATION_ERROR (bad input), tenant-safe. Detect → map → rethrow with NO further
+              // in-tx statement (the 23503 poisoned the tx; the outer rollback is clean).
+              if (isForeignKeyViolation(err)) throw storeFkViolation(store, err);
               throw err;
             }
             const row = inserted[0];
@@ -321,6 +365,9 @@ export function makeStoreHandler(args: {
                 .returning()) as Record<string, unknown>[];
             } catch (err) {
               if (isUniqueViolation(err)) throw storeConflict(store, err, conflictKeys);
+              // Setting a business-key FK column to a NON-existent parent on UPDATE is the same
+              // bad-input 23503 → 400 as create (tenant-safe, names the column, never a foreign value).
+              if (isForeignKeyViolation(err)) throw storeFkViolation(store, err);
               throw err;
             }
             const row = updated[0];
@@ -348,10 +395,28 @@ export function makeStoreHandler(args: {
             // DEFAULT (softDelete falsy/undefined): a HARD physical delete — behaviourally IDENTICAL to
             // the pre-soft-delete engine (the row is physically gone, its freed sequence value reusable).
             // No `deleted_at` filtering happens anywhere on a non-softDelete store.
-            const deleted = (await tx
-              .delete(table as never)
-              .where(eq(idColumn(table), id))
-              .returning()) as Record<string, unknown>[];
+            // A child FK with onDelete:'restrict' that still references this row makes the physical
+            // DELETE fail 23503 → a 409 CONFLICT (tenant-safe, generic): the row is still referenced by
+            // related records. It is a 409 (not the create/update 400) because it is a state CONFLICT —
+            // the parent cannot be removed while children point at it — not a bad-input value. Detect →
+            // map → rethrow with NO further in-tx statement (the 23503 poisoned the tx; the rollback is
+            // clean). The message names NO child table/column/value (a child constraint is not in THIS
+            // store's FK set, and naming a foreign relationship could leak cross-tenant existence).
+            let deleted: Record<string, unknown>[];
+            try {
+              deleted = (await tx
+                .delete(table as never)
+                .where(eq(idColumn(table), id))
+                .returning()) as Record<string, unknown>[];
+            } catch (err) {
+              if (isForeignKeyViolation(err)) {
+                throw new ApiError(
+                  'CONFLICT',
+                  'This record is still referenced by related records and cannot be deleted.',
+                );
+              }
+              throw err;
+            }
             if (!deleted[0]) throw new ApiError('NOT_FOUND', 'Not found.');
             // 204 No Content on a successful delete (uniform, no body leak).
             return c.body(null, 204);

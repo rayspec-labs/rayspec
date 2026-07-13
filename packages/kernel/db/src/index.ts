@@ -54,7 +54,11 @@ export {
   generateProductSchema,
   INJECTED_COLUMN_NAMES,
 } from './generated/generate-product-schema.js';
-export { generateProductSql, type StoreConflictKeys } from './generated/generate-product-sql.js';
+export {
+  fkConstraintName,
+  generateProductSql,
+  type StoreConflictKeys,
+} from './generated/generate-product-sql.js';
 export { PRODUCT_TENANT_SCOPED_TABLES } from './generated/product-schema.js';
 export { MIGRATION_ALLOWLIST } from './migration-scan.allowlist.js';
 export {
@@ -68,7 +72,12 @@ export {
 export { migrationsDir } from './migrations.js';
 // The ONE shared Postgres-error-shape detectors (the 23505 cause-chain walk + the constraint-name
 // reader). Request-path/capability code maps a UNIQUE violation to a typed conflict through these.
-export { isUniqueViolation, uniqueViolationConstraintName } from './pg-errors.js';
+export {
+  foreignKeyViolationConstraintName,
+  isForeignKeyViolation,
+  isUniqueViolation,
+  uniqueViolationConstraintName,
+} from './pg-errors.js';
 export * as schema from './schema.js';
 // The CORE tenant-scoped table set (runs / journal_steps / conversation_items / run_events /
 // idempotency_keys). Additive named re-export (also reachable via `schema.CORE_TENANT_SCOPED_TABLES`)

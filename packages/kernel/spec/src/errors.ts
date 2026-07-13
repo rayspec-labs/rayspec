@@ -131,6 +131,35 @@ export function specError(code: SpecErrorCode, message: string, path?: string): 
 }
 
 /**
+ * The CLOSED set of NON-FATAL spec-warning codes. A warning flags a documented, deliberately-permitted
+ * interaction the author should be AWARE of — it does NOT fail `doctor`/`plan` (unlike a `SpecError`).
+ * Kept a distinct closed vocabulary from `SpecErrorCode` so a fresh session never confuses "advisory"
+ * with "fail-closed".
+ *
+ *  - `softdelete_fk_restrict` — a `softDelete` store is the TARGET of a `restrict` business-key
+ *                               (`referencesColumn`) foreign key. Soft-deleting such a parent is an
+ *                               `UPDATE(deleted_at)` that does NOT fire the database ON DELETE restrict,
+ *                               so children keep pointing at the tombstoned row — the restrict guarantee
+ *                               only binds on a HARD delete. This is a permitted, documented interaction.
+ */
+export const SpecWarningCode = z.enum(['softdelete_fk_restrict']);
+export type SpecWarningCode = z.infer<typeof SpecWarningCode>;
+
+/** A single NON-FATAL spec warning (closed code + message + optional JSON path). Never fails a parse. */
+export const SpecWarning = z.object({
+  code: SpecWarningCode,
+  message: z.string(),
+  /** JSON path into the spec document (e.g. `stores[0].softDelete`); absent for whole-doc warnings. */
+  path: z.string().optional(),
+});
+export type SpecWarning = z.infer<typeof SpecWarning>;
+
+/** Construct a SpecWarning (path omitted when undefined so the envelope stays minimal). */
+export function specWarning(code: SpecWarningCode, message: string, path?: string): SpecWarning {
+  return path !== undefined ? { code, message, path } : { code, message };
+}
+
+/**
  * The result of `parseSpec` — a discriminated `Result` so a caller MUST check `ok` before
  * touching `value` (the fail-closed contract: a spec with any violation yields `ok:false` and
  * the full violation list, never a partially-trusted value).

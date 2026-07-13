@@ -148,6 +148,12 @@ describe('StoreColumn.enum (optional value whitelist)', () => {
   it('rejects an empty enum array (min 1)', () => {
     expect(StoreColumn.safeParse({ name: 'status', type: 'text', enum: [] }).success).toBe(false);
   });
+
+  it('rejects an empty-string enum member (element min 1) — pins the whitelist to non-empty values', () => {
+    expect(
+      StoreColumn.safeParse({ name: 'status', type: 'text', enum: ['open', ''] }).success,
+    ).toBe(false);
+  });
 });
 
 describe('StoreForeignKey.referencesColumn (FK to a unique column)', () => {

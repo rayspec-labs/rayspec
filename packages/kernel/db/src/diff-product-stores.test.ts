@@ -17,7 +17,11 @@
 import { StoreSpec } from '@rayspec/spec';
 import { describe, expect, it } from 'vitest';
 import { diffProductStores, nextMigrationFilename } from './diff-product-stores.js';
-import { emitStoreSql, generateProductSql } from './generated/generate-product-sql.js';
+import {
+  emitStoreSql,
+  fkConstraintName,
+  generateProductSql,
+} from './generated/generate-product-sql.js';
 import { scanMigrationSql } from './migration-scan.js';
 
 /** Parse a raw store object through the REAL Zod grammar so defaults (nullable/unique/onDelete) apply. */
@@ -538,5 +542,111 @@ describe('nextMigrationFilename — versioned append convention', () => {
     expect(nextMigrationFilename(['README.md', 'meta', 'not-a-migration.sql'])).toBe(
       '0000_update.sql',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// Business-key foreign keys (referencesColumn → a unique column, tenant-scoped compound FK).
+// ---------------------------------------------------------------------------------------
+describe('business-key FK (referencesColumn) — compound DDL + byte-fidelity', () => {
+  const PARENT = store({
+    name: 'meetings',
+    columns: [{ name: 'slug', type: 'text', unique: true }],
+  });
+  const CHILD_BIZ = store({
+    name: 'transcripts',
+    columns: [{ name: 'meeting_slug', type: 'text' }],
+    foreignKeys: [{ column: 'meeting_slug', references: 'meetings', referencesColumn: 'slug' }],
+  });
+  const CHILD_ID = store({
+    name: 'transcripts',
+    columns: [{ name: 'meeting_id', type: 'uuid' }],
+    foreignKeys: [{ column: 'meeting_id', references: 'meetings' }],
+  });
+
+  it('emits a TENANT-SCOPED COMPOUND FK onto (tenant_id, refcol) with the business-key constraint name', () => {
+    const sql = generateProductSql([PARENT, CHILD_BIZ]);
+    expect(sql).toContain(
+      'ADD CONSTRAINT "transcripts_meeting_slug_meetings_slug_fk" ' +
+        'FOREIGN KEY ("tenant_id", "meeting_slug") ' +
+        'REFERENCES "public"."meetings"("tenant_id", "slug")',
+    );
+    // The constraint name helper agrees with the emitted SQL (single source of truth).
+    expect(fkConstraintName('transcripts', CHILD_BIZ.foreignKeys[0]!)).toBe(
+      'transcripts_meeting_slug_meetings_slug_fk',
+    );
+  });
+
+  it('an ID-TARGET FK is emitted BYTE-IDENTICALLY to the historic single-column `_id_fk` form', () => {
+    const sql = generateProductSql([PARENT, CHILD_ID]);
+    // The exact pre-business-key DDL — a regression guard on the byte-frozen id-target path.
+    expect(sql).toContain(
+      'ALTER TABLE "transcripts" ADD CONSTRAINT "transcripts_meeting_id_meetings_id_fk" ' +
+        'FOREIGN KEY ("meeting_id") REFERENCES "public"."meetings"("id") ' +
+        'ON DELETE cascade ON UPDATE no action',
+    );
+    expect(fkConstraintName('transcripts', CHILD_ID.foreignKeys[0]!)).toBe(
+      'transcripts_meeting_id_meetings_id_fk',
+    );
+    // A business-key change is NOT present here (no tenant_id compound FK for an id-target).
+    expect(sql).not.toContain('FOREIGN KEY ("tenant_id", "meeting_id")');
+  });
+
+  it('changing an FK id-target → business-key is a REPLACE (DROP + ADD) that re-passes the REAL scan', () => {
+    const r = diffProductStores([PARENT, CHILD_ID], [PARENT, CHILD_BIZ]);
+    // The old id-target constraint is DROPped and the new compound one ADDed (adjacent, drop-first).
+    expect(r.statements).toContain(
+      'ALTER TABLE "transcripts" DROP CONSTRAINT "transcripts_meeting_id_meetings_id_fk"',
+    );
+    // But wait — the FK is on a DIFFERENT column (meeting_id → meeting_slug), so it is also a column
+    // add/drop. The FK REPLACE proper (SAME column, changed referencesColumn) is exercised below.
+    expect(r.destructive).toBe(true);
+    expect(scanMigrationSql(r.migrationSql, []).pass).toBe(false);
+    expect(scanMigrationSql(r.migrationSql, r.proposedAllowlist).pass).toBe(true);
+  });
+
+  it('fkEqual treats a referencesColumn CHANGE on the SAME column as a REPLACE (DROP + ADD)', () => {
+    // Same local column `ref`, target flips from the id (undefined) to the business key `slug`.
+    const parent = store({
+      name: 'meetings',
+      columns: [
+        { name: 'slug', type: 'text', unique: true },
+        { name: 'id_alias', type: 'uuid', unique: true },
+      ],
+    });
+    const oldChild = store({
+      name: 'transcripts',
+      columns: [{ name: 'ref', type: 'uuid' }],
+      foreignKeys: [{ column: 'ref', references: 'meetings', referencesColumn: 'id_alias' }],
+    });
+    const newChild = store({
+      name: 'transcripts',
+      columns: [{ name: 'ref', type: 'uuid' }],
+      // onDelete unchanged, only the referenced column changes id_alias → (still a business key) …
+      foreignKeys: [{ column: 'ref', references: 'meetings', referencesColumn: 'id_alias' }],
+    });
+    // Identical FK ⇒ NO-OP (no spurious REPLACE).
+    expect(diffProductStores([parent, oldChild], [parent, newChild]).statements).toEqual([]);
+
+    // Now actually CHANGE the referenced column → a REPLACE.
+    const changed = store({
+      name: 'transcripts',
+      columns: [{ name: 'ref', type: 'uuid' }],
+      foreignKeys: [{ column: 'ref', references: 'meetings', referencesColumn: 'slug' }],
+    });
+    // ref is uuid but slug is text → this specific pair would fail lint, but the pure diff does not lint;
+    // it just proves the DROP old-name + ADD new-name REPLACE fires on a referencesColumn change.
+    const r = diffProductStores([parent, oldChild], [parent, changed]);
+    expect(r.statements).toContain(
+      'ALTER TABLE "transcripts" DROP CONSTRAINT "transcripts_ref_meetings_id_alias_fk"',
+    );
+    expect(r.statements).toContain(
+      'ALTER TABLE "transcripts" ADD CONSTRAINT "transcripts_ref_meetings_slug_fk" ' +
+        'FOREIGN KEY ("tenant_id", "ref") REFERENCES "public"."meetings"("tenant_id", "slug") ' +
+        'ON DELETE cascade ON UPDATE no action',
+    );
+    // The DROP is destructive; the proposal re-passes the REAL scan (byte-fidelity holds for the new name).
+    expect(scanMigrationSql(r.migrationSql, []).pass).toBe(false);
+    expect(scanMigrationSql(r.migrationSql, r.proposedAllowlist).pass).toBe(true);
   });
 });
