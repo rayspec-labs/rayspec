@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Notes UI</title>
+    <meta name="description" content="notes-ui static frontend served alongside the API" />
+  </head>
+  <body>
+    <main id="app" data-static-frontend="notes-ui">
+      <h1>Notes UI</h1>
+      <p>This page is served statically by the backend from <code>web/dist</code>.</p>
+      <ul id="notes"></ul>
+    </main>
+    <script>
+      // Minimal, self-contained: fetch the tenant's notes (a bearer token is required) and render them.
+      // The static asset carries no build tooling — it is a plain page the backend serves as-is.
+      async function loadNotes(token) {
+        const res = await fetch('/api/notes', { headers: { authorization: 'Bearer ' + token } });
+        if (!res.ok) return;
+        const notes = await res.json();
+        const list = document.getElementById('notes');
+        for (const note of notes) {
+          const li = document.createElement('li');
+          li.textContent = note.title;
+          list.appendChild(li);
+        }
+      }
+      // A real deployment would obtain the token via the auth flow; left as an exercise here.
+      window.loadNotes = loadNotes;
+    </script>
+  </body>
+</html>
