@@ -188,25 +188,34 @@ service additionally needs.
 
 The boot secrets live in the environment, never in the database — which has a sharp
 operational consequence when you **restore a database dump under different secrets**.
-The data survives the restore at the row level, but it stays bound to the secrets that
-created it:
+A full dump restores the rows whole — orgs, users, memberships, the argon2id password
+hashes, the API-key rows, and all tenant data — so at the DB level everything survives
+and stays reachable. The only thing a freshly-minted secret permanently breaks is the
+credential material keyed by that specific secret:
 
 - **The API-key pepper (`RAYSPEC_API_KEY_PEPPER`).** Every API-key row stores an HMAC
   of the key computed with the pepper. Restore the dump under a **freshly-minted**
-  pepper and those stored HMACs no longer match, so the copied keys all fail to verify
-  (`401`) — even though the rows are physically present. Worse, the restored data is
-  tenant-locked to org identities you can no longer authenticate as, so the rows are
-  intact on disk yet **unreachable through the API**. The fix is not to recover the old
-  keys but to **mint new API keys** (and, as needed, re-establish the org identities)
-  after a restore.
+  pepper and those stored HMACs no longer match, so the copied API keys all fail to
+  verify (`401`) — even though the rows are physically present. That is the *only* thing
+  a new pepper breaks: the copied API keys, nothing else. The data and the org
+  identities stay reachable — **user passwords are hashed with argon2id** (each hash
+  carries its own salt and params; the pepper never touches passwords), so they survive
+  the restore untouched. An org owner simply **logs in again** (password intact), gets a
+  fresh JWT minted under the current signing key, and reaches the tenant data exactly as
+  before. The fix is not to recover the old keys but to **mint new API keys** after a
+  restore. The one genuine edge, noted honestly: an org whose *sole* credential was an
+  API key (no user login at all) has nothing to log in with, so it needs a fresh
+  key/identity established out of band.
 - **The JWT/OIDC signing key (`RAYSPEC_JWT_SIGNING_KEY`).** The same class of problem:
   tokens issued under the old key fail to verify under a new one. This one **self-heals**
   — a user simply signs in again and gets a fresh token minted under the current key.
-  The pepper case does **not** self-heal, because an API key cannot "log in again."
+  (It is the same re-login that restores API access above, because user passwords are
+  pepper-independent; only a copied API key, which cannot "log in again," must be
+  re-minted rather than self-healing.)
 
 The practical rule: **keep a restored dump paired with the secrets it was created under**
-(back up the environment/secret material alongside the database), or plan to re-mint
-credentials after a cross-environment restore. This is stated for the **trusted,
+(back up the environment/secret material alongside the database), or plan to re-mint the
+affected **API keys** after a cross-environment restore. This is stated for the **trusted,
 single-node** posture; it is not a claim that restoring a database into a public,
 multi-tenant deployment is safe — that requires the separate hardening layer above (see
 [`SECURITY.md`](../SECURITY.md)).

@@ -35,7 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compound** foreign key — `(tenant_id, <col>) REFERENCES parent(tenant_id, <refcol>)`
   — which structurally forbids a cross-tenant reference. A `create`/`update` naming a
   non-existent parent value returns `400`; a `restrict`-blocked parent delete returns
-  `409` (both tenant-safe — they name the local column, never a foreign value). The
+  `409` (both tenant-safe — the `400` names only the local column, the `409` names no
+  relationship at all, never a foreign value). The
   local column's type must match the referenced column's, the referenced column must
   be `unique: true`, and `onDelete: 'set null'` is rejected (a compound FK cannot null
   `tenant_id`). The id-target FK path is unchanged.
@@ -81,12 +82,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   diff/gate and from-clean-database guarantees are unchanged. Corrected across
   getting-started, the CLI reference, concepts, ARCHITECTURE, and the README.
 - **New "Restore and key rotation" operational note** (ARCHITECTURE → security model):
-  a restored database dump survives at the row level, but its API-key rows are keyed by
-  the old `RAYSPEC_API_KEY_PEPPER` and its data is tenant-locked to org identities you
-  can no longer authenticate as — so under a freshly-minted pepper the copied keys
-  return `401` and the rows, though physically intact, are unreachable through the API.
-  Mint new keys/identities after a restore. (The JWT signing key is the same class but
-  self-heals on re-login; the pepper does not.)
+  a restored database dump survives whole at the row level — orgs, users, the argon2id
+  password hashes, and all tenant data come back reachable. The only thing a
+  **freshly-minted** `RAYSPEC_API_KEY_PEPPER` breaks is the set of *copied API keys*:
+  their stored HMACs no longer match, so they return `401` — mint new ones. User
+  passwords are argon2id (pepper-independent), so an org owner just logs in again and a
+  fresh JWT under the current signing key reaches the data. (The JWT signing key is the
+  same class and self-heals on that same re-login; an org whose sole credential was an
+  API key needs a fresh key established out of band.)
 - **Documented the new store features** in the spec reference (`enum`, `softDelete`,
   `referencesColumn`, and the `<col>__in` set filter), and pinned **Range and HEAD on
   a static `frontend` mount** as a supported feature with tests (byte-range `206` /

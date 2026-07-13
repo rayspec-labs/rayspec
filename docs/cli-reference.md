@@ -353,8 +353,8 @@ change is applied by the explicit `--apply-migration` flag below.
   explicit). It is rejected with `--dry-run` (a dry-run touches no database), and a bare
   `--allowlist` without `--apply-migration` is refused (it would be silently ignored).
   Both file paths are jailed exactly like the spec path.
-- **Postgres:** required for the serve path (it applies the migration chain and
-  materializes/mounts stores). `--dry-run` touches no database.
+- **Postgres:** required for the serve path (it applies the committed **platform**
+  migration chain and materializes/mounts stores). `--dry-run` touches no database.
 - **Flags:** `--port <n>` overrides `PORT` (serve path); `--dry-run` selects the
   one-shot compose check; `--apply-migration <delta.sql>` applies a reviewed forward
   migration; `--allowlist <file.json>` (requires `--apply-migration`) covers reviewed

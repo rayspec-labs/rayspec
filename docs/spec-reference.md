@@ -155,7 +155,8 @@ stores:
     matches the referenced column's type. At runtime, a `create`/`update` naming a
     non-existent parent value is a `400`, and a `restrict`-blocked parent delete (or a
     change to a parent's referenced value while a child still points at the old one) is
-    a `409` — both tenant-safe (they name the local column, never a foreign value).
+    a `409` — both tenant-safe: the `400` names only the local column, the `409` names
+    no relationship at all, never a foreign value.
   - `onDelete` — one of `cascade`, `restrict`, `set null`; default `cascade`. On a
     business-key FK (one with `referencesColumn`) `set null` is **rejected** — a
     compound FK cannot null `tenant_id` — so a business-key FK supports `cascade` or
