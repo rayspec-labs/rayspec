@@ -76,4 +76,9 @@ export * as schema from './schema.js';
 // tables through the SAME `forTenant` chokepoint without naming each table. NOT kill-set (schema.ts is
 // unchanged; this just surfaces an already-exported const on the package barrel).
 export { CORE_TENANT_SCOPED_TABLES } from './schema.js';
+// The soft-delete table-identity registry: `buildProductTables` marks a `softDelete` store's runtime
+// table; the handler-db facade (makeHandlerDb — views/workflows/handlers) consults `isSoftDeleteTable`
+// to fold `deleted_at IS NULL` into reads/updates + stamp the tombstone on delete (parity with the CRUD
+// routes). Mirrors the `registerScopedTables` identity-set pattern (no wide param plumbing).
+export { isSoftDeleteTable, markSoftDeleteTable } from './soft-delete-registry.js';
 export { forTenant, TENANT_GUC, TenantDb } from './tenant-db.js';

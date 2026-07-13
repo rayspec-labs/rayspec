@@ -91,6 +91,19 @@ const scopedStore: StoreSpec = {
   foreignKeys: [],
 };
 
+// SOFT-DELETE fixture — a store that OPTS INTO soft delete. buildProductTables marks its runtime table
+// in the soft-delete registry, so the facade folds `deleted_at IS NULL` into reads/updates + stamps the
+// tombstone on delete (the richer read/write surface — views/workflows/handlers — matching the CRUD routes).
+const notesStore: StoreSpec = {
+  name: 'notes',
+  columns: [
+    { name: 'title', type: 'text', nullable: false, unique: false },
+    { name: 'done', type: 'boolean', nullable: false, unique: false },
+  ],
+  foreignKeys: [],
+  softDelete: true,
+};
+
 describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', () => {
   let db: ReturnType<typeof makeDbWithSchema>;
   let productTables: Map<string, PgTable>;
@@ -161,6 +174,15 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
         deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text,
         CONSTRAINT scoped_tenant_bk_unique UNIQUE (tenant_id, business_key)
       );
+      -- SOFT-DELETE fixture: the facade folds deleted_at IS NULL on reads/updates + stamps on delete.
+      CREATE TABLE notes (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+        title text NOT NULL,
+        done boolean NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text
+      );
       INSERT INTO orgs (id, name) VALUES ('${TENANT_A}', 'A'), ('${TENANT_B}', 'B');
     `);
     productTables = buildProductTables([
@@ -169,6 +191,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
       gizmosStore,
       pairsStore,
       scopedStore,
+      notesStore,
     ]);
     unregister = registerScopedTables([...productTables.values()]);
   });
@@ -180,7 +203,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
 
   beforeEach(async () => {
     await db.$client.unsafe(
-      `SET search_path TO ${SCHEMA}; TRUNCATE meetings, tags, gizmos, pairs, scoped CASCADE;`,
+      `SET search_path TO ${SCHEMA}; TRUNCATE meetings, tags, gizmos, pairs, scoped, notes CASCADE;`,
     );
   });
 
@@ -804,5 +827,93 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     // title: [] → inArray(title, []) → drizzle emits `false` → 0 rows (NOT all rows). Pins the
     // 'empty IN matches nothing' invariant (a fail-OPEN bug would return every row).
     expect(await aDb.select('meetings', { title: [] })).toHaveLength(0);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────────────────────────
+  // SOFT DELETE on the FACADE (the richer read/write surface — declarative views, workflow
+  // store_read/store_write nodes, tool/route/trigger handlers). The CRUD store routes already fold
+  // `deleted_at IS NULL` + stamp the tombstone on delete; these prove `makeHandlerDb` enforces the SAME
+  // "a tombstoned row is uniformly invisible" contract, so a view/workflow/handler read never resurfaces
+  // a tombstoned row and a facade delete never HARD-deletes a softDelete store. A NON-softDelete store is
+  // byte-behaviourally unchanged (physical delete). Fail-the-fix: disable the `visiblePredicate` fold in
+  // `select` and the 'omits the tombstoned row' assertion goes RED.
+  // ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+  it('softDelete: facade delete STAMPS deleted_at (row physically survives) and hides it from select/count', async () => {
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    const keep = await aDb.insert('notes', { title: 'keep', done: false });
+    const gone = await aDb.insert('notes', { title: 'soft-me', done: false });
+    expect(await aDb.count?.('notes')).toBe(2);
+
+    // Soft delete → returns 1 (one row tombstoned), NOT a hard delete.
+    expect(await aDb.delete('notes', { id: gone.id })).toBe(1);
+
+    // select OMITS the tombstoned row; count EXCLUDES it; the surviving row is untouched.
+    const rows = await aDb.select('notes');
+    expect(rows.map((r) => r.title)).toEqual(['keep']);
+    expect(rows[0]?.id).toBe(keep.id);
+    expect(await aDb.count?.('notes')).toBe(1);
+    // A direct filter for the tombstoned row also returns nothing (a caller cannot widen back to a tombstone).
+    expect(await aDb.select('notes', { id: gone.id })).toHaveLength(0);
+
+    // The row PHYSICALLY survives at the DB level with deleted_at stamped (schema-qualified raw read,
+    // bypassing the facade filter entirely — this is what "not a hard delete" means).
+    const raw = (await db.$client.unsafe(`SELECT id, deleted_at FROM ${SCHEMA}.notes;`)) as Array<{
+      id: string;
+      deleted_at: Date | null;
+    }>;
+    expect(raw).toHaveLength(2); // BOTH rows physically present
+    expect(raw.find((r) => r.id === gone.id)?.deleted_at).not.toBeNull(); // tombstoned
+    expect(raw.find((r) => r.id === keep.id)?.deleted_at).toBeNull(); // alive
+  });
+
+  it('softDelete: update on a tombstoned row is a no-op (0 rows); a 2nd delete is a no-op (0)', async () => {
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    const n = await aDb.insert('notes', { title: 'x', done: false });
+    expect(await aDb.delete('notes', { id: n.id })).toBe(1);
+    // update on the tombstoned row matches ZERO rows (uniform with the CRUD PATCH-on-tombstoned → 404).
+    expect(await aDb.update('notes', { id: n.id }, { done: true })).toHaveLength(0);
+    // a 2nd delete of the SAME row is a no-op (`deleted_at IS NULL` folded in → 0 rows tombstoned).
+    expect(await aDb.delete('notes', { id: n.id })).toBe(0);
+    // Still exactly ONE physical row, still tombstoned, done still false (the no-op update never applied).
+    const raw = (await db.$client.unsafe(
+      `SELECT done, deleted_at FROM ${SCHEMA}.notes;`,
+    )) as Array<{
+      done: boolean;
+      deleted_at: Date | null;
+    }>;
+    expect(raw).toHaveLength(1);
+    expect(raw[0]?.done).toBe(false);
+    expect(raw[0]?.deleted_at).not.toBeNull();
+  });
+
+  it("softDelete: delete is still tenant-scoped (B cannot tombstone A's row)", async () => {
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    const bDb = makeHandlerDb(forTenant(db, TENANT_B), productTables);
+    const aRow = await aDb.insert('notes', { title: 'A', done: false });
+    // B's soft-delete affects ZERO rows (the structural tenant predicate is AND-combined BENEATH the
+    // tombstone filter by the TenantDb chokepoint — the soft-delete change never touched it).
+    expect(await bDb.delete('notes', { id: aRow.id })).toBe(0);
+    // A's row is untouched + still visible to A.
+    expect(await aDb.select('notes', { id: aRow.id })).toHaveLength(1);
+    const raw = (await db.$client.unsafe(`SELECT deleted_at FROM ${SCHEMA}.notes;`)) as Array<{
+      deleted_at: Date | null;
+    }>;
+    expect(raw).toHaveLength(1);
+    expect(raw[0]?.deleted_at).toBeNull(); // never tombstoned by B
+  });
+
+  it('positive control: a NON-softDelete store facade delete PHYSICALLY removes (byte-behaviourally unchanged)', async () => {
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    const row = await aDb.insert('meetings', { title: 'hard', completed: false });
+    expect(await aDb.count?.('meetings')).toBe(1);
+    expect(await aDb.delete('meetings', { id: row.id })).toBe(1);
+    // select + count show it gone AND it is PHYSICALLY removed (no tombstone semantics on a default store).
+    expect(await aDb.select('meetings')).toHaveLength(0);
+    expect(await aDb.count?.('meetings')).toBe(0);
+    const raw = (await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM ${SCHEMA}.meetings;`,
+    )) as Array<{ c: number }>;
+    expect(raw[0]?.c).toBe(0); // PHYSICALLY gone — not tombstoned
   });
 });
