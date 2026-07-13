@@ -4,7 +4,7 @@
   "private": true,
   "license": "FSL-1.1-ALv2",
   "type": "module",
-  "description": "DEV-ONLY generic, spec-driven local backend-boot wrapper. A thin wrapper over @rayspec/server (the supported LOCAL boot) parameterized by RAYSPEC_SPEC_PATH: provisions a fresh dev DB, injects the spec, runs the REAL deploy() pipeline, registers product tables, wires the OpenAI backend, and serves any declarative spec (stores + CRUD api + agents) over curl. Lives OUTSIDE packages/ — zero product code in the platform. Local/internal-only: the external-exposure hardening layer gates untrusted traffic.",
+  "description": "DEV-ONLY generic, spec-driven local backend-boot wrapper. A thin wrapper over @rayspec/server (the supported LOCAL boot) parameterized by RAYSPEC_SPEC_PATH: provisions a fresh dev DB, injects the spec, runs the REAL deploy() pipeline, registers product tables, wires each declared agent's backend from env, and serves any declarative spec (stores + CRUD api + agents) over curl. Lives OUTSIDE packages/ — zero product code in the platform. Local/internal-only: the external-exposure hardening layer gates untrusted traffic.",
   "scripts": {
     "serve": "tsx serve.ts",
     "typecheck": "tsc --noEmit",

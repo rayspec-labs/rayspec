@@ -10,16 +10,19 @@
  * This is a thin wrapper over the REAL `@rayspec/server` composition root, PARAMETERIZED by
  * `RAYSPEC_SPEC_PATH` so it can boot ANY declarative spec (stores + CRUD api + agents +
  * tool-handler-backed agents) with NO product knowledge baked in. It:
- *   1. loads repo-root `.env` (the boot secrets + OPENAI_API_KEY) — no dotenv dep,
+ *   1. loads repo-root `.env` (the boot secrets + any provider credentials the declared agents need)
+ *      — no dotenv dep,
  *   2. provisions a FRESH dev DATABASE (DROP+CREATE) so the committed migration chain bootstraps it
  *      CLEAN — never the stale hand-provisioned `public`,
  *   3. injects RAYSPEC_SPEC_PATH (the spec .yaml) so `assembleServer` runs the REAL `deploy()`
- *      pipeline for the declared stores + routes + agents,
- *   4. registers the built product-table instances in the deny-by-default Set via the composition-root
- *      `/testing` seam (a REAL deployment ships a committed generated product-schema.ts; this dev
- *      wrapper stands in for that committed tuple), and
- *   5. supplies the OpenAI backend instance for the spec's declared agents (BackendId 'openai'; the
- *      platform ships none). An agent-free spec still boots (the factory map is just unused).
+ *      pipeline for the declared stores + routes + agents, and
+ *   4. builds the deployer-seam opts via the SHIPPED `assembleOptsFromEnv` (the SAME builder the
+ *      `rayspec-serve` bin and the `rayspec deploy` CLI use): it registers the built product-table
+ *      instances in the deny-by-default Set (a REAL deployment ships a committed generated
+ *      product-schema.ts; this dev wrapper stands in for that committed tuple) AND wires each DECLARED
+ *      agent's backend from the ambient env — demanding a provider credential ONLY when the spec
+ *      declares an agent that needs it (an agent-free spec, e.g. a stores/api-only or Product-YAML
+ *      doc, needs none and boots without one).
  * Then it serves with the loud LOCAL/pre-hardening banner.
  *
  * NOT production. LOCAL / internal-only; the external-exposure hardening layer (RLS/KMS/per-tenant
@@ -54,15 +57,14 @@ import { readFileSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
-import { OpenAIAdapter } from '@rayspec/adapter-openai';
-import type { Backend, BackendId } from '@rayspec/core';
 import type { AllowlistEntry } from '@rayspec/db';
-import { registerProductStores } from '@rayspec/db/composition';
 import {
+  assembleOptsFromEnv,
   assembleServer,
   bootBanner,
   loadServerConfig,
   type PlannedMigration,
+  type ServerConfig,
 } from '@rayspec/server';
 import postgres from 'postgres';
 
@@ -111,8 +113,8 @@ function requireEnv(key: string): string {
   if (!v) {
     throw new Error(
       `[local-boot] required env var ${key} is not set. The boot secrets (RAYSPEC_API_KEY_PEPPER, ` +
-        'RAYSPEC_JWT_SIGNING_KEY), DATABASE_URL, and OPENAI_API_KEY must be in repo-root .env ' +
-        '(gitignored) or the ambient environment.',
+        'RAYSPEC_JWT_SIGNING_KEY) and DATABASE_URL must be in repo-root .env (gitignored) or the ' +
+        'ambient environment. A provider credential is demanded per declared agent (not here).',
     );
   }
   return v;
@@ -208,6 +210,30 @@ export function readUpdateMigrations(env: UpdateMigrationEnv): PlannedMigration[
 }
 
 /**
+ * Build the `assembleServer` opts for the wrapper's boot: the deployer-seam opts derived from the
+ * ambient env + the parsed spec via the SHIPPED `assembleOptsFromEnv` (the SAME builder the
+ * `rayspec-serve` bin and the `rayspec deploy` CLI use), plus the wrapper's UPDATE-mode
+ * `updateMigrations` seam when present.
+ *
+ * `assembleOptsFromEnv` registers the built product tables (harmless when the spec declares none) and
+ * returns an `agentBackendsFactory` ONLY when the spec declares ≥1 agent — building it fail-closes on
+ * that backend's missing per-agent env. So this demands a provider credential ONLY for a spec that
+ * declares an agent needing one; an agent-free spec (a stores/api-only backend, or a Product-YAML
+ * doc) needs none, and the update boot of an agent-free spec no longer fails closed on an unused
+ * provider key. Exported so a test can drive this exact opts-building deterministically (no DB, no listen).
+ */
+export function buildAssembleOpts(
+  config: ServerConfig,
+  updateMigrations?: PlannedMigration[],
+  env: NodeJS.ProcessEnv = process.env,
+): ReturnType<typeof assembleOptsFromEnv> & { updateMigrations?: PlannedMigration[] } {
+  return {
+    ...assembleOptsFromEnv(config, env),
+    ...(updateMigrations ? { updateMigrations } : {}),
+  };
+}
+
+/**
  * UPDATE-mode fail-closed pre-check: the update path redeploys onto an EXISTING dev DB (NO
  * DROP+CREATE). If that DB was never deployed (absent), `assembleServer` would otherwise blow up with a
  * raw postgres `database "…" does not exist` (SQLSTATE 3D000) deep in the migrator. Probe `pg_database`
@@ -263,7 +289,6 @@ async function main(): Promise<void> {
   const baseUrl = requireEnv('DATABASE_URL');
   requireEnv('RAYSPEC_API_KEY_PEPPER');
   requireEnv('RAYSPEC_JWT_SIGNING_KEY');
-  const openaiKey = requireEnv('OPENAI_API_KEY');
 
   // The spec path is the ONE product input — supplied by the deployer (the platform ships none). It
   // must be set BEFORE this point (RAYSPEC_SPEC_PATH=… pnpm …); fail closed with an actionable msg.
@@ -324,30 +349,22 @@ async function main(): Promise<void> {
       })
     : undefined;
 
-  // 3. Register the EXACT product-table instances the composition root builds in the deny-by-default
-  //    Set so deploy()'s identity-keyed verify-not-register step passes, through the SANCTIONED
-  //    registrar (@rayspec/db/composition) — which VALIDATES every table (tenant_id column / shape /
-  //    FK → orgs) before it joins the chokepoint Set, closing the unscoped-INSERT escalation the raw
-  //    registerScopedTables seam leaves open. A real deployment commits a generated product-schema.ts
-  //    that composes them into TENANT_SCOPED_TABLES; this dev wrapper stands in for that committed
-  //    tuple. The composition root calls this hook with the tables it built BEFORE deploy's verify.
-  const registerProductTables = registerProductStores;
-
-  // 4. The OpenAI backend for the spec's declared agents (BackendId 'openai'). The platform ships none;
-  //    the deployer supplies the adapter instance. An agent-free spec never reads this map.
-  const agentBackendsFactory = (): ReadonlyMap<BackendId, Backend> =>
-    new Map<BackendId, Backend>([['openai', new OpenAIAdapter({ apiKey: openaiKey })]]);
-
+  // 3. Build the deployer-seam opts through the SHIPPED `assembleOptsFromEnv` (the SAME builder the
+  //    `rayspec-serve` bin and the `rayspec deploy` CLI use), plus the wrapper's UPDATE-mode
+  //    `updateMigrations` seam. `assembleOptsFromEnv` registers the built product tables via the
+  //    SANCTIONED validating registrar (@rayspec/db/composition — which VALIDATES every table:
+  //    tenant_id column / shape / FK → orgs — before it joins the deny-by-default chokepoint Set;
+  //    a real deployment commits a generated product-schema.ts, this dev wrapper stands in for that
+  //    committed tuple) AND returns an agent-backends factory built from the ambient env ONLY when the
+  //    spec declares ≥1 agent (fail-closed on that backend's missing per-agent credential). An
+  //    agent-free spec (a stores/api-only backend, or a Product-YAML doc) needs no provider key.
+  //
   // Assemble the REAL composition root (applies the migration chain → runs deploy() for the spec). In
   // UPDATE mode, updateMigrations is threaded into deploy()'s DeployConfig.migrations seam (gated +
   // applied); deploy() throws a DeployError at [lint/gate] if the delta carries an unreviewed
   // destructive statement, which propagates here and aborts the boot (never a silent apply).
   const config = loadServerConfig();
-  const server = await assembleServer(config, {
-    agentBackendsFactory,
-    registerProductTables,
-    ...(updateMigrations ? { updateMigrations } : {}),
-  });
+  const server = await assembleServer(config, buildAssembleOpts(config, updateMigrations));
 
   const httpServer = serve({ fetch: server.app.fetch, port: config.port }, (info) => {
     const base = `http://127.0.0.1:${info.port}`;
