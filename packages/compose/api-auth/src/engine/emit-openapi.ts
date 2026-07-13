@@ -292,6 +292,13 @@ function assertNever(action: never): undefined {
  */
 const LIST_MAX_LIMIT = 200;
 
+/**
+ * The bounded `<col>__in` set-filter element count (mirrors store-query.ts `MAX_IN_VALUES`). Documented
+ * in the `<col>__in` param description; kept in sync by the `list` query-param test (a doc, not a
+ * runtime bound — the runtime cap lives in store-query.ts).
+ */
+const LIST_MAX_IN_VALUES = 100;
+
 /** Map a declared ColumnType to a JSON-Schema fragment for a `list` equality-filter QUERY parameter. */
 function filterParamSchema(type: ColumnType): Record<string, unknown> {
   switch (type) {
@@ -315,9 +322,23 @@ function filterParamSchema(type: ColumnType): Record<string, unknown> {
  *  - control params `order` / `after` / `limit`;
  *  - one equality-filter param per declared BUSINESS column (a `jsonb` column is NOT filterable at
  *    runtime, so it is excluded — documenting it would over-claim), keyed by the AUTHOR snake name;
- *  - the injected `created_by` equality filter.
+ *  - a `<col>__in` SET-filter param per filterable column (a comma-separated value list → SQL `IN`);
+ *  - the injected `created_by` equality + `created_by__in` set filter.
  * All optional. Product-agnostic: every name is derived from the spec, none is hard-coded.
  */
+function inFilterParam(name: string): OpenApiParameter {
+  // The `<col>__in` value is a raw comma-separated list (matches store-query.ts, which splits on `,` +
+  // coerces each element to the column type) — documented as a string, not an array, because the wire
+  // form is the literal `?<col>__in=v1,v2` (a distinct query key), not an `explode`d array param.
+  return {
+    name: `${name}__in`,
+    in: 'query',
+    required: false,
+    description: `Set filter on '${name}': a comma-separated list (1..${LIST_MAX_IN_VALUES}) of '${name}' values — matches a row whose '${name}' is ANY of them (SQL IN).`,
+    schema: { type: 'string' },
+  };
+}
+
 function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
   const params: OpenApiParameter[] = [
     {
@@ -360,6 +381,8 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
       description: `Equality filter on '${col.name}'.`,
       schema: filterParamSchema(col.type),
     });
+    // The `<col>__in` set-filter companion (same filterable columns as equality).
+    params.push(inFilterParam(col.name));
   }
   params.push({
     name: 'created_by',
@@ -368,6 +391,7 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
     description: 'Equality filter on the injected created_by actor stamp.',
     schema: { type: 'string' },
   });
+  params.push(inFilterParam('created_by'));
   return params;
 }
 
