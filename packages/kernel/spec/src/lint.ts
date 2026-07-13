@@ -44,7 +44,7 @@ import { type AgentSpec, type BackendId, validateSpec } from '@rayspec/core';
 import type { Ajv2020 as Ajv2020Class } from 'ajv/dist/2020.js';
 import * as Ajv2020Module from 'ajv/dist/2020.js';
 import { type SpecError, type SpecWarning, specError, specWarning } from './errors.js';
-import type { RaySpec } from './grammar.js';
+import { MAX_IDENTIFIER_LENGTH, type RaySpec } from './grammar.js';
 
 type AjvInstance = Ajv2020Class;
 const Ajv2020Ctor = ((Ajv2020Module as { default?: unknown }).default ?? Ajv2020Module) as new (
@@ -278,6 +278,33 @@ export function lintSpec(spec: RaySpec): SpecError[] {
     });
 
     store.foreignKeys.forEach((fk, fi) => {
+      // (FK-NAME-LEN) The generated Postgres constraint name is a TOTAL function of
+      // `(table, column, references, refCol)` — `<table>_<column>_<references>_<refCol>_fk` — mirroring
+      // `fkConstraintName` in @rayspec/db, the single source of truth (kept in sync by this comment; the
+      // db layer cannot be imported here — @rayspec/db depends on @rayspec/spec, so the reverse edge
+      // would cycle). Each identifier is individually ≤ MAX_IDENTIFIER_LENGTH (SafeIdentifier), but their
+      // CONCATENATION is not, and Postgres SILENTLY TRUNCATES an ADD CONSTRAINT name past 63 bytes. A
+      // truncated name (a) breaks the store-route 23503 UPDATE discriminator, which matches the reported
+      // `constraint_name` EXACTLY against this full computed name to tell an own-FK bad-INPUT update (400)
+      // apart from a child-restrict conflict (409) — a truncation is a missed match → a wrongful 409; and
+      // (b) can truncate-COLLIDE two distinct long FK names into one real DDL conflict. Reject it at config
+      // time so the emitted name is never truncated (fail-closed at the source).
+      const refCol = fk.referencesColumn ?? 'id';
+      const constraintName = `${store.name}_${fk.column}_${fk.references}_${refCol}_fk`;
+      if (constraintName.length > MAX_IDENTIFIER_LENGTH) {
+        errors.push(
+          specError(
+            'schema_violation',
+            `store '${store.name}' foreign key on column '${fk.column}' generates the constraint name ` +
+              `'${constraintName}' (${constraintName.length} chars), which exceeds the ` +
+              `${MAX_IDENTIFIER_LENGTH}-char Postgres identifier limit — Postgres would SILENTLY TRUNCATE ` +
+              'it (breaking the update-conflict 400-vs-409 discriminator and risking a name collision). ' +
+              'Use shorter identifiers for the store name, the FK column, the referenced store, or the ' +
+              'referenced column',
+            `stores[${si}].foreignKeys[${fi}].column`,
+          ),
+        );
+      }
       if (!storeNames.has(fk.references)) {
         errors.push(
           specError(

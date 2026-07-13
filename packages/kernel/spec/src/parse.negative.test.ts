@@ -513,6 +513,38 @@ stores:
       'schema_violation',
     );
   });
+
+  it('a FK whose generated constraint name exceeds the 63-char Postgres limit → schema_violation (never silently truncated)', () => {
+    // Each identifier is individually ≤63 (SafeIdentifier), but the constraint name
+    // `<table>_<col>_<parent>_<refcol>_fk` concatenates four of them and here overflows 63 bytes.
+    // Postgres would SILENTLY TRUNCATE such an ADD CONSTRAINT name, breaking the store-route 23503
+    // update discriminator (which matches the reported constraint_name EXACTLY) — so lint rejects it
+    // at config time. Fail-the-fix: without the FK-NAME-LEN check this spec parses clean.
+    const yaml = `
+version: '1.0'
+metadata:
+  name: longfk
+stores:
+  - name: meetings
+    columns:
+      - { name: meeting_reference_slug, type: text, unique: true }
+  - name: transcription_note_records
+    columns:
+      - { name: referenced_meeting_reference_slug, type: text }
+    foreignKeys:
+      - { column: referenced_meeting_reference_slug, references: meetings, referencesColumn: meeting_reference_slug }
+`;
+    const res = parseSpec(yaml);
+    expect(res.ok).toBe(false);
+    if (res.ok) return; // narrow
+    const hit = res.errors.find(
+      (e) => e.code === 'schema_violation' && /63-char Postgres identifier limit/.test(e.message),
+    );
+    expect(hit, JSON.stringify(res.errors, null, 2)).toBeTruthy();
+    // names the offending FK column + the generated constraint name, and its length
+    expect(hit?.message).toContain('referenced_meeting_reference_slug');
+    expect(hit?.message).toMatch(/transcription_note_records_referenced_meeting_reference_slug_/);
+  });
 });
 
 describe('negative — unquoted numeric version (fix #10; helpful diagnostic, no coercion)', () => {

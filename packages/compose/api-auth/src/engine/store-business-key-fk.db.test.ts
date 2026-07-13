@@ -67,6 +67,7 @@ api:
   - { method: PATCH, path: '/meetings/{id}', action: { kind: store, store: meetings, op: update } }
   - { method: DELETE, path: '/meetings/{id}', action: { kind: store, store: meetings, op: delete } }
   - { method: POST, path: '/notes', action: { kind: store, store: notes, op: create } }
+  - { method: PATCH, path: '/notes/{id}', action: { kind: store, store: notes, op: update } }
   - { method: GET, path: '/notes', action: { kind: store, store: notes, op: list } }
   - { method: POST, path: '/tags', action: { kind: store, store: tags, op: create } }
   - { method: GET, path: '/tags', action: { kind: store, store: tags, op: list } }
@@ -194,6 +195,36 @@ describeDb('business-key FK — behaviour + tenant-safety through the declared r
     expect(rows[0]?.slug).toBe(OLD);
   });
 
+  it("PATCHing a child that OWNS a business-key FK to a NON-EXISTENT parent value is a 400 (its OWN FK, bad input), tenant-safe — the discriminator's 400 branch", async () => {
+    testsRan += 1;
+    const a = await principal('fk-own-update@example.com', 'FkOwnUpdateOrg');
+    const SLUG = 'M-OWN-UPD';
+    const MISSING = 'NO-SUCH-MEETING'; // the value that must NEVER appear in the 400 body
+    const created = await post(a.token, '/meetings', { slug: SLUG });
+    expect(created.status).toBe(201);
+
+    // a note references the EXISTING parent slug (its own business-key FK is satisfied) …
+    const note = await post(a.token, '/notes', { meeting_slug: SLUG, body: 'agenda' });
+    expect(note.status).toBe(201);
+    const noteId = (await note.json()).id as string;
+
+    // … now PATCH the note's OWN business-key FK column to a NON-EXISTENT parent value. This fires
+    // THIS store's own 23503 (constraint `notes_meeting_slug_meetings_slug_fk`, which resolves in
+    // `store.foreignKeys`) → bad INPUT → 400 VALIDATION_ERROR, NOT the 409 "still referenced" (that is
+    // the PARENT-side rename conflict on a child's ON UPDATE no action). This is the POSITIVE half of
+    // the store-route 400-vs-409 update discriminator — it goes RED if the discriminator regresses to
+    // an unconditional 409.
+    const bad = await patch(a.token, `/notes/${noteId}`, { meeting_slug: MISSING });
+    expect(bad.status).toBe(400);
+    const body = await bad.json();
+    expect(body.error.code).toBe('VALIDATION_ERROR');
+    // Tenant-safe: NAMES the local FK column …
+    expect(body.error.message).toContain('meeting_slug');
+    // … and NEVER echoes the (non-existent) value the client supplied, nor the real parent value.
+    expect(JSON.stringify(body)).not.toContain(MISSING);
+    expect(JSON.stringify(body)).not.toContain(SLUG);
+  });
+
   it("deleting a parent whose only children are onDelete:'cascade' succeeds (204) and cascades the children", async () => {
     testsRan += 1;
     const a = await principal('fk-cascade@example.com', 'FkCascadeOrg');
@@ -238,7 +269,7 @@ describeDb('business-key FK — behaviour + tenant-safety through the declared r
 describe('business-key FK routes acceptance — ran-guard (must not silently skip in CI)', () => {
   it('the FK-behaviour arms ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (requireDb) {
-      expect(testsRan).toBe(5);
+      expect(testsRan).toBe(6);
     } else {
       expect(requireDb).toBe(false);
     }

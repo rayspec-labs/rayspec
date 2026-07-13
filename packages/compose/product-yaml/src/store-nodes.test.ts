@@ -387,4 +387,29 @@ describe('store.write node (upsert-EXCLUSIVE — the C10/at-least-once law)', ()
     expect(db.upserts).toHaveLength(1);
     expect(db.upserts[0]?.values.status).toBe('accepted');
   });
+
+  it('a NON-STRING resolved value for a text-enum column is rejected — it cannot bypass the whitelist by JS type (fail-the-fix)', async () => {
+    // A NUMBER resolved from the {event:} source for the `status` text-enum column. A non-string is by
+    // definition not a member of a text whitelist, so it must be rejected HERE — matching the HTTP
+    // route's z.enum (a non-member number is a VALIDATION_ERROR). Fail-the-fix: with the pre-fix guard
+    // (`typeof value === 'string' && …`) the number SKIPPED the whitelist and reached db.upsert (and SF-1
+    // accepts a scalar number too), so it would have upserted `completed` — a real bypass.
+    const spec = parseFixture(ENUM_YAML);
+    const db = new SpyDb();
+    const node = makeStoreWriteNode({ spec, db });
+    const result = await node(
+      ctxFor(
+        'log',
+        'write',
+        { session_id: 'sess-1', status: 123 }, // a NUMBER — not a string, not a member of [accepted, rejected]
+        [catalogArtifact],
+        ['fieldlog.log_row'],
+      ),
+    );
+    expect(result.status).toBe('terminal_failure');
+    if (result.status !== 'terminal_failure') throw new Error('unreachable');
+    expect(result.error?.code).toBe('store_write_enum_violation');
+    expect(result.error?.message).toContain('status'); // names the COLUMN
+    expect(db.upserts).toEqual([]); // rejected BEFORE the write — never reached Postgres (fail-the-fix)
+  });
 });
