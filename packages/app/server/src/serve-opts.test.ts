@@ -88,3 +88,47 @@ describe('assembleOptsFromEnv — serve.ts wires the RIGHT deployer seams', () =
     expect(opts.agentBackendsFactory).toBeUndefined();
   });
 });
+
+/**
+ * The backend-profile reach for the reviewed forward-DELTA apply seam: a backend deploy reaches deploy()'s
+ * `DeployConfig.migrations` seam ONLY through `opts.updateMigrations`, so `assembleOptsFromEnv` must
+ * derive it from `RAYSPEC_UPDATE_MIGRATION` (+ optional `RAYSPEC_UPDATE_ALLOWLIST`) — the wiring that lets
+ * `rayspec deploy --apply-migration <delta>` apply a delta to a BACKEND deployment. A revert of this reach
+ * REDs these (a default boot yields no updateMigrations; a set env yields exactly one gated delta).
+ */
+describe('assembleOptsFromEnv — the reviewed forward-DELTA reach (RAYSPEC_UPDATE_MIGRATION)', () => {
+  it('no RAYSPEC_UPDATE_MIGRATION → NO updateMigrations (the default backend boot is unchanged)', () => {
+    const opts = assembleOptsFromEnv(configWithSpec(BACKEND_SPEC), {
+      OPENAI_API_KEY: 'sk-dummy-not-a-real-key',
+    });
+    expect(opts.updateMigrations).toBeUndefined();
+  });
+
+  it('RAYSPEC_UPDATE_MIGRATION set → ONE gated delta, keyed by filename, empty allowlist by default', () => {
+    const deltaSql = 'ALTER TABLE parts ADD COLUMN note text;\n';
+    const deltaPath = writeTempSpec('0001_add_note.sql', deltaSql);
+    const opts = assembleOptsFromEnv(configWithSpec(BACKEND_SPEC), {
+      OPENAI_API_KEY: 'sk-dummy-not-a-real-key',
+      RAYSPEC_UPDATE_MIGRATION: deltaPath,
+    });
+    expect(opts.updateMigrations).toHaveLength(1);
+    expect(opts.updateMigrations?.[0]?.sql).toBe(deltaSql);
+    expect(opts.updateMigrations?.[0]?.name).toBe('0001_add_note.sql');
+    expect(opts.updateMigrations?.[0]?.allowlist).toEqual([]);
+    // The update reach is ADDITIVE — the registrar + agent factory are still wired.
+    expect(opts.registerProductTables).toBe(registerProductStores);
+    expect(opts.agentBackendsFactory).toBeTypeOf('function');
+  });
+
+  it('a reviewed RAYSPEC_UPDATE_ALLOWLIST is threaded onto the delta', () => {
+    const deltaPath = writeTempSpec('0002_drop.sql', 'ALTER TABLE parts DROP COLUMN note;\n');
+    const entry = { kind: 'drop_column', match: 'parts.note', reason: 'reviewed by an operator' };
+    const allowPath = writeTempSpec('allow.json', JSON.stringify([entry]));
+    const opts = assembleOptsFromEnv(configWithSpec(BACKEND_SPEC), {
+      OPENAI_API_KEY: 'sk-dummy-not-a-real-key',
+      RAYSPEC_UPDATE_MIGRATION: deltaPath,
+      RAYSPEC_UPDATE_ALLOWLIST: allowPath,
+    });
+    expect(opts.updateMigrations?.[0]?.allowlist).toEqual([entry]);
+  });
+});

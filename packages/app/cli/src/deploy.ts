@@ -66,11 +66,17 @@ export type DeployOutcome =
   | { readonly kind: 'dry-run'; readonly result: DeployDryRunResult }
   | { readonly kind: 'served' };
 
-/** Parse `deploy`'s args: exactly one positional spec path, plus `--dry-run` and an optional `--port`. */
-function parseDeployArgs(args: readonly string[]): {
+/**
+ * Parse `deploy`'s args: exactly one positional spec path, plus `--dry-run`, an optional `--port`, and
+ * the reviewed-forward-migration flags `--apply-migration <delta.sql>` (+ its optional
+ * `--allowlist <file.json>`). An unknown flag is a strict parse error (mapped to exit 2).
+ */
+export function parseDeployArgs(args: readonly string[]): {
   positionals: string[];
   dryRun: boolean;
   port?: string;
+  applyMigration?: string;
+  allowlist?: string;
 } {
   try {
     const { positionals, values } = parseArgs({
@@ -80,12 +86,18 @@ function parseDeployArgs(args: readonly string[]): {
       options: {
         'dry-run': { type: 'boolean' },
         port: { type: 'string' },
+        'apply-migration': { type: 'string' },
+        allowlist: { type: 'string' },
       },
     });
     return {
       positionals,
       dryRun: values['dry-run'] === true,
       ...(values.port !== undefined ? { port: values.port } : {}),
+      ...(values['apply-migration'] !== undefined
+        ? { applyMigration: values['apply-migration'] }
+        : {}),
+      ...(values.allowlist !== undefined ? { allowlist: values.allowlist } : {}),
     };
   } catch (e) {
     throw new DeployCliError(`invalid arguments: ${e instanceof Error ? e.message : String(e)}`);
@@ -99,7 +111,7 @@ function parseDeployArgs(args: readonly string[]): {
  * open port + signal handlers keep the process alive until SIGINT/SIGTERM).
  */
 export async function runDeploy(args: readonly string[]): Promise<DeployOutcome> {
-  const { positionals, dryRun, port } = parseDeployArgs(args);
+  const { positionals, dryRun, port, applyMigration, allowlist } = parseDeployArgs(args);
 
   // Pre-flight the spec path (jail + size cap). assembleServer RE-READS it via RAYSPEC_SPEC_PATH; this
   // early read gives an actionable error before any boot side effect + jails the operator-supplied path.
@@ -114,10 +126,52 @@ export async function runDeploy(args: readonly string[]): Promise<DeployOutcome>
   }
 
   if (dryRun) {
+    // --dry-run touches NO DB (it composes against a stubbed rollout), so it can apply no migration —
+    // combining it with --apply-migration would silently ignore the delta. Reject the combination.
+    if (applyMigration !== undefined || allowlist !== undefined) {
+      throw new DeployCliError(
+        '--apply-migration/--allowlist cannot be combined with --dry-run (a dry-run touches no DB, ' +
+          'so it applies no migration)',
+      );
+    }
     return { kind: 'dry-run', result: await dryRunCompose(specPath, specText) };
   }
 
-  await serveDeployment(specPath, port);
+  // Resolve + JAIL the reviewed forward-DELTA (and its optional reviewed allowlist) with the FULL spec-
+  // path jail — both are operator-supplied filesystem paths. Each gets BOTH halves the spec path gets:
+  // resolveSpecPath (the lexical `..`/absolute jail on the typed string) AND readSpecFile (the realpath
+  // symlink RE-jail + regular-file check + MAX_SPEC_BYTES cap). The pre-flight readSpecFile's returned
+  // text is DISCARDED here — the boot re-reads the file via env (RAYSPEC_UPDATE_MIGRATION /
+  // RAYSPEC_UPDATE_ALLOWLIST) through the gated deploy() engine (product profile: directly in product-
+  // boot; backend profile: via serve-opts). Its purpose is the JAIL: without it the delta/allowlist would
+  // get ONLY the lexical jail and the boot's later plain readFileSync FOLLOWS symlinks with no re-jail and
+  // no size cap — so a delta symlink whose REAL target is OUTSIDE the cwd, or an oversized file, would slip
+  // the lexical jail. This closes that gap (a symlink-escape / oversized file is refused up front with a
+  // secret-free ReadSpecError), matching the spec path exactly.
+  let migrationPath: string | undefined;
+  let allowlistPath: string | undefined;
+  try {
+    if (applyMigration !== undefined) {
+      migrationPath = resolveSpecPath([applyMigration]);
+      await readSpecFile(migrationPath);
+    }
+    if (allowlist !== undefined) {
+      allowlistPath = resolveSpecPath([allowlist]);
+      await readSpecFile(allowlistPath);
+    }
+  } catch (e) {
+    if (e instanceof ReadSpecError) throw new DeployCliError(e.message);
+    throw e;
+  }
+  // The allowlist only REVIEWS a delta's destructive statements — a bare --allowlist would be silently
+  // ignored (the boot reads it only in update mode). Refuse it as a usage error rather than no-op.
+  if (allowlistPath !== undefined && migrationPath === undefined) {
+    throw new DeployCliError(
+      '--allowlist requires --apply-migration (the allowlist reviews the delta destructive statements)',
+    );
+  }
+
+  await serveDeployment(specPath, port, migrationPath, allowlistPath);
   return { kind: 'served' };
 }
 
@@ -243,11 +297,35 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
  * message + exits 1 (mirrors deployments/acme-notes/serve.mts). Returns once the server is listening;
  * the open port + SIGINT/SIGTERM handlers keep the process alive.
  */
-async function serveDeployment(specPath: string, portOverride?: string): Promise<void> {
+export async function serveDeployment(
+  specPath: string,
+  portOverride?: string,
+  migrationPath?: string,
+  allowlistPath?: string,
+): Promise<void> {
   // RAYSPEC_SPEC_PATH is how loadServerConfig/assembleServer find the doc — set it from the positional
   // (the operator typed the path once). An explicit --port overrides the PORT env.
   process.env.RAYSPEC_SPEC_PATH = specPath;
   if (portOverride !== undefined) process.env.PORT = portOverride;
+
+  // The reviewed forward-DELTA apply seam. Setting RAYSPEC_UPDATE_MIGRATION (from --apply-migration)
+  // switches the boot into UPDATE mode: the gated deploy() engine scans the delta (a DESTRUCTIVE
+  // statement WITHOUT a covering reviewed --allowlist entry is BLOCKED with a DeployError) then applies
+  // it IN PLACE, so existing rows survive. Both profiles reach it: a product-profile boot reads this env
+  // DIRECTLY in product-boot; a backend-profile boot reaches deploy()'s DeployConfig.migrations seam via
+  // assembleOptsFromEnv (serve-opts.ts).
+  //
+  // LEFTOVER-ENV REBOOT SEMANTICS (honest): a delta is NON-IDEMPOTENT, and this env PERSISTS in the
+  // process — a process manager (systemd/docker `Restart=always`) that RESTARTS the command with
+  // --apply-migration still present re-enters update mode on the next boot. BOTH profiles are reboot-safe
+  // by construction: they CLASSIFY the live schema FIRST and MOUNT a present-matching schema (the delta
+  // already landed on a prior boot) instead of re-applying a non-idempotent delta and crash-looping on a
+  // duplicate_column (42701) — the PRODUCT profile in product-boot, the BACKEND profile in the
+  // composition root's update branch (both route through the shared planUpdateBoot). Leaving
+  // --apply-migration in a process-managed unit is therefore SAFE (it applies once, mounts thereafter);
+  // still, drop it once the delta has landed to keep the operator intent explicit.
+  if (migrationPath !== undefined) process.env.RAYSPEC_UPDATE_MIGRATION = migrationPath;
+  if (allowlistPath !== undefined) process.env.RAYSPEC_UPDATE_ALLOWLIST = allowlistPath;
 
   // Dynamic imports: keep DBOS/Hono/the adapters + product-yaml OUT of `rayspec doctor`'s load path.
   const { serve } = await import('@hono/node-server');

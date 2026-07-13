@@ -58,12 +58,19 @@ READ-ONLY diagnostic floor (never mutates a real/target DB; never prints secrets
                                 VIEW surface (read routes → paths/params/response schemas). Product profile only.
 
 PRODUCTION-MUTATING (boots + serves a real deployment; mutates the target DB):
-  rayspec deploy <spec.yaml> [--port <n>]
+  rayspec deploy <spec.yaml> [--port <n>] [--apply-migration <delta.sql> [--allowlist <file.json>]]
                                 Assemble the platform from the ambient env, register the product
                                 stores through the SANCTIONED validating registrar, apply the committed
                                 migration chain + roll out the declared product, and SERVE on PORT
                                 (default 8080) until SIGINT/SIGTERM. Reads config from env (see the
                                 @rayspec/server package README); fails closed on a missing secret.
+                                With --apply-migration, boot in UPDATE mode: apply the reviewed FORWARD
+                                delta <delta.sql> to the EXISTING schema in place (existing rows
+                                survive). A DESTRUCTIVE statement is BLOCKED unless covered by the
+                                reviewed --allowlist JSON. Author the delta with
+                                \`rayspec plan <new-spec> --against <old-spec>\`. Drop --apply-migration
+                                from the NEXT deploy once the delta has landed (a delta is not
+                                idempotent).
   rayspec deploy --dry-run <spec.yaml>
                                 One-shot: validate the product doc + COMPOSE it against a stubbed
                                 rollout. NO DB, NO network. Emits a JSON verdict. Does NOT prove: the
