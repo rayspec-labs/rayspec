@@ -109,12 +109,13 @@ export const CONSOLE_MEDIA_PREP_LOGGER: MediaPrepLogger = {
 };
 
 /**
- * The dual-track completeness wait bound (ms), measured from the run's durable `journal.created_at`.
- * The `session_finalized` event fires as soon as ONE track seals; a sibling track can still be mid-
- * upload (`status='recording'`) at that instant. The STT node waits up to this long for stragglers to
- * seal (re-reading the store on each durable retry) before transcribing whatever sealed — long enough
- * to absorb a slow final-chunk upload, short enough that an ABANDONED track (one that never seals)
- * holds a worker only briefly.
+ * The dual-track completeness wait bound (ms), measured from the CURRENT run execution's start
+ * (`journal.created_at`, which the engine stamps fresh on each execute() — see the guard for the
+ * crash-resume caveat). The `session_finalized` event fires as soon as ONE track seals; a sibling track
+ * can still be mid-upload (`status='recording'`) at that instant. The STT node waits up to this long for
+ * stragglers to seal (re-reading the store on each retry) before transcribing whatever sealed — long
+ * enough to absorb a slow final-chunk upload, short enough that an ABANDONED track (one that never
+ * seals) holds a worker only briefly.
  */
 export const STT_INCOMPLETE_WAIT_MS = 60_000;
 
@@ -158,9 +159,10 @@ export interface SttSessionNodeConfig {
   /** Wall-clock source (ms epoch) for the completeness bound; injectable for deterministic tests. Default `Date.now`. */
   readonly now?: () => number;
   /**
-   * How long (ms, measured from the run's durable `journal.created_at`) to WAIT for a still-recording
-   * sibling track to seal before transcribing whatever sealed. Bounds the dual-track completeness wait
-   * so an abandoned recording track cannot stall the run forever. Default STT_INCOMPLETE_WAIT_MS.
+   * How long (ms, measured from the current run execution's start `journal.created_at`) to WAIT for a
+   * still-recording sibling track to seal before transcribing whatever sealed. Bounds the dual-track
+   * completeness wait so an abandoned recording track cannot stall the run forever. Default
+   * STT_INCOMPLETE_WAIT_MS.
    */
   readonly incompleteWaitMs?: number;
 }
@@ -210,10 +212,14 @@ export function makeSttTranscribeSessionNode(cfg: SttSessionNodeConfig): Capabil
     // drop the still-recording track. So while any track is still recording we WAIT (retryable): the
     // durable engine re-invokes this node (STT_TRANSCRIBE_RETRY_POLICY, wired in compose) and a later
     // attempt re-reads the now-complete set and transcribes ALL sealed tracks. The wait is BOUNDED from
-    // the run's durable start (`journal.created_at`), so an ABANDONED recording track (one that never
-    // seals — client crash / network drop) can never stall the run forever: once the bound elapses we
-    // proceed with WHATEVER sealed. The bound reads durable state (not an in-memory counter), so it
-    // holds identically across engine retries AND a crash + journal-resume.
+    // the CURRENT run execution's start (`journal.created_at`, which the engine stamps fresh per
+    // execute()), so an ABANDONED recording track (one that never seals — client crash / network drop)
+    // can never stall the run forever: once the bound elapses we proceed with WHATEVER sealed.
+    // The bound is STABLE across the in-process retry loop (one execute() reuses one journal object). It
+    // does NOT survive a crash + journal-resume: a fresh execute() stamps a fresh created_at, so the
+    // window RESTARTS from the resume instant. That reset is strictly SAFE-DIRECTION — it only ever
+    // LENGTHENS the wait, never drops a straggler early and never yields a zero-run; and repeated-crash
+    // divergence is bounded by the engine's max-recovery dead-letter, so it cannot loop forever.
     const stillRecording = await cfg.db.select(tracksStore, {
       session_id: sessionId,
       status: 'recording',

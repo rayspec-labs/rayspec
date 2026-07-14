@@ -132,7 +132,7 @@ function completeRecordingTrack(db: FakeHandlerDb, track: string): void {
   row.status = 'completed';
 }
 
-/** The run's durable start (`journal.created_at` in `ctx()`) — the completeness bound's reference. */
+/** The current execution's start (`journal.created_at` in `ctx()`) — the completeness bound's reference. */
 const RUN_START_MS = Date.parse('2026-07-02T00:00:00.000Z');
 
 const STT_STEP: WorkflowStepSpec = {
@@ -301,7 +301,7 @@ describe('stt.transcribe_session node', () => {
 
   // ── dual-track completeness guard (the finalize race the producer-side attempt got wrong) ──────
   // The `session_finalized` event fires when ONE track seals; a sibling can still be `recording`.
-  // The CONSUMER waits (retryable) for the straggler, BOUNDED from the run's durable start, then
+  // The CONSUMER waits (retryable) for the straggler, BOUNDED from the current execution's start, then
   // proceeds with whatever sealed — so no track is silently dropped AND an abandoned track never
   // stalls the run. Unconditional emit (reverted upload.ts) guarantees ≥1 run; this guarantees the
   // run transcribes the COMPLETE sealed set.
