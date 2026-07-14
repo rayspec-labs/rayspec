@@ -141,6 +141,7 @@ import {
   makeGroundingPolicyNode,
   makeShapeValidationNode,
   makeSttTranscribeSessionNode,
+  STT_TRANSCRIBE_RETRY_POLICY,
 } from './nodes.js';
 import { makeStoreReadNode, makeStoreWriteNode } from './store-nodes.js';
 
@@ -712,6 +713,21 @@ export function composeProductDeploy(
         );
       }
       throw e;
+    }
+  }
+
+  // Dual-track completeness: the `stt.transcribe_session` node WAITS (retryable) for a still-recording
+  // sibling track to seal before transcribing (see the node's completeness guard). That only works if
+  // the compiled step actually re-invokes the node — so wire the completeness retry policy (backoff +
+  // enough attempts to span the node's wait bound) here. The bridge compiler sets `max_attempts` but no
+  // `backoff_ms`, which would make retries fire instantly and defeat the wait; this override owns the
+  // stt step's retry semantics. Applied ONLY to the transcribe step; other steps keep their compiled
+  // policy. See STT_TRANSCRIBE_RETRY_POLICY for why the window must exceed the node's bound.
+  for (const wf of workflows.values()) {
+    for (const step of wf.steps) {
+      if (step.capability === 'stt' && step.operation === 'transcribe_session') {
+        step.retry_policy = { ...STT_TRANSCRIBE_RETRY_POLICY };
+      }
     }
   }
 

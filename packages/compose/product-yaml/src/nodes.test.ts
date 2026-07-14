@@ -115,6 +115,26 @@ function sealTracks(db: FakeHandlerDb, tracks: string[] = ['mic', 'system']): vo
   }
 }
 
+/** Push a track row still mid-upload (`status='recording'`) — the incomplete signal the guard reads. */
+function recordTrack(db: FakeHandlerDb, track: string): void {
+  db.rows('audio_tracks').push({
+    session_id: SESSION,
+    track,
+    status: 'recording',
+    track_ref: `${TENANT}:${SESSION}:${track}`,
+  });
+}
+
+/** Seal a track that was recording (the finalize UPDATE: `recording` → `completed`, same row). */
+function completeRecordingTrack(db: FakeHandlerDb, track: string): void {
+  const row = db.rows('audio_tracks').find((r) => r.track === track && r.status === 'recording');
+  if (!row) throw new Error(`no recording track '${track}' to complete`);
+  row.status = 'completed';
+}
+
+/** The run's durable start (`journal.created_at` in `ctx()`) — the completeness bound's reference. */
+const RUN_START_MS = Date.parse('2026-07-02T00:00:00.000Z');
+
 const STT_STEP: WorkflowStepSpec = {
   id: 'transcribe',
   capability: 'stt',
@@ -277,6 +297,112 @@ describe('stt.transcribe_session node', () => {
     });
     const result = await sttNode(spec, db, failing)(ctx(STT_STEP));
     expect(result.status).toBe('terminal_failure');
+  });
+
+  // ── dual-track completeness guard (the finalize race the producer-side attempt got wrong) ──────
+  // The `session_finalized` event fires when ONE track seals; a sibling can still be `recording`.
+  // The CONSUMER waits (retryable) for the straggler, BOUNDED from the run's durable start, then
+  // proceeds with whatever sealed — so no track is silently dropped AND an abandoned track never
+  // stalls the run. Unconditional emit (reverted upload.ts) guarantees ≥1 run; this guarantees the
+  // run transcribes the COMPLETE sealed set.
+  describe('completeness guard', () => {
+    /** Build the node with an injected clock + a short bound (deterministic; no real-time waiting). */
+    function completenessNode(
+      db: FakeHandlerDb,
+      opts: { nowMs: number; boundMs?: number; logger?: { error(m: string): void } },
+    ) {
+      return makeSttTranscribeSessionNode({
+        spec,
+        adapter: new FakeSttAdapter({ fixtures: [dualTrackFixture()] }),
+        db,
+        tenantId: TENANT,
+        transcriptStore: 'track_transcripts',
+        now: () => opts.nowMs,
+        incompleteWaitMs: opts.boundMs ?? 5_000,
+        ...(opts.logger ? { logger: opts.logger } : {}),
+      });
+    }
+
+    it('STAGGERED sequential finalize: waits on the incomplete read, then transcribes BOTH after the straggler seals', async () => {
+      const db = new FakeHandlerDb();
+      sealTracks(db, ['mic']); // mic sealed → session_finalized fired
+      recordTrack(db, 'system'); // system still uploading
+
+      // First pass (within bound): the run must NOT transcribe the partial set — it WAITS.
+      const node = completenessNode(db, { nowMs: RUN_START_MS + 1_000, boundMs: 5_000 });
+      const first = await node(ctx(STT_STEP));
+      expect(first.status).toBe('retryable_failure'); // ← RED if the guard is removed (would 'completed')
+      if (first.status !== 'completed' && first.status !== 'paused') {
+        expect(first.error?.code).toBe('stt_tracks_incomplete');
+      }
+      expect(db.rows('track_transcripts')).toHaveLength(0); // nothing transcribed yet (system not dropped)
+
+      // The staggered `system` finalize completes; a later durable attempt re-reads the COMPLETE set.
+      completeRecordingTrack(db, 'system');
+      const second = await completenessNode(db, { nowMs: RUN_START_MS + 2_000 })(ctx(STT_STEP));
+      expect(second.status).toBe('completed');
+      expect(
+        db
+          .rows('track_transcripts')
+          .map((r) => r.track)
+          .sort(),
+      ).toEqual(['mic', 'system']);
+    });
+
+    it('ABANDONED track (bounded): once the wait bound elapses, transcribes the SEALED track and COMPLETES (no infinite retry, no stall)', async () => {
+      const db = new FakeHandlerDb();
+      sealTracks(db, ['mic']);
+      recordTrack(db, 'system'); // never seals (client crash / network drop)
+      const logged: string[] = [];
+
+      // Within the bound → still waiting (retryable).
+      const within = await completenessNode(db, {
+        nowMs: RUN_START_MS + 1_000,
+        boundMs: 5_000,
+        logger: { error: (m) => logged.push(m) },
+      })(ctx(STT_STEP));
+      expect(within.status).toBe('retryable_failure');
+
+      // Past the bound → proceed with whatever sealed; the run COMPLETES (never stalls forever).
+      const beyond = await completenessNode(db, {
+        nowMs: RUN_START_MS + 6_000,
+        boundMs: 5_000,
+        logger: { error: (m) => logged.push(m) },
+      })(ctx(STT_STEP));
+      expect(beyond.status).toBe('completed');
+      expect(db.rows('track_transcripts').map((r) => r.track)).toEqual(['mic']); // the sealed track IS transcribed
+
+      // The drop is LOUD — an operator sees the abandoned track was dropped from transcription.
+      const line = JSON.parse(logged[logged.length - 1] as string) as Record<string, unknown>;
+      expect(line).toMatchObject({
+        event: 'stt_session_incomplete_bound_exceeded',
+        scope: 'stt.transcribe_session',
+        session_id: SESSION,
+        sealed_tracks: 1,
+        still_recording: 1,
+      });
+    });
+
+    it('CONCURRENT finalize (both already sealed): the single run transcribes BOTH with no spurious wait', async () => {
+      const db = new FakeHandlerDb();
+      sealTracks(db, ['mic', 'system']); // both finalizes committed by the time the run reads
+      const result = await completenessNode(db, { nowMs: RUN_START_MS + 1_000 })(ctx(STT_STEP));
+      expect(result.status).toBe('completed'); // no recording rows ⇒ no wait
+      expect(
+        db
+          .rows('track_transcripts')
+          .map((r) => r.track)
+          .sort(),
+      ).toEqual(['mic', 'system']);
+    });
+
+    it('SINGLE-track session: transcribed immediately, no spurious completeness wait', async () => {
+      const db = new FakeHandlerDb();
+      sealTracks(db, ['mic']); // the only track, sealed; nothing recording
+      const result = await completenessNode(db, { nowMs: RUN_START_MS + 1_000 })(ctx(STT_STEP));
+      expect(result.status).toBe('completed');
+      expect(db.rows('track_transcripts').map((r) => r.track)).toEqual(['mic']);
+    });
   });
 });
 
