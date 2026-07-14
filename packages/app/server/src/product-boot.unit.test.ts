@@ -13,6 +13,8 @@ import { type ProductSpec, parseProductSpec } from '@rayspec/spec';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   anthropicApiKeyOverrideWarning,
+  anthropicReuseLoginEnabled,
+  anthropicReuseLoginShadowWarning,
   assembleExtractionInstructions,
   buildLiveAgent,
   buildSttAdapter,
@@ -298,6 +300,100 @@ describe('makeExtractionBackend — the boot-side backend factory (S5, fail-clos
     expect(anthropicApiKeyOverrideWarning({ CLAUDE_CODE_OAUTH_TOKEN: 't' })).toBeNull();
     expect(anthropicApiKeyOverrideWarning({ ANTHROPIC_API_KEY: 'k' })).toBeNull();
     expect(anthropicApiKeyOverrideWarning({})).toBeNull();
+  });
+
+  // ── Opt-in reuse-login: RAYSPEC_ANTHROPIC_REUSE_LOGIN ───────────────────────────────────────────
+  // A box where a human has run `claude` login and seeded the per-tenant CLAUDE_CONFIG_DIR can run the
+  // anthropic backend with NO token in the server env. The adapter authenticates the child from
+  // CLAUDE_CONFIG_DIR; the flag only RELAXES the boot-side token demand. Strictly opt-in: absent ⇒ throw.
+  it('reuse-login: with the flag set + NO token/key, constructs the anthropic backend (does NOT throw)', () => {
+    expect(
+      makeExtractionBackend(
+        {
+          RAYSPEC_ANTHROPIC_REUSE_LOGIN: 'true',
+          RAYSPEC_ANTHROPIC_CONFIG_ROOT: '/tmp/anthro',
+        },
+        'anthropic',
+      ).id,
+    ).toBe('anthropic');
+  });
+  it('reuse-login: WITHOUT the flag + no token/key still throws the UNCHANGED fail-closed message', () => {
+    // Byte-identical to the pre-flag throw — the flag is strictly additive.
+    expect(() =>
+      makeExtractionBackend({ RAYSPEC_ANTHROPIC_CONFIG_ROOT: '/tmp/anthro' }, 'anthropic'),
+    ).toThrow(/CLAUDE_CODE_OAUTH_TOKEN .* or an ANTHROPIC_API_KEY .* Fail-closed\./);
+  });
+  it('reuse-login: the config root is STILL required (the seed lives under it) even with the flag', () => {
+    expect(() =>
+      makeExtractionBackend({ RAYSPEC_ANTHROPIC_REUSE_LOGIN: 'true' }, 'anthropic'),
+    ).toThrow(/RAYSPEC_ANTHROPIC_CONFIG_ROOT is required/);
+  });
+  it('reuse-login: an INVALID flag value fail-closes with a named error (env contract)', () => {
+    expect(() =>
+      makeExtractionBackend(
+        {
+          RAYSPEC_ANTHROPIC_REUSE_LOGIN: 'yes-please',
+          RAYSPEC_ANTHROPIC_CONFIG_ROOT: '/tmp/anthro',
+        },
+        'anthropic',
+      ),
+    ).toThrow(/RAYSPEC_ANTHROPIC_REUSE_LOGIN 'yes-please' is not supported/);
+  });
+  it('anthropicReuseLoginEnabled parses truthy/falsy values and fail-closes on the rest', () => {
+    for (const v of ['true', '1', 'on', 'TRUE', ' On ']) {
+      expect(anthropicReuseLoginEnabled({ RAYSPEC_ANTHROPIC_REUSE_LOGIN: v })).toBe(true);
+    }
+    for (const v of [undefined, '', 'false', '0', 'off', ' OFF ']) {
+      expect(
+        anthropicReuseLoginEnabled(v === undefined ? {} : { RAYSPEC_ANTHROPIC_REUSE_LOGIN: v }),
+      ).toBe(false);
+    }
+    expect(() => anthropicReuseLoginEnabled({ RAYSPEC_ANTHROPIC_REUSE_LOGIN: 'maybe' })).toThrow(
+      /RAYSPEC_ANTHROPIC_REUSE_LOGIN 'maybe' is not supported/,
+    );
+  });
+
+  // The reuse-login shadow footgun: a token/key present alongside the flag shadows the seeded login
+  // (SDK precedence ANTHROPIC_API_KEY > CLAUDE_CODE_OAUTH_TOKEN > /login) — warn LOUD, NAMES only.
+  it('reuse-login: warns when a token/key is present alongside the flag (seeded login shadowed)', () => {
+    const APIKEY = 'ZZAPIKEYSECRETZZ';
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      makeExtractionBackend(
+        {
+          RAYSPEC_ANTHROPIC_REUSE_LOGIN: 'true',
+          ANTHROPIC_API_KEY: APIKEY,
+          RAYSPEC_ANTHROPIC_CONFIG_ROOT: '/tmp/anthro',
+        },
+        'anthropic',
+      );
+      const msg = spy.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(msg).toMatch(/REUSE-LOGIN INTENT WILL BE SHADOWED/);
+      expect(msg).toContain('BILLS the API');
+      expect(msg).not.toContain(APIKEY); // NAMES only, never the secret VALUE
+    } finally {
+      spy.mockRestore();
+    }
+  });
+  it('anthropicReuseLoginShadowWarning fires ONLY with the flag AND a present credential', () => {
+    // Flag + a credential → fires.
+    expect(
+      anthropicReuseLoginShadowWarning({
+        RAYSPEC_ANTHROPIC_REUSE_LOGIN: 'true',
+        ANTHROPIC_API_KEY: 'k',
+      }),
+    ).toMatch(/SHADOWED/);
+    expect(
+      anthropicReuseLoginShadowWarning({
+        RAYSPEC_ANTHROPIC_REUSE_LOGIN: 'true',
+        CLAUDE_CODE_OAUTH_TOKEN: 't',
+      }),
+    ).toMatch(/SHADOWED/);
+    // Flag alone (the intended reuse-login path) → no warning.
+    expect(anthropicReuseLoginShadowWarning({ RAYSPEC_ANTHROPIC_REUSE_LOGIN: 'true' })).toBeNull();
+    // No flag (a credential present is the normal path) → no warning.
+    expect(anthropicReuseLoginShadowWarning({ ANTHROPIC_API_KEY: 'k' })).toBeNull();
+    expect(anthropicReuseLoginShadowWarning({})).toBeNull();
   });
 });
 

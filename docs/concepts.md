@@ -186,6 +186,17 @@ environment: the adapter runs under a fresh per-tenant `CLAUDE_CONFIG_DIR` that 
 not inherit a machine-level `claude` login. See [`.env.example`](../.env.example)
 for the full per-backend credential contract.
 
+**Reuse a machine login (opt-in).** On a box where a human has already run
+`claude` login, you can run the `anthropic` backend with **no token in the server
+environment** by setting `RAYSPEC_ANTHROPIC_REUSE_LOGIN=true`. This relaxes the
+no-token boot check only — the backend still requires `RAYSPEC_ANTHROPIC_CONFIG_ROOT`,
+and the operator must seed each tenant's config dir before deploy: copy the machine's
+`claude` login into `${RAYSPEC_ANTHROPIC_CONFIG_ROOT}/tenant-<tenantId>/` so the child
+process authenticates from it. If a token or key is *also* present in the environment
+it wins over the seeded login (SDK precedence: `ANTHROPIC_API_KEY` >
+`CLAUDE_CODE_OAUTH_TOKEN` > the seeded login), and the boot warns loudly. Without the
+flag, boot behaviour is unchanged (fail-closed when no credential is present).
+
 ---
 
 ## Tools

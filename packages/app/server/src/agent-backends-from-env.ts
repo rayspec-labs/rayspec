@@ -28,7 +28,11 @@
 import type { Backend, BackendId } from '@rayspec/core';
 import { parseAnySpec } from '@rayspec/spec';
 import { type AgentBackendsFactory, BootConfigError } from './composition-root.js';
-import { anthropicApiKeyOverrideWarning, makeExtractionBackend } from './product-boot.js';
+import {
+  anthropicApiKeyOverrideWarning,
+  anthropicReuseLoginShadowWarning,
+  makeExtractionBackend,
+} from './product-boot.js';
 
 /**
  * Build the DISTINCT backends a set of declared agents selects, reusing `makeExtractionBackend` (the ONE
@@ -63,6 +67,11 @@ function buildDeclaredBackends(
   if (backendToAgents.has('anthropic')) {
     const billingWarning = anthropicApiKeyOverrideWarning(env);
     if (billingWarning) console.warn(billingWarning);
+    // The reuse-login shadow footgun (a token/key present alongside RAYSPEC_ANTHROPIC_REUSE_LOGIN
+    // shadows the seeded per-tenant login) — surfaced UP FRONT for the same reason as the billing
+    // warning (a sibling backend's missing-env abort could otherwise fire before the anthropic build).
+    const shadowWarning = anthropicReuseLoginShadowWarning(env);
+    if (shadowWarning) console.warn(shadowWarning);
   }
 
   const backends = new Map<BackendId, Backend>(existing ?? []);

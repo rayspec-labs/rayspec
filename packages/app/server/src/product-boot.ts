@@ -723,6 +723,56 @@ export function anthropicApiKeyOverrideWarning(env: NodeJS.ProcessEnv): string |
   );
 }
 
+/**
+ * Opt-in `RAYSPEC_ANTHROPIC_REUSE_LOGIN`: when truthy, the anthropic extraction backend boots WITHOUT a
+ * CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY in the server env — trusting that the operator has seeded
+ * each per-tenant CLAUDE_CONFIG_DIR (`${RAYSPEC_ANTHROPIC_CONFIG_ROOT}/tenant-<tenantId>`) with a valid
+ * machine `claude` login, which the child process reuses (the adapter passes that dir to the child and its
+ * existsSync guard never overwrites a seeded dir). UNSET (or `false`) ⇒ the token demand is enforced
+ * UNCHANGED (byte-identical fail-closed). Accepts `true`/`1`/`on` (enabled) and unset/empty/`false`/`0`/
+ * `off` (disabled); any OTHER value fail-closes with a named ProductBootError (the env contract: every
+ * declared env fail-closes on an invalid value).
+ */
+export function anthropicReuseLoginEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.RAYSPEC_ANTHROPIC_REUSE_LOGIN?.trim().toLowerCase();
+  if (raw === undefined || raw === '' || raw === 'false' || raw === '0' || raw === 'off')
+    return false;
+  if (raw === 'true' || raw === '1' || raw === 'on') return true;
+  throw new ProductBootError(
+    `RAYSPEC_ANTHROPIC_REUSE_LOGIN '${env.RAYSPEC_ANTHROPIC_REUSE_LOGIN}' is not supported ` +
+      '(wired: true | false; unset ⇒ false). Fail-closed.',
+  );
+}
+
+/**
+ * Reuse-login shadow footgun (the companion to anthropicApiKeyOverrideWarning): RAYSPEC_ANTHROPIC_REUSE_LOGIN
+ * intends the child to authenticate from the seeded per-tenant CLAUDE_CONFIG_DIR login, but the SDK
+ * credential precedence is ANTHROPIC_API_KEY > CLAUDE_CODE_OAUTH_TOKEN > the seeded /login. So a token/key
+ * ALSO present in the env SHADOWS the seeded login — and a stray ANTHROPIC_API_KEY then silently BILLS the
+ * API. We warn LOUD boot-side (NAMES only, never secret VALUES). Returns the banner or null. Only meaningful
+ * when reuse-login is enabled; NOT a hard block (a deployer may deliberately keep a token as a fallback).
+ */
+export function anthropicReuseLoginShadowWarning(env: NodeJS.ProcessEnv): string | null {
+  if (!anthropicReuseLoginEnabled(env)) return null;
+  const hasApiKey = Boolean(env.ANTHROPIC_API_KEY?.trim());
+  const hasOauth = Boolean(env.CLAUDE_CODE_OAUTH_TOKEN?.trim());
+  if (!hasApiKey && !hasOauth) return null;
+  const present = [
+    hasApiKey ? 'ANTHROPIC_API_KEY' : null,
+    hasOauth ? 'CLAUDE_CODE_OAUTH_TOKEN' : null,
+  ]
+    .filter(Boolean)
+    .join(' + ');
+  return (
+    '\n⚠️  RAYSPEC PRODUCT BOOT — ANTHROPIC REUSE-LOGIN INTENT WILL BE SHADOWED ⚠️\n' +
+    `    RAYSPEC_ANTHROPIC_REUSE_LOGIN is set (reuse the seeded per-tenant \`claude\` login), but ${present}\n` +
+    '    is ALSO present. The Anthropic SDK precedence is ANTHROPIC_API_KEY > CLAUDE_CODE_OAUTH_TOKEN >\n' +
+    '    the seeded /login, so the env credential WINS and the seeded login is IGNORED' +
+    (hasApiKey ? ' (a stray ANTHROPIC_API_KEY BILLS the API).' : '.') +
+    '\n    To reuse the seeded login, UNSET the token/key for this deployment.\n'
+  );
+}
+
 export function makeExtractionBackend(env: NodeJS.ProcessEnv, backend: string): Backend {
   switch (backend) {
     case 'openai': {
@@ -734,7 +784,14 @@ export function makeExtractionBackend(env: NodeJS.ProcessEnv, backend: string): 
       return new OpenAIAdapter({ apiKey });
     }
     case 'anthropic': {
-      if (!env.CLAUDE_CODE_OAUTH_TOKEN?.trim() && !env.ANTHROPIC_API_KEY?.trim()) {
+      // Opt-in reuse-login (RAYSPEC_ANTHROPIC_REUSE_LOGIN): when the operator has seeded each per-tenant
+      // CLAUDE_CONFIG_DIR (`${RAYSPEC_ANTHROPIC_CONFIG_ROOT}/tenant-<tenantId>`) with a valid machine
+      // `claude` login, the child authenticates from that dir with NO token in the server env — so we
+      // relax the no-token boot throw. The adapter's deterministic per-tenant CLAUDE_CONFIG_DIR is
+      // unchanged; it passes that dir to the child, which reuses the seeded login. Absent the flag the
+      // throw below is byte-identical (fail-closed).
+      const reuseLogin = anthropicReuseLoginEnabled(env);
+      if (!reuseLogin && !env.CLAUDE_CODE_OAUTH_TOKEN?.trim() && !env.ANTHROPIC_API_KEY?.trim()) {
         throw new ProductBootError(
           "extraction backend 'anthropic' needs a CLAUDE_CODE_OAUTH_TOKEN (the sanctioned $0 " +
             'subscription official-harness) or an ANTHROPIC_API_KEY (bills the API) — neither is set. ' +
@@ -743,6 +800,9 @@ export function makeExtractionBackend(env: NodeJS.ProcessEnv, backend: string): 
       }
       const billingWarning = anthropicApiKeyOverrideWarning(env);
       if (billingWarning) console.warn(billingWarning);
+      // Reuse-login shadow footgun: a token/key present alongside the flag shadows the seeded login.
+      const shadowWarning = anthropicReuseLoginShadowWarning(env);
+      if (shadowWarning) console.warn(shadowWarning);
       const configRoot = requireEnv(
         env,
         'RAYSPEC_ANTHROPIC_CONFIG_ROOT',
