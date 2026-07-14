@@ -81,8 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applied idempotency as a non-atomic find-then-act, so two concurrent requests with the
   same key could each mint a distinct usable key with the loser's key left stranded
   (usable but never replayable). The mint is now retrofitted onto the atomic
-  reserve-before-execute primitive: a loser replays the winner's key (`200`) or gets a
-  `409` while the mint is in progress, and exactly one key is ever minted. The
+  reserve-before-execute primitive: a concurrent loser replays the winner's **redacted**
+  mint metadata (`200`, plaintext omitted — a caller that lost the original `201` must
+  mint a new key) or gets a `409` while the mint is in progress, and exactly one key is
+  ever minted. The
   no-idempotency-key path is behaviourally unchanged, and the plaintext secret is still
   never stored (the kill-trigger closure is preserved). Honest residual (documented in
   code): exactly-once except a rare ambiguous mint-commit window.
