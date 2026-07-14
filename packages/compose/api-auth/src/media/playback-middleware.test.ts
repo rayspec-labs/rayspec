@@ -130,6 +130,17 @@ describe('perUserStreamSemaphore — permit release (hardening)', () => {
     const res = await app.request('/p');
     expect(res.status).toBe(429);
     expect(res.headers.get('retry-after')).toBeTruthy();
+    // The body is the SHARED `errorEnvelope` (routed through the one details-stripping chokepoint), not a
+    // hand-rolled object — RATE_LIMITED with no details, so the envelope is exactly {code,message,requestId}.
+    const body = (await res.json()) as { error: Record<string, unknown> };
+    expect(body).toEqual({
+      error: {
+        code: 'RATE_LIMITED',
+        message: 'Too many concurrent streams for this user.',
+        requestId: 'test-req',
+      },
+    });
+    expect(body.error).not.toHaveProperty('details');
     // The 429 must NOT have acquired a permit (the count is unchanged at the cap, not cap+1).
     expect(counts.get('user-1')).toBe(cap);
   });

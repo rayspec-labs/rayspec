@@ -18,7 +18,7 @@
  * before streaming. This middleware only AUTHENTICATES the token + bounds concurrency.
  */
 
-import { ApiError, unauthenticated } from '@rayspec/auth-core';
+import { ApiError, errorEnvelope, unauthenticated } from '@rayspec/auth-core';
 import type { MiddlewareHandler } from 'hono';
 import type { AppEnv } from '../app-context.js';
 import type { MediaTokenService } from './media-token.js';
@@ -100,16 +100,17 @@ export function perUserStreamSemaphore(opts: {
 
     const current = counts.get(userId) ?? 0;
     if (current >= maxPerUser) {
-      // Saturated: do NOT acquire; reject with 429 + Retry-After (set the header explicitly — the
-      // generic ApiError→envelope path does not emit Retry-After, and the contract requires it).
+      // Saturated: do NOT acquire; reject 429. Build the body through the SHARED `errorEnvelope` (the one
+      // chokepoint that structurally strips `details` for non-allowlisted codes) so this hand-mounted 429
+      // is not an exception to that invariant — RATE_LIMITED carries no `details` here, so the body is
+      // byte-identical to the previous inline envelope. The `Retry-After` header is still set explicitly
+      // (the ApiError→envelope path does not emit it, and the contract requires it on a 429).
       return c.json(
-        {
-          error: {
-            code: 'RATE_LIMITED',
-            message: 'Too many concurrent streams for this user.',
-            requestId: c.get('requestId') ?? 'unknown',
-          },
-        },
+        errorEnvelope(
+          'RATE_LIMITED',
+          'Too many concurrent streams for this user.',
+          c.get('requestId') ?? 'unknown',
+        ),
         429,
         { 'Retry-After': retryAfter },
       );
