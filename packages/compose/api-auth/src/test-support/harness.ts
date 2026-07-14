@@ -311,6 +311,12 @@ export async function createHarness(
      * (advance/reset) so the reuse-detection grace boundary is exercised WITHOUT a wall-clock race.
      */
     useFakeClock?: boolean;
+    /**
+     * the OPTIONAL session-reprocess seam wired into `deps.sessionReprocessor` (the reprocess route's
+     * injected dependency). A reprocess-route suite injects a fake reprocessor; omit ⇒ the route
+     * fail-closes 501 (the unwired posture a test can also exercise).
+     */
+    sessionReprocessor?: AppDeps['sessionReprocessor'];
   } = {},
 ): Promise<Harness> {
   const url = process.env.DATABASE_URL;
@@ -423,6 +429,7 @@ export async function createHarness(
     bodyRefreshEnabled: opts.bodyRefreshEnabled ?? false,
     agentRegistry: opts.agentRegistry,
     engine,
+    ...(opts.sessionReprocessor ? { sessionReprocessor: opts.sessionReprocessor } : {}),
   };
 
   const app = createAuthApp(deps);

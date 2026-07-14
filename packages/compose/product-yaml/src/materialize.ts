@@ -437,6 +437,9 @@ export function buildCollectionRows(
           artifact_kind: kind.artifact.kind,
           payload: { ...member.payload, evidence_span_ids: [...member.evidence] },
           human_edited: false,
+          // The NEW-row default. A PRIOR row's `dismissed:true` is NOT overwritten by this default:
+          // persistCollectionRows pre-reads and SKIPS the upsert for a dismissed row (preserve), so a
+          // rebuild/reprocess never resurrects a user-dismissed artifact.
           dismissed: false,
           artifact_ref: artifactRef,
         },
@@ -449,6 +452,12 @@ export function buildCollectionRows(
 export interface CollectionPersistOutcome {
   readonly upserted: number;
   readonly skippedHumanEdited: number;
+  /**
+   * Rows whose upsert was SKIPPED because a prior row was `dismissed` — the dismissal-preserve law
+   * (a user-dismissed artifact is never resurrected by a rebuild/reprocess). Counted like
+   * `skippedHumanEdited`; unconditional (independent of the `preserve_human_edits` lifecycle).
+   */
+  readonly skippedDismissed: number;
   readonly reconciledStale: number;
   readonly countsByKind: Readonly<Record<string, number>>;
 }
@@ -482,6 +491,8 @@ export async function persistCollectionRows(
       if (keep.has(ref)) continue;
       if (!reconcile.kinds.has(kind)) continue;
       if (row.human_edited === true) continue; // never delete a human-edited row
+      if (row.dismissed === true) continue; // never delete a dismissed row — the user's dismissal
+      // survives a rebuild/reprocess exactly like a human edit (spared from stale-row reconciliation).
       await db.delete(store, { artifact_ref: ref });
       reconciledStale += 1;
     }
@@ -489,21 +500,33 @@ export async function persistCollectionRows(
 
   let upserted = 0;
   let skippedHumanEdited = 0;
+  let skippedDismissed = 0;
   const countsByKind: Record<string, number> = {};
   for (const p of planned) {
-    if (p.preserveHumanEdits) {
-      const existing = await db.select(p.store, { artifact_ref: p.artifactRef });
-      if (existing[0]?.human_edited === true) {
-        skippedHumanEdited += 1;
-        continue; // the human edit wins
-      }
+    // Pre-read the prior row to enforce the two preserve laws below. The read is UNCONDITIONAL
+    // because dismissal-preserve is unconditional (a user-dismissed artifact must never be
+    // resurrected by a rebuild, independent of `preserve_human_edits`) — and every collection row
+    // carries a `dismissed` column (buildCollectionRows always writes it), so this is always valid.
+    const existing = await db.select(p.store, { artifact_ref: p.artifactRef });
+    const prior = existing[0];
+    if (p.preserveHumanEdits && prior?.human_edited === true) {
+      skippedHumanEdited += 1;
+      continue; // the human edit wins — never overwritten or re-stamped
+    }
+    if (prior?.dismissed === true) {
+      // The DISMISSAL wins: a dismissed artifact is a user decision (like a human edit) that must
+      // survive a reprocess/re-extract — SKIP the upsert so `dismissed` is never re-stamped false
+      // (buildCollectionRows sets `dismissed:false` as the NEW-row default; a prior dismissal is
+      // preserved HERE, never resurrected). Unconditional — spared regardless of preserve_human_edits.
+      skippedDismissed += 1;
+      continue;
     }
     await db.upsert(p.store, ['artifact_ref'], p.row);
     upserted += 1;
     countsByKind[p.kind] = (countsByKind[p.kind] ?? 0) + 1;
   }
 
-  return { upserted, skippedHumanEdited, reconciledStale, countsByKind };
+  return { upserted, skippedHumanEdited, skippedDismissed, reconciledStale, countsByKind };
 }
 
 /**

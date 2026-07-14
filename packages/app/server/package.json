@@ -32,6 +32,7 @@
     "@rayspec/api-auth": "workspace:*",
     "@rayspec/audio-runtime": "workspace:*",
     "@rayspec/auth-core": "workspace:*",
+    "@rayspec/capability-bridges": "workspace:*",
     "@rayspec/conversation-runtime": "workspace:*",
     "@rayspec/core": "workspace:*",
     "@rayspec/db": "workspace:*",

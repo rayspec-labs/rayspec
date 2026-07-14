@@ -122,15 +122,15 @@ importers:
 
   packages/adapters/codex:
     dependencies:
-      '@rayspec/core':
-        specifier: workspace:*
-        version: link:../../kernel/core
       '@modelcontextprotocol/sdk':
         specifier: 1.29.0
         version: 1.29.0(zod@4.4.3)
       '@openai/codex-sdk':
         specifier: 0.142.2
         version: 0.142.2
+      '@rayspec/core':
+        specifier: workspace:*
+        version: link:../../kernel/core
       zod:
         specifier: 4.4.3
         version: 4.4.3
@@ -175,12 +175,12 @@ importers:
 
   packages/adapters/openai:
     dependencies:
-      '@rayspec/core':
-        specifier: workspace:*
-        version: link:../../kernel/core
       '@openai/agents':
         specifier: 0.11.8
         version: 0.11.8(ws@8.21.0)(zod@4.4.3)
+      '@rayspec/core':
+        specifier: workspace:*
+        version: link:../../kernel/core
       zod:
         specifier: 4.4.3
         version: 4.4.3
@@ -304,6 +304,9 @@ importers:
       '@rayspec/auth-core':
         specifier: workspace:*
         version: link:../../kernel/auth-core
+      '@rayspec/capability-bridges':
+        specifier: workspace:*
+        version: link:../../capabilities/workflow-bridges
       '@rayspec/conversation-runtime':
         specifier: workspace:*
         version: link:../../capabilities/conversation-runtime
@@ -794,6 +797,12 @@ importers:
       '@earendil-works/pi-coding-agent':
         specifier: 0.79.9
         version: 0.79.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.0)(zod@4.4.3)
+      '@openai/agents':
+        specifier: 0.11.8
+        version: 0.11.8(ws@8.21.0)(zod@4.4.3)
+      '@openai/codex-sdk':
+        specifier: 0.142.2
+        version: 0.142.2
       '@rayspec/adapter-anthropic':
         specifier: workspace:*
         version: link:../../adapters/anthropic
@@ -809,12 +818,6 @@ importers:
       '@rayspec/platform':
         specifier: workspace:*
         version: link:../../kernel/platform
-      '@openai/agents':
-        specifier: 0.11.8
-        version: 0.11.8(ws@8.21.0)(zod@4.4.3)
-      '@openai/codex-sdk':
-        specifier: 0.142.2
-        version: 0.142.2
       dotenv:
         specifier: 17.4.2
         version: 17.4.2

@@ -26,6 +26,7 @@
  * This lives in the composition root (server) — the DBOS wiring belongs here (server/src is where the
  * concrete engines are wired), NOT in the kill-set deploy.ts (the family dispatch already exists).
  */
+import { randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, relative, resolve as resolvePath } from 'node:path';
 import { AnthropicAdapter } from '@rayspec/adapter-anthropic';
@@ -43,8 +44,10 @@ import {
   deploy,
   eraseTenant,
   type PlannedMigration,
+  type SessionReprocessor,
 } from '@rayspec/api-auth';
-import { chunkKey, remuxChunks } from '@rayspec/audio-runtime';
+import { AUDIO_SESSIONS_STORE, chunkKey, remuxChunks } from '@rayspec/audio-runtime';
+import { reprocessFinalizedSession } from '@rayspec/capability-bridges';
 import {
   CONTEXT_FILTER_PAYLOAD_KEYS,
   type ContextFilterPayloadKey,
@@ -70,7 +73,7 @@ import {
 } from '@rayspec/db';
 import { DbosDurableExecutor, DbosWorkflowExecutor, type ResolvedRun } from '@rayspec/durable-dbos';
 import type { BlobStoreFactory } from '@rayspec/platform';
-import { makeFsBlobStoreFactory, type RunJob } from '@rayspec/platform';
+import { makeFsBlobStoreFactory, makeHandlerDb, type RunJob } from '@rayspec/platform';
 import {
   type ComposedProductDeploy,
   composeCapabilityStores,
@@ -1831,6 +1834,57 @@ export async function deployProductYamlSpec(
   );
   executor.attachPreLaunchHook(() => wfExecutor.registerWorkflowJob());
 
+  // ── 6b. the OPERATIONAL session-reprocess seam (audio products only) ──────────────────────────
+  // Re-drives a session's declared finalized-session workflow as a FRESH durable run — a DISTINCT
+  // idempotency key via the dispatcher's forceKey seam — over the session's CURRENT store state (the
+  // operational recovery path: re-extract after a fix / recover a stuck session, with no manual DB
+  // surgery). Injected into the app as `deps.sessionReprocessor`; `POST /v1/sessions/:id/reprocess`
+  // drives it. TENANT-SCOPED: the existence check reads audio_sessions through the forTenant chokepoint
+  // (a foreign/absent session → found:false → the route's uniform 404). The closure reads the OUTER
+  // `composedProduct` (bound after deploy() below) at REQUEST time — long after boot — so its
+  // ingress/workflows are resolved. Wired ONLY for an AUDIO doc (sessions exist); a non-audio product
+  // omits it and the route fail-closes 501.
+  const sessionReprocessor: SessionReprocessor | undefined = withAudio
+    ? {
+        async reprocessSession({ tenantId: reqTenant, sessionId, reason }) {
+          if (!composedProduct) {
+            throw new ProductBootError(
+              'reprocess before the product composition was bound (fail-closed).',
+            );
+          }
+          // STRUCTURAL tenant reconciliation (fail-closed) — MIRRORS the live finalize sink
+          // (`WorkflowIngressSessionFinalizedSink`). The workflow dispatcher is BOUND to the deployment
+          // `tenantId` at construction and enqueues EVERY run under it, IGNORING the request tenant. So
+          // in a multi-org deployment a FOREIGN tenant whose own (tenant-namespaced) session collides on
+          // the same client-chosen `session_id` (`unique:false`) would pass its OWN existence check
+          // below and enqueue a durable run under the DEPLOYMENT tenant — a cross-tenant run that drops
+          // the fail-closed reconciliation the live sink enforces. Reject a request tenant that is not
+          // the bound deployment tenant with the route's uniform 404 (zero enqueue), exactly as the sink
+          // throws rather than silently running under the wrong tenant. The existence check still runs
+          // for the matching tenant (both must pass).
+          if (reqTenant !== tenantId) return { found: false };
+          // Tenant-scoped existence check via the SAME store facade the workflow nodes read through
+          // (makeHandlerDb over forTenant — the tenant predicate is AND-combined by the chokepoint, so
+          // a tenant can only ever see ITS OWN session).
+          const handlerDb = makeHandlerDb(forTenant(db, reqTenant), productTables);
+          const rows = await handlerDb.select(AUDIO_SESSIONS_STORE, { session_id: sessionId });
+          if (rows.length === 0) return { found: false };
+          // A DISTINCT run per reprocess (a fresh nonce) — never deduped to the session's finalized run.
+          const { enqueued } = await reprocessFinalizedSession({
+            ingress: composedProduct.ingress,
+            tenantId: reqTenant,
+            sessionId,
+            nonce: randomUUID(),
+            ...(reason !== undefined ? { reason } : {}),
+          });
+          return {
+            found: true,
+            enqueued: enqueued.map((e) => ({ workflowId: e.workflowId, runId: e.workflowRunId })),
+          };
+        },
+      }
+    : undefined;
+
   // ── 7. the rollout + deploy ───────────────────────────────────────────────────────────────────
   const productYaml: ProductYamlRollout = {
     tenantId,
@@ -1903,7 +1957,11 @@ export async function deployProductYamlSpec(
           ...(blobFactory ? { blobFactory } : {}),
           ...(mediaTokenService ? { mediaTokenService } : {}),
         };
-        return createAuthApp({ ...baseDeps, engine: engineWithByteMovers }) as App;
+        return createAuthApp({
+          ...baseDeps,
+          ...(sessionReprocessor ? { sessionReprocessor } : {}),
+          engine: engineWithByteMovers,
+        }) as App;
       },
       productYaml,
     },
