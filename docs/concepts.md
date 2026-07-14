@@ -244,6 +244,17 @@ for common ingress shapes, which a product profile requests by name:
 Each capability is a declared dependency, not product code you write: the product
 spec says *I need audio ingress*, and the platform wires the runtime for it.
 
+**Reprocessing a finalized session (audio).** An audio session's workflow can be
+re-driven operationally with `POST /v1/sessions/{id}/reprocess` (`store:write`,
+strictly tenant-scoped). It enqueues a **fresh durable run under a distinct
+idempotency key** — the recovery path for re-running extraction after a fix, or
+unsticking a session, without manual database surgery (simply re-emitting the
+finalized event would deduplicate to the original run and do nothing). A
+user-dismissed collection row is preserved across the rebuild — a reprocess never
+resurrects a dismissed artifact (human-edited rows are likewise spared). A
+foreign or absent session id returns `404`; a deployment with no reprocessor wired
+returns `501`.
+
 ---
 
 ## Views and extraction (product profile)

@@ -135,12 +135,15 @@ stores:
   - `enum` — optional non-empty list of allowed string values, valid **only on a
     `text` column** (and rejected at validation on any other type, or with a
     duplicate member). When present, the column becomes a closed whitelist that the
-    platform **enforces server-side**: an out-of-whitelist value on a `create`/`update`
-    store route is a `400 VALIDATION_ERROR`, and the same whitelist is enforced on the
-    workflow `store.write` value path. Honest residual: a custom escape-hatch handler
-    that writes directly through the `HandlerDb` facade is **not** enum-checked (the
-    facade carries no spec-level vocabulary) — a handler author owns its own value
-    discipline, as for every other business rule.
+    platform **enforces server-side on all three write surfaces**, so no path can
+    persist an out-of-whitelist value: an out-of-whitelist value on a `create`/`update`
+    store route is a `400 VALIDATION_ERROR`; the same whitelist is enforced on the
+    workflow `store.write` value path; and a direct write through the low-level
+    escape-hatch `HandlerDb` facade is now rejected fail-closed against a
+    table-identity whitelist registry (a non-member value — including a non-string
+    scalar — is refused; the failure names the store and column only, never the
+    offending value). The whitelist is uniform across the HTTP, workflow, and
+    escape-hatch handler write paths.
 - `foreignKeys` — optional list of child→parent foreign keys, default `[]`. Each:
   - `column` — the local business column carrying the FK (must be a declared
     column).
@@ -443,6 +446,11 @@ handlers:
 - `export` — required named export within that module.
 - `kind` — one of `tool`, `route`, `trigger` — the chokepoint the handler
   dispatches through.
+- `readonly` — optional boolean, default `false`. Meaningful only for a
+  `kind: route` handler: it is the author's assertion that the handler only **reads**
+  product stores, so its route is gated on `store:read` instead of the default
+  `store:write` (see the authorization consequence below). Absent or `false` leaves
+  the default gate unchanged.
 
 A `handler`-kind route is also the escape hatch for reads the declarative `store`
 `list` op does not cover — an **offset**-paged read or a filtered **`count`**. (The
@@ -451,14 +459,17 @@ pagination — see [Store route runtime semantics](#store-route-runtime-semantic
 The injected data facade a route handler receives supports **equality filters,
 `orderBy`, `limit`/`offset` paging, and a filtered `count`** over the tenant-scoped
 store (still tenant-predicated beneath, and still equality-only — no `>`/`<`/`like`
-operators). One authorization consequence to know: **every
-`handler`-kind route is gated on the `store:write` permission**, not `store:read`.
-The platform cannot statically prove a handler is read-only, so it fail-closes to
-the stronger gate — a handler that only reads is over-protected, never under. So a
-read implemented as a handler is reachable only by a caller (or API key) that also
+operators). One authorization consequence to know: **a `handler`-kind route is gated
+on the `store:write` permission by default**, not `store:read`. The platform cannot
+statically prove a handler is read-only, so it fail-closes to the stronger gate — a
+handler that only reads is over-protected, never under. An author who knows a handler
+only reads can opt into the weaker gate by declaring `readonly: true` on the handler
+(see [`handlers`](#handlers)): its route is then gated on `store:read`, so a
+read-scoped credential (e.g. an ingest-only API key) can reach it. Without that flag,
+a read implemented as a handler is reachable only by a caller (or API key) that also
 holds `store:write`; the read/write scope split that declarative `store` routes get
-(`list`/`get` → `store:read`, `create`/`update`/`delete` → `store:write`) does not
-apply to handler routes.
+(`list`/`get` → `store:read`, `create`/`update`/`delete` → `store:write`) is
+otherwise not automatic for handler routes.
 
 ## `extensions`
 
@@ -524,12 +535,15 @@ returns the platform's uniform `404`. Serving is fail-closed — path traversal
 (including URL-encoded forms), dotfiles/hidden paths, and symlinks that escape the
 directory are refused; directories are never listed.
 
-**Range and HEAD** are a supported feature (delegated to the underlying static
-server): a byte-`Range` GET returns `206` partial content (`Content-Range`,
-`Accept-Ranges: bytes`, and exactly the requested bytes), and a `HEAD` returns `200`
-with `Content-Length` and an empty body — useful for media seek/resume. One honest
-edge: an **unsatisfiable** range (a start past the end of the file) currently returns
-`500`, not an RFC-7233 `416` — the underlying static server has no `416` path.
+**Range and HEAD** are a supported feature: a byte-`Range` GET returns `206` partial
+content (`Content-Range`, `Accept-Ranges: bytes`, and exactly the requested bytes),
+and a `HEAD` returns `200` with `Content-Length` and an empty body — useful for media
+seek/resume. An **unsatisfiable** range (a start at or after the end of the file,
+whether the range is open-ended or closed, or a reversed range) returns RFC-7233
+**`416`** with `Content-Range: bytes */<size>`. `HEAD`/`OPTIONS` are answered `200`
+full-size (never `416`), and every satisfiable/clamped `206` is unchanged; the
+fail-closed dotfile/traversal/symlink guard still returns `404` under a `Range`
+request.
 
 **Not in v1** (deliberately out of scope): server-side rendering, template rendering,
 an asset build/bundling pipeline, cache-control/CDN headers, and the product profile —
