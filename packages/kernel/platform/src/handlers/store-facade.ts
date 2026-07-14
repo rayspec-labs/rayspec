@@ -36,7 +36,12 @@
  *  - a ROUTE/TRIGGER handler's facade is built over a `TenantDb` ALREADY inside `.transaction()` (the
  *    GUC seam, A3); `db.transaction(...)` there nests onto the same tenant-scoped tx.
  */
-import { INJECTED_COLUMN_NAMES, isSoftDeleteTable, type TenantDb } from '@rayspec/db';
+import {
+  enumWhitelistFor,
+  INJECTED_COLUMN_NAMES,
+  isSoftDeleteTable,
+  type TenantDb,
+} from '@rayspec/db';
 import type { HandlerDb, SelectOptions, StoreFilter, StoreRow } from '@rayspec/handler-sdk';
 import {
   and,
@@ -45,6 +50,7 @@ import {
   desc,
   eq,
   getTableColumns,
+  getTableName,
   inArray,
   isNull,
   type SQL,
@@ -268,6 +274,9 @@ function toDbValues(
   op: 'insert' | 'update',
 ): Record<string, unknown> {
   const cols = getTableColumns(table) as Record<string, PgColumn>;
+  // The store's declared column `enum` value whitelists (undefined for a no-enum store → no extra
+  // check). Resolved once per call by table identity (build-product-tables recorded it).
+  const enumWhitelist = enumWhitelistFor(table);
   const out: Record<string, unknown> = {};
   for (const [name, value] of Object.entries(values)) {
     const camel = snakeToCamel(name);
@@ -289,6 +298,29 @@ function toDbValues(
     // column (the injection block); a jsonb column additionally accepts a JSON object/array (parity
     // with the api write path); a non-jsonb column accepts only a plain scalar.
     assertValidValue(cols[key] as PgColumn, op, name, value);
+    // ENUM WHITELIST: if the store declared an `enum` value whitelist for this column, reject any
+    // written value that is not one of the declared members — the SAME server-side whitelist the HTTP
+    // create/update route (store-validation, a `z.enum`) and the workflow store.write node enforce, so a
+    // low-level escape-hatch handler writing directly through this facade cannot persist an
+    // out-of-whitelist value (closing the parity gap the two declarative surfaces already cover). The
+    // `enum` vocabulary is lint-restricted to `type:'text'`, so a declared member is always a STRING; a
+    // NON-STRING resolved value (a number/boolean) is by definition NOT a member and is rejected here
+    // regardless of JS type — matching the declarative paths, and closing the scalar-non-string bypass
+    // the scalar-accepting SF-1 guard above does NOT catch. null/undefined is a nullability concern
+    // (deferred to the column's NOT NULL / nullable enforcement, mirroring the HTTP `z.enum().nullable()`
+    // posture — not an out-of-whitelist VALUE). The message names the store + column ONLY, never the
+    // offending value (no cross-tenant value oracle).
+    if (enumWhitelist) {
+      const allowed = enumWhitelist.get((cols[key] as PgColumn).name);
+      const isMember = typeof value === 'string' && allowed?.has(value) === true;
+      if (allowed && value !== null && value !== undefined && !isMember) {
+        throw new Error(
+          `HandlerDb: ${op} value for column '${name}' of store '${getTableName(table)}' is not one ` +
+            'of the declared allowed values — rejected fail-closed (the enum whitelist is enforced on ' +
+            'this handler write path, parity with the HTTP route and the workflow store.write node).',
+        );
+      }
+    }
     // SF-2: the SDK contract is "plain serializable rows", which includes ISO-string timestamps. A
     // timestamp column's driver mapper expects a Date, so coerce a string → Date here (and reject an
     // invalid date fail-closed). A Date passes through; null passes through. (jsonb passes through.)

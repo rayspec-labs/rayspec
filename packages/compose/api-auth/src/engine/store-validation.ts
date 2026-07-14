@@ -92,14 +92,17 @@ function zodForColumn(type: ColumnType): z.ZodType {
  * distinct member list, so the cast is sound.
  *
  * ENFORCEMENT SURFACE (honest scope — this `z.enum` is NOT the only enforcer): the same declared
- * whitelist is ALSO enforced on the workflow `store.write` value-resolution path
- * (`@rayspec/product-yaml` `makeStoreWriteNode`), so an agent's classification output cannot persist an
- * out-of-whitelist value either. RESIDUAL (deliberately un-enforced): a custom escape-hatch TS handler
- * that writes directly through the `HandlerDb` facade (`insert`/`upsert`/`update`) is NOT enum-checked —
- * the facade closes over Drizzle `PgTable`s (the trust boundary), which carry no spec-level `enum`
- * vocabulary, so enforcing it there would require plumbing the `StoreSpec` into the facade (out of scope
- * for this change). A handler author owns its own value discipline (as it does for every other business
- * rule); the two DECLARATIVE write surfaces (HTTP + workflow) are covered.
+ * whitelist is enforced on all THREE store write surfaces, so no path can persist an out-of-whitelist
+ * value:
+ *  - HTTP create/update — this `z.enum` (a value outside the whitelist is a 400 VALIDATION_ERROR);
+ *  - the workflow `store.write` value-resolution path (`@rayspec/product-yaml` `makeStoreWriteNode`), so
+ *    an agent's classification output cannot persist an out-of-whitelist value;
+ *  - the low-level `HandlerDb` facade (`insert`/`upsert`/`update`) a custom escape-hatch TS handler
+ *    writes through. The facade closes over Drizzle `PgTable`s (which carry no spec-level `enum`
+ *    vocabulary), so the whitelist is supplied by object IDENTITY: `buildProductTables` records each
+ *    store's declared column whitelists in the `@rayspec/db` enum-whitelist registry, and the facade's
+ *    single insert/upsert/update value-mapper (`store-facade.ts` `toDbValues`) consults it and rejects a
+ *    non-member value fail-closed — parity with the two declarative surfaces above.
  */
 function columnSchema(col: StoreColumn): z.ZodType {
   const base =
