@@ -277,6 +277,73 @@ describe('Idempotency-Key on mint (tenant-scoped)', () => {
     expect(keys.keys.length).toBe(1);
   });
 
+  it('N CONCURRENT same-key+body mints → EXACTLY ONE key (reserve-before-mint, exactly-once)', async () => {
+    const t0 = await registerUser('idem-conc@example.com');
+    const orgId = await createOrg(t0, 'IdemConcCo');
+    const orgToken = await switchOrg(t0, orgId);
+    const hdr = { authorization: `Bearer ${orgToken}`, 'idempotency-key': 'idem-conc-key' };
+
+    // Fire N same-key + same-body mints AT ONCE. A non-atomic find-then-act mint lets all N miss the
+    // pre-check and each mints a DISTINCT key → multiple 201s + N api_keys rows, only one of which is
+    // replayable (the exactly-once violation). With the atomic reserve-before-mint, EXACTLY ONE caller
+    // wins the reservation and mints; the rest replay (200) or 409 in-progress — never a second key.
+    const N = 5;
+    const results = await Promise.all(
+      Array.from({ length: N }, () =>
+        jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/api-keys`, {
+          body: { scopes: ['agent:run'] },
+          headers: hdr,
+        }),
+      ),
+    );
+    const statuses = results.map((r) => r.status);
+    const bodies = await Promise.all(results.map((r) => r.json()));
+
+    // EXACTLY ONE 201 (the winner); every other response is a 200 replay or a 409 in-progress.
+    const created = bodies.filter((_, i) => statuses[i] === 201);
+    expect(created.length).toBe(1);
+    expect(statuses.every((s) => s === 201 || s === 200 || s === 409)).toBe(true);
+    // No two 201s carrying distinct key ids (the orphaned-second-key bug).
+    expect(new Set(created.map((b) => b.id)).size).toBe(1);
+    // Any 200 replay carries the SAME id as the winner (never a divergent key).
+    const winnerId = created[0].id as string;
+    for (let i = 0; i < N; i++) {
+      if (statuses[i] === 200) expect(bodies[i].id).toBe(winnerId);
+    }
+
+    // EXACTLY ONE api_keys row for the org (the structural exactly-once guarantee).
+    const keys = await (
+      await jsonRequest(h.app, 'GET', `/v1/orgs/${orgId}/api-keys`, {
+        headers: { authorization: `Bearer ${orgToken}` },
+      })
+    ).json();
+    expect(keys.keys.length).toBe(1);
+  });
+
+  it('reserve on the apikey:mint scope is atomic: 50 CONCURRENT reserves → EXACTLY ONE wins', async () => {
+    const t0 = await registerUser('idem-stress@example.com');
+    const orgId = await createOrg(t0, 'IdemStressCo');
+    // A direct-store atomicity backstop for the mint path: the reserve is a single INSERT ... ON
+    // CONFLICT DO NOTHING RETURNING on UNIQUE(tenant,scope,key), so exactly one of N concurrent callers
+    // gets a RETURNING row. The reserved placeholder snapshot is NON-SECRET (never plaintext).
+    const N = 50;
+    const reservations = await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        h.deps.idempotency.reserve(orgId, 'apikey:mint', 'stress-key', 'body-hash-x', {
+          status: 'pending',
+          candidate: i,
+        }),
+      ),
+    );
+    expect(reservations.filter((r) => r.won).length).toBe(1);
+    expect(reservations.filter((r) => !r.won).length).toBe(N - 1);
+    // Exactly one row physically exists.
+    const rows = await h.db.$client.unsafe(
+      "SELECT id FROM idempotency_keys WHERE scope = 'apikey:mint' AND idem_key = 'stress-key'",
+    );
+    expect(rows.length).toBe(1);
+  });
+
   it('a cross-tenant Idempotency-Key reuse MISSES (tenant-scoped lookup)', async () => {
     const ta = await registerUser('idem-a@example.com');
     const orgA = await createOrg(ta, 'IdemA');

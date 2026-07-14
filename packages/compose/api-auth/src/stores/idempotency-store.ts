@@ -116,23 +116,4 @@ export class IdempotencyStore {
         and(eq(schema.idempotencyKeys.scope, scope), eq(schema.idempotencyKeys.idemKey, idemKey)),
       );
   }
-
-  /** Record a snapshot for (tenant, scope, key). tenant_id is auto-stamped by the chokepoint. */
-  async record(
-    tenantId: string,
-    scope: string,
-    idemKey: string,
-    bodyHash: string,
-    snapshot: unknown,
-  ): Promise<void> {
-    const tdb = forTenant(this.db, tenantId);
-    await tdb
-      .insert(schema.idempotencyKeys, {
-        scope,
-        idemKey,
-        bodyHash,
-        snapshot: snapshot as Record<string, unknown>,
-      })
-      .onConflictDoNothing();
-  }
 }
