@@ -112,3 +112,64 @@ stores:
     expect(lintSpecWarnings(parseOk(yaml))).toEqual([]);
   });
 });
+
+describe('lintSpecWarnings — fk_forward_reference (child declared before its parent)', () => {
+  it('FIRES when a store references another declared LATER (topo-sort reorders; still parses ok)', () => {
+    // `books` (index 0) references `authors` (index 1) — a forward reference. The generator topo-sorts
+    // so `authors` is created first, so this is valid (a warning, not an error).
+    const yaml = `
+version: '1.0'
+metadata:
+  name: fwd
+stores:
+  - name: books
+    columns:
+      - { name: author_id, type: uuid }
+    foreignKeys:
+      - { column: author_id, references: authors, onDelete: cascade }
+  - name: authors
+    columns:
+      - { name: name, type: text }
+`;
+    const value = parseOk(yaml); // still valid — the forward reference applies via the topo-sort
+    const warnings = lintSpecWarnings(value);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.code).toBe('fk_forward_reference');
+    expect(warnings[0]?.path).toBe('stores[0].foreignKeys[0]');
+    expect(warnings[0]?.message).toContain('books');
+    expect(warnings[0]?.message).toContain('authors');
+  });
+
+  it('does NOT fire when the parent is declared FIRST (normal dependency order)', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: ordered
+stores:
+  - name: authors
+    columns:
+      - { name: name, type: text }
+  - name: books
+    columns:
+      - { name: author_id, type: uuid }
+    foreignKeys:
+      - { column: author_id, references: authors, onDelete: cascade }
+`;
+    expect(lintSpecWarnings(parseOk(yaml))).toEqual([]);
+  });
+
+  it('does NOT fire for a SELF-referencing FK (a self-FK applies after its own CREATE)', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: self
+stores:
+  - name: nodes
+    columns:
+      - { name: parent_id, type: uuid, nullable: true }
+    foreignKeys:
+      - { column: parent_id, references: nodes, onDelete: 'set null' }
+`;
+    expect(lintSpecWarnings(parseOk(yaml))).toEqual([]);
+  });
+});

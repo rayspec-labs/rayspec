@@ -86,6 +86,45 @@ describe('negative — unsupported_version', () => {
   });
 });
 
+describe('negative — fk_cycle', () => {
+  it('rejects a circular foreign-key reference (A→B, B→A) as unorderable', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: cyc
+stores:
+  - name: alpha
+    columns:
+      - { name: beta_id, type: uuid }
+    foreignKeys:
+      - { column: beta_id, references: beta, onDelete: cascade }
+  - name: beta
+    columns:
+      - { name: alpha_id, type: uuid }
+    foreignKeys:
+      - { column: alpha_id, references: alpha, onDelete: cascade }
+`;
+    expectRejection(yaml, 'fk_cycle');
+  });
+
+  it('a SELF-referencing FK is NOT a cycle (it applies after the table CREATE) — parses ok', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: self
+stores:
+  - name: nodes
+    columns:
+      - { name: parent_id, type: uuid, nullable: true }
+    foreignKeys:
+      - { column: parent_id, references: nodes, onDelete: 'set null' }
+`;
+    const res = parseSpec(yaml);
+    if (!res.ok) throw new Error(`self-FK must parse:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.ok).toBe(true);
+  });
+});
+
 describe('negative — yaml_parse_error', () => {
   it('rejects non-YAML text with a yaml_parse_error', () => {
     // An unterminated flow-map is a real YAML syntax error.

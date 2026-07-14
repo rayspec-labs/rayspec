@@ -21,6 +21,7 @@ import {
   emitStoreSql,
   fkConstraintName,
   generateProductSql,
+  topoSortStoresByFk,
 } from './generated/generate-product-sql.js';
 import { scanMigrationSql } from './migration-scan.js';
 
@@ -514,6 +515,80 @@ describe('diffProductStores — golden per-shape deltas', () => {
       ...emitStoreSql(notes),
       'ALTER TABLE "items" ADD COLUMN "b" text',
     ]);
+  });
+});
+
+describe('FK ordering — a child declared BEFORE its parent is topo-sorted so the parent CREATE precedes the FK', () => {
+  // The generator emits each store's `ADD CONSTRAINT … REFERENCES <parent>` inline right after that
+  // store's CREATE TABLE, in the declared array order. If the child (with the FK) is declared FIRST and
+  // its parent LATER, the FK ALTER fires before the parent's CREATE TABLE → `42P01 relation does not
+  // exist` at apply. The fix accepts any declared order and STABLE-topo-sorts so a parent is always
+  // created before a child that references it. RED before the fix (child-first order is preserved).
+  const child = store({
+    name: 'books',
+    columns: [{ name: 'author_id', type: 'uuid' }],
+    foreignKeys: [{ column: 'author_id', references: 'authors', onDelete: 'cascade' }],
+  });
+  const parent = store({ name: 'authors', columns: [{ name: 'name', type: 'text' }] });
+
+  it('diffProductStores([], [child, parent]) emits CREATE "authors" BEFORE the FK REFERENCES "authors"', () => {
+    const r = diffProductStores([], [child, parent]);
+    const createParent = r.statements.findIndex((s) => s.startsWith('CREATE TABLE "authors"'));
+    const addFk = r.statements.findIndex((s) => s.includes('REFERENCES "public"."authors"'));
+    expect(createParent).toBeGreaterThanOrEqual(0);
+    expect(addFk).toBeGreaterThanOrEqual(0);
+    expect(createParent).toBeLessThan(addFk);
+  });
+
+  it('generateProductSql([child, parent]) emits CREATE "authors" BEFORE the FK REFERENCES "authors"', () => {
+    const sql = generateProductSql([child, parent]);
+    expect(sql.indexOf('CREATE TABLE "authors"')).toBeLessThan(
+      sql.indexOf('REFERENCES "public"."authors"'),
+    );
+  });
+
+  it('an ALREADY dependency-ordered set is returned UNCHANGED (byte-identical goldens hold)', () => {
+    // parent-first is already correct — the stable topo-sort must be a no-op here (independent + ordered
+    // nodes keep their declared order), so no currently-green golden shifts.
+    const ordered = [parent, child];
+    expect(topoSortStoresByFk(ordered)).toEqual(ordered);
+    expect(generateProductSql(ordered)).toBe(generateProductSql(ordered));
+  });
+
+  it('preserves declared order among INDEPENDENT stores (stable sort)', () => {
+    const a = store({ name: 'alpha', columns: [{ name: 'x', type: 'text' }] });
+    const b = store({ name: 'beta', columns: [{ name: 'y', type: 'text' }] });
+    const c = store({ name: 'gamma', columns: [{ name: 'z', type: 'text' }] });
+    expect(topoSortStoresByFk([a, b, c]).map((s) => s.name)).toEqual(['alpha', 'beta', 'gamma']);
+  });
+
+  it('ignores a SELF-referencing FK (a self-FK applies after its own CREATE — never a cycle)', () => {
+    const tree = store({
+      name: 'nodes',
+      columns: [{ name: 'parent_id', type: 'uuid', nullable: true }],
+      foreignKeys: [{ column: 'parent_id', references: 'nodes', onDelete: 'set null' }],
+    });
+    expect(topoSortStoresByFk([tree]).map((s) => s.name)).toEqual(['nodes']);
+    // And it still emits (CREATE then a self-referential ADD CONSTRAINT).
+    const sql = generateProductSql([tree]);
+    expect(sql.indexOf('CREATE TABLE "nodes"')).toBeLessThan(
+      sql.indexOf('REFERENCES "public"."nodes"'),
+    );
+  });
+
+  it('a mutual FK CYCLE is unorderable — the generator THROWS a clear error (fail-closed)', () => {
+    const alpha = store({
+      name: 'alpha',
+      columns: [{ name: 'beta_id', type: 'uuid' }],
+      foreignKeys: [{ column: 'beta_id', references: 'beta', onDelete: 'cascade' }],
+    });
+    const beta = store({
+      name: 'beta',
+      columns: [{ name: 'alpha_id', type: 'uuid' }],
+      foreignKeys: [{ column: 'alpha_id', references: 'alpha', onDelete: 'cascade' }],
+    });
+    expect(() => topoSortStoresByFk([alpha, beta])).toThrow(/cycle/i);
+    expect(() => generateProductSql([alpha, beta])).toThrow(/cycle/i);
   });
 });
 

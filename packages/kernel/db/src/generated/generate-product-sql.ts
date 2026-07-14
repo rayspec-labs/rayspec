@@ -259,10 +259,85 @@ function assertBusinessKeyFksTargetCompoundUnique(
 }
 
 /**
- * Generate the full product migration SQL for a set of declared stores (DECLARED order). Joins
- * statements with Drizzle's `--> statement-breakpoint` marker so `shadow-dryrun.sh` (which strips
- * the markers) and `drizzle-kit migrate` both apply it identically. An EMPTY `stores[]` produces an
- * empty string (the product-empty baseline adds NO platform migration).
+ * STABLE topological sort of stores by their product->product FK dependency, so a parent table's
+ * CREATE always precedes the FK ADD of any child that references it. `emitStoreSql` emits each store's
+ * `ADD CONSTRAINT … REFERENCES <parent>` inline right after that store's CREATE TABLE, so if a child
+ * (declared first) references a parent (declared later) the REFERENCES fires before the parent exists →
+ * `42P01 relation does not exist` at apply. Reordering the stores parent-before-child closes that.
+ *
+ * STABILITY: independent stores (and an already dependency-ordered set) keep their DECLARED order — the
+ * sort iterates the declared array and emits the FIRST store whose in-set parents are all already
+ * emitted, so an already-ordered spec returns UNCHANGED and the committed goldens stay byte-identical.
+ *
+ * EDGES: a store's `foreignKeys[].references` → that parent store. SELF-references are ignored (a
+ * self-FK applies fine after the table's own CREATE). References to stores NOT in `stores` (e.g. an
+ * existing survivor on the update path) are ignored (they already exist in the database).
+ *
+ * A CYCLE (A→B, B→A, directly or transitively) is UNORDERABLE — no CREATE order satisfies every FK — so
+ * this THROWS a clear fail-closed error (mirroring `assertBusinessKeyFksTargetCompoundUnique`). The spec
+ * lint rejects the same cycle at config time (`fk_cycle`); this is the defense-in-depth backstop for a
+ * code-built spec that bypassed `parseSpec`.
+ *
+ * Exported so the delta-diff (`diffProductStores`) applies the identical ordering to its ADDED stores.
+ */
+export function topoSortStoresByFk(stores: StoreSpec[]): StoreSpec[] {
+  if (stores.length <= 1) return stores;
+  const inSet = new Set(stores.map((s) => s.name));
+  const byName = new Map(stores.map((s) => [s.name, s]));
+  // parents[name] = the set of IN-SET, non-self parent stores `name` must be created after.
+  const parents = new Map<string, Set<string>>();
+  for (const s of stores) {
+    const ps = new Set<string>();
+    for (const fk of s.foreignKeys) {
+      if (fk.references === s.name) continue; // self-FK: applies after this table's own CREATE
+      if (!inSet.has(fk.references)) continue; // out-of-set (a survivor already in the DB)
+      ps.add(fk.references);
+    }
+    parents.set(s.name, ps);
+  }
+
+  const ordered: StoreSpec[] = [];
+  const emitted = new Set<string>();
+  const remaining = new Set(stores.map((s) => s.name));
+  while (remaining.size > 0) {
+    // Pick the FIRST store (in declared order) whose parents are all already emitted → stable.
+    let next: string | undefined;
+    for (const s of stores) {
+      if (!remaining.has(s.name)) continue;
+      let ready = true;
+      for (const p of parents.get(s.name) as Set<string>) {
+        if (!emitted.has(p)) {
+          ready = false;
+          break;
+        }
+      }
+      if (ready) {
+        next = s.name;
+        break;
+      }
+    }
+    if (next === undefined) {
+      // No store is ready but some remain ⇒ a foreign-key cycle among the remaining stores.
+      const cycleNodes = [...remaining].sort().join(', ');
+      throw new Error(
+        `generate-product-sql: foreign-key cycle among stores [${cycleNodes}] — a circular FK ` +
+          'reference is unorderable (each store’s FK ADD needs its parent table to exist first). ' +
+          'Break the cycle (make one side nullable and add it in a separate reviewed migration).',
+      );
+    }
+    ordered.push(byName.get(next) as StoreSpec);
+    emitted.add(next);
+    remaining.delete(next);
+  }
+  return ordered;
+}
+
+/**
+ * Generate the full product migration SQL for a set of declared stores (any declared order — the FK
+ * dependency order is derived via {@link topoSortStoresByFk}, so a parent CREATE always precedes a
+ * child's FK ADD). Joins statements with Drizzle's `--> statement-breakpoint` marker so
+ * `shadow-dryrun.sh` (which strips the markers) and `drizzle-kit migrate` both apply it identically. An
+ * EMPTY `stores[]` produces an empty string (the product-empty baseline adds NO platform migration).
  */
 export function generateProductSql(stores: StoreSpec[], conflictKeys?: StoreConflictKeys): string {
   if (stores.length === 0) return '';
@@ -278,7 +353,9 @@ export function generateProductSql(stores: StoreSpec[], conflictKeys?: StoreConf
     '',
   ].join('\n');
 
-  const allStatements = stores.flatMap((s) => emitStoreSql(s, conflictKeys?.get(s.name)));
+  const allStatements = topoSortStoresByFk(stores).flatMap((s) =>
+    emitStoreSql(s, conflictKeys?.get(s.name)),
+  );
   // Drizzle terminates each statement with `;` then the breakpoint marker (the FINAL statement
   // gets a trailing `;` too); shadow-dryrun strips the markers and runs the file.
   const body = allStatements.map((s) => `${s};`).join('\n--> statement-breakpoint\n');

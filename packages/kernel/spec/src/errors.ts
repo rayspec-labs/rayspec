@@ -45,6 +45,12 @@ import { z } from 'zod';
  *                               registration order). Rename the frontend route.
  *  - `frontend_dir_missing`   — a declared frontend `dir` does not resolve to a readable directory of
  *                               built assets (surfaced by `doctor`, which checks the filesystem).
+ *  - `fk_cycle`               — the declared stores form a CIRCULAR foreign-key reference (store A
+ *                               references B and B references A, directly or transitively). Such a set is
+ *                               UNORDERABLE: each store's FK ADD needs its parent table to already exist,
+ *                               so no CREATE order satisfies every FK. Rejected fail-closed at config time
+ *                               rather than surfacing as a cryptic `42P01 relation does not exist` at
+ *                               apply. Self-references are EXEMPT (a self-FK applies after its own CREATE).
  *
  * PRODUCT-YAML codes — used ONLY by the Product-YAML validation path (`parseProductSpec`,
  * `product-lint.ts`). They share this closed envelope so a fresh session sees ONE error vocabulary
@@ -104,6 +110,7 @@ export const SpecErrorCode = z.enum([
   'reserved_query_keyword',
   'frontend_route_collision',
   'frontend_dir_missing',
+  'fk_cycle',
   'no_code_in_yaml',
   'provider_native_leak',
   'invalid_capability_status',
@@ -141,8 +148,15 @@ export function specError(code: SpecErrorCode, message: string, path?: string): 
  *                               `UPDATE(deleted_at)` that does NOT fire the database ON DELETE restrict,
  *                               so children keep pointing at the tombstoned row — the restrict guarantee
  *                               only binds on a HARD delete. This is a permitted, documented interaction.
+ *  - `fk_forward_reference`   — a store declares a foreign key onto another store declared LATER in the
+ *                               `stores` array. The product-SQL generator topo-sorts stores so the parent
+ *                               table is created before the child's FK is added, so a forward reference
+ *                               still applies cleanly; this advisory notes only that the declared order
+ *                               relies on that reordering (declaring the parent first makes it explicit).
+ *                               Acyclic by construction — a true cycle is the fail-closed `fk_cycle`
+ *                               error, never a warning.
  */
-export const SpecWarningCode = z.enum(['softdelete_fk_restrict']);
+export const SpecWarningCode = z.enum(['softdelete_fk_restrict', 'fk_forward_reference']);
 export type SpecWarningCode = z.infer<typeof SpecWarningCode>;
 
 /** A single NON-FATAL spec warning (closed code + message + optional JSON path). Never fails a parse. */
