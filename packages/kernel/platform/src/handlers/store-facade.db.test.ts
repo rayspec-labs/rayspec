@@ -137,6 +137,23 @@ const docsStore: StoreSpec = {
   softDelete: true,
 };
 
+// ENUM-WHITELIST fixture — a store with a declared column `enum` value whitelist. build-product-tables
+// records the whitelist in the enum-whitelist registry, so the facade rejects an out-of-whitelist write
+// value on the low-level insert/upsert/update funnel (parity with the HTTP route + workflow store.write).
+// `status` is a non-nullable whitelisted column; `priority` is a NULLABLE whitelisted column (null is a
+// nullability concern, not an out-of-whitelist value — so it must be accepted). The DDL is a plain `text`
+// column with NO CHECK constraint (the whitelist is enforced app-side, not by the DB), so an illegal value
+// writes fine at the DB level — i.e. WITHOUT the facade check these inserts SUCCEED (RED before the fix).
+const ticketsStore: StoreSpec = {
+  name: 'tickets',
+  columns: [
+    { name: 'title', type: 'text', nullable: false, unique: false },
+    { name: 'status', type: 'text', nullable: false, unique: false, enum: ['open', 'closed'] },
+    { name: 'priority', type: 'text', nullable: true, unique: false, enum: ['low', 'high'] },
+  ],
+  foreignKeys: [],
+};
+
 /** Every PRODUCT store this suite creates in the isolated schema, paired with its business columns. */
 const productStores = [
   meetingsStore,
@@ -146,6 +163,7 @@ const productStores = [
   scopedStore,
   notesStore,
   docsStore,
+  ticketsStore,
 ];
 
 /**
@@ -229,6 +247,15 @@ function buildFacadeSchemaSql(): string {
         ${after},
         CONSTRAINT docs_tenant_code_unique UNIQUE (tenant_id, code)
       );
+      -- ENUM-WHITELIST fixture: plain text columns with NO DB CHECK — the enum whitelist is enforced
+      -- app-side (the facade), so an illegal value would write fine here without the facade check.
+      CREATE TABLE tickets (
+        ${before},
+        title text NOT NULL,
+        status text NOT NULL,
+        priority text,
+        ${after}
+      );
       INSERT INTO orgs (id, name) VALUES ('${TENANT_A}', 'A'), ('${TENANT_B}', 'B');
     `;
 }
@@ -267,6 +294,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
       scopedStore,
       notesStore,
       docsStore,
+      ticketsStore,
     ]);
     unregister = registerScopedTables([...productTables.values()]);
   });
@@ -278,7 +306,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
 
   beforeEach(async () => {
     await db.$client.unsafe(
-      `SET search_path TO ${SCHEMA}; TRUNCATE meetings, tags, gizmos, pairs, scoped, notes, docs CASCADE;`,
+      `SET search_path TO ${SCHEMA}; TRUNCATE meetings, tags, gizmos, pairs, scoped, notes, docs, tickets CASCADE;`,
     );
   });
 
@@ -1094,6 +1122,95 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
       `SELECT count(*)::int AS c FROM ${SCHEMA}.docs;`,
     )) as Array<{ c: number }>;
     expect(rawAfterInsert[0]?.c).toBe(1);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────────────────────────
+  // ENUM WHITELIST on the FACADE write funnels. A store column may declare an `enum` value whitelist;
+  // the HTTP create/update route (a `z.enum`) and the workflow store.write node already reject an
+  // out-of-whitelist value. These prove the low-level `HandlerDb` facade — the escape-hatch write
+  // surface a tool/route/trigger handler holds — rejects the SAME out-of-whitelist value on EVERY write
+  // funnel (insert / upsert / update), so a handler cannot persist a value the declared whitelist
+  // forbids. Fail-the-fix: the `tickets` DDL is a plain `text` column with NO CHECK, so without the
+  // facade check the illegal value writes fine at the DB level and these assertions go RED.
+  // ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+  it('enum: insert REJECTS an out-of-whitelist value; a whitelisted value SUCCEEDS; null on a nullable enum col is allowed', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // A whitelisted value writes (positive control — the check is not "reject everything").
+    const ok = await aDb.insert('tickets', { title: 't1', status: 'open', priority: 'high' });
+    expect(ok.status).toBe('open');
+    expect(ok.priority).toBe('high');
+    // A nullable enum column accepts null (a nullability concern, NOT an out-of-whitelist value) + omission.
+    const nullable = await aDb.insert('tickets', { title: 't2', status: 'closed', priority: null });
+    expect(nullable.priority).toBeNull();
+    const omitted = await aDb.insert('tickets', { title: 't3', status: 'open' });
+    expect(omitted.priority).toBeNull();
+    // An out-of-whitelist value is rejected fail-closed (WITHOUT the fix this silently writes 'archived').
+    await expect(aDb.insert('tickets', { title: 'bad', status: 'archived' })).rejects.toThrow(
+      /not one of the declared allowed values/,
+    );
+    // The rejection names the store + column but NEVER the offending value (no cross-tenant value oracle).
+    let caught: unknown;
+    try {
+      await aDb.insert('tickets', { title: 'bad2', status: 'leaked-secret-value' });
+    } catch (e) {
+      caught = e;
+    }
+    const msg = (caught as Error).message;
+    expect(msg).toContain('tickets');
+    expect(msg).toContain('status');
+    expect(msg).not.toContain('leaked-secret-value');
+    // Only the three legal rows landed — nothing illegal was persisted.
+    expect((await aDb.select('tickets')).map((r) => r.status).sort()).toEqual([
+      'closed',
+      'open',
+      'open',
+    ]);
+  });
+
+  it('enum: a NON-STRING scalar on a whitelisted column is rejected (closes the scalar-non-string SF-1 bypass)', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // SF-1 (assertValidValue) ACCEPTS a plain scalar number/boolean; the enum check must still reject it,
+    // because a non-string value is by definition not a whitelisted member (parity with store.write).
+    await expect(
+      aDb.insert('tickets', { title: 'num', status: 5 as unknown as string }),
+    ).rejects.toThrow(/not one of the declared allowed values/);
+  });
+
+  it('enum: update REJECTS an out-of-whitelist value (a whitelisted patch still applies)', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    const row = await aDb.insert('tickets', { title: 't', status: 'open' });
+    await expect(aDb.update('tickets', { id: row.id }, { status: 'archived' })).rejects.toThrow(
+      /not one of the declared allowed values/,
+    );
+    // A whitelisted update still applies (the check is value-specific, not column-blanket).
+    const updated = await aDb.update('tickets', { id: row.id }, { status: 'closed' });
+    expect(updated).toHaveLength(1);
+    expect(updated[0]?.status).toBe('closed');
+  });
+
+  it('enum: upsert REJECTS an out-of-whitelist value (the store.write conflict path is covered too)', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // The enum check fires in the shared value-mapper BEFORE any DB conflict logic, so it rejects
+    // regardless of the conflict target (no real unique index is needed to prove the rejection).
+    await expect(
+      aDb.upsert('tickets', ['title'], { title: 't-up', status: 'archived' }),
+    ).rejects.toThrow(/not one of the declared allowed values/);
+    // Nothing was written by the rejected upsert.
+    expect(await aDb.select('tickets')).toHaveLength(0);
+  });
+
+  it('enum: a store with NO enum column is byte-behaviourally unchanged (any string status writes)', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // `meetings` declares no enum column → no whitelist recorded → the facade never adds a check. A
+    // free-form text value writes exactly as before (proves the check is opt-in, not global).
+    const row = await aDb.insert('meetings', { title: 'anything-goes', completed: false });
+    expect(row.title).toBe('anything-goes');
   });
 });
 
