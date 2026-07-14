@@ -12,8 +12,6 @@
   },
   "dependencies": {
     "@hono/node-server": "2.0.6",
-    "@rayspec/adapter-openai": "workspace:*",
-    "@rayspec/core": "workspace:*",
     "@rayspec/db": "workspace:*",
     "@rayspec/server": "workspace:*",
     "@rayspec/spec": "workspace:*",

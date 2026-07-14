@@ -11,18 +11,14 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { parseDotenv } from './src/test-support/dotenv.js';
 
-// Minimal .env loader (no dotenv dependency in the runtime path): parse KEY=VALUE lines, do not
-// overwrite anything already set in the process environment.
+// Minimal .env loader (no dotenv dependency in the runtime path): parse KEY=VALUE lines (dequoting a
+// surrounding quote pair — a double-quoted DATABASE_URL would otherwise throw `Invalid URL`), and do
+// not overwrite anything already set in the process environment.
 const envPath = join(__dirname, '..', '..', '..', '.env');
 if (existsSync(envPath)) {
-  for (const line of readFileSync(envPath, 'utf8').split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq <= 0) continue;
-    const key = trimmed.slice(0, eq).trim();
-    const value = trimmed.slice(eq + 1).trim();
+  for (const [key, value] of parseDotenv(readFileSync(envPath, 'utf8'))) {
     if (!(key in process.env)) process.env[key] = value;
   }
 }

@@ -9,8 +9,14 @@
  *
  * Skips when DATABASE_URL is absent (turbo passes it in CI; a credential-free run self-skips).
  */
-import { forTenant } from '@rayspec/db';
-import { buildProductTables, makeDbWithSchema, registerScopedTables } from '@rayspec/db/testing';
+import { forTenant, INJECTED_COLUMN_NAMES } from '@rayspec/db';
+import {
+  buildProductTables,
+  injectedColumnLinesSql,
+  makeDbWithSchema,
+  parseCreateTableColumnNames,
+  registerScopedTables,
+} from '@rayspec/db/testing';
 import type { StoreSpec } from '@rayspec/spec';
 import { eq, getTableColumns, sql } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
@@ -131,28 +137,41 @@ const docsStore: StoreSpec = {
   softDelete: true,
 };
 
-describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', () => {
-  let db: ReturnType<typeof makeDbWithSchema>;
-  let productTables: Map<string, PgTable>;
-  let unregister: () => void;
+/** Every PRODUCT store this suite creates in the isolated schema, paired with its business columns. */
+const productStores = [
+  meetingsStore,
+  tagsStore,
+  gizmosStore,
+  pairsStore,
+  scopedStore,
+  notesStore,
+  docsStore,
+];
 
-  beforeAll(async () => {
-    db = makeDbWithSchema(process.env.DATABASE_URL as string, SCHEMA);
-    await db.$client.unsafe(`
+/**
+ * The isolated-schema DDL. Each product table's injected tenancy/GDPR columns are DERIVED from the
+ * single-source generator descriptor (`injectedColumnLinesSql`) and interpolated around the still-
+ * explicit business columns + the still-explicit attack-surface constraints (global/composite/
+ * tenant-scoped UNIQUEs the generator would NOT emit), so a NEW injected column can never silently
+ * drift these fixtures while the bespoke constraints stay verbatim.
+ */
+function buildFacadeSchemaSql(): string {
+  const { before, after } = injectedColumnLinesSql({
+    tenantFkRef: 'REFERENCES orgs(id) ON DELETE CASCADE',
+  });
+  return `
       DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE;
       CREATE SCHEMA ${SCHEMA};
       SET search_path TO ${SCHEMA};
       CREATE TABLE orgs (id uuid PRIMARY KEY, name text, created_at timestamptz NOT NULL DEFAULT now());
       CREATE TABLE meetings (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+        ${before},
         title text NOT NULL,
         completed boolean NOT NULL,
         scheduled_at timestamptz,
         metadata jsonb,
         business_key text,
-        created_at timestamptz NOT NULL DEFAULT now(),
-        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text,
+        ${after},
         -- GLOBAL (NOT tenant-scoped) unique — the worst case for an upsert conflict target: two tenants
         -- can collide on the SAME business_key, so C1's tenant-scoped DO-UPDATE setWhere is what stops a
         -- cross-tenant overwrite. (Multiple NULL business_keys are allowed — Postgres NULLs are distinct.)
@@ -160,70 +179,86 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
       );
       -- F1 ensure-exists fixture: only business column is the conflict target → empty DO-UPDATE SET.
       CREATE TABLE tags (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+        ${before},
         name text NOT NULL,
-        created_at timestamptz NOT NULL DEFAULT now(),
-        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text,
+        ${after},
         CONSTRAINT tags_name_global_unique UNIQUE (name)
       );
       -- XT-1 fixture: TWO individual global uniques (a conflict on vendor while the ON CONFLICT target
       -- is business_key is the "DIFFERENT unique" 23505 the sanitizer must neutralize).
       CREATE TABLE gizmos (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+        ${before},
         title text NOT NULL,
         business_key text,
         vendor text,
-        created_at timestamptz NOT NULL DEFAULT now(),
-        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text,
+        ${after},
         CONSTRAINT gizmos_business_key_unique UNIQUE (business_key),
         CONSTRAINT gizmos_vendor_unique UNIQUE (vendor)
       );
       -- TQ-3 fixture: a COMPOSITE global unique (business_key, vendor).
       CREATE TABLE pairs (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+        ${before},
         title text NOT NULL,
         business_key text NOT NULL,
         vendor text NOT NULL,
-        created_at timestamptz NOT NULL DEFAULT now(),
-        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text,
+        ${after},
         CONSTRAINT pairs_bk_vendor_unique UNIQUE (business_key, vendor)
       );
       -- TQ-4 fixture: a TENANT-SCOPED unique (tenant_id, business_key) — the recommended secure pattern.
       CREATE TABLE scoped (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+        ${before},
         title text NOT NULL,
         business_key text NOT NULL,
-        created_at timestamptz NOT NULL DEFAULT now(),
-        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text,
+        ${after},
         CONSTRAINT scoped_tenant_bk_unique UNIQUE (tenant_id, business_key)
       );
       -- SOFT-DELETE fixture: the facade folds deleted_at IS NULL on reads/updates + stamps on delete.
       CREATE TABLE notes (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+        ${before},
         title text NOT NULL,
         done boolean NOT NULL,
-        created_at timestamptz NOT NULL DEFAULT now(),
-        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text
+        ${after}
       );
       -- SOFT-DELETE + UNIQUE fixture: a softDelete store with a TENANT-SCOPED, NON-partial unique
       -- (tenant_id, code) — NOT a partial (no WHERE deleted_at IS NULL), so a tombstoned row STILL occupies
       -- its unique value (the documented unique-vs-tombstone limitation exercised by the write-path test).
       CREATE TABLE docs (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+        ${before},
         title text NOT NULL,
         code text NOT NULL,
-        created_at timestamptz NOT NULL DEFAULT now(),
-        deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text,
+        ${after},
         CONSTRAINT docs_tenant_code_unique UNIQUE (tenant_id, code)
       );
       INSERT INTO orgs (id, name) VALUES ('${TENANT_A}', 'A'), ('${TENANT_B}', 'B');
-    `);
+    `;
+}
+
+// Drift guard (no DB): every PRODUCT table's CREATE TABLE must carry EXACTLY the injected columns
+// ∪ its declared business columns (the test-specific UNIQUE constraints are skipped, not counted).
+// Interpolating `injectedColumnLinesSql` makes drift impossible; this fails the fix RED if a future
+// edit re-hardcodes a product table and forgets an injected column.
+describe('store-facade schema — injected-column drift guard', () => {
+  const sql = buildFacadeSchemaSql();
+  for (const productStore of productStores) {
+    it(`${productStore.name} carries exactly the injected + its business columns`, () => {
+      const columns = new Set(parseCreateTableColumnNames(sql, productStore.name));
+      const expected = new Set([
+        ...INJECTED_COLUMN_NAMES,
+        ...productStore.columns.map((c) => c.name),
+      ]);
+      expect(columns).toEqual(expected);
+    });
+  }
+});
+
+describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', () => {
+  let db: ReturnType<typeof makeDbWithSchema>;
+  let productTables: Map<string, PgTable>;
+  let unregister: () => void;
+
+  beforeAll(async () => {
+    db = makeDbWithSchema(process.env.DATABASE_URL as string, SCHEMA);
+    await db.$client.unsafe(buildFacadeSchemaSql());
     productTables = buildProductTables([
       meetingsStore,
       tagsStore,
