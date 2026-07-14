@@ -376,11 +376,22 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
           createdBy: principal.userId,
         });
       } catch (err) {
-        // A THROW after we won the reservation but BEFORE the key is durably minted must leave the
-        // key RE-RUNNABLE — release the reservation so a retry can mint (a failed mint is retryable).
-        // Once the row IS committed we do NOT release: the reservation is the exactly-once lock that
-        // prevents a duplicate key, so a later finalize/audit failure leaves it as an in-progress 409
-        // for retries rather than allowing a second mint.
+        // A mint THROW releases the reservation so the key stays RE-RUNNABLE — a client whose mint
+        // failed can retry under the same key. This catch deliberately wraps ONLY the mint: a throw
+        // from the post-commit finalize/audit below is NOT released (it leaves the reservation as an
+        // in-progress 409 for retries, never a duplicate mint).
+        //
+        // HONEST caveat — this is exactly-once EXCEPT for one rare ambiguous outcome. apiKeyStore.mint
+        // is a single INSERT ... RETURNING, and the driver rejects its promise if the connection drops
+        // AFTER the server commits the row but BEFORE the RETURNING result is read (an in-doubt commit).
+        // In that window we release a reservation whose row DID commit, so a same-key retry can mint a
+        // SECOND row. That second key is DORMANT and NOT authenticatable — its plaintext was never
+        // returned to any client — so it is a benign correctness residual, not a usable-credential leak,
+        // and it is strictly better than the pre-fix behaviour (which duplicated a USABLE key on ANY
+        // mint throw). The closest structural analog, the run-enqueue path, closes this by probing for
+        // the row's presence before releasing; a probe-before-release here is a possible future
+        // hardening (NOT implemented — it would trade the benign dormant orphan for a stuck in-progress
+        // 409 on the genuinely-failed-mint retry).
         if (idemKey) await deps.idempotency.release(orgId, 'apikey:mint', idemKey).catch(() => {});
         throw err;
       }
@@ -393,8 +404,9 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
       if (idemKey) {
         // Finalize the reservation WE already won with the REDACTED metadata — NEVER the plaintext
         // (kill-trigger closure). The row already exists (we won the reserve), so this is an UPDATE,
-        // not a second insert: the exactly-once contract holds and the earlier onConflictDoNothing
-        // orphan window (two usable keys, one replayable snapshot) is structurally gone.
+        // not a second insert — the earlier find-then-record concurrent orphan window (two usable keys,
+        // one replayable snapshot) is structurally gone (modulo the rare in-doubt-commit residual noted
+        // in the catch above).
         const redacted: MintApiKeyReplay = {
           id: row.id,
           keyPrefix: row.keyPrefix,
