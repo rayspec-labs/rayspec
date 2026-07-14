@@ -171,6 +171,15 @@ function specWithHandlerRoute(base: RaySpec): RaySpec {
         export: 'listCompleted',
         kind: 'route',
       },
+      // the SAME read-only handler, declared `readonly:true` → its route is gated `store:read`
+      // instead of the default `store:write`, so a read-scoped credential can reach it.
+      {
+        id: 'list_completed_readonly_route',
+        module: 'handlers/list-completed-route.ts',
+        export: 'listCompleted',
+        kind: 'route',
+        readonly: true,
+      },
       // an enriched-response route (handler-chosen status + request-body injection).
       {
         id: 'echo_enriched_route',
@@ -206,6 +215,12 @@ function specWithHandlerRoute(base: RaySpec): RaySpec {
         method: 'GET',
         path: '/completed',
         action: { kind: 'handler', handler: 'list_completed_route' },
+      },
+      // the readonly-declared variant, gated `store:read`.
+      {
+        method: 'GET',
+        path: '/completed-readonly',
+        action: { kind: 'handler', handler: 'list_completed_readonly_route' },
       },
       // a POST `{handler}` route → the enriched-response handler (reads the body).
       {
@@ -309,6 +324,18 @@ describe.skipIf(!hasDb)('declared agent + tooling + handler model end-to-end', (
       ).json()
     ).accessToken as string;
     return { orgId, token };
+  }
+
+  /** Mint an org-scoped api-key with the given permission scopes (owner-authorized). */
+  async function mintApiKey(orgId: string, ownerToken: string, scopes: string[]): Promise<string> {
+    const res = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/api-keys`, {
+      body: { name: 'test-key', scopes },
+      headers: { authorization: `Bearer ${ownerToken}` },
+    });
+    if (res.status !== 201) {
+      throw new Error(`api-key mint failed: ${res.status} ${JSON.stringify(await res.json())}`);
+    }
+    return (await res.json()).plaintext as string;
   }
 
   it('loadHandlers resolved the throwaway handlers (tool + trigger + route) from the jailed root', () => {
@@ -558,6 +585,42 @@ describe.skipIf(!hasDb)('declared agent + tooling + handler model end-to-end', (
     const out = (await res.json()) as { status: string; detail: string };
     expect(out.status).toBe('ok'); // the body — including the `status` KEY — is intact
     expect(out.detail).toBe('plain-body');
+  });
+
+  // ----------------------------------------------------------------------------------------------
+  // readonly:true handler → the route is gated store:read (a read-scoped api-key can reach it),
+  // while a non-readonly handler still demands store:write.
+  // ----------------------------------------------------------------------------------------------
+
+  it('a readonly:true {handler} route is reachable with a read-scoped api-key (store:read gate)', async () => {
+    const { orgId, token } = await principal('ro-readkey@example.com', 'ReadonlyRouteOrg');
+    // Mint a READ-ONLY api-key (store:read scope, NO store:write).
+    const readKey = await mintApiKey(orgId, token, ['store:read']);
+    // Seed one completed notebook via the owner JWT so the readonly handler has a row to return.
+    await jsonRequest(h.app, 'POST', '/notebooks', {
+      body: { title: 'ro-done', scheduledAt: '2026-07-01T10:00:00Z', completed: true },
+      headers: { authorization: `Bearer ${token}` },
+    });
+    // The readonly route is gated store:read → the read-scoped key SUCCEEDS (200). Before the gate
+    // flip this route demanded store:write, so the read-scoped key would 403 here (RED).
+    const res = await jsonRequest(h.app, 'GET', '/completed-readonly', {
+      headers: { authorization: `Bearer ${readKey}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { count: number; notebooks: Array<{ title: string }> };
+    expect(body.count).toBe(1);
+    expect(body.notebooks[0]?.title).toBe('ro-done');
+  });
+
+  it('a NON-readonly {handler} route STILL demands store:write (read-scoped api-key → 403)', async () => {
+    const { orgId, token } = await principal('ro-defaultkey@example.com', 'DefaultRouteOrg');
+    // A read-scoped api-key CANNOT reach the default (non-readonly) `/completed` route — it is gated
+    // store:write, unchanged. This pins the default so the readonly opt-in never widens other routes.
+    const readKey = await mintApiKey(orgId, token, ['store:read']);
+    const res = await jsonRequest(h.app, 'GET', '/completed', {
+      headers: { authorization: `Bearer ${readKey}` },
+    });
+    expect(res.status).toBe(403);
   });
 
   it('REGRESSION GUARD: a PLAIN-body {handler} route STILL returns 200', async () => {
