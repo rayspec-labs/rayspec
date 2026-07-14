@@ -317,7 +317,16 @@ export class BootConfigError extends Error {
  * (the dev wrapper wires the OpenAI adapter from OPENAI_API_KEY). Returning an empty map is fine for
  * a stores/api-only spec.
  */
-export type AgentBackendsFactory = () => ReadonlyMap<BackendId, Backend>;
+export type AgentBackendsFactory = (
+  /**
+   * The MERGED spec's agents (deployment ⊕ extension-pack fragments), passed by the composition root
+   * AFTER `mergeExtensions`. A from-env factory uses this to additionally wire any backend a
+   * pack-contributed agent selects that no base agent uses (so `buildAgentRegistry` finds every merged
+   * agent's backend). Optional + additive: omitted (or a factory that ignores it) yields exactly the
+   * base-derived backends — base-only deploys stay byte-identical.
+   */
+  mergedAgents?: readonly { id: string; backend: string }[],
+) => ReadonlyMap<BackendId, Backend>;
 
 /**
  * The LOCAL A1 table-registration hook (the deny-by-default chokepoint Set is keyed by object
@@ -1138,7 +1147,12 @@ async function deployDeclaredSpec(
       specStores.length === 0 ? 'auth-only' : schemaState === 'absent' ? 'materialized' : 'mounted';
   }
 
-  const agentBackends = opts.agentBackendsFactory?.();
+  // Pass the MERGED spec's agents so a from-env factory wires EVERY declared backend — including one a
+  // pack-contributed agent selects that no BASE agent uses. Without this the base-derived factory would
+  // omit that backend and `buildAgentRegistry` would fail closed at boot on the pack agent. Base-only
+  // deploys (empty extensions ⇒ mergeExtensions no-op ⇒ effectiveSpec.agents === base agents) are
+  // byte-identical, and a factory that ignores the arg (a test-injected map) is unaffected.
+  const agentBackends = opts.agentBackendsFactory?.(effectiveSpec.agents);
 
   // ── The BLOB BACKEND deploy guard + injection ───────────────────────────────
   // A `kind:'stream'` route reads/writes binary bytes through the tenant-bound BlobStore (init.blob).
