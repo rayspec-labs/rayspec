@@ -5,6 +5,119 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-07-14
+
+### Added
+
+- **Opt-in `readonly` route handlers.** A `{ kind: route }` handler may now declare
+  `readonly: true`. A `handler`-kind route is gated on the sensitive `store:write`
+  permission by default (the platform cannot statically prove a handler only reads, so
+  it fail-closes to the stronger gate); `readonly: true` is the author's assertion that
+  the handler only reads product stores, so its route is gated on `store:read` instead
+  — letting a read-scoped credential (for example an ingest-only API key) reach a
+  read-only route. It is an authorization gate / author assertion, not a runtime
+  write restriction. An absent or `false` flag parses byte-identically to before, so
+  every existing spec, fixture, and golden is unchanged.
+- **A tenant-scoped session reprocess endpoint.** `POST /v1/sessions/{id}/reprocess`
+  (`store:write`, strictly tenant-scoped) re-drives a session's declared
+  finalized-session workflow as a **fresh durable run under a distinct idempotency
+  key** — the operational recovery path for re-running extraction after a fix or
+  unsticking a stuck session, without manual database surgery (simply re-emitting the
+  finalized event deduplicates to the original run and does nothing). It is wired for
+  audio products; a deployment with no reprocessor wired answers `501`, and a foreign
+  or absent session id returns `404` with zero enqueue.
+- **Opt-in reuse of a machine `claude` login for the Anthropic backend.** Setting
+  `RAYSPEC_ANTHROPIC_REUSE_LOGIN=true` lets the Anthropic subscription backend boot
+  with **no `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` in the server environment**,
+  reusing a `claude` login the operator has seeded into the per-tenant config directory
+  under `RAYSPEC_ANTHROPIC_CONFIG_ROOT` (still required). A loud boot banner announces
+  the mode. Honest caveats: the boot cannot verify any per-tenant directory is actually
+  seeded, so an unseeded tenant boots clean and fails only at first run; seeding the
+  login is a manual operator step; and if a token or key is *also* present in the
+  environment it wins over the seeded login (the boot warns). Without the flag, boot
+  behaviour is byte-identical (fail-closed when no credential is present). Documented in
+  `docs/concepts.md` and `.env.example`.
+
+### Fixed
+
+- **Store `enum` whitelists are now enforced on the low-level escape-hatch handler
+  write path too.** A `text` column's declared `enum` whitelist was already enforced on
+  the HTTP `create`/`update` route and the workflow `store.write` value path, but a
+  custom handler writing directly through the `HandlerDb` facade was not checked. It is
+  now rejected fail-closed against a table-identity whitelist registry (a non-member
+  value — including a non-string scalar — is refused; the failure names the store and
+  column only, never the offending value), so all three write surfaces agree. This
+  **closes the "the facade is not enum-checked" residual noted in `1.3.1`**.
+- **Every sealed track of a multi-track audio session is transcribed.** The
+  session-finalized event fires as soon as one track seals, but a sibling track could
+  still be uploading at that instant; the transcribe node re-read only the completed
+  tracks and finished, permanently dropping any track that sealed afterward. The
+  durable transcribe node now waits (bounded, with real retry backoff) for all tracks
+  to seal before transcribing, so every sealed track is transcribed under a staggered
+  or concurrent finalize. The finalize emit stays unconditional, so a session-scoped
+  idempotency key still deduplicates to exactly one durable run (never zero). Honest
+  bound: once the wait elapses the run proceeds with whatever sealed and logs loudly, so
+  an abandoned upload can never stall the run forever.
+- **The migration generator emits foreign keys after the tables they reference.** A
+  store that referenced a later-declared store emitted its `REFERENCES <parent>` before
+  that parent's `CREATE TABLE`, failing at apply (`42P01 relation does not exist`) while
+  `doctor`/`plan` still reported ok. A stable topological sort now orders every
+  `CREATE TABLE` ahead of the foreign keys that reference it (an already-ordered spec
+  stays byte-identical, so committed goldens are unchanged). A genuine foreign-key
+  **cycle** is now a blocking `fk_cycle` error at `doctor`/`plan` time (rather than a
+  throw at apply); a merely out-of-order forward reference is a non-blocking
+  `fk_forward_reference` advisory.
+- **An unsatisfiable `Range` on a static `frontend` mount now returns `416`.** The
+  underlying static server mishandled an unsatisfiable byte range — a closed range
+  beyond end-of-file yielded a malformed 0-byte `206`, and an open one surfaced as a
+  `500`. An additive guard now returns RFC-7233 **`416`** with
+  `Content-Range: bytes */<size>` for an unsatisfiable range (a start at/after EOF —
+  open or closed — or a reversed range), under `GET` and every write verb. `HEAD`/
+  `OPTIONS` stay `200` full-size (never `416`), every satisfiable/clamped `206` is
+  unchanged, and the fail-closed dotfile/traversal/symlink guard still returns `404`
+  under a `Range` request. This **corrects the `1.3.1` note** that said an unsatisfiable
+  range returns `500`.
+- **API-key minting is exactly-once under a concurrent `Idempotency-Key`.** The mint
+  applied idempotency as a non-atomic find-then-act, so two concurrent requests with the
+  same key could each mint a distinct usable key with the loser's key left stranded
+  (usable but never replayable). The mint is now retrofitted onto the atomic
+  reserve-before-execute primitive: a loser replays the winner's key (`200`) or gets a
+  `409` while the mint is in progress, and exactly one key is ever minted. The
+  no-idempotency-key path is behaviourally unchanged, and the plaintext secret is still
+  never stored (the kill-trigger closure is preserved). Honest residual (documented in
+  code): exactly-once except a rare ambiguous mint-commit window.
+- **A user-dismissed collection row is preserved across a rebuild.** The collections
+  materializer re-stamped `dismissed: false` on every rebuild, so re-extracting (or a
+  reprocess) would resurrect a user-dismissed artifact. A dismissed row is now spared
+  unconditionally — reconciliation never deletes it and the upsert loop skips it —
+  mirroring the existing human-edit preservation, independent of `preserve_human_edits`.
+- **An extension-pack agent that selects a backend no base agent uses now boots.** The
+  env-driven backend factory derived its backend set from the pre-merge base document,
+  so a backend introduced only by a pack agent was never built and the boot failed
+  closed on it — including a backend spec whose *only* agents come from a pack (zero base
+  `agents:`). The composition root now builds any backend a merged agent selects (via the
+  same fail-closed path), while a base-only deploy stays byte-identical.
+
+### Security
+
+- **The API error envelope strips `details` structurally for non-input-echo codes.**
+  The "a bare `401`/`404` leaks no details" invariant moved from a per-call-site
+  convention to a structural guard at the single envelope chokepoint every non-2xx
+  response flows through: an allowlist keeps `details` only for the codes whose details
+  echo caller-supplied context (`VALIDATION_ERROR`, `FORBIDDEN`, `RATE_LIMITED`,
+  `GATEWAY_TIMEOUT`) and drops it for every other code regardless of what a caller
+  passes. Behaviour-preserving — no code outside the allowlist carries a `details`
+  payload today, so no current response changes — but the guarantee is now enforced by
+  construction rather than by convention.
+
+### Documentation
+
+- Updated the spec reference, concepts, and the authoring skill for the `readonly`
+  route-handler flag, the session reprocess endpoint, the all-three-surfaces `enum`
+  enforcement (the `1.3.1` handler-facade residual is closed), the static-mount `416`
+  correction (superseding the `1.3.1` "returns `500`" note), and the
+  `RAYSPEC_ANTHROPIC_REUSE_LOGIN` reuse-login option.
+
 ## [1.3.1] - 2026-07-13
 
 ### Added
@@ -325,6 +438,7 @@ stands up the running backend from that single file.
   untrusted, multi-tenant, public-internet hosting is a separate layer and is
   deliberately not part of the core — see [`SECURITY.md`](./SECURITY.md).
 
+[1.3.2]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.3.2
 [1.3.1]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.3.1
 [1.3.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.3.0
 [1.2.2]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.2.2
