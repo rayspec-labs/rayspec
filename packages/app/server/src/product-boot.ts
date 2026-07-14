@@ -773,6 +773,25 @@ export function anthropicReuseLoginShadowWarning(env: NodeJS.ProcessEnv): string
   );
 }
 
+/**
+ * Reuse-login ACTIVE banner (mirrors nonRealProviderBanner for the "boots clean, fails at first use" class):
+ * when RAYSPEC_ANTHROPIC_REUSE_LOGIN is on, boot relaxes the token demand but nothing can verify a
+ * per-tenant CLAUDE_CONFIG_DIR is actually seeded — the boot layer has no tenant id (the seed is per-tenant
+ * `${RAYSPEC_ANTHROPIC_CONFIG_ROOT}/tenant-<tenantId>`), so an UNSEEDED tenant boots green and fails only at
+ * first run. We make the posture LOUD + operator-visible at boot (NAMES only, never secret VALUES); seed
+ * validation stays at run time, where the tenant id exists. Returns the banner when enabled, else null.
+ */
+export function anthropicReuseLoginBanner(env: NodeJS.ProcessEnv): string | null {
+  if (!anthropicReuseLoginEnabled(env)) return null;
+  return (
+    '\n⚠️  RAYSPEC PRODUCT BOOT — ANTHROPIC REUSE-LOGIN ACTIVE ⚠️\n' +
+    '    RAYSPEC_ANTHROPIC_REUSE_LOGIN is on: the Anthropic backend boots WITHOUT a token/key in the\n' +
+    '    server env. Each tenant CLAUDE_CONFIG_DIR under RAYSPEC_ANTHROPIC_CONFIG_ROOT must carry a\n' +
+    '    seeded `claude` login (`<RAYSPEC_ANTHROPIC_CONFIG_ROOT>/tenant-<tenantId>`); an UNSEEDED\n' +
+    '    tenant will fail at first run (boot cannot verify the per-tenant seed — no tenant id here).\n'
+  );
+}
+
 export function makeExtractionBackend(env: NodeJS.ProcessEnv, backend: string): Backend {
   switch (backend) {
     case 'openai': {
@@ -800,6 +819,9 @@ export function makeExtractionBackend(env: NodeJS.ProcessEnv, backend: string): 
       }
       const billingWarning = anthropicApiKeyOverrideWarning(env);
       if (billingWarning) console.warn(billingWarning);
+      // Reuse-login ACTIVE: a LOUD banner (the seed is per-tenant, unverifiable at boot).
+      const reuseLoginBanner = anthropicReuseLoginBanner(env);
+      if (reuseLoginBanner) console.warn(reuseLoginBanner);
       // Reuse-login shadow footgun: a token/key present alongside the flag shadows the seeded login.
       const shadowWarning = anthropicReuseLoginShadowWarning(env);
       if (shadowWarning) console.warn(shadowWarning);

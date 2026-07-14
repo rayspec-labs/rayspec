@@ -30,6 +30,7 @@ import { parseAnySpec } from '@rayspec/spec';
 import { type AgentBackendsFactory, BootConfigError } from './composition-root.js';
 import {
   anthropicApiKeyOverrideWarning,
+  anthropicReuseLoginBanner,
   anthropicReuseLoginShadowWarning,
   makeExtractionBackend,
 } from './product-boot.js';
@@ -67,9 +68,11 @@ function buildDeclaredBackends(
   if (backendToAgents.has('anthropic')) {
     const billingWarning = anthropicApiKeyOverrideWarning(env);
     if (billingWarning) console.warn(billingWarning);
-    // The reuse-login shadow footgun (a token/key present alongside RAYSPEC_ANTHROPIC_REUSE_LOGIN
-    // shadows the seeded per-tenant login) — surfaced UP FRONT for the same reason as the billing
-    // warning (a sibling backend's missing-env abort could otherwise fire before the anthropic build).
+    // The reuse-login ACTIVE banner + shadow footgun — surfaced UP FRONT for the same reason as the
+    // billing warning (a sibling backend's missing-env abort could otherwise fire before the anthropic
+    // build, suppressing makeExtractionBackend's own in-build emit).
+    const reuseLoginBanner = anthropicReuseLoginBanner(env);
+    if (reuseLoginBanner) console.warn(reuseLoginBanner);
     const shadowWarning = anthropicReuseLoginShadowWarning(env);
     if (shadowWarning) console.warn(shadowWarning);
   }

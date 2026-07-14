@@ -13,6 +13,7 @@ import { type ProductSpec, parseProductSpec } from '@rayspec/spec';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   anthropicApiKeyOverrideWarning,
+  anthropicReuseLoginBanner,
   anthropicReuseLoginEnabled,
   anthropicReuseLoginShadowWarning,
   assembleExtractionInstructions,
@@ -394,6 +395,31 @@ describe('makeExtractionBackend — the boot-side backend factory (S5, fail-clos
     // No flag (a credential present is the normal path) → no warning.
     expect(anthropicReuseLoginShadowWarning({ ANTHROPIC_API_KEY: 'k' })).toBeNull();
     expect(anthropicReuseLoginShadowWarning({})).toBeNull();
+  });
+
+  // Reuse-login ACTIVE banner (mirrors nonRealProviderBanner): the flag boots clean but an unseeded
+  // per-tenant dir fails only at first run, so make the posture LOUD + operator-visible at boot.
+  it('anthropicReuseLoginBanner is present when the flag is on, absent when off', () => {
+    const on = anthropicReuseLoginBanner({ RAYSPEC_ANTHROPIC_REUSE_LOGIN: 'true' });
+    expect(on).toContain('REUSE-LOGIN ACTIVE');
+    expect(on).toContain('RAYSPEC_ANTHROPIC_CONFIG_ROOT');
+    expect(on).toContain('fail at first run');
+    // Off / unset → no banner.
+    expect(anthropicReuseLoginBanner({ RAYSPEC_ANTHROPIC_REUSE_LOGIN: 'false' })).toBeNull();
+    expect(anthropicReuseLoginBanner({})).toBeNull();
+  });
+  it('reuse-login: the ACTIVE banner is emitted at backend construction when the flag is on', () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      makeExtractionBackend(
+        { RAYSPEC_ANTHROPIC_REUSE_LOGIN: 'true', RAYSPEC_ANTHROPIC_CONFIG_ROOT: '/tmp/anthro' },
+        'anthropic',
+      );
+      const msg = spy.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(msg).toMatch(/REUSE-LOGIN ACTIVE/);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
