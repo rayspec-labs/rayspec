@@ -312,41 +312,89 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
       const rawBody = await c.req.json();
       const body = MintApiKeyRequest.parse(rawBody);
 
-      // Idempotency-Key: TENANT-SCOPED replay (the run-core lesson — the lookup carries the tenant
-      // predicate via forTenant). Same key+body → replay the stored snapshot; same key+diff body →
-      // 409 IDEMPOTENCY_CONFLICT. Stored in the tenant-scoped idempotency_keys table.
+      // Idempotency-Key: TENANT-SCOPED, EXACTLY-ONCE mint via reserve-before-mint (the run-core
+      // lesson — the reservation carries the tenant predicate via forTenant). A single atomic
+      // INSERT ... ON CONFLICT DO NOTHING RETURNING on UNIQUE(tenant,scope,key) lets EXACTLY ONE of N
+      // concurrent same-key callers WIN the reservation and mint; the rest replay the winner's key
+      // (200) or 409. Same key+diff body → 409 IDEMPOTENCY_CONFLICT. Stored in the tenant-scoped
+      // idempotency_keys table.
       //
-      // KILL-TRIGGER closure: the persisted snapshot is REDACTED — it NEVER carries the
-      // plaintext secret (the snapshot column is jsonb with no TTL; a DB dump must not yield a
-      // usable `<prefix>.<secret>`). The plaintext is shown EXACTLY ONCE on the original mint
-      // below; a replay returns only `{id, keyPrefix, scopes, replayed:true}` with the secret
-      // OMITTED. A retry therefore does NOT re-reveal the secret (a client that lost the original
-      // 201 response must mint a NEW key) — documented replay semantics.
+      // KILL-TRIGGER closure: NO snapshot ever carries the plaintext secret — the reservation holds a
+      // NON-SECRET placeholder ({status:'pending'}) and is finalized to redacted metadata
+      // ({id, keyPrefix, scopes, replayed:true}); the snapshot column is jsonb with no TTL, so a DB
+      // dump must not yield a usable `<prefix>.<secret>`. The plaintext is shown EXACTLY ONCE on the
+      // original mint below; a replay returns only the redacted metadata with the secret OMITTED. A
+      // retry therefore does NOT re-reveal the secret (a client that lost the original 201 response
+      // must mint a NEW key) — documented replay semantics.
       const idemKey = c.req.header('idempotency-key');
       const bodyHash = hashBody(rawBody);
       if (idemKey) {
-        const existing = await deps.idempotency.find(orgId, 'apikey:mint', idemKey);
-        if (existing) {
-          if (existing.bodyHash !== bodyHash) {
+        // Reserve BEFORE the side effects: on a win WE own the reservation and mint under it; on a
+        // loss a prior/concurrent caller owns it and we MUST NOT mint a second key.
+        const reservation = await deps.idempotency.reserve(
+          orgId,
+          'apikey:mint',
+          idemKey,
+          bodyHash,
+          {
+            status: 'pending',
+          },
+        );
+        if (!reservation.won) {
+          const existing = reservation.existing;
+          if (existing && existing.bodyHash !== bodyHash) {
             throw new ApiError(
               'IDEMPOTENCY_CONFLICT',
               'Idempotency-Key reused with a different body.',
             );
           }
-          // Replay returns the REDACTED snapshot (plaintext omitted, replayed:true), HTTP 200.
-          return c.json(existing.snapshot as MintApiKeyReplay, 200);
+          // Same body: replay the winner's key IF it has finalized (its snapshot carries the id);
+          // otherwise the winner is STILL minting (a true concurrent collision) → a clean 409, and
+          // the loser never mints a second key.
+          const snapshot = existing?.snapshot as MintApiKeyReplay | undefined;
+          if (snapshot?.id) {
+            return c.json(snapshot, 200);
+          }
+          throw new ApiError(
+            'IDEMPOTENCY_CONFLICT',
+            'An API-key mint is already in progress for this Idempotency-Key.',
+          );
         }
+        // reservation.won === true → fall through and mint under the reservation we own.
       }
 
       const pepper = getApiKeyPepper();
-      const minted = mintApiKey(pepper);
-      const row = await deps.apiKeyStore.mint({
-        orgId,
-        keyPrefix: minted.prefix,
-        keyHash: minted.hash,
-        scopes: body.scopes,
-        createdBy: principal.userId,
-      });
+      let minted: ReturnType<typeof mintApiKey>;
+      let row: Awaited<ReturnType<typeof deps.apiKeyStore.mint>>;
+      try {
+        minted = mintApiKey(pepper);
+        row = await deps.apiKeyStore.mint({
+          orgId,
+          keyPrefix: minted.prefix,
+          keyHash: minted.hash,
+          scopes: body.scopes,
+          createdBy: principal.userId,
+        });
+      } catch (err) {
+        // A mint THROW releases the reservation so the key stays RE-RUNNABLE — a client whose mint
+        // failed can retry under the same key. This catch deliberately wraps ONLY the mint: a throw
+        // from the post-commit finalize/audit below is NOT released (it leaves the reservation as an
+        // in-progress 409 for retries, never a duplicate mint).
+        //
+        // HONEST caveat — this is exactly-once EXCEPT for one rare ambiguous outcome. apiKeyStore.mint
+        // is a single INSERT ... RETURNING, and the driver rejects its promise if the connection drops
+        // AFTER the server commits the row but BEFORE the RETURNING result is read (an in-doubt commit).
+        // In that window we release a reservation whose row DID commit, so a same-key retry can mint a
+        // SECOND row. That second key is DORMANT and NOT authenticatable — its plaintext was never
+        // returned to any client — so it is a benign correctness residual, not a usable-credential leak,
+        // and it is strictly better than the pre-fix behaviour (which duplicated a USABLE key on ANY
+        // mint throw). The closest structural analog, the run-enqueue path, closes this by probing for
+        // the row's presence before releasing; a probe-before-release here is a possible future
+        // hardening (NOT implemented — it would trade the benign dormant orphan for a stuck in-progress
+        // 409 on the genuinely-failed-mint retry).
+        if (idemKey) await deps.idempotency.release(orgId, 'apikey:mint', idemKey).catch(() => {});
+        throw err;
+      }
       const resp: MintApiKeyResponse = {
         id: row.id,
         keyPrefix: row.keyPrefix,
@@ -354,22 +402,18 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
         scopes: body.scopes,
       };
       if (idemKey) {
-        // Persist ONLY the redacted metadata — NEVER the plaintext (kill-trigger closure).
-        //
-        // TRACKED-LOW (external-exposure hardening exactly-once mint): record uses onConflictDoNothing
-        // AFTER the key is minted, so two CONCURRENT requests carrying the same Idempotency-Key can
-        // each mint a distinct api-key row; only one snapshot wins the unique (tenant,scope,idem)
-        // index and the other minted key is orphaned (usable but never replayable). This does NOT
-        // reopen the kill-trigger — neither plaintext is persisted (each is shown only in
-        // its own 201) — so it is a correctness/exactly-once gap, not a secret-at-rest gap. Fix
-        // (deferred): mint-under-the-idempotency-row (reserve the idem row in a tx, then mint).
+        // Finalize the reservation WE already won with the REDACTED metadata — NEVER the plaintext
+        // (kill-trigger closure). The row already exists (we won the reserve), so this is an UPDATE,
+        // not a second insert — the earlier find-then-record concurrent orphan window (two usable keys,
+        // one replayable snapshot) is structurally gone (modulo the rare in-doubt-commit residual noted
+        // in the catch above).
         const redacted: MintApiKeyReplay = {
           id: row.id,
           keyPrefix: row.keyPrefix,
           scopes: body.scopes,
           replayed: true,
         };
-        await deps.idempotency.record(orgId, 'apikey:mint', idemKey, bodyHash, redacted);
+        await deps.idempotency.updateSnapshot(orgId, 'apikey:mint', idemKey, redacted);
       }
       await deps.auditStore.append(
         {
