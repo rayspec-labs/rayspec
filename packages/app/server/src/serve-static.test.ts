@@ -295,6 +295,43 @@ describe('mountFrontend — Range / HEAD (partial content for media seek/resume)
     expect(plain.headers.get('accept-ranges')).toBeNull();
   });
 
+  // HEAD/OPTIONS: serveStatic 2.0.6 IGNORES Range for these methods (it answers 200 full-size), so the
+  // additive guard must too — gating on GET keeps HEAD byte-identical to serveStatic (never a 416).
+  it('HEAD + an UNSATISFIABLE Range (bytes=99999-) → 200 (matching serveStatic), never a 416', async () => {
+    const app = buildApp([spaMount], specDir());
+    const res = await app.request('/assets/app.js', {
+      method: 'HEAD',
+      headers: { Range: 'bytes=99999-' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.status).not.toBe(416);
+    expect(await res.text()).toBe(''); // HEAD carries no body
+  });
+
+  it('HEAD + a satisfiable Range (bytes=0-4) stays 200 (serveStatic ignores Range for HEAD)', async () => {
+    const app = buildApp([spaMount], specDir());
+    const res = await app.request('/assets/app.js', {
+      method: 'HEAD',
+      headers: { Range: 'bytes=0-4' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.status).not.toBe(206);
+  });
+
+  // SPA fallback: a Range GET to a NON-FILE deep link on an spa:true mount misses the file server and
+  // would fall through to the SPA fallback, re-running serveStatic's buggy Range math against index.html
+  // (the exact 500 / malformed 206 this guard removes). The guard validates the unsatisfiable range
+  // against index.html — the file the fallback will actually serve — and returns a proper 416 up front.
+  it('spa:true — GET a non-file deep link with an unsatisfiable Range → 416 (guarding the SPA fallback index.html), never a 500/206', async () => {
+    const INDEX_SIZE = Buffer.byteLength(`<!doctype html><title>${INDEX_SENTINEL}</title>`, 'utf8');
+    const app = buildApp([spaMount], specDir());
+    const res = await app.request('/dashboard/deep', { headers: { Range: 'bytes=99999-' } });
+    expect(res.status).toBe(416);
+    expect(res.headers.get('content-range')).toBe(`bytes */${INDEX_SIZE}`);
+    expect(res.status).not.toBe(500);
+    expect(res.status).not.toBe(206);
+  });
+
   // REGRESSION (the load-bearing arm) — the fail-closed guard runs BEFORE and INDEPENDENTLY of the
   // method/range: a dotfile, an encoded traversal, and a symlink-escape each still 404 under BOTH a Range
   // GET and a HEAD, never leaking the secret bytes and never falling back to the SPA shell. How it fails
