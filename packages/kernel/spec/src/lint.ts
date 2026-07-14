@@ -138,6 +138,55 @@ export function toJsIdentifier(name: string): string {
   return name.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
 }
 
+/**
+ * Detect a foreign-key CYCLE among the declared stores (A→B, B→A, directly or transitively). Returns
+ * the cycle as a node-name chain (e.g. `['a','b','a']`) or `null` when the product→product FK graph is
+ * acyclic. SELF-references are excluded (a self-FK applies fine after the table's own CREATE) and so are
+ * references to undeclared stores (already reported as `dangling_ref`). Mirrors the generator's
+ * `topoSortStoresByFk` cycle condition, so a spec that lints clean here never throws at generation/apply.
+ */
+function findFkCycle(stores: RaySpec['stores']): string[] | null {
+  const inSet = new Set(stores.map((s) => s.name));
+  // parents[name] = the DISTINCT in-set, non-self stores `name` references (the DDL parents).
+  const parents = new Map<string, string[]>();
+  for (const s of stores) {
+    const ps: string[] = [];
+    for (const fk of s.foreignKeys) {
+      if (fk.references === s.name) continue; // self-FK: legal, not a cycle edge
+      if (!inSet.has(fk.references)) continue; // dangling: reported as dangling_ref elsewhere
+      if (!ps.includes(fk.references)) ps.push(fk.references);
+    }
+    parents.set(s.name, ps);
+  }
+  const WHITE = 0;
+  const GRAY = 1;
+  const BLACK = 2;
+  const color = new Map<string, number>(stores.map((s) => [s.name, WHITE]));
+  const stack: string[] = [];
+  let cycle: string[] | null = null;
+  const visit = (node: string): boolean => {
+    color.set(node, GRAY);
+    stack.push(node);
+    for (const parent of parents.get(node) ?? []) {
+      const pc = color.get(parent);
+      if (pc === GRAY) {
+        // A back-edge to a node still on the stack ⇒ the cycle is stack[parent..node] + parent.
+        const idx = stack.indexOf(parent);
+        cycle = [...stack.slice(idx), parent];
+        return true;
+      }
+      if (pc === WHITE && visit(parent)) return true;
+    }
+    stack.pop();
+    color.set(node, BLACK);
+    return false;
+  };
+  for (const s of stores) {
+    if (color.get(s.name) === WHITE && visit(s.name)) break;
+  }
+  return cycle;
+}
+
 /** The full semantic pass. Input is already shape-valid (post-Zod-parse). */
 export function lintSpec(spec: RaySpec): SpecError[] {
   const errors: SpecError[] = [];
@@ -434,6 +483,25 @@ export function lintSpec(spec: RaySpec): SpecError[] {
       (i) => `stores[${i}].name`,
     ),
   );
+
+  // FK CYCLE — a circular foreign-key reference (A→B, B→A, directly or transitively) is UNORDERABLE:
+  // no CREATE order lets every store's FK ADD find its parent table already present, so it fails at
+  // apply (42P01). Reject it fail-closed at config time (the generator's topoSortStoresByFk throws on
+  // the same condition — this is the config-level gate so it never reaches apply). Self-references and
+  // references to an unknown store (already `dangling_ref`) are excluded from the graph.
+  const fkCycle = findFkCycle(spec.stores);
+  if (fkCycle !== null) {
+    const si = spec.stores.findIndex((s) => s.name === fkCycle[0]);
+    errors.push(
+      specError(
+        'fk_cycle',
+        `stores form a circular foreign-key reference (${fkCycle.join(' -> ')}) — a circular FK is ` +
+          "unorderable (each store's FK ADD needs its parent table created first) and cannot be " +
+          'applied; break the cycle (make one side nullable and add it in a separate migration)',
+        si >= 0 ? `stores[${si}].foreignKeys` : undefined,
+      ),
+    );
+  }
 
   // tooling[].handler -> a declared handler of kind 'tool'.
   spec.tooling.forEach((tool, ti) => {
@@ -794,5 +862,29 @@ export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
       }
     }
   });
+
+  // FK FORWARD-REFERENCE — a store whose FK references a store declared LATER in the array. The
+  // product-SQL generator topo-sorts stores so the parent table is created before the child's FK is
+  // added, so a forward reference still APPLIES cleanly; this advisory just tells the author the declared
+  // order relies on that reordering (a true cycle is the fail-closed `fk_cycle` error, never a warning).
+  const storeIndexByName = new Map(spec.stores.map((s, i) => [s.name, i]));
+  spec.stores.forEach((store, si) => {
+    store.foreignKeys.forEach((fk, fi) => {
+      if (fk.references === store.name) return; // self-FK applies after this table's own CREATE
+      const parentIndex = storeIndexByName.get(fk.references);
+      if (parentIndex === undefined || parentIndex <= si) return; // unknown (dangling) or already-before
+      warnings.push(
+        specWarning(
+          'fk_forward_reference',
+          `store '${store.name}' declares a foreign key referencing '${fk.references}', which is ` +
+            'declared LATER in the stores list — the generator reorders stores so the parent table is ' +
+            `created first (it applies cleanly); declare '${fk.references}' before '${store.name}' to ` +
+            'make the dependency order explicit',
+          `stores[${si}].foreignKeys[${fi}]`,
+        ),
+      );
+    });
+  });
+
   return warnings;
 }

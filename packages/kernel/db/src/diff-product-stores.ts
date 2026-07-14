@@ -44,6 +44,7 @@ import {
   fkConstraintName,
   generateProductSql,
   type StoreConflictKeys,
+  topoSortStoresByFk,
 } from './generated/generate-product-sql.js';
 import { INJECTED_AFTER } from './generated/injected-columns.js';
 import type { AllowlistEntry, DestructiveKind } from './migration-scan.js';
@@ -492,8 +493,13 @@ export function diffProductStores(
   const newConflictKeys = opts.newConflictKeys;
   const oldConflictKeys = opts.oldConflictKeys;
 
-  // Phase A — added tables (byte-identical CREATE path: injected tenancy cols + FK + indexes).
-  const addedStatements = addedStores.flatMap((s) => emitStoreSql(s, newConflictKeys?.get(s.name)));
+  // Phase A — added tables (byte-identical CREATE path: injected tenancy cols + FK + indexes). The
+  // ADDED set is FK-topo-sorted so a parent table's CREATE precedes any added child that references it
+  // (a child declared before its parent would otherwise emit its FK REFERENCES before the parent CREATE
+  // → 42P01 at apply). References to SURVIVING stores are out-of-set and ignored (they already exist).
+  const addedStatements = topoSortStoresByFk(addedStores).flatMap((s) =>
+    emitStoreSql(s, newConflictKeys?.get(s.name)),
+  );
 
   // Phases B/C — surviving-table alters, split additive-first / destructive-last.
   const survivingAdditive: string[] = [];

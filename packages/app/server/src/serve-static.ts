@@ -29,8 +29,21 @@
  * A refused request passes through to `next()` → the platform's uniform 404 (never the SPA shell, even
  * for an `spa:true` mount — a traversal/dotfile attempt must not be answered with `index.html`). A
  * directory is never listed. This module is import-safe (no side effects at module load).
+ *
+ * RANGE (RFC-7233): `serveStatic` 2.0.6 mishandles an UNSATISFIABLE byte range — a CLOSED range beyond
+ * EOF (e.g. `bytes=999999-1000000` on a small file) yields a malformed 0-byte 206, and an OPEN one
+ * (`bytes=99999-`) throws `ERR_OUT_OF_RANGE` (surfaced as a 500). An additive range guard runs AFTER the
+ * fail-closed path guard, for every verb EXCEPT HEAD/OPTIONS (serveStatic special-cases only those two —
+ * answering them 200 full-size, ignoring Range — so they are left byte-identical, never a 416; every
+ * other verb, GET/POST/PUT/PATCH/DELETE, hits its buggy Range branch), ONLY when a `Range` header is present:
+ * when the range is unsatisfiable (`start >= size`, or a reversed `start > end`) it returns a proper 416
+ * whose `Content-Range` names the full size; every honored / clamped 206 falls through to `serveStatic`
+ * UNCHANGED (byte-identical). When the path resolves to no file the guard ALSO checks the file the SPA
+ * fallback would serve: on an `spa:true` mount a missed deep link would otherwise re-run the same buggy
+ * Range math against `index.html`, so its range is validated against `index.html` too — only a genuine
+ * miss with no SPA fallback falls through unguarded to `serveStatic`'s normal 404.
  */
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, realpathSync, type Stats, statSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { type FrontendSpec, RESERVED_ROUTE_PREFIXES } from '@rayspec/spec';
@@ -85,6 +98,81 @@ function isSafeStaticPath(baseDir: string, realBaseDir: string, subPath: string)
     if (real !== realBaseDir && !real.startsWith(realBaseDir + sep)) return false;
   }
   return true;
+}
+
+/** `statSync` that returns `undefined` instead of throwing on a missing/unreadable path. */
+function statSyncSafe(path: string): Stats | undefined {
+  try {
+    return statSync(path);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve the on-disk file `serveStatic` will read for `subPath` under `baseDir`, mirroring its own
+ * resolution: `join(baseDir, subPath)`, and if that is a directory, its `index.html`. Returns the file
+ * `{ path, size }` from the SAME stat that proved it a file (so the range check never re-stats), or
+ * `undefined` when nothing servable exists (a miss — `serveStatic` will 404 / the SPA fallback takes
+ * over, so the range guard must NOT intercept it via this resolution).
+ */
+function resolveStaticTarget(
+  baseDir: string,
+  subPath: string,
+): { path: string; size: number } | undefined {
+  const candidate = join(baseDir, subPath);
+  const stat = statSyncSafe(candidate);
+  if (stat === undefined) return undefined;
+  if (stat.isDirectory()) {
+    const indexFile = join(candidate, 'index.html');
+    const indexStat = statSyncSafe(indexFile);
+    return indexStat?.isFile() ? { path: indexFile, size: indexStat.size } : undefined;
+  }
+  return stat.isFile() ? { path: candidate, size: stat.size } : undefined;
+}
+
+/**
+ * Given a known file `size`, return a 416 iff `rangeHeader` is UNSATISFIABLE against it, else
+ * `undefined`. Parses the header with the SAME tokenizer `serveStatic` uses (`bytes=` stripped, split on
+ * `-`, `start = parseInt || 0`, closed `end = parseInt`). UNSATISFIABLE = `start >= size` (an open OR
+ * closed range that begins at/after EOF) or a reversed `start > end`; the 416 carries a `Content-Range`
+ * naming the full size. A honored / clamped range returns `undefined` so the request falls through to
+ * `serveStatic` UNCHANGED — every currently-served 206 keeps its exact bytes.
+ */
+function unsatisfiableRangeForSize(size: number, rangeHeader: string): Response | undefined {
+  const [startToken, endToken] = rangeHeader.replace(/bytes=/, '').split('-', 2);
+  const start = Number.parseInt(startToken ?? '', 10) || 0;
+  const end = Number.parseInt(endToken ?? '', 10); // NaN for an open/absent end (start >= size covers it)
+  if (start >= size || start > end) {
+    return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${size}` } });
+  }
+  return undefined;
+}
+
+/**
+ * RFC-7233 range validation, additive in front of `serveStatic`. Resolves the target the way
+ * `serveStatic` will (reusing its single stat's size — no re-stat, no unchecked cast) and, if the range
+ * is unsatisfiable, returns a proper 416 instead of `serveStatic`'s malformed 0-byte 206 (closed beyond
+ * EOF) or `ERR_OUT_OF_RANGE` → 500 (open beyond EOF). When the requested path resolves to NO file, an
+ * `spa:true` mount would fall through to the SPA fallback, which re-runs the SAME buggy Range math
+ * against `baseDir/index.html` — so the range is validated against that `index.html` too. Only a genuine
+ * miss with no SPA fallback returns `undefined`, letting `serveStatic` produce its normal 404.
+ */
+function unsatisfiableRangeResponse(
+  baseDir: string,
+  subPath: string,
+  spa: boolean,
+  rangeHeader: string,
+): Response | undefined {
+  const target = resolveStaticTarget(baseDir, subPath);
+  if (target !== undefined) return unsatisfiableRangeForSize(target.size, rangeHeader);
+  // Direct target missed. For an spa:true mount the request falls through to `index.html` — guard the
+  // range against the file the SPA fallback will actually serve so the buggy math never runs on it.
+  if (spa) {
+    const indexStat = statSyncSafe(join(baseDir, 'index.html'));
+    if (indexStat?.isFile()) return unsatisfiableRangeForSize(indexStat.size, rangeHeader);
+  }
+  return undefined;
 }
 
 /**
@@ -149,6 +237,19 @@ export function mountFrontend<E extends Env>(
       // Fail-closed guard BEFORE serving — a refused path skips the file/SPA server entirely and
       // falls through to the platform's uniform 404 (never the SPA shell).
       if (!isSafeStaticPath(baseDir, realBaseDir, subPath)) return next();
+      // RFC-7233: an UNSATISFIABLE Range (start at/after EOF, or reversed) gets a proper 416 rather than
+      // serveStatic's malformed 0-byte 206 (closed beyond EOF) or ERR_OUT_OF_RANGE → 500 (open beyond
+      // EOF). Runs AFTER the fail-closed guard (a refused path already 404'd) and ONLY when a Range
+      // header is present. serveStatic special-cases ONLY HEAD/OPTIONS (it answers them 200 full-size,
+      // ignoring Range) and routes EVERY other verb (GET/POST/PUT/PATCH/DELETE) through the buggy Range
+      // branch — so the guard exempts HEAD/OPTIONS (kept byte-identical, never a 416) and fires for all
+      // the rest. On a direct-file miss under an spa:true mount it also guards the index.html the SPA
+      // fallback would serve; every honored / clamped range still falls through to serveStatic.
+      const rangeHeader = c.req.header('Range');
+      if (rangeHeader !== undefined && c.req.method !== 'HEAD' && c.req.method !== 'OPTIONS') {
+        const rangeRes = unsatisfiableRangeResponse(baseDir, subPath, spa, rangeHeader);
+        if (rangeRes) return rangeRes;
+      }
       // Serve the file; on a hit serveStatic returns the Response. On a miss it returns undefined —
       // then the SPA fallback (if any) gets a turn; if THAT misses too, fall through to the 404.
       const fileRes = await fileServer(c, noop);

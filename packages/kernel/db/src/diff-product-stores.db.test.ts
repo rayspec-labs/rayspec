@@ -425,6 +425,33 @@ describe.skipIf(!baseUrl)(
       });
       scenariosRan++;
     }, 60_000);
+
+    it('a child store whose FK targets a LATER-declared store APPLIES cleanly (topo-sort orders parent CREATE first — no 42P01)', async () => {
+      // `books` (child, with the FK) is declared FIRST; `authors` (parent) LATER. The UNFIXED generator
+      // emits books' `ADD CONSTRAINT … REFERENCES "authors"` before `CREATE TABLE "authors"` → the first
+      // statement raises `42P01 relation "authors" does not exist` right here. The topo-sort reorders so
+      // authors is created first, and the whole migration applies.
+      const child = store({
+        name: 'books',
+        columns: [{ name: 'author_id', type: 'uuid' }],
+        foreignKeys: [{ column: 'author_id', references: 'authors', onDelete: 'cascade' }],
+      });
+      const parent = store({ name: 'authors', columns: [{ name: 'name', type: 'text' }] });
+      await withMaterializedOld([], async (sql) => {
+        const r = diffProductStores([], [child, parent]); // child declared BEFORE parent
+        for (const stmt of r.statements) await sql.unsafe(stmt);
+        // Both tables exist AND the product FK constraint is present (proves the FK ADD applied).
+        const fk = await sql.unsafe(
+          `SELECT conname FROM pg_constraint WHERE conname = 'books_author_id_authors_id_fk'`,
+        );
+        expect(fk.length).toBe(1);
+        const tables = await sql.unsafe(
+          `SELECT relname FROM pg_class WHERE relname IN ('authors', 'books') AND relkind = 'r'`,
+        );
+        expect(tables.length).toBe(2);
+      });
+      scenariosRan++;
+    }, 60_000);
   },
 );
 
@@ -436,7 +463,7 @@ describe.skipIf(!baseUrl)(
 describe('diffProductStores DB apply — ran-guard (the apply proofs must not silently skip in CI)', () => {
   it('the apply scenarios ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (dbRequired) {
-      expect(scenariosRan).toBe(7);
+      expect(scenariosRan).toBe(8);
     } else {
       expect(dbRequired).toBe(false);
     }
