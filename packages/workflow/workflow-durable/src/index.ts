@@ -21,6 +21,7 @@ export {
   sessionScopedIdempotencyKey,
   type WorkflowDispatchEnqueued,
   type WorkflowDispatchResult,
+  type WorkflowEmitOptions,
   type WorkflowEnqueuer,
   WorkflowEventDispatcher,
   type WorkflowEventIngress,

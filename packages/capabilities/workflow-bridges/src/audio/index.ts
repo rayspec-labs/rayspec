@@ -4,4 +4,5 @@
 // finalizes (the sink). Homed here so neither `@rayspec/workflow-durable` (the neutral Tier A engine)
 // nor `@rayspec/audio-runtime` (the Tier B capability) depends on the other.
 export * from './adapter.js';
+export * from './reprocess.js';
 export * from './sink.js';

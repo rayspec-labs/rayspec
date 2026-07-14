@@ -174,6 +174,49 @@ export interface AuthContext {
   apiKeyId?: string;
 }
 
+/** One enqueued (fresh) durable run produced by a reprocess. */
+export interface ReprocessEnqueued {
+  /** The workflow id that was re-driven. */
+  readonly workflowId: string;
+  /** The FRESH durable run id (distinct from the session's original finalized run). */
+  readonly runId: string;
+}
+
+/**
+ * The outcome of a reprocess attempt. `found:false` means the session does not exist for the
+ * REQUESTING tenant (a foreign/absent session) — the route maps it to a uniform 404 (no existence
+ * leak). `found:true` carries every fresh durable run the reprocess enqueued.
+ */
+export type SessionReprocessResult =
+  | { readonly found: false }
+  | { readonly found: true; readonly enqueued: readonly ReprocessEnqueued[] };
+
+/**
+ * The OPERATIONAL "reprocess a session" seam (opt-in, injected — omit ⇒ the route fail-closes 501,
+ * like async runs without a durable worker). Re-drives the workflow a product declared on a session's
+ * finalized event as a FRESH durable run — a DISTINCT idempotency key so it is NOT deduped to the
+ * session's original finalized run — over the session's CURRENT authoritative store state (a recovery
+ * path so re-running extraction after a fix / recovering a stuck session needs no manual DB surgery).
+ *
+ * PRODUCT-AGNOSTIC from api-auth's view (opaque): the concrete implementation — wired by the
+ * composition root — owns the tenant-scoped session existence check and the finalized-event
+ * construction, so api-auth carries no product/capability knowledge.
+ *
+ * TENANT-SCOPED BY CONSTRUCTION: `tenantId` is the caller's SERVER-DERIVED tenant (from the middleware
+ * chain); the reprocessor NEVER derives its own tenant and its session read is tenant-scoped, so a
+ * tenant can only reprocess ITS OWN session (a foreign/absent session → `found:false` → 404).
+ */
+export interface SessionReprocessor {
+  reprocessSession(input: {
+    /** The caller's server-derived tenant (never client-supplied). */
+    readonly tenantId: string;
+    /** The session to reprocess (the only client-supplied datum — the store state is re-read, not trusted). */
+    readonly sessionId: string;
+    /** Advisory operator context recorded alongside the reprocess (optional; never trusted for logic). */
+    readonly reason?: string;
+  }): Promise<SessionReprocessResult>;
+}
+
 /** Everything the app needs, wired once at construction. */
 export interface AppDeps {
   db: Db;
@@ -233,6 +276,14 @@ export interface AppDeps {
    * adapter lives in @rayspec/durable-dbos; api-auth carries no DBOS dependency).
    */
   durableExecutor?: DurableExecutor;
+  /**
+   * the OPTIONAL operational session-reprocess seam. When wired, `POST /v1/sessions/:id/reprocess`
+   * re-drives the session's declared finalized-session workflow as a FRESH durable run (distinct
+   * idempotency key). When ABSENT, that route is a clean fail-closed 501 (reprocess requires a
+   * configured durable workflow reprocessor). PRODUCT-AGNOSTIC: the concrete implementation is wired by
+   * the composition root; the platform main line ships none.
+   */
+  sessionReprocessor?: SessionReprocessor;
   /**
    * OPTIONAL server-side error logger (DI seam). `createAuthApp`'s OUTERMOST middleware emits exactly
    * ONE line for EVERY 5xx response through this — both a THROWN error (mapped by `onError`) AND a

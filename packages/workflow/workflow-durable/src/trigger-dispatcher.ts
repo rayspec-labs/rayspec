@@ -36,9 +36,28 @@ import type { WorkflowInputEvent, WorkflowSpec } from '@rayspec/foundation';
  * The dispatcher itself is byte-identical either way; the ADAPTER (not just "the emitter") is the glue
  * that changes.
  */
+/**
+ * Per-emit options (ADDITIVE — omit for the byte-identical default dispatch).
+ *
+ * `forceKey` OVERRIDES the per-trigger idempotency key for THIS emit, bypassing the registered
+ * `idempotencyKeyForEvent` (default `sessionScopedIdempotencyKey`). It is the OPERATIONAL reprocess
+ * seam: re-driving a session's declared finalized-session workflow through the NORMAL emit path would
+ * dedup to the prior run (the default per-session key resolves to the SAME `durableWorkflowRunId`), so
+ * a reprocess supplies a DISTINCT key (e.g. `session_id:<id>:reprocess:<nonce>`) to enqueue a FRESH
+ * durable run over the CURRENT store state — WITHOUT changing the byte-frozen `sessionScopedIdempotencyKey`
+ * format the live audio finalize path depends on. An empty/whitespace `forceKey` FALLS BACK to the
+ * per-trigger keyFn (fail-safe: never a silent shared collision key). `reason` is advisory operator
+ * context the caller records alongside the reprocess (the dispatcher does not thread it into the frozen
+ * enqueue signature).
+ */
+export interface WorkflowEmitOptions {
+  readonly forceKey?: string;
+  readonly reason?: string;
+}
+
 export interface WorkflowEventIngress {
   /** Ingest ONE neutral event; enqueue every registered workflow whose trigger event matches. */
-  emit(event: WorkflowInputEvent): Promise<WorkflowDispatchResult>;
+  emit(event: WorkflowInputEvent, options?: WorkflowEmitOptions): Promise<WorkflowDispatchResult>;
 }
 
 /** The seam a dispatcher enqueues durable workflow runs through (the DBOS executor implements it). */
@@ -109,12 +128,21 @@ export class WorkflowEventDispatcher implements WorkflowEventIngress {
     }
   }
 
-  async emit(event: WorkflowInputEvent): Promise<WorkflowDispatchResult> {
+  async emit(
+    event: WorkflowInputEvent,
+    options?: WorkflowEmitOptions,
+  ): Promise<WorkflowDispatchResult> {
     const triggers = this.#byEvent.get(event.type) ?? [];
     const enqueued: WorkflowDispatchEnqueued[] = [];
+    // A non-empty forceKey overrides the per-trigger keyFn for THIS emit (the reprocess seam);
+    // an empty/whitespace value FALLS BACK to the keyFn (never a silent shared collision key).
+    const forced =
+      typeof options?.forceKey === 'string' && options.forceKey.trim().length > 0
+        ? options.forceKey
+        : undefined;
     for (const trigger of triggers) {
       const keyFn = trigger.idempotencyKeyForEvent ?? sessionScopedIdempotencyKey('session_id');
-      const idempotencyKey = keyFn(event);
+      const idempotencyKey = forced ?? keyFn(event);
       const { workflowRunId, deduped } = await this.#enqueuer.enqueueWorkflowRun({
         tenantId: this.#tenantId,
         workflow: trigger.workflow,

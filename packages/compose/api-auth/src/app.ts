@@ -31,6 +31,7 @@ import { mountOidc } from './oidc/mount.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerOAuthRoutes } from './routes/oauth.js';
 import { registerOrgRoutes } from './routes/orgs.js';
+import { registerReprocessRoutes } from './routes/reprocess.js';
 import { registerRunsRoutes } from './routes/runs.js';
 
 /** A ContentfulStatusCode-compatible cast for Hono's c.json status arg. */
@@ -197,6 +198,9 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
   // the effective deps so a declared agent (spec-built registry entry) resolves on /v1/agents/:id/runs
   // too — one registry, both surfaces.
   registerRunsRoutes(app, effectiveDeps);
+  // the operational session-reprocess route (opt-in; 501 when no reprocessor is wired). Same
+  // middleware chain (server-derived tenant, store:write).
+  registerReprocessRoutes(app, effectiveDeps);
   // the declarative engine — interpret `api[]` and register each
   // declared route on THIS app behind the SAME middleware chain. The `{handler}` route now resolves
   // its declared handler from the boot-loaded map. Omitted ⇒ an auth-only app (the platform
