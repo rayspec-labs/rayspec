@@ -12,9 +12,11 @@
  *     wins, and an ordinary app deep link (`/dashboard`) still gets the SPA shell.
  *   - RANGE / HEAD (byte-serving delegated to serveStatic): a Range GET returns 206 partial content
  *     (Content-Range + Accept-Ranges + only the requested bytes); a HEAD returns 200 with Content-Length
- *     and an empty body; an unsatisfiable range is pinned to serveStatic 2.0.6's ACTUAL clamped-206
- *     (there is no RFC-7233 416 path); and the fail-closed guard stays method/range-agnostic (dotfile,
- *     traversal, and symlink-escape each still 404 under BOTH a Range GET and a HEAD).
+ *     and an empty body; an UNSATISFIABLE range (start >= size — open OR closed beyond EOF) is intercepted
+ *     by the additive validateRange guard and returned as a proper RFC-7233 416 whose Content-Range names
+ *     the full size (BEFORE serveStatic, which would otherwise emit a malformed 0-byte 206 or throw a
+ *     500); and the fail-closed guard stays method/range-agnostic (dotfile, traversal, and symlink-escape
+ *     each still 404 under BOTH a Range GET and a HEAD).
  *
  * Fail-the-fix: remove the guard in serve-static.ts and the traversal/dotfile/symlink arms serve the
  * secret file (200) instead of 404 — the `.not.toContain(SECRET)` + status assertions go red. Remove the
@@ -229,11 +231,12 @@ describe('mountFrontend — non-root mount + longest-route-first ordering', () =
 });
 
 describe('mountFrontend — Range / HEAD (partial content for media seek/resume)', () => {
-  // Range + HEAD handling is delegated ENTIRELY to @hono/node-server's serveStatic (pinned 2.0.6) — this
-  // module adds no range code of its own. These tests PIN that delegated behaviour as a deliberate,
-  // supported feature (a client can request a byte range to seek/resume a large media asset) AND act as a
-  // fail-closed regression guard. Every assertion mirrors the ACTUAL 2.0.6 output (verified by running the
-  // suite against the real dependency), NOT an idealized RFC-7233 response.
+  // HONORED Range + HEAD handling is delegated to @hono/node-server's serveStatic (pinned 2.0.6); the
+  // module adds ONE additive guard — validateRange — that intercepts an UNSATISFIABLE range (start >= size)
+  // and returns a proper RFC-7233 416 before serveStatic (which would otherwise emit a malformed 0-byte
+  // 206 for a closed beyond-EOF range, or throw a 500 for an open one). Every HONORED-range assertion
+  // still mirrors the ACTUAL 2.0.6 output (a client can seek/resume a large media asset); the guard only
+  // changes the unsatisfiable case.
   const ASSET_CONTENT = `console.log('${ASSET_SENTINEL}');`;
   const ASSET_SIZE = Buffer.byteLength(ASSET_CONTENT, 'utf8');
 
@@ -259,21 +262,30 @@ describe('mountFrontend — Range / HEAD (partial content for media seek/resume)
     expect(await res.text()).toBe('');
   });
 
-  it('unsatisfiable Range (bytes=99999- on a small file) → 500, NOT 416 (serveStatic 2.0.6 has no 416 path)', async () => {
-    // ⚠ OBSERVED REALITY, NOT THE IDEAL (empirically verified against @hono/node-server 2.0.6): there is
-    // no RFC-7233 416 branch. For `bytes=99999-` serveStatic parses start=99999 and clamps `end` to
-    // size-1 (< start), then calls `createReadStream(path, { start: 99999, end: size-1 })` — Node throws
-    // `ERR_OUT_OF_RANGE` synchronously because start > end, and Hono surfaces the throw as a 500 (NOT a
-    // clamped 206, and NOT a 416). We pin the ACTUAL status: asserting 416/206 would assert a fiction, and
-    // producing a proper 416 would require vendoring the dependency (out of scope for this tests-only
-    // change). This also serves as a sentinel: a future serveStatic that adds a real 416 (or a clean 206)
-    // would flip this and force a deliberate re-look. Body left unread on purpose (it is a 500 error page).
+  it('unsatisfiable OPEN Range (bytes=99999- on a small file) → 416 with Content-Range: bytes */<size>', async () => {
+    // The additive validateRange guard intercepts an unsatisfiable range BEFORE serveStatic (which would
+    // otherwise clamp end < start and throw ERR_OUT_OF_RANGE → 500). start (99999) ≥ size ⇒ unsatisfiable
+    // ⇒ a proper RFC-7233 416 with `Content-Range: bytes */<size>`. Correcting the old 500 to 416 is
+    // deliberate and RFC-correct.
     const app = buildApp([spaMount], specDir());
     const res = await app.request('/assets/app.js', { headers: { Range: 'bytes=99999-' } });
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(416);
+    expect(res.headers.get('content-range')).toBe(`bytes */${ASSET_SIZE}`);
     expect(res.status).not.toBe(200);
     expect(res.status).not.toBe(206);
-    expect(res.status).not.toBe(416);
+    expect(res.status).not.toBe(500);
+  });
+
+  it('unsatisfiable CLOSED Range (bytes=999999-1000000 beyond EOF) → 416, not a malformed 0-byte 206', async () => {
+    // A CLOSED beyond-EOF range makes serveStatic 2.0.6 emit a malformed 206 (Content-Range/Content-Length
+    // set, 0-byte body). start (999999) ≥ size ⇒ the guard returns a proper RFC-7233 416 instead.
+    const app = buildApp([spaMount], specDir());
+    const res = await app.request('/assets/app.js', {
+      headers: { Range: 'bytes=999999-1000000' },
+    });
+    expect(res.status).toBe(416);
+    expect(res.headers.get('content-range')).toBe(`bytes */${ASSET_SIZE}`);
+    expect(res.status).not.toBe(206);
   });
 
   it('Accept-Ranges is present ONLY on an actual Range response — absent on a plain GET', async () => {
