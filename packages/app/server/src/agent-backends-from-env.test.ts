@@ -232,3 +232,85 @@ describe('agentBackendsFactoryFromEnv — merged-spec-aware backend wiring', () 
     expect(message).toContain('CLAUDE_CODE_OAUTH_TOKEN');
   });
 });
+
+// The "thin base + all agents delegated to an extensions pack" shape: the BASE document declares ZERO
+// `agents:` — every agent is contributed by an extension pack. Before the fix the `agents.length === 0`
+// early-return yielded `undefined` for this shape, so no factory was injected, the composition-root call
+// short-circuited, and a pack-contributed agent was SILENTLY absent from the registry (an authenticated
+// run fail-OPENed to 404, NOT fail-closed). A spec declaring `extensions:` must still get a factory that
+// wires the pack's backends lazily from the merged agents the composition root passes.
+describe('agentBackendsFactoryFromEnv — zero base agents but an extensions pack', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // A backend-profile spec with ZERO base agents that DECLARES an extensions pack (the pack contributes
+  // the only agent). The `module` path is unresolved here (loadExtensions resolves it at boot); it only
+  // needs to parse as a valid `extensions[]` entry.
+  const PACK_ONLY_SPEC = `version: '1.0'
+metadata:
+  name: u-pack-only
+extensions:
+  - id: some_pack
+    module: ./packs/some-pack
+    version: 1.0.0
+`;
+
+  // Stand-in for the pack-contributed agent the merge lands in effectiveSpec.agents ([writer → openai]).
+  const parsedPackAgents = parseAnySpec(OPENAI_SPEC);
+  if (!parsedPackAgents.ok || parsedPackAgents.kind !== 'rayspec') {
+    throw new Error('test fixture OPENAI_SPEC did not parse as a backend spec');
+  }
+  const packContributedAgents = parsedPackAgents.spec.agents; // [writer → openai]
+
+  it('returns a factory (NOT undefined) for a zero-base-agent spec that declares extensions', () => {
+    // RED before the fix: the old `agents.length === 0` early-return returned undefined for this shape,
+    // so serve-opts injected no factory and the pack agent could never be wired.
+    const factory = agentBackendsFactoryFromEnv(PACK_ONLY_SPEC, {
+      OPENAI_API_KEY: 'sk-dummy-not-a-real-key',
+    });
+    expect(factory).toBeTypeOf('function');
+    // The base view (no merged agents passed) is an EMPTY map — nothing to wire yet, never a throw.
+    expect(factory?.()?.size).toBe(0);
+  });
+
+  it('wires the pack backend when GIVEN the merged agents the pack contributes', () => {
+    const factory = agentBackendsFactoryFromEnv(PACK_ONLY_SPEC, {
+      OPENAI_API_KEY: 'sk-dummy-not-a-real-key',
+    });
+    // Given the merged agents (the pack's [writer → openai]), the factory builds the openai backend —
+    // exactly what buildAgentRegistry needs to resolve the pack agent instead of 404-ing at boot.
+    const map = factory?.(packContributedAgents);
+    expect(map?.size).toBe(1);
+    expect(map?.get('openai')).toBeInstanceOf(OpenAIAdapter);
+  });
+
+  it('fail-closed: the pack backend with NO env credential aborts with an actionable BootConfigError', () => {
+    // The eager base view is empty (zero base agents ⇒ no throw at creation). When the merged pack agent
+    // introduces the openai backend whose env is absent, the augmentation fail-closes with the SAME
+    // actionable message — never a silent skip (which would fail-OPEN to a 404 at run time).
+    const factory = agentBackendsFactoryFromEnv(PACK_ONLY_SPEC, {}); // no OPENAI_API_KEY
+    expect(factory).toBeTypeOf('function');
+    let message = '';
+    expect(() => {
+      try {
+        factory?.(packContributedAgents);
+      } catch (e) {
+        message = e instanceof Error ? e.message : String(e);
+        throw e;
+      }
+    }).toThrow(BootConfigError);
+    expect(message).toContain('openai'); // the backend the pack agent selects
+    expect(message).toContain('writer'); // the pack agent that selects it
+    expect(message).toContain('OPENAI_API_KEY'); // the missing env var makeExtractionBackend demands
+  });
+
+  it('still returns undefined for a spec with NEITHER base agents NOR extensions (byte-identical)', () => {
+    // The complement of the fix: a stores/api-only spec (no agents, no extensions) can never gain an
+    // agent from a merge, so it still returns undefined — no factory injected, boot byte-identical.
+    expect(parseAnySpec(AGENT_FREE_SPEC).kind).toBe('rayspec');
+    expect(
+      agentBackendsFactoryFromEnv(AGENT_FREE_SPEC, { OPENAI_API_KEY: 'sk-dummy' }),
+    ).toBeUndefined();
+  });
+});

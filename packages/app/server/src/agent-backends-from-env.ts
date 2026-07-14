@@ -16,6 +16,11 @@
  * finds every merged agent's backend instead of failing closed at boot. Base-only deploys stay
  * byte-identical (the merged agent set equals the base set ⇒ nothing extra is built).
  *
+ * This covers the canonical "thin base + all agents delegated to a pack" shape too: a spec with ZERO
+ * base `agents:` that declares `extensions:` still yields a factory (its eager base map is empty), and
+ * the pack's agents are wired lazily from the merged set the composition root passes. Only a spec that
+ * declares NEITHER base agents NOR extensions returns `undefined` (nothing can ever need a backend).
+ *
  * The mapping is NOT re-implemented here: each backend is built via `makeExtractionBackend` (the ONE
  * boot-side factory that owns the per-backend env contract + the fail-closed, actionable messages, and
  * consumes each adapter through its EXPORTED constructor only).
@@ -87,13 +92,17 @@ function buildDeclaredBackends(
  * DISTINCT backends the spec's agents declare — or `undefined` when none is needed:
  *   - a PRODUCT-profile document builds its own backends from its extraction sidecars (not the YAML), so
  *     this returns `undefined` and the product deploy path owns the wiring;
- *   - a backend-profile spec with NO agents (a stores/api/handler-only spec) needs no backend;
+ *   - a backend-profile spec with NEITHER base agents NOR `extensions:` (a stores/api/handler-only spec)
+ *     needs no backend — nothing can ever gain an agent from a merge;
  *   - an unparseable / non-backend document likewise needs nothing here (the deploy path re-parses +
  *     fail-closed-validates the doc itself, so a real parse error surfaces there with a clean message).
  *
- * A backend-profile spec WITH ≥1 agent builds each distinct declared backend EAGERLY, so a boot with a
- * misconfigured credential fails FAST with a clean, actionable `BootConfigError` naming the missing env
- * var, the backend, and which agent(s) select it — never deep inside `assembleServer`.
+ * A backend-profile spec WITH ≥1 base agent builds each distinct declared backend EAGERLY, so a boot with
+ * a misconfigured credential fails FAST with a clean, actionable `BootConfigError` naming the missing env
+ * var, the backend, and which agent(s) select it — never deep inside `assembleServer`. A spec with ZERO
+ * base agents that DECLARES `extensions:` still gets a factory (its eager base map is empty): the pack's
+ * agents are wired LAZILY from the merged agent set the composition root passes, and a pack backend with
+ * no env credential still fails closed via the SAME `makeExtractionBackend` throw (never a silent skip).
  *
  * The returned factory ADDITIONALLY accepts the MERGED spec's agents (the composition root passes them
  * after `mergeExtensions`). When a pack-contributed agent selects a backend NO base agent uses, the
@@ -111,9 +120,18 @@ export function agentBackendsFactoryFromEnv(
   if (!parsed.ok || parsed.kind !== 'rayspec') return undefined;
 
   const agents = parsed.spec.agents;
-  if (agents.length === 0) return undefined;
+  // A spec that declares NEITHER base agents NOR extension packs can never gain an agent from a merge, so
+  // it needs no backend factory — a byte-identical auth-only / stores-only boot (no factory injected).
+  // But a spec with ZERO base agents that DOES declare `extensions:` may gain agents from a pack merge
+  // (mergeExtensions concatenates each pack's `agents` fragment into effectiveSpec.agents). For that shape
+  // we MUST still return a factory: otherwise `opts.agentBackendsFactory?.(effectiveSpec.agents)`
+  // short-circuits to undefined, no agent registry is built, and a pack-contributed agent is SILENTLY
+  // absent — an authenticated run fail-OPENs to 404 instead of the agent being wired (or failing closed).
+  if (agents.length === 0 && parsed.spec.extensions.length === 0) return undefined;
 
   // EAGERLY build the base backends (fail-fast at factory creation on a misconfigured base credential).
+  // For a zero-base-agent + extensions spec this is an EMPTY map (no throw, no side effect); the pack's
+  // backends are built lazily below when the composition root passes the merged agents.
   const baseBackends = buildDeclaredBackends(agents, env);
 
   // The factory yields the base map, and — given the MERGED spec's agents — additionally wires any
