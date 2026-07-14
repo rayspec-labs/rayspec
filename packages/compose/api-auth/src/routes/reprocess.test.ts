@@ -125,6 +125,45 @@ describe('POST /v1/sessions/:id/reprocess (the reprocess affordance)', () => {
   });
 });
 
+describe('POST /v1/sessions/:id/reprocess with a reprocessor that found the session but enqueued NOTHING', () => {
+  /** A found session MUST match a registered trigger, so found:true + empty enqueue is an internal fault. */
+  class EmptyEnqueueReprocessor implements SessionReprocessor {
+    async reprocessSession(): ReturnType<SessionReprocessor['reprocessSession']> {
+      return { found: true, enqueued: [] };
+    }
+  }
+  let hEmpty: Harness;
+  beforeAll(async () => {
+    hEmpty = await createHarness({
+      sessionReprocessor: new EmptyEnqueueReprocessor(),
+      schema: 'rayspec_test_reprocess_empty',
+    });
+  });
+  afterAll(async () => {
+    await hEmpty.close();
+  });
+
+  it('500 — never a misleading 202 with an empty enqueue for a found session', async () => {
+    const reg = await jsonRequest(hEmpty.app, 'POST', '/v1/auth/register', {
+      body: { email: 'reproc-empty@example.test', password: 'a-long-enough-password' },
+    });
+    const t0 = (await reg.json()).accessToken as string;
+    const orgRes = await jsonRequest(hEmpty.app, 'POST', '/v1/orgs', {
+      body: { name: 'Org Empty' },
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    const orgId = (await orgRes.json()).id as string;
+    const switchRes = await jsonRequest(hEmpty.app, 'POST', `/v1/orgs/${orgId}/switch`, {
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    const token = (await switchRes.json()).accessToken as string;
+    const res = await jsonRequest(hEmpty.app, 'POST', '/v1/sessions/sess-1/reprocess', {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(500);
+  });
+});
+
 describe('POST /v1/sessions/:id/reprocess with NO wired reprocessor (fail-closed 501)', () => {
   let hNo: Harness;
   beforeAll(async () => {

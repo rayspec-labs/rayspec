@@ -1852,6 +1852,17 @@ export async function deployProductYamlSpec(
               'reprocess before the product composition was bound (fail-closed).',
             );
           }
+          // STRUCTURAL tenant reconciliation (fail-closed) — MIRRORS the live finalize sink
+          // (`WorkflowIngressSessionFinalizedSink`). The workflow dispatcher is BOUND to the deployment
+          // `tenantId` at construction and enqueues EVERY run under it, IGNORING the request tenant. So
+          // in a multi-org deployment a FOREIGN tenant whose own (tenant-namespaced) session collides on
+          // the same client-chosen `session_id` (`unique:false`) would pass its OWN existence check
+          // below and enqueue a durable run under the DEPLOYMENT tenant — a cross-tenant run that drops
+          // the fail-closed reconciliation the live sink enforces. Reject a request tenant that is not
+          // the bound deployment tenant with the route's uniform 404 (zero enqueue), exactly as the sink
+          // throws rather than silently running under the wrong tenant. The existence check still runs
+          // for the matching tenant (both must pass).
+          if (reqTenant !== tenantId) return { found: false };
           // Tenant-scoped existence check via the SAME store facade the workflow nodes read through
           // (makeHandlerDb over forTenant — the tenant predicate is AND-combined by the chokepoint, so
           // a tenant can only ever see ITS OWN session).

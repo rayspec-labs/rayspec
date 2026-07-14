@@ -73,6 +73,16 @@ export function registerReprocessRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       });
       if (!result.found) throw new ApiError('NOT_FOUND', 'Not found.');
 
+      // A FOUND session must always match a registered finalized-session trigger, so zero enqueue for a
+      // found session is an INTERNAL FAULT (a misconfigured/missing workflow trigger), NEVER a success —
+      // fail LOUD (500) rather than return a misleading 202 with nothing enqueued.
+      if (result.enqueued.length === 0) {
+        throw new ApiError(
+          'INTERNAL',
+          'Session reprocess enqueued no runs for an existing session (misconfigured workflow trigger).',
+        );
+      }
+
       return c.json({ sessionId, enqueued: result.enqueued }, 202);
     },
   );
