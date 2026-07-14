@@ -33,8 +33,9 @@
  * RANGE (RFC-7233): `serveStatic` 2.0.6 mishandles an UNSATISFIABLE byte range — a CLOSED range beyond
  * EOF (e.g. `bytes=999999-1000000` on a small file) yields a malformed 0-byte 206, and an OPEN one
  * (`bytes=99999-`) throws `ERR_OUT_OF_RANGE` (surfaced as a 500). An additive range guard runs AFTER the
- * fail-closed path guard, ONLY on a GET (serveStatic ignores Range for HEAD/OPTIONS — it answers 200
- * full-size — so those are left byte-identical, never a 416), and ONLY when a `Range` header is present:
+ * fail-closed path guard, for every verb EXCEPT HEAD/OPTIONS (serveStatic special-cases only those two —
+ * answering them 200 full-size, ignoring Range — so they are left byte-identical, never a 416; every
+ * other verb, GET/POST/PUT/PATCH/DELETE, hits its buggy Range branch), ONLY when a `Range` header is present:
  * when the range is unsatisfiable (`start >= size`, or a reversed `start > end`) it returns a proper 416
  * whose `Content-Range` names the full size; every honored / clamped 206 falls through to `serveStatic`
  * UNCHANGED (byte-identical). When the path resolves to no file the guard ALSO checks the file the SPA
@@ -238,12 +239,14 @@ export function mountFrontend<E extends Env>(
       if (!isSafeStaticPath(baseDir, realBaseDir, subPath)) return next();
       // RFC-7233: an UNSATISFIABLE Range (start at/after EOF, or reversed) gets a proper 416 rather than
       // serveStatic's malformed 0-byte 206 (closed beyond EOF) or ERR_OUT_OF_RANGE → 500 (open beyond
-      // EOF). Runs AFTER the fail-closed guard (a refused path already 404'd), ONLY on a GET (serveStatic
-      // ignores Range for HEAD/OPTIONS → 200 full-size, left byte-identical), and ONLY when a Range
-      // header is present. On a direct-file miss under an spa:true mount it also guards the index.html
-      // the SPA fallback would serve; every honored / clamped range still falls through to serveStatic.
+      // EOF). Runs AFTER the fail-closed guard (a refused path already 404'd) and ONLY when a Range
+      // header is present. serveStatic special-cases ONLY HEAD/OPTIONS (it answers them 200 full-size,
+      // ignoring Range) and routes EVERY other verb (GET/POST/PUT/PATCH/DELETE) through the buggy Range
+      // branch — so the guard exempts HEAD/OPTIONS (kept byte-identical, never a 416) and fires for all
+      // the rest. On a direct-file miss under an spa:true mount it also guards the index.html the SPA
+      // fallback would serve; every honored / clamped range still falls through to serveStatic.
       const rangeHeader = c.req.header('Range');
-      if (rangeHeader !== undefined && c.req.method === 'GET') {
+      if (rangeHeader !== undefined && c.req.method !== 'HEAD' && c.req.method !== 'OPTIONS') {
         const rangeRes = unsatisfiableRangeResponse(baseDir, subPath, spa, rangeHeader);
         if (rangeRes) return rangeRes;
       }

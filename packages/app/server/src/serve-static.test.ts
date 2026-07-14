@@ -295,18 +295,47 @@ describe('mountFrontend — Range / HEAD (partial content for media seek/resume)
     expect(plain.headers.get('accept-ranges')).toBeNull();
   });
 
-  // HEAD/OPTIONS: serveStatic 2.0.6 IGNORES Range for these methods (it answers 200 full-size), so the
-  // additive guard must too — gating on GET keeps HEAD byte-identical to serveStatic (never a 416).
-  it('HEAD + an UNSATISFIABLE Range (bytes=99999-) → 200 (matching serveStatic), never a 416', async () => {
+  // METHOD-COMPLETENESS: serveStatic 2.0.6 answers HEAD/OPTIONS safely at 200 (it ignores Range for
+  // them) but routes EVERY other verb through its buggy Range branch — so the additive guard fires for
+  // GET AND the write verbs (POST/PUT/PATCH/DELETE) and exempts ONLY HEAD/OPTIONS. `mountFrontend`
+  // registers with app.use (all methods), so each verb reaches the guard. Fail-the-fix: gate on GET-only
+  // and the POST/PUT/PATCH/DELETE arms go RED (serveStatic 500s on the open range); exempt nothing and
+  // the HEAD/OPTIONS arms go RED (they'd get a 416 where serveStatic answers 200).
+  for (const method of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const) {
+    it(`${method} + an unsatisfiable OPEN Range (bytes=99999-) → 416, never serveStatic's 500`, async () => {
+      const app = buildApp([spaMount], specDir());
+      const res = await app.request('/assets/app.js', {
+        method,
+        headers: { Range: 'bytes=99999-' },
+      });
+      expect(res.status).toBe(416);
+      expect(res.headers.get('content-range')).toBe(`bytes */${ASSET_SIZE}`);
+      expect(res.status).not.toBe(500);
+      expect(res.status).not.toBe(206);
+    });
+  }
+
+  it('POST + an unsatisfiable CLOSED Range (bytes=999999-1000000) → 416, not a malformed 0-byte 206', async () => {
     const app = buildApp([spaMount], specDir());
     const res = await app.request('/assets/app.js', {
-      method: 'HEAD',
-      headers: { Range: 'bytes=99999-' },
+      method: 'POST',
+      headers: { Range: 'bytes=999999-1000000' },
     });
-    expect(res.status).toBe(200);
-    expect(res.status).not.toBe(416);
-    expect(await res.text()).toBe(''); // HEAD carries no body
+    expect(res.status).toBe(416);
+    expect(res.status).not.toBe(206);
   });
+
+  for (const method of ['HEAD', 'OPTIONS'] as const) {
+    it(`${method} + an unsatisfiable Range (bytes=99999-) → 200 (serveStatic ignores Range for ${method}), never a 416`, async () => {
+      const app = buildApp([spaMount], specDir());
+      const res = await app.request('/assets/app.js', {
+        method,
+        headers: { Range: 'bytes=99999-' },
+      });
+      expect(res.status).toBe(200);
+      expect(res.status).not.toBe(416);
+    });
+  }
 
   it('HEAD + a satisfiable Range (bytes=0-4) stays 200 (serveStatic ignores Range for HEAD)', async () => {
     const app = buildApp([spaMount], specDir());
