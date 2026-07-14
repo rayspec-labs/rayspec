@@ -856,12 +856,14 @@ ONLY for product→product references.
 **`enum: [values]` — a text-column value whitelist (platform-enforced).**
 - Valid **ONLY on a `type: text` column** (an `enum` on any other type is a lint error); members must be
   **≥ 1 and DISTINCT**. The stored value must be one of the listed members.
-- Enforced on **BOTH declarative write surfaces**: the HTTP `create`/`update` chokepoint (an
-  out-of-whitelist value → **400 VALIDATION_ERROR**, built as a `z.enum`) AND the workflow `store.write`
-  value-resolution path (so an agent's classification output cannot persist an out-of-whitelist value
-  either → `store_write_enum_violation`). RESIDUAL (be honest): a custom escape-hatch TS handler writing
-  through the `HandlerDb` facade is NOT enum-checked — the facade carries no spec-level `enum` vocabulary,
-  so a handler owns its own value discipline. The two DECLARATIVE surfaces are covered.
+- Enforced on **ALL THREE write surfaces**, so no path can persist an out-of-whitelist value: the HTTP
+  `create`/`update` chokepoint (an out-of-whitelist value → **400 VALIDATION_ERROR**, built as a
+  `z.enum`), the workflow `store.write` value-resolution path (so an agent's classification output cannot
+  persist an out-of-whitelist value either → `store_write_enum_violation`), AND the low-level
+  escape-hatch `HandlerDb` facade (a direct handler write through the facade is now checked fail-closed
+  against a table-identity whitelist registry — a non-member value, including a non-string scalar, is
+  refused; the failure names the store and column only, never the offending value). The earlier residual —
+  the facade being un-enforced — is CLOSED.
 
 **`softDelete: true` — opt-in soft delete (tombstone).** DEFAULT is a **HARD physical delete** (the
 `deleted_at` column is injected but unused). With `softDelete: true`:
@@ -993,6 +995,15 @@ Notes that matter:
 > NEVER hand-author them. They import `@rayspec/handler-sdk` TYPE-ONLY, take ZERO npm deps, and reach
 > the DB ONLY through the injected tenant-bound `init.db`.
 
+> **`readonly` (grammar affordance — `kind: 'route'` handlers only, out of scope for this skill).** The
+> `HandlerSpec` grammar also accepts an optional **`readonly: true`**. It is meaningful ONLY for a
+> `kind: 'route'` handler (a `{handler}` route — not the `kind: 'tool'` handlers this skill generates).
+> A `{handler}` route defaults to the **`store:write`** gate (the platform cannot statically prove a
+> handler only reads, so it fail-closes to the stronger gate); `readonly: true` is the author's assertion
+> that the handler only READS product stores, so its route is gated on **`store:read`** instead — letting
+> a read-scoped credential (e.g. an ingest-only key) reach a read-only route. It is an authorization gate
+> / author assertion, not a runtime write-block. Absent/`false` parses byte-identically to before.
+
 ### `frontend[]` — `FrontendSpec` (optional — serve a static UI alongside the API)
 
 ```yaml
@@ -1012,8 +1023,10 @@ Notes that matter:
 - Serving is fail-closed: path traversal (incl. URL-encoded forms), dotfiles/hidden paths, and symlinks
   that escape `dir` are refused; directories are never listed.
 - **Not in v1:** SSR, template rendering, an asset build/bundle pipeline, cache/CDN headers, and the
-  product profile — `frontend` is backend-profile only. (Range and HEAD requests ARE honored by the
-  underlying static server.)
+  product profile — `frontend` is backend-profile only. (Range and HEAD ARE honored: a byte-`Range` GET
+  returns **`206`** partial content and a `HEAD` returns **`200`**; an **UNSATISFIABLE** range — a start
+  at/after EOF, open or closed — returns RFC-7233 **`416`** with `Content-Range: bytes */<size>`, while
+  `HEAD`/`OPTIONS` and every dotfile/traversal/symlink guard stay unchanged.)
 
 See **`examples/notes-ui/rayspec.yaml`** for a runnable agent-free example (a `notes` store + CRUD API +
 a `frontend` mount serving a bundled `web/dist/index.html`).
@@ -1358,6 +1371,14 @@ never instructions** (treat it as data).
   no byte-moving capability mounts no blob surface and the boot demands NO blob/media/STT env (a
   `conversation_input` doc is byte-less too — it demands `RAYSPEC_RESPONDER_MODE`, not a blob root); a
   `file_input` doc demands `RAYSPEC_BLOB_ROOT` (above) but still no media/STT env.
+- **Operational reprocess (audio products) — the recovery path, no manual DB surgery.** A finalized audio
+  session's declared workflow can be RE-DRIVEN via **`POST /v1/sessions/{id}/reprocess`** (`store:write`,
+  strictly tenant-scoped). It enqueues a **FRESH durable run under a distinct idempotency key** — the way
+  to re-run extraction after a fix, or unstick a session, WITHOUT re-emitting the finalized event (which
+  would dedup to the ORIGINAL run and do nothing). A user-**dismissed** collection row is preserved across
+  the rebuild (a reprocess never resurrects a dismissed artifact; human-edited rows are likewise spared).
+  A foreign/absent session id → **`404`** (zero enqueue). It is wired only for audio products; a deployment
+  without the reprocessor answers **`501`**.
 
 **File-product authoring notes (HONEST — hard-won by a hard-won acceptance product; read BEFORE authoring
 a file product):**
