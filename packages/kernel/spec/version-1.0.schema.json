@@ -498,6 +498,9 @@
                   "route",
                   "trigger"
                 ]
+              },
+              "readonly": {
+                "type": "boolean"
               }
             },
             "required": [

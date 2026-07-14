@@ -12,13 +12,23 @@
  */
 
 import { OpenAPIHono } from '@hono/zod-openapi';
+import type { Permission } from '@rayspec/auth-core';
 import type { BlobStore, BlobStoreFactory, ResolvedHandler } from '@rayspec/platform';
-import type { ApiRouteSpec, RaySpec } from '@rayspec/spec';
+import type { ApiRouteSpec, HandlerSpec, RaySpec } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { AgentRegistry, AppDeps, AppEnv } from '../app-context.js';
+import { requirePermission } from '../http/middleware.js';
 import type { MediaTokenService } from '../media/media-token.js';
 import { registerDeclaredRoutes } from './register-declared-routes.js';
+
+// Spy on `requirePermission` so a route-registration test can assert WHICH permission a declared
+// route is wired behind (the middleware itself is never run here — the registrar throws/records at
+// wiring time). The real implementation is preserved; only the call is recorded.
+vi.mock('../http/middleware.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../http/middleware.js')>();
+  return { ...actual, requirePermission: vi.fn(actual.requirePermission) };
+});
 
 // A minimal, shape-valid RaySpec with overridable `api`/`agents`. The boot-fail paths under test
 // throw during route wiring, so only `api`/`agents`/`stores` are consulted.
@@ -281,5 +291,54 @@ describe('registerDeclaredRoutes — {stream} mode:ingest boot-time fail-closed'
         dummyMediaService,
       ),
     ).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// the `{handler}` route permission derivation: readonly:true → store:read, else store:write.
+// ---------------------------------------------------------------------------------------
+describe('registerDeclaredRoutes — {handler} readonly gates store:read (default store:write)', () => {
+  // Register a single `{handler}` route whose declared handler carries the given `readonly` value
+  // (omitted when undefined) and return the permission the registrar wired it behind.
+  function permForHandlerRoute(readonly: boolean | undefined): Permission {
+    vi.mocked(requirePermission).mockClear();
+    const declared: HandlerSpec = {
+      id: 'custom_route',
+      module: 'handlers/custom.ts',
+      export: 'custom',
+      kind: 'route',
+      ...(readonly === undefined ? {} : { readonly }),
+    };
+    const spec = makeSpec({
+      handlers: [declared],
+      api: [
+        { method: 'GET', path: '/custom', action: { kind: 'handler', handler: 'custom_route' } },
+      ],
+    });
+    const loaded = new Map<string, ResolvedHandler>([
+      ['custom_route', { kind: 'route', fn: async () => ({ ok: true }) }],
+    ]);
+    const app = new OpenAPIHono<AppEnv>();
+    registerDeclaredRoutes(app, makeDeps(undefined), {
+      spec,
+      productTables: emptyTables,
+      handlers: loaded,
+    });
+    const calls = vi.mocked(requirePermission).mock.calls;
+    // exactly one declared route → requirePermission called exactly once
+    expect(calls).toHaveLength(1);
+    return calls[0]?.[1] as Permission;
+  }
+
+  it('a readonly:true handler route is gated store:read', () => {
+    expect(permForHandlerRoute(true)).toBe('store:read');
+  });
+
+  it('a handler route WITHOUT readonly is gated store:write (default unchanged)', () => {
+    expect(permForHandlerRoute(undefined)).toBe('store:write');
+  });
+
+  it('an explicit readonly:false handler route is gated store:write (fail-closed on false)', () => {
+    expect(permForHandlerRoute(false)).toBe('store:write');
   });
 });

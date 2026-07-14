@@ -207,6 +207,11 @@ export const HandlerSpec = z
     /** The named export within that module. */
     export: z.string().min(1),
     kind: HandlerKind,
+    /**
+     * Opt-in: a route handler that only READS product stores. When true, its route is gated
+     * `store:read` instead of the default `store:write`, so a read-scoped credential can reach it.
+     */
+    readonly: z.boolean().optional(),
   })
   .strict();
 export type HandlerSpec = z.infer<typeof HandlerSpec>;

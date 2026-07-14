@@ -287,12 +287,14 @@ export function registerDeclaredRoutes(
       // through the single `HandlerRuntime` indirection. The handler is the escape-hatch fn the
       // loader resolved (path-jailed, fail-closed at boot).
       //
-      // AUTHZ (decision — resolving the placeholder): a route handler is arbitrary
-      // trusted-author product logic that may READ AND WRITE the tenant's product stores, so it is
-      // gated on `store:write` — the SENSITIVE, most-privileged product permission (live-membership
-      // rechecked for JWT principals; api-key-grantable with scope). We cannot statically prove a
-      // handler is read-only, so we fail-closed to the write gate (a read-only handler authored under
-      // it is simply over-protected, never under). This is product-agnostic (no per-handler grant).
+      // AUTHZ: a route handler is trusted-author product logic. By DEFAULT it may READ AND WRITE the
+      // tenant's product stores, so it is gated on `store:write` — the SENSITIVE, most-privileged
+      // product permission (live-membership rechecked for JWT principals; api-key-grantable with
+      // scope). A handler the author opts into `readonly:true` only reads product stores, so its route
+      // is gated on `store:read` instead (letting a read-scoped credential reach it, while a
+      // write-only credential still cannot). Fail-closed: an absent/false flag keeps the write gate, so
+      // a handler that in fact writes is never under-protected. This is product-agnostic (no per-
+      // handler grant); the permission is derived from the DECLARED handler (`spec.handlers`) below.
       const handler = handlers?.get(action.handler);
       if (!handler) {
         // No loader supplied (or the handler was not loaded) → abort the BOOT clearly, never ship a
@@ -319,13 +321,18 @@ export function registerDeclaredRoutes(
         // `init.mintPlayToken` capability. Absent for a deploy with no media key.
         ...(mediaTokenService ? { mediaTokenService } : {}),
       });
+      // Derive the gate from the DECLARED handler (the grammar/author `readonly` flag lives on
+      // `spec.handlers`, NOT the code-level ResolvedHandler). Opt-in read-only ⇒ `store:read`;
+      // default ⇒ `store:write` (fail-closed).
+      const declaredHandler = spec.handlers.find((h) => h.id === action.handler);
+      const perm: Permission = declaredHandler?.readonly === true ? 'store:read' : 'store:write';
       registerOn(
         app,
         route.method,
         honoPath,
         auth,
         tenant,
-        requirePermission(deps, 'store:write'),
+        requirePermission(deps, perm),
         routeHandler,
       );
       continue;
