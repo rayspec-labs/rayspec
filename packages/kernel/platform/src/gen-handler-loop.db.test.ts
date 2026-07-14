@@ -35,8 +35,14 @@ import type {
   RunContext,
   RunResult,
 } from '@rayspec/core';
-import { forTenant } from '@rayspec/db';
-import { buildProductTables, makeDbWithSchema, registerScopedTables } from '@rayspec/db/testing';
+import { forTenant, INJECTED_COLUMN_NAMES } from '@rayspec/db';
+import {
+  buildProductTables,
+  injectedColumnLinesSql,
+  makeDbWithSchema,
+  parseCreateTableColumnNames,
+  registerScopedTables,
+} from '@rayspec/db/testing';
 import type { RaySpec, StoreSpec } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -238,16 +244,16 @@ function agentSpec(): AgentSpec {
   };
 }
 
-describe.skipIf(!hasDb)(
-  'auto-persist LOOP — generated handlers through the real dispatchTool',
-  () => {
-    let db: ReturnType<typeof makeDbWithSchema>;
-    let productTables: Map<string, PgTable>;
-    let unregister: () => void;
-
-    beforeAll(async () => {
-      db = makeDbWithSchema(process.env.DATABASE_URL as string, SCHEMA);
-      await db.$client.unsafe(`
+/**
+ * The isolated-schema DDL: the run-core tables + the two PRODUCT stores. The product tables carry the
+ * injected tenancy/GDPR columns DERIVED from the single-source generator descriptor (`injectedColumnLinesSql`)
+ * around their explicit business columns, so a NEW injected column can never silently drift this fixture.
+ */
+function buildLoopSchemaSql(): string {
+  const { before, after } = injectedColumnLinesSql({
+    tenantFkRef: 'REFERENCES orgs(id) ON DELETE CASCADE',
+  });
+  return `
       DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE;
       CREATE SCHEMA ${SCHEMA};
       SET search_path TO ${SCHEMA};
@@ -293,23 +299,48 @@ describe.skipIf(!hasDb)(
       CREATE UNIQUE INDEX it2_run_events_idx ON run_events (tenant_id, run_id, seq);
       -- the two PRODUCT stores (with the injected tenancy/GDPR columns a real deploy adds).
       CREATE TABLE expense_categories (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+        ${before},
         code text NOT NULL, name text NOT NULL, description text, active boolean NOT NULL,
-        created_at timestamptz NOT NULL DEFAULT now(), deleted_at timestamptz,
-        retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text
+        ${after}
       );
       CREATE TABLE expense_claims (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+        ${before},
         employee_email text NOT NULL, description text NOT NULL, amount_cents integer NOT NULL,
         currency text NOT NULL, status text NOT NULL, category_code text, gl_code text,
         coding_summary text, policy_flag text,
-        created_at timestamptz NOT NULL DEFAULT now(), deleted_at timestamptz,
-        retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text
+        ${after}
       );
       INSERT INTO orgs (id, name) VALUES ('${TENANT_A}', 'A'), ('${TENANT_B}', 'B');
-    `);
+    `;
+}
+
+// Drift guard (no DB): every PRODUCT table's CREATE TABLE must carry EXACTLY the injected columns
+// ∪ its declared business columns. Interpolating `injectedColumnLinesSql` makes drift impossible;
+// this fails the fix RED if a future edit re-hardcodes a product table and forgets an injected column.
+describe('gen-handler loop schema — injected-column drift guard', () => {
+  const sql = buildLoopSchemaSql();
+  for (const productStore of [categoriesStore, claimsStore]) {
+    it(`${productStore.name} carries exactly the injected + its business columns`, () => {
+      const columns = new Set(parseCreateTableColumnNames(sql, productStore.name));
+      const expected = new Set([
+        ...INJECTED_COLUMN_NAMES,
+        ...productStore.columns.map((c) => c.name),
+      ]);
+      expect(columns).toEqual(expected);
+    });
+  }
+});
+
+describe.skipIf(!hasDb)(
+  'auto-persist LOOP — generated handlers through the real dispatchTool',
+  () => {
+    let db: ReturnType<typeof makeDbWithSchema>;
+    let productTables: Map<string, PgTable>;
+    let unregister: () => void;
+
+    beforeAll(async () => {
+      db = makeDbWithSchema(process.env.DATABASE_URL as string, SCHEMA);
+      await db.$client.unsafe(buildLoopSchemaSql());
       productTables = buildProductTables([categoriesStore, claimsStore]);
       unregister = registerScopedTables([...productTables.values()]);
     });

@@ -1,3 +1,5 @@
+import { injectedColumnLinesSql } from '@rayspec/db/testing';
+
 /**
  * Minimal isolated-schema DDL for the durable-dbos spine integration test — the core tenant tables
  * `runAgent` (+ the started-once guard) write to, plus their `orgs` FK target. Mirrors the committed
@@ -82,13 +84,14 @@ export function buildSpineSchemaSql(schema: string): string {
  * `IF NOT EXISTS` so it composes onto the spine schema without re-dropping it.
  */
 export function buildCronProductSchemaSql(schema: string): string {
+  const { before, after } = injectedColumnLinesSql({
+    tenantFkRef: `REFERENCES ${schema}.orgs(id) ON DELETE CASCADE`,
+  });
   return `
   CREATE TABLE IF NOT EXISTS ${schema}.cron_marks (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id uuid NOT NULL REFERENCES ${schema}.orgs(id) ON DELETE CASCADE,
+    ${before},
     note text NOT NULL,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    deleted_at timestamptz, retention_days integer, region text NOT NULL DEFAULT 'eu', created_by text, idempotency_key text
+    ${after}
   );
 `;
 }

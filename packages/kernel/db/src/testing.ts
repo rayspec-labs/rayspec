@@ -50,3 +50,9 @@ export {
   type QueryFn as ProductTenancyQueryFn,
 } from './generated/product-tenancy-gate.js';
 export { registerScopedTables, withScopedTables } from './tenant-db.js';
+export {
+  type InjectedColumnLines,
+  type InjectedColumnLinesOptions,
+  injectedColumnLinesSql,
+  parseCreateTableColumnNames,
+} from './testing-ddl.js';
