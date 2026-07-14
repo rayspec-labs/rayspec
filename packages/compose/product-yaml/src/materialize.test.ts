@@ -217,6 +217,62 @@ describe('persistCollectionRows (the DECLARED lifecycle, executed)', () => {
     expect((after?.payload as Record<string, unknown>).text).toBe('HUMAN EDIT');
   });
 
+  it('preserve_dismissed: a dismissed row is NEVER resurrected across a rebuild', async () => {
+    const db = new FakeHandlerDb();
+    await persistCollectionRows(db, plannedRows(), SCOPE, RECONCILE);
+    // A user DISMISSES finding:0 (a distinct lifecycle from human_edited — the row is NOT edited).
+    const row = db.rows('note_artifacts').find((r) => r.artifact_ref === 'tenant-a:s1:finding:0');
+    if (!row) throw new Error('row missing');
+    row.dismissed = true;
+    row.payload = { text: 'DISMISSED-MARKER', evidence: ['sp-1'], evidence_span_ids: ['sp-1'] };
+    // … a reprocess re-extracts (the same candidate) → the DISMISSAL wins: dismissed STAYS true and
+    // the row is NOT re-stamped `dismissed:false` (RED before the fix — the upsert Object.assigns
+    // `dismissed:false` from buildCollectionRows over the dismissed row, resurrecting it).
+    const outcome = await persistCollectionRows(db, plannedRows(), SCOPE, RECONCILE);
+    expect(outcome.skippedDismissed).toBe(1);
+    const after = db.rows('note_artifacts').find((r) => r.artifact_ref === 'tenant-a:s1:finding:0');
+    expect(after?.dismissed).toBe(true);
+    // The dismissed row is preserved as-is (the upsert is skipped, mirroring the human-edit skip).
+    expect((after?.payload as Record<string, unknown>).text).toBe('DISMISSED-MARKER');
+  });
+
+  it('preserve_dismissed: a dismissed row is spared even when preserveHumanEdits is FALSE (unconditional)', async () => {
+    const db = new FakeHandlerDb();
+    // A prior DISMISSED row already in the store.
+    await db.insert('note_artifacts', {
+      session_id: 's1',
+      artifact_kind: 'finding',
+      payload: { text: 'old', evidence_span_ids: [] },
+      human_edited: false,
+      dismissed: true,
+      artifact_ref: 'tenant-a:s1:finding:0',
+    });
+    // A re-extract plans the SAME ref with preserveHumanEdits:FALSE (so the human-edit pre-read is
+    // NOT what spares it) — the dismissal-preserve is unconditional.
+    const planned = [
+      {
+        store: 'note_artifacts',
+        artifactRef: 'tenant-a:s1:finding:0',
+        kind: 'finding',
+        preserveHumanEdits: false,
+        row: {
+          session_id: 's1',
+          artifact_kind: 'finding',
+          payload: { text: 'RE-EXTRACTED', evidence_span_ids: [] },
+          human_edited: false,
+          dismissed: false,
+          artifact_ref: 'tenant-a:s1:finding:0',
+        },
+      },
+    ];
+    const outcome = await persistCollectionRows(db, planned, SCOPE, RECONCILE);
+    expect(outcome.skippedDismissed).toBe(1);
+    expect(outcome.upserted).toBe(0);
+    const after = db.rows('note_artifacts').find((r) => r.artifact_ref === 'tenant-a:s1:finding:0');
+    expect(after?.dismissed).toBe(true);
+    expect((after?.payload as Record<string, unknown>).text).toBe('old'); // NOT re-extracted over
+  });
+
   it('reconcile_stale_rows: a smaller re-extract deletes orphans — except human-edited ones', async () => {
     const db = new FakeHandlerDb();
     await persistCollectionRows(db, plannedRows(), SCOPE, RECONCILE);
@@ -240,6 +296,33 @@ describe('persistCollectionRows (the DECLARED lifecycle, executed)', () => {
       'tenant-a:s1:finding:0',
       'tenant-a:s1:finding:2',
     ]);
+  });
+
+  it('reconcile_stale_rows: a smaller re-extract spares a DISMISSED orphan (never deletes a dismissed row)', async () => {
+    const db = new FakeHandlerDb();
+    await persistCollectionRows(db, plannedRows(), SCOPE, RECONCILE);
+    // A user dismissed finding:2 — the reconcile must spare it exactly like a human-edited row.
+    const spare = db.rows('note_artifacts').find((r) => r.artifact_ref === 'tenant-a:s1:finding:2');
+    if (!spare) throw new Error('row missing');
+    spare.dismissed = true;
+    // The re-extract now produces ONE finding (finding:1 and finding:2 become stale orphans).
+    const smaller = {
+      ...candidateDoc(),
+      findings: [{ text: 'only survivor', evidence: ['sp-1'] }],
+    };
+    const outcome = await persistCollectionRows(db, plannedRows(smaller), SCOPE, RECONCILE);
+    expect(outcome.reconciledStale).toBe(1); // finding:1 deleted; finding:2 spared (dismissed)
+    const refs = db
+      .rows('note_artifacts')
+      .map((r) => r.artifact_ref)
+      .sort();
+    expect(refs).toEqual([
+      'tenant-a:s1:digest:0',
+      'tenant-a:s1:finding:0',
+      'tenant-a:s1:finding:2',
+    ]);
+    const kept = db.rows('note_artifacts').find((r) => r.artifact_ref === 'tenant-a:s1:finding:2');
+    expect(kept?.dismissed).toBe(true);
   });
 
   it('reconcile_stale_rows on WHOLE-KIND removal: a re-extract with ZERO members of a declared kind deletes ALL its prior non-human-edited rows (MAT-1)', async () => {
