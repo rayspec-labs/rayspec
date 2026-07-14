@@ -57,12 +57,6 @@ importers:
       '@hono/node-server':
         specifier: 2.0.6
         version: 2.0.6(hono@4.12.26)
-      '@rayspec/adapter-openai':
-        specifier: workspace:*
-        version: link:../../packages/adapters/openai
-      '@rayspec/core':
-        specifier: workspace:*
-        version: link:../../packages/kernel/core
       '@rayspec/db':
         specifier: workspace:*
         version: link:../../packages/kernel/db
