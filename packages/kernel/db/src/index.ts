@@ -34,6 +34,15 @@ export {
   type StatementFinding,
   type StoreDiffResult,
 } from './diff-product-stores.js';
+// The column enum-whitelist table-identity registry: `buildProductTables` records a store's declared
+// column value whitelists; the handler-db facade (makeHandlerDb — views/workflows/handlers) consults
+// `enumWhitelistFor` to reject an out-of-whitelist write value (parity with the HTTP create/update route
+// + the workflow store.write node). Mirrors the soft-delete identity-registry pattern (no param plumbing).
+export {
+  type ColumnEnumWhitelists,
+  enumWhitelistFor,
+  markEnumWhitelist,
+} from './enum-whitelist-registry.js';
 // The PURE product-schema MECHANISM (generator + drift). Product-agnostic platform/
 // deploy tooling. The platform main line ships these + a PRODUCT-EMPTY generated baseline; a
 // deployment / the throwaway runs the generator over its own spec. The GATE-ONLY product-tenancy

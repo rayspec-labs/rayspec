@@ -26,6 +26,7 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { markEnumWhitelist } from '../enum-whitelist-registry.js';
 import { orgs } from '../schema.js';
 import { markSoftDeleteTable } from '../soft-delete-registry.js';
 import type { StoreConflictKeys } from './generate-product-sql.js';
@@ -178,6 +179,14 @@ export function buildProductTables(
     // tombstone-invisibility the CRUD routes do. Default (hard-delete) stores are never marked → their
     // facade behaviour is byte-behaviourally unchanged.
     if (store.softDelete === true) markSoftDeleteTable(table);
+    // A store's declared column `enum` value whitelists are recorded in the identity registry so the
+    // handler-db facade rejects an out-of-whitelist write value (parity with the HTTP create/update
+    // route + the workflow store.write node). Keyed by the DECLARED column name; a store with no `enum`
+    // column records nothing → its facade write behaviour is byte-behaviourally unchanged.
+    const enumWhitelist = new Map(
+      store.columns.filter((c) => c.enum !== undefined).map((c) => [c.name, new Set(c.enum)]),
+    );
+    if (enumWhitelist.size > 0) markEnumWhitelist(table, enumWhitelist);
     tables.set(store.name, table);
   }
   return tables;
