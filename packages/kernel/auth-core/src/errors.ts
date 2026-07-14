@@ -85,12 +85,33 @@ export function forbidden(message = 'Forbidden.', details?: Record<string, unkno
   return new ApiError('FORBIDDEN', message, details);
 }
 
-/** Build the wire envelope for a code + message + requestId. */
+/**
+ * The codes that may carry `details` out to the client — the ones whose `details` echoes
+ * caller-supplied INPUT context and leaks nothing about existence or credentials:
+ *   - VALIDATION_ERROR — the Zod issue set (a shape/validation echo of the caller's own body);
+ *   - FORBIDDEN — the named missing permission for an AUTHENTICATED scope/role gap;
+ *   - RATE_LIMITED — the retry hint (`retryAfterMs`);
+ *   - GATEWAY_TIMEOUT — the neutral run error class (`errorClass`).
+ * Every other code — notably the existence-leak-sensitive UNAUTHENTICATED (401) / NOT_FOUND (404) —
+ * MUST NOT emit `details`, so the envelope strips it structurally below regardless of what a caller
+ * passes. This makes the "a bare 401/404 leaks nothing" invariant STRUCTURAL at the one chokepoint
+ * every response flows through, not a per-call-site convention. It is behavior-preserving today: no
+ * code outside this set is ever thrown with a `details` payload.
+ */
+export const DETAILS_ALLOWED: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
+  'VALIDATION_ERROR',
+  'FORBIDDEN',
+  'RATE_LIMITED',
+  'GATEWAY_TIMEOUT',
+]);
+
+/** Build the wire envelope for a code + message + requestId. Strips `details` for non-allowlisted codes. */
 export function errorEnvelope(
   code: ErrorCode,
   message: string,
   requestId: string,
   details?: unknown,
 ): ErrorEnvelope {
-  return { error: { code, message, requestId, ...(details !== undefined ? { details } : {}) } };
+  const emitDetails = details !== undefined && DETAILS_ALLOWED.has(code);
+  return { error: { code, message, requestId, ...(emitDetails ? { details } : {}) } };
 }
