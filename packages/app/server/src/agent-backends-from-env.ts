@@ -28,7 +28,12 @@
 import type { Backend, BackendId } from '@rayspec/core';
 import { parseAnySpec } from '@rayspec/spec';
 import { type AgentBackendsFactory, BootConfigError } from './composition-root.js';
-import { anthropicApiKeyOverrideWarning, makeExtractionBackend } from './product-boot.js';
+import {
+  anthropicApiKeyOverrideWarning,
+  anthropicReuseLoginBanner,
+  anthropicReuseLoginShadowWarning,
+  makeExtractionBackend,
+} from './product-boot.js';
 
 /**
  * Build the DISTINCT backends a set of declared agents selects, reusing `makeExtractionBackend` (the ONE
@@ -63,6 +68,13 @@ function buildDeclaredBackends(
   if (backendToAgents.has('anthropic')) {
     const billingWarning = anthropicApiKeyOverrideWarning(env);
     if (billingWarning) console.warn(billingWarning);
+    // The reuse-login ACTIVE banner + shadow footgun — surfaced UP FRONT for the same reason as the
+    // billing warning (a sibling backend's missing-env abort could otherwise fire before the anthropic
+    // build, suppressing makeExtractionBackend's own in-build emit).
+    const reuseLoginBanner = anthropicReuseLoginBanner(env);
+    if (reuseLoginBanner) console.warn(reuseLoginBanner);
+    const shadowWarning = anthropicReuseLoginShadowWarning(env);
+    if (shadowWarning) console.warn(shadowWarning);
   }
 
   const backends = new Map<BackendId, Backend>(existing ?? []);
