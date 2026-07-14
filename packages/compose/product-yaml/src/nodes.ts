@@ -29,6 +29,7 @@ import type {
   CapabilityInvocationContext,
   CapabilityInvocationResult,
   CapabilityNodeHandler,
+  WorkflowRetryPolicy,
 } from '@rayspec/foundation';
 import {
   type ArtifactContent,
@@ -107,6 +108,32 @@ export const CONSOLE_MEDIA_PREP_LOGGER: MediaPrepLogger = {
   error: (m) => console.error(m),
 };
 
+/**
+ * The dual-track completeness wait bound (ms), measured from the CURRENT run execution's start
+ * (`journal.created_at`, which the engine stamps fresh on each execute() — see the guard for the
+ * crash-resume caveat). The `session_finalized` event fires as soon as ONE track seals; a sibling track
+ * can still be mid-upload (`status='recording'`) at that instant. The STT node waits up to this long for
+ * stragglers to seal (re-reading the store on each retry) before transcribing whatever sealed — long
+ * enough to absorb a slow final-chunk upload, short enough that an ABANDONED track (one that never
+ * seals) holds a worker only briefly.
+ */
+export const STT_INCOMPLETE_WAIT_MS = 60_000;
+
+/**
+ * The retry policy compose wires onto the `stt.transcribe_session` step so the completeness wait above
+ * actually RE-INVOKES the node. The engine re-attempts a `retryable_failure` up to `max_attempts` times
+ * with `backoff_ms` in-process backoff, re-reading the store each attempt. The window
+ * `(max_attempts - 1) * backoff_ms` (= 90s here) MUST exceed STT_INCOMPLETE_WAIT_MS (60s) so the node's
+ * own time-bound (proceed-with-whatever-sealed) — NOT retry exhaustion — decides the outcome: otherwise
+ * an abandoned recording track would exhaust the retries and FAIL the run (the fail-closed default
+ * failure policy) instead of transcribing the tracks that DID seal. Also gives the pre-existing
+ * `stt_pending` retryable path real backoff (previously the compiled step carried no backoff).
+ */
+export const STT_TRANSCRIBE_RETRY_POLICY: WorkflowRetryPolicy = {
+  max_attempts: 10,
+  backoff_ms: 10_000,
+};
+
 export interface SttSessionNodeConfig {
   readonly spec: ProductSpec;
   readonly adapter: SttAdapter;
@@ -129,6 +156,15 @@ export interface SttSessionNodeConfig {
   readonly mediaPrep?: (params: { session_id: string; track: string }) => Promise<void>;
   /** Where a media-prep hook THROW is logged (default `console`); the typed-err path logs in the hook. */
   readonly logger?: MediaPrepLogger;
+  /** Wall-clock source (ms epoch) for the completeness bound; injectable for deterministic tests. Default `Date.now`. */
+  readonly now?: () => number;
+  /**
+   * How long (ms, measured from the current run execution's start `journal.created_at`) to WAIT for a
+   * still-recording sibling track to seal before transcribing whatever sealed. Bounds the dual-track
+   * completeness wait so an abandoned recording track cannot stall the run forever. Default
+   * STT_INCOMPLETE_WAIT_MS.
+   */
+  readonly incompleteWaitMs?: number;
 }
 
 /**
@@ -142,6 +178,8 @@ export interface SttSessionNodeConfig {
 export function makeSttTranscribeSessionNode(cfg: SttSessionNodeConfig): CapabilityNodeHandler {
   const tracksStore = cfg.audioTracksStore ?? AUDIO_TRACKS_STORE;
   const spanRef = cfg.spec.grounding?.source_span_contract;
+  const now = cfg.now ?? (() => Date.now());
+  const waitMs = cfg.incompleteWaitMs ?? STT_INCOMPLETE_WAIT_MS;
 
   return async (ctx): Promise<CapabilityInvocationResult> => {
     const sessionId = eventScopeId(ctx, 'session_id');
@@ -167,6 +205,55 @@ export function makeSttTranscribeSessionNode(cfg: SttSessionNodeConfig): Capabil
       .map((r) => (typeof r.track === 'string' ? r.track : ''))
       .filter((t) => t.length > 0)
       .sort();
+
+    // Completeness guard (the dual-track finalize race): the `session_finalized` event fires as soon as
+    // ONE track SEALS, but a multi-track session can still have a sibling track mid-upload
+    // (`status='recording'`) at that instant. Transcribing the completed subset now would PERMANENTLY
+    // drop the still-recording track. So while any track is still recording we WAIT (retryable): the
+    // durable engine re-invokes this node (STT_TRANSCRIBE_RETRY_POLICY, wired in compose) and a later
+    // attempt re-reads the now-complete set and transcribes ALL sealed tracks. The wait is BOUNDED from
+    // the CURRENT run execution's start (`journal.created_at`, which the engine stamps fresh per
+    // execute()), so an ABANDONED recording track (one that never seals — client crash / network drop)
+    // can never stall the run forever: once the bound elapses we proceed with WHATEVER sealed.
+    // The bound is STABLE across the in-process retry loop (one execute() reuses one journal object). It
+    // does NOT survive a crash + journal-resume: a fresh execute() stamps a fresh created_at, so the
+    // window RESTARTS from the resume instant. That reset is strictly SAFE-DIRECTION — it only ever
+    // LENGTHENS the wait, never drops a straggler early and never yields a zero-run; and repeated-crash
+    // divergence is bounded by the engine's max-recovery dead-letter, so it cannot loop forever.
+    const stillRecording = await cfg.db.select(tracksStore, {
+      session_id: sessionId,
+      status: 'recording',
+    });
+    if (stillRecording.length > 0) {
+      const startedAtMs = Date.parse(ctx.journal.created_at);
+      const elapsedMs = Number.isFinite(startedAtMs)
+        ? now() - startedAtMs
+        : Number.POSITIVE_INFINITY;
+      if (elapsedMs < waitMs) {
+        return fail(
+          'stt_tracks_incomplete',
+          `session '${sessionId}' still has ${stillRecording.length} track(s) recording ` +
+            `(${tracks.length} already sealed); waiting for completeness ` +
+            `(${elapsedMs}ms of ${waitMs}ms) before transcribing.`,
+          true,
+        );
+      }
+      // Bound exceeded — a track never sealed. Proceed with whatever sealed (never stall forever), but
+      // LOUD: an operator must see that a track was DROPPED from this session's transcription.
+      (cfg.logger ?? CONSOLE_MEDIA_PREP_LOGGER).error(
+        JSON.stringify({
+          event: 'stt_session_incomplete_bound_exceeded',
+          scope: 'stt.transcribe_session',
+          tenant_id: cfg.tenantId,
+          session_id: sessionId,
+          sealed_tracks: tracks.length,
+          still_recording: stillRecording.length,
+          waited_ms: elapsedMs,
+          bound_ms: waitMs,
+        }),
+      );
+    }
+
     if (tracks.length === 0) {
       return fail(
         'stt_no_sealed_tracks',

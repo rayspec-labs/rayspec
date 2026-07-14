@@ -284,4 +284,31 @@ describe.skipIf(!hasDb)('Audio/Media → durable workflow seam, composed', () =>
     expect(enqueuer.calls[1]?.deduped).toBe(true);
     expect(enqueuer.calls[0]?.tenantId).toBe(a.orgId);
   });
+
+  it('STAGGERED finalize (a sibling track still recording) STILL enqueues EXACTLY ONE run — never zero', async () => {
+    // The dual-track completeness fix keeps finalize's emit UNCONDITIONAL: the `session_finalized`
+    // event fires the moment the FIRST track seals, even while a sibling is still `recording`. That
+    // guarantees ≥1 durable run for the session (the run's own completeness guard then waits for the
+    // straggler before transcribing). A producer-side "withhold until every track sealed" would emit
+    // ZERO here and the session would never be transcribed — this is the anti-regression proof.
+    const a = await principal('d2i-stagger@example.com', 'D2iStagger');
+    const enqueuer = wireWorkflow(a.orgId);
+
+    // mic + system both received a chunk (both track rows exist, `recording`), but only mic finalizes.
+    expect((await postChunk('s3', 'mic', 0, a.token, new Uint8Array([1]))).status).toBe(200);
+    expect((await postChunk('s3', 'system', 0, a.token, new Uint8Array([2]))).status).toBe(200);
+    expect((await finalize('s3', 'mic', a.token, 1)).status).toBe(200); // system stays recording
+
+    // Exactly ONE run enqueued despite the session being INCOMPLETE at finalize time (never zero).
+    expect(enqueuer.calls).toHaveLength(1);
+    expect(enqueuer.distinctRunIds()).toHaveLength(1);
+    expect(enqueuer.calls[0]?.deduped).toBe(false);
+    expect(enqueuer.calls[0]?.tenantId).toBe(a.orgId);
+
+    // system is still mid-upload — its finalize would later re-emit the SAME session-scoped event and
+    // dedup to this SAME run (proven by the DUAL-TRACK case above); here we pin the ≥1-run guarantee.
+    expect((await finalize('s3', 'system', a.token, 1)).status).toBe(200);
+    expect(enqueuer.distinctRunIds()).toHaveLength(1); // still one run after the sibling seals
+    expect(enqueuer.calls[1]?.deduped).toBe(true);
+  });
 });

@@ -15,6 +15,7 @@ import { composeProductDeploy, makeFailSoftMediaPrep, type ProductYamlRollout } 
 import { deriveProductStores } from './derive-stores.js';
 import { ProductComposeError } from './errors.js';
 import { mountedTriggerEventDescriptors } from './event-vocabulary.js';
+import { STT_INCOMPLETE_WAIT_MS } from './nodes.js';
 import {
   FIELDLOG_YAML,
   fixtureStores,
@@ -115,6 +116,18 @@ describe('composeProductDeploy — healthy composition', () => {
       'persist',
     ]);
     expect(composed.triggerEvents).toEqual(['audio_input.finalized_session']);
+
+    // Dual-track completeness plumbing: compose wires the transcribe step a retry policy with REAL
+    // backoff so the node's completeness wait (a `retryable_failure`) actually re-invokes it — the
+    // bridge compiler alone sets `max_attempts` but no `backoff_ms`, which would fire retries instantly
+    // and defeat the wait. The retry WINDOW must exceed the node's completeness bound so the node
+    // proceeds-with-whatever-sealed rather than exhausting into a fail-closed run failure.
+    const transcribeStep = wf?.steps.find((s) => s.id === 'transcribe');
+    expect(transcribeStep?.retry_policy?.backoff_ms ?? 0).toBeGreaterThan(0);
+    const window =
+      ((transcribeStep?.retry_policy?.max_attempts ?? 1) - 1) *
+      (transcribeStep?.retry_policy?.backoff_ms ?? 0);
+    expect(window).toBeGreaterThan(STT_INCOMPLETE_WAIT_MS);
 
     // The composed store read surface: audio capability stores + the deployment's product stores.
     const storeNames = composed.engineSpec.stores.map((s) => s.name);
