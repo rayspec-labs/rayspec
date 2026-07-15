@@ -36,7 +36,7 @@ import {
   reconcileCost,
 } from '@rayspec/core';
 import { schema, type TenantDb } from '@rayspec/db';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { makeDispatchTool } from './dispatch.js';
 import { EventPipeline } from './event-pipeline.js';
 import { rehydrateConversation } from './rehydrate.js';
@@ -198,7 +198,7 @@ export function makeJournalSink(
       const providerCost = step.providerCostUsd ?? null;
       const recon = reconcileCost(computed.costUsd, providerCost);
       const billed = isSubscriptionBilling(step.authMode) ? 0 : computed.costUsd;
-      await tdb.insert(schema.journalSteps, {
+      const values = {
         stepId,
         runId,
         // tenantId is auto-stamped by the chokepoint.
@@ -222,6 +222,48 @@ export function makeJournalSink(
         latencyMs: String(step.latencyMs),
         status: step.status,
         authMode: step.authMode,
+      };
+      // Heal a previously-FAILED attempt at this step. A step's idempotencyKey occupies exactly one
+      // slot in the (tenant_id, run_id, idempotency_key) unique index. A `status='error'` row from a
+      // transient failure (e.g. a 429) must NOT permanently reserve that slot: a re-run that reaches
+      // the same step re-executes it and records again under the same key — a plain insert would then
+      // collide (unique_violation) and abort the whole run, discarding the successful output.
+      //
+      // So record() is a CONDITIONAL upsert on that index: on conflict, REPLACE the row ONLY when the
+      // existing row is an error (the `setWhere` predicate references the pre-update target row's
+      // status). An existing `status='ok'` row is authoritative — the `setWhere` is false for it, so
+      // the write is a no-op and a completed step's output can never be clobbered by a later attempt.
+      // This keeps the ok-replay path intact (a succeeded step is still returned verbatim on re-run)
+      // while letting a failed attempt be superseded (error→ok heal, or the later of two errors wins).
+      // Column values are refreshed from the winning attempt; createdAt is reset so the healed row
+      // reflects when it actually succeeded.
+      await tdb.insert(schema.journalSteps, values).onConflictDoUpdate({
+        target: [
+          schema.journalSteps.tenantId,
+          schema.journalSteps.runId,
+          schema.journalSteps.idempotencyKey,
+        ],
+        set: {
+          stepId: values.stepId,
+          backend: values.backend,
+          type: values.type,
+          inputHash: values.inputHash,
+          output: values.output,
+          inputTokens: values.inputTokens,
+          outputTokens: values.outputTokens,
+          totalTokens: values.totalTokens,
+          costUsd: values.costUsd,
+          providerCostUsd: values.providerCostUsd,
+          billedCostUsd: values.billedCostUsd,
+          costDrift: values.costDrift,
+          producedBy: values.producedBy,
+          pricingVersion: values.pricingVersion,
+          latencyMs: values.latencyMs,
+          status: values.status,
+          authMode: values.authMode,
+          createdAt: sql`now()`,
+        },
+        setWhere: eq(schema.journalSteps.status, 'error'),
       });
       return stepId;
     },

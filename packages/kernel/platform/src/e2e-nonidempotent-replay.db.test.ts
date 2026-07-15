@@ -22,8 +22,11 @@ import type {
   RunResult,
   ToolDispatchResult,
 } from '@rayspec/core';
+import { schema } from '@rayspec/db';
+import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { runAgent } from './run-core.js';
+import { isRunTainted } from './run-taint.js';
 import {
   forTenant,
   makeTestDb,
@@ -200,5 +203,109 @@ describe('E2E #10: non-idempotent tool through dispatchTool — fail-closed on R
     expect(replay.status).toBe('completed');
     expect(Object.hasOwn(replay, 'output')).toBe(true);
     expect(Object.hasOwn(replay, 'error')).toBe(true);
+  });
+});
+
+/**
+ * A backend where the non-idempotent tool SUCCEEDS (the card is charged) but the follow-up llm step
+ * fails transiently — so the run journals a `status='error'` step AND is quarantined (tainted). On a
+ * re-run, the errored step is HEALED, but the taint gate must STILL refuse to re-fire the side effect.
+ * This proves the error-step heal does not open a hole in the non-idempotent-taint quarantine.
+ */
+class ChargeThenTransientLlmBackend implements Backend {
+  readonly id = 'openai' as const;
+  lastDispatch?: ToolDispatchResult;
+  async resolveAuth(): Promise<AuthMode> {
+    return 'api-key';
+  }
+  async run(spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
+    const llmKey = `llm:${spec.name}`;
+    // Marshal the non-idempotent tool exactly as a real adapter does (on BOTH live + replay).
+    if (ctx.dispatchTool) {
+      this.lastDispatch = await ctx.dispatchTool('charge_card', { amount: 42 }, 'call-charge-1');
+    }
+    if (ctx.replay) {
+      const cached = await ctx.journal.lookup(llmKey);
+      if (!cached) {
+        // The earlier llm attempt errored (no OK row) → re-execute + record the success (the heal).
+        await ctx.journal.record({
+          type: 'llm',
+          idempotencyKey: llmKey,
+          inputHash: `hash:${spec.input}`,
+          output: { finalText: 'healed summary' },
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+          costUsd: 0,
+          model: spec.model,
+          latencyMs: 1,
+          status: 'ok',
+          authMode: 'api-key',
+        });
+      }
+    } else {
+      // LIVE: the charge fired (taint marker written by the chokepoint) but the summary step 429s.
+      await ctx.journal.record({
+        type: 'llm',
+        idempotencyKey: llmKey,
+        inputHash: `hash:${spec.input}`,
+        output: null,
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        costUsd: 0,
+        model: spec.model,
+        latencyMs: 1,
+        status: 'error',
+        authMode: 'api-key',
+      });
+    }
+    return {
+      runId: ctx.runId,
+      backend: this.id,
+      authMode: 'api-key',
+      status: ctx.replay ? 'completed' : 'error',
+      finalText: ctx.replay ? 'healed summary' : '',
+      output: null,
+      error: ctx.replay ? null : 'transient upstream error',
+      errorClass: null,
+      conversation: [],
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      costUsd: 0,
+      stepCount: 1,
+    };
+  }
+}
+
+describe('non-idempotent-taint quarantine survives an error-step heal', () => {
+  it('a run that charged then errored heals its step on re-run WITHOUT re-firing the charge or losing the taint', async () => {
+    const tdb = forTenant(db, TENANT_A);
+    const liveBackend = new ChargeThenTransientLlmBackend();
+    const live = await runAgent(tdb, liveBackend, spec(), { tools: [nonIdempotentTool()] });
+
+    // Live: the card was charged exactly once, the run errored on the summary step, and the run is
+    // now quarantined (the taint marker was written before the side effect).
+    expect(sideEffectFires).toBe(1);
+    expect(live.status).toBe('error');
+    expect(await isRunTainted(tdb, live.runId)).toBe(true);
+
+    // Re-run the SAME run. WITHOUT the heal, re-recording the errored llm step collides (23505) and
+    // runAgent rejects; WITH it the run completes — but the taint gate must STILL hold.
+    const replayBackend = new ChargeThenTransientLlmBackend();
+    const replay = await runAgent(tdb, replayBackend, spec(), {
+      replayRunId: live.runId,
+      tools: [nonIdempotentTool()],
+    });
+
+    // The non-idempotent tool did NOT re-fire (the fail-closed replay contract held) ...
+    expect(sideEffectFires).toBe(1);
+    expect(replayBackend.lastDispatch?.kind).toBe('tool_error');
+    // ... the run is STILL tainted (the heal did not clear the quarantine) ...
+    expect(await isRunTainted(tdb, live.runId)).toBe(true);
+    // ... and the errored llm step healed to ok with no conflict.
+    expect(replay.status).toBe('completed');
+    const llmRows = await db
+      .select()
+      .from(schema.journalSteps)
+      .where(and(eq(schema.journalSteps.runId, live.runId), eq(schema.journalSteps.type, 'llm')));
+    expect(llmRows).toHaveLength(1);
+    expect(llmRows[0]?.status).toBe('ok');
+    expect(llmRows[0]?.output).toEqual({ finalText: 'healed summary' });
   });
 });

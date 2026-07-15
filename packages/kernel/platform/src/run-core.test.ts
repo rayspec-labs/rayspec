@@ -10,7 +10,7 @@ import type { AgentSpec, Backend, NeutralTool, RunContext, RunResult } from '@ra
 import { schema } from '@rayspec/db';
 import { and, asc, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { runAgent } from './run-core.js';
+import { makeJournalSink, runAgent } from './run-core.js';
 import {
   forTenant,
   makeTestDb,
@@ -465,5 +465,261 @@ describe('run-core replay', () => {
         and(eq(schema.journalSteps.runId, live.runId), eq(schema.journalSteps.tenantId, TENANT_A)),
       );
     expect(steps).toHaveLength(1);
+  });
+});
+
+/**
+ * A backend whose first (live) attempt at a step fails transiently — it journals a `status='error'`
+ * step (a 429/5xx class) and returns an error — but whose re-run of that SAME step succeeds. On the
+ * re-run the journal `lookup()` finds no cached OK row (the error is filtered out), so the backend
+ * re-executes and re-records under the SAME idempotency key — the exact path that a plain insert
+ * would collide on (the failed row still occupies the unique slot). Used to prove the error step is
+ * HEALED (replaced by the success) rather than permanently bricking the re-run.
+ */
+class TransientThenHealBackend implements Backend {
+  readonly id = 'openai' as const;
+  liveExecutions = 0;
+
+  async resolveAuth() {
+    return 'api-key' as const;
+  }
+
+  async run(spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
+    const idemKey = `llm:${spec.name}`;
+    if (ctx.replay) {
+      const cached = await ctx.journal.lookup(idemKey);
+      if (cached) {
+        // A previously-succeeded step: return it verbatim WITHOUT re-executing (ok-replay).
+        const co = cached.output as { finalText?: string } | null;
+        return this.result(ctx, co?.finalText ?? '', 'completed', 0);
+      }
+      // No OK row (the earlier attempt errored) → re-execute and record the success (the heal).
+      this.liveExecutions += 1;
+      await ctx.journal.record({
+        type: 'llm',
+        idempotencyKey: idemKey,
+        inputHash: `hash:${spec.input}`,
+        output: { finalText: 'healed answer' },
+        usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+        costUsd: 0,
+        latencyMs: 1,
+        status: 'ok',
+        authMode: 'api-key',
+      });
+      return this.result(ctx, 'healed answer', 'completed', 1);
+    }
+    // First, LIVE attempt: the step fails transiently (a 429) → journal an error row + return an error.
+    this.liveExecutions += 1;
+    await ctx.journal.record({
+      type: 'llm',
+      idempotencyKey: idemKey,
+      inputHash: `hash:${spec.input}`,
+      output: null,
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      costUsd: 0,
+      latencyMs: 1,
+      status: 'error',
+      authMode: 'api-key',
+    });
+    return this.result(ctx, '', 'error', 1);
+  }
+
+  private result(
+    ctx: RunContext,
+    finalText: string,
+    status: 'completed' | 'error',
+    stepCount: number,
+  ): RunResult {
+    return {
+      runId: ctx.runId,
+      backend: this.id,
+      authMode: 'api-key',
+      status,
+      finalText,
+      output: null,
+      error: status === 'error' ? 'transient upstream error' : null,
+      errorClass: null,
+      conversation:
+        status === 'error'
+          ? []
+          : [{ role: 'assistant', index: 0, parts: [{ kind: 'text', text: finalText }] }],
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      costUsd: 0,
+      stepCount,
+    };
+  }
+}
+
+describe('run-core error-step healing on re-run', () => {
+  const cost = { model: 'gpt-4.1-mini', at: '2026-01-01T00:00:00.000Z' };
+  const RUN = 'heal-run';
+  const KEY = 'llm:heal';
+
+  it('heals a failed step end-to-end: a re-run of a step that errored persists the success with NO conflict', async () => {
+    const tdb = forTenant(db, TENANT_A);
+    const backend = new TransientThenHealBackend();
+
+    // First live run: the step fails transiently → one error row in the journal.
+    const live = await runAgent(tdb, backend, spec, {});
+    expect(live.status).toBe('error');
+    const afterLive = await db
+      .select()
+      .from(schema.journalSteps)
+      .where(eq(schema.journalSteps.runId, live.runId));
+    expect(afterLive).toHaveLength(1);
+    expect(afterLive[0]?.status).toBe('error');
+
+    // Re-run the SAME run via the replay path. WITHOUT the conflict handling the re-record collides
+    // on the unique index (23505) → runAgent rejects → the paid success is discarded. WITH it, the
+    // error row is REPLACED by the success and the run completes.
+    const replay = await runAgent(tdb, backend, spec, { replayRunId: live.runId });
+    expect(replay.status).toBe('completed');
+    expect(replay.finalText).toBe('healed answer');
+
+    const afterReplay = await db
+      .select()
+      .from(schema.journalSteps)
+      .where(eq(schema.journalSteps.runId, live.runId));
+    // Exactly ONE row for the step (the error was healed, not duplicated), now status='ok'.
+    expect(afterReplay).toHaveLength(1);
+    expect(afterReplay[0]?.status).toBe('ok');
+    expect(afterReplay[0]?.output).toEqual({ finalText: 'healed answer' });
+  });
+
+  it('heals a failed step at the sink: re-recording an error step under the same key REPLACES it', async () => {
+    const sink = makeJournalSink(forTenant(db, TENANT_A), RUN, 'openai', false, cost);
+    // First attempt fails transiently → an error row occupies the (tenant,run,key) unique slot.
+    await sink.record({
+      type: 'llm',
+      idempotencyKey: KEY,
+      inputHash: 'h',
+      output: null,
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      costUsd: 0,
+      latencyMs: 1,
+      status: 'error',
+      authMode: 'api-key',
+    });
+    // The re-run succeeds under the SAME key. Without the fix this throws 23505; with it the error
+    // row is replaced by the success.
+    await sink.record({
+      type: 'llm',
+      idempotencyKey: KEY,
+      inputHash: 'h',
+      output: { finalText: 'healed' },
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      costUsd: 0,
+      latencyMs: 1,
+      status: 'ok',
+      authMode: 'api-key',
+    });
+
+    const rows = await db
+      .select()
+      .from(schema.journalSteps)
+      .where(and(eq(schema.journalSteps.runId, RUN), eq(schema.journalSteps.idempotencyKey, KEY)));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe('ok');
+    expect(rows[0]?.output).toEqual({ finalText: 'healed' });
+  });
+
+  it('never overwrites an ok row: a later same-key record leaves the completed output authoritative', async () => {
+    const sink = makeJournalSink(forTenant(db, TENANT_A), RUN, 'openai', false, cost);
+    await sink.record({
+      type: 'llm',
+      idempotencyKey: KEY,
+      inputHash: 'h',
+      output: { finalText: 'ORIGINAL' },
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      costUsd: 0,
+      latencyMs: 1,
+      status: 'ok',
+      authMode: 'api-key',
+    });
+    // A later attempt under the SAME key must NOT clobber the succeeded row — only error rows are
+    // replaced (the setWhere guard). A naive unconditional upsert would overwrite ORIGINAL with STALE
+    // (this assertion fails it); the missing conflict handling would 23505 (also a failure). Only the
+    // conditional heal leaves the completed output authoritative.
+    await sink.record({
+      type: 'llm',
+      idempotencyKey: KEY,
+      inputHash: 'h',
+      output: { finalText: 'STALE' },
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      costUsd: 0,
+      latencyMs: 1,
+      status: 'ok',
+      authMode: 'api-key',
+    });
+
+    const rows = await db
+      .select()
+      .from(schema.journalSteps)
+      .where(and(eq(schema.journalSteps.runId, RUN), eq(schema.journalSteps.idempotencyKey, KEY)));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe('ok');
+    expect(rows[0]?.output).toEqual({ finalText: 'ORIGINAL' });
+  });
+
+  it('double error under the same key: the later attempt wins cleanly, no conflict', async () => {
+    const sink = makeJournalSink(forTenant(db, TENANT_A), RUN, 'openai', false, cost);
+    await sink.record({
+      type: 'llm',
+      idempotencyKey: KEY,
+      inputHash: 'h',
+      output: { attempt: 1 },
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      costUsd: 0,
+      latencyMs: 1,
+      status: 'error',
+      authMode: 'api-key',
+    });
+    await sink.record({
+      type: 'llm',
+      idempotencyKey: KEY,
+      inputHash: 'h',
+      output: { attempt: 2 },
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      costUsd: 0,
+      latencyMs: 1,
+      status: 'error',
+      authMode: 'api-key',
+    });
+
+    const rows = await db
+      .select()
+      .from(schema.journalSteps)
+      .where(and(eq(schema.journalSteps.runId, RUN), eq(schema.journalSteps.idempotencyKey, KEY)));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe('error');
+    expect(rows[0]?.output).toEqual({ attempt: 2 });
+  });
+
+  it('an ok step is left untouched by a re-run: the same row (stepId + output) survives replay', async () => {
+    const tdb = forTenant(db, TENANT_A);
+    const backend = new FakeBackend();
+    const live = await runAgent(tdb, backend, spec, {});
+    expect(backend.liveCalls).toBe(1);
+
+    const before = await db
+      .select()
+      .from(schema.journalSteps)
+      .where(eq(schema.journalSteps.runId, live.runId));
+    expect(before).toHaveLength(1);
+    expect(before[0]?.status).toBe('ok');
+
+    await runAgent(tdb, backend, spec, { replayRunId: live.runId });
+    // The model was NOT re-called on replay (the ok-replay short-circuit — no re-record).
+    expect(backend.liveCalls).toBe(1);
+
+    const after = await db
+      .select()
+      .from(schema.journalSteps)
+      .where(eq(schema.journalSteps.runId, live.runId));
+    expect(after).toHaveLength(1);
+    // Same row identity (never replaced) + byte-identical output — a completed step is authoritative.
+    expect(after[0]?.stepId).toBe(before[0]?.stepId);
+    expect(after[0]?.status).toBe('ok');
+    expect(after[0]?.output).toEqual(before[0]?.output);
   });
 });
