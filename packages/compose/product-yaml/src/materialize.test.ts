@@ -129,6 +129,101 @@ describe('applyGroundingPolicy (prune + drop, declaration-driven)', () => {
   });
 });
 
+describe('applyGroundingPolicy — a declared quote_field with no quote is an unquoted claim', () => {
+  // Mutate the parsed fixture so the `finding` artifact declares a quote_field and the grounding
+  // policy carries the given on_unquoted_claim mode. Citations stay in-set so ONLY the quote path
+  // is under test; a product that declares NO quote_field is exercised by the tests above.
+  function specWithQuoteField(onUnquotedClaim: 'fail' | 'prune' | 'drop' | 'ignore') {
+    const base = parseFixture();
+    return {
+      ...base,
+      grounding: { ...base.grounding, on_unquoted_claim: onUnquotedClaim },
+      artifacts: base.artifacts.map((a) =>
+        a.kind === 'finding' ? { ...a, provenance: { ...a.provenance, quote_field: 'quote' } } : a,
+      ),
+    };
+  }
+
+  // One in-set-cited finding whose declared quote_field value is absent/empty/blank — nothing to
+  // verify against a span, so the member is an unquoted claim.
+  function candidateWithQuote(quote: unknown) {
+    return {
+      headline: 'Weekly sync',
+      body: 'Notes body.',
+      findings: [
+        { text: 'grounded claim', evidence: ['sp-1'], ...(quote === undefined ? {} : { quote }) },
+      ],
+    };
+  }
+
+  it('fails when a declared quote_field is empty and on_unquoted_claim is fail', () => {
+    expect(() =>
+      applyGroundingPolicy(
+        specWithQuoteField('fail'),
+        candidateWithQuote(''),
+        'notetool.notes',
+        CLOSED,
+      ),
+    ).toThrow(MaterializeError);
+    expect(() =>
+      applyGroundingPolicy(
+        specWithQuoteField('fail'),
+        candidateWithQuote(''),
+        'notetool.notes',
+        CLOSED,
+      ),
+    ).toThrow(/quote_field/);
+  });
+
+  it('fails identically when the declared quote_field key is entirely absent (missing == empty)', () => {
+    expect(() =>
+      applyGroundingPolicy(
+        specWithQuoteField('fail'),
+        candidateWithQuote(undefined),
+        'notetool.notes',
+        CLOSED,
+      ),
+    ).toThrow(/quote_field/);
+  });
+
+  it('drops the member (never persists it) when the empty-quote mode is drop', () => {
+    const app = applyGroundingPolicy(
+      specWithQuoteField('drop'),
+      candidateWithQuote(''),
+      'notetool.notes',
+      CLOSED,
+    );
+    const finding = app.kinds.find((k) => k.artifact.kind === 'finding');
+    expect(finding?.members).toHaveLength(0);
+    expect(app.droppedMembers).toBe(1);
+    expect(app.unsupportedClaims).toBe(1);
+  });
+
+  it('keeps the member as an advisory finding when the empty-quote mode is ignore', () => {
+    const app = applyGroundingPolicy(
+      specWithQuoteField('ignore'),
+      candidateWithQuote(''),
+      'notetool.notes',
+      CLOSED,
+    );
+    const finding = app.kinds.find((k) => k.artifact.kind === 'finding');
+    expect(finding?.members.map((m) => m.payload.text)).toEqual(['grounded claim']);
+    expect(app.unsupportedClaims).toBe(1);
+  });
+
+  it('does NOT fire for a member whose declared quote IS a verbatim subset of a cited span', () => {
+    const app = applyGroundingPolicy(
+      specWithQuoteField('fail'),
+      candidateWithQuote('the first source span text'), // exact text of the cited sp-1 span
+      'notetool.notes',
+      CLOSED,
+    );
+    const finding = app.kinds.find((k) => k.artifact.kind === 'finding');
+    expect(finding?.members.map((m) => m.payload.text)).toEqual(['grounded claim']);
+    expect(app.unsupportedClaims).toBe(0);
+  });
+});
+
 describe('buildCollectionRows (the canonical row contract)', () => {
   const spec = parseFixture();
 
