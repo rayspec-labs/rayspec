@@ -37,4 +37,4 @@ export {
   invokeStreamRouteHandler,
   invokeTriggerHandler,
 } from './route-init.js';
-export { makeHandlerDb } from './store-facade.js';
+export { makeHandlerDb, StoreInputError } from './store-facade.js';

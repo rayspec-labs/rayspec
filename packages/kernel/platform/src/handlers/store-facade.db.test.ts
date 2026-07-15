@@ -21,7 +21,7 @@ import type { StoreSpec } from '@rayspec/spec';
 import { eq, getTableColumns, sql } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { makeHandlerDb } from './store-facade.js';
+import { makeHandlerDb, StoreInputError } from './store-facade.js';
 
 const SCHEMA = 'rayspec_test_handlerdb';
 const TENANT_A = '00000000-0000-0000-0000-0000000000aa';
@@ -325,6 +325,63 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     expect(await bDb.select('meetings')).toHaveLength(0);
   });
 
+  it('insert stamps created_by from the route actor un-spoofably (the actor is the sole writer)', async () => {
+    testsRan += 1;
+    const actor = 'user:11111111-1111-1111-1111-111111111111';
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables, actor);
+    const inserted = await aDb.insert('meetings', { title: 'stamped', completed: false });
+    // The injected created_by column carries the server-derived caller identity (RED before the stamp:
+    // it was left NULL — nobody wrote it on the handler path).
+    expect(inserted.created_by).toBe(actor);
+    // UN-SPOOFABLE: a handler can NEVER supply created_by — it is a server-controlled column, rejected
+    // fail-closed — so a bogus value never survives; the actor stamp is the only path to the column.
+    await expect(
+      aDb.insert('meetings', { title: 'x', completed: false, created_by: 'user:evil' }),
+    ).rejects.toThrow(/may not set server-controlled column 'created_by'/);
+  });
+
+  it('an api-key principal stamps created_by as key:<apiKeyId>', async () => {
+    testsRan += 1;
+    const actor = 'key:22222222-2222-2222-2222-222222222222';
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables, actor);
+    const inserted = await aDb.insert('meetings', { title: 'k', completed: false });
+    expect(inserted.created_by).toBe(actor);
+  });
+
+  it('ADDITIVE: with NO route actor bound (a tool handler / any 2-arg caller) created_by stays NULL', async () => {
+    testsRan += 1;
+    // The pre-existing 2-arg facade — no actor threaded — must behave byte-identically: created_by NULL.
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    const inserted = await aDb.insert('meetings', { title: 'noactor', completed: false });
+    expect(inserted.created_by).toBeNull();
+  });
+
+  it('upsert stamps created_by on insert; a conflict-update keeps the ORIGINAL creator (create-only)', async () => {
+    testsRan += 1;
+    const actor1 = 'user:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    const actor2 = 'user:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+    const db1 = makeHandlerDb(forTenant(db, TENANT_A), productTables, actor1);
+    // First upsert → INSERT arm → created_by stamped with actor1 (RED before the stamp: NULL).
+    const first = await db1.upsert('meetings', ['business_key'], {
+      title: 'first',
+      completed: false,
+      business_key: 'K-created-by',
+    });
+    expect(first?.created_by).toBe(actor1);
+    // A second upsert by a DIFFERENT actor on the SAME (tenant, business_key) → DO-UPDATE arm.
+    const db2 = makeHandlerDb(forTenant(db, TENANT_A), productTables, actor2);
+    const second = await db2.upsert('meetings', ['business_key'], {
+      title: 'second',
+      completed: true,
+      business_key: 'K-created-by',
+    });
+    // The row was UPDATED (title changed) …
+    expect(second?.title).toBe('second');
+    // … but created_by is CREATE-ONLY: it stays the ORIGINAL creator, never overwritten by actor2
+    // (RED without excluding created_by from the DO-UPDATE SET: it would flip to actor2).
+    expect(second?.created_by).toBe(actor1);
+  });
+
   it('select honors a snake_case column-equality filter (mapped to the camel Drizzle key)', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
@@ -426,6 +483,47 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     await expect(aDb.update('meetings', { id: row.id }, { region: 'us' })).rejects.toThrow(
       /may not set server-controlled column 'region'/,
     );
+  });
+
+  it('input-validation guards reject with a StoreInputError carrying a generic, non-leaking public message', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // Capture the thrown error so we can inspect its TYPE + the client-facing public message (a plain
+    // `.rejects.toThrow` only sees the internal message).
+    const capture = async (p: Promise<unknown>): Promise<unknown> => {
+      try {
+        await p;
+      } catch (e) {
+        return e;
+      }
+      throw new Error('expected the guard to throw');
+    };
+    const unknownColumn = await capture(
+      aDb.insert('meetings', { title: 'x', completed: false, ghost_col: 1 }),
+    );
+    const serverControlled = await capture(
+      aDb.insert('meetings', { title: 'x', completed: false, tenant_id: TENANT_B }),
+    );
+    const injection = await capture(
+      aDb.insert('meetings', {
+        title: sql`(SELECT secret FROM other_tenant)` as unknown as string,
+        completed: false,
+      }),
+    );
+    const badEnum = await capture(aDb.insert('tickets', { title: 't', status: 'not_a_status' }));
+
+    for (const err of [unknownColumn, serverControlled, injection, badEnum]) {
+      // TYPED as an input error → the api layer classifies it as HTTP 400 (RED before: a plain Error →
+      // it fell through onError to an INTERNAL 500).
+      expect(err).toBeInstanceOf(StoreInputError);
+      const publicMessage = (err as StoreInputError).publicMessage;
+      expect(publicMessage.length).toBeGreaterThan(0);
+      // NO-LEAK: the client-facing message never carries an internal — not the facade prefix, a store or
+      // column name, the offending value, a DB/SQL/constraint term, or the enum member.
+      expect(publicMessage).not.toMatch(
+        /HandlerDb|ghost_col|tenant_id|meetings|tickets|not_a_status|secret|SELECT|SQL|constraint/i,
+      );
+    }
   });
 
   it('#2 defense-in-depth: even at the TenantDb layer a foreign tenant_id lands under the run tenant', async () => {
@@ -594,6 +692,35 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     await expect(
       aDb.insert('meetings', { title: 'bad', completed: false, scheduled_at: 'not-a-date' }),
     ).rejects.toThrow(/not a valid date/);
+  });
+
+  it('an invalid timestamp value is TYPED as an input error carrying a generic, non-leaking public message (a client 400, not a server 500)', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // Capture the thrown error to inspect its TYPE + the client-facing public message.
+    let err: unknown;
+    try {
+      await aDb.insert('meetings', {
+        title: 'bad',
+        completed: false,
+        scheduled_at: 'not-a-real-date',
+      });
+      throw new Error('expected the invalid-date guard to reject');
+    } catch (e) {
+      err = e;
+    }
+    // TYPED as an input error → the api layer classifies it as HTTP 400 (RED before: a plain Error fell
+    // through onError to an INTERNAL 500, misreporting a bad request as a server incident).
+    expect(err).toBeInstanceOf(StoreInputError);
+    const publicMessage = (err as StoreInputError).publicMessage;
+    expect(publicMessage.length).toBeGreaterThan(0);
+    // NO-LEAK: the client-facing message never carries an internal — not the column name, the offending
+    // value, the facade prefix, the column type, or the store name.
+    expect(publicMessage).not.toMatch(
+      /HandlerDb|scheduled_at|not-a-real-date|timestamp|meetings|JSON/i,
+    );
+    // The DETAILED text stays available server-side (log / throw-site), never sent to the client.
+    expect((err as StoreInputError).message).toMatch(/not a valid date/);
   });
 
   it('TenantDb backstop: update with tenantId in the SET does NOT move the row', async () => {
@@ -878,6 +1005,31 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     );
     // TQ-5: limit:0 is VALID — returns 0 rows (never "all rows").
     expect(await aDb.select('meetings', {}, { limit: 0 })).toHaveLength(0);
+  });
+
+  it('an out-of-range limit/offset is TYPED as an input error carrying a generic, non-leaking public message (a client 400, not a server 500)', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // Every out-of-range pagination value (negative limit, NaN limit, negative offset) is a CLIENT bad
+    // request, not a server fault — assert the WHOLE invariant (each rejects TYPED + leaks nothing).
+    const cases = [{ limit: -1 }, { limit: Number.NaN }, { offset: -5 }];
+    for (const opts of cases) {
+      let err: unknown;
+      try {
+        await aDb.select('meetings', {}, opts);
+        throw new Error(`expected the pagination guard to reject ${JSON.stringify(opts)}`);
+      } catch (e) {
+        err = e;
+      }
+      // TYPED as an input error → HTTP 400 (RED before: a plain Error fell through onError to a 500).
+      expect(err).toBeInstanceOf(StoreInputError);
+      const publicMessage = (err as StoreInputError).publicMessage;
+      expect(publicMessage.length).toBeGreaterThan(0);
+      // NO-LEAK: never the field name, the offending value, the facade prefix, or DB text.
+      expect(publicMessage).not.toMatch(/HandlerDb|\blimit\b|\boffset\b|non-negative|meetings/i);
+      // The DETAILED text stays available server-side only.
+      expect((err as StoreInputError).message).toMatch(/non-negative integer/);
+    }
   });
 
   it('TQ-1 concurrent same-key upserts: exactly ONE row, neither rejects with a 23505', async () => {

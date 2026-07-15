@@ -58,6 +58,30 @@ import {
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 
 /**
+ * A fail-closed INPUT-validation rejection at the store facade — a handler db call that names an
+ * unknown column, sets a server-controlled column, passes a non-data/injection value, writes an
+ * out-of-whitelist enum value, supplies an invalid date for a timestamp column, or requests an
+ * out-of-range limit/offset. It is a CLIENT error (the request shape is invalid), NOT a server fault:
+ * the api layer classifies it as HTTP 400 (an unhandled `Error` would otherwise surface as an
+ * INTERNAL 500, misreporting a bad request as a server incident).
+ *
+ * Two messages, deliberately: `message` (Error.message) keeps the DETAILED text — naming the column,
+ * the op, the guard — for local throw-site assertions and dev logs, and is NEVER sent to the client;
+ * `publicMessage` is a GENERIC, non-leaking summary the api layer puts in the 400 envelope (never the
+ * store's column list, the offending value, or a DB message). Keeping the two separate means the 400
+ * response leaks nothing while the internal text stays available server-side.
+ */
+export class StoreInputError extends Error {
+  /** A generic, non-leaking summary safe to return to the client (used for the 400 envelope). */
+  readonly publicMessage: string;
+  constructor(message: string, publicMessage: string) {
+    super(message);
+    this.name = 'StoreInputError';
+    this.publicMessage = publicMessage;
+  }
+}
+
+/**
  * snake_case → camelCase — the SAME transform `buildProductTables`/`generate-product-schema` apply
  * to column names (`note_id` → `noteId`). Re-derived here (one rule) so the facade's name
  * mapping matches the runtime table keys exactly; it cannot drift (the rule is trivial + shared by
@@ -99,9 +123,10 @@ function resolveColumn(table: PgTable, name: string): PgColumn {
   const camel = snakeToCamel(name);
   const col = cols[camel] ?? cols[name];
   if (!col) {
-    throw new Error(
+    throw new StoreInputError(
       `HandlerDb: column '${name}' is not a column of the store (fail-closed) — check the declared ` +
         'column name.',
+      'The request references a column that does not exist on the target store.',
     );
   }
   return col;
@@ -162,17 +187,19 @@ function assertValidValue(col: PgColumn, where: string, name: string, value: unk
   // not-a-plain-object check catches every OTHER class instance. Only a plain Object/Array survives.
   const isPlain = t === 'object' && isPlainObjectOrArray(value as object);
   if (isForbiddenNonDataValue(value) || !isPlain) {
-    throw new Error(
+    throw new StoreInputError(
       `HandlerDb: ${where} value for '${name}' is a forbidden non-data value (a Drizzle SQL object, ` +
         'a function, or a class instance) — a SQL-injection vector, rejected fail-closed (SF-1).',
+      'A supplied value is not a permitted data value.',
     );
   }
   // A plain Object/Array is allowed ONLY for a jsonb column (free-form JSON, parity with the api path).
   if (isJsonbColumn(col)) return;
-  throw new Error(
+  throw new StoreInputError(
     `HandlerDb: ${where} value for '${name}' must be a plain scalar (string/number/boolean/null/Date)` +
       ` for a non-jsonb column — got ${Array.isArray(value) ? 'an array' : 'a non-plain object'} ` +
       '(only a `jsonb` column accepts a JSON object/array). Rejected fail-closed (SF-1).',
+    'A supplied value is not a permitted data value.',
   );
 }
 
@@ -282,16 +309,18 @@ function toDbValues(
     const camel = snakeToCamel(name);
     const key = camel in cols ? camel : name in cols ? name : undefined;
     if (key === undefined) {
-      throw new Error(
+      throw new StoreInputError(
         `HandlerDb: ${op} into the store names column '${name}', which is not a declared column ` +
           '(fail-closed) — a handler may only write declared business columns.',
+        'The request references a column that does not exist on the target store.',
       );
     }
     if (SERVER_CONTROLLED_CAMEL.has(key)) {
-      throw new Error(
+      throw new StoreInputError(
         `HandlerDb: ${op} may not set server-controlled column '${name}' (id/tenant_id/created_at/` +
           'deleted_at/retention_days/region are platform-managed — tenant_id is auto-stamped, the ' +
           'rest carry DB defaults). Remove it from the values (fail-closed, refinement #3).',
+        'The request may not set a server-managed column.',
       );
     }
     // SF-1 (column-type-aware): reject a Drizzle SQL object / function / class instance for EVERY
@@ -314,10 +343,11 @@ function toDbValues(
       const allowed = enumWhitelist.get((cols[key] as PgColumn).name);
       const isMember = typeof value === 'string' && allowed?.has(value) === true;
       if (allowed && value !== null && value !== undefined && !isMember) {
-        throw new Error(
+        throw new StoreInputError(
           `HandlerDb: ${op} value for column '${name}' of store '${getTableName(table)}' is not one ` +
             'of the declared allowed values — rejected fail-closed (the enum whitelist is enforced on ' +
             'this handler write path, parity with the HTTP route and the workflow store.write node).',
+          'A supplied value is not one of the permitted values for its column.',
         );
       }
     }
@@ -335,9 +365,14 @@ function coerceForColumn(col: PgColumn, name: string, value: unknown, op: string
   if (isTimestampColumn(col) && typeof value === 'string') {
     const d = new Date(value);
     if (Number.isNaN(d.getTime())) {
-      throw new Error(
+      // A malformed timestamp value is a CLIENT input error (a bad request shape), not a server fault:
+      // throw a StoreInputError so the api layer returns HTTP 400, uniform with the other facade input
+      // guards. The detailed text (column + offending value) stays on the internal `message` (logs /
+      // throw-site assertions); the client sees only the GENERIC publicMessage.
+      throw new StoreInputError(
         `HandlerDb: ${op} value for timestamp column '${name}' is not a valid date: ` +
           `${JSON.stringify(value)} (fail-closed, SF-2).`,
+        'A supplied value is not a valid date.',
       );
     }
     return d;
@@ -354,10 +389,15 @@ function coerceForColumn(col: PgColumn, name: string, value: unknown, op: string
  */
 function assertNonNegativeInt(field: string, value: number): void {
   if (!Number.isInteger(value) || value < 0) {
-    throw new Error(
+    // An out-of-range limit/offset is CLIENT-supplied bad input (a bad request shape), not a server
+    // fault: throw a StoreInputError so the api layer returns HTTP 400, uniform with the other facade
+    // input guards. The detailed text (which field + offending value) stays on the internal `message`;
+    // the client sees only the GENERIC publicMessage.
+    throw new StoreInputError(
       `HandlerDb: select '${field}' must be a non-negative integer (got ${JSON.stringify(value)}) — ` +
         'a negative/NaN value would silently drop the clause or raise a raw DB error. Rejected ' +
         'fail-closed (F2).',
+      'A supplied pagination value is not a permitted value.',
     );
   }
 }
@@ -424,14 +464,39 @@ function serializeRow(table: PgTable, row: Record<string, unknown>): StoreRow {
 }
 
 /**
+ * Stamp the injected `created_by` actor column from the ROUTE-CONTEXT principal — un-spoofable, and
+ * exactly the same server-side stamp the declarative store.create path applies. A handler can never
+ * SUPPLY `created_by`: it is a server-controlled column that `toDbValues` rejects (#3), so this facade
+ * is the SOLE writer of the value and the route actor always wins. No-op when no actor is bound (a tool
+ * or trigger handler, and every pre-existing 2-arg caller) OR the target store carries no `created_by`
+ * column, so the prior behavior is byte-identical. Stamped ONLY on the create ops (insert + the insert
+ * arm of upsert), never on update — `created_by` is create-only (immutable after creation).
+ */
+function stampCreatedBy(
+  table: PgTable,
+  dbValues: Record<string, unknown>,
+  actor: string | undefined,
+): void {
+  if (actor === undefined) return;
+  const cols = getTableColumns(table) as Record<string, PgColumn>;
+  if ('createdBy' in cols) dbValues.createdBy = actor;
+}
+
+/**
  * Build the `HandlerDb` facade over a `TenantDb` + the declared product tables. The TenantDb is the
  * REAL chokepoint (its predicate is structural); this facade only translates name-keyed,
  * serializable-shaped calls into TenantDb calls + maps rows back. Used for tool handlers (plain
  * TenantDb — no outer tx) AND, inside `.transaction()`, for route/trigger handlers (A2 asymmetry).
+ *
+ * `createdByActor` is the OPTIONAL server-derived caller identity (`user:<userId>` / `key:<apiKeyId>`)
+ * of the request whose route handler owns this facade. When present, insert/upsert stamp it onto the
+ * injected `created_by` column (un-spoofable — see `stampCreatedBy`). Absent (tool/trigger handlers and
+ * every pre-existing 2-arg caller) ⇒ `created_by` is left as-is, byte-identical to the prior facade.
  */
 export function makeHandlerDb(
   tdb: TenantDb,
   productTables: ReadonlyMap<string, PgTable>,
+  createdByActor?: string,
 ): HandlerDb {
   return {
     async select(store: string, filter?: StoreFilter, opts?: SelectOptions): Promise<StoreRow[]> {
@@ -488,6 +553,10 @@ export function makeHandlerDb(
       const table = resolveTable(productTables, store);
       // #3/#4: fail-closed on unknown OR server-controlled columns in the VALUES.
       const dbValues = toDbValues(table, values, 'insert');
+      // Stamp the un-spoofable caller identity onto `created_by` from the route context (no-op when no
+      // actor is bound or the store lacks the column). The handler could not have set it — toDbValues
+      // rejected it as server-controlled above — so the actor is the SOLE writer.
+      stampCreatedBy(table, dbValues, createdByActor);
       let inserted: Record<string, unknown>[];
       try {
         inserted = (await tdb.insert(table as never, dbValues).returning()) as Record<
@@ -514,15 +583,23 @@ export function makeHandlerDb(
       // #3/#4 + SF-1: the SAME guard insert uses — fail-closed on unknown/server-controlled cols; reject
       // a SQL/function/class injection value. Zero new trust surface (we reuse toDbValues verbatim).
       const dbValues = toDbValues(table, values, 'insert');
+      // Stamp the un-spoofable caller identity onto `created_by` for the INSERT arm (no-op without an
+      // actor or a `created_by` column) — same as insert.
+      stampCreatedBy(table, dbValues, createdByActor);
       // Resolve every conflict-target column fail-closed (an unknown column throws — never a silent
       // ON CONFLICT on the wrong column). These are the unique-index columns the conflict matches on.
       const targets = conflictColumns.map((name) => resolveColumn(table, name));
       // The DO-UPDATE SET = the written values MINUS the conflict columns (you don't re-assign the key
-      // you matched on). Keys here are already camelCase (toDbValues output).
+      // you matched on) AND MINUS `created_by`. Keys here are already camelCase (toDbValues output).
       const conflictCamel = new Set(conflictColumns.map((name) => snakeToCamel(name)));
       const setValues: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(dbValues)) {
-        if (!conflictCamel.has(key)) setValues[key] = value;
+        if (conflictCamel.has(key)) continue;
+        // `created_by` is create-only (immutable): never re-assign it on a conflict-update, so a
+        // same-tenant conflict KEEPS the ORIGINAL creator (parity with the declarative create-only
+        // stamp). Without an actor this key is never present, so this is byte-identical to before.
+        if (key === 'createdBy') continue;
+        setValues[key] = value;
       }
       const tenantCol = resolveColumn(table, 'tenant_id');
       const builder = tdb.insert(table as never, dbValues);
@@ -621,7 +698,9 @@ export function makeHandlerDb(
       // running the whole handler inside one isolate-side tx), NOT something this seam already solves.
       // The in-process impl is correct + GUC-populated; do NOT claim the transaction path is
       // isolate-ready. (See handler-runtime.ts / @rayspec/handler-sdk for the same caveat.)
-      return tdb.transaction(async (txTdb) => fn(makeHandlerDb(txTdb, productTables)));
+      return tdb.transaction(async (txTdb) =>
+        fn(makeHandlerDb(txTdb, productTables, createdByActor)),
+      );
     },
   };
 }

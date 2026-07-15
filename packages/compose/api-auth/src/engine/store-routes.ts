@@ -35,6 +35,7 @@ import { and, eq, getTableColumns, isNull, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { Context } from 'hono';
 import type { AppDeps, AppEnv } from '../app-context.js';
+import { principalActor } from './principal-actor.js';
 import { buildListQuery, nextCursor } from './store-query.js';
 import {
   createBodySchema,
@@ -316,13 +317,8 @@ export function makeStoreHandler(args: {
             const values = toDbValues(store, body as Record<string, unknown>);
             // Stamp the actor SERVER-SIDE (never client-settable — created_by is reserved + strict).
             // A JWT principal → `user:<userId>`; an API key → `key:<apiKeyId>` (there is no api-key NAME).
-            const principal = c.get('principal');
-            const actor =
-              principal?.kind === 'user' && principal.userId
-                ? `user:${principal.userId}`
-                : principal?.apiKeyId
-                  ? `key:${principal.apiKeyId}`
-                  : undefined;
+            // The SAME derivation the escape-hatch handler store facade uses (one shared helper).
+            const actor = principalActor(c.get('principal'));
             if (actor) values.createdBy = actor;
             // Stamp the Idempotency-Key (absent ⇒ NULL ⇒ never collides — Postgres NULLs are distinct).
             // Replay is KEY-based (standard idempotency semantics): a repeat with the SAME

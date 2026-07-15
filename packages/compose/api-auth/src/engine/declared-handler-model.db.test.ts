@@ -102,6 +102,34 @@ const badHeaderHandler: RouteHandler = () =>
 const plainStatusOk: RouteHandler = () => ({ status: 'ok', detail: 'plain-body' });
 
 /**
+ * an escape-hatch ROUTE handler that inserts into the `notebooks` store using a CLIENT-SUPPLIED
+ * `scheduled_at` value (a timestamp column). A malformed date is a bad REQUEST shape, so the store
+ * facade rejects it as a client input error — the api layer must return HTTP 400, never surface it as
+ * an INTERNAL 500 (misreporting a bad request as a server incident), and never leak the column/value.
+ */
+const insertClientTimestamp: RouteHandler = async (init: RouteHandlerInit) => {
+  const body = (init.body ?? {}) as { scheduled_at?: unknown };
+  const scheduledAt = typeof body.scheduled_at === 'string' ? body.scheduled_at : 'not-a-real-date';
+  return init.db.insert('notebooks', {
+    title: 'client-supplied',
+    completed: false,
+    scheduled_at: scheduledAt,
+  });
+};
+
+/**
+ * an escape-hatch ROUTE handler that reads `notebooks` with a CLIENT-DERIVED page `limit` (request
+ * bodies/params are DATA — server-coerced to a number). An out-of-range value (negative / non-numeric
+ * → NaN) is a bad REQUEST shape, so the store facade rejects it as a client input error — the api
+ * layer must return HTTP 400, never an INTERNAL 500 or a silent over-read, and leak nothing.
+ */
+const selectClientLimit: RouteHandler = async (init: RouteHandlerInit) => {
+  const body = (init.body ?? {}) as { limit?: unknown };
+  const limit = Number(body.limit);
+  return { rows: await init.db.select('notebooks', {}, { limit }) };
+};
+
+/**
  * A deterministic backend that drives a REAL `lookup_notebook` dispatch with VALID args (the notebook id
  * threaded as `spec.input`), so the escape-hatch tool handler actually runs against the store + the
  * opaque tool_data flows back. No live model. Mirrors how a real adapter marshals a tool-call into
@@ -208,6 +236,20 @@ function specWithHandlerRoute(base: RaySpec): RaySpec {
         export: 'plainStatusOk',
         kind: 'route',
       },
+      // a route that inserts with a client-supplied timestamp value (exercises the facade's date guard).
+      {
+        id: 'insert_client_timestamp_route',
+        module: 'handlers/insert-client-timestamp.ts',
+        export: 'insertClientTimestamp',
+        kind: 'route',
+      },
+      // a route that reads with a client-derived page limit (exercises the facade's limit/offset guard).
+      {
+        id: 'select_client_limit_route',
+        module: 'handlers/select-client-limit.ts',
+        export: 'selectClientLimit',
+        kind: 'route',
+      },
     ],
     api: [
       ...base.api,
@@ -246,6 +288,18 @@ function specWithHandlerRoute(base: RaySpec): RaySpec {
         path: '/plain-status',
         action: { kind: 'handler', handler: 'plain_status_ok_route' },
       },
+      // a POST `{handler}` route that inserts with a client-supplied timestamp.
+      {
+        method: 'POST',
+        path: '/insert-client-timestamp',
+        action: { kind: 'handler', handler: 'insert_client_timestamp_route' },
+      },
+      // a POST `{handler}` route that reads with a client-derived page limit.
+      {
+        method: 'POST',
+        path: '/select-client-limit',
+        action: { kind: 'handler', handler: 'select_client_limit_route' },
+      },
     ],
   };
 }
@@ -271,6 +325,8 @@ describe.skipIf(!hasDb)('declared agent + tooling + handler model end-to-end', (
       'echo_body_direct_route',
       'bad_header_route',
       'plain_status_ok_route',
+      'insert_client_timestamp_route',
+      'select_client_limit_route',
     ]);
     const loaded = await loadHandlers(
       ACME_DIR,
@@ -282,6 +338,8 @@ describe.skipIf(!hasDb)('declared agent + tooling + handler model end-to-end', (
       ['echo_body_direct_route', { kind: 'route', fn: echoBodyDirect as never }],
       ['bad_header_route', { kind: 'route', fn: badHeaderHandler as never }],
       ['plain_status_ok_route', { kind: 'route', fn: plainStatusOk as never }],
+      ['insert_client_timestamp_route', { kind: 'route', fn: insertClientTimestamp as never }],
+      ['select_client_limit_route', { kind: 'route', fn: selectClientLimit as never }],
     ]);
     backends = new Map<BackendId, Backend>([['openai', backend]]);
     h = await createHarness({
@@ -621,6 +679,51 @@ describe.skipIf(!hasDb)('declared agent + tooling + handler model end-to-end', (
       headers: { authorization: `Bearer ${readKey}` },
     });
     expect(res.status).toBe(403);
+  });
+
+  // ----------------------------------------------------------------------------------------------
+  // store-facade INPUT rejections surface as a CLIENT 400, not a server 500, and leak nothing.
+  // A bad client-supplied value that the facade refuses (a malformed timestamp, an out-of-range page
+  // limit) is a bad REQUEST, so the api layer must classify it as 400 — not report a bad request as an
+  // INTERNAL 500 (which also emits a spurious 5xx server-incident log). Uniform with every other
+  // facade input guard. RED before the guards were typed as input errors (they threw a plain Error →
+  // onError returned 500). The response envelope carries ONLY the generic public message.
+  // ----------------------------------------------------------------------------------------------
+
+  it('a handler insert with an invalid-date timestamp value returns HTTP 400 (not 500), leaking nothing', async () => {
+    const { token } = await principal('facade-bad-date@example.com', 'FacadeBadDateOrg');
+    const res = await jsonRequest(h.app, 'POST', '/insert-client-timestamp', {
+      body: { scheduled_at: 'not-a-real-date' },
+      headers: { authorization: `Bearer ${token}` },
+    });
+    // RED before the fix: the timestamp guard threw a plain Error → onError returned INTERNAL 500.
+    expect(res.status).toBe(400);
+    const env = (await res.json()) as { error?: { code?: string; message?: string } };
+    expect(env.error?.code).toBe('VALIDATION_ERROR');
+    // NO-LEAK: the 400 envelope carries ONLY the generic public message — never the column name, the
+    // offending value, the facade prefix, the column type, DB text, or the store name.
+    expect(JSON.stringify(env)).not.toMatch(
+      /scheduled_at|not-a-real-date|HandlerDb|timestamp|notebooks|SELECT/i,
+    );
+  });
+
+  it('a handler select with an out-of-range page limit returns HTTP 400 (not 500), leaking nothing', async () => {
+    const { token } = await principal('facade-bad-limit@example.com', 'FacadeBadLimitOrg');
+    // A NEGATIVE number AND a NON-NUMERIC client value (→ NaN) both reach the facade's guard.
+    for (const limit of [-1, 'abc']) {
+      const res = await jsonRequest(h.app, 'POST', '/select-client-limit', {
+        body: { limit },
+        headers: { authorization: `Bearer ${token}` },
+      });
+      // RED before the fix: the pagination guard threw a plain Error → onError returned INTERNAL 500.
+      expect(res.status).toBe(400);
+      const env = (await res.json()) as { error?: { code?: string } };
+      expect(env.error?.code).toBe('VALIDATION_ERROR');
+      // NO-LEAK: never the field name, the offending value, the facade prefix, or DB text.
+      expect(JSON.stringify(env)).not.toMatch(
+        /\blimit\b|\boffset\b|HandlerDb|non-negative|notebooks/i,
+      );
+    }
   });
 
   it('REGRESSION GUARD: a PLAIN-body {handler} route STILL returns 200', async () => {

@@ -100,6 +100,7 @@ export {
   type ModuleImporter,
   makeHandlerDb,
   type ResolvedHandler,
+  StoreInputError,
   setHandlerRuntime,
   type ToolFactory,
 } from './handlers/index.js';
