@@ -195,14 +195,14 @@ function buildFacadeSchemaSql(): string {
         -- cross-tenant overwrite. (Multiple NULL business_keys are allowed — Postgres NULLs are distinct.)
         CONSTRAINT meetings_business_key_global_unique UNIQUE (business_key)
       );
-      -- F1 ensure-exists fixture: only business column is the conflict target → empty DO-UPDATE SET.
+      -- ensure-exists fixture: only business column is the conflict target → empty DO-UPDATE SET.
       CREATE TABLE tags (
         ${before},
         name text NOT NULL,
         ${after},
         CONSTRAINT tags_name_global_unique UNIQUE (name)
       );
-      -- XT-1 fixture: TWO individual global uniques (a conflict on vendor while the ON CONFLICT target
+      -- two-global-uniques fixture: TWO individual global uniques (a conflict on vendor while the ON CONFLICT target
       -- is business_key is the "DIFFERENT unique" 23505 the sanitizer must neutralize).
       CREATE TABLE gizmos (
         ${before},
@@ -213,7 +213,7 @@ function buildFacadeSchemaSql(): string {
         CONSTRAINT gizmos_business_key_unique UNIQUE (business_key),
         CONSTRAINT gizmos_vendor_unique UNIQUE (vendor)
       );
-      -- TQ-3 fixture: a COMPOSITE global unique (business_key, vendor).
+      -- composite-unique fixture: a COMPOSITE global unique (business_key, vendor).
       CREATE TABLE pairs (
         ${before},
         title text NOT NULL,
@@ -222,7 +222,7 @@ function buildFacadeSchemaSql(): string {
         ${after},
         CONSTRAINT pairs_bk_vendor_unique UNIQUE (business_key, vendor)
       );
-      -- TQ-4 fixture: a TENANT-SCOPED unique (tenant_id, business_key) — the recommended secure pattern.
+      -- tenant-scoped-unique fixture: a TENANT-SCOPED unique (tenant_id, business_key) — the recommended secure pattern.
       CREATE TABLE scoped (
         ${before},
         title text NOT NULL,

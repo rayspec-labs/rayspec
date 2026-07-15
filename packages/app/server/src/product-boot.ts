@@ -1022,7 +1022,7 @@ export function nativeValidatedDowngradeWarning(
     `    backend '${backend}' supports NATIVE constrained decode, but the extractor config selects\n` +
     "    structured_output_mode: 'validated' — the run will use validate-and-repair (emulated), NOT\n" +
     '    native strict output. If you want the stronger native guarantee, set structured_output_mode:\n' +
-    "    'native' (the S5 default). This is allowed; it is only a heads-up.\n"
+    "    'native' (the default). This is allowed; it is only a heads-up.\n"
   );
 }
 
@@ -1198,7 +1198,7 @@ export function buildLiveAgent(
     if (mode === 'native' && !capabilitiesFor(backend.id).nativeStructuredOutput) {
       throw new ProductBootError(
         `extractor '${extractor.id}': the extractor config demands NATIVE structured output ` +
-          `(structured_output_mode: native — the S5 default) but backend '${cfg.backend}' only ` +
+          `(structured_output_mode: native — the default) but backend '${cfg.backend}' only ` +
           'EMULATES it (validate-and-repair, not native constrained decode). Set ' +
           "structured_output_mode: 'validated' to allow emulation, or choose a native backend " +
           '(openai | anthropic | codex). Fail-closed.',

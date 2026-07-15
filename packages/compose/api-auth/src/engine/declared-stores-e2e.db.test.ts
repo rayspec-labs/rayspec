@@ -146,7 +146,7 @@ workflows:
           catalog_snapshot: { artifact: fieldlog.catalog_rows }
         outputs:
           log_row: fieldlog.log_row
-      # FIX-REG-1 arm (g): a KEY-ONLY (ensure-exists) write — values ≡ the conflict key, so the
+      # arm (g): a KEY-ONLY (ensure-exists) write — values ≡ the conflict key, so the
       # facade takes the onConflictDoNothing arm and the node's verify-read disambiguates.
       - id: ensure
         type: store_write

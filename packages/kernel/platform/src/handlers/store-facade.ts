@@ -396,7 +396,7 @@ function assertNonNegativeInt(field: string, value: number): void {
     throw new StoreInputError(
       `HandlerDb: select '${field}' must be a non-negative integer (got ${JSON.stringify(value)}) — ` +
         'a negative/NaN value would silently drop the clause or raise a raw DB error. Rejected ' +
-        'fail-closed (F2).',
+        'fail-closed.',
       'A supplied pagination value is not a permitted value.',
     );
   }

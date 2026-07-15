@@ -146,7 +146,7 @@ export function makeLiveTurnResponder(
           message:
             `all ${REPLY_RUN_MAX_ATTEMPTS} deterministic reply attempts for this turn have ` +
             'terminally FAILED run headers — refusing to derive further attempt ids (the bounded ' +
-            'TF-F1 walk). Inspect the failed runs under this turn_ref’s attempt-id chain; ' +
+            'terminal-failure walk). Inspect the failed runs under this turn_ref’s attempt-id chain; ' +
             'the fault is persistent (upstream/config), not retry-shaped.',
         };
       }

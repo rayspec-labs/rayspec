@@ -903,7 +903,7 @@ export function composeProductDeploy(
   if (withConversationInput && rollout.conversation?.responder === undefined) {
     rolloutError(
       "the document declares 'conversation_input' but rollout.conversation.responder is absent — " +
-        'a submitted turn produces a real agent reply (S3), so the deployment must wire a turn ' +
+        'a submitted turn produces a real agent reply, so the deployment must wire a turn ' +
         'responder (production: makeLiveTurnResponder over the per-product ' +
         '<agent_id>.responder.json; dev/CI: the deterministic injection seam). Fail-closed.',
     );

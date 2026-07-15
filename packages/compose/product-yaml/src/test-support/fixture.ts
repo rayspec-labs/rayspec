@@ -459,7 +459,7 @@ version: "1.0"
 product:
   id: playbackonly
   name: PlaybackOnly
-  description: A doc declaring media_playback ONLY (no audio_input) — pins the S4 partial-audio mount as all-or-nothing.
+  description: A doc declaring media_playback ONLY (no audio_input) — pins the partial-audio mount as all-or-nothing.
 requires:
   capabilities: [media_playback]
 capabilities:

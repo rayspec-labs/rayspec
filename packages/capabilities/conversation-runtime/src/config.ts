@@ -213,14 +213,14 @@ export function resolveConversationConfig(
   assertPositiveInt(
     maxHistoryTurns,
     'maxHistoryTurns',
-    'a malformed window would unbound the S3 history read',
+    'a malformed window would unbound the history read',
   );
 
   const maxHistoryChars = config?.maxHistoryChars ?? DEFAULT_MAX_HISTORY_CHARS;
   assertPositiveInt(
     maxHistoryChars,
     'maxHistoryChars',
-    'a malformed window would unbound the S3 history assembly',
+    'a malformed window would unbound the history assembly',
   );
 
   return {
