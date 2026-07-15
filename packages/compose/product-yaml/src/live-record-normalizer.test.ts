@@ -14,6 +14,13 @@ import { describe, expect, it, vi } from 'vitest';
 
 const { runAgentMock } = vi.hoisted(() => ({ runAgentMock: vi.fn() }));
 vi.mock('@rayspec/platform', () => ({ runAgent: runAgentMock }));
+// Override ONLY drizzle's `eq` (spread the real module so @rayspec/db's table builders stay intact) so
+// the run-id-keyed ATTACH fake below can read the EXACT run id loadCompletedNormalize queries on
+// (where(runs.runId == runId)) — reproducing the real payload-keyed attach contract.
+vi.mock('drizzle-orm', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('drizzle-orm')>();
+  return { ...actual, eq: (_col: unknown, value: unknown) => ({ __runId: value }) };
+});
 
 const { makeLiveRecordNormalizer, normalizeRunId } = await import('./live-record-normalizer.js');
 type LiveRecordNormalizerConfig = import('./live-record-normalizer.js').LiveRecordNormalizerConfig;
@@ -27,6 +34,24 @@ type HeaderRow = { status: string; output: unknown };
 function fakeTdb(header: HeaderRow[] = []) {
   return {
     select: () => ({ where: () => ({ limit: async () => header }) }),
+  } as unknown as ReturnType<LiveRecordNormalizerConfig['tdbFor']>;
+}
+
+/**
+ * A fake tenant-bound db whose runs-header read returns a COMPLETED header ONLY for the exact run id
+ * queried (via the overridden `eq` → `{ __runId }`) — reproducing the real payload-keyed attach: a run
+ * id with no committed header returns [] and the normalizer runs fresh.
+ */
+function fakeTdbByRunId(outputsByRunId: Map<string, unknown>) {
+  return {
+    select: () => ({
+      where: (cond: { __runId: string }) => ({
+        limit: async () => {
+          const output = outputsByRunId.get(cond.__runId);
+          return output === undefined ? [] : [{ status: 'completed', output }];
+        },
+      }),
+    }),
   } as unknown as ReturnType<LiveRecordNormalizerConfig['tdbFor']>;
 }
 
@@ -60,15 +85,24 @@ function completedRun(output: unknown): RunResult {
 }
 
 describe('normalizeRunId', () => {
-  it('is deterministic per (tenant, record), distinct across records, and UUID-shaped', () => {
-    const a1 = normalizeRunId(TENANT, RECORD_ID);
-    const a2 = normalizeRunId(TENANT, RECORD_ID);
-    const b = normalizeRunId(TENANT, 'rec-2');
-    const c = normalizeRunId('tenant-b', RECORD_ID);
+  const REC = { title: 'a' };
+  it('is deterministic per (tenant, record, payload), distinct across records/tenants, and UUID-shaped', () => {
+    const a1 = normalizeRunId(TENANT, RECORD_ID, REC);
+    const a2 = normalizeRunId(TENANT, RECORD_ID, REC);
+    const b = normalizeRunId(TENANT, 'rec-2', REC);
+    const c = normalizeRunId('tenant-b', RECORD_ID, REC);
     expect(a1).toBe(a2);
     expect(a1).not.toBe(b);
     expect(a1).not.toBe(c); // tenant-disjoint
     expect(a1).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+
+  it('is PAYLOAD-dependent — a DIFFERENT raw record for the same (tenant, record) derives a DIFFERENT run id (no stale-output reuse across a corrected-payload retry), while key-order is not a difference (canonical hash)', () => {
+    const base = normalizeRunId(TENANT, RECORD_ID, { title: 'a', priority: 'high' });
+    const different = normalizeRunId(TENANT, RECORD_ID, { title: 'b', priority: 'high' });
+    const reordered = normalizeRunId(TENANT, RECORD_ID, { priority: 'high', title: 'a' });
+    expect(different).not.toBe(base); // a corrected payload → a fresh run (the crash-window fix)
+    expect(reordered).toBe(base); // canonical: key order is not a payload change (convergence holds)
   });
 });
 
@@ -96,9 +130,43 @@ describe('makeLiveRecordNormalizer', () => {
     expect((spec as { input: string }).input).toContain('UNTRUSTED DATA');
     expect((spec as { input: string }).input).toContain('"title":"fixed"');
     expect(opts).toMatchObject({
-      runId: normalizeRunId(TENANT, RECORD_ID),
+      runId: normalizeRunId(TENANT, RECORD_ID, { title: 'fixed' }),
       requireNativeStructuredOutput: true,
     });
+  });
+
+  it('CRASH-WINDOW: a completed run for raw payload A is NOT reused for a corrected payload B (payload-keyed run id) — B runs fresh; a retry of A still ATTACHES (convergence, no double-bill)', async () => {
+    runAgentMock.mockReset();
+    const A = { title: 'raw-a' };
+    const B = { title: 'corrected-b' };
+    const idA = normalizeRunId(TENANT, RECORD_ID, A);
+    const idB = normalizeRunId(TENANT, RECORD_ID, B);
+    expect(idA).not.toBe(idB); // the fix: a corrected payload derives a distinct run
+
+    // The crash state: A's normalize run header committed (output = normalized(A)) but the submission
+    // row did NOT persist — so a corrected-payload retry reaches this attach path. Only idA is completed.
+    const outputs = new Map<string, unknown>([[idA, { title: 'NORMALIZED-A' }]]);
+    const config: LiveRecordNormalizerConfig = { ...cfg(), tdbFor: () => fakeTdbByRunId(outputs) };
+
+    // B (corrected) → idB has NO committed header → a FRESH run produces normalized(B), NEVER the stale
+    // normalized(A) (which would be stored under B's hash — silent data loss).
+    runAgentMock.mockResolvedValueOnce(completedRun({ title: 'NORMALIZED-B' }));
+    const outB = await makeLiveRecordNormalizer(config)(TENANT).normalize({
+      record: B,
+      recordId: RECORD_ID,
+    });
+    expect(outB).toEqual({ status: 'normalized', record: { title: 'NORMALIZED-B' } });
+    expect(runAgentMock).toHaveBeenCalledTimes(1); // ran fresh — did NOT attach A's output
+    const [, , , opts] = runAgentMock.mock.calls[0] as unknown[];
+    expect((opts as { runId: string }).runId).toBe(idB);
+
+    // A (identical raw payload) → idA → ATTACHES to the completed header — no re-run, no double-bill.
+    const outA = await makeLiveRecordNormalizer(config)(TENANT).normalize({
+      record: A,
+      recordId: RECORD_ID,
+    });
+    expect(outA).toEqual({ status: 'normalized', record: { title: 'NORMALIZED-A' } });
+    expect(runAgentMock).toHaveBeenCalledTimes(1); // STILL 1 — A attached, the model was not re-invoked
   });
 
   it('ATTACHES to a completed run header — the model is NOT re-invoked (no double-bill)', async () => {

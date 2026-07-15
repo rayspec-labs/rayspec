@@ -14,16 +14,26 @@
  * deployer-authored config.
  *
  * ── DETERMINISTIC RUN ID + ATTACH (crash-window convergence, no double-bill) ─────────────────────
- * The normalize run id is deterministic from the tenant-prefixed record identity, so a crash between
- * the model call and the capability's persist is recovered WITHOUT re-invoking the model: a completed
- * run header's structured `output` IS the normalized record. (The capability additionally runs
- * normalize only on the FIRST persist, so a re-submit never reaches this path at all.)
+ * The normalize run id is deterministic from the tenant-prefixed record identity AND the raw record's
+ * canonical hash, so a crash between the model call and the capability's persist is recovered WITHOUT
+ * re-invoking the model: a completed run header's structured `output` IS the normalized record. The
+ * capability runs normalize only on the FIRST persist, so a re-submit of the IDENTICAL record never
+ * reaches this path at all; the run id BINDS the raw payload so the one place it CAN be reached — a
+ * corrected-payload retry after the run header committed but the submission row did NOT persist —
+ * derives a DIFFERENT run id and re-runs fresh, instead of silently attaching the PRIOR payload's
+ * normalized output under the new payload's hash (a stored-value/hash mismatch = silent data loss).
+ * A retry of the SAME raw payload still derives the SAME run id and attaches (convergence, no
+ * double-bill).
  */
 import { createHash } from 'node:crypto';
 import type { AgentSpec, Backend, RunResult } from '@rayspec/core';
 import { schema, type TenantDb } from '@rayspec/db';
 import { runAgent } from '@rayspec/platform';
-import type { RecordNormalizeOutcome, RecordNormalizerFactory } from '@rayspec/record-runtime';
+import {
+  type RecordNormalizeOutcome,
+  type RecordNormalizerFactory,
+  recordPayloadHash,
+} from '@rayspec/record-runtime';
 import { eq } from 'drizzle-orm';
 
 /** What the boot bakes into the live normalizer (constant across a deployment's requests). */
@@ -55,12 +65,23 @@ function uuidShaped(hex: string): string {
 }
 
 /**
- * A deterministic, UUID-shaped normalize run id from the tenant-prefixed record identity. Tenant-
- * disjoint by the embedded tenant, so a crash-window retry reserves the SAME run (attach, no re-bill).
+ * A deterministic, UUID-shaped normalize run id from the tenant-prefixed record identity AND the raw
+ * record's canonical payload hash. Tenant-disjoint by the embedded tenant; PAYLOAD-disjoint by the
+ * embedded hash — a retry of the SAME raw record reserves the SAME run (attach, no re-bill), while a
+ * corrected-payload retry of the same record id derives a DIFFERENT run (no stale-output reuse). The
+ * hash is the SAME canonical `recordPayloadHash` the submit path keys `payload_hash` on, so the run
+ * identity and the stored idempotency identity agree by construction.
  */
-export function normalizeRunId(tenantId: string, recordId: string): string {
+export function normalizeRunId(
+  tenantId: string,
+  recordId: string,
+  record: Record<string, unknown>,
+): string {
+  const payloadHash = recordPayloadHash(record);
   return uuidShaped(
-    createHash('sha256').update(`record-normalize:${tenantId}:${recordId}`).digest('hex'),
+    createHash('sha256')
+      .update(`record-normalize:${tenantId}:${recordId}:${payloadHash}`)
+      .digest('hex'),
   );
 }
 
@@ -74,7 +95,7 @@ export function makeLiveRecordNormalizer(cfg: LiveRecordNormalizerConfig): Recor
     agentId: cfg.agentId,
     async normalize({ record, recordId }): Promise<RecordNormalizeOutcome> {
       const tdb = cfg.tdbFor(tenantId);
-      const runId = normalizeRunId(tenantId, recordId);
+      const runId = normalizeRunId(tenantId, recordId, record);
 
       // ATTACH: a completed run header's structured output IS the normalized record (crash-window
       // convergence — the model is NOT re-invoked).
