@@ -454,7 +454,7 @@ describe('resolveStructuredOutputMode — the fork-4 structured-output policy (n
   });
 });
 
-describe('resolveExtractorConfigPath — the per-agent config convention (S5)', () => {
+describe('resolveExtractorConfigPath — the per-agent config convention', () => {
   const one = specWithAgents(['note_extractor']);
   const two = specWithAgents(['agent_one', 'agent_two']);
   it('single-agent: falls back to the legacy extraction/extractor.json (acme-notes byte-identity)', () => {
@@ -954,7 +954,7 @@ describe('planUpdateBoot — the ENV-DRIVEN update boot is REBOOT-SAFE by classi
   const ADDITIVE: PlannedMigration[] = [
     { name: '0001_add_pinned.sql', sql: 'CREATE TABLE "pinned_moments" ();', allowlist: [] },
   ];
-  // A pure-SUBSET destructive delta: at present-matching FIX-2 must PROBE the drop target.
+  // A pure-SUBSET destructive delta: at present-matching the boot must PROBE the drop target.
   const DROP_HIGHLIGHTS: PlannedMigration[] = [
     {
       name: '0002_drop_highlights.sql',
@@ -974,7 +974,7 @@ describe('planUpdateBoot — the ENV-DRIVEN update boot is REBOOT-SAFE by classi
     expect(logs).toEqual([]); // no leftover-env warning on the normal update
   });
 
-  it('present-matching + ADDITIVE-only leftover → MOUNTS with the loud log (behavior-identical to FIX-1)', async () => {
+  it('present-matching + ADDITIVE-only leftover → MOUNTS with the loud log', async () => {
     // A stale RAYSPEC_UPDATE_MIGRATION carrying only additive DDL on a plain restart must NOT re-apply
     // the non-idempotent delta (42P07 crash-loop). No destructive finding ⇒ no probe ⇒ MOUNT.
     const logs: string[] = [];
@@ -991,8 +991,8 @@ describe('planUpdateBoot — the ENV-DRIVEN update boot is REBOOT-SAFE by classi
     expect(logs[0]).toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/); // tells the operator to clear the stale env
   });
 
-  it('present-matching + a SUBSET DROP whose target STILL EXISTS → APPLIES (FIX-2: not a silent mount)', async () => {
-    // The regression FIX-2 closes: a pure-subset removal on its first boot present-matches (superset-blind)
+  it('present-matching + a SUBSET DROP whose target STILL EXISTS → APPLIES (not a silent mount)', async () => {
+    // The regression closed here: a pure-subset removal on its first boot present-matches (superset-blind)
     // but the drop target still exists ⇒ the delta is UNAPPLIED ⇒ it MUST run, not mount-and-lose it.
     const logs: string[] = [];
     const plan = await planUpdateBoot(

@@ -18,7 +18,7 @@ import { FIELDLOG_YAML, INTAKE_YAML, NOTETOOL_YAML, parseFixture } from './test-
 const AUDIO_STORE_LIST = [...AUDIO_STORE_NAMES];
 const RECORD_STORE_LIST = [...RECORD_STORE_NAMES];
 
-describe('composeCapabilityStores — conditional-by-declaration (S4)', () => {
+describe('composeCapabilityStores — conditional-by-declaration', () => {
   it('a doc declaring audio (NOTETOOL) mounts the audio stores, and declaresAudio is true', () => {
     const spec = parseFixture(NOTETOOL_YAML);
     expect(declaresAudio(spec)).toBe(true);

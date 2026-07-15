@@ -231,7 +231,7 @@ export function makeJournalSink(
         billedCostUsd: String(billed),
         costDrift: recon.costDrift,
         producedBy: step.producedBy ?? null,
-        // Pricing provenance (S1): the EXACT effective-dated entry that computed this step's cost
+        // Pricing provenance: the EXACT effective-dated entry that computed this step's cost
         // (`<model>@<effectiveFrom>`), or 'FALLBACK' when the model/date had no registry entry — so a
         // fallback-priced step is distinguishable in the ledger, not silently indistinguishable.
         pricingVersion: computed.pricingVersion,

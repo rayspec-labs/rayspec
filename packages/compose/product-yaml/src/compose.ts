@@ -37,7 +37,7 @@ import type {
   AudioCapabilityResult,
   SessionFinalizedSink,
 } from '@rayspec/audio-runtime';
-// AUDIO_CAPABILITY_MANIFEST: the audio half of the mounted trigger-event vocabulary (S1/S3). The
+// AUDIO_CAPABILITY_MANIFEST: the audio half of the mounted trigger-event vocabulary. The
 // capability-owned store NAMES for the shared store checker (CW-1) come from the spec-aware
 // composeCapabilityStores helper (capability-stores.ts) since S3.
 import {
@@ -479,7 +479,7 @@ function requireStoreContract(
 const FROZEN_ENGINE_SPEC_VERSION: string = '0.1';
 
 /**
- * The NEUTRAL code-built engine spec the SHARED deploy pipeline consumes (S4). Assembles a fixed
+ * The NEUTRAL code-built engine spec the SHARED deploy pipeline consumes. Assembles a fixed
  * `RaySpec` skeleton (version FROZEN — see `FROZEN_ENGINE_SPEC_VERSION`) from the composed store
  * read surface + the ownership-merged route set + metadata — with NO capability-specific coupling, so a
  * doc that declares no audio composes a correct minimal spec, and an audio-declaring doc
@@ -550,7 +550,7 @@ export function composeProductDeploy(
     }
   }
 
-  // ── 2b. declared product stores + store steps (S2) — the SHARED spec checker, re-run here ─────
+  // ── 2b. declared product stores + store steps — the SHARED spec checker, re-run here ──────────
   // `lintProductSpec` already ran this at parse time; re-running it fail-closed at compose guards a
   // CODE-BUILT spec that bypassed the parser (a store step targeting an undeclared store / a filter
   // or values column outside the store's declared columns / a write omitting the conflict key would
@@ -685,12 +685,12 @@ export function composeProductDeploy(
 
   // ── 5. trigger vocabulary + workflow compile + the tenant-bound dispatcher (the i composition) ─
   const workflows = new Map<string, WorkflowSpec>();
-  // The trigger-event vocabulary of the MOUNTED capabilities (S1/S4): the inventory's events, the CC-1
+  // The trigger-event vocabulary of the MOUNTED capabilities: the inventory's events, the CC-1
   // payload contracts, and the per-trigger idempotency keys all derive from these descriptors — the
-  // audio mount's `session_finalized` WHEN the doc declares audio (S4 — conditional, in lockstep with
-  // the mount below) plus, WHEN DECLARED, the record mount's `record_submitted` (S3) and the file
-  // mount's `file_submitted` (S2) and the conversation mount's `turn_submitted` (S2
-  // the DEFAULT `${capability}.${event}` join, per-TURN `idempotency_key_field: 'turn_ref'`). An
+  // audio mount's `session_finalized` WHEN the doc declares audio (conditional, in lockstep with
+  // the mount below) plus, WHEN DECLARED, the record mount's `record_submitted` and the file
+  // mount's `file_submitted` and the conversation mount's `turn_submitted` (the DEFAULT
+  // `${capability}.${event}` join, per-TURN `idempotency_key_field: 'turn_ref'`). An
   // UNDECLARED capability contributes no vocabulary, so a workflow triggering on its event without
   // declaring it fails compose fail-closed (`triggerRegistrationForWorkflow` → unknown_trigger_event).
   const eventDescriptors = mountedTriggerEventDescriptors([
@@ -787,7 +787,7 @@ export function composeProductDeploy(
       triggerRegistrationForWorkflow(workflow, eventDescriptors),
     ),
   });
-  // ── 5a. audio capability mount — CONDITIONAL on declaration (S4) ──────────────────────────────
+  // ── 5a. audio capability mount — CONDITIONAL on declaration ───────────────────────────────────
   // The audio mount (stores/routes/handlers/media) joins the composition iff the doc declares
   // `audio_input`/`media_playback`; a non-audio doc mounts NOTHING audio-shaped (no stores, no
   // routes, no handlers, no `session_finalized` trigger vocabulary). A doc that declares audio
@@ -819,7 +819,7 @@ export function composeProductDeploy(
     });
   }
 
-  // ── 5b. the record (submit-ingress) capability mount — CONDITIONAL on declaration (S3) ───────
+  // ── 5b. the record (submit-ingress) capability mount — CONDITIONAL on declaration ────────────
   // The sink is the SAME tenant-bound dispatcher the audio sink feeds (one ingress, one C10
   // authority), behind the record bridge's fail-closed cross-tenant assertion. A doc that does not
   // declare `record_input` mounts NOTHING record-shaped (no store, no route, no handler, no
@@ -866,7 +866,7 @@ export function composeProductDeploy(
       })
     : undefined;
 
-  // ── 5c. the file (byte-ingest) capability mount — CONDITIONAL on declaration (S2) ───────
+  // ── 5c. the file (byte-ingest) capability mount — CONDITIONAL on declaration ────────
   // The SAME conditional-mount law as record (5b): the sink is the SAME tenant-bound dispatcher
   // (one ingress, one C10 authority), behind the file bridge's fail-closed cross-tenant assertion.
   // A doc that does not declare `file_input` mounts NOTHING file-shaped (no store, no routes, no
@@ -884,7 +884,7 @@ export function composeProductDeploy(
       })
     : undefined;
 
-  // ── 5d. the conversation (conversational-ingress) capability mount — CONDITIONAL (S2) ───
+  // ── 5d. the conversation (conversational-ingress) capability mount — CONDITIONAL ────────
   // The SAME conditional-mount law as record/file (5b/5c): the sink is the SAME tenant-bound
   // dispatcher (one ingress, one C10 authority), behind the conversation bridge's fail-closed
   // cross-tenant assertion. The per-TURN enqueue idempotency key derives EXPLICITLY from the

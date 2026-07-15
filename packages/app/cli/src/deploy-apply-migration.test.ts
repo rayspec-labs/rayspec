@@ -146,7 +146,7 @@ describe('runDeploy — the delta/allowlist paths get the FULL spec-path jail (r
     writeFileSync(join(jailDir, 'spec.yaml'), "version: '1.0'\nmetadata: { name: x }\n");
     // The reviewed delta's REAL target lives OUTSIDE the jail; a symlink INSIDE the jail points at it —
     // the LEXICAL jail (resolveSpecPath) sees an in-CWD path and passes, so ONLY readSpecFile's realpath
-    // RE-jail catches the escape (this is the gap FIX-2 closes; the boot's plain readFileSync would
+    // RE-jail catches the escape (this is the gap the realpath re-jail closes; the boot's plain readFileSync would
     // otherwise FOLLOW the symlink out of the cwd with no re-jail).
     writeFileSync(
       join(outsideDir, 'secret-delta.sql'),

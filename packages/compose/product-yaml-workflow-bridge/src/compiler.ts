@@ -548,7 +548,7 @@ function splitCapabilityOperation(use: string): [string, string] {
 
 /**
  * The trigger-event normalization is the SHARED `normalizeProductTriggerEvent` from `@rayspec/spec`
- * (S1) — the ONE source the parser lint also uses (the old KEEP-IN-SYNC local copy is gone). Exported
+ * the ONE source the parser lint also uses (the old KEEP-IN-SYNC local copy is gone). Exported
  * under the historical bridge name so the cross-package parity test can pin the single source by
  * IDENTITY (`compileTriggerEvent === normalizeProductTriggerEvent`): re-introducing a local copy here
  * breaks that pin (or collides with this binding at compile time).

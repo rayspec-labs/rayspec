@@ -525,7 +525,7 @@ describe('plan — Product-YAML (0.2) projections + update mode', () => {
     expect(r.agents).toEqual([]);
   });
 
-  it('support-triage (non-audio): projects the collection store + the two DECLARED stores (S2) + its section counts', async () => {
+  it('support-triage (non-audio): projects the collection store + the two DECLARED stores + its section counts', async () => {
     writeFileSync(join(dir, 'support-triage.yaml'), SUPPORT_TRIAGE_YAML, 'utf8');
     const r = await runPlan(['support-triage.yaml'], { shadowDatabaseUrl: undefined });
     expect(r.ok).toBe(true);

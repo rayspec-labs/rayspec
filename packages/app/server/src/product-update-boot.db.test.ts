@@ -9,10 +9,10 @@
  * data survives, the post-update drift GATE fails closed on an under-reconciling delta, and the deploy
  * gate blocks an unreviewed destructive statement.
  *
- * ── FIX-2 headline: a pure-SUBSET (removal) update on its FIRST boot MUST APPLY, not MOUNT ────────
+ * ── Headline: a pure-SUBSET (removal) update on its FIRST boot MUST APPLY, not MOUNT ─────────────
  * detectDrift is SUPERSET-BLIND (it introspects only the NEW spec's stores), so a live SUPERSET schema
  * (v2) present-matches a smaller NEW spec (v1) — the SAME classification a genuine leftover env yields.
- * Pre-FIX-2 `planUpdateBoot` MOUNTED both, SILENTLY LOSING the operator's reviewed DROP forever. FIX-2
+ * An earlier `planUpdateBoot` MOUNTED both, SILENTLY LOSING the operator's reviewed DROP forever. The boot
  * PROBES the delta's destructive targets live to discriminate: a target that STILL EXISTS ⇒ the delta is
  * UNAPPLIED ⇒ APPLY; all targets GONE ⇒ a genuine leftover ⇒ MOUNT.
  *
@@ -20,11 +20,11 @@
  * Every Product-YAML boot launches the process-global DBOS singleton, and a SECOND `DBOS.launch()` in
  * one process (after a NON-deregistering shutdown, which the live boot uses) is unsafe — the hard-won
  * safe-half lesson (executor-safe-half.db.test.ts). So this file completes exactly ONE full product
- * boot: the SUBSET-DESTRUCTIVE update boot (the FIX-2 novel surface). v-schemas are materialized DIRECTLY
+ * boot: the SUBSET-DESTRUCTIVE update boot (the novel surface). v-schemas are materialized DIRECTLY
  * via the EXACT production first-materialization SQL (`generateProductSql`) + the committed platform
  * migration chain — DBOS-launch is orthogonal to schema materialization. Every OTHER boot()-driven arm
  * THROWS before `executor.start()` (no launch): the incomplete-delta arm on the post-update drift GATE,
- * the blocked arm on deploy()'s lint/gate, the absent-schema arm on FIX-1's classify preflight. A full
+ * the blocked arm on deploy()'s lint/gate, the absent-schema arm on the classify preflight. A full
  * product BOOT + workflow (deployMode 'materialized', real grounded rows) is proven independently by
  * product-yaml-boot.db.test.ts; THIS file's novel surface is the UPDATE.
  *
@@ -34,25 +34,25 @@
  *                          applies (pinned_moments live) but the post-update drift GATE FAILS CLOSED with
  *                          a ProductBootError (STILL DRIFTED) BEFORE any launch — NOT a green 'updated'
  *                          boot that would brick the next reboot. Mid-state asserted on the real catalog.
- *   2.  SUBSET-DESTRUCTIVE — (FIX-2, the ONE launch) a v2-materialized DB (the SUPERSET) + a seeded
+ *   2.  SUBSET-DESTRUCTIVE — (the ONE launch) a v2-materialized DB (the SUPERSET) + a seeded
  *       APPLIES through   — note_artifacts row → env-driven UPDATE boot with SPEC v1 (the SUBSET) and
  *       the REAL boot()     the reviewed v2→v1 pure-DROP delta (drops pinned_moments + highlights) + its
  *                          reviewed allowlist. present-matching (superset-blind) BUT the drop targets
  *                          STILL EXIST → planUpdateBoot PROBES them → APPLY: deployMode 'updated', both
  *                          targets DROPPED, the SEEDED ROW SURVIVES, drift-clean vs v1. (RED against the
- *                          pre-FIX-2 boot: this MOUNTED, targets intact, the drop silently lost.)
+ *                          earlier boot: this MOUNTED, targets intact, the drop silently lost.)
  *                          Tails, launch-free: (2b) a plain reboot present-matches v1 → would MOUNT;
  *                          (2c, case-(A)) a LEFTOVER env is reboot-safe — (RED) re-applying the drop to
  *                          the now-v1 schema CRASHES 42P01; (GREEN) planUpdateBoot over the REAL
  *                          present-matching classify + a REAL live probe sees the targets GONE → MOUNTS.
- *   3.  BLOCKED (no      — (FIX-2 through boot) the SAME v2→v1 drop delta but env carries NO reviewed
+ *   3.  BLOCKED (no      — (through boot) the SAME v2→v1 drop delta but env carries NO reviewed
  *       allowlist)         allowlist → planUpdateBoot routes present-matching+target-exists to APPLY →
  *                          deploy()'s lint/gate REFUSES the DROP → boot throws a DeployError BEFORE
  *                          executor.start() (launch-free), the schema INTACT. The through-boot replacement
  *                          for the old hand-rolled direct-gate arm (that workaround existed only because
- *                          the pre-FIX-2 boot MOUNTED a subset drop instead of routing it to the gate).
- *   4.  ABSENT + env     — (FIX-1) a FULL boot() with the update env against a DB with NO product stores →
- *                          FIX-1 classifies 'absent' → throws the actionable ProductBootError BEFORE
+ *                          an earlier boot MOUNTED a subset drop instead of routing it to the gate).
+ *   4.  ABSENT + env     — a FULL boot() with the update env against a DB with NO product stores →
+ *                          the boot classifies 'absent' → throws the actionable ProductBootError BEFORE
  *                          deploy()/launch (remove the env for a first materialization). Launch-free.
  *
  * UN-SKIPPABLE RAN-GUARD (the false-green class): a separate, NON-skipped
@@ -353,7 +353,7 @@ describe.skipIf(!baseUrl)(
       180_000,
     );
 
-    // ── Arm 2 (FIX-2): the SUBSET-DESTRUCTIVE update through the REAL boot() — the ONE product boot / launch ──
+    // ── Arm 2: the SUBSET-DESTRUCTIVE update through the REAL boot() — the ONE product boot / launch ──
     maybe(
       'SUBSET-DESTRUCTIVE delta (v2→v1) APPLIES through boot(): present-matching + target-exists → deployMode "updated", targets DROPPED, the seeded row SURVIVES, drift-clean vs v1; a leftover env is then REBOOT-SAFE',
       async () => {
@@ -367,7 +367,7 @@ describe.skipIf(!baseUrl)(
         expect(await tableExists(appDbUrl, 'pinned_moments')).toBe(true);
         expect(await tableExists(appDbUrl, 'highlights')).toBe(true);
 
-        // FIX-2 probe-SQL ground truth: makeSchemaProbe resolves EVERY superset-blind kind correctly
+        // Probe-SQL ground truth: makeSchemaProbe resolves EVERY superset-blind kind correctly
         // against the LIVE v2 schema (a wrong probe that reports a PRESENT target as GONE would route an
         // unapplied subset update to MOUNT — the exact silent-loss the fix guards against). Index +
         // constraint names are discovered from the catalog so this never hardcodes generator naming.
@@ -434,11 +434,11 @@ describe.skipIf(!baseUrl)(
         writeFileSync(allowlistPath, JSON.stringify(diff.proposedAllowlist), 'utf8');
 
         // Boot spec v1 (the SUBSET) with the drop delta. present-matching (superset-blind) BUT the drop
-        // targets STILL EXIST → planUpdateBoot PROBES them and routes to APPLY. (Against the pre-FIX-2
+        // targets STILL EXIST → planUpdateBoot PROBES them and routes to APPLY. (Against an earlier
         // boot this MOUNTED green, targets intact — deployMode 'mounted', the reviewed drop silently lost.)
         const server = await boot(V1_YAML, appDbUrl, deltaPath, allowlistPath);
         try {
-          expect(server.deployMode).toBe('updated'); // APPLIES — not 'mounted' (the RED against pre-FIX-2)
+          expect(server.deployMode).toBe('updated'); // APPLIES — not 'mounted' (the RED against the earlier boot)
           expect(server.drift).toEqual([]); // the drops fully reconcile the superset to the v1 subset
           // GROUND TRUTH: both reviewed drop targets are GONE.
           expect(await tableExists(appDbUrl, 'pinned_moments')).toBe(false);
@@ -476,7 +476,7 @@ describe.skipIf(!baseUrl)(
           await c.end();
         }
 
-        // ── Arm 2c (case-(A), FIX-1 preserved under FIX-2): a LEFTOVER env after the destructive update is
+        // ── Arm 2c (case-(A), leftover-env reboot-safety preserved): a LEFTOVER env after the destructive update is
         // REBOOT-SAFE. The env is PERSISTENT (docker-compose/.env-prod), re-read on every restart. Both
         // facts launch-free (the ONE DBOS launch above is spent — a second is unsafe, see the file header):
         //
@@ -505,7 +505,7 @@ describe.skipIf(!baseUrl)(
           await rdb.$client.end();
         }
 
-        //  (GREEN — FIX-2 discriminates via the live probe) planUpdateBoot over the REAL present-matching
+        //  (GREEN — the boot discriminates via the live probe) planUpdateBoot over the REAL present-matching
         //  classify + a REAL live-schema probe sees BOTH drop targets GONE → routes to MOUNT (ZERO
         //  migrations, no re-apply) + the loud log. This is the exact decision the live boot makes on the
         //  next restart with the env still set — a genuine leftover, NOT an unapplied subset update.
@@ -538,12 +538,12 @@ describe.skipIf(!baseUrl)(
       180_000,
     );
 
-    // ── Arm 3 (FIX-2 through boot): the SUBSET-DESTRUCTIVE gate BLOCKS when the reviewed allowlist is ABSENT ──
+    // ── Arm 3 (through boot): the SUBSET-DESTRUCTIVE gate BLOCKS when the reviewed allowlist is ABSENT ──
     // The SAME v2→v1 drop delta, but the env carries NO RAYSPEC_UPDATE_ALLOWLIST (readReviewedAllowlist ⇒
     // []). planUpdateBoot routes present-matching+target-exists to APPLY → deploy()'s lint/gate REFUSES the
     // DROP (a destructive statement with no covering reviewed entry) → boot throws a DeployError BEFORE
     // executor.start() (launch-free), the schema INTACT. This is the through-boot replacement for the old
-    // hand-rolled direct-gate arm (that workaround existed only because the pre-FIX-2 boot MOUNTED a subset
+    // hand-rolled direct-gate arm (that workaround existed only because an earlier boot MOUNTED a subset
     // drop instead of routing it to deploy()'s gate).
     maybe(
       'SUBSET-DESTRUCTIVE delta with NO reviewed allowlist → boot()’s deploy() gate BLOCKS it (DeployError at lint/gate), schema INTACT, no launch',
@@ -570,12 +570,12 @@ describe.skipIf(!baseUrl)(
       180_000,
     );
 
-    // ── Arm 4 (FIX-1): update env on an ABSENT schema (a first boot) REFUSES actionably, fail-closed ──
+    // ── Arm 4: update env on an ABSENT schema (a first boot) REFUSES actionably, fail-closed ──
     // A FULL boot() with RAYSPEC_UPDATE_MIGRATION set against a DB that has NO product stores yet.
-    // FIX-1's classify preflight sees 'absent' and throws the actionable ProductBootError BEFORE deploy()
-    // and BEFORE executor.start() — launch-free. RED-first: against the pre-FIX-1 boot this proceeds into
+    // The classify preflight sees 'absent' and throws the actionable ProductBootError BEFORE deploy()
+    // and BEFORE executor.start() — launch-free. RED-first: against an earlier boot this proceeds into
     // deploy() (migrations = updateMigrations), applies a PARTIAL schema, and the post-update drift gate
-    // throws "STILL DRIFTED" instead — a different, non-actionable error. The assertion pins the FIX-1
+    // throws "STILL DRIFTED" instead — a different, non-actionable error. The assertion pins the boot's actionable
     // message (a first-materialization operator is told to REMOVE the env), which only the fix produces.
     maybe(
       'ABSENT schema + update env (a first boot) → REFUSES actionably (remove the env for a first materialization)',
@@ -604,7 +604,7 @@ describe.skipIf(!baseUrl)(
  * FAILS the run when the DB is REQUIRED (CI / RAYSPEC_REQUIRE_DB_TESTS) but the arms did NOT run.
  * Registered with NO beforeAll dependency, so a suite whose setup throws-and-skips still leaves `armsRan`
  * at 0 and THIS fails. A local dev with no DB skips ergonomically. FOUR arms: INCOMPLETE, SUBSET-DESTRUCTIVE
- * APPLIES-through-boot (+ the FIX-1/FIX-2 leftover-env reboot-safety tail), BLOCKED-through-boot, ABSENT-refuse.
+ * APPLIES-through-boot (+ the leftover-env reboot-safety tail), BLOCKED-through-boot, ABSENT-refuse.
  */
 describe('Product-YAML update seam — ran-guard (the 0.2 update-seam arms must not silently skip)', () => {
   it('the four update-seam arms ACTUALLY RAN when the DB is required (CI / opt-in)', () => {

@@ -80,7 +80,7 @@ function acmeAgents(): InMemoryAgentHandlerRegistry {
   return registry;
 }
 
-describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands (S4)', () => {
+describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands', () => {
   let demandDbUrl = '';
   let intakeDbUrl = '';
   let intakeServer: BootedServer | undefined;

@@ -14,7 +14,7 @@
  * (reboot-safe by construction, because `RAYSPEC_UPDATE_MIGRATION` is a PERSISTENT
  * deployment env re-read on EVERY boot) routes on the result: `drifted` (the normal update) hands the
  * reviewed forward DELTA to `deploy()`'s gate; `absent` (a first boot) refuses actionably; and
- * `present-matching` PROBES the delta's destructive targets live (FIX-2 — detectDrift is superset-blind,
+ * `present-matching` PROBES the delta's destructive targets live (detectDrift is superset-blind,
  * so a leftover-env schema and an UNAPPLIED pure-SUBSET removal both classify present-matching): a genuine
  * LEFTOVER (all drop targets gone / additive-only) SHORT-CIRCUITs to MOUNT with a loud operator log
  * (re-applying a non-idempotent delta would 42P07/42P01 crash-loop the boot), an UNAPPLIED subset removal
@@ -499,13 +499,13 @@ export function makeSchemaProbe(
  *                          'updated'.
  *   - `present-matching` — the live schema satisfies the NEW spec's load-bearing facts, but detectDrift
  *                          is SUPERSET-BLIND, so this covers TWO indistinguishable-by-classification cases.
- *                          FIX-2 discriminates them by PROBING the delta's destructive targets live
+ *                          the boot discriminates them by PROBING the delta's destructive targets live
  *                          (`routePresentMatchingUpdate` + `probeTarget`):
  *                            · all drop targets GONE / additive-only  → MOUNT (a leftover env; ZERO
  *                              migrations, loud log). deployMode 'mounted'.
  *                            · a reviewed drop target STILL EXISTS    → APPLY (the delta never ran — a
- *                              pure-SUBSET update on its first boot). deployMode 'updated'. (FIX-1 pre-
- *                              FIX-2 mounted this too and SILENTLY LOST the reviewed drop forever.)
+ *                              pure-SUBSET update on its first boot). deployMode 'updated'. (an earlier
+ *                              revision mounted this too and SILENTLY LOST the reviewed drop forever.)
  *                            · an undeterminable destructive statement → REFUSE fail-closed (honest both-
  *                              cases message).
  *   - `absent`           — NOTHING is materialized yet (a first boot). Update mode evolves an EXISTING
@@ -710,7 +710,7 @@ interface ExtractorConfig {
 export const WIRED_EXTRACTION_BACKENDS = ['openai', 'anthropic', 'pi', 'codex'] as const;
 
 /**
- * The boot-side backend FACTORY (S5): map an extractor config's `backend` string to the right
+ * The boot-side backend FACTORY: map an extractor config's `backend` string to the right
  * in-process neutral adapter, demanding ONLY the env the CHOSEN backend needs (fail-closed, actionable).
  * The kill-set `packages/adapters/**` are consumed via their EXPORTED constructors ONLY (zero adapter
  * source edits). Per-backend env contract (doc-first verified against each adapter's source + the
@@ -1982,9 +1982,9 @@ export async function deployProductYamlSpec(
   let migrations: PlannedMigration[];
   let deployMode: BootedServer['deployMode'];
   if (updateMigrations !== undefined) {
-    // ENV-DRIVEN UPDATE mode. planUpdateBoot routes on the classify (FIX-1 — reboot-safe): drifted →
+    // ENV-DRIVEN UPDATE mode. planUpdateBoot routes on the classify (reboot-safe): drifted →
     // apply; absent → refuse actionably; present-matching → PROBE the delta's destructive targets live
-    // (FIX-2) — a leftover env MOUNTS + loud log, but an UNAPPLIED pure-subset removal (a drop target
+    // — a leftover env MOUNTS + loud log, but an UNAPPLIED pure-subset removal (a drop target
     // still exists) APPLIES, and an undeterminable destructive statement REFUSES fail-closed.
     // (S4: audio is now conditional, so a doc composing ZERO stores — no capability/declared/collection
     // stores — classifies 'present-matching' [classifyProductSchema: stores.length===0, UNIT-PINNED at
@@ -2067,7 +2067,7 @@ export async function deployProductYamlSpec(
     }
   }
 
-  // ── 4. the extraction executor — DEMANDED iff the doc declares agents (S4) ────────────────────
+  // ── 4. the extraction executor — DEMANDED iff the doc declares agents ─────────────────────────
   // A zero-agent doc has nothing to extract, so it demands NO RAYSPEC_EXTRACTION_MODE (the env is
   // only read inside the `hasAgents` guard). An agent-declaring product ⇒ the demand + the live/
   // deterministic dispatch stay exactly as before.
@@ -2097,7 +2097,7 @@ export async function deployProductYamlSpec(
     }
   }
 
-  // ── 5. the STT adapter — DEMANDED iff the doc declares an stt.* step (S4) ──────────────────────
+  // ── 5. the STT adapter — DEMANDED iff the doc declares an stt.* step ───────────────────────────
   // STT_PROVIDER (and DEEPGRAM_API_KEY) are only demanded when the doc actually transcribes. A
   // deployment override (a fixtured fake) still wins. The real STT resolver reads the AUDIO
   // capability's blob chunks, so an stt.* step needs the audio capability's blob factory — a doc that
@@ -2320,9 +2320,9 @@ export async function deployProductYamlSpec(
 
   // ── 7b. the post-UPDATE drift GATE (fail-closed on an under-reconciling reviewed delta) ─
   // SCOPED to the branch that ACTUALLY applied a reviewed delta (deployMode === 'updated' — a 'drifted'
-  // classify OR, per FIX-2, a 'present-matching' classify whose reviewed drop target still existed).
+  // classify OR a 'present-matching' classify whose reviewed drop target still existed).
   // `deploy()`'s drift step is REPORT-ONLY: it returns `result.drift` but never aborts. A mount/materialize
-  // boot (and, per FIX-1/FIX-2, an update env that classified 'present-matching' as a genuine LEFTOVER and
+  // boot (and an update env that classified 'present-matching' as a genuine LEFTOVER and
   // short-circuited to MOUNT) already has a drift-clean live schema, so this gate never fires for them;
   // only the 'updated' branch APPLIED a delta whose completeness `result.drift` must confirm — including a
   // present-matching subset DROP that must fully reconcile to the smaller spec. A delta that applies cleanly but UNDER-reconciles

@@ -4,7 +4,7 @@
  * coherent (key field within the payload keys; payload keys == the ONE payload-key source); the
  * turn contract pins the runtime constants; the ROUTE TUPLES are whole (method/kind/auth for BOTH
  * routes — the S2 gate asserts manifest == mounted surface from these). The repo-level capability
- * check (S2) re-asserts these from the committed JSON — this test keeps JSON and TS from drifting.
+ * check re-asserts these from the committed JSON — this test keeps JSON and TS from drifting.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';

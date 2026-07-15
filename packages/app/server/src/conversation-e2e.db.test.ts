@@ -575,7 +575,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
       );
 
       // MATERIALIZED ground truth 1 — the capability's OWN ledger rows: the user turn carries the
-      // tenant-prefixed unique authorities + the verbatim message; the ASSISTANT reply row (S3)
+      // tenant-prefixed unique authorities + the verbatim message; the ASSISTANT reply row
       // carries the derived `reply~` refs, its OWN seq, the deterministic run id, state 'replied'.
       const turns = await turnRowsFor(TENANT);
       expect(turns).toHaveLength(2);

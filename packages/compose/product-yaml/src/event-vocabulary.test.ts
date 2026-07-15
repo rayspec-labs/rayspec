@@ -1,5 +1,5 @@
 /**
- * The composition-side trigger-event vocabulary (S1) — the unit proofs compose.ts
+ * The composition-side trigger-event vocabulary — the unit proofs compose.ts
  * relies on:
  *
  *   • the MOUNTED descriptor registry is exactly the audio vocabulary (the inventory source);
@@ -65,7 +65,7 @@ describe('mountedTriggerEventDescriptors (the inventory source)', () => {
     expect(audio?.idempotency_key_field).toBe('session_id');
   });
 
-  it('the audio + record manifest UNION is coherent: both canonical ids, each descriptor intact (S3)', () => {
+  it('the audio + record manifest UNION is coherent: both canonical ids, each descriptor intact', () => {
     const descriptors = mountedTriggerEventDescriptors([
       ...AUDIO_CAPABILITY_MANIFEST.capabilities,
       ...RECORD_CAPABILITY_MANIFEST.capabilities,

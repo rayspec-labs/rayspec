@@ -24,7 +24,7 @@
  * plain value) — like `HandlerDb.transaction`'s closure, the cross-isolate stream model is a design
  * point, NOT solved here. The in-process call is correct + GUC-populated; see `invokeStreamRouteHandler`.
  *
- * TX POSTURE (S3): the optional `ResolvedHandler.routeTx` flag is NOT honored here — both stream
+ * TX POSTURE: the optional `ResolvedHandler.routeTx` flag is NOT honored here — both stream
  * arms ALWAYS run inside the engine's tenant transaction (only the plain `{kind:'handler'}` route
  * interpreter dispatches on it; see handler-runtime.ts).
  */
