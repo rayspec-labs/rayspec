@@ -603,6 +603,50 @@ describe('plan — Product-YAML (0.2) projections + update mode', () => {
     expect(rev.breakingChangeBlocked).toBe(true);
   });
 
+  it('planning a spec against its OWN identical copy yields an EMPTY delta (no phantom injected-column DDL)', async () => {
+    // The headline no-op invariant for `plan --against`: nothing changed, so the migration is EMPTY.
+    // The platform-injected tenancy/GDPR columns (created_by / idempotency_key + the idempotency index)
+    // are CONSTANT and present on both sides, so they must CANCEL — never surface as spurious
+    // `ADD COLUMN IF NOT EXISTS` / `CREATE UNIQUE INDEX IF NOT EXISTS` no-ops (one set per surviving
+    // store) that dilute delta review. VALID_SPEC has two stores, so an un-normalized diff would print
+    // several no-op statements here.
+    writeFileSync(join(dir, 'noop-a.yaml'), VALID_SPEC, 'utf8');
+    writeFileSync(join(dir, 'noop-b.yaml'), VALID_SPEC, 'utf8');
+    const r = await runPlan(['noop-a.yaml'], {
+      against: 'noop-b.yaml',
+      shadowDatabaseUrl: undefined,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.updateMode).toBe(true);
+    expect(r.breakingChangeBlocked).toBe(false);
+    expect(r.migrationSql).toBe(''); // the whole point: empty, not ~N phantom statements
+    expect(r.migrationSql).not.toContain('ADD COLUMN IF NOT EXISTS');
+    expect(r.migrationSql).not.toContain('idempotency_key');
+    expect(r.migrationSql).not.toContain('created_by');
+  });
+
+  it('a REAL business-column addition STILL emits its ADD — the fix cancels ONLY the injected no-ops', async () => {
+    // Guard: normalization must never swallow a genuine business delta. v2 adds one nullable column to
+    // `meetings`; the delta carries exactly that ADD, and NO phantom injected-column DDL rides alongside.
+    const v2 = VALID_SPEC.replace(
+      '      - { name: completed, type: boolean }\n',
+      '      - { name: completed, type: boolean }\n      - { name: label, type: text, nullable: true }\n',
+    );
+    writeFileSync(join(dir, 'real-a.yaml'), v2, 'utf8');
+    writeFileSync(join(dir, 'real-b.yaml'), VALID_SPEC, 'utf8');
+    const r = await runPlan(['real-a.yaml'], {
+      against: 'real-b.yaml',
+      shadowDatabaseUrl: undefined,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.updateMode).toBe(true);
+    expect(r.breakingChangeBlocked).toBe(false);
+    expect(r.migrationSql).toContain('ALTER TABLE "meetings" ADD COLUMN "label" text');
+    // The real ADD is the ONLY column change — the injected no-ops are gone.
+    expect(r.migrationSql).not.toContain('ADD COLUMN IF NOT EXISTS');
+    expect(r.migrationSql).not.toContain('idempotency_key');
+  });
+
   it('a PRODUCT update THREADS the derived conflict keys to the baseline-seeded shadow (arms the plan-time oracle)', async () => {
     // Minimal product with a declared store: `serial_no` is a plain author-unique (tenant-scoped
     // compound), `sku` is the durable `key` (single-column). deriveConflictKeys ⇒ {catalog: {sku}} — the

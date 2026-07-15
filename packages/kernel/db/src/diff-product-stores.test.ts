@@ -78,6 +78,59 @@ describe('diffProductStores — no-op', () => {
   });
 });
 
+describe('diffProductStores — injected-column normalization (spec-vs-spec vs real-DB reconcile)', () => {
+  const s = [
+    store({
+      name: 'notes',
+      columns: [
+        { name: 'title', type: 'text' },
+        { name: 'body', type: 'text' },
+      ],
+    }),
+  ];
+
+  it('identical spec sides CANCEL the constant injected columns (no phantom no-op DDL)', () => {
+    // Both sides carry the SAME platform-injected columns (created_by / idempotency_key + its index),
+    // so the diff normalizes them onto both sides and they cancel — a spec-vs-spec no-op stays EMPTY.
+    const r = diffProductStores(s, s);
+    expect(r.statements).toEqual([]);
+    expect(r.migrationSql).toBe('');
+  });
+
+  it('a REAL business delta emits only that change — injected columns never leak into it', () => {
+    // Adding a nullable business column produces exactly one ADD; the constant injected columns cancel
+    // and do NOT ride along as phantom `ADD COLUMN IF NOT EXISTS` / `idempotency_key` DDL.
+    const next = [
+      store({
+        name: 'notes',
+        columns: [
+          { name: 'title', type: 'text' },
+          { name: 'body', type: 'text' },
+          { name: 'label', type: 'text', nullable: true },
+        ],
+      }),
+    ];
+    const r = diffProductStores(s, next);
+    expect(r.statements).toEqual(['ALTER TABLE "notes" ADD COLUMN "label" text']);
+    expect(r.migrationSql).not.toContain('IF NOT EXISTS');
+    expect(r.migrationSql).not.toContain('idempotency_key');
+    expect(r.migrationSql).not.toContain('created_by');
+  });
+
+  it('the real-DB reconcile knob (backfillInjectedColumns) STILL forces the injected backfill', () => {
+    // The boundary: normalization only levels spec-vs-spec. A caller that KNOWS the live DB predates an
+    // injected column opts into the UNCONDITIONAL backfill, which still emits — scoped to the columns
+    // added after the first release (created_by + idempotency_key + its index), never the always-present
+    // ones. This is the preserved yaml-vs-DB reconcile path (kept behind the flag; the CLI leaves it off).
+    const r = diffProductStores(s, s, { backfillInjectedColumns: true });
+    expect(r.statements.filter((x) => x.includes('ADD COLUMN')).length).toBe(2);
+    expect(r.statements.some((x) => x.includes('"created_by"'))).toBe(true);
+    expect(r.statements.some((x) => x.includes('"idempotency_key"'))).toBe(true);
+    expect(r.statements.some((x) => x.includes('"deleted_at"'))).toBe(false);
+    expect(r.destructive).toBe(false); // additive / idempotent — the gate never blocks it
+  });
+});
+
 describe('diffProductStores — first materialization equals the CREATE-only generator', () => {
   it('diff([], new).migrationSql === generateProductSql(new) BYTE-FOR-BYTE', () => {
     const r = diffProductStores([], NEW_RICH);

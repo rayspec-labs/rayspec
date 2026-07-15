@@ -419,10 +419,12 @@ async function planStores(inp: StorePlanInputs): Promise<PlanResult> {
     const diff = diffProductStores(inp.oldStores, inp.newStores, {
       newConflictKeys: inp.newConflictKeys,
       oldConflictKeys: inp.oldConflictKeys,
-      // Reconcile a store materialized before an injected column existed (e.g. an
-      // older deployment lacking created_by/idempotency_key). Idempotent (IF NOT EXISTS) — a
-      // no-op on an already-current store; the ONLY way `rayspec plan --against` closes the injected gap.
-      backfillInjectedColumns: true,
+      // NB `backfillInjectedColumns` is intentionally NOT set here. This is a spec-vs-spec diff (both
+      // sides are declared specs, not the live DB), so `diffProductStores` NORMALIZES both sides with the
+      // platform-injected columns: identical specs cancel to an EMPTY delta instead of emitting a phantom
+      // no-op backfill for every surviving store, while a side that genuinely lacks an injected column
+      // still emits its ADD. Forcing the unconditional backfill (a real-DB reconcile knob) here diluted
+      // every `--against` delta with ~18 no-op statements even when the two specs were identical.
     });
     migrationSql = diff.migrationSql;
     proposedAllowlist = diff.proposedAllowlist;
