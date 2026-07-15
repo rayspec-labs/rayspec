@@ -29,10 +29,19 @@ import { readRefreshCookie } from './cookies.js';
 
 type Env = { Variables: AppVariables };
 
-/** Attach a request id. */
+/**
+ * A short, printable allow-list for a caller-supplied `x-request-id`. The id is echoed back (into the
+ * error envelope) and written to the audit log, so it must not carry newlines/control characters (log
+ * injection — a crafted value could forge or wrap a log line) or be unboundedly long. The pattern
+ * covers the common propagated-id shapes (UUIDs, hex/trace ids, `svc.req-123` forms); anything else is
+ * replaced with a fresh `randomUUID()`.
+ */
+const REQUEST_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+
+/** Attach a request id — echo a well-formed incoming one, else mint a fresh UUID. */
 export const requestId: MiddlewareHandler<Env> = async (c, next) => {
   const incoming = c.req.header('x-request-id');
-  c.set('requestId', incoming && incoming.length <= 200 ? incoming : randomUUID());
+  c.set('requestId', incoming && REQUEST_ID_RE.test(incoming) ? incoming : randomUUID());
   await next();
 };
 
