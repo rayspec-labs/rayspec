@@ -54,7 +54,7 @@ if (requireDb && !hasDb) {
   );
 }
 
-const MEDIA_SECRET = 'py-d4b-media-secret-at-least-32-bytes-x';
+const MEDIA_SECRET = 'test-a-media-secret-at-least-32-bytes-x';
 const capConfig = resolveConfig({ allowedTracks: ['mic', 'system'] });
 
 describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {

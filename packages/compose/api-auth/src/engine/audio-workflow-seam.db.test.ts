@@ -62,7 +62,7 @@ if (requireDb && !hasDb) {
   );
 }
 
-const MEDIA_SECRET = 'py-d2i-media-secret-at-least-32-bytes-x';
+const MEDIA_SECRET = 'test-b-media-secret-at-least-32-bytes-x';
 
 /** The Tier A workflow that triggers on a finalized session (the id is part of the durable run id). */
 const AUDIO_FLOW_ID = 'audio_session_flow';

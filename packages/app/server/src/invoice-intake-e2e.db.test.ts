@@ -33,7 +33,7 @@
  *   (h) unauthenticated upload + submit → 401;
  *   (i) cross-tenant: a SECOND org's submit → the bridge sink's fail-closed 403, ZERO enqueue;
  *   (j) a FILENAME-LESS upload (no optional x-file-name header) completes end-to-end — the product
- *       does NOT persist the client filename (PY-1: `{event:}` is fail-closed on a null payload
+ *       does NOT persist the client filename (`{event:}` is fail-closed on a null payload
  *       value, so the doc keeps the attacker-influenced optional filename out of the coded row);
  *   (k) a coded output MISSING a required field (no gl_code, via the sentinel document) is REJECTED
  *       before persist — the agent node's required_output_shape gate fires first
