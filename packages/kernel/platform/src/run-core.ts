@@ -284,13 +284,15 @@ export async function runAgent(
 
   // CRITICAL — run-HEADER cross-tenant check BEFORE the model runs.
   //
-  // runs.runId is the PK and the header upsert below uses onConflictDoNothing, while
-  // conversation persistence is gated on not-replay. An adapter (e.g. Pi) falls through to a
-  // LIVE re-run when lookup() returns null on replay. So a B-context replay of A's runId
-  // would run the model, silently no-op its header upsert against A's row, persist NO
-  // conversation, and leave A's header authoritative for any later read of that runId — a
-  // stored cross-tenant read leak through the runs table that the lookup() predicate alone
-  // does NOT close.
+  // runs.runId is the PK and the header upsert below is a CONDITIONAL upsert on that PK
+  // (onConflictDoUpdate with setWhere ne(status,'completed')), while conversation persistence
+  // is gated on not-replay. An adapter (e.g. Pi) falls through to a LIVE re-run when lookup()
+  // returns null on replay. So a B-context replay of A's runId would run the model and then
+  // reconcile B's outcome onto A's header row: when A's run is already 'completed' the setWhere
+  // is false so the upsert silently no-ops (A's header stays authoritative), and when A's run
+  // is not yet 'completed' the upsert OVERWRITES A's header with B's outcome. Either way it
+  // persists NO conversation and contaminates the runs table cross-tenant — a stored leak that
+  // the lookup() predicate alone does NOT close.
   //
   // The ownership probe is intentionally a cross-tenant read (it must see whether the PK
   // belongs to ANOTHER tenant), so it is encapsulated inside the db boundary
