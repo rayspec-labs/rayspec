@@ -59,8 +59,9 @@ import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 
 /**
  * A fail-closed INPUT-validation rejection at the store facade — a handler db call that names an
- * unknown column, sets a server-controlled column, passes a non-data/injection value, or writes an
- * out-of-whitelist enum value. It is a CLIENT error (the request shape is invalid), NOT a server fault:
+ * unknown column, sets a server-controlled column, passes a non-data/injection value, writes an
+ * out-of-whitelist enum value, supplies an invalid date for a timestamp column, or requests an
+ * out-of-range limit/offset. It is a CLIENT error (the request shape is invalid), NOT a server fault:
  * the api layer classifies it as HTTP 400 (an unhandled `Error` would otherwise surface as an
  * INTERNAL 500, misreporting a bad request as a server incident).
  *
@@ -364,9 +365,14 @@ function coerceForColumn(col: PgColumn, name: string, value: unknown, op: string
   if (isTimestampColumn(col) && typeof value === 'string') {
     const d = new Date(value);
     if (Number.isNaN(d.getTime())) {
-      throw new Error(
+      // A malformed timestamp value is a CLIENT input error (a bad request shape), not a server fault:
+      // throw a StoreInputError so the api layer returns HTTP 400, uniform with the other facade input
+      // guards. The detailed text (column + offending value) stays on the internal `message` (logs /
+      // throw-site assertions); the client sees only the GENERIC publicMessage.
+      throw new StoreInputError(
         `HandlerDb: ${op} value for timestamp column '${name}' is not a valid date: ` +
           `${JSON.stringify(value)} (fail-closed, SF-2).`,
+        'A supplied value is not a valid date.',
       );
     }
     return d;
@@ -383,10 +389,15 @@ function coerceForColumn(col: PgColumn, name: string, value: unknown, op: string
  */
 function assertNonNegativeInt(field: string, value: number): void {
   if (!Number.isInteger(value) || value < 0) {
-    throw new Error(
+    // An out-of-range limit/offset is CLIENT-supplied bad input (a bad request shape), not a server
+    // fault: throw a StoreInputError so the api layer returns HTTP 400, uniform with the other facade
+    // input guards. The detailed text (which field + offending value) stays on the internal `message`;
+    // the client sees only the GENERIC publicMessage.
+    throw new StoreInputError(
       `HandlerDb: select '${field}' must be a non-negative integer (got ${JSON.stringify(value)}) — ` +
         'a negative/NaN value would silently drop the clause or raise a raw DB error. Rejected ' +
         'fail-closed (F2).',
+      'A supplied pagination value is not a permitted value.',
     );
   }
 }

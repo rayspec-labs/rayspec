@@ -694,6 +694,35 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     ).rejects.toThrow(/not a valid date/);
   });
 
+  it('an invalid timestamp value is TYPED as an input error carrying a generic, non-leaking public message (a client 400, not a server 500)', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // Capture the thrown error to inspect its TYPE + the client-facing public message.
+    let err: unknown;
+    try {
+      await aDb.insert('meetings', {
+        title: 'bad',
+        completed: false,
+        scheduled_at: 'not-a-real-date',
+      });
+      throw new Error('expected the invalid-date guard to reject');
+    } catch (e) {
+      err = e;
+    }
+    // TYPED as an input error → the api layer classifies it as HTTP 400 (RED before: a plain Error fell
+    // through onError to an INTERNAL 500, misreporting a bad request as a server incident).
+    expect(err).toBeInstanceOf(StoreInputError);
+    const publicMessage = (err as StoreInputError).publicMessage;
+    expect(publicMessage.length).toBeGreaterThan(0);
+    // NO-LEAK: the client-facing message never carries an internal — not the column name, the offending
+    // value, the facade prefix, the column type, or the store name.
+    expect(publicMessage).not.toMatch(
+      /HandlerDb|scheduled_at|not-a-real-date|timestamp|meetings|JSON/i,
+    );
+    // The DETAILED text stays available server-side (log / throw-site), never sent to the client.
+    expect((err as StoreInputError).message).toMatch(/not a valid date/);
+  });
+
   it('TenantDb backstop: update with tenantId in the SET does NOT move the row', async () => {
     testsRan += 1;
     // The facade rejects a server-controlled key (#3); this proves the LAYER BENEATH — a RAW
@@ -976,6 +1005,31 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     );
     // TQ-5: limit:0 is VALID — returns 0 rows (never "all rows").
     expect(await aDb.select('meetings', {}, { limit: 0 })).toHaveLength(0);
+  });
+
+  it('an out-of-range limit/offset is TYPED as an input error carrying a generic, non-leaking public message (a client 400, not a server 500)', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // Every out-of-range pagination value (negative limit, NaN limit, negative offset) is a CLIENT bad
+    // request, not a server fault — assert the WHOLE invariant (each rejects TYPED + leaks nothing).
+    const cases = [{ limit: -1 }, { limit: Number.NaN }, { offset: -5 }];
+    for (const opts of cases) {
+      let err: unknown;
+      try {
+        await aDb.select('meetings', {}, opts);
+        throw new Error(`expected the pagination guard to reject ${JSON.stringify(opts)}`);
+      } catch (e) {
+        err = e;
+      }
+      // TYPED as an input error → HTTP 400 (RED before: a plain Error fell through onError to a 500).
+      expect(err).toBeInstanceOf(StoreInputError);
+      const publicMessage = (err as StoreInputError).publicMessage;
+      expect(publicMessage.length).toBeGreaterThan(0);
+      // NO-LEAK: never the field name, the offending value, the facade prefix, or DB text.
+      expect(publicMessage).not.toMatch(/HandlerDb|\blimit\b|\boffset\b|non-negative|meetings/i);
+      // The DETAILED text stays available server-side only.
+      expect((err as StoreInputError).message).toMatch(/non-negative integer/);
+    }
   });
 
   it('TQ-1 concurrent same-key upserts: exactly ONE row, neither rejects with a 23505', async () => {
