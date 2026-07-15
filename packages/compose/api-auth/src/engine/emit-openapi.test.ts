@@ -327,7 +327,7 @@ function structuralOpenApiProblems(doc: OpenApiDocument): string[] {
       // NO duplicate parameter (same name+in) — the no-duplicate-parameter invariant.
       const seenParams = new Set<string>();
       for (const p of op.parameters ?? []) {
-        const dedupKey = `${p.in} ${p.name}`;
+        const dedupKey = `${p.in}\u0000${p.name}`;
         if (seenParams.has(dedupKey)) {
           problems.push(`${where}: duplicate parameter name='${p.name}' in='${p.in}'`);
         } else {
