@@ -88,18 +88,34 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # Dependency vulnerability audit — turns CVE detection into a gate instead of luck. Runs against
-      # the frozen lockfile (no build needed), so a dependency carrying a known-exploitable advisory
-      # fails the lane instead of shipping silently.
+      # Dependency vulnerability audit — turns known-advisory detection into a merge gate instead of
+      # luck. Scans the frozen pnpm-lock.yaml (the single workspace-wide lockfile, i.e. the WHOLE
+      # dependency tree; no build/install needed) against the OSV.dev advisory database with
+      # osv-scanner, so a dependency carrying a known advisory fails the lane instead of shipping
+      # silently. The scanner binary is pinned to an exact release and SHA256-verified before it runs,
+      # so the gate itself is tamper-evident. (This replaces `pnpm audit`, whose classic advisory
+      # endpoint the npm registry retired — it now answers every request with HTTP 410, which would
+      # redden this lane on every run.)
       #
-      # Threshold is high/critical, NOT moderate, on purpose: the npm ecosystem continuously surfaces
-      # MODERATE advisories in transitive DEV-ONLY tooling that never executes in the deployed artifact
-      # (build/migration/test tools), and hard-blocking every merge on those produces constant noise for
-      # issues with no production reach. Gating on high/critical blocks the severities that genuinely
-      # warrant stopping a merge; a moderate is still printed by the audit and is triaged deliberately
-      # (e.g. pinned or overridden) rather than wedging CI on an unreachable dev-tool finding.
-      - name: Dependency audit (high/critical)
-        run: pnpm audit --audit-level high
+      # Threshold = ANY advisory, on purpose. osv-scanner has no native per-severity gate: it exits
+      # non-zero when a package matches ANY OSV advisory, regardless of CVSS score — and many OSV
+      # entries carry no score at all, so a "high/critical-only" filter cannot be expressed cleanly and
+      # would have to treat unscored-but-serious advisories as sub-threshold, a false-negative hazard.
+      # This is stricter than the old high/critical-only npm-audit threshold, but OSV.dev is a curated
+      # database that is far less noisy than the retired npm audit endpoint was, so the transitive
+      # dev-tooling MODERATE noise that motivated the looser threshold is largely absent here. If a
+      # genuinely unreachable dev-only-tool advisory ever does surface, triage it deliberately with a
+      # documented per-advisory entry in an osv-scanner.toml at the repo root ([[IgnoredVulns]] with a
+      # `reason` and an `ignoreUntil` expiry, auto-loaded by the scanner) — a precise, auditable
+      # exception — rather than lowering the gate for every future finding.
+      - name: Dependency audit (osv-scanner / OSV.dev)
+        run: |
+          OSV=2.4.0
+          OSV_SHA256=15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0
+          curl -sSL -o /tmp/osv-scanner "https://github.com/google/osv-scanner/releases/download/v${OSV}/osv-scanner_linux_amd64"
+          echo "${OSV_SHA256}  /tmp/osv-scanner" | sha256sum -c -
+          chmod +x /tmp/osv-scanner
+          /tmp/osv-scanner scan source --lockfile=pnpm-lock.yaml
 
       - name: Typecheck
         run: pnpm typecheck
