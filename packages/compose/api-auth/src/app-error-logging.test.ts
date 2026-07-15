@@ -17,6 +17,7 @@
  * the SAME app so the outermost 5xx-logging middleware wraps them) — no DB in either case.
  */
 import { ApiError } from '@rayspec/auth-core';
+import { StoreInputError } from '@rayspec/platform';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAuthApp } from './app.js';
 import type { AppDeps } from './app-context.js';
@@ -67,6 +68,20 @@ const app = buildApp();
 app.get('/probe-returned-502', (c) => c.json({ error: { code: 'UPSTREAM_ERROR' } }, 502));
 app.get('/probe-returned-504', (c) => c.json({ error: { code: 'GATEWAY_TIMEOUT' } }, 504));
 app.get('/probe-returned-200', (c) => c.json({ ok: true }, 200));
+
+// Probe routes that THROW: a store-facade input error (→ 400) vs a plain error (→ 500). Both carry the
+// same internal-leak token in their detailed message; only the StoreInputError's GENERIC public message
+// may reach the client.
+const LEAK_TOKEN = 'secret_internal_column_detail';
+app.get('/probe-throw-store-input', () => {
+  throw new StoreInputError(
+    `HandlerDb: insert names column '${LEAK_TOKEN}', which is not a declared column.`,
+    'The request references a column that does not exist on the target store.',
+  );
+});
+app.get('/probe-throw-plain', () => {
+  throw new Error(`raw internal failure (${LEAK_TOKEN})`);
+});
 
 /** Drive a request with the sentinel bearer + a known request id; returns the parsed envelope. */
 async function drive(
@@ -171,5 +186,41 @@ describe('a DIRECTLY-RETURNED 5xx (bypasses onError) still logs EXACTLY ONCE', (
     const res = await app.request('/probe-returned-200', { method: 'GET' });
     expect(res.status).toBe(200);
     expect(logError).not.toHaveBeenCalled();
+  });
+});
+
+describe('onError — a store-facade input error is a 400 (not a 500) and leaks no internals', () => {
+  it('a StoreInputError → 400 VALIDATION_ERROR carrying ONLY the generic public message', async () => {
+    const res = await app.request('/probe-throw-store-input', {
+      method: 'GET',
+      headers: { 'x-request-id': 'rid-store-input' },
+    });
+    const body = (await res.json()) as { error?: { code?: string; message?: string } };
+    // Fail-the-fix: WITHOUT the onError StoreInputError branch this error falls through to the 500
+    // INTERNAL arm → status 500 / code INTERNAL, and these three assertions go RED.
+    expect(res.status).toBe(400);
+    expect(body.error?.code).toBe('VALIDATION_ERROR');
+    expect(body.error?.message).toBe(
+      'The request references a column that does not exist on the target store.',
+    );
+    // NO-LEAK: the detailed internal text (the facade prefix + the column name) never reaches the client.
+    const raw = JSON.stringify(body);
+    expect(raw).not.toContain(LEAK_TOKEN);
+    expect(raw).not.toContain('HandlerDb');
+    // A 400 is not a 5xx → NO server-side error log line.
+    expect(logError).not.toHaveBeenCalled();
+  });
+
+  it('a plain Error still → 500 INTERNAL (only a StoreInputError earns the 400), no leak', async () => {
+    const res = await app.request('/probe-throw-plain', {
+      method: 'GET',
+      headers: { 'x-request-id': 'rid-plain-throw' },
+    });
+    const body = (await res.json()) as { error?: { code?: string; message?: string } };
+    expect(res.status).toBe(500);
+    expect(body.error?.code).toBe('INTERNAL');
+    expect(body.error?.message).toBe('Internal server error.');
+    // The 500 envelope is the bare closed message — the internal detail never crosses to the client.
+    expect(JSON.stringify(body)).not.toContain(LEAK_TOKEN);
   });
 });

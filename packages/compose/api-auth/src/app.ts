@@ -19,6 +19,7 @@ import {
   errorEnvelope,
   STATUS_BY_CODE,
 } from '@rayspec/auth-core';
+import { StoreInputError } from '@rayspec/platform';
 import type { Context } from 'hono';
 import { cors } from 'hono/cors';
 import { ZodError } from 'zod';
@@ -294,6 +295,13 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
         errorEnvelope('VALIDATION_ERROR', 'Request validation failed.', rid, formatZod(err)),
         400,
       );
+    }
+    // A store-facade input-validation rejection (an unknown/server-managed column, a non-data value, an
+    // out-of-whitelist enum) is a CLIENT error → 400, not a server fault. Only the GENERIC publicMessage
+    // crosses to the client (never the detailed internal text / column names / offending value); no
+    // `details` is emitted, so the closed envelope leaks nothing.
+    if (err instanceof StoreInputError) {
+      return c.json(errorEnvelope('VALIDATION_ERROR', err.publicMessage, rid), 400);
     }
     // Unexpected → 500, no internals leaked (the outermost middleware logs the detail server-side).
     return c.json(errorEnvelope('INTERNAL', 'Internal server error.', rid), 500);

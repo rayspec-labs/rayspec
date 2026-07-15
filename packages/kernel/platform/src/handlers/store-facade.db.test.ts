@@ -21,7 +21,7 @@ import type { StoreSpec } from '@rayspec/spec';
 import { eq, getTableColumns, sql } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { makeHandlerDb } from './store-facade.js';
+import { makeHandlerDb, StoreInputError } from './store-facade.js';
 
 const SCHEMA = 'rayspec_test_handlerdb';
 const TENANT_A = '00000000-0000-0000-0000-0000000000aa';
@@ -483,6 +483,47 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     await expect(aDb.update('meetings', { id: row.id }, { region: 'us' })).rejects.toThrow(
       /may not set server-controlled column 'region'/,
     );
+  });
+
+  it('input-validation guards reject with a StoreInputError carrying a generic, non-leaking public message', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // Capture the thrown error so we can inspect its TYPE + the client-facing public message (a plain
+    // `.rejects.toThrow` only sees the internal message).
+    const capture = async (p: Promise<unknown>): Promise<unknown> => {
+      try {
+        await p;
+      } catch (e) {
+        return e;
+      }
+      throw new Error('expected the guard to throw');
+    };
+    const unknownColumn = await capture(
+      aDb.insert('meetings', { title: 'x', completed: false, ghost_col: 1 }),
+    );
+    const serverControlled = await capture(
+      aDb.insert('meetings', { title: 'x', completed: false, tenant_id: TENANT_B }),
+    );
+    const injection = await capture(
+      aDb.insert('meetings', {
+        title: sql`(SELECT secret FROM other_tenant)` as unknown as string,
+        completed: false,
+      }),
+    );
+    const badEnum = await capture(aDb.insert('tickets', { title: 't', status: 'not_a_status' }));
+
+    for (const err of [unknownColumn, serverControlled, injection, badEnum]) {
+      // TYPED as an input error → the api layer classifies it as HTTP 400 (RED before: a plain Error →
+      // it fell through onError to an INTERNAL 500).
+      expect(err).toBeInstanceOf(StoreInputError);
+      const publicMessage = (err as StoreInputError).publicMessage;
+      expect(publicMessage.length).toBeGreaterThan(0);
+      // NO-LEAK: the client-facing message never carries an internal — not the facade prefix, a store or
+      // column name, the offending value, a DB/SQL/constraint term, or the enum member.
+      expect(publicMessage).not.toMatch(
+        /HandlerDb|ghost_col|tenant_id|meetings|tickets|not_a_status|secret|SELECT|SQL|constraint/i,
+      );
+    }
   });
 
   it('#2 defense-in-depth: even at the TenantDb layer a foreign tenant_id lands under the run tenant', async () => {

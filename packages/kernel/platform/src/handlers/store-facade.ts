@@ -58,6 +58,29 @@ import {
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 
 /**
+ * A fail-closed INPUT-validation rejection at the store facade — a handler db call that names an
+ * unknown column, sets a server-controlled column, passes a non-data/injection value, or writes an
+ * out-of-whitelist enum value. It is a CLIENT error (the request shape is invalid), NOT a server fault:
+ * the api layer classifies it as HTTP 400 (an unhandled `Error` would otherwise surface as an
+ * INTERNAL 500, misreporting a bad request as a server incident).
+ *
+ * Two messages, deliberately: `message` (Error.message) keeps the DETAILED text — naming the column,
+ * the op, the guard — for local throw-site assertions and dev logs, and is NEVER sent to the client;
+ * `publicMessage` is a GENERIC, non-leaking summary the api layer puts in the 400 envelope (never the
+ * store's column list, the offending value, or a DB message). Keeping the two separate means the 400
+ * response leaks nothing while the internal text stays available server-side.
+ */
+export class StoreInputError extends Error {
+  /** A generic, non-leaking summary safe to return to the client (used for the 400 envelope). */
+  readonly publicMessage: string;
+  constructor(message: string, publicMessage: string) {
+    super(message);
+    this.name = 'StoreInputError';
+    this.publicMessage = publicMessage;
+  }
+}
+
+/**
  * snake_case → camelCase — the SAME transform `buildProductTables`/`generate-product-schema` apply
  * to column names (`note_id` → `noteId`). Re-derived here (one rule) so the facade's name
  * mapping matches the runtime table keys exactly; it cannot drift (the rule is trivial + shared by
@@ -99,9 +122,10 @@ function resolveColumn(table: PgTable, name: string): PgColumn {
   const camel = snakeToCamel(name);
   const col = cols[camel] ?? cols[name];
   if (!col) {
-    throw new Error(
+    throw new StoreInputError(
       `HandlerDb: column '${name}' is not a column of the store (fail-closed) — check the declared ` +
         'column name.',
+      'The request references a column that does not exist on the target store.',
     );
   }
   return col;
@@ -162,17 +186,19 @@ function assertValidValue(col: PgColumn, where: string, name: string, value: unk
   // not-a-plain-object check catches every OTHER class instance. Only a plain Object/Array survives.
   const isPlain = t === 'object' && isPlainObjectOrArray(value as object);
   if (isForbiddenNonDataValue(value) || !isPlain) {
-    throw new Error(
+    throw new StoreInputError(
       `HandlerDb: ${where} value for '${name}' is a forbidden non-data value (a Drizzle SQL object, ` +
         'a function, or a class instance) — a SQL-injection vector, rejected fail-closed (SF-1).',
+      'A supplied value is not a permitted data value.',
     );
   }
   // A plain Object/Array is allowed ONLY for a jsonb column (free-form JSON, parity with the api path).
   if (isJsonbColumn(col)) return;
-  throw new Error(
+  throw new StoreInputError(
     `HandlerDb: ${where} value for '${name}' must be a plain scalar (string/number/boolean/null/Date)` +
       ` for a non-jsonb column — got ${Array.isArray(value) ? 'an array' : 'a non-plain object'} ` +
       '(only a `jsonb` column accepts a JSON object/array). Rejected fail-closed (SF-1).',
+    'A supplied value is not a permitted data value.',
   );
 }
 
@@ -282,16 +308,18 @@ function toDbValues(
     const camel = snakeToCamel(name);
     const key = camel in cols ? camel : name in cols ? name : undefined;
     if (key === undefined) {
-      throw new Error(
+      throw new StoreInputError(
         `HandlerDb: ${op} into the store names column '${name}', which is not a declared column ` +
           '(fail-closed) — a handler may only write declared business columns.',
+        'The request references a column that does not exist on the target store.',
       );
     }
     if (SERVER_CONTROLLED_CAMEL.has(key)) {
-      throw new Error(
+      throw new StoreInputError(
         `HandlerDb: ${op} may not set server-controlled column '${name}' (id/tenant_id/created_at/` +
           'deleted_at/retention_days/region are platform-managed — tenant_id is auto-stamped, the ' +
           'rest carry DB defaults). Remove it from the values (fail-closed, refinement #3).',
+        'The request may not set a server-managed column.',
       );
     }
     // SF-1 (column-type-aware): reject a Drizzle SQL object / function / class instance for EVERY
@@ -314,10 +342,11 @@ function toDbValues(
       const allowed = enumWhitelist.get((cols[key] as PgColumn).name);
       const isMember = typeof value === 'string' && allowed?.has(value) === true;
       if (allowed && value !== null && value !== undefined && !isMember) {
-        throw new Error(
+        throw new StoreInputError(
           `HandlerDb: ${op} value for column '${name}' of store '${getTableName(table)}' is not one ` +
             'of the declared allowed values — rejected fail-closed (the enum whitelist is enforced on ' +
             'this handler write path, parity with the HTTP route and the workflow store.write node).',
+          'A supplied value is not one of the permitted values for its column.',
         );
       }
     }
