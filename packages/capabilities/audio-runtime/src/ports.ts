@@ -18,7 +18,7 @@ export const AUDIO_TRACKS_STORE = 'audio_tracks';
  * The capability's two store names as a set — the SINGLE source for store-derivation callers (the
  * server boot + the CLI's product-profile store derivation) that pass it to `deriveProductStores` to tell the
  * capability's own stores apart from a product's inline stores. Shared so the two call sites cannot
- * drift (LAYER-DRY-1).
+ * drift.
  */
 export const AUDIO_STORE_NAMES: ReadonlySet<string> = new Set([
   AUDIO_SESSIONS_STORE,

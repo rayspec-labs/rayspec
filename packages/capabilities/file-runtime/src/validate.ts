@@ -1,6 +1,6 @@
 /**
  * Shared request-shape validation (the audio `validate.ts` role): the file-id gate BOTH cores run
- * first. Pattern check + the point-of-use STRUCTURAL belt (the record HS-2 belt, widened for
+ * first. Pattern check + the point-of-use STRUCTURAL belt (the record capability's delimiter belt, widened for
  * bytes): ':' is the `file_ref`/event-id delimiter; '/'/'\\' and the bare dot-segments are
  * path-significant in the blob key (`files/${fileId}`). The belt holds even for a hand-built
  * config whose pattern would admit these (resolveFileConfig already rejects such an override at

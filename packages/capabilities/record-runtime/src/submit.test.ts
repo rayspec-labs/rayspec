@@ -25,7 +25,7 @@ function ctx(table: SharedRecordTable, tenantId = TENANT_A): RecordCoreContext {
   return { tenantId, db: makeFakeRecordDb(table, tenantId), config: resolveRecordConfig() };
 }
 
-/** A body of `depth` nested arrays (the HS-1 hostile shape: tiny bytes, huge recursion). */
+/** A body of `depth` nested arrays (the hostile shape: tiny bytes, huge recursion). */
 function nestedArrays(depth: number): unknown {
   let v: unknown = 1;
   for (let i = 0; i < depth; i += 1) v = [v];
@@ -35,7 +35,7 @@ function nestedArrays(depth: number): unknown {
 /**
  * Wrap a fake db so the SECOND select (the authoritative re-read) returns a MUTATED row — the only
  * way to make the concurrent-divergent re-read branch (and the emit-stored-not-raw property)
- * OBSERVABLE in a unit test (TQ-1: every identical-body test leaves them indistinguishable).
+ * OBSERVABLE in a unit test (every identical-body test leaves them indistinguishable).
  */
 function divergeSecondSelect(inner: HandlerDb, mutate: (row: StoreRow) => StoreRow): HandlerDb {
   let selects = 0;
@@ -108,7 +108,7 @@ describe('submitRecord — the durability recipe', () => {
     expect(sink.deliveredCount()).toBe(1); // … and the sink deduped to ONE delivery (C10)
   });
 
-  it('a DIFFERENT payload for the same record key is a LOUD 409 — the STORED event is RE-EMITTED (the DUR-1 heal), the divergent payload never, stored row untouched (requirement 4)', async () => {
+  it('a DIFFERENT payload for the same record key is a LOUD 409 — the STORED event is RE-EMITTED (the heal), the divergent payload never, stored row untouched (requirement 4)', async () => {
     const table = new SharedRecordTable();
     const sink = createInMemoryRecordSubmittedSink();
 
@@ -122,7 +122,7 @@ describe('submitRecord — the durability recipe', () => {
     expect(divergent.status).toBe(409);
     expect(divergent.error).toBe('record_conflict');
 
-    // DUR-1: the 409 path re-emits the STORED authoritative event (heals a persisted-but-never-
+    // The 409 path re-emits the STORED authoritative event (heals a persisted-but-never-
     // enqueued record on ANY retry payload) — the losing request's payload is NEVER emitted.
     expect(sink.emitCount()).toBe(1);
     expect(sink.deliveredFor(`${TENANT_A}:rec-1`)).toMatchObject({ record: { title: 'v1' } });
@@ -237,12 +237,12 @@ describe('submitRecord — the nesting-depth bound (the trust boundary must not 
   });
 });
 
-describe('submitRecord — DUR-1: the divergent-409 heal (re-emit the STORED event; zero double-run)', () => {
+describe('submitRecord — the divergent-409 heal (re-emit the STORED event; zero double-run)', () => {
   it('heals a persisted-but-NEVER-enqueued record: a divergent retry gets 409 AND the stored event reaches the sink', async () => {
     const table = new SharedRecordTable();
     const sink = createInMemoryRecordSubmittedSink();
     const storedPayload = { title: 'v1' };
-    // The crash state DUR-1 names: the upsert committed, then the process died BEFORE the emit.
+    // The crash state: the upsert committed, then the process died BEFORE the emit.
     table.rows.push({
       record_id: 'rec-1',
       record_ref: `${TENANT_A}:rec-1`,
@@ -292,7 +292,7 @@ describe('submitRecord — DUR-1: the divergent-409 heal (re-emit the STORED eve
   });
 });
 
-describe('submitRecord — TQ-1: the authoritative re-read net (fake makes the SECOND select diverge)', () => {
+describe('submitRecord — the authoritative re-read net (fake makes the SECOND select diverge)', () => {
   it('a concurrent DIVERGENT overwrite between upsert and re-read is a 409 record_conflict with ZERO emit', async () => {
     const table = new SharedRecordTable();
     const sink = createInMemoryRecordSubmittedSink();
@@ -340,8 +340,8 @@ describe('submitRecord — TQ-1: the authoritative re-read net (fake makes the S
   });
 });
 
-describe('submitRecord — TQ-2/TQ-3/HS-2 boundary + shape pins', () => {
-  it('TQ-2: the size bound is the max ALLOWED — canonical length EXACTLY 65536 accepts; 65537 is the 413', async () => {
+describe('submitRecord — boundary + shape pins', () => {
+  it('the size bound is the max ALLOWED — canonical length EXACTLY 65536 accepts; 65537 is the 413', async () => {
     // The cap semantics are deliberate: `maxRecordBytes` names the LARGEST accepted canonical
     // serialization ("capped at 64 KiB"; the 413 taxonomy is 'exceeds'), matching the manifest's
     // `max_record_bytes: 65536` — a record OF the cap size is legal, one byte more is not.
@@ -362,7 +362,7 @@ describe('submitRecord — TQ-2/TQ-3/HS-2 boundary + shape pins', () => {
     expect(rejected.error).toBe('record_too_large');
   });
 
-  it('TQ-3: an EMPTY body {} is a valid record — accepted, persisted, envelope-only event (deliberate: the neutral layer imposes no non-empty policy; emptiness is the product workflow’s concern)', async () => {
+  it('an EMPTY body {} is a valid record — accepted, persisted, envelope-only event (deliberate: the neutral layer imposes no non-empty policy; emptiness is the product workflow’s concern)', async () => {
     const table = new SharedRecordTable();
     const sink = createInMemoryRecordSubmittedSink();
     const res = await submitRecord(ctx(table), { record_id: 'rec-empty' }, {}, sink);
@@ -376,7 +376,7 @@ describe('submitRecord — TQ-2/TQ-3/HS-2 boundary + shape pins', () => {
     });
   });
 
-  it('TQ-3: a record_id of EXACTLY 128 chars accepts; a unicode record_id rejects (ASCII-only default shape)', async () => {
+  it('a record_id of EXACTLY 128 chars accepts; a unicode record_id rejects (ASCII-only default shape)', async () => {
     const table = new SharedRecordTable();
     const sink = createInMemoryRecordSubmittedSink();
 
@@ -392,7 +392,7 @@ describe('submitRecord — TQ-2/TQ-3/HS-2 boundary + shape pins', () => {
     }
   });
 
-  it("HS-2: a record_id containing ':' is rejected at the point of use EVEN IF a (resolver-bypassing) pattern admits it — the record_ref/event-id delimiter is structural", async () => {
+  it("a record_id containing ':' is rejected at the point of use EVEN IF a (resolver-bypassing) pattern admits it — the record_ref/event-id delimiter is structural", async () => {
     const table = new SharedRecordTable();
     const sink = createInMemoryRecordSubmittedSink();
     // A hand-built ResolvedRecordConfig bypasses resolveRecordConfig's construction-time validation
@@ -443,7 +443,7 @@ class FakeCrossTenantError extends RecordEventRejectedError {
   }
 }
 
-/** Seed the DUR-1 crash state: a row a prior submit persisted (upsert committed, process died
+/** Seed the crash state: a row a prior submit persisted (upsert committed, process died
  * BEFORE the emit) — the deterministic way to reach the found-divergent 409 heal and the
  * identical-redelivery re-emit paths in a unit test. */
 function seedRow(
@@ -460,7 +460,7 @@ function seedRow(
   });
 }
 
-describe('submitRecord — REG-1: the divergent-409 heal re-emit is BEST-EFFORT (a transient sink fault must not turn the deterministic 409 into a 500; the fail-closed cross-tenant class STILL 403s)', () => {
+describe('submitRecord — the divergent-409 heal re-emit is BEST-EFFORT (a transient sink fault must not turn the deterministic 409 into a 500; the fail-closed cross-tenant class STILL 403s)', () => {
   it('a divergent re-submit against a persisted record with a THROWING (generic transient) sink STILL returns 409 record_conflict — never a propagated 500', async () => {
     const table = new SharedRecordTable();
     seedRow(table, { title: 'v1' });
@@ -496,7 +496,7 @@ describe('submitRecord — REG-1: the divergent-409 heal re-emit is BEST-EFFORT 
     ).rejects.toBeInstanceOf(RecordEventRejectedError);
   });
 
-  it('DECISION (documented): the IDENTICAL-redelivery re-emit is DELIBERATELY NOT best-effort — it is the DUR-1 crash-recovery mechanism, so a transient sink fault SURFACES (propagates) to keep the client retrying until the record is enqueued (swallowing it would re-open the silent zero-run the heal exists to prevent)', async () => {
+  it('DECISION (documented): the IDENTICAL-redelivery re-emit is DELIBERATELY NOT best-effort — it is the crash-recovery mechanism, so a transient sink fault SURFACES (propagates) to keep the client retrying until the record is enqueued (swallowing it would re-open the silent zero-run the heal exists to prevent)', async () => {
     const table = new SharedRecordTable();
     seedRow(table, { title: 'v1' });
     const sink = new ThrowingSink(new Error('DBOS enqueue unavailable (transient)'));

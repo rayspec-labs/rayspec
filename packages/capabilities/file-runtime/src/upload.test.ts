@@ -9,7 +9,7 @@
  *  - the DRAIN-TIME cap defeats a LYING Content-Length (proven with a pull-counting stream — the
  *    read stops at the cap boundary, never a full drain);
  *  - 415 fail-closed content-type allowlist BEFORE any read/store;
- *  - the client filename NEVER appears in any blob key / ref / id (SUF-8);
+ *  - the client filename NEVER appears in any blob key / ref / id;
  *  - the divergence contract: idempotent identical re-upload, last-write-wins pre-seal,
  *    409 + stored-event heal post-seal (best-effort, cross-tenant family rethrows).
  */
@@ -261,7 +261,7 @@ describe('uploadFile — the DRAIN-TIME cap (a lying Content-Length must not byp
     expect(lying.pulls()).toBeLessThanOrEqual(8);
   });
 
-  it('BB-1: a body whose cancel() THROWS still yields the deterministic 413 file_too_large (the cancel fault is swallowed)', async () => {
+  it('a body whose cancel() THROWS still yields the deterministic 413 file_too_large (the cancel fault is swallowed)', async () => {
     const config = resolveFileConfig({ maxFileBytes: 64 });
     // An over-cap body whose underlying source's cancel() throws — `reader.cancel()` rejects.
     const stream = new ReadableStream<Uint8Array>({
@@ -284,7 +284,7 @@ describe('uploadFile — the DRAIN-TIME cap (a lying Content-Length must not byp
     expect(res.error).toBe('file_too_large');
   });
 
-  it('BB-2: a body SMALLER than its declared Content-Length stores the ACTUAL drained size + sha (never the declared length)', async () => {
+  it('a body SMALLER than its declared Content-Length stores the ACTUAL drained size + sha (never the declared length)', async () => {
     const table = new SharedFileTable();
     const bucket = new SharedBlobBucket();
     const bytes = bytesOf('12345'); // 5 real bytes, declared as 1000
@@ -353,7 +353,7 @@ describe('uploadFile — the content-type allowlist (415 fail-closed, before sto
   });
 });
 
-describe('uploadFile — file-id validation (422, the record HS-2 belt widened for paths)', () => {
+describe('uploadFile — file-id validation (422, the record delimiter belt widened for paths)', () => {
   it('rejects invalid shapes incl. path/delimiter ids (422 file_id_invalid), zero puts', async () => {
     const bucket = new SharedBlobBucket();
     for (const bad of ['', 'has space', 'a/b', 'a:b', 'a\\b', '.', '..', 'x'.repeat(129)]) {
@@ -394,7 +394,7 @@ describe('uploadFile — file-id validation (422, the record HS-2 belt widened f
   });
 });
 
-describe('uploadFile — the filename is DATA only (SUF-8)', () => {
+describe('uploadFile — the filename is DATA only', () => {
   it('stores the client filename as a data column; it NEVER appears in any blob key, ref, or id', async () => {
     const table = new SharedFileTable();
     const bucket = new SharedBlobBucket();
@@ -446,7 +446,7 @@ describe('uploadFile — the filename is DATA only (SUF-8)', () => {
     }
   });
 
-  it('TS-1: C1 controls, bidi controls, and zero-width chars in the filename are a 422 file_name_invalid (extension-spoof defense)', async () => {
+  it('C1 controls, bidi controls, and zero-width chars in the filename are a 422 file_name_invalid (extension-spoof defense)', async () => {
     const spoofs = [
       'report\u202Efdp.exe', // U+202E RLO bidi override — renders as 'reportexe.pdf'
       'invoice\u202A.pdf', // U+202A LRE bidi embedding
@@ -476,7 +476,7 @@ describe('uploadFile — the filename is DATA only (SUF-8)', () => {
     }
   });
 
-  it('TS-1: legitimate unicode filenames (umlauts, CJK, emoji) stay accepted and stored verbatim', async () => {
+  it('legitimate unicode filenames (umlauts, CJK, emoji) stay accepted and stored verbatim', async () => {
     const table = new SharedFileTable();
     const name = 'Prüfbericht-会議メモ-📄.txt';
     const res = await uploadFile(
@@ -582,8 +582,8 @@ describe('uploadFile — the state machine (every arm pinned)', () => {
     const bucket = new SharedBlobBucket();
     const bytes = bytesOf('sealed bytes');
     seedRow(table, { state: 'submitted', bytes });
-    // FQ-2: pin the FULL row unchanged (whole-row snapshot), not a partial column match — the
-    // no-op arm must not touch ANY column (incl. metadata; sha-only dedup freezes it, SM-3).
+    // Pin the FULL row unchanged (whole-row snapshot), not a partial column match — the
+    // no-op arm must not touch ANY column (incl. metadata; sha-only dedup freezes it).
     const before = JSON.parse(JSON.stringify(table.rows));
     const res = await uploadFile(ctx(table, bucket), { file_id: 'f-1' }, req({ bytes }), sink());
     expect(res.ok).toBe(true);
@@ -613,9 +613,9 @@ describe('uploadFile — the state machine (every arm pinned)', () => {
     expect(res.error).toBe('file_conflict');
     expect(bucket.puts).toHaveLength(0); // a sealed file is NEVER silently replaced
     expect(JSON.parse(JSON.stringify(table.rows))).toEqual(before);
-    // The DUR-1 heal: the STORED authoritative event was re-emitted (a sealed-but-never-enqueued
+    // The heal: the STORED authoritative event was re-emitted (a sealed-but-never-enqueued
     // file is healed by any SUBMIT retry or a DIVERGENT upload retry like this one; an IDENTICAL
-    // post-seal upload is a pure no-op that does not re-emit — SM-2) — the divergent request's
+    // post-seal upload is a pure no-op that does not re-emit) — the divergent request's
     // bytes are NEVER in it.
     expect(s.emitCount()).toBe(1);
     expect(s.deliveredFor(`${TENANT_A}:f-1`)).toMatchObject({
@@ -675,7 +675,7 @@ describe('uploadFile — the state machine (every arm pinned)', () => {
   });
 });
 
-describe('uploadFile — the upload-racing-submit TOCTOU (SM-1 arm 1: the state-guarded pre-seal write)', () => {
+describe('uploadFile — the upload-racing-submit TOCTOU (arm 1: the state-guarded pre-seal write)', () => {
   it('a submit that SEALS between the upload’s stale read and its row write is NEVER silently overwritten: 409, row keeps the sealed bytes, heal re-emitted', async () => {
     const table = new SharedFileTable();
     const bucket = new SharedBlobBucket();
@@ -708,7 +708,7 @@ describe('uploadFile — the upload-racing-submit TOCTOU (SM-1 arm 1: the state-
     );
 
     // The ROW is untouched: still the SEALED old bytes (the unguarded write would have silently
-    // replaced sha/blob_key on the sealed row — exactly the SM-1 defect).
+    // replaced sha/blob_key on the sealed row — exactly the unguarded-write defect).
     expect(table.rows).toHaveLength(1);
     expect(table.rows[0]).toMatchObject({
       state: 'submitted',
@@ -716,7 +716,7 @@ describe('uploadFile — the upload-racing-submit TOCTOU (SM-1 arm 1: the state-
       blob_key: `files/f-1/${sha256Hex(sealedBytes)}`,
       original_filename: 'v1.txt',
     });
-    // The upload lands on the post-seal divergent path: the LOUD 409 + the DUR-1 heal.
+    // The upload lands on the post-seal divergent path: the LOUD 409 + the heal.
     expect(res.ok).toBe(false);
     if (res.ok) throw new Error('unreachable');
     expect(res.status).toBe(409);

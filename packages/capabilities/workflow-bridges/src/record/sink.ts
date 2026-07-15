@@ -13,7 +13,7 @@
  *
  * The sink does NOT single-flight itself: the capability re-emits the SAME record-scoped event on
  * every successful submit (first + identical re-submit) AND on the divergent-conflict 409 path
- * (the DUR-1 heal — the STORED event, re-emitted so a persisted-but-never-enqueued record is
+ * (the STORED event, re-emitted so a persisted-but-never-enqueued record is
  * recovered by any retry), and the dispatcher's per-record enqueue idempotency key (the
  * descriptor-derived `payloadFieldIdempotencyKey('record_id')` → the tenant-namespaced
  * `durableWorkflowRunId`) is what dedups the re-emissions to ONE durable run (C10). So delivery

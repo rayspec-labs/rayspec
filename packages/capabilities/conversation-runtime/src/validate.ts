@@ -1,12 +1,12 @@
 /**
  * Shared request-shape validation (the record/file `validate.ts` role): the id gates both cores
- * run first, plus the TS-1 display-field shape bound. Pattern check + the point-of-use STRUCTURAL
- * belts (the record HS-2 belt): both hold EVEN for a hand-built config whose pattern would admit
+ * run first, plus the display-field shape bound. Pattern check + the point-of-use STRUCTURAL
+ * belts (the record capability's delimiter belt): both hold EVEN for a hand-built config whose pattern would admit
  * the reserved char (resolveConversationConfig rejects such an override at construction, but the
  * probe belt is convenience — the point-of-use belt is the guarantee).
  *  - ':' — the delimiter of every derived ref/idempotency key (`conversation_ref`/`turn_ref`/
  *    `seq_ref`/`event_id` — keys.ts); applies to BOTH id kinds.
- *  - the reply namespace (BELT-1) — a MESSAGE id must not start with `REPLY_MESSAGE_ID_PREFIX`
+ *  - the reply namespace — a MESSAGE id must not start with `REPLY_MESSAGE_ID_PREFIX`
  *    ('reply~'), the reserved namespace of the DERIVED assistant reply id (reply.ts); an accepted
  *    'reply~<m>' user id would derive the SAME `turn_ref` as message <m>'s reply and pre-occupy it.
  *    Message ids ONLY — conversation ids never carry the reply namespace (config.ts).
@@ -64,7 +64,7 @@ export function validateMessageId(
         'event idempotency key.',
     );
   }
-  // The reply-namespace point-of-use belt (BELT-1): a client id in the reserved `reply~` namespace
+  // The reply-namespace point-of-use belt: a client id in the reserved `reply~` namespace
   // would derive the SAME turn_ref as its own reply row (turnRef(t,c,'reply~m') ===
   // turnRef(t,c,replyMessageId('m'))) and pre-occupy it — permanently 500ing that message's reply
   // leg. Enforced HERE, so it holds even for a hand-built (or anchored, e.g. /^reply~[0-9]$/)
@@ -84,9 +84,9 @@ export function validateMessageId(
 
 /**
  * True if `value` carries a control or invisible char — rejected in a DISPLAY field (the title;
- * TS-1, the file `x-file-name` mirror): C0 controls + DEL, C1 controls (0x80–0x9F), bidi controls
+ * the file `x-file-name` mirror): C0 controls + DEL, C1 controls (0x80–0x9F), bidi controls
  * (U+202A–U+202E embeddings/overrides, U+2066–U+2069 isolates — the RLO spoof class), the
- * STANDALONE bidi marks (U+200E LRM, U+200F RLM, U+061C ALM — BOUNDS-2: invisible direction
+ * STANDALONE bidi marks (U+200E LRM, U+200F RLM, U+061C ALM — invisible direction
  * flips with no terminator, the same display-spoof class as the embeddings), and zero-width chars
  * (U+200B–U+200D, U+FEFF). Legitimate unicode (umlauts, CJK, emoji, Arabic LETTERS) stays
  * accepted — this is a shape bound, not an ASCII allowlist. NOT applied to the message TEXT
@@ -108,7 +108,7 @@ export function hasControlChars(value: string): boolean {
 
 /**
  * Validate the optional conversation title (a create-body field): a non-empty printable string of
- * at most `MAX_CONVERSATION_TITLE_CHARS` chars, control/bidi/zero-width-rejected (TS-1). Returns
+ * at most `MAX_CONVERSATION_TITLE_CHARS` chars, control/bidi/zero-width-rejected. Returns
  * the title or the typed 422.
  */
 export function validateTitle(raw: unknown): ConversationCapabilityResult<string> {

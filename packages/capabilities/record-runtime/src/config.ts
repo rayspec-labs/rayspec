@@ -29,7 +29,7 @@ export interface ResolvedRecordConfig {
 }
 
 /**
- * HS-2: probe ids a `recordIdPattern` override must NOT accept — ':' is the STRUCTURAL delimiter
+ * Probe ids a `recordIdPattern` override must NOT accept — ':' is the STRUCTURAL delimiter
  * of `record_ref` and the event idempotency key (`${tenantId}:${recordId}`, keys.ts), so a pattern
  * admitting it would let two distinct (tenant, record) pairs collide on one ref/key (a re-emit /
  * ref-collision correctness bug). Probe-based (a regex's accepted language can't be cheaply

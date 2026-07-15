@@ -6,7 +6,7 @@
  * straight into the core ports. The binding owns ONLY transport concerns (status-code mapping);
  * the contract lives in the core (submit.ts).
  *
- * ── THE PRE-PARSE BODY-SIZE POSTURE (HS-1, deliberate) ────────────────────────────────────────
+ * ── THE PRE-PARSE BODY-SIZE POSTURE (deliberate) ──────────────────────────────────────────────
  * `init.body` arrives ALREADY parsed by the shared `{handler}` route interpreter
  * (route-handlers.ts `c.req.json().catch(() => undefined)`), which has no Content-Length guard —
  * so this capability CANNOT pre-parse-bound the raw body from its own layer (the parse happened
