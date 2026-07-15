@@ -47,6 +47,12 @@ const MANUAL_TO_AGENT: TriggerSpec = {
   kind: 'manual',
   action: { kind: 'agent', agent: 'summarizer' },
 };
+const CRON_TO_AGENT_PERSIST: TriggerSpec = {
+  name: 'nightly-extract',
+  kind: 'cron',
+  schedule: '0 3 * * *',
+  action: { kind: 'agent', agent: 'extractor', persistTo: 'extracted_facts' },
+};
 
 describe('registerTriggers — fail-closed boot resolution', () => {
   it('registers a cron→handler + a manual→agent trigger, preserving descriptor fields', () => {
@@ -68,6 +74,39 @@ describe('registerTriggers — fail-closed boot resolution', () => {
     const manual = reg.get('kick-summarizer');
     expect(manual?.kind).toBe('manual');
     expect(manual?.action).toEqual({ kind: 'agent', agentId: 'summarizer' });
+  });
+
+  it("threads an agent action's persistTo onto the resolved trigger descriptor (so the durable worker writes the run output)", () => {
+    // FAIL-THE-FIX: an agent trigger action carries an optional persistTo (the store its run output is
+    // written into). registerTriggers must carry it onto the resolved ResolvedTriggerAction so the
+    // durable cron/trigger worker can thread it onto the enqueued RunJob. Dropping the persistTo
+    // pass-through in the registry leaves the resolved action WITHOUT it → this deepEqual goes RED.
+    const reg = registerTriggers(specWith([CRON_TO_AGENT_PERSIST]), {
+      handlers: new Map(),
+      agentIds: new Set(['extractor']),
+    });
+    const descriptor = reg.get('nightly-extract');
+    expect(descriptor?.kind).toBe('cron');
+    // The WHOLE resolved action, not just presence: kind + agentId + the threaded persistTo.
+    expect(descriptor?.action).toEqual({
+      kind: 'agent',
+      agentId: 'extractor',
+      persistTo: 'extracted_facts',
+    });
+  });
+
+  it('is ADDITIVE: an agent action WITHOUT persistTo resolves to an action with NO persistTo key (never persistTo:undefined)', () => {
+    // The complementary direction: the persistTo threading is conditional (spread only when present), so
+    // an action without persistTo must resolve to the byte-identical no-key shape. An over-eager
+    // unconditional spread would leave `persistTo: undefined` on the action → `'persistTo' in action`
+    // would be true → this goes RED.
+    const reg = registerTriggers(specWith([MANUAL_TO_AGENT]), {
+      handlers: new Map(),
+      agentIds: new Set(['summarizer']),
+    });
+    const action = reg.get('kick-summarizer')?.action ?? {};
+    expect('persistTo' in action).toBe(false);
+    expect(action).toEqual({ kind: 'agent', agentId: 'summarizer' });
   });
 
   it('an empty triggers[] yields an empty registry (stores/api/agents-only spec)', () => {

@@ -324,3 +324,55 @@ describe('in-request transient-retry quarantine (SSE)', () => {
     expect(backend.liveRuns).toBe(1);
   });
 });
+
+describe('in-request THROW-path quarantine (SSE) — a post-side-effect throw', () => {
+  it('SSE: a run that FIRED a NON-idempotent tool then THREW is QUARANTINED — a same-key SSE retry does NOT re-fire the side effect (fires EXACTLY ONCE)', async () => {
+    const { token } = await principal('taintssethrow@example.com', 'TaintSseThrowOrg');
+    const headers = {
+      authorization: `Bearer ${token}`,
+      accept: 'text/event-stream',
+      'content-type': 'application/json',
+      'idempotency-key': 'taint-throw-sse',
+    };
+    const body = JSON.stringify({ input: 'order-sse-throw' });
+    // The run fires charge_card (the side effect + the run-taint marker) on the success path, THEN the
+    // backend's gate REJECTS — a throw AFTER the side effect fired (the motivating instance is a
+    // completed, tool-firing, billed run throwing from its post-completion output-persist write). Under
+    // SSE the run executes inside streamSSE, so runAgent throwing lands in the SSE catch, which runs the
+    // reservation release. The pre-fix blanket release would free the reservation on the tainted run;
+    // the taint-aware release must KEEP it so a same-key SSE retry cannot re-fire the side effect.
+    backend.gate = () =>
+      Promise.reject(new Error('post-side-effect throw (e.g. persist write failed)'));
+
+    const firstRes = await h.app.request('/v1/agents/charge-agent/runs', {
+      method: 'POST',
+      headers,
+      body,
+    });
+    await firstRes.text();
+    expect(backend.liveRuns).toBe(1);
+    expect(sideEffects.count).toBe(1); // charged once
+
+    // Clear the gate so a retry COULD complete cleanly — the ONLY thing that must stop a re-fire is the
+    // taint-aware SSE throw-release keeping the reservation on the tainted run.
+    backend.gate = undefined;
+
+    // Same-key SSE retry. WITHOUT the taint-aware throw-release (runs.ts SSE catch), the blanket release
+    // freed the reservation → the agent RE-RUNS fresh → charge_card fires AGAIN (count → 2, RED). WITH
+    // it, the tainted run keeps its reservation → the retry hits the loser path (the thrown run wrote no
+    // run header → the SSE loser 409s) → the side effect fires EXACTLY ONCE (count stays 1, GREEN).
+    const secondRes = await h.app.request('/v1/agents/charge-agent/runs', {
+      method: 'POST',
+      headers,
+      body,
+    });
+    await secondRes.text();
+    // The WHOLE invariant: the non-idempotent side effect fired EXACTLY ONCE across the retry.
+    expect(sideEffects.count).toBe(1);
+    // The retry did NOT execute a second live run of the agent.
+    expect(backend.liveRuns).toBe(1);
+    // The quarantined thrown run is surfaced loudly (the SSE loser path 409s a still-reserved,
+    // header-less run — the same fail-closed outcome the JSON throw-path retry produces).
+    expect(secondRes.status).toBe(409);
+  });
+});

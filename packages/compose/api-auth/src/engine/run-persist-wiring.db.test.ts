@@ -17,6 +17,7 @@
  * Skips without DATABASE_URL; the un-skippable ran-guard hard-fails a REQUIRED run.
  */
 import type { AgentSpec, Backend, RunContext, RunResult } from '@rayspec/core';
+import type { DurableExecutor, EnqueueResult, RunJob } from '@rayspec/platform';
 import type { RaySpec } from '@rayspec/spec';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentRegistry, AgentRegistryEntry } from '../app-context.js';
@@ -120,6 +121,25 @@ const registry: AgentRegistry = new Map<string, AgentRegistryEntry>([
   ['fact-extractor', { spec: agentSpec, backend: new PersistWiringBackend(), tools: [] }],
 ]);
 
+/**
+ * A capturing STUB DurableExecutor: records each enqueued (tenantId, job) so an async-path test can
+ * assert the WHOLE enqueued RunJob (the persistTo the declared-route assembly threads onto it). It does
+ * NOT run runAgent — the off-request execution + store write is proven against the REAL DBOS engine in
+ * @rayspec/durable-dbos's executor.db.test.ts. `status`/`start`/`shutdown` are inert.
+ */
+class CapturingExecutor implements DurableExecutor {
+  readonly enqueued: Array<{ tenantId: string; job: RunJob }> = [];
+  async enqueue(tenantId: string, job: RunJob): Promise<EnqueueResult> {
+    this.enqueued.push({ tenantId, job });
+    return { jobId: job.runId };
+  }
+  async status(): Promise<'unknown'> {
+    return 'unknown';
+  }
+  async start(): Promise<void> {}
+  async shutdown(): Promise<void> {}
+}
+
 describe.skipIf(!hasDb)(
   'persistTo wiring on the composed HTTP path (register-declared-routes → executeAgentRun → runAgent)',
   () => {
@@ -204,6 +224,74 @@ describe.skipIf(!hasDb)(
 
       expect(await factRows(a.orgId)).toHaveLength(1);
       expect(await factRows(b.orgId)).toHaveLength(0);
+    });
+
+    it('an SSE (Accept: text/event-stream) POST to the declared agent-action route ALSO persists the run output', async () => {
+      wiringTestsRan += 1;
+      const { orgId, token } = await principal(
+        'persist-wiring-sse@example.com',
+        'PersistWiringOrgSse',
+      );
+
+      // The SSE arm of executeAgentRun spreads persistOpts into the streamed runAgent(...) call. Drive a
+      // real SSE request and consume the whole stream so runAgent runs to completion (incl. the
+      // post-completion persist write). Fail-the-fix: delete the `...persistOpts` spread on the SSE
+      // runAgent call → the streamed run persists nothing → 0 rows → RED.
+      const res = await h.app.request('/extract', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: 'text/event-stream',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ input: 'a streamed transcript' }),
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/event-stream');
+      // Consume the stream fully so the streamSSE callback (which runs runAgent + the persist) completes.
+      const streamed = await res.text();
+      expect(streamed).toContain('run_completed');
+
+      // GROUND TRUTH: the row LANDED through the SSE persist arm, tenant-scoped, created_by unset.
+      const rows = await factRows(orgId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.title).toBe('Q3 review');
+      expect(Number(rows[0]?.score)).toBe(7);
+      expect(rows[0]?.verified).toBe(true);
+      expect(rows[0]?.details).toEqual({ source: 'report' });
+      expect(rows[0]?.tenant_id).toBe(orgId);
+      expect(rows[0]?.created_by ?? null).toBeNull();
+    });
+
+    it('an async:true POST to the declared agent-action route threads persistTo onto the enqueued RunJob', async () => {
+      wiringTestsRan += 1;
+      const { token } = await principal(
+        'persist-wiring-async@example.com',
+        'PersistWiringOrgAsync',
+      );
+      const stub = new CapturingExecutor();
+      h.deps.durableExecutor = stub;
+      try {
+        // An async declared-route run is ENQUEUED (202) rather than run in-request. The declared route
+        // hands executeAgentRun the action's persistTo, which the async-enqueue assembly must thread onto
+        // the RunJob (so the off-request worker persists the output). Fail-the-fix: drop `persistTo` from
+        // the enqueueAsyncRun(...) assembly in executeAgentRun → the enqueued job carries no persistTo → RED.
+        const res = await jsonRequest(h.app, 'POST', '/extract', {
+          body: { input: 'a transcript', async: true },
+          headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+        });
+        expect(res.status).toBe(202);
+
+        // The WHOLE enqueued job payload, not just presence: exactly ONE job, carrying the threaded persistTo.
+        expect(stub.enqueued).toHaveLength(1);
+        const { job } = stub.enqueued[0]!;
+        expect(job.persistTo).toBe('extracted_facts');
+        expect(job.agentId).toBe('fact-extractor');
+        expect(job.input).toBe('a transcript');
+      } finally {
+        // Do not leak the stub executor into the file's other (sync) tests.
+        h.deps.durableExecutor = undefined;
+      }
     });
   },
 );
