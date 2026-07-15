@@ -44,13 +44,18 @@ const USAGE = `rayspec — RaySpec CLI
 READ-ONLY diagnostic floor (never mutates a real/target DB; never prints secrets):
   rayspec doctor <spec.yaml>   Static spec validation (parseSpec). Exit 0 if valid, 1 otherwise.
   rayspec plan   <spec.yaml> [--against <old-spec>] [--allowlist <file.json>]
+                             [--reconcile-injected-columns]
                                 Read-only deploy front-half (validate -> diff -> gate [-> shadow]).
                                 Handles both spec profiles (backend + product). With --against, diffs
                                 the prior spec FILE -> new spec into a DELTA migration (a destructive
                                 delta is BLOCKED unless covered by the reviewed --allowlist JSON). Set
                                 SHADOW_DATABASE_URL to also apply the SQL to a throwaway DB (in update
-                                mode: baseline -> delta -> assert drift-clean). Never mutates the
-                                real/target DB. Exit 0/1.
+                                mode: baseline -> delta -> assert drift-clean). Add
+                                --reconcile-injected-columns (update mode only) when the target DB
+                                predates the platform tenancy columns and genuinely lacks
+                                created_by / idempotency_key: the delta then also carries their
+                                idempotent ADD COLUMN IF NOT EXISTS + idempotency index. Never mutates
+                                the real/target DB. Exit 0/1.
   rayspec gen-handler --holes <holes.json> --out <dir> [--file <name.ts>]
                                 Render ONE bounded-template handler (.ts) from a holes contract
                                 Deterministic; type-only SDK import; zero npm deps.
@@ -160,8 +165,8 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
       return result.ok ? 0 : 1;
     }
     case 'plan': {
-      const { positionals, against, allowlist } = parsePlanArgs(rest);
-      const result = await runPlan(positionals, { against, allowlist });
+      const { positionals, against, allowlist, reconcileInjectedColumns } = parsePlanArgs(rest);
+      const result = await runPlan(positionals, { against, allowlist, reconcileInjectedColumns });
       await emit(result);
       return result.ok ? 0 : 1;
     }
@@ -244,14 +249,16 @@ function parsePositionals(args: readonly string[]): string[] {
 
 /**
  * Parse `plan`'s args: exactly one positional spec path, plus the OPTIONAL update-mode flags
- * `--against <old-spec>` and `--allowlist <file.json>`. Unknown flags are a strict CLI
- * error. The positional-count check stays in `resolveSpecPath` (a missing/extra positional there is a
- * clean plan error), so a bare `plan` with no positional still routes through the normal channel.
+ * `--against <old-spec>`, `--allowlist <file.json>`, and the boolean `--reconcile-injected-columns`.
+ * Unknown flags are a strict CLI error. The positional-count check stays in `resolveSpecPath` (a
+ * missing/extra positional there is a clean plan error), so a bare `plan` with no positional still
+ * routes through the normal channel.
  */
 function parsePlanArgs(args: readonly string[]): {
   positionals: string[];
   against?: string;
   allowlist?: string;
+  reconcileInjectedColumns?: boolean;
 } {
   try {
     const { positionals, values } = parseArgs({
@@ -261,9 +268,15 @@ function parsePlanArgs(args: readonly string[]): {
       options: {
         against: { type: 'string' },
         allowlist: { type: 'string' },
+        'reconcile-injected-columns': { type: 'boolean' },
       },
     });
-    return { positionals, against: values.against, allowlist: values.allowlist };
+    return {
+      positionals,
+      against: values.against,
+      allowlist: values.allowlist,
+      reconcileInjectedColumns: values['reconcile-injected-columns'],
+    };
   } catch (e) {
     throw new CliError(`invalid arguments: ${e instanceof Error ? e.message : String(e)}`);
   }

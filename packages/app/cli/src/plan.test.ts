@@ -605,11 +605,12 @@ describe('plan — Product-YAML (0.2) projections + update mode', () => {
 
   it('planning a spec against its OWN identical copy yields an EMPTY delta (no phantom injected-column DDL)', async () => {
     // The headline no-op invariant for `plan --against`: nothing changed, so the migration is EMPTY.
-    // The platform-injected tenancy/GDPR columns (created_by / idempotency_key + the idempotency index)
-    // are CONSTANT and present on both sides, so they must CANCEL — never surface as spurious
+    // By DEFAULT the diff never touches the platform-injected tenancy/GDPR columns (created_by /
+    // idempotency_key + the idempotency index) — a declared spec never lists them (reserved names), so a
+    // spec-vs-spec diff simply produces no injected-column DDL. They must NOT surface as spurious
     // `ADD COLUMN IF NOT EXISTS` / `CREATE UNIQUE INDEX IF NOT EXISTS` no-ops (one set per surviving
-    // store) that dilute delta review. VALID_SPEC has two stores, so an un-normalized diff would print
-    // several no-op statements here.
+    // store) that dilute delta review. FAIL-THE-FIX: RED if the diff ever re-forces the unconditional
+    // backfill by default (VALID_SPEC has two stores → several phantom statements would appear).
     writeFileSync(join(dir, 'noop-a.yaml'), VALID_SPEC, 'utf8');
     writeFileSync(join(dir, 'noop-b.yaml'), VALID_SPEC, 'utf8');
     const r = await runPlan(['noop-a.yaml'], {
@@ -625,9 +626,10 @@ describe('plan — Product-YAML (0.2) projections + update mode', () => {
     expect(r.migrationSql).not.toContain('created_by');
   });
 
-  it('a REAL business-column addition STILL emits its ADD — the fix cancels ONLY the injected no-ops', async () => {
-    // Guard: normalization must never swallow a genuine business delta. v2 adds one nullable column to
-    // `meetings`; the delta carries exactly that ADD, and NO phantom injected-column DDL rides alongside.
+  it('a REAL business-column addition STILL emits its ADD — the default levels ONLY the injected no-ops', async () => {
+    // Guard: the phantom-free default must never swallow a genuine business delta. v2 adds one nullable
+    // column to `meetings`; the delta carries exactly that ADD, and NO phantom injected-column DDL rides
+    // alongside.
     const v2 = VALID_SPEC.replace(
       '      - { name: completed, type: boolean }\n',
       '      - { name: completed, type: boolean }\n      - { name: label, type: text, nullable: true }\n',
@@ -645,6 +647,44 @@ describe('plan — Product-YAML (0.2) projections + update mode', () => {
     // The real ADD is the ONLY column change — the injected no-ops are gone.
     expect(r.migrationSql).not.toContain('ADD COLUMN IF NOT EXISTS');
     expect(r.migrationSql).not.toContain('idempotency_key');
+  });
+
+  it('--reconcile-injected-columns FORCES the injected backfill (the real-DB reconcile path is reachable)', async () => {
+    // The regression guard: the real yaml-vs-DB reconcile MUST stay reachable. A target DB materialized
+    // before the platform tenancy columns existed genuinely LACKS created_by / idempotency_key; a spec
+    // diff cannot see the live DB, so the operator opts in with `--reconcile-injected-columns` and the
+    // delta then carries the idempotent ADD COLUMN IF NOT EXISTS + idempotency index for every surviving
+    // store. FAIL-THE-FIX: RED if the flag is not threaded to diffProductStores (reconcile unreachable)
+    // — proving the reconcile path cannot silently become unreachable from the CLI.
+    writeFileSync(join(dir, 'recon-a.yaml'), VALID_SPEC, 'utf8');
+    writeFileSync(join(dir, 'recon-b.yaml'), VALID_SPEC, 'utf8');
+    const r = await runPlan(['recon-a.yaml'], {
+      against: 'recon-b.yaml',
+      reconcileInjectedColumns: true,
+      shadowDatabaseUrl: undefined,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.updateMode).toBe(true);
+    expect(r.breakingChangeBlocked).toBe(false); // the backfill is additive/idempotent — never blocked
+    // Both injected columns are reconciled on each surviving store (meetings + transcripts).
+    expect(r.migrationSql).toContain('ADD COLUMN IF NOT EXISTS "created_by"');
+    expect(r.migrationSql).toContain('ADD COLUMN IF NOT EXISTS "idempotency_key"');
+    expect(r.migrationSql).toContain(
+      'CREATE UNIQUE INDEX IF NOT EXISTS "meetings_idempotency_key_unique"',
+    );
+  });
+
+  it('--reconcile-injected-columns WITHOUT --against is rejected fail-closed (no silently-inert flag)', async () => {
+    // The flag only augments an UPDATE delta; on a first materialization the columns are created fresh,
+    // so the combination is rejected rather than accepted as a no-op (mirrors --allowlist requires --against).
+    writeFileSync(join(dir, 'recon-solo.yaml'), VALID_SPEC, 'utf8');
+    const r = await runPlan(['recon-solo.yaml'], {
+      reconcileInjectedColumns: true,
+      shadowDatabaseUrl: undefined,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.phase).toBe('validate');
+    expect(r.errors[0]?.message).toMatch(/--reconcile-injected-columns requires --against/);
   });
 
   it('a PRODUCT update THREADS the derived conflict keys to the baseline-seeded shadow (arms the plan-time oracle)', async () => {

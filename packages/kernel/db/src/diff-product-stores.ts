@@ -46,7 +46,7 @@ import {
   type StoreConflictKeys,
   topoSortStoresByFk,
 } from './generated/generate-product-sql.js';
-import { INJECTED_AFTER, INJECTED_COLUMNS } from './generated/injected-columns.js';
+import { INJECTED_AFTER } from './generated/injected-columns.js';
 import type { AllowlistEntry, DestructiveKind } from './migration-scan.js';
 import { scanMigrationSql } from './migration-scan.js';
 
@@ -101,18 +101,20 @@ export interface DiffProductStoresOptions {
   readonly oldConflictKeys?: StoreConflictKeys;
   /**
    * When true, every SURVIVING table ALSO gets an ADDITIVE, IDEMPOTENT, UNCONDITIONAL backfill of the
-   * injected tenancy/GDPR columns (`ADD COLUMN IF NOT EXISTS` for each nullable injected column +
+   * injected tenancy/GDPR columns added after the first release (`ADD COLUMN IF NOT EXISTS` for each +
    * `CREATE UNIQUE INDEX IF NOT EXISTS` for the idempotency index) — regardless of whether the two spec
-   * sides agree. This forces reconciliation of a store MATERIALIZED (in a real DB) before an injected
-   * column existed (e.g. an older deployment that lacks `created_by`/`idempotency_key`), for a caller
-   * that KNOWS the live DB may predate those columns. `IF NOT EXISTS` makes it a genuine no-op on an
-   * already-current DB.
+   * sides agree. This is the ONLY way a spec diff can reconcile a store MATERIALIZED (in a real DB)
+   * before an injected column existed (e.g. an older deployment that lacks `created_by`/`idempotency_key`):
+   * a declared spec NEVER lists the constant injected columns (the spec lint reserves their names), so a
+   * spec-vs-spec diff is otherwise BLIND to them and can never emit their ADD on its own. Turn this ON
+   * only when the caller KNOWS the live DB may predate those columns. `IF NOT EXISTS` makes it a genuine
+   * no-op on an already-current DB.
    *
-   * NB spec-vs-spec callers should leave this OFF: the diff now NORMALIZES both sides with the injected
-   * columns (`withInjectedColumns`), so two agreeing specs cancel to EMPTY and a side that genuinely
-   * lacks an injected column still emits its ADD honestly — WITHOUT the blanket, unconditional DDL this
-   * flag emits (which surfaces as a phantom no-op delta when the two specs are identical). DEFAULT off ⇒
-   * `diff(old, old)` stays EMPTY (the NO-OP invariant). Kept ON for a genuine real-DB reconcile path.
+   * DEFAULT off. With it off, a spec-vs-spec diff simply never touches the injected columns (both sides
+   * declare the same business columns and neither declares an injected one), so `diff(old, old)` is
+   * EMPTY (the NO-OP invariant) — the common yaml-vs-yaml `rayspec plan --against` case is phantom-free.
+   * The flag is the deliberate, operator-reachable escape hatch for the real-DB reconcile, surfaced by
+   * the CLI as `rayspec plan --reconcile-injected-columns`.
    */
   readonly backfillInjectedColumns?: boolean;
 }
@@ -238,7 +240,8 @@ function dropTableSql(table: string): string {
  * tenant-scoped idempotency index). Reconciles a store materialized before those columns existed without
  * ever failing on an already-current one. The always-present injected columns (id/tenant_id/created_at/
  * deleted_at/retention_days/region) are NOT re-emitted — every materialized store already carries them,
- * so `rayspec plan --against` on an unchanged spec no longer prints spurious backfill DDL for them.
+ * so even when this reconcile is explicitly requested it stays scoped to the two columns a spec diff
+ * cannot otherwise see (`created_by` / `idempotency_key`), never the always-present ones.
  */
 function injectedBackfillSql(table: string): string[] {
   const out: string[] = [];
@@ -320,38 +323,6 @@ function normalizeStatementForMatch(statement: string): string {
 /** Index a column list by name (author BUSINESS columns only — injected tenancy columns are constant). */
 function columnsByName(store: StoreSpec): Map<string, StoreColumn> {
   return new Map(store.columns.map((c) => [c.name, c]));
-}
-
-/**
- * The platform-injected tenancy/GDPR columns expressed as ordinary author-shaped `StoreColumn`s, so a
- * store diff can SEE them. A declared `StoreSpec` never lists these (they are constant, reserved, and
- * materialized by the generator), which is exactly why a spec-vs-spec diff was BLIND to them. The
- * `idempotency_key` column carries its tenant-scoped unique index as `unique: true` — a NON-conflict-key
- * unique, so the surviving-table diff shapes it as the compound `(tenant_id, col)` index the generator
- * emits; every other injected column is a plain non-unique column (id/tenant_id are the generator's own
- * PK/FK, not represented through the unique-index path).
- */
-const INJECTED_STORE_COLUMNS: readonly StoreColumn[] = INJECTED_COLUMNS.map((inj) => ({
-  name: inj.sqlName,
-  type: inj.type,
-  nullable: inj.nullable,
-  unique: inj.uniqueIndex !== undefined,
-}));
-
-/**
- * Return a copy of `store` whose `columns` ALSO carry the platform-injected columns (append-only — an
- * already-present name is left untouched; a valid spec never declares a reserved injected name, so this
- * is a straight append in practice). This NORMALIZES the two sides of a SURVIVING-table diff so the
- * constant injected columns become visible to it: present on BOTH sides ⇒ they CANCEL (no phantom no-op
- * DDL when the two specs agree), present on ONE side only ⇒ the diff still honestly emits the ADD (the
- * genuine reconcile of a store that predates an injected column). Applied ONLY to the surviving-table
- * comparison — NOT to the added-table CREATE path, which materializes the injected columns itself
- * (normalizing an added store would double-inject them).
- */
-function withInjectedColumns(store: StoreSpec): StoreSpec {
-  const present = new Set(store.columns.map((c) => c.name));
-  const extra = INJECTED_STORE_COLUMNS.filter((c) => !present.has(c.name));
-  return extra.length === 0 ? store : { ...store, columns: [...store.columns, ...extra] };
 }
 
 /** Index a store's FKs by their local column (the key drift-detect + the FK name key off). */
@@ -543,12 +514,14 @@ export function diffProductStores(
   for (const store of survivingStores) {
     const oldStore = oldByName.get(store.name);
     if (!oldStore) continue; // unreachable (survivingStores are in oldByName) — narrows the type
-    // Normalize BOTH sides with the platform-injected columns so a spec-vs-spec diff sees them and they
-    // CANCEL when the two sides agree (no phantom injected-column DDL); a side that genuinely LACKS one
-    // still emits its ADD honestly.
+    // A spec-vs-spec diff compares the DECLARED business columns only. The constant injected tenancy/GDPR
+    // columns are never listed in a spec (their names are reserved), so two agreeing specs simply produce
+    // no injected-column DDL and `diff(old, old)` is EMPTY. Reconciling a real DB that predates an
+    // injected column is the caller-opt-in `backfillInjectedColumns` path below — a spec diff cannot see
+    // the live DB, so it can only reconcile on that explicit signal.
     const plan = planSurvivingTable(
-      withInjectedColumns(oldStore),
-      withInjectedColumns(store),
+      oldStore,
+      store,
       newConflictKeys?.get(store.name),
       oldConflictKeys?.get(store.name),
       opts.backfillInjectedColumns ?? false,
