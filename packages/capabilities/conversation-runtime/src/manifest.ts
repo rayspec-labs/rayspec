@@ -6,7 +6,7 @@
  * default-join rule: NEW events add NO alias-table entry; the alias table stays audio-only).
  *
  * ZERO product vocabulary. This is the SOURCE OF TRUTH; the committed `manifest.json` at the
- * package root MUST equal it (asserted by manifest.test.ts) and is what the S2
+ * package root MUST equal it (asserted by manifest.test.ts) and is what the
  * conversation-input capability check reads.
  *
  * ── THE PAYLOAD CONTRACT (stated here deliberately — see types.ts for the full rationale) ──────
@@ -36,7 +36,7 @@ import { CONVERSATION_EVENT_PAYLOAD_KEYS } from './types.js';
  * The conversation realization of the SHARED per-event descriptor contract
  * (`TriggerEventDescriptor`, `@rayspec/spec` product-events.ts). This extension only NARROWS the
  * dedup-scope label: TURN-scoped single-flight (a re-POST of one message converges on one durable
- * run; every new turn gets its own). The derived idempotency key uses the S3 GENERIC format
+ * run; every new turn gets its own). The derived idempotency key uses the GENERIC format
  * `turn_ref:<conversation_id>:<message_id>` (payloadFieldIdempotencyKey — no legacy suffix; the
  * `:finalized` format is audio-only, byte-frozen live run identity).
  */
@@ -66,15 +66,15 @@ export interface ConversationCapabilityDescriptor {
   readonly events: readonly ConversationCapabilityEventDescriptor[];
 }
 
-/** The turn-intake contract block (gate-pinned against the runtime constants in S2). */
+/** The turn-intake contract block (gate-pinned against the runtime constants). */
 export interface ConversationTurnContract {
   /** The message TEXT rides the trigger payload (bounded by the byte cap — the module header). */
   readonly message_in_event_payload: true;
   /** The UTF-8 byte cap on one message (413 above it). */
   readonly max_message_bytes: number;
-  /** The S3 history read-window in turns (the bounded-history law; never unbounded). */
+  /** The history read-window in turns (the bounded-history law; never unbounded). */
   readonly max_history_turns: number;
-  /** The S3 history read-window in chars (the second axis of the bound). */
+  /** The history read-window in chars (the second axis of the bound). */
   readonly max_history_chars: number;
 }
 
@@ -90,7 +90,7 @@ export interface ConversationCapabilityManifest {
 
 /**
  * The route path templates relative to the mount base — the ONE source both this manifest and
- * `mountConversationCapability` consume (the S2 gate pins manifest == mounted surface; shared
+ * `mountConversationCapability` consume (the gate pins manifest == mounted surface; shared
  * constants are what keep them from drifting).
  */
 export const CONVERSATION_CREATE_ROUTE_SUBPATH = '/{conversation_id}';

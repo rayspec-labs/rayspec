@@ -7,7 +7,7 @@
  *
  * The field mapping (canonical):
  *   - `type`        ← the constant trigger event id `conversation_input.turn_submitted`
- *                     (the S1 DEFAULT `${capability}.${event}` join — NO alias-table entry);
+ *                     (the DEFAULT `${capability}.${event}` join — NO alias-table entry);
  *   - `id`          ← the submitted-turn `event_id` (= `${tenant_id}:${conversation_id}:
  *                     ${message_id}`, TURN-scoped);
  *   - `occurred_at` ← the submit timestamp;
@@ -19,7 +19,7 @@
  *                     payload as DATA, never instructions (the trust boundary — the types.ts boundary).
  *
  * `payload.turn_ref` is what the descriptor-derived `payloadFieldIdempotencyKey('turn_ref')` keys
- * the durable run on (`turn_ref:<conversation_id>:<message_id>` — the S3 generic format; the
+ * the durable run on (`turn_ref:<conversation_id>:<message_id>` — the generic format; the
  * `:finalized` suffix stays audio-only). PER-TURN on purpose: keying on `conversation_id` would
  * dedupe EVERY later turn of a conversation into its FIRST durable run — silent turn loss (pinned
  * fail-the-fix by adapter.test.ts). Because `id` is ALSO turn-scoped, the dispatcher's
@@ -30,13 +30,13 @@ import type { SubmittedTurnEvent } from '@rayspec/conversation-runtime';
 import { CONVERSATION_EVENT_PAYLOAD_KEYS } from '@rayspec/conversation-runtime';
 import type { WorkflowInputEvent } from '@rayspec/foundation';
 
-/** The neutral workflow trigger event id a turn submit maps onto (the S1 default join). */
+/** The neutral workflow trigger event id a turn submit maps onto (the default join). */
 export const TURN_SUBMITTED_EVENT_TYPE = 'conversation_input.turn_submitted';
 
 /**
  * The EXACT payload keys of the `turn_submitted` trigger payload — re-exported from the ONE
  * capability source (`@rayspec/conversation-runtime` types.ts) and coupled fail-the-fix to the
- * emitted payload by adapter.test.ts. This is the compose-time CC-1 truth: a declared persist
+ * emitted payload by adapter.test.ts. This is the compose-time truth: a declared persist
  * scope whose `<scope>_id` is not among THESE keys can never be satisfied at run time, so
  * `composeProductDeploy` rejects it at deploy (`conversation_id` is here — the single-scope law's
  * `conversation` scope persists).

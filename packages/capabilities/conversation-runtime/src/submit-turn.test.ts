@@ -113,7 +113,7 @@ describe('submitTurn — persist + emit (the durability recipe)', () => {
       event_id: `${TENANT_A}:c-1:m-1`,
       deduped: false,
     });
-    // The ledger row: BOTH unique authorities + the S3 seam columns.
+    // The ledger row: BOTH unique authorities + the reply seam columns.
     expect(tables.turns).toHaveLength(1);
     expect(tables.turns[0]).toMatchObject({
       conversation_id: 'c-1',
@@ -401,7 +401,7 @@ describe('submitTurn — the closed body shape (no spoof channel; the structural
     }
   });
 
-  it('DONOR-PARITY (BOUNDS-1): the WHOLE turn body is byte-bounded (the record whole-payload discipline) — an oversize junk sibling with a SMALL text is the typed 413 BEFORE field validation, with ZERO side effects', async () => {
+  it('DONOR-PARITY: the WHOLE turn body is byte-bounded (the record whole-payload discipline) — an oversize junk sibling with a SMALL text is the typed 413 BEFORE field validation, with ZERO side effects', async () => {
     const tables = new SharedConversationTables();
     seedConversation(tables);
     const s = sink();
@@ -422,7 +422,7 @@ describe('submitTurn — the closed body shape (no spoof channel; the structural
     expect(s.emitCount()).toBe(0); // zero emit
   });
 
-  it('DONOR-PARITY (BOUNDS-1): the whole-body bound is EXACT against the real config — one measured byte over is the 413; below it the CLOSED SHAPE still owns rejection (422 unknown key)', async () => {
+  it('DONOR-PARITY: the whole-body bound is EXACT against the real config — one measured byte over is the 413; below it the CLOSED SHAPE still owns rejection (422 unknown key)', async () => {
     const cfg = resolveConversationConfig();
     const s = sink();
     // The shallow measure: own key names + own string values, raw UTF-8 bytes.
@@ -473,7 +473,7 @@ describe('submitTurn — the closed body shape (no spoof channel; the structural
     expect(s.deliveredFor(`${TENANT_A}:c-1:m-1`)?.message).toBe(text);
   });
 
-  it('a HOSTILE deeply-nested body is a typed 422, never a stack overflow (the record HS-1 discipline realized structurally — nothing recurses over the body)', async () => {
+  it('a HOSTILE deeply-nested body is a typed 422, never a stack overflow (the record depth-bound discipline realized structurally — nothing recurses over the body)', async () => {
     let deep: unknown = 'x';
     for (let i = 0; i < 100_000; i++) deep = [deep];
     const tables = new SharedConversationTables();
@@ -492,7 +492,7 @@ describe('submitTurn — the closed body shape (no spoof channel; the structural
 });
 
 describe('submitTurn — the divergence contract (409 conversation_message_conflict)', () => {
-  it('a re-POST of one message_id with DIFFERENT text is a loud 409: zero row change, and the DUR-1 heal re-emits the STORED text (never the request’s)', async () => {
+  it('a re-POST of one message_id with DIFFERENT text is a loud 409: zero row change, and the stored-event heal re-emits the STORED text (never the request’s)', async () => {
     const tables = new SharedConversationTables();
     seedConversation(tables);
     const s = sink();
@@ -547,7 +547,7 @@ describe('submitTurn — the divergence contract (409 conversation_message_confl
   });
 });
 
-describe('submitTurn — the C10 turn-seq races (deterministic TOCTOU interposers, the SM-1 precedent)', () => {
+describe('submitTurn — the C10 turn-seq races (deterministic TOCTOU interposers)', () => {
   it('ARM A — two DIFFERENT turns race one conversation: the loser gets the TYPED 409 conversation_turn_conflict with ZERO emit (never a silent overwrite), and its retry takes the next seq', async () => {
     const tables = new SharedConversationTables();
     seedConversation(tables);
@@ -645,7 +645,7 @@ describe('submitTurn — the C10 turn-seq races (deterministic TOCTOU interposer
     expect(tables.turns).toHaveLength(1);
   });
 
-  it('THE POISON LAW (the F1 harvest): the lost race leaves the ROUTE TX CLEAN — the typed 409 survives the engine transaction instead of becoming the outer-tx 500', async () => {
+  it('THE POISON LAW: the lost race leaves the ROUTE TX CLEAN — the typed 409 survives the engine transaction instead of becoming the outer-tx 500', async () => {
     const tables = new SharedConversationTables();
     seedConversation(tables);
     const s = sink();
@@ -676,7 +676,7 @@ describe('submitTurn — the C10 turn-seq races (deterministic TOCTOU interposer
     // ★ THE PIN: the unique violation must have been SAVEPOINT-scoped. An UNSCOPED in-tx 23505
     // poisons the route tx — postgres.js rejects the OUTER transaction promise with the
     // remembered raw error, so the handler's clean 409 is DISCARDED and the route 500s (the
-    // F1 composed-stack evidence; e2e arm (h) is the real-stack half of this proof).
+    // composed-stack evidence; e2e arm (h) is the real-stack half of this proof).
     expect(base.poisoned).toBe(false);
     // The route tx stays usable after the 409 — a poisoned tx would 25P02 here.
     await expect(base.select('conversation_turns')).resolves.toHaveLength(1);
@@ -712,8 +712,8 @@ describe('submitTurn — the C10 turn-seq races (deterministic TOCTOU interposer
   });
 });
 
-describe('submitTurn — emit faults on the PRIMARY paths surface (the DUR-1 liveness decision, donor-faithful)', () => {
-  it('a transient sink fault on the FIRST turn PROPAGATES (the row stays persisted under the unit-fake posture; the retry re-emits — DP-1 dual posture)', async () => {
+describe('submitTurn — emit faults on the PRIMARY paths surface (the liveness decision, donor-faithful)', () => {
+  it('a transient sink fault on the FIRST turn PROPAGATES (the row stays persisted under the unit-fake posture; the retry re-emits — the dual posture)', async () => {
     const tables = new SharedConversationTables();
     seedConversation(tables);
     const throwing = new ThrowingSink(new Error('DBOS enqueue unavailable (transient)'));

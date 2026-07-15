@@ -2,11 +2,11 @@
  * Tenant-namespaced key derivation — the AUDIO/RECORD KEYING PATTERN, mirrored deliberately: the
  * platform's generated single-column UNIQUE is GLOBAL, so the tenant id is EMBEDDED in the unique
  * ref (`file_ref`), which is what keeps two tenants' identical `file_id` from colliding. That
- * makes the capability-owned store PER-TENANT-KEYED BY CONSTRUCTION (we own this DDL — not the S2
+ * makes the capability-owned store PER-TENANT-KEYED BY CONSTRUCTION (we own this DDL — not the
  * declared-store global-key caveat class). The tenant id is always SERVER-DERIVED (never
  * client-supplied).
  *
- * ── THE BLOB KEY (SUF-8, the server-derived key rule) ──────────────────────────────────────────────────────────
+ * ── THE BLOB KEY (the server-derived key rule) ──────────────────────────────────────────────────────────
  * The blob key is derived SERVER-SIDE from the validated `file_id` ONLY. The client filename
  * NEVER appears in any blob key, path, or id — it is an escaped DATA column on the pointer row
  * and a DATA field on the event, nothing more. Blob keys are tenant-RELATIVE: the injected
@@ -32,7 +32,7 @@ export function submittedFileEventId(tenantId: string, fileId: string): string {
  * the file id: `files/${fileId}/${sha256}`. Both components are SERVER-DERIVED (the validated
  * file id + the hash computed over the drained bytes — the filename is never a key component).
  *
- * WHY the sha suffix (deliberate, an S1 design decision): the pointer row and the blob live in
+ * WHY the sha suffix (deliberate, a design decision): the pointer row and the blob live in
  * different stores with no shared transaction, so a plain `files/${fileId}` key would let two
  * CONCURRENT divergent uploads interleave put/upsert into a row whose `sha256` does not match the
  * blob's actual bytes — permanently, even past seal. With the content suffix, a key IMMUTABLY

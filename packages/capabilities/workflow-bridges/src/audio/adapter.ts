@@ -29,7 +29,7 @@ export const AUDIO_FINALIZED_SESSION_EVENT_TYPE = 'audio_input.finalized_session
  * keys `finalizedSessionEventToWorkflowInput` emits (coupled fail-the-fix by adapter.test.ts). This
  * is the compose-time truth for what a triggered workflow node can read from the trigger payload:
  * a declared persist scope whose `<scope>_id` is not among these keys can NEVER be satisfied at run
- * time, so `composeProductDeploy` rejects it at deploy (CC-1) instead of letting every persist fail.
+ * time, so `composeProductDeploy` rejects it at deploy instead of letting every persist fail.
  */
 export const AUDIO_FINALIZED_SESSION_PAYLOAD_KEYS: readonly string[] = Object.freeze([
   'session_id',

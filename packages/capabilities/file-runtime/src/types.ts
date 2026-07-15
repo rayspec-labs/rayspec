@@ -39,7 +39,7 @@ export type FileState = 'uploaded' | 'submitted';
  * so a re-submit of the same file converges on ONE workflow (C10 single-flight downstream). Every
  * field is read from the AUTHORITATIVE stored pointer row (never a raw request), so a deduped
  * redelivery is byte-consistent with the first delivery. Bytes are NOT here — `blob_key` is the
- * tenant-relative key a tenant-bound reader resolves (the S3 parse node's input).
+ * tenant-relative key a tenant-bound reader resolves (the parse node's input).
  */
 export interface SubmittedFileEvent {
   /** Idempotency key for workflow consumption (= `${tenant_id}:${file_id}`). */

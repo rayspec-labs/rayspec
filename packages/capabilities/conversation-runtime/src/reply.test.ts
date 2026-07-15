@@ -80,9 +80,9 @@ class FakeResponder implements ConversationTurnResponder {
   });
   /** Optional hook fired BEFORE returning (simulates concurrent activity during the model run). */
   beforeReturn?: () => Promise<void>;
-  /** S4: true iff `respond` was handed an `onEvent` sink (the streaming thread). */
+  /** True iff `respond` was handed an `onEvent` sink (the streaming thread). */
   receivedOnEvent = false;
-  /** S4: events this responder forwards through the received `onEvent` (simulates a live run). */
+  /** Events this responder forwards through the received `onEvent` (simulates a live run). */
   emit: unknown[] = [];
 
   async respond(args: {
@@ -100,7 +100,7 @@ class FakeResponder implements ConversationTurnResponder {
   }
 }
 
-describe('ensureTurnReply — the S4 onEvent thread (additive; default-absent = S3 byte-identical)', () => {
+describe('ensureTurnReply — the onEvent thread (additive; default-absent = the non-streaming path, byte-identical)', () => {
   it('threads opts.onEvent through to the responder, which forwards its live events', async () => {
     const tables = new SharedConversationTables();
     const db = makeFakeConversationDb(tables, TENANT);
@@ -122,7 +122,7 @@ describe('ensureTurnReply — the S4 onEvent thread (additive; default-absent = 
     ]);
   });
 
-  it('opts ABSENT → the responder receives NO onEvent (the S3 reply path, unchanged)', async () => {
+  it('opts ABSENT → the responder receives NO onEvent (the non-streaming reply path, unchanged)', async () => {
     const tables = new SharedConversationTables();
     const db = makeFakeConversationDb(tables, TENANT);
     await seedUserTurn(db, 1, 'm-1', 'hello');
@@ -212,7 +212,7 @@ describe('ensureTurnReply — C10 convergence', () => {
     const responder = new FakeResponder();
     // While the model "runs", the user's NEXT turn takes seq 2 — BEFORE the persist loop starts,
     // so attempt 1's tail read already sees it and lands on seq 3 first try (honestly: this arm
-    // never raises a unique violation; the retry-executing arm below does — TQ-1).
+    // never raises a unique violation; the retry-executing arm below does).
     responder.beforeReturn = async () => {
       await seedUserTurn(db, 2, 'm-2', 'follow-up');
     };
@@ -225,7 +225,7 @@ describe('ensureTurnReply — C10 convergence', () => {
     expect(reply?.seq_ref).toBe(turnSeqRef(TENANT, CONV, 3));
   });
 
-  it('TQ-1 SEQ race: a seq stolen BETWEEN the tail read and the insert 23505s attempt 1 — the FRESH-tx retry ACTUALLY executes and lands on the next free seq', async () => {
+  it('SEQ race: a seq stolen BETWEEN the tail read and the insert 23505s attempt 1 — the FRESH-tx retry ACTUALLY executes and lands on the next free seq', async () => {
     const tables = new SharedConversationTables();
     const db = makeFakeConversationDb(tables, TENANT);
     await seedUserTurn(db, 1, 'm-1', 'hello');

@@ -9,7 +9,7 @@
  * ── KEYING (the audio/record/file pattern, mirrored on purpose) ───────────────────────────────
  * The platform's generated single-column UNIQUE is GLOBAL, so every unique ref embeds the
  * SERVER-DERIVED tenant id (keys.ts). That makes both stores PER-TENANT-KEYED BY CONSTRUCTION —
- * not the S2 declared-store deployment-global-key caveat class (BACKLOG PY-STORE-KEY-1).
+ * not the declared-store deployment-global-key caveat class.
  *
  * ── THE LEDGER'S TWO UNIQUES (the C10 turn state machine's authorities) ───────────────────────
  * `turn_ref`  (`${tenantId}:${conversationId}:${messageId}`) — the DEDUP authority: a re-POST of
@@ -18,9 +18,9 @@
  *             racing one conversation collide here and resolve LOUD (typed 409), never by silent
  *             overwrite (the anti-quadratic ledger is INSERT-only — no upsert can eat a race).
  *
- * ── THE ANTI-QUADRATIC LAW (PLAN fork c, design-binding) ──────────────────────────────────────
- * A ledger row stores ONLY its own message (the new user message now; the S3 assistant reply
- * later) — NEVER serialized history. The S3 model input is composed transiently from a bounded
+ * ── THE ANTI-QUADRATIC LAW (design-binding) ──────────────────────────────────────
+ * A ledger row stores ONLY its own message (the new user message now; the assistant reply
+ * later) — NEVER serialized history. The model input is composed transiently from a bounded
  * read window over these rows.
  */
 import type { StoreSpec } from '@rayspec/spec';
@@ -37,8 +37,8 @@ export const CONVERSATION_TURNS_STORE = 'conversation_turns';
 /**
  * The capability's store names as a set — the single source for store-derivation callers (the
  * server boot + the CLI pass it to `deriveProductStores`, unioned with the audio/record/file
- * names, to tell capability-owned stores apart from a product's declared stores — the LAYER-DRY-1
- * pattern).
+ * names, to tell capability-owned stores apart from a product's declared stores — the shared
+ * store-name-derivation pattern).
  */
 export const CONVERSATION_STORE_NAMES: ReadonlySet<string> = new Set([
   CONVERSATIONS_STORE,

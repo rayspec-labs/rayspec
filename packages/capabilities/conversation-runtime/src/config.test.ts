@@ -1,5 +1,5 @@
 /**
- * Config resolution invariants — the record/file HS-2 belt: every derived ref/idempotency key
+ * Config resolution invariants — the record/file construction belt: every derived ref/idempotency key
  * joins on ':' (`conversation_ref`/`turn_ref`/`seq_ref`/`event_id`), so an id that can carry ':'
  * corrupts refs/keys. The DEFAULT patterns exclude the delimiter by construction; an OVERRIDE that
  * admits it is rejected fail-closed at construction (deploy-time loud), and validate.ts carries a
@@ -46,13 +46,13 @@ describe('resolveConversationConfig — the ref-delimiter law', () => {
     );
   });
 
-  it("TF-F2: the DEFAULT message-id pattern excludes '~' (the derived reply-id namespace separator)", () => {
+  it("the DEFAULT message-id pattern excludes '~' (the derived reply-id namespace separator)", () => {
     for (const probe of ['~', 'reply~x', 'a~b', '~a', 'a~']) {
       expect(DEFAULT_MESSAGE_ID_RE.test(probe), `message probe '${probe}'`).toBe(false);
     }
   });
 
-  it("TF-F2: REJECTS at construction a messageIdPattern override that admits '~' — the reply~ namespace would become client-forgeable", () => {
+  it("REJECTS at construction a messageIdPattern override that admits '~' — the reply~ namespace would become client-forgeable", () => {
     for (const pattern of [/^[a-z~-]{1,64}$/, /^[\w~.]{1,64}$/, /^[a-z0-9~_.-]{1,128}$/]) {
       expect(
         () => resolveConversationConfig({ messageIdPattern: pattern }),
@@ -63,12 +63,12 @@ describe('resolveConversationConfig — the ref-delimiter law', () => {
     expect(() => resolveConversationConfig({ messageIdPattern: /^[a-z~]{1,8}$/g })).toThrow(/'~'/);
   });
 
-  it("TF-F2: a conversationIdPattern override admitting '~' stays ACCEPTED (the reply namespace rides message ids only — documented)", () => {
+  it("a conversationIdPattern override admitting '~' stays ACCEPTED (the reply namespace rides message ids only — documented)", () => {
     const resolved = resolveConversationConfig({ conversationIdPattern: /^[a-z0-9~-]{1,32}$/ });
     expect(resolved.conversationIdPattern.test('conv~1')).toBe(true);
   });
 
-  it('TF-F2: a narrowing messageIdPattern override WITHOUT the tilde still resolves (previously-valid ids stay accepted)', () => {
+  it('a narrowing messageIdPattern override WITHOUT the tilde still resolves (previously-valid ids stay accepted)', () => {
     const resolved = resolveConversationConfig({ messageIdPattern: /^[a-z0-9_.-]{1,64}$/ });
     expect(resolved.messageIdPattern.test('m-1_a.b')).toBe(true);
     expect(resolved.messageIdPattern.test('reply~m-1')).toBe(false);
@@ -92,7 +92,7 @@ describe('resolveConversationConfig — the ref-delimiter law', () => {
     expect(DEFAULT_MAX_HISTORY_CHARS).toBe(64 * 1024);
   });
 
-  it('CONTRACT-MINOR-1: maxMessageBytes has a HARD CEILING — an override above the journal-friendliness class (the record 64 KiB whole-payload donor) is a construction error, never a silent widening', () => {
+  it('maxMessageBytes has a HARD CEILING — an override above the journal-friendliness class (the record 64 KiB whole-payload donor) is a construction error, never a silent widening', () => {
     // The ceiling IS the record whole-payload class bound (DEFAULT_MAX_RECORD_BYTES = 64 KiB).
     expect(MAX_MESSAGE_BYTES_CEILING).toBe(64 * 1024);
     // At the ceiling: accepted (a deployment may consciously widen up to the class bound) …
@@ -105,7 +105,7 @@ describe('resolveConversationConfig — the ref-delimiter law', () => {
     ).toThrow(/ceiling/);
   });
 
-  it('BOUNDS-1: the whole-turn-body bound is DERIVED (maxMessageBytes + the fixed envelope headroom) — it tracks an override and exceeds the text cap BY CONSTRUCTION', () => {
+  it('the whole-turn-body bound is DERIVED (maxMessageBytes + the fixed envelope headroom) — it tracks an override and exceeds the text cap BY CONSTRUCTION', () => {
     const resolved = resolveConversationConfig();
     expect(resolved.maxTurnBodyBytes).toBe(
       DEFAULT_MAX_MESSAGE_BYTES + TURN_BODY_ENVELOPE_HEADROOM_BYTES,

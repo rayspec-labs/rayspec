@@ -10,7 +10,7 @@
  * record-input capability check reads.
  *
  * ── THE PAYLOAD CONTRACT (stated here deliberately — see types.ts for the full rationale) ──────
- * `payload_keys` is the FIXED ENVELOPE (server-derived; the CC-1 scope contract — an artifact
+ * `payload_keys` is the FIXED ENVELOPE (server-derived; the scope contract — an artifact
  * scope must be satisfiable by THESE keys, so only `record` scopes persist). The submitted
  * business fields MERGE TOP-LEVEL ALONGSIDE the envelope (that is how `store_write`
  * `{ event: <field> }` sources reach them — store-nodes resolves top-level scalar keys only), so
@@ -25,9 +25,9 @@ import { RECORD_EVENT_ENVELOPE_KEYS } from './types.js';
 
 /**
  * The record realization of the SHARED per-event descriptor contract (`TriggerEventDescriptor`,
- * `@rayspec/spec` product-events.ts — S1). This extension only NARROWS the dedup-scope label:
+ * `@rayspec/spec` product-events.ts). This extension only NARROWS the dedup-scope label:
  * record-scoped single-flight (a re-submit of one record converges on one durable run). The
- * derived idempotency key uses the S3 GENERIC format `record_id:<id>` (payloadFieldIdempotencyKey
+ * derived idempotency key uses the GENERIC format `record_id:<id>` (payloadFieldIdempotencyKey
  * — no legacy `:finalized` suffix; that format is audio-only, byte-frozen live run identity).
  */
 export interface RecordCapabilityEventDescriptor extends TriggerEventDescriptor {
@@ -64,7 +64,7 @@ export interface RecordPayloadContract {
   readonly reserved_keys: readonly string[];
   /** The canonical-JSON byte cap on a submitted record (413 above it). */
   readonly max_record_bytes: number;
-  /** The JSON container-nesting cap on a submitted record (422 `record_too_deep` above it — HS-1). */
+  /** The JSON container-nesting cap on a submitted record (422 `record_too_deep` above it). */
   readonly max_record_depth: number;
 }
 

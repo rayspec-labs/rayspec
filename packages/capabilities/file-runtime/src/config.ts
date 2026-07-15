@@ -8,7 +8,7 @@
 export const DEFAULT_FILE_ID_RE = /^[A-Za-z0-9_.-]{1,128}$/;
 
 /**
- * The default raw-byte size bound: 25 MiB. Rationale (documented, gate-pinned in S2): the upload
+ * The default raw-byte size bound: 25 MiB. Rationale (documented, gate-pinned): the upload
  * route drains the body into memory to enforce the cap + hash it, and the fs `BlobStore` impl
  * buffers the body again on `put` — so the per-concurrent-upload peak memory is ≈ 2× the file
  * size. 25 MiB keeps that peak ≈ 50 MiB per in-flight upload (bounded, single-node-friendly under
@@ -38,7 +38,7 @@ export const DEFAULT_ALLOWED_FILE_CONTENT_TYPES: readonly string[] = Object.free
 const MEDIA_TYPE_RE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
 
 /**
- * HS-2, WIDENED FOR BYTES: probe strings a `fileIdPattern` override must NOT accept. ':' is the
+ * The construction belt, WIDENED FOR BYTES: probe strings a `fileIdPattern` override must NOT accept. ':' is the
  * STRUCTURAL delimiter of `file_ref` and the event idempotency key (`${tenantId}:${fileId}`,
  * keys.ts) — a pattern admitting it would let two distinct (tenant, file) pairs collide on one
  * ref/key. '/'/'\\' and the bare dot-segments ('.', '..') are PATH-significant in the blob key

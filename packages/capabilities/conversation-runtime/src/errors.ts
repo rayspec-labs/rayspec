@@ -7,7 +7,7 @@
  * The stable error codes (the capability's client taxonomy):
  *  - `conversation_id_invalid`        422 — the conversation id fails the safe-id shape (or carries ':').
  *  - `invalid_conversation_body`      422 — the create body is not the closed `{ title? }` shape.
- *  - `conversation_title_invalid`     422 — the optional title fails the DATA-shape bound (TS-1).
+ *  - `conversation_title_invalid`     422 — the optional title fails the DATA-shape bound.
  *  - `conversation_conflict`          409 — a re-create's title assertion diverges from the stored
  *                                           conversation (stored authoritative, zero change).
  *  - `message_id_invalid`             422 — the message id fails the safe-id shape (or carries ':').
@@ -28,7 +28,7 @@
  *                                           stored turn is authoritative; submit new text under a
  *                                           new message_id) — permanent, never a silent dedup.
  *
- * The S3 reply-leg codes (the intake is COMMITTED on both — the body carries the intake facts):
+ * The reply-leg codes (the intake is COMMITTED on both — the body carries the intake facts):
  *  - `conversation_reply_failed`           502 — the reply model run failed (transient upstream
  *                                                classes included); retry with the SAME message_id
  *                                                to converge on one reply (C10).

@@ -9,8 +9,8 @@
  * The platform's generated single-column UNIQUE is GLOBAL, so `file_ref` embeds the SERVER-DERIVED
  * tenant id (`${tenantId}:${file_id}` — keys.ts). That prefix makes the store PER-TENANT-KEYED BY
  * CONSTRUCTION: two tenants' identical `file_id` values can never collide, so this
- * capability-owned store does NOT carry the S2 declared-store deployment-global-key caveat
- * (BACKLOG PY-STORE-KEY-1) — we own this DDL and key it per-tenant cheaply, exactly like the
+ * capability-owned store does NOT carry the declared-store deployment-global-key caveat
+ * — we own this DDL and key it per-tenant cheaply, exactly like the
  * record capability's `record_ref`.
  */
 import type { StoreSpec } from '@rayspec/spec';
@@ -24,7 +24,7 @@ export const FILE_UPLOADS_STORE = 'file_uploads';
 /**
  * The capability's store names as a set — the single source for store-derivation callers (the
  * server boot + the CLI pass it to `deriveProductStores`, unioned with the audio/record names, to
- * tell capability-owned stores apart from a product's declared stores — the LAYER-DRY-1 pattern).
+ * tell capability-owned stores apart from a product's declared stores — the shared store-name-derivation pattern).
  */
 export const FILE_STORE_NAMES: ReadonlySet<string> = new Set([FILE_UPLOADS_STORE]);
 
@@ -51,7 +51,7 @@ export function fileCapabilityStores(): StoreSpec[] {
         { name: 'size_bytes', type: 'integer', nullable: false, unique: false },
         // The client-DECLARED media type (advisory DATA — allowlist-checked, never trusted).
         { name: 'content_type', type: 'text', nullable: false, unique: false },
-        // The client filename — escaped DATA ONLY (SUF-8): NEVER part of any key, path, or id.
+        // The client filename — escaped DATA ONLY: NEVER part of any key, path, or id.
         { name: 'original_filename', type: 'text', nullable: true, unique: false },
         // The tenant-relative blob key of the stored bytes (server-derived from file_id only).
         { name: 'blob_key', type: 'text', nullable: false, unique: false },
