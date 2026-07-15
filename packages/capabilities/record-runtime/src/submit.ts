@@ -143,6 +143,14 @@ function validateNormalizedShape(
  * normalizer, a returned `error` outcome, and an output that fails structural re-validation ALL become
  * a typed 502 (nothing is persisted). On success the validated normalized record is returned to be
  * stored + emitted in place of the raw input.
+ *
+ * NO-LEAK: the client-facing 502 `detail` is GENERIC. The underlying agent/provider/DB text (an
+ * upstream 429 carrying an org id / model / quota, or a raw Postgres error) is UNTRUSTED to expose and
+ * NEVER reaches the HTTP body — only the NEUTRALIZED error CLASS (a closed vocabulary that carries no
+ * raw provider text) is surfaced, so a caller learns the failure class without the leaky detail. The
+ * raw text stays server-side (no logger is threaded into the neutral core — the platform
+ * sink/dispatcher owns observability). The self-authored `record_normalize_invalid_output` messages
+ * (validateNormalizedShape) are already neutral and describe the shape violation, so they are kept.
  */
 async function runNormalize(
   normalizer: RecordNormalizer,
@@ -155,20 +163,22 @@ async function runNormalize(
   let outcome: RecordNormalizeOutcome;
   try {
     outcome = await normalizer.normalize({ record: raw, recordId });
-  } catch (e) {
+  } catch {
+    // The thrown text is dropped from the client body (no-leak) — a generic, actionable 502.
     return err(
       502,
       'record_normalize_failed',
-      `the input-normalize step threw (${e instanceof Error ? e.message : String(e)}) — ` +
-        'no record was stored.',
+      'the input-normalize step failed — no record was stored.',
     );
   }
   if (outcome.status === 'error') {
+    // `outcome.message` is the RAW upstream text (the classifier preserves it) and is dropped from the
+    // client body; only the neutralized `errorClass` (never raw provider text) is surfaced.
     return err(
       502,
       'record_normalize_failed',
-      `the input-normalize step failed${outcome.errorClass ? ` (${outcome.errorClass})` : ''}: ` +
-        `${outcome.message} — no record was stored.`,
+      `the input-normalize step failed${outcome.errorClass ? ` (${outcome.errorClass})` : ''} — ` +
+        'no record was stored.',
     );
   }
   const shapeError = validateNormalizedShape(outcome.record, config);

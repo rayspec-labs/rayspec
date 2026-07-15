@@ -583,6 +583,56 @@ describe('submitRecord — the OPTIONAL declared input-normalize step', () => {
     expect(sink.emitCount()).toBe(0);
   });
 
+  it('NO-LEAK: a normalize failure whose raw message carries a secret-ish token is NOT surfaced in the 502 body — only the neutral errorClass is (never the raw provider/DB text)', async () => {
+    const table = new SharedRecordTable();
+    const sink = createInMemoryRecordSubmittedSink();
+    // The raw error message an upstream 429 / a Postgres error would carry: an org id + a quota detail.
+    const SECRET = 'org-4a9f7c21 model=gpt-5 quota exceeded at postgres://user:pw@db:5432';
+    const leaky: RecordNormalizer = {
+      agentId: 'x',
+      async normalize() {
+        return { status: 'error', errorClass: 'rate_limited', message: SECRET };
+      },
+    };
+
+    const res = await submitRecord(ctx(table), { record_id: 'rec-1' }, { title: 'x' }, sink, leaky);
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('unreachable');
+    expect(res.status).toBe(502);
+    expect(res.error).toBe('record_normalize_failed');
+    // The raw token (org id / model / quota / DSN) MUST NOT reach the client body …
+    expect(res.detail).not.toContain('org-4a9f7c21');
+    expect(res.detail).not.toContain('postgres://');
+    expect(res.detail).not.toContain(SECRET);
+    // … while the neutralized failure CLASS still is (a caller learns the class without the detail).
+    expect(res.detail).toContain('rate_limited');
+    expect(table.rows).toHaveLength(0);
+    expect(sink.emitCount()).toBe(0);
+  });
+
+  it('NO-LEAK: a THROWN normalizer whose Error message carries a secret-ish token is NOT surfaced in the 502 body (generic message only)', async () => {
+    const table = new SharedRecordTable();
+    const sink = createInMemoryRecordSubmittedSink();
+    const SECRET = 'ANTHROPIC_API_KEY=sk-ant-abc123 at postgres://user:pw@db:5432';
+    const leaky: RecordNormalizer = {
+      agentId: 'x',
+      async normalize() {
+        throw new Error(SECRET);
+      },
+    };
+
+    const res = await submitRecord(ctx(table), { record_id: 'rec-1' }, { title: 'x' }, sink, leaky);
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('unreachable');
+    expect(res.status).toBe(502);
+    expect(res.error).toBe('record_normalize_failed');
+    expect(res.detail).not.toContain('sk-ant-abc123');
+    expect(res.detail).not.toContain('postgres://');
+    expect(res.detail).not.toContain(SECRET);
+    expect(table.rows).toHaveLength(0);
+    expect(sink.emitCount()).toBe(0);
+  });
+
   it('a normalize step that THROWS is caught fail-closed (502 record_normalize_failed) — nothing persisted, nothing emitted', async () => {
     const table = new SharedRecordTable();
     const sink = createInMemoryRecordSubmittedSink();
