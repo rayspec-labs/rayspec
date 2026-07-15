@@ -85,6 +85,7 @@ it dispatches on the `product:` discriminant.
 
 ```
 rayspec plan <spec.yaml> [--against <old-spec.yaml>] [--allowlist <file.json>]
+             [--reconcile-injected-columns]
 ```
 
 Runs the **read-only front half of a deploy**: it validates the spec, computes the
@@ -109,6 +110,16 @@ introspects a live target.
     array of `{ kind, match, reason }` entries that let an approved destructive
     delta preview as would-pass. A bad allowlist aborts at validation
     (fail-closed) — it never silently clears a finding.
+  - `--reconcile-injected-columns` — optional; requires `--against` (**update
+    mode only**). Forces the platform-injected-column reconcile: the delta then
+    also carries an idempotent `ADD COLUMN IF NOT EXISTS "created_by"` /
+    `"idempotency_key"` plus the tenant-scoped idempotency unique index, for a
+    database materialized before those injected columns existed. A spec never
+    declares the injected columns, so a spec-vs-spec diff is otherwise blind to
+    them; `IF NOT EXISTS` keeps it a no-op on an already-current database. Passing
+    it without `--against` is refused fail-closed (a first materialization creates
+    those columns fresh). Without the flag (the default) the diff never touches the
+    injected columns, so the spec-vs-spec plan stays phantom-free.
 - **Output** (a stable envelope; update/product fields are additive):
 
   ```json
