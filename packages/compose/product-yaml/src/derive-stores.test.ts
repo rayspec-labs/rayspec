@@ -95,7 +95,7 @@ describe('deriveProductStores (acme-notes.product.yaml)', () => {
   });
 });
 
-// ── the S2 DECLARED product stores ─────────────────────────────────
+// ── the DECLARED product stores ─────────────────────────────────
 
 /** A declared 0.2 store in the PARSED shape (StoreColumn defaults applied). */
 function declaredStore(name: string, keyColumn = 'item_code'): ProductSpec['stores'][number] {
@@ -140,7 +140,7 @@ describe('deriveProductStores — declared 0.2 stores', () => {
       stores: [declaredStore('gadget_catalog')],
       views: [
         ...spec.views,
-        // A store-sourced view over the DECLARED store: before the S2 fix this made the transcript
+        // A store-sourced view over the DECLARED store: before the fix this made the transcript
         // sink AMBIGUOUS (two non-audio non-collection store-sourced refs) — fail-the-fix.
         {
           id: 'gadgets',

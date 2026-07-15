@@ -1,19 +1,19 @@
 /**
- * The LIVE conversation turn responder (S3 — the `live-agent-node` sibling for the
+ * The LIVE conversation turn responder (the `live-agent-node` sibling for the
  * conversational reply): the `ConversationTurnResponder` implementation that runs the reply
  * through the platform's REAL `runAgent` path, so a real turn journals per-step usage/cost under
  * the run's tenant and persists its run_events (free — run-core mechanics). PRODUCT-NEUTRAL: the
  * instructions/model/backend come from the deployment's `<agent_id>.responder.json` (boot-side,
  * the extractor.json precedent) — no product or model name lives here.
  *
- * ── THE DETERMINISTIC REPLY RUN ID (C10 — the convergence anchor), ATTEMPT-SCOPED (TF-F1) ──────
+ * ── THE DETERMINISTIC REPLY RUN ID (C10 — the convergence anchor), ATTEMPT-SCOPED ──────
  * `replyAttemptRunId(turnRef, n)` derives a UUID-shaped id from the turn's TENANT-PREFIXED ledger
  * `turn_ref` plus the ATTEMPT ordinal (the `agentSubRunId` donor recipe; attempt 0 is byte-
  * compatible with the original `replyRunId(turnRef)`): every converging retry of one turn WALKS
  * the same deterministic id chain (tenant-disjoint by the embedded tenant), which is what makes
  * the ATTACH below possible.
  *
- * ── ATTACH-OR-ADVANCE BEFORE RUN (the crash-window convergence, attempt-scoped — TF-F1) ────────
+ * ── ATTACH-OR-ADVANCE BEFORE RUN (the crash-window convergence, attempt-scoped) ────────
  * Before invoking the model, walk the deterministic attempt ids (0, 1, …, bounded by
  * `REPLY_RUN_MAX_ATTEMPTS`) and read each header:
  *   - COMPLETED (any attempt) → ATTACH: reconstruct the reply from the persisted `final_text`
@@ -33,7 +33,7 @@
  * tools: [] (scope cut 3 — the extraction-node posture), maxTurns: 1, NO outputSchema (a chat
  * reply is free text — `finalText`); the -framed input arrives ASSEMBLED from the capability
  * (assemble.ts owns the jail); `instructions` are TRUSTED deployer-authored config. The optional
- * `onEvent` (the S4 seam) threads straight into `runAgent`'s live sink.
+ * `onEvent` (the live-sink seam) threads straight into `runAgent`'s live sink.
  */
 import { createHash } from 'node:crypto';
 import type {
@@ -52,7 +52,7 @@ import { eq } from 'drizzle-orm';
 export interface LiveTurnResponderConfig {
   /** The responder agent id (the config filename stem; the reply run's `agentName`). */
   readonly agentId: string;
-  /** The neutral backend instance (boot-constructed via the S5 factory — config-side choice). */
+  /** The neutral backend instance (boot-constructed via the backend factory — config-side choice). */
   readonly backend: Backend;
   /** The reply model (config-side — never named in the capability package). */
   readonly model: string;
@@ -74,14 +74,14 @@ function uuidShaped(hex: string): string {
 /**
  * A deterministic, UUID-shaped reply run id from the tenant-prefixed ledger turn_ref (the
  * `agentSubRunId` donor recipe — sha256, v5-shaped). Tenant-disjoint by the embedded tenant.
- * This is ATTEMPT 0 of the TF-F1 chain (`replyAttemptRunId(turnRef, 0)`).
+ * This is ATTEMPT 0 of the attempt-id chain (`replyAttemptRunId(turnRef, 0)`).
  */
 export function replyRunId(turnRef: string): string {
   return uuidShaped(createHash('sha256').update(`conversation-reply:${turnRef}`).digest('hex'));
 }
 
 /**
- * TF-F1: the deterministic id of reply ATTEMPT `attempt` for one turn. Attempt 0 is byte-
+ * The deterministic id of reply ATTEMPT `attempt` for one turn. Attempt 0 is byte-
  * compatible with `replyRunId` (the pre-fix derivation — the e2e's independent oracle and any
  * persisted reply row stay valid); attempt n ≥ 1 appends the ordinal to the hash input.
  */
@@ -93,7 +93,7 @@ export function replyAttemptRunId(turnRef: string, attempt: number): string {
 }
 
 /**
- * TF-F1: the bounded cap on the deterministic attempt-id walk. Reaching it means
+ * The bounded cap on the deterministic attempt-id walk. Reaching it means
  * REPLY_RUN_MAX_ATTEMPTS retries of ONE turn each ran the model and terminally FAILED — a
  * persistent upstream/config fault the operator must inspect (the typed error names the cap),
  * not something more derived ids would fix.
@@ -121,7 +121,7 @@ export function makeLiveTurnResponder(
     async respond({ input, turnRef, onEvent }): Promise<TurnReplyOutcome> {
       const tdb = cfg.tdbFor(tenantId);
 
-      // ATTACH-OR-ADVANCE (TF-F1, module header): walk the deterministic attempt chain — attach
+      // ATTACH-OR-ADVANCE (module header): walk the deterministic attempt chain — attach
       // to a COMPLETED header (any attempt, no model call), advance past a terminally-FAILED one
       // (fresh header + clean journal for the retry), run fresh at the first ABSENT slot.
       let runId: string | undefined;
@@ -164,7 +164,7 @@ export function makeLiveTurnResponder(
       try {
         result = await runAgent(tdb, cfg.backend, spec, {
           runId,
-          // The S4 seam: forward the live sink verbatim when the caller supplies one (S3: never).
+          // The live-sink seam: forward the live sink verbatim when the caller supplies one.
           ...(onEvent ? { onEvent: onEvent as EventSink } : {}),
         });
       } catch (e) {
@@ -191,7 +191,7 @@ export function makeLiveTurnResponder(
 /**
  * Read one deterministic reply attempt's run header (tenant-scoped chokepoint): `undefined` when
  * no header exists (the attempt slot is FREE — run fresh there), else the persisted status +
- * final_text (the TF-F1 walk attaches on 'completed', advances on a terminal failure). Mirrors
+ * final_text (the attempt-id walk attaches on 'completed', advances on a terminal failure). Mirrors
  * `loadCompletedSubRun` (live-agent-node.ts) with the free-text column instead of the structured
  * output.
  */

@@ -235,7 +235,7 @@ describe('store.write node (upsert-EXCLUSIVE — the C10/at-least-once law)', ()
     ]);
   });
 
-  it('an undefined upsert on a DO-UPDATE-shaped write (values beyond the key) is a TYPED terminal failure — NEVER a silent completed/wrote:0 (SEC-TEN-1)', async () => {
+  it('an undefined upsert on a DO-UPDATE-shaped write (values beyond the key) is a TYPED terminal failure — NEVER a silent completed/wrote:0', async () => {
     // The facade's return contract (store-facade.ts): on the DO-UPDATE arm, `undefined` means the
     // conflict row EXISTS but the tenant-scoped setWhere matched ZERO rows — i.e. a FOREIGN tenant
     // holds the (deployment-global) key. Reporting `completed/wrote:0` here was SILENT cross-tenant
@@ -392,7 +392,7 @@ describe('store.write node (upsert-EXCLUSIVE — the C10/at-least-once law)', ()
     // A NUMBER resolved from the {event:} source for the `status` text-enum column. A non-string is by
     // definition not a member of a text whitelist, so it must be rejected HERE — matching the HTTP
     // route's z.enum (a non-member number is a VALIDATION_ERROR). Fail-the-fix: with the pre-fix guard
-    // (`typeof value === 'string' && …`) the number SKIPPED the whitelist and reached db.upsert (and SF-1
+    // (`typeof value === 'string' && …`) the number SKIPPED the whitelist and reached db.upsert (and the facade guard
     // accepts a scalar number too), so it would have upserted `completed` — a real bypass.
     const spec = parseFixture(ENUM_YAML);
     const db = new SpyDb();

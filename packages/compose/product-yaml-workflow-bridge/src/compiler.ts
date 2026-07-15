@@ -62,7 +62,7 @@ const promptExecutionPattern = /\b(prompt\s+execution|execute\s+prompt|llm\s+cal
 const validationOperations = new Set(['grounding.check', 'validation.check']);
 const artifactPersistOperations = new Set(['artifact.persist']);
 const artifactReadOperations = new Set(['artifact.read']);
-// S2: the EXACT per-type ops for the store step types. The declaration-only
+// The EXACT per-type ops for the store step types. The declaration-only
 // fields (store/filter/values/limit) are deliberately NOT compiled into the WorkflowStepSpec — the
 // Tier-A store nodes re-read them from the validated ProductSpec by (workflow id, step id); the
 // compiled step carries only the neutral capability/operation dispatch shape.
@@ -323,7 +323,7 @@ function isCompilableStep(step: ProductYamlWorkflowStep): boolean {
     step.type === 'validation' ||
     step.type === 'artifact_persist' ||
     step.type === 'artifact_read' ||
-    // S2: the store step types compile onto the Tier-A store.read/store.write
+    // The store step types compile onto the Tier-A store.read/store.write
     // nodes (the inventory check above still fail-closes a composition that wires no store runtime).
     step.type === 'store_read' ||
     step.type === 'store_write'

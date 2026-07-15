@@ -1,6 +1,6 @@
 /**
- * S2 — the conversation_input conditional mount at the COMPOSE layer
- * (the record S3 / file -S2 test pattern, designed for the two-JSON-route surface):
+ * The conversation_input conditional mount at the COMPOSE layer
+ * (following the record and file conditional-mount test pattern, designed for the two-JSON-route surface):
  *
  *   1. WHEN DECLARED: BOTH capability-owned stores + BOTH routes — asserted as WHOLE TUPLES
  *      (method/path/action.kind/action.handler; both are plain `{kind:'handler'}` JSON routes — no
@@ -19,7 +19,7 @@
  *      decorative; a cap above the 64 KiB ceiling likewise).
  *   5. ROUTE-COLLISION fail-closed: a declared POST view on the turn-submit route key is a compose
  *      rejection naming both owners, never a silent second owner.
- * 6. S3: a conversation-declaring doc REQUIRES a wired responder (fail-closed, the
+ * 6. A conversation-declaring doc REQUIRES a wired responder (fail-closed, the
  *      declared-agents executor-coverage mirror); the turn-submit handler entry carries the
  *      handler-managed tx posture; a responder-declared store-context read is cross-checked
  *      against the composed stores (store exists / limit within the STORE_READ cap / closed
@@ -43,7 +43,7 @@ import {
 
 const TENANT = '00000000-0000-0000-0000-0000000000c3';
 
-/** A deterministic responder factory for compose tests (the S3 REQUIRED rollout seam). */
+/** A deterministic responder factory for compose tests (the REQUIRED rollout seam). */
 function fakeResponder(
   storeContext?: ConversationStoreContextRead,
 ): ConversationTurnResponderFactory {
@@ -71,14 +71,14 @@ function conversationRollout(
     enqueuer: new RecordingEnqueuer(),
     stores: derived.stores,
     artifactCollections: derived.artifactCollections,
-    // S3: the responder is REQUIRED for a conversation-declaring doc; overrides may replace
+    // The responder is REQUIRED for a conversation-declaring doc; overrides may replace
     // the whole conversation block (basePath/capability arms spread their own).
     conversation: { responder: fakeResponder() },
     ...overrides,
   };
 }
 
-describe('composeProductDeploy — the conversation_input capability (S2: conditional mount + the per-TURN key)', () => {
+describe('composeProductDeploy — the conversation_input capability (conditional mount + the per-TURN key)', () => {
   it('mounts the conversation capability WHEN DECLARED: BOTH stores + BOTH routes as WHOLE TUPLES + handlers + trigger event', () => {
     const spec = parseFixture(CONVERSATION_INTAKE_YAML);
     expect(declaresConversationInput(spec)).toBe(true);
@@ -190,7 +190,7 @@ describe('composeProductDeploy — the conversation_input capability (S2: condit
       artifactCollections: derived.artifactCollections,
     });
     expect(composed.engineSpec.stores.map((s) => s.name)).not.toContain('conversations');
-    // CM-1 (the S2 review): route absence asserted here too — symmetric with the record-only arm.
+    // Route absence asserted here too — symmetric with the record-only arm.
     const paths = composed.engineSpec.api.map((r) => `${r.method} ${r.path}`);
     expect(paths).not.toContain('PUT /conversations/{conversation_id}');
     expect(paths).not.toContain('POST /conversations/{conversation_id}/turns');
@@ -210,7 +210,7 @@ describe('composeProductDeploy — the conversation_input capability (S2: condit
   });
 
   it('threads rollout.conversation.capability into the REAL config resolution (an invalid cap fail-closes at compose)', () => {
-    // resolveConversationConfig rejects a non-positive byte cap AT CONSTRUCTION (the S1 fail-closed
+    // resolveConversationConfig rejects a non-positive byte cap AT CONSTRUCTION (the fail-closed
     // belt); reaching that error through composeProductDeploy proves the override seam is wired.
     expect(() =>
       composeProductDeploy(
@@ -282,7 +282,7 @@ views:
   });
 });
 
-describe('composeProductDeploy — the S3 responder laws', () => {
+describe('composeProductDeploy — the responder laws', () => {
   it('FAIL-CLOSES a conversation-declaring doc WITHOUT a wired responder (the executor-coverage mirror)', () => {
     expect(() =>
       composeProductDeploy(
@@ -309,7 +309,7 @@ describe('composeProductDeploy — the S3 responder laws', () => {
     expect(create?.routeTx).toBeUndefined();
   });
 
-  it('CFG-03: a responder store-context read targeting a CAPABILITY-OWNED conversation store fail-closes at compose (the cross-conversation leak class)', () => {
+  it('a responder store-context read targeting a CAPABILITY-OWNED conversation store fail-closes at compose (the cross-conversation leak class)', () => {
     for (const store of ['conversations', 'conversation_turns']) {
       expect(
         () =>

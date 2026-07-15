@@ -6,8 +6,7 @@
  * audio half joins iff the doc declares `audio_input`/`media_playback`, the record half iff it
  * declares `record_input`, the file half iff it declares `file_input`, the
  * conversation half iff it declares `conversation_input`. A doc declaring audio has its
- * capability store set byte-identical to the pre-S4 unconditional prepend — the compose
- * golden pins that.
+ * capability store set pinned byte-identical by the compose golden.
  *
  * Content identity: `mountAudioCapability().stores` / `mountRecordCapability().stores` /
  * `mountFileCapability().stores` / `mountConversationCapability().stores` return exactly
@@ -47,12 +46,12 @@ const AUDIO_CAPABILITY_IDS: ReadonlySet<string> = new Set(
   AUDIO_CAPABILITY_MANIFEST.capabilities.map((c) => c.id),
 );
 
-/** Does the doc declare the audio capability (the S4 conditional-mount predicate)? */
+/** Does the doc declare the audio capability (the conditional-mount predicate)? */
 export function declaresAudio(spec: ProductSpec): boolean {
   return spec.capabilities.some((c) => AUDIO_CAPABILITY_IDS.has(c.id));
 }
 
-/** Does the doc declare the record_input capability (the S3 conditional-mount predicate)? */
+/** Does the doc declare the record_input capability (the conditional-mount predicate)? */
 export function declaresRecordInput(spec: ProductSpec): boolean {
   return spec.capabilities.some((c) => c.id === RECORD_INPUT_CAPABILITY_ID);
 }
@@ -79,7 +78,7 @@ const FILE_CAPABILITY_IDS: ReadonlySet<string> = new Set(
   FILE_CAPABILITY_MANIFEST.capabilities.map((c) => c.id),
 );
 
-/** Does the doc declare the file_input capability (the S2 conditional-mount predicate)? */
+/** Does the doc declare the file_input capability (the conditional-mount predicate)? */
 export function declaresFileInput(spec: ProductSpec): boolean {
   return spec.capabilities.some((c) => FILE_CAPABILITY_IDS.has(c.id));
 }
@@ -94,20 +93,20 @@ const CONVERSATION_CAPABILITY_IDS: ReadonlySet<string> = new Set(
   CONVERSATION_CAPABILITY_MANIFEST.capabilities.map((c) => c.id),
 );
 
-/** Does the doc declare the conversation_input capability (the S2 conditional-mount predicate)? */
+/** Does the doc declare the conversation_input capability (the conditional-mount predicate)? */
 export function declaresConversationInput(spec: ProductSpec): boolean {
   return spec.capabilities.some((c) => CONVERSATION_CAPABILITY_IDS.has(c.id));
 }
 
 export interface CapabilityStoreComposition {
   /**
-   * The capability-owned stores this doc mounts (audio iff declared — S4; record — S3; file —
-   * S2; conversation — S2).
+   * The capability-owned stores this doc mounts (audio iff declared, record iff declared, file
+   * iff declared, conversation iff declared).
    */
   readonly stores: StoreSpec[];
   /**
    * Their name set — what `deriveProductStores` / `checkProductStores` take to tell capability
-   * stores apart from a product's own (the LAYER-DRY-1 pattern, now spec-aware).
+   * stores apart from a product's own (the shared name-set pattern, now spec-aware).
    */
   readonly names: ReadonlySet<string>;
 }
@@ -120,7 +119,7 @@ export function composeCapabilityStores(spec: ProductSpec): CapabilityStoreCompo
   const withConversation = declaresConversationInput(spec);
   return {
     // ORDER: audio (when declared) then record then file then conversation (each when declared) —
-    // the pre-S4 prepend order for a doc declaring audio only, so its set is byte-identical
+    // the prepend order that keeps a doc declaring audio only byte-identical
     // (the compose golden).
     stores: [
       ...(withAudio ? audioCapabilityStores() : []),

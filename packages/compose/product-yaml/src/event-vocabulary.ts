@@ -4,10 +4,10 @@
  * from them instead of hardcodes:
  *
  *   1. the capability inventory's `events` set (was: a hardcoded `{'audio_input.finalized_session'}`);
- *   2. the CC-1 persist-scope check — the artifact scope key is validated against the SPECIFIC
+ *   2. the persist-scope check — the artifact scope key is validated against the SPECIFIC
  *      triggering workflow's event `payload_keys` (was: the global audio constant). NEVER a union
  *      across events: a union would re-admit a scope the actual triggering event cannot satisfy —
- *      exactly the runtime 'persist_scope_missing' hole CC-1 closed;
+ *      exactly the runtime 'persist_scope_missing' hole this closed;
  *   3. the per-trigger idempotency-key derivation (C10) — every trigger registration passes an
  *      EXPLICIT `idempotencyKeyForEvent` from the descriptor's declared key field (was: the
  *      dispatcher's implicit default, a silent single-flight weakening for any future non-audio
@@ -15,7 +15,7 @@
  *      `session_id:<id>:finalized` (live deployment run identity — pinned by test).
  *
  * Today exactly ONE capability mounts (the unconditional audio mount), so the vocabulary is the audio
- * manifest's descriptors. S4 makes mounting conditional; this module is the seam that stays.
+ * manifest's descriptors. Conditional mounting is layered on top; this module is the seam that stays.
  */
 import { AUDIO_CAPABILITY_MANIFEST } from '@rayspec/audio-runtime';
 import type { WorkflowSpec } from '@rayspec/foundation';
@@ -29,10 +29,10 @@ import { ProductComposeError } from './errors.js';
 
 /**
  * The canonical event ids whose derived idempotency key keeps the LEGACY `<field>:<value>:finalized`
- * format (`sessionScopedIdempotencyKey`). Exactly ONE entry, like the S1 alias table — the audio
+ * format (`sessionScopedIdempotencyKey`). Exactly ONE entry, like the alias table — the audio
  * event's key feeds LIVE deployment run identity and is byte-frozen (a re-key duplicates live
  * runs on redelivery). Every OTHER event derives the clean generic `<field>:<value>` format
- * (`payloadFieldIdempotencyKey`, S3) — new events must NOT join this set.
+ * (`payloadFieldIdempotencyKey`) — new events must NOT join this set.
  */
 const LEGACY_SUFFIXED_KEY_EVENTS: ReadonlySet<string> = new Set(['audio_input.finalized_session']);
 
@@ -43,7 +43,7 @@ const LEGACY_SUFFIXED_KEY_EVENTS: ReadonlySet<string> = new Set(['audio_input.fi
  * contract, or two capabilities claiming one canonical id is a compose-time rejection, never a
  * silently wrong dispatch table.
  *
- * The `capabilities` parameter is an ADDITIVE test seam (TB-1): it defaults to the frozen audio
+ * The `capabilities` parameter is an ADDITIVE test seam: it defaults to the frozen audio
  * manifest, and the production call site (`compose.ts`) stays a zero-arg call — byte-identical
  * behavior. Its only purpose is to make the three coherence guards REACHABLE by unit tests feeding
  * synthetic capability lists (a guard no test can trip is an unproven guard).
@@ -113,7 +113,7 @@ export function triggerRegistrationForWorkflow(
   }
   // For the audio event (`idempotency_key_field: 'session_id'`) this derives EXACTLY the legacy
   // dispatcher-default format `session_id:<id>:finalized` — byte-identical live run identity
-  // (LEGACY_SUFFIXED_KEY_EVENTS above). Every other event uses the S3 generic `<field>:<value>`.
+  // (LEGACY_SUFFIXED_KEY_EVENTS above). Every other event uses the generic `<field>:<value>`.
   const keyFn = LEGACY_SUFFIXED_KEY_EVENTS.has(descriptor.contract)
     ? sessionScopedIdempotencyKey(descriptor.idempotency_key_field)
     : payloadFieldIdempotencyKey(descriptor.idempotency_key_field);
@@ -121,11 +121,11 @@ export function triggerRegistrationForWorkflow(
 }
 
 /**
- * CC-1, per-event: the artifact-persist node scopes rows by the TRIGGER payload's `<scope>_id`,
+ * Per-event: the artifact-persist node scopes rows by the TRIGGER payload's `<scope>_id`,
  * so the declared scope key must be among the SPECIFIC triggering workflow's event `payload_keys`.
  * Deliberately NOT a union across all mounted events — with a second event in the vocabulary, a
  * union would accept a scope only the OTHER event's payload carries, re-opening the exact
- * every-persist-fails-'persist_scope_missing' hole CC-1 closed (pinned fail-the-fix by the
+ * every-persist-fails-'persist_scope_missing' hole this closed (pinned fail-the-fix by the
  * two-descriptor union test).
  */
 export function requirePersistScopeInTriggerPayload(check: {

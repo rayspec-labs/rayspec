@@ -22,7 +22,7 @@
  * skip and never an inert mount:
  *   - a capability outside the wired set, or not `status: available`;
  *   - a workflow step type / operation without a wired node (`store_read`/`store_write` are WIRED
- *     since S2 — two tenant-bound nodes over the makeHandlerDb facade, store-nodes.ts);
+ *     — two tenant-bound nodes over the makeHandlerDb facade, store-nodes.ts);
  *   - a grounding policy value other than the executed `prune`/`drop` pair;
  *   - a declared agent without a registered extraction executor;
  *   - a persisted artifact collection / transcript sink without a bound store carrying the canonical
@@ -38,8 +38,8 @@ import type {
   SessionFinalizedSink,
 } from '@rayspec/audio-runtime';
 // AUDIO_CAPABILITY_MANIFEST: the audio half of the mounted trigger-event vocabulary. The
-// capability-owned store NAMES for the shared store checker (CW-1) come from the spec-aware
-// composeCapabilityStores helper (capability-stores.ts) since S3.
+// capability-owned store NAMES for the shared store checker come from the spec-aware
+// composeCapabilityStores helper (capability-stores.ts).
 import {
   AUDIO_CAPABILITY_MANIFEST,
   prepareTrackMedia,
@@ -52,7 +52,7 @@ import {
   WorkflowIngressSessionFinalizedSink,
   WorkflowIngressTurnSubmittedSink,
 } from '@rayspec/capability-bridges';
-// S2: the conversational-ingress capability — mounted CONDITIONALLY, iff the doc declares
+// The conversational-ingress capability — mounted CONDITIONALLY, iff the doc declares
 // `conversation_input` (the record/file conditional-mount law). The manifest feeds the trigger
 // vocabulary; the bridge sink is the fail-closed tenant boundary (the audio/record/file mirror).
 import {
@@ -67,8 +67,8 @@ import {
   mountConversationCapability,
 } from '@rayspec/conversation-runtime/rayspec';
 import type { TenantDb } from '@rayspec/db';
-// S2: the generic byte-ingest capability — mounted CONDITIONALLY, iff the doc declares
-// `file_input` (the record S3 conditional-mount law). The manifest feeds the trigger vocabulary;
+// The generic byte-ingest capability — mounted CONDITIONALLY, iff the doc declares
+// `file_input` (the record conditional-mount law). The manifest feeds the trigger vocabulary;
 // the bridge sink is the fail-closed tenant boundary (the audio/record sink mirror).
 import { FILE_CAPABILITY_MANIFEST, type FileCapabilityConfig } from '@rayspec/file-runtime';
 import { type MountedFileCapability, mountFileCapability } from '@rayspec/file-runtime/rayspec';
@@ -86,8 +86,8 @@ import {
   type ProductYamlBridgeInput,
   ProductYamlWorkflowBridgeError,
 } from '@rayspec/product-yaml-workflow-bridge';
-// S3: the generic submit-ingress capability — mounted CONDITIONALLY, iff the doc
-// declares `record_input` (audio stays unconditional until S4). The manifest feeds the trigger
+// The generic submit-ingress capability — mounted CONDITIONALLY, iff the doc
+// declares `record_input`. The manifest feeds the trigger
 // vocabulary; the bridge sink is the fail-closed tenant boundary (the audio sink's mirror).
 import {
   RECORD_CAPABILITY_MANIFEST,
@@ -99,7 +99,7 @@ import {
   type MountedRecordCapability,
   mountRecordCapability,
 } from '@rayspec/record-runtime/rayspec';
-// The SHARED S2 store checker (product-lint.ts) — the SAME implementation `lintProductSpec` runs at
+// The SHARED store checker (product-lint.ts) — the SAME implementation `lintProductSpec` runs at
 // parse time; compose re-runs it as defense-in-depth for a code-built spec that bypassed the parser.
 import {
   type ApiRouteSpec,
@@ -172,16 +172,16 @@ const WIRED_OPERATIONS = [
   'validation.check',
   'artifact.persist',
   'artifact.read',
-  // S2: the declared-store step runtime (store-nodes.ts over makeHandlerDb).
+  // The declared-store step runtime (store-nodes.ts over makeHandlerDb).
   'store.read',
   'store.write',
-  // S3: the durable blob→text parse node (file-parse-node.ts over the injected tenant-bound
+  // The durable blob→text parse node (file-parse-node.ts over the injected tenant-bound
   // blob reader). Bridge-compilable for any doc; ACTUALLY registered iff the doc declares
   // file_input AND the deployment supplies rollout.file.blob (fail-closed pre-checked below).
   'file_input.parse_text',
 ] as const;
 
-/** The workflow step types the bridge compiles (store_read/store_write wired since S2). */
+/** The workflow step types the bridge compiles (store_read/store_write wired). */
 const COMPILABLE_STEP_TYPES: ReadonlySet<string> = new Set([
   'capability',
   'agent',
@@ -255,16 +255,16 @@ export interface ProductYamlRollout {
   /** Declared-extractor executors, keyed `agent.<id>` (required iff `extractors[]` is non-empty). */
   readonly agents?: AgentRuntimeRegistry;
   /**
-   * The LIVE extraction executor seam (item 1; S5 generalized to per-agent). When supplied it
+   * The LIVE extraction executor seam (item 1; generalized to per-agent). When supplied it
    * SUPERSEDES `rollout.agents` for the declared agent nodes: `buildNodeRegistry` builds a per-run,
    * PER-AGENT node via `buildNodeForAgent(agentId, { tdb, tenantId })` (closing over the run's
    * tenant-bound db so `runAgent` journals cost, AND over the agent id so a multi-agent /
    * multi-backend deployment mounts a DISTINCT node — its own backend + config — per declared extractor).
    * `agentIds` lists the extractors this executor serves — compose fail-closed-verifies it covers every
    * `spec.extractors`. Exactly one of `agents` / `liveAgent` must be supplied when `spec.extractors` is
-   * non-empty. (S5: `buildNode` — one shared node for all agents — was replaced by `buildNodeForAgent`;
+   * non-empty. (`buildNodeForAgent` builds a per-agent node — not one shared node for all agents;
    * deploy.ts (kill-set) imports `ProductYamlRollout` but does NOT destructure `liveAgent`, so this
-   * per-agent shape change keeps deploy.ts compiling byte-unchanged.)
+   * per-agent shape keeps deploy.ts compiling byte-unchanged.)
    */
   readonly liveAgent?: {
     readonly agentIds: readonly string[];
@@ -279,7 +279,7 @@ export interface ProductYamlRollout {
     readonly capability?: AudioCapabilityConfig;
   };
   /**
-   * Record (submit-ingress) capability mount options (S3, ADDITIVE/optional — deploy.ts consumes
+   * Record (submit-ingress) capability mount options (ADDITIVE/optional — deploy.ts consumes
    * this type; only relevant when the doc declares `record_input`).
    */
   readonly record?: {
@@ -296,17 +296,17 @@ export interface ProductYamlRollout {
     readonly normalizer?: RecordNormalizerFactory;
   };
   /**
-   * File (byte-ingest) capability mount options (S2, ADDITIVE/optional — deploy.ts consumes
+   * File (byte-ingest) capability mount options (ADDITIVE/optional — deploy.ts consumes
    * `ProductYamlRollout` opaquely, so this block keeps it compiling byte-unchanged; only relevant
    * when the doc declares `file_input`). `capability` is the deployment's config-override seam
-   * (byte cap, content-type allowlist, file-id shape — the S1 `FileCapabilityConfig`).
+   * (byte cap, content-type allowlist, file-id shape — the `FileCapabilityConfig`).
    *
-   * S3 (additive): `blob(tenantId)` is the tenant-bound blob READER factory the
+   * Additive: `blob(tenantId)` is the tenant-bound blob READER factory the
    * `file_input.parse_text` node resolves the sealed file bytes through (the `mediaPrep.blob`
    * mirror — the deployment's fs blob factory; NEVER a raw fs/db handle). Required iff a workflow
    * declares a `file_input.parse_text` step (fail-closed pre-checked). `parse` overrides the
    * parser-bomb bounds (page/char/timeout caps — validated fail-closed at compose, INCLUDING the
-   * WIRE-1 cross-check that `pdfParseTimeoutMs` stays under the compiled step's timeout_policy so
+   * cross-check that `pdfParseTimeoutMs` stays under the compiled step's timeout_policy so
    * the typed `pdf_parse_timeout` wins over the generic engine timeout; file-parse-node.ts
    * documents the defaults + rationale).
    */
@@ -317,22 +317,22 @@ export interface ProductYamlRollout {
     readonly parse?: FileParseLimits;
   };
   /**
-   * Conversation (conversational-ingress) capability mount options (S2, ADDITIVE/optional
+   * Conversation (conversational-ingress) capability mount options (ADDITIVE/optional
    * deploy.ts consumes `ProductYamlRollout` opaquely, so this block keeps it compiling
    * byte-unchanged; only relevant when the doc declares `conversation_input`). `capability` is the
    * deployment's config-override seam (message byte cap WITHIN the construction-belted 64 KiB
-   * ceiling, id shapes, S3 history-window bounds — the S1 `ConversationCapabilityConfig`;
+   * ceiling, id shapes, history-window bounds — the `ConversationCapabilityConfig`;
    * every override is validated fail-closed AT COMPOSE via the real `resolveConversationConfig`).
    * No blob/byte-mover option: this capability moves no bytes (the message is a bounded DB
-   * column). Supplied without the declaration it is silently unused — the CW-MINOR-1 posture
+   * column). Supplied without the declaration it is silently unused — the silently-unused-rollout posture
    * (5b below) applies verbatim.
    */
   readonly conversation?: {
     readonly basePath?: string;
     readonly capability?: ConversationCapabilityConfig;
     /**
-     * The tenant-bound turn responder factory (S3 — REQUIRED when the doc declares
-     * `conversation_input`: from S3 on a submitted turn produces a REAL reply, so a
+     * The tenant-bound turn responder factory (REQUIRED when the doc declares
+     * `conversation_input`: a submitted turn produces a REAL reply, so a
      * conversation-declaring doc without a wired responder fails closed at compose, mirroring the
      * declared-agents executor-coverage law). Production: the boot's `makeLiveTurnResponder` over
      * the per-product `<agent_id>.responder.json`; tests inject a deterministic fake. A declared
@@ -381,7 +381,7 @@ export interface ComposedProductDeploy {
   readonly viewRoutes: readonly string[];
   /**
    * The composed tenant-bound event ingress (the SAME dispatcher instance the mounted audio sink
-   * feeds) — ADDITIVE S1 exposure so a harness/test can emit a neutral `WorkflowInputEvent` and
+   * feeds) — ADDITIVE exposure so a harness/test can emit a neutral `WorkflowInputEvent` and
    * observe the real trigger wiring (incl. the descriptor-derived idempotency keys) without driving
    * the full capability HTTP surface. Tenant-bound at construction; exposing it widens no external
    * surface (`deploy()` does not consume it).
@@ -389,18 +389,18 @@ export interface ComposedProductDeploy {
   readonly ingress: WorkflowEventIngress;
 }
 
-// ── the fail-soft media-prep hook (MP-1) ──────────────────────────────────────────────────────────
+// ── the fail-soft media-prep hook ──────────────────────────────────────────────────────────
 
 /**
  * Build the STT node's FAIL-SOFT media-prep hook. Runs `prepareTrackMedia` off the
- * transcript path and — this is the MP-1 fix — INSPECTS its typed result: on `!ok` (the real
+ * transcript path and — this is the fix — INSPECTS its typed result: on `!ok` (the real
  * ffmpeg-failure path, where a RemuxError becomes `err(500 media_prep_failed)` that the node's own
  * try/catch never sees because the hook returns void) it emits a LOUD structured operator log. A broken
  * ffmpeg on the VPS MUST be operator-visible (forbids a silent swallow). Stays fail-soft:
  * a typed err is logged and swallowed (play-token then serves the honest `not_ready_409`); a genuine
  * THROW (a non-RemuxError fault `prepareTrackMedia` re-raises) propagates to the STT node's own
  * catch-and-log (defense-in-depth). `prepareTrackMedia` is a parameter (the real import at the call
- * site; a fake in the MP-1 unit proof, which asserts the return-err path logs).
+ * site; a fake in the unit proof, which asserts the return-err path logs).
  */
 export function makeFailSoftMediaPrep(deps: {
   readonly prepareTrackMedia: (
@@ -483,7 +483,7 @@ const FROZEN_ENGINE_SPEC_VERSION: string = '0.1';
  * `RaySpec` skeleton (version FROZEN — see `FROZEN_ENGINE_SPEC_VERSION`) from the composed store
  * read surface + the ownership-merged route set + metadata — with NO capability-specific coupling, so a
  * doc that declares no audio composes a correct minimal spec, and an audio-declaring doc
- * composes BYTE-IDENTICALLY to the pre-S4 `buildAudioCapabilitySpec({ ...audio, api: [] }, meta, {
+ * composes BYTE-IDENTICALLY to the earlier `buildAudioCapabilitySpec({ ...audio, api: [] }, meta, {
  * stores, api })` output (that call only ever contributed `audio.stores` — merged here via
  * `composedStores` — plus the same empty arrays; the key ORDER below matches it exactly so the JSON
  * serialization is unchanged). Pinned by the compose golden (the live-stack freeze).
@@ -554,9 +554,9 @@ export function composeProductDeploy(
   // `lintProductSpec` already ran this at parse time; re-running it fail-closed at compose guards a
   // CODE-BUILT spec that bypassed the parser (a store step targeting an undeclared store / a filter
   // or values column outside the store's declared columns / a write omitting the conflict key would
-  // otherwise surface only as a run-time node failure — reject it at deploy instead). CW-1: compose
+  // otherwise surface only as a run-time node failure — reject it at deploy instead). Compose
   // ALSO passes the wired capability-owned store names (parse time cannot), so a declared store
-  // shadowing a capability store is rejected HERE, before derive/rollout ever run. S3: the name set
+  // shadowing a capability store is rejected HERE, before derive/rollout ever run. The name set
   // is SPEC-AWARE (the shared composeCapabilityStores helper — record_submissions joins it iff the
   // doc declares record_input, so the shadow check tracks the actual mounts).
   const capabilityStores = composeCapabilityStores(spec);
@@ -627,7 +627,7 @@ export function composeProductDeploy(
         'stay empty (fail-closed).',
     );
   }
-  // S3: a `file_input.parse_text` step needs the DECLARED file capability (its trigger payload
+  // A `file_input.parse_text` step needs the DECLARED file capability (its trigger payload
   // carries the blob key) AND the deployment's tenant-bound blob reader — both fail-closed with a
   // named, actionable message BEFORE the generic registered-ops cross-check. The parse-bound
   // overrides are validated here too (deploy-time loud — a malformed cap would silently disable a
@@ -685,7 +685,7 @@ export function composeProductDeploy(
 
   // ── 5. trigger vocabulary + workflow compile + the tenant-bound dispatcher (the i composition) ─
   const workflows = new Map<string, WorkflowSpec>();
-  // The trigger-event vocabulary of the MOUNTED capabilities: the inventory's events, the CC-1
+  // The trigger-event vocabulary of the MOUNTED capabilities: the inventory's events, the persist-scope
   // payload contracts, and the per-trigger idempotency keys all derive from these descriptors — the
   // audio mount's `session_finalized` WHEN the doc declares audio (conditional, in lockstep with
   // the mount below) plus, WHEN DECLARED, the record mount's `record_submitted` and the file
@@ -755,7 +755,7 @@ export function composeProductDeploy(
     }
   }
 
-  // S3 (WIRE-1): the parse node's TYPED `pdf_parse_timeout` must fire BEFORE the engine's
+  // The parse node's TYPED `pdf_parse_timeout` must fire BEFORE the engine's
   // generic step timeout — an override at/above the compiled step's timeout_policy would silently
   // demote the named failure to a generic engine timeout. The default relation (20s < 30s) is
   // unit-pinned; overrides are cross-checked here against the COMPILED value (the compiler owns
@@ -823,9 +823,9 @@ export function composeProductDeploy(
   // The sink is the SAME tenant-bound dispatcher the audio sink feeds (one ingress, one C10
   // authority), behind the record bridge's fail-closed cross-tenant assertion. A doc that does not
   // declare `record_input` mounts NOTHING record-shaped (no store, no route, no handler, no
-  // trigger vocabulary — the conditional-mount law this slice establishes; S4 brings audio in line).
+  // trigger vocabulary — the conditional-mount law this establishes; audio follows the same law).
   //
-  // CW-MINOR-1 (DELIBERATE): a `rollout.record` supplied WITHOUT the doc declaring `record_input`
+  // DELIBERATE: a `rollout.record` supplied WITHOUT the doc declaring `record_input`
   // is silently unused — the DECLARATION is the mount authority, rollout blocks are deployment-
   // side OPTIONS for whatever the doc mounts (the audio mirror: `rollout.audio` is likewise only
   // consumed by the audio mount). This is the single-deployment-tenant beta posture's static
@@ -871,8 +871,8 @@ export function composeProductDeploy(
   // (one ingress, one C10 authority), behind the file bridge's fail-closed cross-tenant assertion.
   // A doc that does not declare `file_input` mounts NOTHING file-shaped (no store, no routes, no
   // handlers, no trigger vocabulary). `rollout.file` is the deployment-side OPTIONS block for the
-  // mount (base path + the S1 config-override seam: byte cap / content-type allowlist); supplied
-  // without the declaration it is silently unused — the CW-MINOR-1 posture above applies verbatim.
+  // mount (base path + the config-override seam: byte cap / content-type allowlist); supplied
+  // without the declaration it is silently unused — the silently-unused-rollout posture above applies verbatim.
   const file: MountedFileCapability | undefined = withFileInput
     ? mountFileCapability({
         fileSubmittedSink: new WorkflowIngressFileSubmittedSink({
@@ -889,15 +889,15 @@ export function composeProductDeploy(
   // dispatcher (one ingress, one C10 authority), behind the conversation bridge's fail-closed
   // cross-tenant assertion. The per-TURN enqueue idempotency key derives EXPLICITLY from the
   // manifest descriptor via `triggerRegistrationForWorkflow` above (`turn_ref` →
-  // `payloadFieldIdempotencyKey` — the S3 generic format; never the dispatcher default, never
+  // `payloadFieldIdempotencyKey` — the generic format; never the dispatcher default, never
   // conversation-scoped: a conversation-scoped key would dedupe every later turn into the first
   // durable run). A doc that does not declare `conversation_input` mounts NOTHING
   // conversation-shaped (no stores, no routes, no handlers, no trigger vocabulary).
-  // `rollout.conversation` is the deployment-side OPTIONS block (base path + the S1
+  // `rollout.conversation` is the deployment-side OPTIONS block (base path + the
   // config-override seam, compose-validated fail-closed by the real `resolveConversationConfig`);
-  // supplied without the declaration it is silently unused — the CW-MINOR-1 posture (5b) verbatim.
-  // S3: a conversation-declaring doc REQUIRES a wired responder (the declared-agents
-  // executor-coverage mirror, step 4b above): from S3 on, POST .../turns produces a REAL reply, so
+  // supplied without the declaration it is silently unused — the silently-unused-rollout posture (5b) verbatim.
+  // A conversation-declaring doc REQUIRES a wired responder (the declared-agents
+  // executor-coverage mirror, step 4b above): POST .../turns produces a REAL reply, so
   // composing the surface without a responder would mount a route that 500s at request time —
   // fail-closed at compose instead (deploy-time loud).
   if (withConversationInput && rollout.conversation?.responder === undefined) {
@@ -926,7 +926,7 @@ export function composeProductDeploy(
     : undefined;
 
   // ── 6. the composed store read surface + row-contract verification ───────────────────────────
-  // S4: the capability-owned prefix comes from the ONE shared `composeCapabilityStores` helper (the
+  // The capability-owned prefix comes from the ONE shared `composeCapabilityStores` helper (the
   // SAME source the server boot's DDL derivation uses) — killing the boot↔compose lockstep
   // structurally: both sides now compute the capability store set (audio iff declared + record iff
   // declared) from one function, so they can never diverge on which capability stores exist. The
@@ -941,7 +941,7 @@ export function composeProductDeploy(
       'transcript sink',
     );
   }
-  // S2: every DECLARED product store must be bound in the composed read surface with its declared
+  // Every DECLARED product store must be bound in the composed read surface with its declared
   // column contract (the deployment's rollout.stores normally carries them via deriveProductStores —
   // a hand-built rollout that omits one is rejected here, naming the store, never an inert mount
   // whose store steps fail at run time).
@@ -953,7 +953,7 @@ export function composeProductDeploy(
       `declared store '${declared.name}'`,
     );
   }
-  // S3: a responder's DECLARED bounded store-context read must resolve against THIS
+  // A responder's DECLARED bounded store-context read must resolve against THIS
   // deployment's composed stores (fail-closed at compose — never a turn route whose context read
   // 500s at request time). The declaration is constant across tenants; read it off a
   // deployment-tenant-bound instance. Boot-side validation owns the config SHAPE (limit bounds,
@@ -961,7 +961,7 @@ export function composeProductDeploy(
   if (conversation && rollout.conversation?.responder) {
     const declared = rollout.conversation.responder(rollout.tenantId).storeContext;
     if (declared) {
-      // CFG-03: the capability-owned conversation stores are NEVER a context
+      // The capability-owned conversation stores are NEVER a context
       // source. The bounded history window (assemble.ts) is the ONLY sanctioned ledger read — a
       // store-context read of `conversations`/`conversation_turns` would feed OTHER conversations'
       // raw turns/titles into the model input (a cross-conversation leak class) outside the
@@ -1024,7 +1024,7 @@ export function composeProductDeploy(
     }
     const scope = scopes[0];
     const scopeColumn = `${scope}_id`;
-    // CC-1 (per-event, S1): the persist node scopes rows by the TRIGGER payload's `<scope>_id`, and
+    // Per-event: the persist node scopes rows by the TRIGGER payload's `<scope>_id`, and
     // each persisting workflow's scope key is validated against ITS OWN trigger event's descriptor
     // `payload_keys` (the event-vocabulary registry; for the audio event that contract is coupled
     // fail-the-fix to the seam adapter's emitted payload). NEVER a union across events — a union
@@ -1063,13 +1063,13 @@ export function composeProductDeploy(
       );
     }
   }
-  // CW-2 (fail-closed, after the binds): every composed store must be accounted for by the KNOWN
+  // Fail-closed, after the binds: every composed store must be accounted for by the KNOWN
   // union — the audio capability stores + the declared product stores + the bound transcript sink +
   // the bound artifact-collection stores. A stray rollout.stores entry corresponding to NOTHING
   // would otherwise MATERIALIZE as a real table no declaration owns (silent pre-fix); reject it
   // naming the stray.
   const knownStoreNames = new Set<string>([
-    // S4: the capability-owned names from the SAME shared helper that seeds composedStores.
+    // The capability-owned names from the SAME shared helper that seeds composedStores.
     ...capabilityStores.names,
     ...spec.stores.map((s) => s.name),
     ...(rollout.transcripts ? [rollout.transcripts.store] : []),
@@ -1087,7 +1087,7 @@ export function composeProductDeploy(
 
   // ── 7. views mount (delegates resolved per capability CONTRACT, never per product view id) ────
   const delegates = new Map<string, ViewResolvedHandler>();
-  /** Views delegating the play-token capability handler (CC-3: route coincidence enforced below). */
+  /** Views delegating the play-token capability handler (route coincidence enforced below). */
   const delegatedPlayTokenViews: Array<{ id: string; key: string }> = [];
   for (const view of spec.views) {
     if (view.source?.kind !== 'capability') continue;
@@ -1154,7 +1154,7 @@ export function composeProductDeploy(
         'DIFFERENT handlers — a route must have exactly one owner.',
     );
   }
-  // S3: the record capability's routes join the merge. NO delegation exists for a submit route (it
+  // The record capability's routes join the merge. NO delegation exists for a submit route (it
   // is a write, views are reads), so ANY coincidence with an already-mounted route key is a
   // fail-closed collision naming both owners — never a silent second owner.
   const mountedRouteKeys = new Set(api.map((r) => `${r.method} ${r.path}`));
@@ -1169,7 +1169,7 @@ export function composeProductDeploy(
     api.push(route);
     mountedRouteKeys.add(key);
   }
-  // S2: the file capability's routes join the merge under the SAME law — NO delegation exists
+  // The file capability's routes join the merge under the SAME law — NO delegation exists
   // for a byte-ingest upload or a submit route, so any coincidence with an already-mounted route
   // key is a fail-closed collision naming both owners.
   for (const route of file?.api ?? []) {
@@ -1184,7 +1184,7 @@ export function composeProductDeploy(
     api.push(route);
     mountedRouteKeys.add(key);
   }
-  // S2: the conversation capability's routes join the merge under the SAME law — NO
+  // The conversation capability's routes join the merge under the SAME law — NO
   // delegation exists for the idempotent create or the turn submit (both are writes, views are
   // reads), so any coincidence with an already-mounted route key is a fail-closed collision
   // naming both owners.
@@ -1201,7 +1201,7 @@ export function composeProductDeploy(
     mountedRouteKeys.add(key);
   }
 
-  // CC-3: the play-token surface must exist EXACTLY ONCE. The merge above dedupes on byte-equal
+  // The play-token surface must exist EXACTLY ONCE. The merge above dedupes on byte-equal
   // `METHOD path` keys only, so a `rollout.audio.basePath` override that moves the audio
   // capability's play-token route away from the delegated view's declared route would silently
   // DOUBLE-EXPOSE it (two mounted routes onto one capability handler). Fail-closed: when a
@@ -1263,10 +1263,10 @@ export function composeProductDeploy(
   }
 
   // ── 9. the engine spec the SHARED deploy pipeline consumes ────────────────────────────────────
-  // S4: a NEUTRAL spec builder (no audio coupling) over composedStores + the ownership-merged route
+  // A NEUTRAL spec builder (no audio coupling) over composedStores + the ownership-merged route
   // set. Store order == composedStores (capability stores when declared + rollout stores) — the boot
   // path's DDL derives the SAME order via composeCapabilityStores. For an audio-declaring doc this is byte-identical
-  // to the pre-S4 `buildAudioCapabilitySpec` output (which only ever contributed `audio.stores`,
+  // to the earlier `buildAudioCapabilitySpec` output (which only ever contributed `audio.stores`,
   // already inside composedStores, plus the same empty 0.1 arrays); pinned by the compose golden.
   const engineSpec: RaySpec = buildProductEngineSpec(composedStores, api, {
     name: `product:${spec.product.id}`,
@@ -1279,8 +1279,8 @@ export function composeProductDeploy(
     const db = makeHandlerDb(bindings.tdb, bindings.productTables);
     // The FAIL-SOFT media-prep hook: build a per-run tenant-bound blob context and
     // prepare each finalized track's playable artifact. A remux failure surfaces as a typed
-    // err(media_prep_failed) — `makeFailSoftMediaPrep` INSPECTS the result and LOGS it loudly (MP-1;
-    // a broken ffmpeg must be operator-visible), then swallows it (play-token stays not_ready_409);
+    // err(media_prep_failed) — `makeFailSoftMediaPrep` INSPECTS the result and LOGS it loudly
+    // (a broken ffmpeg must be operator-visible), then swallows it (play-token stays not_ready_409);
     // a genuine throw propagates to the STT node's own catch-and-log. Media prep never poisons extraction.
     const mediaPrepBlob = rollout.mediaPrep?.blob;
     const mediaPrep = mediaPrepBlob
@@ -1308,7 +1308,7 @@ export function composeProductDeploy(
       );
     }
     if (rollout.liveAgent) {
-      // S5: the LIVE extraction node is built PER RUN AND PER AGENT — `buildNodeForAgent` closes over
+      // The LIVE extraction node is built PER RUN AND PER AGENT — `buildNodeForAgent` closes over
       // this run's tenant-bound db (so `runAgent` journals usage/cost under the run's tenant, ledger
       // 1.2) AND the declared agent id, so a multi-agent / multi-backend deployment registers a
       // DISTINCT node — its own backend + config — for EACH declared agent (not one shared node).
@@ -1338,12 +1338,12 @@ export function composeProductDeploy(
       }),
     );
     registry.register('artifact.read', createArtifactReadHandler({ store: artifactStore }));
-    // S2: the declared-store step runtime — two tenant-bound nodes over the SAME makeHandlerDb
+    // The declared-store step runtime — two tenant-bound nodes over the SAME makeHandlerDb
     // facade (fail-closed on undeclared stores/columns; store.write = db.upsert EXCLUSIVELY on the
     // store's declared conflict key — the C10/at-least-once law; see store-nodes.ts).
     registry.register('store.read', makeStoreReadNode({ spec, db }));
     registry.register('store.write', makeStoreWriteNode({ spec, db }));
-    // S3: the durable blob→text parse node, per-run TENANT-BOUND through the deployment's
+    // The durable blob→text parse node, per-run TENANT-BOUND through the deployment's
     // blob-reader factory (the mediaPrep.blob mirror) — registered in LOCKSTEP with the
     // registeredOps cross-check below (withFileInput + rollout.file.blob), so a compiled
     // parse_text step can never come up capability_unavailable at run time.
@@ -1371,7 +1371,7 @@ export function composeProductDeploy(
     'artifact.read',
     'store.read',
     'store.write',
-    // S3: mirrors the buildNodeRegistry registration condition EXACTLY (declared file_input +
+    // Mirrors the buildNodeRegistry registration condition EXACTLY (declared file_input +
     // a supplied blob reader) — the specific pre-check above already named the actionable fix.
     ...(withFileInput && rollout.file?.blob ? ['file_input.parse_text'] : []),
   ]);

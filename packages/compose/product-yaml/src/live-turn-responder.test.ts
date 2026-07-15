@@ -8,7 +8,7 @@
  *    and the runId threading (reserve-the-deterministic-id);
  *  - error mapping (a returned error RunResult AND a thrown runAgent both become the typed error
  *    outcome CARRYING the deterministic run id);
- *  - the S4 seam: a supplied onEvent threads into runAgent's opts.
+ *  - the live-sink seam: a supplied onEvent threads into runAgent's opts.
  */
 import type { RunResult } from '@rayspec/core';
 import { describe, expect, it, vi } from 'vitest';
@@ -26,7 +26,7 @@ type HeaderRow = { status: string; finalText: string | null };
 
 /**
  * A fake tenant-bound db whose runs-header reads return the queued result per SUCCESSIVE select
- * (the TF-F1 attempt walk reads attempt 0, 1, … in order — a queue is a faithful per-id fake).
+ * (the attempt walk reads attempt 0, 1, … in order — a queue is a faithful per-id fake).
  */
 function fakeTdb(perCall: HeaderRow[][] = []) {
   let call = 0;
@@ -73,7 +73,7 @@ describe('replyRunId / replyAttemptRunId', () => {
     expect(a1).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 
-  it('TF-F1: attempt 0 IS replyRunId (byte-compatible with the pre-fix derivation + the e2e oracle); later attempts are distinct, deterministic, UUID-shaped', () => {
+  it('attempt 0 IS replyRunId (byte-compatible with the pre-fix derivation + the e2e oracle); later attempts are distinct, deterministic, UUID-shaped', () => {
     expect(replyAttemptRunId(TURN_REF, 0)).toBe(replyRunId(TURN_REF));
     const a1 = replyAttemptRunId(TURN_REF, 1);
     expect(a1).toBe(replyAttemptRunId(TURN_REF, 1));
@@ -126,7 +126,7 @@ describe('makeLiveTurnResponder', () => {
     expect(runAgentMock).not.toHaveBeenCalled();
   });
 
-  it('TF-F1: a terminal-FAILED header advances to the NEXT deterministic attempt id (fresh header + clean journal — never a re-run under the failed id)', async () => {
+  it('a terminal-FAILED header advances to the NEXT deterministic attempt id (fresh header + clean journal — never a re-run under the failed id)', async () => {
     runAgentMock.mockReset();
     runAgentMock.mockResolvedValue(completedRun('second attempt'));
     // Attempt 0's header is terminally failed; attempt 1 has no header → run fresh THERE.
@@ -140,7 +140,7 @@ describe('makeLiveTurnResponder', () => {
       runId: replyAttemptRunId(TURN_REF, 1),
     });
     expect(runAgentMock).toHaveBeenCalledTimes(1);
-    // ★ THE PIN: the fresh run is reserved under the ATTEMPT-1 id, NOT the failed attempt-0 id
+    // ★ THE PIN: the fresh run is reserved under the attempt-1 id, NOT the failed attempt-0 id
     // (pre-fix the retry re-used the failed id: its header stayed 'error' forever and the new
     // events deduped against the failed attempt's seqs — the journal-mixing wart).
     expect((runAgentMock.mock.calls[0] as unknown[])[3]).toMatchObject({
@@ -149,7 +149,7 @@ describe('makeLiveTurnResponder', () => {
     expect(replyAttemptRunId(TURN_REF, 1)).not.toBe(replyRunId(TURN_REF));
   });
 
-  it('TF-F1: a COMPLETED header at a LATER attempt ATTACHES (any attempt — never a second model call)', async () => {
+  it('a COMPLETED header at a LATER attempt ATTACHES (any attempt — never a second model call)', async () => {
     runAgentMock.mockReset();
     const responder = makeLiveTurnResponder(
       cfg([
@@ -166,7 +166,7 @@ describe('makeLiveTurnResponder', () => {
     expect(runAgentMock).not.toHaveBeenCalled();
   });
 
-  it(`TF-F1: the bounded walk caps at ${REPLY_RUN_MAX_ATTEMPTS} — all-failed headers yield the TYPED error naming the cap, ZERO model calls`, async () => {
+  it(`the bounded walk caps at ${REPLY_RUN_MAX_ATTEMPTS} — all-failed headers yield the TYPED error naming the cap, ZERO model calls`, async () => {
     runAgentMock.mockReset();
     const allFailed = Array.from({ length: REPLY_RUN_MAX_ATTEMPTS }, () => [
       { status: 'error', finalText: null },
@@ -212,7 +212,7 @@ describe('makeLiveTurnResponder', () => {
     });
   });
 
-  it('threads a supplied onEvent into runAgent opts (the S4 seam — no restructuring later)', async () => {
+  it('threads a supplied onEvent into runAgent opts (the live-sink seam — no restructuring later)', async () => {
     runAgentMock.mockReset();
     runAgentMock.mockResolvedValue(completedRun('ok'));
     const responder = makeLiveTurnResponder(cfg())('tenant-a');
