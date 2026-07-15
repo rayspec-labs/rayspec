@@ -656,6 +656,13 @@ export async function assembleServer(
      * responder config path still resolves/validates). Ignored for the classic boot + live replies.
      */
     productDeterministicResponderBackend?: Backend;
+    /**
+     * the deterministic record NORMALIZE Backend for
+     * `RAYSPEC_NORMALIZE_MODE=deterministic` (dev/CI — the injected-Backend proof, the responder-backend
+     * mirror; the normalizer config path + output schema still resolve/validate). Ignored for the
+     * classic boot + live normalize.
+     */
+    productDeterministicNormalizerBackend?: Backend;
     /** A deployment-supplied STT adapter for a Product-YAML boot (dev/CI — else STT_PROVIDER). */
     productSttAdapter?: SttAdapter;
     /**
@@ -768,6 +775,9 @@ export async function assembleServer(
       ...(opts.productSttAdapter ? { sttAdapter: opts.productSttAdapter } : {}),
       ...(opts.productDeterministicResponderBackend
         ? { deterministicResponderBackend: opts.productDeterministicResponderBackend }
+        : {}),
+      ...(opts.productDeterministicNormalizerBackend
+        ? { deterministicNormalizerBackend: opts.productDeterministicNormalizerBackend }
         : {}),
     });
     app = deployed.app;

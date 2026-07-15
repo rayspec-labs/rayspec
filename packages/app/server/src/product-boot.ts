@@ -80,12 +80,16 @@ import {
   declaresAudio,
   declaresConversationInput,
   declaresFileInput,
+  declaresRecordInput,
   deriveConflictKeys,
   deriveProductStores,
   type LiveExtractionInputContext,
+  type LiveRecordNormalizerConfig,
   makeLiveExtractionNode,
+  makeLiveRecordNormalizer,
   makeLiveTurnResponder,
   type ProductYamlRollout,
+  recordInputNormalize,
 } from '@rayspec/product-yaml';
 import {
   assertProductScope,
@@ -156,6 +160,13 @@ export interface DeployProductYamlOpts {
    * swapped, so a CI drive proves everything but the provider call. LIVE mode ignores this.
    */
   deterministicResponderBackend?: Backend;
+  /**
+   * the deterministic NORMALIZE BACKEND for `RAYSPEC_NORMALIZE_MODE=deterministic` (dev/CI — the
+   * injected-Backend proof, the responder-backend mirror). The FULL normalizer config path (the
+   * per-product `record/<agent_id>.normalizer.json` resolve + validation + the output schema built from
+   * the declared `output_contract`) still runs; ONLY the neutral Backend is swapped. LIVE mode ignores this.
+   */
+  deterministicNormalizerBackend?: Backend;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, name: string, why: string): string {
@@ -574,6 +585,7 @@ export function nonRealProviderBanner(
   hasInjectedStt: boolean,
   extractionMode: string,
   responderMode = '',
+  normalizeMode = '',
 ): string | null {
   const parts: string[] = [];
   if (!hasInjectedStt && env.STT_PROVIDER?.trim() === 'fake') {
@@ -586,6 +598,12 @@ export function nonRealProviderBanner(
     parts.push(
       'RAYSPEC_RESPONDER_MODE=deterministic (no real conversation reply model — the injected ' +
         'deterministic Backend answers turns)',
+    );
+  }
+  if (normalizeMode === 'deterministic') {
+    parts.push(
+      'RAYSPEC_NORMALIZE_MODE=deterministic (no real record input-normalize model — the injected ' +
+        'deterministic Backend normalizes submitted records)',
     );
   }
   if (parts.length === 0) return null;
@@ -1546,6 +1564,305 @@ export function buildTurnResponder(
   });
 }
 
+// ── the record input-normalize step (the responder precedent, record-ingress side) ──────
+
+/**
+ * The per-product normalizer config file shape (`<specDir>/record/<agent_id>.normalizer.json` — STRICT
+ * per-agent naming, the `<agent_id>.responder.json` mirror; the declared `input_normalize.agent` id
+ * names the file). CONFIG-SIDE by design (the responder/extractor precedent): model/backend names +
+ * instructions live HERE, never in the capability package and never as YAML graph keys. The NORMALIZED
+ * record's output schema is NOT here — it is built from the doc's declared
+ * `input_normalize.output_contract` (a single source of truth, no config↔doc drift).
+ */
+export interface RecordNormalizerConfig {
+  /** Must equal the declared input_normalize agent id AND the file name stem (the extractor law). */
+  agent_id: string;
+  /** The TRUSTED deployer-authored normalize instructions (the system channel). */
+  instructions: string;
+  /** The normalize model (config-side). */
+  model: string;
+  /** The normalize backend id (the boot-side backend factory's vocabulary: openai | anthropic | pi | codex). */
+  backend: string;
+  /**
+   * The structured-output policy (the extractor mirror): `native` (the DEFAULT) demands native strict
+   * structured output (fail-closed at boot on an emulating backend); `validated` allows validate-and-repair.
+   */
+  structured_output_mode?: 'native' | 'validated';
+}
+
+/**
+ * Belt-and-suspenders PATH-TRAVERSAL jail for the record dir (the `jailToConversationDir` mirror): a
+ * normalizer-config path derived from an agent id MUST stay inside the deployment's `record/` dir.
+ */
+function jailToRecordDir(recordDir: string, resolved: string, agentId: string): string {
+  const rel = relative(recordDir, resolved);
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+    throw new ProductBootError(
+      `normalizer '${agentId}': the resolved normalizer-config path escapes the deployment record ` +
+        `directory (${resolved} is not inside ${recordDir}) — refusing to read outside it ` +
+        '(path-traversal guard). Fail-closed.',
+    );
+  }
+  return resolved;
+}
+
+/**
+ * Resolve THE normalizer config for a record_input doc that declares `input_normalize`: read
+ * `<specDir>/record/<agent_id>.normalizer.json` (the declared agent id names the file — the STRICT
+ * per-agent convention, no bare-default fallback), path-jailed, strict-parsed, its `agent_id` matching
+ * the declared id (the extractor law), instructions/model/backend/structured_output_mode validated.
+ */
+export function resolveRecordNormalizerConfig(
+  specPath: string,
+  agentId: string,
+): RecordNormalizerConfig & { agentId: string } {
+  const recordDir = resolvePath(dirname(specPath), 'record');
+  if (!existsSync(recordDir)) {
+    throw new ProductBootError(
+      `the record_input capability declares 'input_normalize' but ${recordDir} does not exist — ` +
+        `create record/${agentId}.normalizer.json (instructions/model/backend). Fail-closed.`,
+    );
+  }
+  const file = `${agentId}.normalizer.json`;
+  const path = jailToRecordDir(recordDir, resolvePath(recordDir, file), agentId);
+  if (!existsSync(path)) {
+    throw new ProductBootError(
+      `the declared input_normalize agent '${agentId}' needs its config at ${path}, which does not ` +
+        'exist — create it (instructions/model/backend). Fail-closed.',
+    );
+  }
+  let cfg: RecordNormalizerConfig;
+  try {
+    cfg = JSON.parse(readFileSync(path, 'utf8')) as RecordNormalizerConfig;
+  } catch (e) {
+    throw new ProductBootError(
+      `could not read/parse the normalizer config at ${path} (${
+        e instanceof Error ? e.message : String(e)
+      }). Fail-closed.`,
+    );
+  }
+  const KNOWN_NORMALIZER_KEYS = [
+    'agent_id',
+    'instructions',
+    'model',
+    'backend',
+    'structured_output_mode',
+  ];
+  const unknownKeys = Object.keys(cfg).filter((k) => !KNOWN_NORMALIZER_KEYS.includes(k));
+  if (unknownKeys.length > 0) {
+    throw new ProductBootError(
+      `the normalizer config at ${path} carries unknown key(s): ${unknownKeys.join(', ')} — the ` +
+        'closed shape is { agent_id, instructions, model, backend, structured_output_mode? } (strict ' +
+        'parsing: a typo would silently fall back to a default). Fail-closed.',
+    );
+  }
+  if (cfg.agent_id !== agentId) {
+    throw new ProductBootError(
+      `the normalizer config at ${path} names agent '${String(cfg.agent_id)}', not '${agentId}' — a ` +
+        'per-agent config must name the agent it configures (the extractor law); it must equal the ' +
+        'declared input_normalize agent id. Fail-closed.',
+    );
+  }
+  if (typeof cfg.instructions !== 'string' || cfg.instructions.trim().length === 0) {
+    throw new ProductBootError(
+      `normalizer '${agentId}': 'instructions' must be a non-empty string (the trusted ` +
+        'deployer-authored system prompt). Fail-closed.',
+    );
+  }
+  if (typeof cfg.model !== 'string' || cfg.model.trim().length === 0) {
+    throw new ProductBootError(
+      `normalizer '${agentId}': 'model' must be a non-empty string. Fail-closed.`,
+    );
+  }
+  if (typeof cfg.backend !== 'string' || cfg.backend.trim().length === 0) {
+    throw new ProductBootError(
+      `normalizer '${agentId}': 'backend' must name one of the wired backends ` +
+        `(${WIRED_EXTRACTION_BACKENDS.join(' | ')}). Fail-closed.`,
+    );
+  }
+  if (!(WIRED_EXTRACTION_BACKENDS as readonly string[]).includes(cfg.backend)) {
+    throw new ProductBootError(
+      `normalizer '${agentId}': backend '${cfg.backend}' is not wired in this boot ` +
+        `(wired: ${WIRED_EXTRACTION_BACKENDS.join(' | ')}). Fail-closed.`,
+    );
+  }
+  if (
+    cfg.structured_output_mode !== undefined &&
+    cfg.structured_output_mode !== 'native' &&
+    cfg.structured_output_mode !== 'validated'
+  ) {
+    throw new ProductBootError(
+      `normalizer '${agentId}': structured_output_mode '${String(cfg.structured_output_mode)}' is ` +
+        'invalid (native | validated; unset ⇒ native). Fail-closed.',
+    );
+  }
+  return { ...cfg, agentId };
+}
+
+/**
+ * Translate ONE declared product CONTRACT node (the closed JSON-Schema-like vocabulary product-lint
+ * enforces: type/description/properties/items/required/enum/additional_properties/nullable/ref) into a
+ * JSON-Schema 2020-12 node the neutral agent path consumes as `outputSchema.schema`. `ref` is
+ * INLINE-resolved against the SAME contracts map (a normalize output is a SELF-CONTAINED schema, never
+ * an external $ref); an unknown or CYCLIC ref fail-closes (a bounded structured-output schema cannot be
+ * self-referential). FAITHFUL to the closed vocabulary only — the same translation the view OpenAPI
+ * emitter does, inlined. For native structured output the deployer authors the contract STRICT
+ * (additional_properties:false + required listing every key + nullable unions for optionality), exactly
+ * like a hand-authored extractor schema.
+ */
+function contractNodeToNativeSchema(
+  node: Record<string, unknown>,
+  contracts: ProductSpec['contracts'],
+  seen: ReadonlySet<string>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const ref = typeof node.ref === 'string' ? node.ref : undefined;
+  const types: string[] = [];
+  if (typeof node.type === 'string') types.push(node.type);
+  else if (Array.isArray(node.type))
+    for (const t of node.type) if (typeof t === 'string') types.push(t);
+  if (node.nullable === true && !types.includes('null')) types.push('null');
+
+  if (ref !== undefined) {
+    const target = contracts[ref];
+    if (target === undefined) {
+      throw new ProductBootError(
+        `the input-normalize output contract references an unknown contract '${ref}' (product-lint ` +
+          'should have resolved it). Fail-closed.',
+      );
+    }
+    if (seen.has(ref)) {
+      throw new ProductBootError(
+        `the input-normalize output contract is CYCLIC at '${ref}' — a bounded structured-output ` +
+          'schema cannot be self-referential. Fail-closed.',
+      );
+    }
+    const inlined = contractNodeToNativeSchema(target, contracts, new Set([...seen, ref]));
+    return types.includes('null') ? { anyOf: [inlined, { type: 'null' }] } : inlined;
+  }
+
+  if (types.length === 1) out.type = types[0];
+  else if (types.length > 1) out.type = types;
+  if (typeof node.description === 'string') out.description = node.description;
+  if (Array.isArray(node.enum)) out.enum = [...node.enum];
+  if (node.additional_properties === false) out.additionalProperties = false;
+  if (node.additional_properties === true) out.additionalProperties = true;
+  const props = node.properties;
+  if (props !== null && typeof props === 'object' && !Array.isArray(props)) {
+    const outProps: Record<string, unknown> = {};
+    for (const [name, sub] of Object.entries(props as Record<string, unknown>)) {
+      if (sub !== null && typeof sub === 'object' && !Array.isArray(sub)) {
+        outProps[name] = contractNodeToNativeSchema(
+          sub as Record<string, unknown>,
+          contracts,
+          seen,
+        );
+      }
+    }
+    out.properties = outProps;
+  }
+  const items = node.items;
+  if (items !== null && typeof items === 'object' && !Array.isArray(items)) {
+    out.items = contractNodeToNativeSchema(items as Record<string, unknown>, contracts, seen);
+  }
+  if (Array.isArray(node.required))
+    out.required = node.required.filter((r) => typeof r === 'string');
+  return out;
+}
+
+/**
+ * Build the native structured-output schema for the input-normalize step from the doc's declared
+ * `output_contract` (resolved against `spec.contracts`). Fail-closed on an unresolved contract (lint
+ * should have caught it). The result is the `outputSchema.schema` the neutral agent path uses.
+ */
+export function buildNormalizeOutputSchema(
+  contractId: string,
+  contracts: ProductSpec['contracts'],
+): Record<string, unknown> {
+  const contract = contracts[contractId];
+  if (contract === undefined) {
+    throw new ProductBootError(
+      `the input-normalize output_contract '${contractId}' does not resolve to a declared contract ` +
+        '(product-lint should have caught this). Fail-closed.',
+    );
+  }
+  return contractNodeToNativeSchema(contract, contracts, new Set([contractId]));
+}
+
+/**
+ * Build the `rollout.record.normalizer` factory for a record_input doc that declares `input_normalize`
+ * (the `buildTurnResponder` mirror). `RAYSPEC_NORMALIZE_MODE` selects WHERE the neutral Backend comes
+ * from — `live` (the boot-side backend factory over the config's `backend`) or `deterministic` (the injected
+ * proof Backend; dev/CI) — while the config resolve + validation + the output-schema build run in BOTH
+ * modes. The factory closes over the raw db; the tenant is bound per request from the SERVER-DERIVED value.
+ */
+export function buildRecordNormalizer(
+  env: NodeJS.ProcessEnv,
+  specPath: string,
+  spec: ProductSpec,
+  db: Db,
+  opts: DeployProductYamlOpts,
+  decl: NonNullable<ReturnType<typeof recordInputNormalize>>,
+): NonNullable<NonNullable<ProductYamlRollout['record']>['normalizer']> {
+  const mode = requireEnv(
+    env,
+    'RAYSPEC_NORMALIZE_MODE',
+    "the record input-normalize executor: 'live' (real runAgent) | 'deterministic' (injected Backend, dev/CI)",
+  );
+  const cfg = resolveRecordNormalizerConfig(specPath, decl.agent);
+  const outputSchema = {
+    name: 'normalized_record',
+    schema: buildNormalizeOutputSchema(decl.output_contract, spec.contracts),
+  };
+  const structuredMode = cfg.structured_output_mode ?? 'native';
+
+  let backend: Backend;
+  if (mode === 'live') {
+    try {
+      backend = makeExtractionBackend(env, cfg.backend);
+    } catch (e) {
+      if (e instanceof ProductBootError) {
+        throw new ProductBootError(`normalizer '${cfg.agentId}': ${e.message}`);
+      }
+      throw e;
+    }
+  } else if (mode === 'deterministic') {
+    if (!opts.deterministicNormalizerBackend) {
+      throw new ProductBootError(
+        'RAYSPEC_NORMALIZE_MODE=deterministic requires an injected deterministic normalize Backend ' +
+          '(the platform ships none — product-free). Use live mode in production. Fail-closed.',
+      );
+    }
+    backend = opts.deterministicNormalizerBackend;
+  } else {
+    throw new ProductBootError(
+      `RAYSPEC_NORMALIZE_MODE '${mode}' is not supported (wired: live | deterministic).`,
+    );
+  }
+
+  // fork-4 fail-closed AT BOOT: a native-demand on a backend that only EMULATES (pi) is a clear
+  // misconfiguration — reject NOW with an actionable message, not at the first submit (the extractor mirror).
+  if (structuredMode === 'native' && !capabilitiesFor(backend.id).nativeStructuredOutput) {
+    throw new ProductBootError(
+      `normalizer '${cfg.agentId}': the config demands NATIVE structured output ` +
+        `(structured_output_mode: native — the default) but backend '${cfg.backend}' only EMULATES it ` +
+        "(validate-and-repair, not native constrained decode). Set structured_output_mode: 'validated' " +
+        'to allow emulation, or choose a native backend (openai | anthropic | codex). Fail-closed.',
+    );
+  }
+
+  const normalizerCfg: LiveRecordNormalizerConfig = {
+    agentId: cfg.agentId,
+    backend,
+    model: cfg.model,
+    instructions: cfg.instructions,
+    outputSchema,
+    ...(structuredMode === 'native' ? { requireNativeStructuredOutput: true } : {}),
+    tdbFor: (tenantId: string) => forTenant(db, tenantId),
+  };
+  return makeLiveRecordNormalizer(normalizerCfg);
+}
+
 // ── the boot ─────────────────────────────────────────────────────────────────────────────────────
 
 export async function deployProductYamlSpec(
@@ -1605,6 +1922,12 @@ export async function deployProductYamlSpec(
   // REAL reply; compose fail-closes without a wired responder). A non-conversation doc demands
   // NEITHER — the S2 negative-env law grows by exactly this one conditional demand.
   const withConversationInput = declaresConversationInput(spec);
+  // `recordNormalizeDecl` (the record_input capability's declared OPTIONAL input-normalize step) ⇒
+  // demand RAYSPEC_NORMALIZE_MODE + the per-product record/<agent_id>.normalizer.json (a submitted
+  // record is transformed by the declared agent before persist; compose fail-closes a normalize-
+  // declaring doc without a wired normalizer). A record_input doc WITHOUT input_normalize demands
+  // NEITHER — the responder-mirror conditional demand.
+  const recordNormalizeDecl = declaresRecordInput(spec) ? recordInputNormalize(spec) : undefined;
   const usesStt = spec.workflows.some((wf) => wf.steps.some((s) => s.use?.startsWith('stt.')));
   const hasAgents = spec.extractors.length > 0;
 
@@ -1791,6 +2114,7 @@ export async function deployProductYamlSpec(
     Boolean(opts.sttAdapter),
     extractionMode ?? '',
     withConversationInput ? (env.RAYSPEC_RESPONDER_MODE?.trim() ?? '') : '',
+    recordNormalizeDecl ? (env.RAYSPEC_NORMALIZE_MODE?.trim() ?? '') : '',
   );
   if (banner) console.warn(banner);
 
@@ -1916,6 +2240,18 @@ export async function deployProductYamlSpec(
     // compose guard can never disagree on when a responder exists).
     ...(withConversationInput
       ? { conversation: { responder: buildTurnResponder(env, specPath, spec, db, opts) } }
+      : {}),
+    // the record input-normalize step — built iff the record_input capability declares input_normalize
+    // (demands RAYSPEC_NORMALIZE_MODE + the per-product record/<agent_id>.normalizer.json; compose
+    // fail-closes a normalize-declaring doc without it, so the guard here and the compose guard can
+    // never disagree on when a normalizer exists — the responder mirror). A record_input doc WITHOUT
+    // input_normalize sets no `record` block and stores the raw record unchanged (byte-identical to today).
+    ...(recordNormalizeDecl
+      ? {
+          record: {
+            normalizer: buildRecordNormalizer(env, specPath, spec, db, opts, recordNormalizeDecl),
+          },
+        }
       : {}),
   };
 

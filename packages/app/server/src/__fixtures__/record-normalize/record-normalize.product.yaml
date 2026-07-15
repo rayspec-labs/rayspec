@@ -1,0 +1,79 @@
+version: "1.0"
+product:
+  id: normalize_intake
+  name: Normalize Intake
+  description: A submit-ingress product with a declared input-normalize step (record_input only, no audio/stt/agents/conversation).
+requires:
+  capabilities: [record_input]
+capabilities:
+  - id: record_input
+    tier: B
+    status: available
+    contracts: [record_input.record_submitted]
+    input_normalize:
+      agent: field_normalizer
+      output_contract: intake.normalized
+contracts:
+  intake.request_row:
+    type: object
+  intake.normalized:
+    type: object
+    additional_properties: false
+    properties:
+      title: { type: string }
+      priority: { type: string }
+    required: [title, priority]
+  intake.status_response:
+    type: object
+    additional_properties: false
+    properties:
+      record_id: { type: string }
+      title: { type: [string, "null"] }
+    required: [record_id, title]
+stores:
+  - name: intake_requests
+    columns:
+      - { name: request_ref, type: text }
+      - { name: record_id, type: text }
+      - { name: title, type: text }
+    key: [request_ref]
+workflows:
+  - id: log_request
+    trigger:
+      capability: record_input
+      event: record_submitted
+      scope: record
+    steps:
+      - id: log
+        type: store_write
+        use: store.write
+        store: intake_requests
+        values:
+          request_ref: { event: record_id }
+          record_id: { event: record_id }
+          title: { event: title }
+        outputs:
+          row: intake.request_row
+views:
+  - id: request_status_view
+    route:
+      method: GET
+      path: "/intake/{record_id}/status"
+    auth: bearer_tenant
+    params:
+      record_id: { in: path, shape: safe_id }
+    source: { kind: store, ref: intake_requests }
+    read:
+      mode: single
+      filter:
+        record_id: { param: record_id }
+      shape:
+        fields:
+          record_id: { kind: param, param: record_id }
+          title: { kind: column, column: title, type: string }
+      absent:
+        fields:
+          record_id: { kind: param, param: record_id }
+          title: { kind: const, value: null }
+    absent_state: empty_200
+    response_contract: intake.status_response

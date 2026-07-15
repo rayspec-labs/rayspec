@@ -9,6 +9,7 @@ export {
   declaresConversationInput,
   declaresFileInput,
   declaresRecordInput,
+  recordInputNormalize,
 } from './capability-stores.js';
 export {
   type ComposedProductDeploy,
