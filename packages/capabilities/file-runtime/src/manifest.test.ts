@@ -106,7 +106,6 @@ describe('FILE_CAPABILITY_MANIFEST', () => {
   it('carries no product-specific vocabulary (the denylist)', () => {
     const serialized = JSON.stringify(FILE_CAPABILITY_MANIFEST).toLowerCase();
     for (const word of [
-      'memovo',
       'meeting',
       'recording',
       'transcription',

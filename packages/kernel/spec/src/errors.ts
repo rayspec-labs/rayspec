@@ -28,7 +28,7 @@ import { z } from 'zod';
  *  - `invalid_embedded_schema`— an embedded JSON-Schema (tool `parameters`/`outputSchema`,
  *                               agent `outputSchema.schema`) failed to compile through Ajv2020.
  *  - `reserved_column_name`   — a store declares a business column whose name collides with a
- *                               tenancy/GDPR column the Slice-1 generator injects (`id`,
+ *                               tenancy/GDPR column the table generator injects (`id`,
  *                               `tenant_id`, `created_at`, `deleted_at`, `retention_days`,
  *                               `region`) — fail-closed against a shadow/tenancy collision.
  *  - `reserved_query_keyword` — a store declares a business column whose name is one of the

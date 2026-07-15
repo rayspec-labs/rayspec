@@ -243,7 +243,7 @@ ${MINIMAL_READ}
 });
 
 // =========================================================================================
-// THE WHOLE-INVARIANT REJECTION TABLE (S8 gate: "route declarations cannot run arbitrary code"
+// THE WHOLE-INVARIANT REJECTION TABLE (the gate: "route declarations cannot run arbitrary code"
 // + the fail-open lesson: reject loudly). NOT "≥1 rejection": every field kind is checked against every
 // context it is NOT allowed in, every law has its violation case, and every name position is
 // checked against the whole reserved-name set.

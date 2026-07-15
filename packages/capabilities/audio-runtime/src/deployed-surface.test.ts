@@ -20,7 +20,6 @@ interface RuntimeManifest {
 
 const manifestJsonPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'manifest.json');
 const forbiddenProductWords = [
-  'memovo',
   'meeting',
   'recording',
   'transcription',

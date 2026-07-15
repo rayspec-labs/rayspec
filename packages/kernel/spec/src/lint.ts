@@ -52,7 +52,7 @@ const Ajv2020Ctor = ((Ajv2020Module as { default?: unknown }).default ?? Ajv2020
 ) => AjvInstance;
 
 /**
- * Column names the Slice-1 generator INJECTS on every product table (the tenancy/GDPR pattern —
+ * Column names the table generator INJECTS on every product table (the tenancy/GDPR pattern —
  * see packages/db/src/schema.ts). An author-declared business column with one of these names
  * would shadow/collide with the injected column, so the linter rejects it fail-closed.
  */

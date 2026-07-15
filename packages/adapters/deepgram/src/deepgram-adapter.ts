@@ -78,7 +78,7 @@ export class DeepgramSttAdapter implements SttAdapter {
   /**
    * Transcribe one finalized track via a single `POST /v1/listen`.
    *
-   * IDEMPOTENCY (accepted-but-not-deduped deferral): `request.idempotency_key` is accepted for
+   * IDEMPOTENCY (F1, accepted-but-not-deduped deferral): `request.idempotency_key` is accepted for
    * forward-compatibility but this adapter does NOT dedupe on it — every call issues a fresh billed
    * Deepgram request, so two identical calls today = two billed requests. Single-flight/dedup is the
    * Tier-A workflow-runtime's job (its `enqueueAgentRun` idempotency-key), NOT the provider adapter's.
@@ -207,7 +207,7 @@ export class DeepgramSttAdapter implements SttAdapter {
   /**
    * Fan out to one `transcribeTrack` per finalized track (session model/language policy applied to
    * each). The session `idempotency_key` is forwarded but, as on `transcribeTrack`, is NOT deduped
-   * here — dedup/single-flight belongs to the Tier-A workflow-runtime, not this adapter.
+   * here — dedup/single-flight belongs to the Tier-A workflow-runtime, not this adapter (F1).
    */
   async transcribeSession(request: SttTranscribeSessionRequest): Promise<SttTranscriptionResult[]> {
     const results: SttTranscriptionResult[] = [];

@@ -274,8 +274,8 @@ export function makeStoreWriteNode(cfg: StoreNodeConfig): CapabilityNodeHandler 
         `store_write step '${step.id}' could not apply its write to store '${store.name}': the row ` +
           `identified by key column '${keyColumn}' exists but is not writable by this tenant. The ` +
           'conflict key is deployment-global in this beta posture, so another tenant may already ' +
-          'hold this key (see LIMITATIONS; the tenant-scoped composite key is BACKLOG ' +
-          'PY-STORE-KEY-1). The write was NOT applied — failing loudly instead of reporting success.',
+          'hold this key (see LIMITATIONS; a tenant-scoped composite key is a known limitation). ' +
+          'The write was NOT applied — failing loudly instead of reporting success.',
       );
       const hasNonKeyValues = Object.keys(values).some((c) => !store.key.includes(c));
       // DO-UPDATE arm: unambiguous (see the docstring) — the typed failure, no verify-read.

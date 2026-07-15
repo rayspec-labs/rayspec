@@ -5,7 +5,7 @@
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * WHY MANIFEST-DERIVED (and what "manifest-derived" means for a static .mjs gate).
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * Before S4 the gates hard-coded the escape-hatch roots they scan. With the extension-pack mechanism
+ * Historically the gates hard-coded the escape-hatch roots they scan. With the extension-pack mechanism
  * a deployment's `rayspec.yaml` can REFERENCE a pack (`extensions: [{ id, module: <dir>, version }]`)
  * whose handlers live in the PACK's own directory, NOT under the deployment dir. If the gates kept a
  * fixed root list, adding a pack would silently EXEMPT the pack's handlers from the import +

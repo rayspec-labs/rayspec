@@ -1,5 +1,5 @@
 /**
- * Mount-time FAIL-CLOSED tests (the S8 gate: every unknown/unsupported construct is REJECTED at
+ * Mount-time FAIL-CLOSED tests (the mount gate: every unknown/unsupported construct is REJECTED at
  * validate/mount time — never skipped). Each case injects exactly one defect into a known-good
  * mount config and asserts the compile/mount THROWS naming it. The set covers the WHOLE mount-only
  * check table: read-surface resolution (stores/columns), the injected-column allowlist,

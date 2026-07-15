@@ -43,7 +43,7 @@ describe('capability manifest', () => {
 
   it('contains ZERO product-specific vocabulary (product-neutral Tier B capability)', () => {
     const serialized = JSON.stringify(AUDIO_CAPABILITY_MANIFEST).toLowerCase();
-    for (const word of ['memovo', 'meeting', 'recording', 'transcription', 'deepgram']) {
+    for (const word of ['meeting', 'recording', 'transcription', 'deepgram']) {
       expect(serialized).not.toContain(word);
     }
   });

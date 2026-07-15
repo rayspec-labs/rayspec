@@ -220,7 +220,7 @@ describe('@rayspec/agent-runtime', () => {
     expect(journal.node_states[1]?.error?.code).toBe('agent_output_shape_mismatch');
   });
 
-  // FIX-RT1 (test-honesty correction): the previous version of this test smuggled the leak
+  // Test-honesty correction: the previous version of this test smuggled the leak
   // tokens into the artifact `value` (the runtime DATA payload) and asserted they were
   // rejected. That encoded a data-content filter, which re-breaks product neutrality (a real
   // transcript may name a provider; a product may declare a field named `body`). The guard is
@@ -417,13 +417,13 @@ describe('@rayspec/agent-runtime declared output contract (product-neutral)', ()
   });
 });
 
-// FIX-RT1 (product neutrality): the neutrality guard is a tripwire for the CONTRACT/declaration
+// Product-neutrality scope: the neutrality guard is a tripwire for the CONTRACT/declaration
 // surface (operation, intent, artifact refs/kinds/schema_refs, required_output_shape,
 // acceptance_boundary, and the artifact envelope), NOT a content filter over runtime artifact
 // data. Real transcript/document content may name a provider, and a product may legitimately
 // declare a field named `body`/`code`/`model`. Scanning data payloads re-broke the very
 // neutrality the declared-shape check established. These tests pin the correct scope.
-describe('@rayspec/agent-runtime data-content neutrality (FIX-RT1)', () => {
+describe('@rayspec/agent-runtime data-content neutrality', () => {
   const triageEvent: WorkflowInputEvent = {
     id: 'evt-triage',
     type: 'agent_runtime.test',

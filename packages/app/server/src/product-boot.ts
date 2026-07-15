@@ -559,7 +559,7 @@ export async function planUpdateBoot(
  * Honor `RAYSPEC_MEDIA_PREP` (the env table advertised it but the boot never read it):
  * `ffmpeg` (or unset ⇒ default `ffmpeg`) wires the fail-soft media-prep hook; `off` disables it (no
  * playable-artifact prep — playback stays 409); any OTHER value fail-closes with a named ProductBootError
- * (the S13.2 env contract: every declared env fail-closes on an invalid value). Returns whether to wire it.
+ * (the env contract: every declared env fail-closes on an invalid value). Returns whether to wire it.
  */
 export function mediaPrepEnabled(env: NodeJS.ProcessEnv): boolean {
   const raw = env.RAYSPEC_MEDIA_PREP?.trim();

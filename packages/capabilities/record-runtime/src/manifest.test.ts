@@ -80,7 +80,7 @@ describe('RECORD_CAPABILITY_MANIFEST', () => {
 
   it('carries no product-specific vocabulary (the 5-word denylist)', () => {
     const serialized = JSON.stringify(RECORD_CAPABILITY_MANIFEST).toLowerCase();
-    for (const word of ['memovo', 'meeting', 'recording', 'transcription', 'deepgram']) {
+    for (const word of ['meeting', 'recording', 'transcription', 'deepgram']) {
       expect(serialized.includes(word), `product word '${word}'`).toBe(false);
     }
   });

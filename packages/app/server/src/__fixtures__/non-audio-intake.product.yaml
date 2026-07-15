@@ -2,7 +2,7 @@ version: "1.0"
 product:
   id: intake
   name: Intake
-  description: A neutral submit-ingress product used to prove the S4 conditional-mount boot (no audio, no stt, no agents).
+  description: A neutral submit-ingress product used to prove the conditional-mount boot (no audio, no stt, no agents).
 requires:
   capabilities: [record_input]
 capabilities:

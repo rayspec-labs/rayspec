@@ -88,7 +88,7 @@ psql -d postgres -c "CREATE DATABASE $DRYRUN_DB OWNER $PGUSER;" >/dev/null
 # incremental deploy (the cost columns would never be created -> runtime failure). This lexical-from-
 # empty apply CANNOT catch that (it applies every file regardless of `when`), so assert monotonicity
 # of `when` (strictly increasing with idx) directly against meta/_journal.json before the apply.
-echo "== ASSERT journal \`when\` is strictly monotonic with idx (drizzle incremental-skip guard, S3) =="
+echo "== ASSERT journal \`when\` is strictly monotonic with idx (drizzle incremental-skip guard) =="
 node -e '
   const j = require("'"$MIGRATION_DIR"'/meta/_journal.json");
   const es = [...j.entries].sort((a,b)=>a.idx-b.idx);

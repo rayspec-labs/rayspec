@@ -16,7 +16,7 @@
  *
  * DESIGN LAWS (enforced by product-views-lint + the @rayspec/views-runtime interpreter):
  *   - EVERYTHING here is data: literals, column names, param names, JSON paths. There is no
- *     expression language, no computed string, no handler reference — the S8 "route declarations
+ *     expression language, no computed string, no handler reference — the "route declarations
  *     cannot run arbitrary code" gate is structural (closed discriminated unions + strict objects).
  *   - Every leaf carries a declared `type` from a closed set and an optional literal `default`
  *     (default `null`): a raw value that does not match the type is replaced by the default, which

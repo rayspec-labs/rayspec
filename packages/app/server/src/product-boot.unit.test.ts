@@ -89,7 +89,7 @@ describe('mediaPrepEnabled — honors RAYSPEC_MEDIA_PREP', () => {
   it('DISABLES media-prep for RAYSPEC_MEDIA_PREP=off', () => {
     expect(mediaPrepEnabled({ RAYSPEC_MEDIA_PREP: 'off' })).toBe(false);
   });
-  it('fail-closes on any OTHER value, naming it (the S13.2 env contract)', () => {
+  it('fail-closes on any OTHER value, naming it (the env contract)', () => {
     expect(() => mediaPrepEnabled({ RAYSPEC_MEDIA_PREP: 'yes' })).toThrow(ProductBootError);
     expect(() => mediaPrepEnabled({ RAYSPEC_MEDIA_PREP: 'yes' })).toThrow(
       /RAYSPEC_MEDIA_PREP 'yes' is not supported/,
