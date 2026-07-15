@@ -424,14 +424,39 @@ function serializeRow(table: PgTable, row: Record<string, unknown>): StoreRow {
 }
 
 /**
+ * Stamp the injected `created_by` actor column from the ROUTE-CONTEXT principal — un-spoofable, and
+ * exactly the same server-side stamp the declarative store.create path applies. A handler can never
+ * SUPPLY `created_by`: it is a server-controlled column that `toDbValues` rejects (#3), so this facade
+ * is the SOLE writer of the value and the route actor always wins. No-op when no actor is bound (a tool
+ * or trigger handler, and every pre-existing 2-arg caller) OR the target store carries no `created_by`
+ * column, so the prior behavior is byte-identical. Stamped ONLY on the create ops (insert + the insert
+ * arm of upsert), never on update — `created_by` is create-only (immutable after creation).
+ */
+function stampCreatedBy(
+  table: PgTable,
+  dbValues: Record<string, unknown>,
+  actor: string | undefined,
+): void {
+  if (actor === undefined) return;
+  const cols = getTableColumns(table) as Record<string, PgColumn>;
+  if ('createdBy' in cols) dbValues.createdBy = actor;
+}
+
+/**
  * Build the `HandlerDb` facade over a `TenantDb` + the declared product tables. The TenantDb is the
  * REAL chokepoint (its predicate is structural); this facade only translates name-keyed,
  * serializable-shaped calls into TenantDb calls + maps rows back. Used for tool handlers (plain
  * TenantDb — no outer tx) AND, inside `.transaction()`, for route/trigger handlers (A2 asymmetry).
+ *
+ * `createdByActor` is the OPTIONAL server-derived caller identity (`user:<userId>` / `key:<apiKeyId>`)
+ * of the request whose route handler owns this facade. When present, insert/upsert stamp it onto the
+ * injected `created_by` column (un-spoofable — see `stampCreatedBy`). Absent (tool/trigger handlers and
+ * every pre-existing 2-arg caller) ⇒ `created_by` is left as-is, byte-identical to the prior facade.
  */
 export function makeHandlerDb(
   tdb: TenantDb,
   productTables: ReadonlyMap<string, PgTable>,
+  createdByActor?: string,
 ): HandlerDb {
   return {
     async select(store: string, filter?: StoreFilter, opts?: SelectOptions): Promise<StoreRow[]> {
@@ -488,6 +513,10 @@ export function makeHandlerDb(
       const table = resolveTable(productTables, store);
       // #3/#4: fail-closed on unknown OR server-controlled columns in the VALUES.
       const dbValues = toDbValues(table, values, 'insert');
+      // Stamp the un-spoofable caller identity onto `created_by` from the route context (no-op when no
+      // actor is bound or the store lacks the column). The handler could not have set it — toDbValues
+      // rejected it as server-controlled above — so the actor is the SOLE writer.
+      stampCreatedBy(table, dbValues, createdByActor);
       let inserted: Record<string, unknown>[];
       try {
         inserted = (await tdb.insert(table as never, dbValues).returning()) as Record<
@@ -514,15 +543,23 @@ export function makeHandlerDb(
       // #3/#4 + SF-1: the SAME guard insert uses — fail-closed on unknown/server-controlled cols; reject
       // a SQL/function/class injection value. Zero new trust surface (we reuse toDbValues verbatim).
       const dbValues = toDbValues(table, values, 'insert');
+      // Stamp the un-spoofable caller identity onto `created_by` for the INSERT arm (no-op without an
+      // actor or a `created_by` column) — same as insert.
+      stampCreatedBy(table, dbValues, createdByActor);
       // Resolve every conflict-target column fail-closed (an unknown column throws — never a silent
       // ON CONFLICT on the wrong column). These are the unique-index columns the conflict matches on.
       const targets = conflictColumns.map((name) => resolveColumn(table, name));
       // The DO-UPDATE SET = the written values MINUS the conflict columns (you don't re-assign the key
-      // you matched on). Keys here are already camelCase (toDbValues output).
+      // you matched on) AND MINUS `created_by`. Keys here are already camelCase (toDbValues output).
       const conflictCamel = new Set(conflictColumns.map((name) => snakeToCamel(name)));
       const setValues: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(dbValues)) {
-        if (!conflictCamel.has(key)) setValues[key] = value;
+        if (conflictCamel.has(key)) continue;
+        // `created_by` is create-only (immutable): never re-assign it on a conflict-update, so a
+        // same-tenant conflict KEEPS the ORIGINAL creator (parity with the declarative create-only
+        // stamp). Without an actor this key is never present, so this is byte-identical to before.
+        if (key === 'createdBy') continue;
+        setValues[key] = value;
       }
       const tenantCol = resolveColumn(table, 'tenant_id');
       const builder = tdb.insert(table as never, dbValues);
@@ -621,7 +658,9 @@ export function makeHandlerDb(
       // running the whole handler inside one isolate-side tx), NOT something this seam already solves.
       // The in-process impl is correct + GUC-populated; do NOT claim the transaction path is
       // isolate-ready. (See handler-runtime.ts / @rayspec/handler-sdk for the same caveat.)
-      return tdb.transaction(async (txTdb) => fn(makeHandlerDb(txTdb, productTables)));
+      return tdb.transaction(async (txTdb) =>
+        fn(makeHandlerDb(txTdb, productTables, createdByActor)),
+      );
     },
   };
 }

@@ -94,6 +94,9 @@ export async function invokeRouteHandler(
   // → 304) can see them. `undefined` ⇒ init.headers is ABSENT (every existing caller passes nothing →
   // unchanged). TRUST BOUNDARY: header values are UNTRUSTED CALLER DATA; the tenant stays server-derived.
   headers?: Readonly<Record<string, string>>,
+  // OPTIONAL server-derived caller identity (`user:<userId>` / `key:<apiKeyId>`), threaded so the
+  // handler's store facade stamps `created_by` un-spoofably on inserts. Absent ⇒ no stamp.
+  createdByActor?: string,
 ): Promise<unknown> {
   return tdb.transaction(async (txTdb) => {
     const init = buildRouteHandlerInit(
@@ -105,6 +108,7 @@ export async function invokeRouteHandler(
       enqueue,
       body,
       headers,
+      createdByActor,
     );
     return getHandlerRuntime().invokeRoute(fn, init);
   });
@@ -126,10 +130,14 @@ function buildRouteHandlerInit(
   enqueue?: EnqueueAgentRun,
   body?: unknown,
   headers?: Readonly<Record<string, string>>,
+  // The server-derived caller identity (`user:<userId>` / `key:<apiKeyId>`) of this request, threaded so
+  // the handler's store facade stamps `created_by` un-spoofably on inserts (both route postures share
+  // this builder, so both stamp identically). Absent ⇒ no stamp (byte-identical to before).
+  createdByActor?: string,
 ): RouteHandlerInit {
   return {
     tenantId: boundTdb.tenantId,
-    db: makeHandlerDb(boundTdb, productTables),
+    db: makeHandlerDb(boundTdb, productTables, createdByActor),
     // The tenant-bound blob handle, built from the run's server-derived tenant. Spread so the
     // field is ABSENT (not `undefined`) when no factory is injected — keeping the init shape exact.
     ...(blobFactory ? { blob: blobFactory(boundTdb.tenantId) } : {}),
@@ -178,6 +186,9 @@ export async function invokeRouteHandlerDetached(
   enqueue?: EnqueueAgentRun,
   body?: unknown,
   headers?: Readonly<Record<string, string>>,
+  // OPTIONAL server-derived caller identity — see invokeRouteHandler. Threaded identically so the
+  // handler-managed posture stamps `created_by` the same way the engine-tx posture does.
+  createdByActor?: string,
 ): Promise<unknown> {
   const init = buildRouteHandlerInit(
     tdb,
@@ -188,6 +199,7 @@ export async function invokeRouteHandlerDetached(
     enqueue,
     body,
     headers,
+    createdByActor,
   );
   return getHandlerRuntime().invokeRoute(fn, init);
 }

@@ -35,6 +35,7 @@ import { streamSSE } from 'hono/streaming';
 import type { AppDeps, AppEnv } from '../app-context.js';
 import type { MediaTokenService } from '../media/media-token.js';
 import { makeEnqueueAgentRunCapability } from '../routes/runs.js';
+import { principalActor } from './principal-actor.js';
 
 /**
  * Methods that may carry a request body. A GET/HEAD route never has one, so we don't attempt to read
@@ -197,6 +198,10 @@ export function makeRouteHandler(args: {
     // when a media key is wired AND a user principal is present (a mint route is on the authed Bearer
     // chain, so the principal is always set here). Omitted otherwise ⇒ init.mintPlayToken is absent.
     const userId = c.get('principal')?.userId;
+    // derive the un-spoofable caller identity for the `created_by` stamp (user:<userId> / key:<apiKeyId>)
+    // from THIS request's server-derived principal — the SAME derivation the declarative store.create
+    // path uses. Threaded into the handler's store facade so a handler insert records who created a row.
+    const createdByActor = principalActor(c.get('principal'));
     const mintPlayToken =
       mediaTokenService && userId
         ? (mintArgs: { resource: string; ttlSeconds: number }): Promise<string> =>
@@ -241,6 +246,8 @@ export function makeRouteHandler(args: {
       // the ALLOWLISTED request headers (lowercase-keyed DATA — the conditional-read set +
       // content-negotiation basics; nothing else is forwarded, so credentials can never cross).
       collectHeaders(c),
+      // the server-derived caller identity → the handler facade stamps `created_by` un-spoofably.
+      createdByActor,
     );
     // a BRANDED enriched return chooses the status + headers; a plain return keeps the
     // existing behavior (HTTP 200 + that value as the JSON body). The brand check is unambiguous — a

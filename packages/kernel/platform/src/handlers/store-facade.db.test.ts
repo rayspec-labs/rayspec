@@ -325,6 +325,63 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     expect(await bDb.select('meetings')).toHaveLength(0);
   });
 
+  it('insert stamps created_by from the route actor un-spoofably (the actor is the sole writer)', async () => {
+    testsRan += 1;
+    const actor = 'user:11111111-1111-1111-1111-111111111111';
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables, actor);
+    const inserted = await aDb.insert('meetings', { title: 'stamped', completed: false });
+    // The injected created_by column carries the server-derived caller identity (RED before the stamp:
+    // it was left NULL — nobody wrote it on the handler path).
+    expect(inserted.created_by).toBe(actor);
+    // UN-SPOOFABLE: a handler can NEVER supply created_by — it is a server-controlled column, rejected
+    // fail-closed — so a bogus value never survives; the actor stamp is the only path to the column.
+    await expect(
+      aDb.insert('meetings', { title: 'x', completed: false, created_by: 'user:evil' }),
+    ).rejects.toThrow(/may not set server-controlled column 'created_by'/);
+  });
+
+  it('an api-key principal stamps created_by as key:<apiKeyId>', async () => {
+    testsRan += 1;
+    const actor = 'key:22222222-2222-2222-2222-222222222222';
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables, actor);
+    const inserted = await aDb.insert('meetings', { title: 'k', completed: false });
+    expect(inserted.created_by).toBe(actor);
+  });
+
+  it('ADDITIVE: with NO route actor bound (a tool handler / any 2-arg caller) created_by stays NULL', async () => {
+    testsRan += 1;
+    // The pre-existing 2-arg facade — no actor threaded — must behave byte-identically: created_by NULL.
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    const inserted = await aDb.insert('meetings', { title: 'noactor', completed: false });
+    expect(inserted.created_by).toBeNull();
+  });
+
+  it('upsert stamps created_by on insert; a conflict-update keeps the ORIGINAL creator (create-only)', async () => {
+    testsRan += 1;
+    const actor1 = 'user:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    const actor2 = 'user:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+    const db1 = makeHandlerDb(forTenant(db, TENANT_A), productTables, actor1);
+    // First upsert → INSERT arm → created_by stamped with actor1 (RED before the stamp: NULL).
+    const first = await db1.upsert('meetings', ['business_key'], {
+      title: 'first',
+      completed: false,
+      business_key: 'K-created-by',
+    });
+    expect(first?.created_by).toBe(actor1);
+    // A second upsert by a DIFFERENT actor on the SAME (tenant, business_key) → DO-UPDATE arm.
+    const db2 = makeHandlerDb(forTenant(db, TENANT_A), productTables, actor2);
+    const second = await db2.upsert('meetings', ['business_key'], {
+      title: 'second',
+      completed: true,
+      business_key: 'K-created-by',
+    });
+    // The row was UPDATED (title changed) …
+    expect(second?.title).toBe('second');
+    // … but created_by is CREATE-ONLY: it stays the ORIGINAL creator, never overwritten by actor2
+    // (RED without excluding created_by from the DO-UPDATE SET: it would flip to actor2).
+    expect(second?.created_by).toBe(actor1);
+  });
+
   it('select honors a snake_case column-equality filter (mapped to the camel Drizzle key)', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
