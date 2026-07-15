@@ -149,6 +149,6 @@ workflows:
       - { id: b, type: capability, use: cap.op, depends_on: [a] }
 `;
     expect(validate(parseYaml(yaml))).toBe(true); // declaration-order is not a shape rule
-    expect(parseProductSpec(yaml).ok).toBe(false); // it is a PARSER rule (GR-3)
+    expect(parseProductSpec(yaml).ok).toBe(false); // it is a PARSER rule
   });
 });

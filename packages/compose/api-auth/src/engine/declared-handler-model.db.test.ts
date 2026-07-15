@@ -463,7 +463,7 @@ describe.skipIf(!hasDb)('declared agent + tooling + handler model end-to-end', (
     // The injection string IS present — but ONLY inside the opaque tool_data payload (the tool result),
     // NEVER promoted to a system/user turn (no path turns a store row into an instruction turn).
     expect(result.output).toEqual({ tool: { title: INJECTION, scheduled_at: expect.any(String) } });
-    // NOTE (F2): this turn-level check is STRUCTURAL-AGAINST-THIS-FAKE — the deterministic backend
+    // NOTE: this turn-level check is STRUCTURAL-AGAINST-THIS-FAKE — the deterministic backend
     // here never echoes tool data into a system/user turn, so it mainly documents the invariant. The
     // LOAD-BEARING assertion is the durable run_events check below: it inspects the platform's actual
     // NEUTRALIZED event log (what the chokepoint produced), so a regression that leaked the store DATA

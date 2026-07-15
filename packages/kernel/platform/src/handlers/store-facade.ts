@@ -381,7 +381,7 @@ function coerceForColumn(col: PgColumn, name: string, value: unknown, op: string
 }
 
 /**
- * F2 guard: validate a `select` `limit`/`offset` BEFORE it reaches drizzle. An unvalidated value is a
+ * limit/offset guard: validate a `select` `limit`/`offset` BEFORE it reaches drizzle. An unvalidated value is a
  * FAIL-OPEN hazard — a negative / NaN `limit` makes drizzle SILENTLY DROP the LIMIT clause (returns ALL
  * tenant rows, a quiet over-read), and a negative `offset` emits a raw DB error. Require a NON-NEGATIVE
  * INTEGER (throwing the same shape resolveColumn/coerceForColumn do). `0` is VALID — `LIMIT 0` returns 0
@@ -436,7 +436,7 @@ function isUniqueViolation(err: unknown): boolean {
  * (chunk-ingest et al. — they detect the concurrent-same-index race via `err.code`/`err.cause?.code`)
  * still recognize + recover the race instead of 500ing. NON-enumerable means a `JSON.stringify(err)` at
  * the model boundary CANNOT expose it, and `String(err)` is just the neutral message — so the raw
- * constraint NAME (the cross-tenant existence oracle the XT-1 sanitize exists to hide) still never
+ * constraint NAME (the cross-tenant existence oracle the sanitize exists to hide) still never
  * reaches the model. (We preserve only the SQLSTATE, never the constraint/column name.)
  */
 function sanitizeDbError(err: unknown): unknown {
@@ -520,7 +520,7 @@ export function makeHandlerDb(
         });
         q = q.orderBy(...order);
       }
-      // F2: guard limit/offset fail-closed — a negative/NaN limit would SILENTLY drop the LIMIT clause
+      // guard limit/offset fail-closed — a negative/NaN limit would SILENTLY drop the LIMIT clause
       // (return ALL tenant rows), a negative offset would raise a raw DB error. (limit:0 stays valid.)
       if (opts?.limit !== undefined) {
         assertNonNegativeInt('limit', opts.limit);

@@ -1,10 +1,10 @@
 /**
  * Local-development-only optional `.env` auto-loader for the `rayspec` CLI (a local development convenience).
  *
- * `rayspec plan`'s OPTIONAL shadow-apply only runs when `SHADOW_DATABASE_URL` is set, and the RO-1
+ * `rayspec plan`'s OPTIONAL shadow-apply only runs when `SHADOW_DATABASE_URL` is set, and the read-only
  * same-DB guard can only fire when it has a `DATABASE_URL` to compare against. Without auto-loading
  * the repo-root `.env`, an operator running `node packages/cli/dist/index.js plan …` got a silent
- * `shadowApplied:false` (the shadow check skipped) and no RO-1 comparison target — unless they
+ * `shadowApplied:false` (the shadow check skipped) and no read-only-guard comparison target — unless they
  * manually exported both. This loader fixes that by reading the repo-root `.env` at CLI startup,
  * mirroring `@rayspec/server`'s `loadLocalDotenvIfPresent` (packages/server/src/serve.ts).
  *
@@ -18,7 +18,7 @@
  *   • OPT-OUT — `RAYSPEC_SKIP_DOTENV=1` disables it entirely (to prove a pure-ambient-env run).
  *
  * `doctor` needs no env, so this is a no-op for it; `plan`'s read-only guarantee is UNCHANGED — the
- * loader only makes `DATABASE_URL` readable so the RO-1 guard can COMPARE (a net security improvement:
+ * loader only makes `DATABASE_URL` readable so the read-only guard can COMPARE (a net security improvement:
  * the guard now fires where before it was skipped for lack of a compare target). `plan` still NEVER
  * connects to `DATABASE_URL`.
  */

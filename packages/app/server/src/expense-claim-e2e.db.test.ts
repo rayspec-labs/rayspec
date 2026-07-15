@@ -4,8 +4,8 @@
  * the REAL server entrypoint (`assembleServer` from `RAYSPEC_SPEC_PATH`) on a throwaway DATABASE + a
  * real DBOS launch, and is driven end-to-end over REAL HTTP against MATERIALIZED ground truth
  * (fail-the-fix). It composes EVERY component the unlock delivered in ONE doc:
- *   S1 record_submitted trigger · S2 declared stores + store_read/store_write · S3 record_input ingress
- *   · S4 conditional-no-audio (demands NEITHER blob/media NOR stt env) · S5 the single-turn extraction
+ *   record_submitted trigger · declared stores + store_read/store_write · record_input ingress
+ *   · conditional-no-audio (demands NEITHER blob/media NOR stt env) · the single-turn extraction
  *   agent (DETERMINISTIC in CI — no live LLM).
  *
  * Arms:
@@ -17,7 +17,7 @@
  *   4. re-submit the SAME claim id → deduped:true → STILL one run + one row (C10 single-flight);
  *   5. a foreign-tenant submit → 403 record_event_rejected (cross-tenant fail-closed, zero enqueue);
  *   6. an unauthenticated submit → 401;
- *   7. the S6 boot-scope gate is WIRED: an out-of-scope (multi-scope) doc fails the boot fail-closed.
+ *   7. the boot-scope gate is WIRED: an out-of-scope (multi-scope) doc fails the boot fail-closed.
  *
  * Skips without DATABASE_URL; a real DBOS launch needs a separate `<appdb>_dbos_sys` (auto-created).
  */
@@ -127,7 +127,7 @@ describe.skipIf(!baseUrl)('Expense-Claim acceptance — real boot + real DBOS + 
     delete process.env.DBOS_SYSTEM_DATABASE_URL;
     process.env.RAYSPEC_PRODUCT_TENANT_ID = TENANT;
     process.env.RAYSPEC_EXTRACTION_MODE = 'deterministic';
-    // S4 doc-driven env: this NON-audio, no-stt doc demands NEITHER of these. Prove it by leaving them
+    // Doc-driven env: this NON-audio, no-stt doc demands NEITHER of these. Prove it by leaving them
     // UNSET — a boot that (wrongly) demanded them would fail-close here instead of booting.
     delete process.env.STT_PROVIDER;
     delete process.env.RAYSPEC_BLOB_ROOT;
@@ -357,7 +357,7 @@ describe.skipIf(!baseUrl)('Expense-Claim acceptance — real boot + real DBOS + 
   );
 
   maybe(
-    'the S6 boot-scope gate is WIRED — an out-of-scope product doc fails the boot fail-closed',
+    'the boot-scope gate is WIRED — an out-of-scope product doc fails the boot fail-closed',
     async () => {
       e2eTestsRan += 1;
       const savedPath = process.env.RAYSPEC_SPEC_PATH;

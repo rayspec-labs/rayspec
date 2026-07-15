@@ -63,7 +63,7 @@ export interface BlobStat {
    * An OPAQUE, STABLE source string for deriving an HTTP ETag for this exact object content. Opaque
    * keys have no fs mtime a caller should trust, so the impl derives a content-stable value (e.g. a
    * content hash, or `len`+a stored manifest digest) — the contract is only that it CHANGES when the
-   * bytes change and is STABLE while they do not. The caller (the S3 playback primitive) hashes/quotes
+   * bytes change and is STABLE while they do not. The caller (the playback primitive) hashes/quotes
    * it into an ETag; it must not be parsed for structure.
    */
   readonly etagSource: string;
@@ -77,7 +77,7 @@ export interface BlobPutOpts {
   readonly contentType?: string;
 }
 
-/** Options for `createReadStream` — a byte range for HTTP Range (S3 playback). */
+/** Options for `createReadStream` — a byte range for HTTP Range (playback). */
 export interface BlobRangeOpts {
   /** The 0-based byte offset to start at (default 0). Negative/out-of-range is the impl's concern. */
   readonly offset?: number;
@@ -124,7 +124,7 @@ export interface BlobStore {
   get(key: string): Promise<BlobReadResult | BlobNotFound>;
 
   /**
-   * A streaming read for HTTP Range (S3 playback): a `ReadableStream` over `[offset, offset+length)`
+   * A streaming read for HTTP Range (playback): a `ReadableStream` over `[offset, offset+length)`
    * of the object (whole object if `opts` is omitted). Not-found is the typed `BlobNotFound`.
    */
   createReadStream(

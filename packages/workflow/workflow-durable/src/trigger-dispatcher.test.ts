@@ -117,7 +117,7 @@ describe('WorkflowEventDispatcher (the event-ingress seam)', () => {
     expect(keyFn({ id: 'evt-9', type: 't', occurred_at: 'now', payload: {} })).toBe('event:evt-9');
   });
 
-  it('payloadFieldIdempotencyKey (S3, additive) derives the clean generic format with the same fallback', () => {
+  it('payloadFieldIdempotencyKey (additive) derives the clean generic format with the same fallback', () => {
     const keyFn = payloadFieldIdempotencyKey('record_id');
     expect(
       keyFn({ id: 'e1', type: 't', occurred_at: 'now', payload: { record_id: 'rec-1' } }),

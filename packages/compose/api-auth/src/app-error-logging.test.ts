@@ -156,7 +156,7 @@ describe('onError — a 4xx emits NO 5xx log line', () => {
 
 describe('a DIRECTLY-RETURNED 5xx (bypasses onError) still logs EXACTLY ONCE', () => {
   // Fail-the-fix: without the outermost response-level middleware — with the log left in onError only
-  // (the pre-fix S2 shape) — a RETURNED 502/504 never reaches onError, so `logError` would fire ZERO
+  // (the pre-fix shape) — a RETURNED 502/504 never reaches onError, so `logError` would fire ZERO
   // times and each `toHaveBeenCalledTimes(1)` below would go RED. It is ALSO the no-double-log guard:
   // the thrown-500 cases above assert exactly ONE call, which fails if both middleware AND onError log.
   it('a returned 502 (the sync-run upstream_5xx shape) logs exactly one server-side line', async () => {

@@ -9,7 +9,7 @@
  * off-request, UNCHANGED, inside one DBOS workflow whose single durable step calls it inside
  * `forTenant(db, tenantId).transaction()` (so the `app.current_tenant` GUC is populated → RLS-ready).
  * It adds NO new persistence/streaming layer: events still persist to `run_events` via run-core's
- * pipeline; the client resumes via the shipped `GET /v1/runs/{id}/events?lastEventId=` (F5).
+ * pipeline; the client resumes via the shipped `GET /v1/runs/{id}/events?lastEventId=`.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * DURABILITY CONTRACT — WHOLE-RUN RE-EXECUTION, HONEST.

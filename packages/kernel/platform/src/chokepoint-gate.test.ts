@@ -1,10 +1,10 @@
 /**
- * Negative integration test for the tenant-chokepoint CI gate (F1 regression net).
+ * Negative integration test for the tenant-chokepoint CI gate (regression net).
  *
  * Proves the END-TO-END gate (walk a scoped root -> detect -> non-zero exit), not just the
  * pure detector: it drops a temporary fixture file into a SCOPED ROOT
  * (packages/platform/src/__chokepoint_fixture__) that names a raw-handle factory, runs the real
- * gate script as a child process, and asserts it FAILS. Covers both makeDbWithSchema (the F1
+ * gate script as a child process, and asserts it FAILS. Covers both makeDbWithSchema (the
  * gap) and makeDb. The fixture is removed in afterEach so it never lingers in the tree.
  *
  * This file is a `.test.ts`, so the gate excludes it from its own scan (no chicken-and-egg).
@@ -42,7 +42,7 @@ describe('tenant-chokepoint gate (negative)', () => {
     expect(runGate().code).toBe(0);
   });
 
-  it('FAILS when a scoped-root file imports makeDbWithSchema (the F1 gap)', () => {
+  it('FAILS when a scoped-root file imports makeDbWithSchema (the gap)', () => {
     mkdirSync(fixtureDir, { recursive: true });
     writeFileSync(
       fixtureFile,

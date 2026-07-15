@@ -19,12 +19,12 @@
  *                                         tail): it streams the durable rows with seq > lastEventId and
  *                                         then ENDS. A client resumes / pulls newly-persisted events for
  *                                         an in-flight async run by RE-REQUESTING from Last-Event-ID /
- *                                         lastEventId (F5 reconnect-and-replay; a live server-push tail
+ *                                         lastEventId (reconnect-and-replay; a live server-push tail
  * is not built).
  *
  * the SYNC run executes in-request; an `async:true` run is ENQUEUED onto the durable
  * worker (the neutral `deps.durableExecutor`) and returns 202 + the runId — the client streams
- * completion via the EXISTING GET /v1/runs/{id}/events (F5 reconnect-and-replay; run_events persists
+ * completion via the EXISTING GET /v1/runs/{id}/events (reconnect-and-replay; run_events persists
  * off-request). With no durable worker wired, `async:true` is a clean fail-closed 501. The agent
  * registry is a MINIMAL seam — the full declarative engine is.
  *
@@ -72,7 +72,7 @@ export const StartRunRequest = z
      * Request an ASYNC (job-queued, off-request) run.: when a durable worker is wired
      * (`deps.durableExecutor` + `deployment.durableWorker:true`), `async:true` ENQUEUES the run and
      * returns 202 + the runId immediately (the client streams completion via GET /v1/runs/{id}/events
-     * — F5). With NO durable worker wired it is a clean fail-closed 501 (never a silent sync fallback
+     * ). With NO durable worker wired it is a clean fail-closed 501 (never a silent sync fallback
      * that would violate the async-execution constraint — long runs must not block a sync HTTP request).
      */
     async: z.boolean().optional(),
@@ -203,7 +203,7 @@ export async function executeAgentRun(
   // ASYNC (off-request) RUN PATH (501 → 202) -------
   // `async:true` enqueues the run onto the durable worker and returns 202 + the runId IMMEDIATELY
   // (not blocking on completion); the client streams completion via the EXISTING
-  // GET /v1/runs/{id}/events?lastEventId= (run_events persists off-request — F5 reconnect-and-replay,
+  // GET /v1/runs/{id}/events?lastEventId= (run_events persists off-request — reconnect-and-replay,
   // zero new delivery code). Fail-closed: with NO durable executor wired, `async:true` is a clean 501
   // (async requires deployment.durableWorker:true + a configured worker), never a silent sync fallback
   // that would violate the async-execution constraint (long runs must not block a sync HTTP request).
@@ -612,7 +612,7 @@ async function enqueueAsyncRun(
   return c.json(deduped ? loserBody(runId) : acceptedBody(runId), 202);
 }
 
-/** The 202 ACCEPTED body for a FRESHLY enqueued async run: the runId + where to stream (F5). */
+/** The 202 ACCEPTED body for a FRESHLY enqueued async run: the runId + where to stream. */
 function acceptedBody(runId: string): Record<string, unknown> {
   return { runId, status: 'enqueued', events: `/v1/runs/${runId}/events` };
 }
@@ -920,7 +920,7 @@ function toSseFrame(event: {
  * poll for events persisted after this read. For a SYNC run the run is already complete by the
  * time anyone reads /events, so this returns the whole stream. For a ASYNC (off-request) run the
  * run may still be in flight: the client pulls newly-persisted events by RE-REQUESTING from the last
- * seq it saw (F5 reconnect-and-replay) — a live server-push tail is intentionally not built (the
+ * seq it saw (reconnect-and-replay) — a live server-push tail is intentionally not built (the
  * durable run_events table makes resume a real read path). Tenant-scoped via the supplied TenantDb;
  * `id:` = seq so the client resumes from Last-Event-ID.
  */

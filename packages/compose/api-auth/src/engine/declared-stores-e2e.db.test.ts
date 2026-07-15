@@ -22,7 +22,7 @@
  *      key fails TYPED for the second tenant (loud-not-silent), writes ZERO rows for it, leaves the
  *      first tenant's row byte-untouched — and the single-column-no-tenant_id index posture is
  *      pg_catalog-PINNED as the documented beta cut (the structural fix is a deferred capability);
- *  (g) FIX-REG-1: the DO-NOTHING (ensure-exists, values ≡ key) store_write arm
+ *  (g) the DO-NOTHING (ensure-exists, values ≡ key) store_write arm
  *      against the REAL facade's onConflictDoNothing + the REAL tenant-predicated verify-read — the
  * SpyDb unit fake cannot prove this contract (the lesson): first write INSERTS, a same-tenant
  *      re-execution converges to completed `wrote: 0` (the at-least-once convergence), and a
@@ -671,7 +671,7 @@ describe.skipIf(!hasDb)('declared stores + store steps e2e (the composed stack)'
     expect(after).toEqual(before);
   });
 
-  it('(g) FIX-REG-1: the DO-NOTHING (ensure-exists, values ≡ key) arm on the REAL facade — insert, same-tenant verify-read convergence (wrote:0), foreign-tenant TYPED conflict', async () => {
+  it('(g) the DO-NOTHING (ensure-exists, values ≡ key) arm on the REAL facade — insert, same-tenant verify-read convergence (wrote:0), foreign-tenant TYPED conflict', async () => {
     testsRan += 1;
     const product = result.product;
     if (!product) throw new Error('composed product missing');
@@ -829,7 +829,7 @@ describe.skipIf(!hasDb)('declared stores + store steps e2e (the composed stack)'
  * Ran-guard: a SEPARATE, NON-skipped describe that fails when the DB is REQUIRED
  * (CI / RAYSPEC_REQUIRE_DB_TESTS) but the six e2e arms did not run.
  */
-describe('S2 declared-stores e2e — ran-guard (must not silently skip in CI)', () => {
+describe('declared-stores e2e — ran-guard (must not silently skip in CI)', () => {
   it('the e2e arms ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (requireDb) {
       expect(testsRan).toBe(6);

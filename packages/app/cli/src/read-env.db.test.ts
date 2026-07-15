@@ -9,10 +9,10 @@
  *      SKIP for lack of a shadow URL, now runs out of the box. REMOVE the loader call from `main()`
  *      (or break the no-`.env` load) and this goes RED (`shadowApplied:false`).
  *
- *  (d) RO-1 STILL HOLDS over the LOADED env: when the loaded DATABASE_URL === the loaded
- *      SHADOW_DATABASE_URL (both pointing at the same real DB), the RO-1 same-DB guard REFUSES the
+ *  (d) the read-only guard STILL HOLDS over the LOADED env: when the loaded DATABASE_URL === the loaded
+ *      SHADOW_DATABASE_URL (both pointing at the same real DB), the read-only same-DB guard REFUSES the
  *      shadow (ok:false, phase:'shadow') and opens NO admin connection — the loader does not weaken
- *      the read-only guarantee, it only gives RO-1 a DATABASE_URL to compare against.
+ *      the read-only guarantee, it only gives the read-only guard a DATABASE_URL to compare against.
  *
  * Self-skips when SHADOW_DATABASE_URL is unset in the environment (mirrors the other *.db.test.ts —
  * we need a reachable real shadow DB to apply against). We read it from the AMBIENT env to know the
@@ -113,7 +113,7 @@ describe.skipIf(!hasShadow)(
       process.chdir(dir);
 
       // Remove BOTH from the ambient env: the ONLY way plan can see the shadow URL is via the loader.
-      // (DATABASE_URL stays removed so RO-1 has no real-DB target → the sibling shadow runs unimpeded.)
+      // (DATABASE_URL stays removed so the read-only guard has no real-DB target → the sibling shadow runs unimpeded.)
       const prevShadow = process.env.SHADOW_DATABASE_URL;
       const prevDb = process.env.DATABASE_URL;
       delete process.env.SHADOW_DATABASE_URL;
@@ -139,10 +139,10 @@ describe.skipIf(!hasShadow)(
       }
     }, 60_000);
 
-    it('(d) loaded DATABASE_URL === loaded SHADOW_DATABASE_URL → RO-1 refuses (ok:false phase:shadow)', async () => {
+    it('(d) loaded DATABASE_URL === loaded SHADOW_DATABASE_URL → the read-only guard refuses (ok:false phase:shadow)', async () => {
       dir = mkdtempSync(join(tmpdir(), 'cli-readenv-db-'));
       writeFileSync(join(dir, 'rayspec.yaml'), VALID_SPEC, 'utf8');
-      // BOTH point at the SAME real DB → RO-1 must refuse. (We never connect: RO-1 returns before any
+      // BOTH point at the SAME real DB → the guard must refuse. (We never connect: the guard returns before any
       // admin connection, so using the same real shadow URL for both is safe — nothing is mutated.)
       const envPath = join(dir, '.env');
       writeFileSync(
@@ -160,7 +160,7 @@ describe.skipIf(!hasShadow)(
         const main = await mainPointedAt(envPath);
         const code = await main(['plan', 'rayspec.yaml']);
         const result = JSON.parse(outChunks.join(''));
-        // RO-1 fired: the loader gave it a DATABASE_URL to compare against, and it matched the shadow.
+        // The guard fired: the loader gave it a DATABASE_URL to compare against, and it matched the shadow.
         expect(result.ok).toBe(false);
         expect(result.phase).toBe('shadow');
         expect(result.shadowApplied).toBe(false);

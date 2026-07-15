@@ -17,7 +17,7 @@
  *  - `{ kind:'handler', handler }`       → a declared ROUTE handler, wired through the escape-hatch
  * handler model inside a TenantDb.transaction.
  *  - `{ kind:'stream', handler, mode }`  → a raw binary ingest / Range-206 playback stream handler
- * (grammar; the INTERPRETER lands in /S3). Until
+ * (grammar; the INTERPRETER is deferred). Until
  *                                          then this arm FAILS CLOSED at boot with a clear error —
  *                                          never a silent no-op (a declared stream route that 200s
  *                                          nothing would be a worse outcome than a loud refusal).
@@ -340,7 +340,7 @@ export function registerDeclaredRoutes(
 
     if (action.kind === 'stream') {
       // the `stream` route interpreter. `mode:'ingest'` is BUILT here (the raw
-      // binary write half); `mode:'playback'` (Range/206 media read) lands in S3 and still fails
+      // binary write half); `mode:'playback'` (Range/206 media read) is deferred and still fails
       // closed at boot below. A stream route resolves a `route`-kind handler (the grammar: a stream
       // handler dispatches through the api chokepoint, like a `{handler}` route) — but the RUNTIME
       // init it receives is a `StreamRouteHandlerInit` (raw Request + blob), not a `RouteHandlerInit`
@@ -379,7 +379,7 @@ export function registerDeclaredRoutes(
               'route-kind handler — fail-closed at boot).',
           );
         }
-        // AUTHZ (S2 decision — documented): a stream INGEST handler is arbitrary trusted-author product
+        // AUTHZ (a documented decision): a stream INGEST handler is arbitrary trusted-author product
         // logic that WRITES (its pointer row + the blob bytes), so it is gated on `store:write` — the
         // SAME sensitive, most-privileged product permission the `{handler}` route uses (live-membership
         // rechecked for JWT principals; api-key-grantable with scope). A raw binary write is a SENSITIVE

@@ -322,7 +322,7 @@ export type ExtractorSpec = z.infer<typeof ExtractorSpec>;
  *  - the columns are EXACTLY the backend `StoreColumn` vocabulary (imported from grammar.ts, which stays
  *    byte-frozen), so the DERIVED output (`deriveProductStores`) is a standard `StoreSpec` and the
  *    whole existing store machinery — `generateProductSql` (tenancy/GDPR injection), `diffProductStores`,
- *    drift/classify, the S4 update seam, `eraseTenant` — consumes declared stores UNCHANGED;
+ *    drift/classify, the update seam, `eraseTenant` — consumes declared stores UNCHANGED;
  *  - authors declare BUSINESS columns only; the tenancy/GDPR columns (`id`/`tenant_id`/`created_at`/
  *    `deleted_at`/`retention_days`/`region`) are INJECTED downstream exactly like collection stores get
  *    them (declaring one is rejected by lint, `reserved_column_name`);

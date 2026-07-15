@@ -1056,7 +1056,7 @@ async function deployDeclaredSpec(
   // real pack file) + any capability instances the packs provide. The MERGED spec is what every
   // downstream step (product tables / migration SQL / blob guard / deploy()'s re-parse + handler load)
   // sees — so a pack store rides the UNCHANGED migration gate + chokepoint probe (NO new migration
-  // path), a pack route the existing api interpreter (incl. the S2/S3 stream arms), a pack handler the
+  // path), a pack route the existing api interpreter (incl. the stream arms), a pack handler the
   // existing path-jailed loader. `deploy()` / the migration pipeline / the chokepoint stay
   // BYTE-UNCHANGED — the multi-root resolution rides the existing `rollout.importer` seam.
   const {

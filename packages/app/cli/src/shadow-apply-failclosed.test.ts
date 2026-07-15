@@ -1,5 +1,5 @@
 /**
- * SL-1-INCOMPLETE — the connect/admin boundary is STRUCTURALLY fail-closed (RED-first proof).
+ * The connect/admin boundary is STRUCTURALLY fail-closed by region (RED-first proof).
  *
  * The sanitizer must NOT rely on an enumerated error-code allowlist to decide whether a failure is
  * connect-class: a connection failure whose code is OUTSIDE the old set (EHOSTUNREACH, ENETUNREACH,
@@ -36,7 +36,7 @@ afterEach(() => {
   adminError.value = undefined;
 });
 
-describe('SL-1-INCOMPLETE: connect region is fail-closed regardless of error code', () => {
+describe('connect region is fail-closed regardless of error code', () => {
   it('an out-of-set code with a BARE host:port message → generic, no host/port leak', async () => {
     // EHOSTUNREACH is NOT in CONNECT_AUTH_CODES; the message embeds a bare `10.0.0.5:5432` (no `@`).
     // Under the old code-allowlist-only model this verbatim message would leak the host:port.

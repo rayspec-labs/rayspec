@@ -2,7 +2,7 @@
  * THE CONTRACT-INTAKE LIVE SMOKE (real provider). The SAME Contract-Intake
  * product the merge-gated deterministic e2e proves, booted on
  * the REAL composed stack with RAYSPEC_EXTRACTION_MODE=live and driven with ONE real document:
- * upload the committed sample NDA → REAL `file_input.parse_text` → the S4 GENERIC live-extraction
+ * upload the committed sample NDA → REAL `file_input.parse_text` → the GENERIC live-extraction
  * branch assembles the model input (parsed document text + the contract-type retention catalog +
  * the extractor-config payload fields) → ONE REAL gpt-5 call through `runAgent` (native strict
  * structured output) → `validation.check` → store_write → the declared view serves the coded
@@ -123,7 +123,7 @@ describe.skipIf(!canRun)(
       process.env.RAYSPEC_PRODUCT_TENANT_ID = TENANT;
       process.env.RAYSPEC_BLOB_ROOT = blobDir;
       // THE LIVE PATH: the boot reads extraction/contract_extractor.extractor.json (backend openai,
-      // gpt-5, native structured output, the S4 input_context) and wires the REAL runAgent node.
+      // gpt-5, native structured output, the input_context) and wires the REAL runAgent node.
       process.env.RAYSPEC_EXTRACTION_MODE = 'live';
       delete process.env.RAYSPEC_MEDIA_SIGNING_KEY;
       delete process.env.STT_PROVIDER;

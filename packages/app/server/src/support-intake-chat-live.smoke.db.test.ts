@@ -3,8 +3,8 @@
  * product the merge-gated deterministic e2e proves, booted on
  * the REAL composed stack with BOTH RAYSPEC_RESPONDER_MODE=live and RAYSPEC_EXTRACTION_MODE=live, and
  * driven with a REAL multi-turn conversation:
- *   create → turn-1 (a login issue) → a REAL gpt-5 reply grounded in the SEEDED catalog (through the S3
- *   responder + the bounded store-context read) + the async workflow extracts a ticket through the S4
+ *   create → turn-1 (a login issue) → a REAL gpt-5 reply grounded in the SEEDED catalog (through the
+ *   responder + the bounded store-context read) + the async workflow extracts a ticket through the
  *   generic branch (read_catalog → REAL gpt-5 → validation.check → store_write) → turn-2 (a billing
  *   issue, multi-turn) → a reply grounded in the FULL history + an UPSERT of the conversation ticket.
  *

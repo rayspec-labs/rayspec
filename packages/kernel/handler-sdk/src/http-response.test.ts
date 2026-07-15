@@ -18,11 +18,11 @@ import {
 } from './index.js';
 
 describe('httpResponse — the plain-value envelope (unflagged default, byte-identity)', () => {
-  it('a body-only envelope carries NO sse own-key (byte-identity with the pre-S4 shape)', () => {
+  it('a body-only envelope carries NO sse own-key (byte-identity with the pre-sse shape)', () => {
     const r = httpResponse({ body: { ok: true } });
     expect(isHttpResponse(r)).toBe(true);
     expect(Object.hasOwn(r, 'sse')).toBe(false);
-    // Exact key set — brand + body only, nothing S4 leaked in.
+    // Exact key set — brand + body only, nothing new leaked in.
     expect(Object.keys(r).sort()).toEqual([HTTP_RESPONSE_BRAND, 'body'].sort());
   });
 
