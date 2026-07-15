@@ -530,9 +530,11 @@ describe('buildDeclaredRoutesOpenApi — emitted document is STRUCTURALLY VALID'
     expect(structuralOpenApiProblems(doc)).toEqual([]);
   });
 
-  it('a store with NO text column omits `search` and every `__contains` param (honest — text-less is not searchable)', () => {
-    // On a store whose columns are all non-text, `?search=` 400s at runtime — so the document must NOT
-    // advertise it. RED-first: an unconditional search param would appear here and over-claim.
+  it('a store with NO declared text column omits `search` (text-less is not searchable) but still exposes `created_by__contains`', () => {
+    // On a store whose declared columns are all non-text, `?search=` 400s at runtime (store-query.ts
+    // gates it on the DECLARED text columns, and the injected created_by does NOT widen it) — so the
+    // document must NOT advertise `search`. RED-first: the pre-fix emitter let the injected created_by
+    // make `search` appear here, over-claiming a param the server rejects with 400.
     const doc = buildDeclaredRoutesOpenApi(
       specFromObject({
         version: '1.0',
@@ -556,12 +558,48 @@ describe('buildDeclaredRoutesOpenApi — emitted document is STRUCTURALLY VALID'
       }),
     );
     const params = doc.paths['/widgets'].get.parameters ?? [];
-    // No business text column, so no `search` param and no business `__contains` — BUT the injected
-    // created_by (text) still backs `created_by__contains` + makes `search` available.
-    expect(params.some((p) => p.name === 'search')).toBe(true);
+    // No declared text column ⇒ `?search=` is NOT emitted (the server would 400 it). The injected
+    // created_by does NOT make `search` available — the doc must agree with the runtime gate.
+    expect(params.some((p) => p.name === 'search')).toBe(false);
+    // But the injected created_by (text) DOES back `created_by__contains` at runtime (INJECTED_FILTERABLE),
+    // so that companion is still emitted — the doc and server agree on it too.
     expect(params.some((p) => p.name === 'created_by__contains')).toBe(true);
+    // No declared text column ⇒ no business `__contains`.
     expect(params.some((p) => p.name === 'count__contains')).toBe(false);
     expect(params.some((p) => p.name === 'active__contains')).toBe(false);
+    expect(structuralOpenApiProblems(doc)).toEqual([]);
+  });
+
+  it('a store WITH one declared text column emits `search` (the searchable-store counterpart)', () => {
+    // The positive counterpart to the text-less omission above: a single declared text column is enough
+    // to back `?search=` at runtime, so the document advertises it. Together the pair asserts the WHOLE
+    // invariant — `search` is emitted iff the store declares >= 1 text column, never off the injected col.
+    const doc = buildDeclaredRoutesOpenApi(
+      specFromObject({
+        version: '1.0',
+        metadata: { name: 'searchable-backend' },
+        stores: [
+          {
+            name: 'widgets',
+            columns: [
+              { name: 'label', type: 'text' },
+              { name: 'count', type: 'integer' },
+            ],
+          },
+        ],
+        api: [
+          {
+            method: 'GET',
+            path: '/widgets',
+            action: { kind: 'store', store: 'widgets', op: 'list' },
+          },
+        ],
+      }),
+    );
+    const params = doc.paths['/widgets'].get.parameters ?? [];
+    expect(params.some((p) => p.name === 'search')).toBe(true);
+    expect(params.some((p) => p.name === 'label__contains')).toBe(true);
+    expect(params.some((p) => p.name === 'count__contains')).toBe(false); // integer is not searchable
     expect(structuralOpenApiProblems(doc)).toEqual([]);
   });
 

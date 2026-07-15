@@ -23,6 +23,7 @@
 import { parseSpec, type RaySpec } from '@rayspec/spec';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
+import { buildDeclaredRoutesOpenApi } from './emit-openapi.js';
 
 const hasDb = Boolean(process.env.DATABASE_URL);
 const requireDb = process.env.CI === 'true' || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -271,12 +272,23 @@ describeDb('store list substring search', () => {
     expect(aRows.map((r) => r.title).sort()).toEqual(['another apple', 'shared apple']);
   });
 
-  it('a ?search on a store with NO text column 400s (nothing to search — fail-closed, not a silent empty result)', async () => {
+  it('a ?search on a store with NO text column 400s, and the emitted OpenAPI OMITS `search` (doc agrees with server)', async () => {
     testsRan += 1;
     const { token } = await principal('search-textless@example.com', 'SearchTextlessOrg');
     // The `metrics` store has only an integer column — searching it can never match.
     const res = await jsonRequest(h.app, 'GET', '/metrics?search=x', { headers: auth(token) });
     expect(res.status).toBe(400);
+
+    // Cross-check: the PUBLIC OpenAPI doc for the SAME fixture must NOT advertise `search` on this
+    // text-less store — otherwise the document over-claims a param the server (above) rejects with 400.
+    // It DOES still expose `created_by__contains` (the injected text column is `__contains`-searchable),
+    // so the two surfaces agree on BOTH the omission and the exposure.
+    const parsed = parseSpec(SEARCH_YAML);
+    if (!parsed.ok) throw new Error(`search fixture invalid: ${JSON.stringify(parsed.errors)}`);
+    const doc = buildDeclaredRoutesOpenApi(parsed.value);
+    const metricsParams = doc.paths['/metrics'].get.parameters ?? [];
+    expect(metricsParams.some((p) => p.name === 'search')).toBe(false);
+    expect(metricsParams.some((p) => p.name === 'created_by__contains')).toBe(true);
   });
 
   it('additive: a plain list with NO search param returns EVERY row (no filter applied — unchanged behaviour)', async () => {

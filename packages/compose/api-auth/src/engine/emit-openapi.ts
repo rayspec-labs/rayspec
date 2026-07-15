@@ -386,8 +386,11 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
   // column is skipped — defense-in-depth), PLUS the injected `created_by`. Collected FIRST, with their
   // names, so the `<col>__in` set-filter companions below can be DE-DUPLICATED against them.
   const equalityNames = new Set<string>();
-  // The TEXT columns (business + injected created_by) that back the substring-search surface
-  // (`?search=` OR-combined + `?<col>__contains=`) — collected alongside the equality params.
+  // The TEXT columns (declared business + injected created_by) that each back a `?<col>__contains=`
+  // substring-filter companion — collected alongside the equality params. NOTE the `?search=` control
+  // param is gated SEPARATELY (on the DECLARED text columns only — see below): at runtime `search` scans
+  // the declared text columns and the injected created_by does NOT widen it, so it must not appear in
+  // this set's role of deciding whether `search` is emitted.
   const textNames = new Set<string>();
   for (const col of store.columns) {
     if (col.type === 'jsonb') continue; // jsonb is not filterable — omit rather than over-claim
@@ -417,9 +420,12 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
     description: 'Equality filter on the injected created_by actor stamp.',
     schema: { type: 'string' },
   });
-  // The substring-search control param — emitted ONLY when the store has a text column to search (on a
-  // text-less store `?search=` 400s, so documenting it would over-claim). Matches store-query.ts.
-  if (textNames.size > 0) {
+  // The substring-search control param — emitted ONLY when the store declares at least one text column,
+  // mirroring the runtime EXACTLY (store-query.ts scans `store.columns.filter(c => c.type === 'text')`).
+  // The injected created_by is a text column but does NOT back `?search=` at runtime, so it must never
+  // make `search` available here: on a store with no declared text column `?search=` 400s, so
+  // documenting it would over-claim a param the server rejects.
+  if (store.columns.some((c) => c.type === 'text')) {
     params.push({
       name: 'search',
       in: 'query',
