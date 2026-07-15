@@ -70,18 +70,24 @@ export const RESERVED_COLUMN_NAMES: ReadonlySet<string> = new Set([
 
 /**
  * The list-query CONTROL keywords — the reserved query-string keys the declarative `list` route
- * uses to steer sorting + keyset pagination (mirrors `CONTROL_KEYS` in the compose package's
- * store-query.ts; @rayspec/spec cannot import the compose package, so this is the KEEP-IN-SYNC copy).
+ * uses to steer sorting, keyset pagination, and substring search (mirrors `CONTROL_KEYS` in the compose
+ * package's store-query.ts; @rayspec/spec cannot import the compose package, so this is the KEEP-IN-SYNC
+ * copy).
  *
  * A declared BUSINESS column of one of these names is a config error, because at the `list` route it is
- * (a) silently un-equality-filterable — `buildListQuery` routes `?order=`/`?after=`/`?limit=` to the
- * control parsers and never reaches the per-column equality lookup — AND (b) it makes the emitted
+ * (a) silently un-equality-filterable — `buildListQuery` routes `?order=`/`?after=`/`?limit=`/`?search=`
+ * to the control parsers and never reaches the per-column equality lookup — AND (b) it makes the emitted
  * OpenAPI document carry a DUPLICATE query parameter (the hard-coded control param + the per-column
  * filter param share a `name`+`in`), which is an INVALID OpenAPI 3.1 doc. This is a SEPARATE set from
  * `RESERVED_COLUMN_NAMES` on purpose — that Set is meta-test-locked to equal the injected columns
  * (`INJECTED_COLUMN_NAMES`); these keywords are not injected columns, they are query controls.
  */
-export const RESERVED_QUERY_KEYWORDS: ReadonlySet<string> = new Set(['order', 'after', 'limit']);
+export const RESERVED_QUERY_KEYWORDS: ReadonlySet<string> = new Set([
+  'order',
+  'after',
+  'limit',
+  'search',
+]);
 
 /**
  * Route prefixes the PLATFORM owns — a declared static frontend mount may neither claim one nor nest
@@ -286,9 +292,9 @@ export function lintSpec(spec: RaySpec): SpecError[] {
           specError(
             'reserved_query_keyword',
             `store '${store.name}' declares column '${col.name}', which collides with a reserved ` +
-              'list-query control keyword (order/after/limit) the declarative list route uses for ' +
-              'sorting/keyset pagination — the column would be un-filterable and would emit a duplicate ' +
-              'OpenAPI query parameter; rename the business column',
+              'list-query control keyword (order/after/limit/search) the declarative list route uses ' +
+              'for sorting/keyset pagination/substring search — the column would be un-filterable and ' +
+              'would emit a duplicate OpenAPI query parameter; rename the business column',
             `stores[${si}].columns[${ci}].name`,
           ),
         );

@@ -327,7 +327,7 @@ function structuralOpenApiProblems(doc: OpenApiDocument): string[] {
       // NO duplicate parameter (same name+in) — the no-duplicate-parameter invariant.
       const seenParams = new Set<string>();
       for (const p of op.parameters ?? []) {
-        const dedupKey = `${p.in} ${p.name}`;
+        const dedupKey = `${p.in}\u0000${p.name}`;
         if (seenParams.has(dedupKey)) {
           problems.push(`${where}: duplicate parameter name='${p.name}' in='${p.in}'`);
         } else {
@@ -509,6 +509,133 @@ describe('buildDeclaredRoutesOpenApi — emitted document is STRUCTURALLY VALID'
     // Normal `x`: BOTH the equality param AND the `x__in` companion (unchanged behaviour).
     expect(params.some((p) => p.name === 'x' && p.in === 'query')).toBe(true);
     expect(params.some((p) => p.name === 'x__in' && p.in === 'query')).toBe(true);
+  });
+
+  it('a {store} LIST documents the substring-search surface (search + a __contains per text column)', () => {
+    // Additive: the search control param + a `<col>__contains` companion per TEXT column (business text
+    // cols + the injected created_by). RED-first: without the emitter change neither is documented.
+    const doc = buildDeclaredRoutesOpenApi(richSpec());
+    const params = doc.paths['/widgets'].get.parameters ?? [];
+    const byName = new Map(params.map((p) => [p.name, p]));
+    // The search control param — present + optional.
+    expect(byName.get('search')?.in).toBe('query');
+    expect(byName.get('search')?.required ?? false).toBe(false);
+    // A `__contains` companion per text column (title, note, created_by) — NOT on the non-text columns.
+    for (const name of ['title__contains', 'note__contains', 'created_by__contains']) {
+      expect(byName.get(name)?.in).toBe('query');
+    }
+    expect(byName.has('count__contains')).toBe(false); // integer is not searchable
+    expect(byName.has('active__contains')).toBe(false); // boolean is not searchable
+    // Still structurally valid — no duplicate parameter introduced by the search surface.
+    expect(structuralOpenApiProblems(doc)).toEqual([]);
+  });
+
+  it('a store with NO declared text column omits `search` (text-less is not searchable) but still exposes `created_by__contains`', () => {
+    // On a store whose declared columns are all non-text, `?search=` 400s at runtime (store-query.ts
+    // gates it on the DECLARED text columns, and the injected created_by does NOT widen it) — so the
+    // document must NOT advertise `search`. RED-first: the pre-fix emitter let the injected created_by
+    // make `search` appear here, over-claiming a param the server rejects with 400.
+    const doc = buildDeclaredRoutesOpenApi(
+      specFromObject({
+        version: '1.0',
+        metadata: { name: 'text-less-backend' },
+        stores: [
+          {
+            name: 'widgets',
+            columns: [
+              { name: 'count', type: 'integer' },
+              { name: 'active', type: 'boolean' },
+            ],
+          },
+        ],
+        api: [
+          {
+            method: 'GET',
+            path: '/widgets',
+            action: { kind: 'store', store: 'widgets', op: 'list' },
+          },
+        ],
+      }),
+    );
+    const params = doc.paths['/widgets'].get.parameters ?? [];
+    // No declared text column ⇒ `?search=` is NOT emitted (the server would 400 it). The injected
+    // created_by does NOT make `search` available — the doc must agree with the runtime gate.
+    expect(params.some((p) => p.name === 'search')).toBe(false);
+    // But the injected created_by (text) DOES back `created_by__contains` at runtime (INJECTED_FILTERABLE),
+    // so that companion is still emitted — the doc and server agree on it too.
+    expect(params.some((p) => p.name === 'created_by__contains')).toBe(true);
+    // No declared text column ⇒ no business `__contains`.
+    expect(params.some((p) => p.name === 'count__contains')).toBe(false);
+    expect(params.some((p) => p.name === 'active__contains')).toBe(false);
+    expect(structuralOpenApiProblems(doc)).toEqual([]);
+  });
+
+  it('a store WITH one declared text column emits `search` (the searchable-store counterpart)', () => {
+    // The positive counterpart to the text-less omission above: a single declared text column is enough
+    // to back `?search=` at runtime, so the document advertises it. Together the pair asserts the WHOLE
+    // invariant — `search` is emitted iff the store declares >= 1 text column, never off the injected col.
+    const doc = buildDeclaredRoutesOpenApi(
+      specFromObject({
+        version: '1.0',
+        metadata: { name: 'searchable-backend' },
+        stores: [
+          {
+            name: 'widgets',
+            columns: [
+              { name: 'label', type: 'text' },
+              { name: 'count', type: 'integer' },
+            ],
+          },
+        ],
+        api: [
+          {
+            method: 'GET',
+            path: '/widgets',
+            action: { kind: 'store', store: 'widgets', op: 'list' },
+          },
+        ],
+      }),
+    );
+    const params = doc.paths['/widgets'].get.parameters ?? [];
+    expect(params.some((p) => p.name === 'search')).toBe(true);
+    expect(params.some((p) => p.name === 'label__contains')).toBe(true);
+    expect(params.some((p) => p.name === 'count__contains')).toBe(false); // integer is not searchable
+    expect(structuralOpenApiProblems(doc)).toEqual([]);
+  });
+
+  it('a column literally named `<x>__contains` does NOT emit a duplicate query param (equality wins)', () => {
+    // A store with BOTH `foo` and `foo__contains`. The emitter pushes a `<col>__contains` companion per
+    // text column, so `foo`'s companion `foo__contains` would collide with `foo__contains`'s OWN equality
+    // param → a DUPLICATE (name+in) → an invalid OpenAPI 3.1 document. The de-dup drops the colliding
+    // companion; the EXACT-NAMED equality param wins (mirroring runtime Precedence-1 in store-query.ts).
+    const doc = buildDeclaredRoutesOpenApi(
+      specFromObject({
+        version: '1.0',
+        metadata: { name: 'contains-collision-backend' },
+        stores: [
+          {
+            name: 'widgets',
+            columns: [
+              { name: 'foo', type: 'text' },
+              { name: 'foo__contains', type: 'text' }, // literally named `<x>__contains` — legal
+            ],
+          },
+        ],
+        api: [
+          {
+            method: 'GET',
+            path: '/widgets',
+            action: { kind: 'store', store: 'widgets', op: 'list' },
+          },
+        ],
+      }),
+    );
+    const params = doc.paths['/widgets'].get.parameters ?? [];
+    expect(structuralOpenApiProblems(doc)).toEqual([]);
+    // EXACTLY ONE `foo__contains` query param — the EQUALITY filter (the exact-named column wins).
+    const fooContains = params.filter((p) => p.name === 'foo__contains' && p.in === 'query');
+    expect(fooContains).toHaveLength(1);
+    expect(fooContains[0].description).toMatch(/Equality filter/);
   });
 
   it('the emit-side control keys agree with the linter keyword set (anti-drift parity)', () => {

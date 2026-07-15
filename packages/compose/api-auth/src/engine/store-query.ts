@@ -7,16 +7,19 @@
  * the tenant predicate stays STRUCTURAL (`and(tenantPredicate, extra)`) and can NEVER be dropped — a
  * filter/order/keyset from tenant B can never surface tenant A's rows.
  *
- * Fail-CLOSED: every query param must be a recognized control key (`order`/`after`/`limit`), a
- * filterable column (a declared business column, or the injected `created_by`), or a `<col>__in` set
- * filter on one such column. An UNKNOWN param is a VALIDATION_ERROR (never silently ignored — a typo'd
- * filter must not return the whole table).
+ * Fail-CLOSED: every query param must be a recognized control key (`order`/`after`/`limit`/`search`), a
+ * filterable column (a declared business column, or the injected `created_by`), a `<col>__in` set
+ * filter, or a `<col>__contains` substring filter on one such column. An UNKNOWN param is a
+ * VALIDATION_ERROR (never silently ignored — a typo'd filter must not return the whole table).
  *
  * Deliberately NARROW: equality filters (`?col=v`, AND-combined) + a per-column set filter
- * (`?col__in=v1,v2,…` → SQL `IN`, folded into the SAME AND-chain) — no ranges, no full-text, no
- * cross-column OR. The distinct `__in` SUFFIX (not a bare `?col=a,b`) keeps plain equality byte-
- * identical and unambiguous on a comma-bearing value, and a real column literally named `<x>__in` still
- * takes precedence as plain equality. Order is a single `order=<col>.asc|desc`; the default is a
+ * (`?col__in=v1,v2,…` → SQL `IN`) + a case-insensitive substring search (`?search=term` matched over
+ * EVERY text column as an OR; `?<col>__contains=term` on one text column), all folded into the SAME
+ * AND-chain — no ranges, no relevance ranking. `search`/`__contains` escape the term's LIKE wildcards
+ * (`%`/`_`) with an explicit `ESCAPE` clause so a term matches LITERALLY (never injects a wildcard). The
+ * distinct `__in`/`__contains` SUFFIXES (not a bare `?col=a,b`) keep plain equality byte-identical and
+ * unambiguous on a comma-bearing value, and a real column literally named `<x>__in`/`<x>__contains`
+ * still takes precedence as plain equality. Order is a single `order=<col>.asc|desc`; the default is a
  * deterministic `id asc` so keyset pagination is stable. Keyset (`after=<opaque cursor>` + `limit`)
  * compares `(order_col, id)` against the cursor in the sort direction, so paging is correct even when
  * the order column has duplicate values.
@@ -44,6 +47,7 @@ import {
   lt,
   or,
   type SQL,
+  sql,
 } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import { snakeToCamel } from './injected-columns-view.js';
@@ -59,7 +63,7 @@ const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
  * (@rayspec/spec `RESERVED_QUERY_KEYWORDS`) rejects such a column at config; this skip is belt-and-braces
  * for a code-built spec that bypassed the parser.
  */
-export const CONTROL_KEYS: ReadonlySet<string> = new Set(['order', 'after', 'limit']);
+export const CONTROL_KEYS: ReadonlySet<string> = new Set(['order', 'after', 'limit', 'search']);
 
 /** Bounded page size: 1..200, default 200 (the hard cap). */
 const DEFAULT_LIMIT = 200;
@@ -72,6 +76,36 @@ const MAX_LIMIT = 200;
  */
 const IN_SUFFIX = '__in';
 const MAX_IN_VALUES = 100;
+
+/**
+ * The substring-search control key + the per-column `__contains` suffix. `?search=term` runs a
+ * case-insensitive substring match OR-combined across EVERY declared TEXT column; `?<col>__contains=term`
+ * runs the SAME match on ONE named text column. Both fold into the SAME AND-chain as a single predicate,
+ * so they compose with equality/`__in` filters, keyset pagination, and the tenant chokepoint. `search` is
+ * a CONTROL_KEY (parsed like `order`/`after`/`limit`); `__contains`, being per-column, is parsed in the
+ * filter loop alongside `__in`.
+ */
+const SEARCH_KEY = 'search';
+const CONTAINS_SUFFIX = '__contains';
+
+/**
+ * Escape a user term's LIKE metacharacters so a substring search matches them LITERALLY. Backslash-
+ * escapes `%`, `_`, and the backslash escape char itself; the fragment then bracket-wraps the ESCAPED
+ * term with the substring wildcards (`%…%`) and pairs it with an explicit `ESCAPE '\'` clause — so the
+ * ONLY wildcards are the wrapping `%`, and a term containing `%`/`_` can never act as a wildcard.
+ */
+function escapeLikeTerm(term: string): string {
+  return term.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+/**
+ * A `col ILIKE '%term%' ESCAPE '\'` substring predicate. The `%…%` pattern is a BOUND parameter (never
+ * string-concatenated into SQL); the escape char in the `ESCAPE` clause is the same backslash
+ * `escapeLikeTerm` prefixes with, so `%`/`_`/`\` in the term match literally.
+ */
+function containsPredicate(col: PgColumn, term: string): SQL {
+  return sql`${col} ilike ${`%${escapeLikeTerm(term)}%`} escape '\\'`;
+}
 
 /** The injected columns that are FILTERABLE in addition to the declared business columns. */
 const INJECTED_FILTERABLE: ReadonlyMap<string, ColumnType> = new Map([['created_by', 'text']]);
@@ -312,8 +346,50 @@ export function buildListQuery(
         continue;
       }
     }
-    // Precedence 3 — neither a filterable column nor a `<col>__in` on one: fail-closed.
+    // Precedence 3 — `<col>__contains`: a case-insensitive SUBSTRING (ILIKE '%term%') filter on ONE
+    // declared TEXT column, folded into the SAME AND-chain. Only text columns are searchable: a
+    // `__contains` on a non-text filterable column (integer/uuid/…) 400s (substring match is undefined
+    // for it), and an empty term 400s (a blank substring would match every row — almost certainly a
+    // typo). An unknown prefix falls THROUGH to the fail-closed below (like `__in`). A column literally
+    // named `<x>__contains` already won as plain equality at Precedence 1.
+    if (key.endsWith(CONTAINS_SUFFIX)) {
+      const prefix = key.slice(0, -CONTAINS_SUFFIX.length);
+      const containsType = filterable.get(prefix);
+      if (containsType !== undefined) {
+        if (containsType !== 'text') {
+          validationError(`Filter '${key}' requires a text column ('${prefix}' is not text).`);
+        }
+        if (rawValue === '') {
+          validationError(`Filter '${key}' must not be empty.`);
+        }
+        predicates.push(containsPredicate(drizzleColumn(table, prefix), rawValue));
+        continue;
+      }
+    }
+    // Precedence 4 — none of the above: fail-closed.
     validationError(`Unknown query parameter '${key}'.`);
+  }
+
+  // --- substring search: `?search=term` → a case-insensitive substring match OR-combined across EVERY
+  // declared TEXT column, folded into the SAME AND-chain as ONE predicate (composes with equality/`__in`
+  // filters, keyset pagination, and the tenant chokepoint). The term's LIKE wildcards are escaped (see
+  // containsPredicate) so it matches literally. Fail-closed: an empty term 400s, and a store with NO
+  // text column to search 400s (searching it can never match — a config/caller mistake, not a silent
+  // empty result). `search` is a CONTROL_KEY, so the filter loop above skipped it. ---
+  const rawSearch = params.get(SEARCH_KEY);
+  if (rawSearch !== null) {
+    if (rawSearch === '') {
+      validationError("Query 'search' must not be empty.");
+    }
+    const textColumns = store.columns.filter((c) => c.type === 'text');
+    if (textColumns.length === 0) {
+      validationError("Query 'search' is not available: this store has no text columns to search.");
+    }
+    predicates.push(
+      or(
+        ...textColumns.map((c) => containsPredicate(drizzleColumn(table, c.name), rawSearch)),
+      ) as SQL,
+    );
   }
 
   // --- soft-delete tombstone filter (opt-in) ---
