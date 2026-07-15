@@ -63,6 +63,17 @@ export function registerReprocessRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
         );
       }
 
+      // QUOTA (cost-DoS bound): a reprocess mints a FRESH durable run each call (dedup is deliberately
+      // bypassed — that is the point of the affordance), so an unthrottled caller can re-drive one
+      // session's workflow without bound. Throttle the reprocesses of ONE (tenant, session) via the
+      // SAME limiter the OAuth token endpoint uses, keyed by the server-derived tenant + the session —
+      // BEFORE the reprocessor runs, so an over-quota call enqueues nothing.
+      const { allowed, retryAfterMs } = deps.rateLimiter.check(
+        'reprocess',
+        `${tenantId}:${sessionId}`,
+      );
+      if (!allowed) throw new ApiError('RATE_LIMITED', 'Too many requests.', { retryAfterMs });
+
       // Drain the (optional) body under the configured byte cap — a 413 for an over-cap body BEFORE
       // any reprocess side effect; an absent/invalid body is the valid empty request (`{}`).
       const body = ReprocessRequest.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
@@ -85,6 +96,29 @@ export function registerReprocessRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
           'Session reprocess enqueued no runs for an existing session (misconfigured workflow trigger).',
         );
       }
+
+      // IMMUTABLE AUDIT (out-of-band, best-effort): a reprocess re-drives durable runs, so record the
+      // actor, the server-derived tenant, the session, the advisory reason, and the resulting FRESH run
+      // ids. Emitted ONLY on the successful-enqueue path (never on 404/501/500/429 — those returned
+      // above). The api-key/user actor tag mirrors the store-route created_by convention.
+      const principal = c.get('principal');
+      const actor =
+        principal?.kind === 'user' && principal.userId
+          ? `user:${principal.userId}`
+          : principal?.apiKeyId
+            ? `key:${principal.apiKeyId}`
+            : 'unknown';
+      await deps.auditStore.appendReprocess({
+        tenantId,
+        actorUserId: principal?.userId ?? null,
+        requestId: c.get('requestId'),
+        meta: {
+          sessionId,
+          runIds: result.enqueued.map((e) => e.runId),
+          actor,
+          ...(body.reason !== undefined ? { reason: body.reason } : {}),
+        },
+      });
 
       return c.json({ sessionId, enqueued: result.enqueued }, 202);
     },
