@@ -939,7 +939,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     testsRan += 1;
     // values == the conflict column ONLY → setValues is genuinely EMPTY. onConflictDoUpdate({set:{}})
     // throws drizzle's synchronous "No values to set"; the facade uses onConflictDoNothing instead.
-    // (Fail-the-fix: revert FIX 1 and the 1st upsert RAISES "No values to set" — this test goes RED.)
+    // (Fail-the-fix: revert the empty-set DO-NOTHING guard and the 1st upsert RAISES "No values to set" — this test goes RED.)
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     const first = await aDb.upsert('tags', ['name'], { name: 'EX' });
     expect(first?.name).toBe('EX'); // 1st call INSERTS → returns the row
@@ -956,7 +956,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     // B holds vendor='V'. A upserts a FRESH business_key (the named target → no conflict there) but
     // vendor='V' (held by B) → the INSERT hits the DIFFERENT global unique (gizmos_vendor_unique) →
     // 23505. The facade SANITIZES it to a neutral message (the raw pg constraint name = a cross-tenant
-    // existence oracle). Fail-the-fix: WITHOUT FIX 2 the raw 'duplicate key value violates unique
+    // existence oracle). Fail-the-fix: WITHOUT the unique-violation sanitizer the raw 'duplicate key value violates unique
     // constraint "gizmos_vendor_unique"' would cross to the model.
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     const bDb = makeHandlerDb(forTenant(db, TENANT_B), productTables);

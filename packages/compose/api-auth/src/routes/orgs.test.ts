@@ -823,7 +823,7 @@ describe('org membership: owner-gated add + list', () => {
     const ownerToken = await switchOrg(t0, orgId);
 
     // Several concurrent adds of a NEW email: each misses findUserByEmail, then races createUser on
-    // the users email-unique index → the losers hit 23505. The FIX 2 catch re-reads and proceeds as
+    // the users email-unique index → the losers hit 23505. The 23505 catch re-reads and proceeds as
     // the existing-user path; WITHOUT it a loser returns HTTP 500. All must be 200/201, and exactly
     // ONE user + ONE one-time password (the single provisioner that won the index).
     const email = 'conc-new@example.com';

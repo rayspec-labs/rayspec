@@ -32,7 +32,7 @@ requires:
     - record_input
 
 capabilities:
-  # The generic Tier-B submit-ingress capability (S3). `available` + runtime-backed ⇒ it MOUNTS
+  # The generic Tier-B submit-ingress capability. `available` + runtime-backed ⇒ it MOUNTS
   # (POST /records/{record_id}/submit) — the boot demands no product code for it.
   - id: record_input
     tier: B
@@ -117,7 +117,7 @@ workflows:
       event: record_submitted
       scope: record
     steps:
-      # S2 store_read — a bounded routing lookup filtered by the submitted product_area.
+      # store_read — a bounded routing lookup filtered by the submitted product_area.
       - id: read_routing
         type: store_read
         use: store.read
@@ -127,7 +127,7 @@ workflows:
         limit: 10
         outputs:
           routing: ticket.routing_rows
-      # S2 store_write — UPSERT on the declared conflict key (ticket_ref). The raw ticket fields come from
+      # store_write — UPSERT on the declared conflict key (ticket_ref). The raw ticket fields come from
       # the trigger payload (`{ event: … }`); the matched routing rows are the upstream store_read artifact;
       # the status is a server-stamped constant.
       - id: persist

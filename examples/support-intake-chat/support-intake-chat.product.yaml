@@ -214,7 +214,7 @@ workflows:
         limit: 50
         outputs:
           catalog: support.catalog_rows
-      # The single-turn extraction+classification agent (deterministic in CI; live via extraction/ — S4).
+      # The single-turn extraction+classification agent (deterministic in CI; live via extraction/).
       - id: extract
         type: agent
         use: agent.support_extractor

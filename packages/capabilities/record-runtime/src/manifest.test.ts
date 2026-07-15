@@ -78,7 +78,7 @@ describe('RECORD_CAPABILITY_MANIFEST', () => {
     expect([...RECORD_CAPABILITY_MANIFEST.stores].sort()).toEqual([...RECORD_STORE_NAMES].sort());
   });
 
-  it('carries no product-specific vocabulary (the 5-word denylist)', () => {
+  it('carries no product-specific vocabulary (the denylist)', () => {
     const serialized = JSON.stringify(RECORD_CAPABILITY_MANIFEST).toLowerCase();
     for (const word of ['meeting', 'recording', 'transcription', 'deepgram']) {
       expect(serialized.includes(word), `product word '${word}'`).toBe(false);

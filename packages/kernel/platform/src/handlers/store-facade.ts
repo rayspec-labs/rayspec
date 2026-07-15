@@ -603,7 +603,7 @@ export function makeHandlerDb(
       }
       const tenantCol = resolveColumn(table, 'tenant_id');
       const builder = tdb.insert(table as never, dbValues);
-      // FIX 1 — EMPTY DO-UPDATE SET: when `values` is a SUBSET of `conflictColumns` (an ensure-exists
+      // EMPTY DO-UPDATE SET: when `values` is a SUBSET of `conflictColumns` (an ensure-exists
       // upsert, e.g. upsert('tags',['name'],{name})), the SET-exclusion loop above yields `setValues={}`,
       // and `.onConflictDoUpdate({set:{}})` throws drizzle's synchronous "No values to set". Use DO
       // NOTHING instead: ensure-exists semantics — on a conflict (same OR foreign tenant) it no-ops, on no

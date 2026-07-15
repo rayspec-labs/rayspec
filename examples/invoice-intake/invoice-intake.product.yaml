@@ -63,7 +63,7 @@ capabilities:
       - validation.result
 
 contracts:
-  # The parse step's output — the invoice document as bounded extracted text (S3).
+  # The parse step's output — the invoice document as bounded extracted text.
   invoice.extracted_text:
     type: string
 
@@ -154,9 +154,9 @@ extractors:
       text and assign the vendor's GL account code from the provided catalog.
     extraction:
       intent: invoice_coding
-      # TWO declared inputs: the parsed document text (the S3 parse step's artifact) and the bounded
+      # TWO declared inputs: the parsed document text (the parse step's artifact) and the bounded
       # vendor→GL catalog (the store_read artifact). The agent declares NO closed_source_artifacts,
-      # so its LIVE extraction runs the S4 GENERIC branch (artifact_inputs + the extractor config's
+      # so its LIVE extraction runs the GENERIC branch (artifact_inputs + the extractor config's
       # input_context assemble the model input).
       input_artifacts:
         - name: document_text
@@ -202,13 +202,13 @@ workflows:
       event: file_submitted
       scope: file
     steps:
-      # S3 — the durable blob→text parse (magic-byte sniffed; text pass-through / PDF text-layer).
+      # the durable blob→text parse (magic-byte sniffed; text pass-through / PDF text-layer).
       - id: parse
         type: capability
         use: file_input.parse_text
         outputs:
           text: invoice.extracted_text
-      # S2 (unlock) store_read — the bounded vendor→GL catalog, feeding the coder AND the persisted
+      # (unlock) store_read — the bounded vendor→GL catalog, feeding the coder AND the persisted
       # snapshot. UNFILTERED by design: filters are equality-over-event-fields only and the file
       # event carries no business fields — the vendor match is the agent's job.
       - id: read_catalog
@@ -218,7 +218,7 @@ workflows:
         limit: 50
         outputs:
           catalog: invoice.catalog_rows
-      # The single-turn extraction+coding agent (deterministic in CI; live via extraction/ — S4).
+      # The single-turn extraction+coding agent (deterministic in CI; live via extraction/).
       - id: extract
         type: agent
         use: agent.invoice_extractor
@@ -239,7 +239,7 @@ workflows:
         outputs:
           validation_result: validation.result
         on_error: fail
-      # S2 (unlock) store_write — UPSERT on the declared conflict key (invoice_ref). The byte
+      # (unlock) store_write — UPSERT on the declared conflict key (invoice_ref). The byte
       # metadata comes from the SERVER-DERIVED trigger payload (`{ event: … }` — a file event has no
       # client business fields); the coded output + the catalog snapshot are the upstream artifacts.
       - id: persist

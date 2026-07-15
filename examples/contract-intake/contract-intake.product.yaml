@@ -52,7 +52,7 @@ capabilities:
       - validation.result
 
 contracts:
-  # The parse step's output — the contract document as bounded extracted text (S3).
+  # The parse step's output — the contract document as bounded extracted text.
   contract.extracted_text:
     type: string
 
