@@ -44,8 +44,12 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { isBuiltin } from 'node:module';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const repoRoot = join(dirname(new URL(import.meta.url).pathname), '..');
+// Resolve the repo root from THIS file via fileURLToPath — a checkout path with a space (or any
+// other percent-encodable character) survives, where `new URL(import.meta.url).pathname` would leave
+// a literal `%20` in the path and break every join below.
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 // The deployment dir(s) whose `.mts` files are booted via `pnpm exec tsx <file>`. Everything under here
 // lives OUTSIDE a workspace package, so Node resolves its bare imports from the repo root. Every `.mts`
