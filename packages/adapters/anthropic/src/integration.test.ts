@@ -17,9 +17,16 @@
  *   - a real per-step llm ledger (one step per assistant turn) -> stepCount > 1;
  *   - the abortController is aborted (the child is owned/torn down).
  */
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AuthMode, NeutralTool, RunContext, StepReport } from '@rayspec/core';
 import { makeDispatchTool } from '@rayspec/platform';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// A hermetic, per-run config root (a fresh 0700 tree). The adapter now refuses a group/world-accessible
+// tenant dir, so these tests must not share a persistent, world-readable location across runs.
+const CONFIG_ROOT = mkdtempSync(join(tmpdir(), 'rayspec-anth-int-'));
 
 // ---- mock the SDK: real-ish tool()/createSdkMcpServer + a controllable query() -----------------
 interface CapturedTool {
@@ -325,7 +332,7 @@ describe('Anthropic adapter: A1 built-in-tool restriction + quarantine (§10.A h
       return mockQueryWithToolCall('toolu_X')(params);
     });
 
-    const adapter = new AnthropicAdapter({ configRoot: '/tmp/rayspec-anth-test' });
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
     await adapter.run({ ...baseSpec, tools: [tool.spec] }, makeCtx(journal, [tool]));
 
     // The built-in-tool restrictor: tools:[] disables ALL built-in tools (the documented mechanism).
@@ -353,7 +360,7 @@ describe('Anthropic adapter: A1 built-in-tool restriction + quarantine (§10.A h
       mockQueryWithBuiltinAndMcpCall('toolu_BUILTIN_ToolSearch', 'toolu_MCP_weather'),
     );
 
-    const adapter = new AnthropicAdapter({ configRoot: '/tmp/rayspec-anth-test' });
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
     const res = await adapter.run({ ...baseSpec, tools: [tool.spec] }, makeCtx(journal, [tool]));
 
     expect(res.status).toBe('completed');
@@ -400,7 +407,7 @@ describe('Anthropic adapter: in-proc MCP tool bridge routes through ctx.dispatch
     const journal = new FakeJournal();
     querySpy.mockImplementation(mockQueryWithToolCall('toolu_REAL_123'));
 
-    const adapter = new AnthropicAdapter({ configRoot: '/tmp/rayspec-anth-test' });
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
     const res = await adapter.run({ ...baseSpec, tools: [tool.spec] }, makeCtx(journal, [tool]));
 
     expect(res.status).toBe('completed');
@@ -448,7 +455,7 @@ describe('Anthropic adapter: in-proc MCP tool bridge routes through ctx.dispatch
     const journal = new FakeJournal();
     querySpy.mockImplementation(mockQueryWithToolCall('toolu_REAL_456'));
 
-    const adapter = new AnthropicAdapter({ configRoot: '/tmp/rayspec-anth-test' });
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
     const res = await adapter.run({ ...baseSpec, tools: [tool.spec] }, makeCtx(journal, [tool]));
 
     const llm = journal.records.filter((s) => s.type === 'llm');
@@ -522,7 +529,7 @@ describe('Anthropic adapter: C1 — a legit tool whose sole property is named `a
       interrupt: async () => {},
     }));
 
-    const adapter = new AnthropicAdapter({ configRoot: '/tmp/rayspec-anth-test' });
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
     await adapter.run({ ...baseSpec, tools: [argsTool.spec] }, makeCtx(journal, [argsTool]));
 
     // The handler received the FULL { args: '{"x":1}' } object — NOT the unwrapped '{"x":1}' string.
@@ -573,7 +580,7 @@ describe('Anthropic adapter: C1 — a legit tool whose sole property is named `a
       interrupt: async () => {},
     }));
 
-    const adapter = new AnthropicAdapter({ configRoot: '/tmp/rayspec-anth-test' });
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
     await adapter.run(
       { ...baseSpec, tools: [fallbackTool.spec] },
       makeCtx(journal, [fallbackTool]),
@@ -608,7 +615,7 @@ describe('Anthropic adapter: C4 non-success result branch (subtype !== success)'
       interrupt: async () => {},
     }));
 
-    const adapter = new AnthropicAdapter({ configRoot: '/tmp/rayspec-anth-test' });
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
     const res = await adapter.run({ ...baseSpec, tools: [] }, makeCtx(journal, []));
 
     expect(res.status).toBe('error');
@@ -652,7 +659,7 @@ describe('Anthropic adapter: N1 — no total_cost_usd => provider cost ABSENT (n
       interrupt: async () => {},
     }));
 
-    const adapter = new AnthropicAdapter({ configRoot: '/tmp/rayspec-anth-test' });
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
     const res = await adapter.run({ ...baseSpec, tools: [] }, makeCtx(journal, []));
 
     expect(res.status).toBe('completed');
@@ -667,7 +674,7 @@ describe('Anthropic adapter: N1 — no total_cost_usd => provider cost ABSENT (n
   it('a success result WITH total_cost_usd still surfaces it as the provider cost (regression guard)', async () => {
     const journal = new FakeJournal();
     querySpy.mockImplementation(mockQueryWithToolCall('toolu_cost'));
-    const adapter = new AnthropicAdapter({ configRoot: '/tmp/rayspec-anth-test' });
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
     await adapter.run(
       { ...baseSpec, tools: [recordingTool([]).spec] },
       makeCtx(journal, [recordingTool([])]),
@@ -709,7 +716,7 @@ describe('Anthropic adapter: native structured output via outputFormat (no promp
       };
     });
 
-    const adapter = new AnthropicAdapter({ configRoot: '/tmp/rayspec-anth-test' });
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
     const res = await adapter.run(
       {
         ...baseSpec,
@@ -783,7 +790,7 @@ describe('Anthropic adapter: P5-COST-1 — coalesce assistant stream frames into
       interrupt: async () => {},
     }));
 
-    const adapter = new AnthropicAdapter({ configRoot: '/tmp/rayspec-anth-test' });
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
     const res = await adapter.run({ ...baseSpec, tools: [] }, makeCtx(journal, []));
 
     const llmSteps = journal.records.filter((s) => s.type === 'llm');
@@ -834,7 +841,7 @@ describe('Anthropic adapter: P5-COST-1 — coalesce assistant stream frames into
       interrupt: async () => {},
     }));
 
-    const adapter = new AnthropicAdapter({ configRoot: '/tmp/rayspec-anth-test' });
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
     const res = await adapter.run({ ...baseSpec, tools: [] }, makeCtx(journal, []));
 
     const llmSteps = journal.records.filter((s) => s.type === 'llm');
@@ -878,7 +885,7 @@ describe('Anthropic adapter: P5-COST-1 — coalesce assistant stream frames into
       interrupt: async () => {},
     }));
 
-    const adapter = new AnthropicAdapter({ configRoot: '/tmp/rayspec-anth-test' });
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
     const res = await adapter.run({ ...baseSpec, tools: [] }, makeCtx(journal, []));
 
     const llmSteps = journal.records.filter((s) => s.type === 'llm');

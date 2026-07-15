@@ -73,9 +73,17 @@
  * No SDK type escapes this file — everything returned is a neutral RunResult.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { createSdkMcpServer, query, tool } from '@anthropic-ai/claude-agent-sdk';
 import type {
   AgentSpec,
@@ -136,7 +144,35 @@ export class AnthropicAdapter implements Backend {
   /** Per-tenant config dir — created on demand, isolates credentials + JSONL transcripts. */
   configDirFor(tenantId: string): string {
     const dir = join(this.configRoot, `tenant-${tenantId}`);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    // Containment: the target must be a DIRECT child named tenant-<id>. A separator or traversal in
+    // tenantId that would place the dir anywhere else is refused, never created.
+    if (dirname(resolve(dir)) !== resolve(this.configRoot)) {
+      throw new Error(
+        `anthropic adapter: refusing tenant config dir outside the configured root (tenant '${tenantId}').`,
+      );
+    }
+    const existing = lstatSync(dir, { throwIfNoEntry: false });
+    if (existing === undefined) {
+      // 0o700 so a tenant's credentials + on-disk JSONL transcripts are never group/world-readable.
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+    } else if (existing.isSymbolicLink() || !existing.isDirectory()) {
+      // Never follow a symlink (or a non-directory) into place — it could redirect a tenant's dir.
+      throw new Error(
+        `anthropic adapter: tenant config path is a symlink or not a directory (tenant '${tenantId}').`,
+      );
+    } else if (existing.mode & 0o077) {
+      // An existing dir reachable by group/world is not trustworthy for credential isolation.
+      throw new Error(
+        `anthropic adapter: tenant config dir is group/world-accessible (tenant '${tenantId}').`,
+      );
+    }
+    // Realpath containment: after resolving every symlink, the real dir must still sit directly under
+    // the real configured root (defeats a symlinked path component between the root and the dir).
+    if (dirname(realpathSync(dir)) !== realpathSync(this.configRoot)) {
+      throw new Error(
+        `anthropic adapter: tenant config dir resolves outside the configured root (tenant '${tenantId}').`,
+      );
+    }
     return dir;
   }
 

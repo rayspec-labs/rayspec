@@ -8,7 +8,7 @@
  *   - JSONL session re-derivation round-trips into neutral ConvItems
  *   - the FAITHFUL recursive tool-arg Zod projection validate-and-repair
  */
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -34,6 +34,41 @@ describe('A.1 per-tenant config-dir isolation', () => {
     expect(a).not.toBe(b);
     expect(a).toContain('tenant-alpha');
     expect(b).toContain('tenant-beta');
+  });
+});
+
+describe('A.1 tenant config-dir hardening (credential isolation on disk)', () => {
+  it('creates the tenant dir private — mode 0700, no group/world access', () => {
+    const adapter = new AnthropicAdapter({ configRoot: tmpRoot() });
+    const dir = adapter.configDirFor('alpha');
+    expect(statSync(dir).mode & 0o077).toBe(0);
+  });
+
+  it('refuses a tenant path that is already a symlink (never follows it into place)', () => {
+    const root = tmpRoot();
+    symlinkSync(tmpRoot(), join(root, 'tenant-alpha'));
+    const adapter = new AnthropicAdapter({ configRoot: root });
+    expect(() => adapter.configDirFor('alpha')).toThrow(/symlink|not a directory/);
+  });
+
+  it('refuses a group/world-accessible existing tenant dir instead of trusting it', () => {
+    const root = tmpRoot();
+    mkdirSync(join(root, 'tenant-alpha'), { mode: 0o755 });
+    const adapter = new AnthropicAdapter({ configRoot: root });
+    expect(() => adapter.configDirFor('alpha')).toThrow(/group|world|access/);
+  });
+
+  it('refuses a tenant id that escapes the configured root (containment)', () => {
+    const adapter = new AnthropicAdapter({ configRoot: tmpRoot() });
+    expect(() => adapter.configDirFor('nested/evil')).toThrow(/root/);
+  });
+
+  it('is idempotent — a second call returns the same private dir without error', () => {
+    const adapter = new AnthropicAdapter({ configRoot: tmpRoot() });
+    const first = adapter.configDirFor('alpha');
+    const second = adapter.configDirFor('alpha');
+    expect(second).toBe(first);
+    expect(statSync(first).mode & 0o077).toBe(0);
   });
 });
 
