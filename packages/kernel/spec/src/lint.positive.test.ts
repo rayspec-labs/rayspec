@@ -323,6 +323,7 @@ agents:
       name: Facts
       schema:
         type: object
+        required: [title, score, details]
         properties:
           title: { type: string }
           score: { type: integer }

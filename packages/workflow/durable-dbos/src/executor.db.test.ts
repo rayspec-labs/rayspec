@@ -37,10 +37,17 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AgentSpec } from '@rayspec/core';
 import { type Db, forTenant, schema, TENANT_GUC } from '@rayspec/db';
-import { makeDbWithSchema } from '@rayspec/db/testing';
+import {
+  buildProductTables,
+  injectedColumnLinesSql,
+  makeDbWithSchema,
+  registerScopedTables,
+} from '@rayspec/db/testing';
 import { RUN_TAINT_SCOPE, type RunJob } from '@rayspec/platform';
+import type { StoreSpec } from '@rayspec/spec';
 import { config as loadDotenv } from 'dotenv';
 import { eq, sql } from 'drizzle-orm';
+import type { PgTable } from 'drizzle-orm/pg-core';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -76,11 +83,27 @@ const baseSpec: AgentSpec = {
   maxTurns: 4,
 };
 
+/**
+ * A product store an off-request run persists its validated output into (the `persistTo` hop). The
+ * resolver hands the executor these product tables; a job carrying `persistTo` resolves the target and
+ * writes one row through the store-facade insert path.
+ */
+const persistFactsStore: StoreSpec = {
+  name: 'persist_facts',
+  columns: [
+    { name: 'title', type: 'text', nullable: false, unique: false },
+    { name: 'score', type: 'integer', nullable: true, unique: false },
+  ],
+  foreignKeys: [],
+};
+
 type DbHandle = ReturnType<typeof makeDbWithSchema>;
 let db: DbHandle;
 let executor: DbosDurableExecutor;
 let dbosSystemUrl: string;
 let appBaseUrl: string;
+let productTables: Map<string, PgTable>;
+let unregisterTables: (() => void) | undefined;
 
 /**
  * Captures the `app.current_tenant` GUC value read INSIDE the run's own `tdb.transaction()` body —
@@ -198,6 +221,16 @@ beforeAll(async () => {
   // own system DB is SEPARATE (dbosSystemUrl) — it never touches this app schema.
   db = makeDbWithSchema(url, APP_SCHEMA);
   await db.$client.unsafe(buildSpineSchemaSql(APP_SCHEMA));
+  // The PRODUCT store the persistTo hop writes into (injected tenancy/GDPR columns matching
+  // buildProductTables + the two business columns).
+  const { before, after } = injectedColumnLinesSql({
+    tenantFkRef: `REFERENCES ${APP_SCHEMA}.orgs(id) ON DELETE CASCADE`,
+  });
+  await db.$client.unsafe(
+    `CREATE TABLE IF NOT EXISTS ${APP_SCHEMA}.persist_facts (${before}, title text NOT NULL, score integer, ${after});`,
+  );
+  productTables = buildProductTables([persistFactsStore]);
+  unregisterTables = registerScopedTables([...productTables.values()]);
   await db.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'spine', 'spine')`, [
     TENANT,
   ]);
@@ -210,7 +243,8 @@ beforeAll(async () => {
       if (job.agentId !== 'echo-agent') {
         throw new Error(`unknown agent '${job.agentId}'`);
       }
-      return { backend, spec: baseSpec };
+      // productTables is deployment-constant (like `backend`); a job without persistTo leaves it inert.
+      return { backend, spec: baseSpec, productTables };
     },
   };
   executor = new DbosDurableExecutor(deps, {
@@ -223,10 +257,11 @@ beforeAll(async () => {
 beforeEach(async () => {
   backend.liveRuns = 0;
   backend.throwMidRunTimes = 0;
+  backend.structuredOutput = undefined;
   capturedGuc.value = null;
   // Clean the app tables between tests (orgs cascade keeps the tenant row; clear the run data).
   await db.$client.unsafe(
-    'TRUNCATE run_events, journal_steps, conversation_items, runs, idempotency_keys CASCADE',
+    'TRUNCATE run_events, journal_steps, conversation_items, runs, idempotency_keys, persist_facts CASCADE',
   );
 });
 
@@ -235,6 +270,7 @@ afterAll(async () => {
   try {
     await executor.shutdown();
   } finally {
+    unregisterTables?.();
     await db.$client.end();
     await dropSysDbSafely(appBaseUrl, DBOS_SYS_DB);
   }
@@ -299,6 +335,46 @@ describe('DBOS durable spine — runAgent off-request', () => {
     // The single seq authority is contiguous from 0 (run-core stampSeq, unchanged off-request).
     const seqs = events.map((e: { seq: number }) => e.seq);
     expect(seqs).toEqual(seqs.map((_, i) => i));
+  });
+
+  it('a job carrying persistTo writes the run output into the resolved store (the real executor threads job.persistTo + productTables into runAgent)', async () => {
+    const runId = randomUUID();
+    backend.structuredOutput = { title: 'durable Q3', score: 9 };
+    const job: RunJob = {
+      runId,
+      tenantId: TENANT,
+      agentId: 'echo-agent',
+      input: 'persist me',
+      persistTo: 'persist_facts',
+    };
+
+    const { jobId } = await executor.enqueue(TENANT, job);
+    const status = await waitForTerminal(jobId);
+    expect(status).toBe('succeeded');
+    expect(backend.liveRuns).toBe(1);
+
+    // GROUND TRUTH: the row landed through the REAL executor's persist hop (job.persistTo +
+    // resolved.productTables threaded into runAgent), tenant-scoped, created_by unset (uniform posture).
+    // Fail-the-fix: dropping job.persistTo (or productTables) at the executor hop leaves this 0 rows.
+    const rows = (await db.$client.unsafe(
+      'SELECT title, score::int AS score, tenant_id::text AS tenant_id, created_by FROM persist_facts WHERE tenant_id = $1',
+      [TENANT],
+    )) as unknown as Array<{
+      title: string;
+      score: number;
+      tenant_id: string;
+      created_by: string | null;
+    }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.title).toBe('durable Q3');
+    expect(rows[0]!.score).toBe(9);
+    expect(rows[0]!.tenant_id).toBe(TENANT);
+    expect(rows[0]!.created_by ?? null).toBeNull();
+
+    // The run header also completed (the persist commits atomically with the completing transition).
+    const headers = await db.$client.unsafe('SELECT status FROM runs WHERE run_id = $1', [runId]);
+    expect(headers).toHaveLength(1);
+    expect((headers[0] as { status: string }).status).toBe('completed');
   });
 
   it('the started-once safety guard (TAINT-AWARE): a recovery of an already-started TAINTED run FAILS without re-running runAgent', async () => {

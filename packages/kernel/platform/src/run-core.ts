@@ -617,6 +617,15 @@ export async function runAgent(
  * `created_by` is left to its column default (unset): the durable path has NO route principal, and
  * leaving it unset keeps the sync and durable paths UNIFORM (the same posture as a trigger-handler
  * insert) rather than stamping a principal on one path and nothing on the other.
+ *
+ * IRREDUCIBLE RESIDUAL (documented, fail-closed — not silent corruption): the doctor rejects at DEPLOY
+ * every persist incompatibility it can see statically (unknown/server-controlled columns, type
+ * mismatches, uncovered NOT-NULL columns, enum-whitelist escapes). It CANNOT see a constraint the run's
+ * OUTPUT DATA violates only at runtime — a UNIQUE business column or an FK where two distinct runs
+ * produce the same business key. Such a collision (23505 / 23503) rolls back this whole transaction: the
+ * run is NOT marked completed and the output is NOT persisted (fail-closed — never a completed header
+ * with a missing/duplicate row). When two runs may legitimately produce the same business key, target a
+ * NON-unique persist store, or ensure the output value is unique per run.
  */
 async function persistRunOutput(
   tdb: TenantDb,

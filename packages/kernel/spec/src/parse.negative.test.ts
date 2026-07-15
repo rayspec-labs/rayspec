@@ -787,6 +787,7 @@ agents:
       name: Facts
       schema:
         type: object
+        required: [title, score, verified, details]
         properties:
           title: { type: string }
           score: { type: integer }
@@ -843,5 +844,84 @@ triggers:
     action: { kind: agent, agent: extractor, persistTo: nonexistent_store }
 `;
     expectRejection(yaml, 'dangling_ref');
+  });
+
+  // ── Reverse required-column coverage: a NOT-NULL business column the output does not reliably fill
+  // would fail the runtime INSERT (NOT-NULL violation) AFTER the run billed. The doctor must reject that
+  // at deploy. Each case below leaves the store's NOT-NULL columns un-covered in exactly ONE way.
+  it('rejects a NOT-NULL store column with NO matching output property (schema_violation)', () => {
+    // Remove the `score` property entirely (and from `required`): the NOT-NULL `score` column is now
+    // produced by nothing → a runtime NOT-NULL violation the doctor must catch at deploy.
+    const yaml = PERSIST_BASE.replace('          score: { type: integer }\n', '').replace(
+      'required: [title, score, verified, details]',
+      'required: [title, verified, details]',
+    );
+    expectRejection(yaml, 'schema_violation');
+  });
+
+  it('rejects a NOT-NULL store column mapped by a property that is NOT in `required` (schema_violation)', () => {
+    // `score` still has a matching property, but drop it from `required` — an optional property the model
+    // may omit cannot satisfy a NOT-NULL column.
+    const yaml = PERSIST_BASE.replace(
+      'required: [title, score, verified, details]',
+      'required: [title, verified, details]',
+    );
+    expectRejection(yaml, 'schema_violation');
+  });
+
+  it('rejects a NOT-NULL store column mapped by a NULLABLE-typed property (type includes null) (schema_violation)', () => {
+    // `score` is required, but its type now includes `null` — an emitted null would violate the column's
+    // NOT-NULL constraint at runtime.
+    const yaml = PERSIST_BASE.replace(
+      'score: { type: integer }',
+      'score: { type: [integer, "null"] }',
+    );
+    expectRejection(yaml, 'schema_violation');
+  });
+
+  // ── Enum whitelist subset: a store column enum is enforced server-side; a mapped output property whose
+  // enum escapes the whitelist would fail the persist fail-closed at runtime.
+  const PERSIST_ENUM_BASE = `
+version: '1.0'
+metadata:
+  name: persist-enum-base
+stores:
+  - name: tickets
+    columns:
+      - { name: status, type: text, enum: [open, closed] }
+api:
+  - method: POST
+    path: '/tickets'
+    action: { kind: agent, agent: classifier, persistTo: tickets }
+agents:
+  - id: classifier
+    name: classifier
+    backend: openai
+    model: gpt-4o-mini
+    instructions: classify the ticket
+    outputSchema:
+      name: Ticket
+      schema:
+        type: object
+        required: [status]
+        properties:
+          status: { type: string, enum: [open, closed] }
+`;
+
+  it('the persistTo enum base spec is valid (a subset enum maps cleanly)', () => {
+    const res = parseSpec(PERSIST_ENUM_BASE);
+    if (!res.ok)
+      throw new Error(`persist enum base must parse:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.ok).toBe(true);
+  });
+
+  it('rejects an output property enum that ESCAPES the store column enum whitelist (schema_violation)', () => {
+    // `pending` is not in the column whitelist [open, closed] — the model could emit a value the store
+    // rejects fail-closed at runtime.
+    const yaml = PERSIST_ENUM_BASE.replace(
+      'status: { type: string, enum: [open, closed] }',
+      'status: { type: string, enum: [open, closed, pending] }',
+    );
+    expectRejection(yaml, 'schema_violation');
   });
 });

@@ -229,8 +229,22 @@ api:
     same-tenant uniqueness violation (never cross-tenant, because the index is
     tenant-scoped). The error message names the violated column but never echoes
     the offending value; a non-conflict failure is unaffected.
-  - **`agent`** — invoke a declared agent over the run surface. Field: `agent`
-    (a declared agent id).
+  - **`agent`** — invoke a declared agent over the run surface. Fields: `agent`
+    (a declared agent id) and an optional `persistTo` (a declared store name). When
+    `persistTo` is set, a successful run's validated `outputSchema` output is written
+    as one row into that store — exactly once, atomically with the run's completion.
+    The agent's output properties must map to the store's writable business columns,
+    and the doctor rejects at **deploy** any persist that cannot succeed: an unknown
+    store, a missing/mismatched `outputSchema`, a property that is not a writable
+    column or has an incompatible type, a NOT-NULL store column the output does not
+    reliably produce (no matching property, a property absent from the schema's
+    `required` array, or a property whose type admits `null`), or an `enum` property
+    whose members escape the column's whitelist. A runtime-**data** constraint the
+    doctor cannot see statically — a `unique` business column or a foreign key that
+    two distinct runs' output values violate — fails the whole run **fail-closed**:
+    the run is not marked completed and nothing is persisted (never a completed run
+    with a missing or duplicate row). Target a non-`unique` store, or ensure the
+    output value is unique per run, when two runs may produce the same business key.
   - **`handler`** — call a declared escape-hatch handler. Field: `handler` (a
     declared handler id of `kind: route`).
   - **`stream`** — a raw binary route. Fields: `handler` (a declared

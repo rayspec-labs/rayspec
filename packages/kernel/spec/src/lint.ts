@@ -225,10 +225,19 @@ function jsonSchemaTypes(propSchema: unknown): string[] {
 }
 
 /**
- * Validate an agent action's optional `persistTo` (shared by api routes AND triggers): the target store
- * must be declared, the referenced agent must declare an OBJECT `outputSchema`, and EVERY output property
- * must map to a WRITABLE business column of the store with a compatible type. A mismatch is a fail-closed
- * doctor/lint error at DEPLOY — never a surprise at the runtime persist write. Aggregates ALL violations.
+ * Validate an agent action's optional `persistTo` (shared by api routes AND triggers). Two directions,
+ * both fail-closed at DEPLOY so nothing surfaces at the runtime persist write; aggregates ALL violations:
+ *
+ *  FORWARD — the target store must be declared, the referenced agent must declare an OBJECT
+ *  `outputSchema`, and EVERY output property must map to a WRITABLE business column of a compatible type.
+ *
+ *  REVERSE — every REQUIRED (NOT-NULL, no-default) business column of the store must be reliably produced
+ *  by the output: (a) a matching output property exists, (b) that property is in the schema's `required`
+ *  array (an optional property the model may omit would violate NOT-NULL), and (c) the property's type
+ *  does not include `null`. Plus (d): where a store column and the mapped property BOTH declare an `enum`,
+ *  the property's enum must be a subset of the column's whitelist. Without the reverse pass, an uncovered
+ *  NOT-NULL column (or a nullable/optional property mapped to one) fails the INSERT with a NOT-NULL
+ *  violation AFTER the run has billed — silently defeating the exactly-once persist.
  */
 function checkPersistTo(
   persistTo: string,
@@ -310,6 +319,113 @@ function checkPersistTo(
               '/',
             )}) into store '${persistTo}' column '${column.name}' of type '${column.type}', which ` +
             'is not a compatible type',
+          `${pathPrefix}.persistTo`,
+        ),
+      );
+    }
+  }
+
+  // The forward loop above proves every OUTPUT property maps to a compatible writable column. It does
+  // NOT prove the CONVERSE: that every REQUIRED (NOT-NULL, no-default) business column of the store is
+  // actually produced by the output. A business column defaults NOT NULL (grammar) and gets NO database
+  // default (the product-table builder emits `.notNull()` with no `.default()` on business columns), so a
+  // NOT-NULL column the output does not reliably fill fails the runtime INSERT with a NOT-NULL violation
+  // AFTER the run has billed — silently defeating the exactly-once persist. Reject that at DEPLOY. The
+  // server-controlled/injected columns (id / tenant_id / created_at / created_by / region / …) are filled
+  // by the platform, never by the output — RESERVED_COLUMN_NAMES is the authoritative injected-column set
+  // (meta-locked to INJECTED_COLUMN_NAMES), so they are exempt.
+  const props = properties as Record<string, unknown>;
+  const requiredSet = new Set(
+    Array.isArray((schema as { required?: unknown }).required)
+      ? ((schema as { required?: unknown }).required as unknown[]).filter(
+          (x): x is string => typeof x === 'string',
+        )
+      : [],
+  );
+  // The OUTPUT property that maps to a store column (snake OR camel — the facade accepts both), if any.
+  const propNameForColumn = (columnName: string): string | undefined => {
+    if (columnName in props) return columnName;
+    const camel = toCamelIdent(columnName);
+    if (camel in props) return camel;
+    return undefined;
+  };
+  for (const column of store.columns) {
+    // Only NOT-NULL business columns must be covered; a nullable column may be omitted safely. Injected
+    // columns are platform-filled (never author-declarable as business columns anyway) — skip them.
+    if (column.nullable === true) continue;
+    if (RESERVED_COLUMN_NAMES.has(column.name)) continue;
+    const propName = propNameForColumn(column.name);
+    if (propName === undefined) {
+      // (a) No output property maps to this NOT-NULL column → a runtime NOT-NULL violation.
+      out.push(
+        specError(
+          'schema_violation',
+          `${refLabel} persists to store '${persistTo}', but its NOT-NULL column '${column.name}' is not ` +
+            `produced by agent '${agentId}' outputSchema — no output property maps to it, so the persist ` +
+            "write would fail the column's NOT-NULL constraint at runtime. Add a matching output property " +
+            `(named '${column.name}'), or make the column nullable`,
+          `${pathPrefix}.persistTo`,
+        ),
+      );
+      continue;
+    }
+    // (b) The property exists but is not in `required` → the model may OMIT it → a runtime NOT-NULL
+    //     violation (a property present in `properties` but absent from `required` is optional output).
+    if (!requiredSet.has(propName)) {
+      out.push(
+        specError(
+          'schema_violation',
+          `${refLabel} persists to store '${persistTo}': output property '${propName}' maps to NOT-NULL ` +
+            `column '${column.name}' but is not in the outputSchema 'required' array — the model may omit ` +
+            "it, failing the column's NOT-NULL constraint at runtime. Add it to 'required', or make the " +
+            'column nullable',
+          `${pathPrefix}.persistTo`,
+        ),
+      );
+    }
+    // (c) The property's declared type includes 'null' → the model may EMIT null into a NOT-NULL column.
+    if (jsonSchemaTypes(props[propName]).includes('null')) {
+      out.push(
+        specError(
+          'schema_violation',
+          `${refLabel} persists to store '${persistTo}': output property '${propName}' declares a nullable ` +
+            `type (includes 'null') but maps to NOT-NULL column '${column.name}' — an emitted null would ` +
+            "fail the column's NOT-NULL constraint at runtime. Remove 'null' from the property's type, or " +
+            'make the column nullable',
+          `${pathPrefix}.persistTo`,
+        ),
+      );
+    }
+  }
+
+  // (d) ENUM whitelist subset: a store column `enum` is a value whitelist the platform enforces
+  // server-side (an out-of-whitelist write is a fail-closed StoreInputError at runtime). When the mapped
+  // output property ALSO declares an `enum`, EVERY member must be within the column's whitelist — else the
+  // model may legally emit a value the store rejects, failing the persist AFTER the run has billed. (A
+  // property with NO enum against an enum column is deliberately NOT rejected here: the value may still be
+  // bounded by the agent's instructions, and forcing an enum on every such property would be over-strict —
+  // that residual is a runtime fail-closed case, documented rather than blocked at deploy.)
+  for (const column of store.columns) {
+    if (column.enum === undefined) continue;
+    const propName = propNameForColumn(column.name);
+    if (propName === undefined) continue; // coverage is handled above; nothing maps here
+    const propSchema = props[propName];
+    const propEnum =
+      typeof propSchema === 'object' && propSchema !== null
+        ? (propSchema as { enum?: unknown }).enum
+        : undefined;
+    if (!Array.isArray(propEnum)) continue; // no property enum → the documented runtime-fail-closed residual
+    const allowed = new Set<string>(column.enum);
+    // A member outside the whitelist — OR a non-string member (the enum column stores text) — is invalid.
+    const offenders = propEnum.filter((v) => typeof v !== 'string' || !allowed.has(v));
+    if (offenders.length > 0) {
+      out.push(
+        specError(
+          'schema_violation',
+          `${refLabel} persists to store '${persistTo}': output property '${propName}' enum includes ` +
+            `${offenders.map((v) => JSON.stringify(v)).join('/')}, outside store column '${column.name}' ` +
+            'enum whitelist — the store rejects an out-of-whitelist value fail-closed at runtime. Constrain ' +
+            "the property's enum to a subset of the column's whitelist",
           `${pathPrefix}.persistTo`,
         ),
       );

@@ -212,6 +212,82 @@ describe('in-request transient-retry quarantine (JSON)', () => {
   });
 });
 
+describe('in-request THROW-path quarantine (JSON) — a post-side-effect throw', () => {
+  it('a run that FIRED a NON-idempotent tool then THREW (e.g. the persist write failed) is QUARANTINED — a same-key retry does NOT re-fire the side effect (fires EXACTLY ONCE)', async () => {
+    const { token } = await principal('taintthrow@example.com', 'TaintThrowOrg');
+    const headers = {
+      authorization: `Bearer ${token}`,
+      accept: 'application/json',
+      'idempotency-key': 'taint-throw-json',
+    };
+    // The run fires charge_card (the side effect + the run-taint marker) on the success path, THEN the
+    // backend's gate REJECTS — modelling a throw AFTER the side effect fired. A completed, tool-firing,
+    // billed run throwing from its post-completion output-persist write is the motivating instance:
+    // runAgent throws → the JSON catch runs the reservation release. BEFORE the taint-aware throw-release
+    // this was a BLANKET release (safe pre-persist, when a throw meant the run never completed); now it
+    // must consult the taint marker so a tainted thrown run keeps its reservation.
+    backend.gate = () =>
+      Promise.reject(new Error('post-side-effect throw (e.g. persist write failed)'));
+
+    const first = await jsonRequest(h.app, 'POST', '/v1/agents/charge-agent/runs', {
+      body: { input: 'order-throw' },
+      headers,
+    });
+    // The throw surfaces non-2xx (a generic 500); the side effect fired exactly once.
+    expect(first.status).not.toBe(200);
+    expect(backend.liveRuns).toBe(1);
+    expect(sideEffects.count).toBe(1);
+
+    // Clear the gate so a retry COULD complete cleanly — the ONLY thing that must stop a re-fire is the
+    // taint-aware throw-release keeping the reservation on the tainted run.
+    backend.gate = undefined;
+
+    // Same Idempotency-Key retry. WITHOUT the taint-aware throw-release, the blanket release freed the
+    // reservation → the agent RE-RUNS fresh → charge_card fires AGAIN (count → 2, RED). WITH it, the
+    // tainted run keeps its reservation → the retry hits the loser path (the thrown run wrote no run
+    // header → 409) → the side effect fires EXACTLY ONCE (count stays 1, GREEN).
+    const second = await jsonRequest(h.app, 'POST', '/v1/agents/charge-agent/runs', {
+      body: { input: 'order-throw' },
+      headers,
+    });
+    // The WHOLE invariant: the non-idempotent side effect fired EXACTLY ONCE across the retry.
+    expect(sideEffects.count).toBe(1);
+    // The retry did NOT execute a second live run of the agent.
+    expect(backend.liveRuns).toBe(1);
+    // The quarantined thrown run is surfaced loudly (the loser path 409s a still-reserved, header-less run).
+    expect(second.status).toBe(409);
+  });
+
+  it('OVER-QUARANTINE GUARD (throw path): an IDEMPOTENT-only run that THREW still RE-RUNS on a same-key retry (it is NOT quarantined)', async () => {
+    const { token } = await principal('taintthrowok@example.com', 'TaintThrowOkOrg');
+    const headers = {
+      authorization: `Bearer ${token}`,
+      accept: 'application/json',
+      'idempotency-key': 'taint-throw-idempotent',
+    };
+    // The run fires the IDEMPOTENT lookup tool (NO taint marker), then throws.
+    backend.gate = () => Promise.reject(new Error('transient throw after a safe lookup'));
+    const first = await jsonRequest(h.app, 'POST', '/v1/agents/lookup-agent/runs', {
+      body: { input: 'safe-throw' },
+      headers,
+    });
+    expect(first.status).not.toBe(200);
+    expect(backend.liveRuns).toBe(1);
+    expect(sideEffects.count).toBe(1);
+
+    // With the gate cleared, an UNTAINTED thrown run is legitimately re-runnable: the taint-aware release
+    // must NOT over-quarantine it — it releases, so the same-key retry RE-RUNS (liveRuns → 2). A wrong
+    // fix that froze ALL thrown runs would keep this at 1 (RED); the shipped correct behaviour is a re-run.
+    backend.gate = undefined;
+    const second = await jsonRequest(h.app, 'POST', '/v1/agents/lookup-agent/runs', {
+      body: { input: 'safe-throw' },
+      headers,
+    });
+    expect(backend.liveRuns).toBe(2);
+    expect(second.status).toBe(200);
+  });
+});
+
 describe('in-request transient-retry quarantine (SSE)', () => {
   it('SSE: a transient-failed run that FIRED a NON-idempotent tool is QUARANTINED — a same-key SSE retry does NOT re-fire the side effect', async () => {
     const { token } = await principal('taintsse@example.com', 'TaintSseOrg');

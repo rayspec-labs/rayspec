@@ -328,13 +328,13 @@ export async function executeAgentRun(
         // unchanged (errorClass still rides the run_completed/error event; the durable run_events log is
         // already persisted). A COMPLETED run or a NON-transient error keeps its reservation (replayed).
         // (QUARANTINE): the release is now TAINT-AWARE — a run that fired a non-idempotent
-        // tool is NOT released (a same-key retry would re-fire the side effect). See releaseIfTransient.
+        // tool is NOT released (a same-key retry would re-fire the side effect). See releaseIfUntainted.
         if (
           idemKey &&
           sseResult.status === 'error' &&
           isTransientErrorClass(sseResult.errorClass)
         ) {
-          await releaseIfTransientAndUntainted(deps, tdb, tenantId, idemKey, freshRunId);
+          await releaseIfUntainted(deps, tdb, tenantId, idemKey, freshRunId);
         }
         // Otherwise: the reservation snapshot already holds { runId } (set at reserve time) — the run
         // is reconstructable + replayable. No record() needed (reserve-before-execute owns it).
@@ -342,9 +342,11 @@ export async function executeAgentRun(
         // The run THREW (failed / timed out mid-stream). Surface a terminal error frame carrying the
         // neutral errorClass (the status line cannot change mid-stream — see the note above). The
         // durable run_events log holds whatever was persisted before the failure. RELEASE the
-        // reservation so a retry can re-run (a thrown run produced no completed RunResult).
+        // reservation so a retry can re-run (a thrown run produced no completed RunResult) — but
+        // TAINT-AWARE: a run that fired a non-idempotent tool then threw (e.g. from the post-completion
+        // persist write) must NOT be released, or a same-key retry re-fires the side effect.
         if (idemKey) {
-          await deps.idempotency.release(tenantId, RUN_IDEM_SCOPE, idemKey).catch(() => {});
+          await releaseIfUntainted(deps, tdb, tenantId, idemKey, freshRunId);
         }
         // A held-request timeout is the neutral `timeout` class; any other throw → classify it.
         const { errorClass, message } =
@@ -367,8 +369,11 @@ export async function executeAgentRun(
       timeoutMs,
     );
   } catch (err) {
+    // RELEASE the reservation so a retry can re-run (a thrown run produced no completed RunResult) —
+    // but TAINT-AWARE: a run that fired a non-idempotent tool then threw (e.g. from the post-completion
+    // persist write) must NOT be released, or a same-key retry re-fires the side effect.
     if (idemKey) {
-      await deps.idempotency.release(tenantId, RUN_IDEM_SCOPE, idemKey).catch(() => {});
+      await releaseIfUntainted(deps, tdb, tenantId, idemKey, freshRunId);
     }
     // (HTTP-2): a held-request TIMEOUT is honestly a 504 Gateway Timeout (not the
     // generic 500 the global onError gives a bare Error). HTTP-2: emit the STANDARD closed-ErrorCode
@@ -393,9 +398,9 @@ export async function executeAgentRun(
   // (model_refusal / upstream_4xx / internal) is a real, repeatable outcome — keep it under the key
   // and replay it (see the reservation replay path above, which now applies the same status mapping).
   // (QUARANTINE): the release is now TAINT-AWARE — a run that fired a non-idempotent tool is
-  // NOT released (a same-key retry would re-fire the side effect). See releaseIfTransientAndUntainted.
+  // NOT released (a same-key retry would re-fire the side effect). See releaseIfUntainted.
   if (idemKey && result.status === 'error' && isTransientErrorClass(result.errorClass)) {
-    await releaseIfTransientAndUntainted(deps, tdb, tenantId, idemKey, freshRunId);
+    await releaseIfUntainted(deps, tdb, tenantId, idemKey, freshRunId);
   }
   // map the neutral errorClass → HTTP status (429/502/504; else 200). On a 429,
   // surface a Retry-After header when the adapter captured one (read back from the failing journal
@@ -632,26 +637,33 @@ function isTransientErrorClass(errorClass: ErrorClass | null): boolean {
 }
 
 /**
- * the NON-IDEMPOTENT-TAINT QUARANTINE applied to the in-request transient-release.
+ * the NON-IDEMPOTENT-TAINT QUARANTINE applied to an in-request reservation release.
  *
- * The shipped transient-release (HTTP-1) frees the `agent_run` reservation on a transient error
- * so a same-Idempotency-Key retry RE-RUNS `runAgent` FRESH. That is SAFE only when the failed run did
- * NOT fire a non-idempotent (side-effecting) tool: a fresh re-run re-fires the side effect (the
- * `dispatch.ts` non-idempotent guard blocks only on `replay===true`), so a tainted run must NOT be
- * blanket-released. This makes the release TAINT-AWARE:
+ * A release frees the `agent_run` reservation so a same-Idempotency-Key retry RE-RUNS `runAgent` FRESH.
+ * That is SAFE only when the failed run did NOT fire a non-idempotent (side-effecting) tool: a fresh
+ * re-run re-fires the side effect (the `dispatch.ts` non-idempotent guard blocks only on
+ * `replay===true`), so a tainted run must NOT be released. This makes the release TAINT-AWARE:
  *  - the run is QUARANTINED (a non-idempotent tool fired ⇒ the chokepoint wrote the run-taint marker)
  *    → KEEP the reservation. A same-key retry then hits the loser path (it replays the cached terminal
  *    error / 409s, NEVER re-runs), so the side effect fires EXACTLY ONCE. The taint marker stays as the
  * durable evidence the run needs manual review (it is never auto-retried).
- *  - the run is UNTAINTED (idempotent / no-tool) → RELEASE as before (the legitimately-retryable case;
- *    over-quarantining would break the shipped, correct transient-release for those runs).
+ *  - the run is UNTAINTED (idempotent / no-tool) → RELEASE (the legitimately-retryable case;
+ *    over-quarantining would break the correct release for those runs).
+ *
+ * TWO callers gate through this, each having established its OWN precondition for release:
+ *  - the RETURNED-error path (a completed-but-errored RunResult with a TRANSIENT `errorClass`), and
+ *  - the THROW path (`runAgent` threw — a timeout / mid-run fault — which produced no completed
+ *    RunResult and is therefore retry-worthy). BEFORE `persistTo`, a throw always meant the run did not
+ *    complete; a `persistTo` write now runs AFTER the tools fired, so a fully-completed, tool-firing,
+ *    billed run can throw from the persist write — a blanket throw-release would then re-fire the side
+ *    effect on a same-key retry. Routing the throw-path release through this taint gate closes that.
  *
  * `runId` is the runId the run executed under (the reserved runId when there is an Idempotency-Key — the
  * same id the chokepoint keyed the marker on). The taint read is tenant-scoped via the supplied
  * TenantDb. FAIL-CLOSED: if the taint read throws we do NOT release (treat the run as possibly tainted),
  * so a re-fire is never enabled by a failed marker read.
  */
-async function releaseIfTransientAndUntainted(
+async function releaseIfUntainted(
   deps: AppDeps,
   tdb: TenantDb,
   tenantId: string,

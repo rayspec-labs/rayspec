@@ -59,8 +59,25 @@ const factsStore: StoreSpec = {
   foreignKeys: [],
 };
 
+/**
+ * A SECOND persist target with a UNIQUE business column (`title`). Two DISTINCT runs producing the same
+ * `title` value collide on the tenant-scoped `(tenant_id, title)` unique index (23505) — a runtime-data
+ * constraint the doctor cannot see at deploy. Used to prove the atomic coupling: a colliding persist
+ * rolls back the WHOLE run (header + persist) rather than leaving a completed run with no/duplicate row.
+ */
+const uniqueFactsStore: StoreSpec = {
+  name: 'unique_facts',
+  columns: [
+    { name: 'title', type: 'text', nullable: false, unique: true },
+    { name: 'score', type: 'integer', nullable: true, unique: false },
+    { name: 'verified', type: 'boolean', nullable: true, unique: false },
+    { name: 'details', type: 'jsonb', nullable: true, unique: false },
+  ],
+  foreignKeys: [],
+};
+
 /** The validated structured output a successful run produces (maps 1:1 to the store's columns). */
-const OUTPUT = { title: 'Q3 review', score: 7, verified: true, details: { source: 'meeting' } };
+const OUTPUT = { title: 'Q3 review', score: 7, verified: true, details: { source: 'report' } };
 
 /**
  * A fake backend that ALWAYS returns a COMPLETED run carrying `OUTPUT` as its structured output and
@@ -168,6 +185,14 @@ function buildPersistSchemaSql(): string {
       title text NOT NULL, score integer, verified boolean, details jsonb,
       ${after}
     );
+    -- a SECOND store with a UNIQUE business column — the tenant-scoped (tenant_id, title) unique index
+    -- MATCHES what buildProductTables emits for a non-conflict-key unique column.
+    CREATE TABLE unique_facts (
+      ${before},
+      title text NOT NULL, score integer, verified boolean, details jsonb,
+      ${after}
+    );
+    CREATE UNIQUE INDEX unique_facts_title_unique ON unique_facts (tenant_id, title);
     INSERT INTO orgs (id, name) VALUES ('${TENANT_A}', 'A'), ('${TENANT_B}', 'B');
   `;
 }
@@ -192,7 +217,7 @@ describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
   beforeAll(async () => {
     db = makeDbWithSchema(process.env.DATABASE_URL as string, SCHEMA);
     await db.$client.unsafe(buildPersistSchemaSql());
-    productTables = buildProductTables([factsStore]);
+    productTables = buildProductTables([factsStore, uniqueFactsStore]);
     unregister = registerScopedTables([...productTables.values()]);
   });
 
@@ -204,12 +229,19 @@ describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
   beforeEach(async () => {
     await db.$client.unsafe(
       `SET search_path TO ${SCHEMA};
-       TRUNCATE journal_steps, conversation_items, run_events, runs, idempotency_keys, extracted_facts CASCADE;`,
+       TRUNCATE journal_steps, conversation_items, run_events, runs, idempotency_keys, extracted_facts, unique_facts CASCADE;`,
     );
   });
 
   async function readFacts(tenant: string): Promise<Record<string, unknown>[]> {
     const facts = productTables.get('extracted_facts') as PgTable;
+    return (await forTenant(db, tenant)
+      .select(facts as never)
+      .all()) as Record<string, unknown>[];
+  }
+
+  async function readUniqueFacts(tenant: string): Promise<Record<string, unknown>[]> {
+    const facts = productTables.get('unique_facts') as PgTable;
     return (await forTenant(db, tenant)
       .select(facts as never)
       .all()) as Record<string, unknown>[];
@@ -232,7 +264,7 @@ describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
     expect(rows[0]?.title).toBe('Q3 review');
     expect(Number(rows[0]?.score)).toBe(7);
     expect(rows[0]?.verified).toBe(true);
-    expect(rows[0]?.details).toEqual({ source: 'meeting' });
+    expect(rows[0]?.details).toEqual({ source: 'report' });
     // Tenant-scoped: the write carries THIS tenant, and created_by is left unset (uniform sync+durable).
     expect(rows[0]?.tenantId).toBe(TENANT_A);
     expect(rows[0]?.createdBy ?? null).toBeNull();
@@ -266,6 +298,50 @@ describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
     const rows = await readFacts(TENANT_A);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.title).toBe('Q3 review');
+  });
+
+  it('ATOMICITY: a persist that violates a UNIQUE business column rolls back the run header WITH the failed persist (winner intact, exactly one row, loser not completed)', async () => {
+    persistTestsRan++;
+    const backend = new PersistBackend();
+
+    // Run A persists its row (title 'Q3 review') on the sync path — persistRunOutput opens its OWN
+    // transaction (no outer tx), so the header-completing upsert + the store insert commit atomically.
+    const a = await runAgent(forTenant(db, TENANT_A), backend, spec, {
+      runId: 'unique-run-a',
+      persistTo: 'unique_facts',
+      productTables,
+    });
+    expect(a.status).toBe('completed');
+
+    // Run B is a DISTINCT run producing the SAME OUTPUT.title. Its persist INSERT collides on the
+    // tenant-scoped (tenant_id, title) unique index (23505) — a runtime-DATA constraint the doctor cannot
+    // see at deploy. Because the header-completing upsert AND the store insert share ONE transaction, the
+    // 23505 rolls BOTH back: run B throws fail-closed (never a completed header with a missing row).
+    await expect(
+      runAgent(forTenant(db, TENANT_A), backend, spec, {
+        runId: 'unique-run-b',
+        persistTo: 'unique_facts',
+        productTables,
+      }),
+    ).rejects.toThrow();
+
+    // The store holds EXACTLY ONE row — A's; B's colliding insert wrote nothing.
+    const rows = await readUniqueFacts(TENANT_A);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.title).toBe('Q3 review');
+
+    // A's run header is completed; B has NO run header at all — its completing transition rolled back
+    // atomically with the failed persist (the exactly-once, fail-closed property this coupling guarantees).
+    const headerA = await db
+      .select()
+      .from(schema.runs)
+      .where(eq(schema.runs.runId, 'unique-run-a'));
+    expect(headerA[0]?.status).toBe('completed');
+    const headerB = await db
+      .select()
+      .from(schema.runs)
+      .where(eq(schema.runs.runId, 'unique-run-b'));
+    expect(headerB).toHaveLength(0);
   });
 
   it('does NOT persist when persistTo is set but productTables is absent (inert, no throw)', async () => {
