@@ -250,11 +250,17 @@ export async function invokeStreamRouteHandler(
   // handler binds it to the requested route resource + re-validates ownership in the DB (it is never
   // trusted alone). `undefined` ⇒ no media token (the ingest path) — the field is then absent on init.
   mediaResource?: string,
+  // OPTIONAL server-derived caller identity (`user:<userId>` / `key:<apiKeyId>`), threaded IDENTICALLY
+  // to the JSON `{handler}` route path (invokeRouteHandler) so a stream handler's store facade stamps
+  // `created_by` un-spoofably on its inserts (the ingest pointer row). Built by the api interpreter from
+  // the request's SERVER-DERIVED principal — never handler-supplied. Absent ⇒ no stamp (byte-identical to
+  // before): a posture with no request principal (the media-JWT playback path) passes nothing here.
+  createdByActor?: string,
 ): Promise<Response> {
   return tdb.transaction(async (txTdb) => {
     const init: StreamRouteHandlerInit = {
       tenantId: txTdb.tenantId,
-      db: makeHandlerDb(txTdb, productTables),
+      db: makeHandlerDb(txTdb, productTables, createdByActor),
       // The tenant-bound blob handle, built from the run's server-derived tenant (REQUIRED — a stream
       // handler moves bytes; the deploy fail-closes if no backend is wired, so this is never absent).
       blob: blobFactory(txTdb.tenantId),

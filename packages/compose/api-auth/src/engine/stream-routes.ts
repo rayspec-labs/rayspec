@@ -40,6 +40,7 @@ import {
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { Context } from 'hono';
 import type { AppDeps, AppEnv } from '../app-context.js';
+import { principalActor } from './principal-actor.js';
 
 /**
  * Collect the route's path + query params into a plain `{ key: string }` map (DATA). Path params win
@@ -87,11 +88,28 @@ export function makeStreamIngestHandler(args: {
     if (!tenantId) throw new ApiError('NOT_FOUND', 'Not found.');
     const tdb = forTenant(deps.db, tenantId);
     const params = collectParams(c);
+    // derive the un-spoofable caller identity for the `created_by` stamp (user:<userId> / key:<apiKeyId>)
+    // from THIS request's SERVER-DERIVED principal — the SAME derivation the JSON {handler} route and the
+    // declarative store.create path use. An ingest route runs the full auth chain (requireAuth →
+    // resolveTenant → requirePermission('store:write')), so a principal is always present here. Threaded
+    // into the handler's store facade so the pointer-row insert records who created it (un-spoofable: the
+    // handler could not supply created_by — the facade rejects that server-controlled column).
+    const createdByActor = principalActor(c.get('principal'));
     // The RAW Web Request — the binary body reaches the handler UNPARSED (the body is UNTRUSTED
     // DATA the handler treats as bytes; we never call c.req.json()). invokeStreamRouteHandler opens the
     // TenantDb.transaction (GUC), builds the StreamRouteHandlerInit (db + tenant-bound blob + params +
     // request), invokes the handler, and returns its raw Response.
-    return invokeStreamRouteHandler(fn, tdb, productTables, params, c.req.raw, blobFactory);
+    return invokeStreamRouteHandler(
+      fn,
+      tdb,
+      productTables,
+      params,
+      c.req.raw,
+      blobFactory,
+      // no media resource on the ingest path (playback-only); the actor follows as the next arg.
+      undefined,
+      createdByActor,
+    );
   };
 }
 

@@ -238,6 +238,29 @@ describe.skipIf(!hasDb)('stream INGEST primitive end-to-end', () => {
     const bBytes = new Uint8Array(await new Response(bGot.body).arrayBuffer());
     expect([...bBytes]).toEqual([9]); // B's bytes, not A's [1]
   });
+
+  it('the ingest pointer row stamps created_by from the SERVER-DERIVED principal (user:<userId>), un-spoofably', async () => {
+    // The ingest route runs the full auth chain, so the handler's store facade must stamp the injected
+    // created_by column with the authenticated caller's identity — the SAME invariant the JSON {handler}
+    // route and the declarative store.create path uphold. This exercises the WHOLE path: the route derives
+    // the actor from c.get('principal') → invokeStreamRouteHandler → makeHandlerDb → the pointer insert.
+    const email = 'ingest-actor@example.com';
+    const { orgId, token } = await principal(email, 'IngestActorOrg');
+    const upl = 'upl-actor';
+
+    // One clean ingest (index 0 == next_expected) → 200 ack, exactly one pointer row written.
+    const r0 = await postChunk(h.app, chunkPath(upl, 0), token, new Uint8Array([1, 2, 3]));
+    expect(r0.status).toBe(200);
+    expect(await countChunks(h, orgId, upl)).toBe(1);
+
+    // GROUND TRUTH: created_by carries the AUTHENTICATED user's identity `user:<userId>`. It is
+    // UN-SPOOFABLE and SERVER-DERIVED: the stream body is RAW bytes (no JSON field the caller could set),
+    // the handler cannot write created_by (the facade rejects that server-controlled column), and the
+    // stamped value equals the real `users.id` the caller never transmitted. RED without the thread: the
+    // stream path built its facade with NO actor (2-arg makeHandlerDb), so created_by was NULL.
+    const userId = await userIdByEmail(h, email);
+    expect(await chunkCreatedBy(h, orgId, upl)).toBe(`user:${userId}`);
+  });
 });
 
 /**
@@ -252,4 +275,30 @@ async function countChunks(h: Harness, orgId: string, uploadId: string): Promise
     [orgId, uploadId],
   )) as unknown as Array<{ n: number }>;
   return rows[0]?.n ?? 0;
+}
+
+/**
+ * The `created_by` actor stamp on the (single) pointer row for one upload within a tenant — the
+ * GROUND-TRUTH for the actor-stamp invariant. Reads the REAL `blob_chunks` table through the isolated
+ * schema's search_path (same raw-SQL path as countChunks).
+ */
+async function chunkCreatedBy(h: Harness, orgId: string, uploadId: string): Promise<string | null> {
+  const rows = (await h.db.$client.unsafe(
+    'select created_by from blob_chunks where tenant_id = $1 and upload_id = $2',
+    [orgId, uploadId],
+  )) as unknown as Array<{ created_by: string | null }>;
+  return rows[0]?.created_by ?? null;
+}
+
+/**
+ * The SERVER-side `users.id` for an email — the identity the created_by stamp must equal. The caller
+ * never transmits this value, so asserting against it proves the stamp is server-derived, not client-set.
+ */
+async function userIdByEmail(h: Harness, email: string): Promise<string> {
+  const rows = (await h.db.$client.unsafe('select id from users where email = $1', [
+    email,
+  ])) as unknown as Array<{ id: string }>;
+  const id = rows[0]?.id;
+  if (!id) throw new Error(`userIdByEmail: no user row for ${email}`);
+  return id;
 }
