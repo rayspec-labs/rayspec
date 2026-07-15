@@ -25,6 +25,7 @@
 import { httpResponse, type RouteHandler, type RouteHandlerInit } from '@rayspec/handler-sdk';
 import type { ResolvedRecordConfig } from '../config.js';
 import { RecordEventRejectedError, type RecordSubmittedSink } from '../events.js';
+import type { RecordNormalizerFactory } from '../normalizer.js';
 import type { RecordCoreContext } from '../ports.js';
 import { submitRecord } from '../submit.js';
 
@@ -33,6 +34,12 @@ export interface RecordHandlersConfig {
   readonly resolved: ResolvedRecordConfig;
   /** The sink `submit` emits `record_submitted` through — the workflow-ingress event seam. */
   readonly recordSubmittedSink: RecordSubmittedSink;
+  /**
+   * OPTIONAL tenant-bound normalizer factory — invoked per request with the SERVER-DERIVED
+   * `init.tenantId` (the sink/responder factory trust shape). Present iff the deployment wires an
+   * input-normalize step for this capability; absent ⇒ the submit stores the raw record unchanged.
+   */
+  readonly recordNormalizer?: RecordNormalizerFactory;
 }
 
 /** Build the tenant-bound core context from a `{handler}` route init. */
@@ -44,8 +51,17 @@ function coreContext(init: RouteHandlerInit, config: ResolvedRecordConfig): Reco
 export function makeRecordSubmitHandler(config: RecordHandlersConfig): RouteHandler {
   return async (init: RouteHandlerInit) => {
     const ctx = coreContext(init, config.resolved);
+    // Build the tenant-bound normalizer per request from the SERVER-DERIVED tenant (absent when no
+    // input-normalize step is wired — the submit then stores the raw record unchanged).
+    const normalizer = config.recordNormalizer?.(init.tenantId);
     try {
-      const result = await submitRecord(ctx, init.params, init.body, config.recordSubmittedSink);
+      const result = await submitRecord(
+        ctx,
+        init.params,
+        init.body,
+        config.recordSubmittedSink,
+        normalizer,
+      );
       if (result.ok) return result.value;
       return httpResponse({
         status: result.status,

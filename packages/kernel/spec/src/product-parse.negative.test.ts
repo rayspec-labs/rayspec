@@ -235,6 +235,35 @@ agents:
   });
 });
 
+describe('capabilities[].input_normalize.output_contract → resolve (dangling_ref)', () => {
+  const RUNTIME_NOTES =
+    '    runtime_notes: cap_a is a future Tier B capability (deepgram is a candidate adapter).\n';
+  const withNormalize = (outputContract: string, extra = ''): string =>
+    BASE.replace(
+      RUNTIME_NOTES,
+      `${RUNTIME_NOTES}    input_normalize:\n      agent: field_normalizer\n      output_contract: ${outputContract}\n${extra}`,
+    );
+
+  it('rejects an input_normalize whose output_contract does not resolve (EXACTLY one dangling_ref)', () => {
+    expectExact(withNormalize('nope.missing'), [
+      ['dangling_ref', 'capabilities[0].input_normalize.output_contract'],
+    ]);
+  });
+
+  it('ACCEPTS an input_normalize whose output_contract resolves to a declared contract (additive — BASE stays valid)', () => {
+    const res = parseProductSpec(withNormalize('cap_a.thing'));
+    if (!res.ok) throw new Error(`must parse:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.ok).toBe(true);
+  });
+
+  it('rejects an unknown key inside input_normalize (.strict())', () => {
+    const res = parseProductSpec(withNormalize('cap_a.thing', '      bogus: 1\n'));
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors.some((e) => (e.path ?? '').includes('input_normalize'))).toBe(true);
+  });
+});
+
 describe('yaml_parse_error', () => {
   it('rejects non-YAML text', () => {
     expectExact('version: "1.0"\nproduct: { id: ', [['yaml_parse_error', undefined]]);

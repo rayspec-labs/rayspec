@@ -58,6 +58,19 @@ export function declaresRecordInput(spec: ProductSpec): boolean {
 }
 
 /**
+ * The record_input capability's declared OPTIONAL input-normalize step (`{ agent, output_contract }`),
+ * or `undefined` when the doc does not declare record_input or declares it without a normalize step. A
+ * declared step transforms each submitted record via the named agent before persist, so the deployment
+ * MUST wire a normalizer factory for it — the same authority the compose fail-closed guard keys off
+ * (input_normalize is only ever valid on record_input; enforced elsewhere in compose).
+ */
+export function recordInputNormalize(
+  spec: ProductSpec,
+): ProductSpec['capabilities'][number]['input_normalize'] {
+  return spec.capabilities.find((c) => c.id === RECORD_INPUT_CAPABILITY_ID)?.input_normalize;
+}
+
+/**
  * The capability ids the file runtime owns (`file_input`) — sourced from the file manifest so the
  * predicate can never drift from the mounted surface (the declaresAudio-from-manifest pattern; the
  * id is deliberately NOT a string literal duplicated here).

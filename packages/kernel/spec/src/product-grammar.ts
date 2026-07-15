@@ -110,6 +110,34 @@ export const ProviderPolicy = z
   .strict();
 export type ProviderPolicy = z.infer<typeof ProviderPolicy>;
 
+/**
+ * OPTIONAL declarative INPUT-NORMALIZE step for a submit-ingress capability (default OFF). When
+ * declared, a submitted record is transformed by the named agent AFTER shape-validation and BEFORE
+ * persist — the NORMALIZED value is what is re-validated, stored, and emitted. ABSENT ⇒ behaviour is
+ * byte-identical to today (a capability that does not declare it is completely unaffected). The agent
+ * runs through the platform's neutral agent-invocation path (the deployment wires a normalizer for the
+ * declared `agent` id — the config-side wiring precedent); the model output must conform to
+ * `output_contract`. Fail-closed: a normalize failure REJECTS the submit and persists nothing.
+ */
+export const CapabilityInputNormalize = z
+  .object({
+    /**
+     * The config-side agent id that normalizes the submitted record (same safe-identifier discipline as
+     * every sibling id). It is a stable label the deployment binds a normalizer to — NOT a declared
+     * `extractors[]` id (an input-normalize step is the record-ingress equivalent of the config-side
+     * responder, wired at deploy, not a workflow-graph extractor).
+     */
+    agent: SafeIdentifier,
+    /**
+     * The declared contract id the NORMALIZED record must conform to before persist (product-lint
+     * resolves it against `contracts[]` / a declared capability contract, exactly like an
+     * `artifacts[].contract` ref). The runtime uses it as the agent's expected output shape.
+     */
+    output_contract: z.string().min(1),
+  })
+  .strict();
+export type CapabilityInputNormalize = z.infer<typeof CapabilityInputNormalize>;
+
 export const CapabilitySpec = z
   .object({
     id: z.string().min(1),
@@ -120,6 +148,8 @@ export const CapabilitySpec = z
     provider_policy: ProviderPolicy.optional(),
     /** Non-normative explanation (may mention providers — this is NOT the executable graph). */
     runtime_notes: z.string().optional(),
+    /** OPTIONAL declarative input-normalize step (default OFF — see CapabilityInputNormalize). */
+    input_normalize: CapabilityInputNormalize.optional(),
   })
   .strict();
 export type CapabilitySpec = z.infer<typeof CapabilitySpec>;

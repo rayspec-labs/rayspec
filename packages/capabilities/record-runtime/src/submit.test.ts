@@ -12,6 +12,7 @@ import {
   RecordEventRejectedError,
   type RecordSubmittedSink,
 } from './events.js';
+import type { RecordNormalizer } from './normalizer.js';
 import type { RecordCoreContext } from './ports.js';
 import { RECORD_SUBMISSIONS_STORE } from './stores.js';
 import { submitRecord } from './submit.js';
@@ -513,5 +514,247 @@ describe('submitRecord — REG-1: the divergent-409 heal re-emit is BEST-EFFORT 
       submitRecord(ctx(table), { record_id: 'rec-new' }, { title: 'first' }, sink),
     ).rejects.toThrow('DBOS enqueue unavailable');
     expect(table.rows).toHaveLength(1); // the non-atomic persist committed; the retry re-emits
+  });
+});
+
+/**
+ * A deterministic fake normalizer that reproduces the REAL `RecordNormalizer` port contract (not a
+ * stub that bypasses the path): it transforms the raw record and returns the neutral outcome the
+ * binding threads. `upcaseNormalizer` upper-cases a `title` field + stamps `normalized: true`.
+ */
+function upcaseNormalizer(): RecordNormalizer {
+  return {
+    agentId: 'field_normalizer',
+    async normalize({ record }) {
+      const title = typeof record.title === 'string' ? record.title.toUpperCase() : record.title;
+      return { status: 'normalized', record: { ...record, title, normalized: true } };
+    },
+  };
+}
+
+describe('submitRecord — the OPTIONAL declared input-normalize step', () => {
+  it('transforms the record BEFORE persist: the STORED row AND the emitted event carry the NORMALIZED value, never the raw input', async () => {
+    const table = new SharedRecordTable();
+    const sink = createInMemoryRecordSubmittedSink();
+    const raw = { title: 'fix the door', priority: 'high' };
+
+    const result = await submitRecord(
+      ctx(table),
+      { record_id: 'rec-1' },
+      raw,
+      sink,
+      upcaseNormalizer(),
+    );
+    expect(result.ok).toBe(true);
+
+    const normalized = { title: 'FIX THE DOOR', priority: 'high', normalized: true };
+    // The STORED payload is the NORMALIZED value (title upper-cased + the stamp) — NOT the raw body.
+    expect(table.rows).toHaveLength(1);
+    expect(table.rows[0]?.payload).toEqual(normalized);
+    // payload_hash stays the RAW-input hash — the idempotency identity is the submitted input.
+    expect(table.rows[0]?.payload_hash).toBe(recordPayloadHash(raw));
+    // The emitted event sources the STORED (normalized) row (authoritative re-read).
+    expect(sink.deliveredFor(`${TENANT_A}:rec-1`)?.record).toEqual(normalized);
+  });
+
+  it('a normalize step that returns an error REJECTS the submit fail-closed (502 record_normalize_failed) — nothing persisted, nothing emitted', async () => {
+    const table = new SharedRecordTable();
+    const sink = createInMemoryRecordSubmittedSink();
+    const failing: RecordNormalizer = {
+      agentId: 'x',
+      async normalize() {
+        return { status: 'error', errorClass: 'upstream_5xx', message: 'model unavailable' };
+      },
+    };
+
+    const res = await submitRecord(
+      ctx(table),
+      { record_id: 'rec-1' },
+      { title: 'x' },
+      sink,
+      failing,
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('unreachable');
+    expect(res.status).toBe(502);
+    expect(res.error).toBe('record_normalize_failed');
+    expect(res.detail).toContain('upstream_5xx');
+    expect(table.rows).toHaveLength(0);
+    expect(sink.emitCount()).toBe(0);
+  });
+
+  it('NO-LEAK: a normalize failure whose raw message carries a secret-ish token is NOT surfaced in the 502 body — only the neutral errorClass is (never the raw provider/DB text)', async () => {
+    const table = new SharedRecordTable();
+    const sink = createInMemoryRecordSubmittedSink();
+    // The raw error message an upstream 429 / a Postgres error would carry: an org id + a quota detail.
+    const SECRET = 'org-4a9f7c21 model=gpt-5 quota exceeded at postgres://user:pw@db:5432';
+    const leaky: RecordNormalizer = {
+      agentId: 'x',
+      async normalize() {
+        return { status: 'error', errorClass: 'rate_limited', message: SECRET };
+      },
+    };
+
+    const res = await submitRecord(ctx(table), { record_id: 'rec-1' }, { title: 'x' }, sink, leaky);
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('unreachable');
+    expect(res.status).toBe(502);
+    expect(res.error).toBe('record_normalize_failed');
+    // The raw token (org id / model / quota / DSN) MUST NOT reach the client body …
+    expect(res.detail).not.toContain('org-4a9f7c21');
+    expect(res.detail).not.toContain('postgres://');
+    expect(res.detail).not.toContain(SECRET);
+    // … while the neutralized failure CLASS still is (a caller learns the class without the detail).
+    expect(res.detail).toContain('rate_limited');
+    expect(table.rows).toHaveLength(0);
+    expect(sink.emitCount()).toBe(0);
+  });
+
+  it('NO-LEAK: a THROWN normalizer whose Error message carries a secret-ish token is NOT surfaced in the 502 body (generic message only)', async () => {
+    const table = new SharedRecordTable();
+    const sink = createInMemoryRecordSubmittedSink();
+    const SECRET = 'ANTHROPIC_API_KEY=sk-ant-abc123 at postgres://user:pw@db:5432';
+    const leaky: RecordNormalizer = {
+      agentId: 'x',
+      async normalize() {
+        throw new Error(SECRET);
+      },
+    };
+
+    const res = await submitRecord(ctx(table), { record_id: 'rec-1' }, { title: 'x' }, sink, leaky);
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('unreachable');
+    expect(res.status).toBe(502);
+    expect(res.error).toBe('record_normalize_failed');
+    expect(res.detail).not.toContain('sk-ant-abc123');
+    expect(res.detail).not.toContain('postgres://');
+    expect(res.detail).not.toContain(SECRET);
+    expect(table.rows).toHaveLength(0);
+    expect(sink.emitCount()).toBe(0);
+  });
+
+  it('a normalize step that THROWS is caught fail-closed (502 record_normalize_failed) — nothing persisted, nothing emitted', async () => {
+    const table = new SharedRecordTable();
+    const sink = createInMemoryRecordSubmittedSink();
+    const throwing: RecordNormalizer = {
+      agentId: 'x',
+      async normalize() {
+        throw new Error('socket hang up');
+      },
+    };
+
+    const res = await submitRecord(
+      ctx(table),
+      { record_id: 'rec-1' },
+      { title: 'x' },
+      sink,
+      throwing,
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('unreachable');
+    expect(res.status).toBe(502);
+    expect(res.error).toBe('record_normalize_failed');
+    expect(table.rows).toHaveLength(0);
+    expect(sink.emitCount()).toBe(0);
+  });
+
+  it('a normalize OUTPUT carrying a reserved envelope key is rejected (502 record_normalize_invalid_output, naming it) — nothing persisted', async () => {
+    const table = new SharedRecordTable();
+    const sink = createInMemoryRecordSubmittedSink();
+    const spoofing: RecordNormalizer = {
+      agentId: 'x',
+      async normalize({ record }) {
+        return { status: 'normalized', record: { ...record, tenant_id: 'spoof' } };
+      },
+    };
+
+    const res = await submitRecord(
+      ctx(table),
+      { record_id: 'rec-1' },
+      { title: 'x' },
+      sink,
+      spoofing,
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('unreachable');
+    expect(res.status).toBe(502);
+    expect(res.error).toBe('record_normalize_invalid_output');
+    expect(res.detail).toContain('tenant_id');
+    expect(table.rows).toHaveLength(0);
+    expect(sink.emitCount()).toBe(0);
+  });
+
+  it('a normalize OUTPUT that is a non-object OR exceeds the byte bound is rejected (502 record_normalize_invalid_output) — nothing persisted', async () => {
+    const table = new SharedRecordTable();
+    const sink = createInMemoryRecordSubmittedSink();
+
+    const nonObject: RecordNormalizer = {
+      agentId: 'x',
+      async normalize() {
+        return { status: 'normalized', record: ['not', 'an', 'object'] as never };
+      },
+    };
+    const r1 = await submitRecord(ctx(table), { record_id: 'rec-1' }, { t: 1 }, sink, nonObject);
+    expect(r1.ok).toBe(false);
+    if (r1.ok) throw new Error('unreachable');
+    expect(r1.status).toBe(502);
+    expect(r1.error).toBe('record_normalize_invalid_output');
+
+    const oversize: RecordNormalizer = {
+      agentId: 'x',
+      async normalize() {
+        return { status: 'normalized', record: { blob: 'x'.repeat(70_000) } };
+      },
+    };
+    const r2 = await submitRecord(ctx(table), { record_id: 'rec-2' }, { t: 1 }, sink, oversize);
+    expect(r2.ok).toBe(false);
+    if (r2.ok) throw new Error('unreachable');
+    expect(r2.status).toBe(502);
+    expect(r2.error).toBe('record_normalize_invalid_output');
+
+    expect(table.rows).toHaveLength(0);
+    expect(sink.emitCount()).toBe(0);
+  });
+
+  it('ADDITIVE: WITHOUT a normalizer the raw record is stored + emitted unchanged (byte-identical to no normalize)', async () => {
+    const table = new SharedRecordTable();
+    const sink = createInMemoryRecordSubmittedSink();
+    const body = { title: 'fix the door', priority: 'high' };
+
+    const res = await submitRecord(ctx(table), { record_id: 'rec-1' }, body, sink); // no normalizer
+    expect(res.ok).toBe(true);
+    expect(table.rows[0]?.payload).toEqual(body); // stored raw, not transformed
+    expect(sink.deliveredFor(`${TENANT_A}:rec-1`)?.record).toEqual(body);
+  });
+
+  it('a re-submit does NOT re-run the (possibly non-deterministic) normalize step: it re-emits the ALREADY-normalized stored row (idempotency keys on the RAW input)', async () => {
+    const table = new SharedRecordTable();
+    const sink = createInMemoryRecordSubmittedSink();
+    let calls = 0;
+    // A NON-deterministic transform: it stamps the call ordinal, so a re-run WOULD diverge — the fake
+    // reproduces the real hazard the first-persist-only design defends against.
+    const counting: RecordNormalizer = {
+      agentId: 'x',
+      async normalize({ record }) {
+        calls += 1;
+        return { status: 'normalized', record: { ...record, run: calls } };
+      },
+    };
+    const body = { title: 'fix' };
+
+    const first = await submitRecord(ctx(table), { record_id: 'rec-1' }, body, sink, counting);
+    expect(first.ok).toBe(true);
+    const second = await submitRecord(ctx(table), { record_id: 'rec-1' }, body, sink, counting);
+    expect(second.ok).toBe(true);
+    if (!second.ok) throw new Error('unreachable');
+
+    // Normalize ran EXACTLY ONCE — the re-submit converged on the found-path and skipped it.
+    expect(calls).toBe(1);
+    expect(second.value.deduped).toBe(true);
+    expect(table.rows).toHaveLength(1);
+    expect(table.rows[0]?.payload).toEqual({ title: 'fix', run: 1 }); // the first normalized value stands
+    // ONE delivered event (redelivery), carrying the SAME stored normalized row.
+    expect(sink.deliveredCount()).toBe(1);
+    expect(sink.deliveredFor(`${TENANT_A}:rec-1`)?.record).toEqual({ title: 'fix', run: 1 });
   });
 });

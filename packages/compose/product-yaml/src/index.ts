@@ -9,6 +9,7 @@ export {
   declaresConversationInput,
   declaresFileInput,
   declaresRecordInput,
+  recordInputNormalize,
 } from './capability-stores.js';
 export {
   type ComposedProductDeploy,
@@ -46,6 +47,11 @@ export {
   type LiveExtractionNodeConfig,
   makeLiveExtractionNode,
 } from './live-agent-node.js';
+export {
+  type LiveRecordNormalizerConfig,
+  makeLiveRecordNormalizer,
+  normalizeRunId,
+} from './live-record-normalizer.js';
 export {
   type LiveTurnResponderConfig,
   makeLiveTurnResponder,

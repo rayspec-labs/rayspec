@@ -89,7 +89,12 @@ import {
 // S3: the generic submit-ingress capability — mounted CONDITIONALLY, iff the doc
 // declares `record_input` (audio stays unconditional until S4). The manifest feeds the trigger
 // vocabulary; the bridge sink is the fail-closed tenant boundary (the audio sink's mirror).
-import { RECORD_CAPABILITY_MANIFEST, type RecordCapabilityConfig } from '@rayspec/record-runtime';
+import {
+  RECORD_CAPABILITY_MANIFEST,
+  RECORD_INPUT_CAPABILITY_ID,
+  type RecordCapabilityConfig,
+  type RecordNormalizerFactory,
+} from '@rayspec/record-runtime';
 import {
   type MountedRecordCapability,
   mountRecordCapability,
@@ -280,6 +285,15 @@ export interface ProductYamlRollout {
   readonly record?: {
     readonly basePath?: string;
     readonly capability?: RecordCapabilityConfig;
+    /**
+     * The tenant-bound record NORMALIZER factory (REQUIRED when the record_input capability declares
+     * `input_normalize`): a submitted record is transformed by the declared agent before persist, so a
+     * normalize-declaring doc without a wired normalizer fails closed at compose — the declared-agents
+     * executor-coverage mirror. Production: `makeLiveRecordNormalizer` over the neutral agent path;
+     * dev/tests inject a deterministic fake. Supplied without the declaration it is silently unused (the
+     * same deployment-side-options posture as the sibling rollout blocks).
+     */
+    readonly normalizer?: RecordNormalizerFactory;
   };
   /**
    * File (byte-ingest) capability mount options (S2, ADDITIVE/optional — deploy.ts consumes
@@ -510,6 +524,16 @@ export function composeProductDeploy(
         `capability '${cap.id}' is declared '${cap.status}', but a MOUNTED doc declares only ` +
           "runtime-backed capabilities — mark it 'available' (it IS wired in this composition) or " +
           'remove it from the mounted document.',
+      );
+    }
+    // input_normalize is a RECORD-ingress feature: only the record_input submit path runs a declared
+    // normalize step. A declaration on any OTHER capability has no wired runtime here — reject it
+    // fail-closed (never a silently-ignored declaration).
+    if (cap.input_normalize && cap.id !== RECORD_INPUT_CAPABILITY_ID) {
+      unsupported(
+        `capability '${cap.id}' declares 'input_normalize', but a declared input-normalize step is ` +
+          `only wired for the '${RECORD_INPUT_CAPABILITY_ID}' submit-ingress capability in this ` +
+          'composition — remove it (or declare it on record_input).',
       );
     }
   }
@@ -809,6 +833,21 @@ export function composeProductDeploy(
   // CURRENT doc revision does not declare (e.g. across an update boot), so an unused block is not
   // an error. compose is a pure function with no warn channel; if that changes, a loud
   // rollout-block-without-declaration notice belongs here.
+  // A declared input-normalize step transforms each submitted record via an agent before persist, so a
+  // normalize-declaring doc REQUIRES a wired normalizer factory (the declared-agents executor-coverage
+  // mirror, step 4 above): composing the submit surface without one would mount a route that 502s at
+  // request time — fail-closed at compose instead (deploy-time loud).
+  const recordNormalizeDecl = withRecordInput
+    ? spec.capabilities.find((c) => c.id === RECORD_INPUT_CAPABILITY_ID)?.input_normalize
+    : undefined;
+  if (recordNormalizeDecl && rollout.record?.normalizer === undefined) {
+    rolloutError(
+      "the record_input capability declares 'input_normalize' but rollout.record.normalizer is " +
+        `absent — a submitted record is transformed by the declared agent '${recordNormalizeDecl.agent}' ` +
+        'before persist (production: makeLiveRecordNormalizer over the neutral agent path; dev/tests: ' +
+        'the deterministic injection seam). Fail-closed.',
+    );
+  }
   const record: MountedRecordCapability | undefined = withRecordInput
     ? mountRecordCapability({
         recordSubmittedSink: new WorkflowIngressRecordSubmittedSink({
@@ -818,6 +857,11 @@ export function composeProductDeploy(
         ...(rollout.record?.basePath !== undefined ? { basePath: rollout.record.basePath } : {}),
         ...(rollout.record?.capability !== undefined
           ? { capability: rollout.record.capability }
+          : {}),
+        // Wire the normalizer iff the doc declares input_normalize AND the deployment supplied one (the
+        // fail-closed guard above guarantees a declaration has a matching factory here).
+        ...(recordNormalizeDecl && rollout.record?.normalizer !== undefined
+          ? { recordNormalizer: rollout.record.normalizer }
           : {}),
       })
     : undefined;
