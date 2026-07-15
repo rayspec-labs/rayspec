@@ -295,4 +295,72 @@ frontend:
       throw new Error(`expected ok:\n${JSON.stringify(notNested.errors, null, 2)}`);
     expect(notNested.value.frontend).toHaveLength(1);
   });
+
+  it('accepts an agent action (api + trigger) whose persistTo maps to a compatible store', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: persist-ok
+deployment:
+  durableWorker: true
+stores:
+  - name: extracted_facts
+    columns:
+      - { name: title, type: text }
+      - { name: score, type: integer }
+      - { name: details, type: jsonb }
+api:
+  - method: POST
+    path: '/extract'
+    action: { kind: agent, agent: extractor, persistTo: extracted_facts }
+agents:
+  - id: extractor
+    name: extractor
+    backend: openai
+    model: gpt-4o-mini
+    instructions: extract
+    outputSchema:
+      name: Facts
+      schema:
+        type: object
+        properties:
+          title: { type: string }
+          score: { type: integer }
+          details: { type: object }
+triggers:
+  - name: refresh
+    kind: manual
+    action: { kind: agent, agent: extractor, persistTo: extracted_facts }
+`;
+    const res = parseSpec(yaml);
+    if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
+    const apiAction = res.value.api[0]?.action as { persistTo?: string };
+    expect(apiAction.persistTo).toBe('extracted_facts');
+    const triggerAction = res.value.triggers[0]?.action as { persistTo?: string };
+    expect(triggerAction.persistTo).toBe('extracted_facts');
+  });
+
+  it('is ADDITIVE: an agent action WITHOUT persistTo parses to the byte-identical (no-key) shape', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: no-persist
+agents:
+  - id: helper
+    name: helper
+    backend: openai
+    model: gpt-4o-mini
+    instructions: help
+api:
+  - method: POST
+    path: '/help'
+    action: { kind: agent, agent: helper }
+`;
+    const res = parseSpec(yaml);
+    if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
+    // No default: the optional field is entirely ABSENT (not persistTo:undefined) — proving the field
+    // is additive and an existing spec's action shape is unchanged.
+    expect(res.value.api[0]?.action).toEqual({ kind: 'agent', agent: 'helper' });
+    expect('persistTo' in (res.value.api[0]?.action ?? {})).toBe(false);
+  });
 });

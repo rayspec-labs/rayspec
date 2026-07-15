@@ -121,10 +121,17 @@ export async function executeAgentRun(
   deps: AppDeps,
   agentId: string | undefined,
   routeParams: Record<string, string> = {},
+  persistTo?: string,
 ): Promise<Response> {
   const tenantId = c.get('tenantId');
   if (!tenantId) throw new ApiError('NOT_FOUND', 'Not found.');
   if (!agentId) throw new ApiError('NOT_FOUND', 'Not found.');
+  // Output persistence (opt-in per-action `persistTo`): the run's validated output is written into this
+  // declared store after a successful run. The runtime store table comes from the declarative engine's
+  // product tables; both are threaded into `runAgent` (sync) and the enqueued job (async/durable).
+  const productTables = deps.engine?.productTables;
+  const persistOpts =
+    persistTo !== undefined && productTables !== undefined ? { persistTo, productTables } : {};
 
   // Resolve the agent from the MINIMAL registry (full engine =). Unknown id → uniform 404
   // (no existence leak; an attacker cannot enumerate registered agents).
@@ -214,6 +221,7 @@ export async function executeAgentRun(
       input: effectiveInput,
       instructions: body.instructions,
       maxTurns: body.maxTurns,
+      persistTo,
     });
   }
 
@@ -301,6 +309,7 @@ export async function executeAgentRun(
           runAgent(tdb, entry.backend, spec, {
             tools: runTools,
             runId: freshRunId,
+            ...persistOpts,
             onEvent: async (event) => {
               // 1:1 NeutralEvent → SSE frame, fail-closed: a frame we cannot faithfully
               // serialize is OMITTED (never fabricated). seq is the resume cursor (Last-Event-ID).
@@ -354,7 +363,7 @@ export async function executeAgentRun(
   let result: RunResult;
   try {
     result = await withTimeout(
-      runAgent(tdb, entry.backend, spec, { tools: runTools, runId: freshRunId }),
+      runAgent(tdb, entry.backend, spec, { tools: runTools, runId: freshRunId, ...persistOpts }),
       timeoutMs,
     );
   } catch (err) {
@@ -410,6 +419,8 @@ interface AsyncEnqueueInput {
   input: string;
   instructions?: string;
   maxTurns?: number;
+  /** The agent action's optional output-persist store (threaded onto the durable job). */
+  persistTo?: string;
 }
 
 /**
@@ -435,6 +446,11 @@ interface EnqueueAgentRunInput {
   bodyHash: string;
   /** The PRE-MINTED runId reserved + used as the durable workflow id (reserve-before-execute). */
   reservedRunId: string;
+  /**
+   * The agent action's optional output-persist store name — carried onto the durable `RunJob` so the
+   * off-request run writes its validated output into the declared store. Undefined ⇒ no output persist.
+   */
+  persistTo?: string;
 }
 
 /** The neutral outcome of `enqueueAgentRun` — the effective runId + whether it was a same-key dedupe. */
@@ -532,6 +548,7 @@ async function enqueueAgentRun(
       input: inp.input,
       ...(inp.instructions !== undefined ? { instructions: inp.instructions } : {}),
       ...(inp.maxTurns !== undefined ? { maxTurns: inp.maxTurns } : {}),
+      ...(inp.persistTo !== undefined ? { persistTo: inp.persistTo } : {}),
     });
   } catch (err) {
     // Enqueue THREW — but the throw does NOT prove the job did not start. The durable engine persists
@@ -582,6 +599,7 @@ async function enqueueAsyncRun(
     idemKey: inp.idemKey,
     bodyHash: inp.bodyHash,
     reservedRunId: inp.reservedRunId,
+    ...(inp.persistTo !== undefined ? { persistTo: inp.persistTo } : {}),
   });
   // A same-key dedupe → the loser body (omits `status`: the prior run may already be COMPLETED/FAILED,
   // so echoing 'enqueued' would be a lie — the caller reads the real state from GET /v1/runs/{id}). A

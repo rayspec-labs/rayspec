@@ -756,3 +756,92 @@ describe('negative — TEN-3 camelCase identifier collision (duplicate_name)', (
     expectRejection(yaml, 'duplicate_name');
   });
 });
+
+/**
+ * An agent action's optional `persistTo` writes the run's validated output into a declared store. Each
+ * defect below is caught at DEPLOY (parse/doctor), never surfacing at the runtime persist write: an
+ * unknown store is a dangling ref; a missing/mismatched outputSchema shape is a schema violation.
+ */
+const PERSIST_BASE = `
+version: '1.0'
+metadata:
+  name: persist-base
+stores:
+  - name: extracted_facts
+    columns:
+      - { name: title, type: text }
+      - { name: score, type: integer }
+      - { name: verified, type: boolean }
+      - { name: details, type: jsonb }
+api:
+  - method: POST
+    path: '/extract'
+    action: { kind: agent, agent: extractor, persistTo: extracted_facts }
+agents:
+  - id: extractor
+    name: extractor
+    backend: openai
+    model: gpt-4o-mini
+    instructions: extract the facts
+    outputSchema:
+      name: Facts
+      schema:
+        type: object
+        properties:
+          title: { type: string }
+          score: { type: integer }
+          verified: { type: boolean }
+          details: { type: object }
+`;
+
+describe('persistTo — output persistence target (fail-closed at deploy)', () => {
+  it('the persistTo base spec is valid (so each negative case isolates ONE defect)', () => {
+    const res = parseSpec(PERSIST_BASE);
+    if (!res.ok)
+      throw new Error(`persist base must parse:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.ok).toBe(true);
+  });
+
+  it('rejects persistTo naming an UNKNOWN store (dangling_ref)', () => {
+    const yaml = PERSIST_BASE.replace('persistTo: extracted_facts', 'persistTo: nonexistent_store');
+    expectRejection(yaml, 'dangling_ref');
+  });
+
+  it('rejects persistTo when the agent declares NO outputSchema (schema_violation)', () => {
+    // Drop the whole outputSchema block: there is no structured output to persist.
+    const yaml = PERSIST_BASE.replace(/ {4}outputSchema:[\s\S]*$/, '    tools: []\n');
+    expectRejection(yaml, 'schema_violation');
+  });
+
+  it('rejects an output property whose type MISMATCHES the store column (object → text)', () => {
+    // `title` maps to a `text` column; declaring it as a JSON object is a shape mismatch.
+    const yaml = PERSIST_BASE.replace('title: { type: string }', 'title: { type: object }');
+    expectRejection(yaml, 'schema_violation');
+  });
+
+  it('rejects an output property that is NOT a writable business column (schema_violation)', () => {
+    // A stray property with no matching column — a runtime insert would fail-closed; catch it at deploy.
+    const yaml = PERSIST_BASE.replace(
+      'details: { type: object }',
+      'details: { type: object }\n          bogus_column: { type: string }',
+    );
+    expectRejection(yaml, 'schema_violation');
+  });
+
+  it('rejects persistTo to a SERVER-CONTROLLED column (id → not writable)', () => {
+    const yaml = PERSIST_BASE.replace('title: { type: string }', 'id: { type: string }');
+    expectRejection(yaml, 'schema_violation');
+  });
+
+  it('rejects a TRIGGER agent action persistTo naming an unknown store (dangling_ref)', () => {
+    const yaml = `${PERSIST_BASE}
+deployment:
+  durableWorker: true
+triggers:
+  - name: refresh
+    kind: manual
+    action: { kind: agent, agent: extractor, persistTo: nonexistent_store }
+`;
+    expectRejection(yaml, 'dangling_ref');
+  });
+});

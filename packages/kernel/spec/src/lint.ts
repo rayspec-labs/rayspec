@@ -44,7 +44,7 @@ import { type AgentSpec, type BackendId, validateSpec } from '@rayspec/core';
 import type { Ajv2020 as Ajv2020Class } from 'ajv/dist/2020.js';
 import * as Ajv2020Module from 'ajv/dist/2020.js';
 import { type SpecError, type SpecWarning, specError, specWarning } from './errors.js';
-import { MAX_IDENTIFIER_LENGTH, type RaySpec } from './grammar.js';
+import { type ColumnType, MAX_IDENTIFIER_LENGTH, type RaySpec } from './grammar.js';
 
 type AjvInstance = Ajv2020Class;
 const Ajv2020Ctor = ((Ajv2020Module as { default?: unknown }).default ?? Ajv2020Module) as new (
@@ -193,6 +193,131 @@ function findFkCycle(stores: RaySpec['stores']): string[] | null {
   return cycle;
 }
 
+/**
+ * The JSON-Schema types a declared store column of each `ColumnType` accepts when a run's validated
+ * output is written into it (the `persistTo` cross-check). A `jsonb` column accepts any JSON value; a
+ * scalar column accepts only its matching JSON-Schema scalar (a `timestamp` takes an ISO string, which
+ * the store facade coerces to a Date). Deliberately permissive on `integer` (accepts JSON `number` too —
+ * numeric↔numeric) so the check flags only genuine SHAPE mismatches (e.g. an object into a text column),
+ * never a false positive on a numeric-typed property. `null` is universally compatible (handled below).
+ */
+const PERSIST_COLUMN_COMPAT: Record<ColumnType, ReadonlySet<string>> = {
+  text: new Set(['string']),
+  uuid: new Set(['string']),
+  timestamp: new Set(['string']),
+  integer: new Set(['integer', 'number']),
+  boolean: new Set(['boolean']),
+  jsonb: new Set(['object', 'array', 'string', 'number', 'integer', 'boolean']),
+};
+
+/** snake_case → camelCase — the SAME rule the store facade + product-table builder use for columns. */
+function toCamelIdent(snake: string): string {
+  return snake.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
+}
+
+/** The declared JSON-Schema type(s) of a property schema, as a list ([] when none is declared). */
+function jsonSchemaTypes(propSchema: unknown): string[] {
+  if (typeof propSchema !== 'object' || propSchema === null) return [];
+  const t = (propSchema as { type?: unknown }).type;
+  if (typeof t === 'string') return [t];
+  if (Array.isArray(t)) return t.filter((x): x is string => typeof x === 'string');
+  return [];
+}
+
+/**
+ * Validate an agent action's optional `persistTo` (shared by api routes AND triggers): the target store
+ * must be declared, the referenced agent must declare an OBJECT `outputSchema`, and EVERY output property
+ * must map to a WRITABLE business column of the store with a compatible type. A mismatch is a fail-closed
+ * doctor/lint error at DEPLOY — never a surprise at the runtime persist write. Aggregates ALL violations.
+ */
+function checkPersistTo(
+  persistTo: string,
+  agentId: string,
+  storeByName: ReadonlyMap<string, RaySpec['stores'][number]>,
+  agentById: ReadonlyMap<string, RaySpec['agents'][number]>,
+  pathPrefix: string,
+  refLabel: string,
+): SpecError[] {
+  const out: SpecError[] = [];
+  const store = storeByName.get(persistTo);
+  if (!store) {
+    out.push(
+      specError(
+        'dangling_ref',
+        `${refLabel} persists to unknown store '${persistTo}'`,
+        `${pathPrefix}.persistTo`,
+      ),
+    );
+    return out; // no store ⇒ the column checks below cannot run
+  }
+  // A dangling agent ref is reported by the caller's agent-existence check; only proceed if resolvable.
+  const agent = agentById.get(agentId);
+  if (!agent) return out;
+  const schema = agent.outputSchema?.schema as { properties?: unknown } | undefined;
+  if (!agent.outputSchema || schema === undefined) {
+    out.push(
+      specError(
+        'schema_violation',
+        `${refLabel} sets persistTo '${persistTo}' but agent '${agentId}' declares no outputSchema — there ` +
+          'is no structured output to persist. Declare an outputSchema on the agent, or drop persistTo',
+        `${pathPrefix}.persistTo`,
+      ),
+    );
+    return out;
+  }
+  const properties = schema.properties;
+  if (typeof properties !== 'object' || properties === null || Array.isArray(properties)) {
+    out.push(
+      specError(
+        'schema_violation',
+        `${refLabel} sets persistTo '${persistTo}' but agent '${agentId}' outputSchema declares no object ` +
+          "'properties' — persistTo requires an object output whose properties map to the store's columns",
+        `${pathPrefix}.persistTo`,
+      ),
+    );
+    return out;
+  }
+  // name (snake OR camel) → the declared business column of the target store (the facade accepts both).
+  const columnByName = new Map<string, (typeof store.columns)[number]>();
+  for (const c of store.columns) {
+    columnByName.set(c.name, c);
+    columnByName.set(toCamelIdent(c.name), c);
+  }
+  for (const [propName, propSchema] of Object.entries(properties as Record<string, unknown>)) {
+    const column = columnByName.get(propName);
+    if (!column) {
+      out.push(
+        specError(
+          'schema_violation',
+          `${refLabel} persists to store '${persistTo}', but the agent's output property '${propName}' is ` +
+            'not a writable business column of that store (server-controlled columns like id/tenant_id/' +
+            'created_at/created_by are not writable — check the declared column name)',
+          `${pathPrefix}.persistTo`,
+        ),
+      );
+      continue;
+    }
+    const declaredTypes = jsonSchemaTypes(propSchema);
+    const compat = PERSIST_COLUMN_COMPAT[column.type];
+    const incompatible = declaredTypes.filter((t) => t !== 'null' && !compat.has(t));
+    if (declaredTypes.length > 0 && incompatible.length > 0) {
+      out.push(
+        specError(
+          'schema_violation',
+          `${refLabel} persists output property '${propName}' (type ${incompatible
+            .map((t) => `'${t}'`)
+            .join(
+              '/',
+            )}) into store '${persistTo}' column '${column.name}' of type '${column.type}', which ` +
+            'is not a compatible type',
+          `${pathPrefix}.persistTo`,
+        ),
+      );
+    }
+  }
+  return out;
+}
+
 /** The full semantic pass. Input is already shape-valid (post-Zod-parse). */
 export function lintSpec(spec: RaySpec): SpecError[] {
   const errors: SpecError[] = [];
@@ -202,6 +327,9 @@ export function lintSpec(spec: RaySpec): SpecError[] {
   // name -> store, so a business-key FK (`referencesColumn`) can resolve its referenced column in the
   // TARGET store (unique + type-match validation below).
   const storeByName = new Map(spec.stores.map((s) => [s.name, s]));
+  // id -> agent, so an action's `persistTo` can resolve the referenced agent's outputSchema and check
+  // it maps to the target store's columns.
+  const agentById = new Map(spec.agents.map((a) => [a.id, a]));
   const agentIds = new Set(spec.agents.map((a) => a.id));
   const toolIds = new Set(spec.tooling.map((t) => t.id));
   // handlers indexed by id -> kind, so a ref can also assert the handler is the RIGHT kind.
@@ -569,6 +697,18 @@ export function lintSpec(spec: RaySpec): SpecError[] {
           ),
         );
       }
+      if (action.persistTo !== undefined) {
+        errors.push(
+          ...checkPersistTo(
+            action.persistTo,
+            action.agent,
+            storeByName,
+            agentById,
+            `api[${ri}].action`,
+            `route ${route.method} ${route.path}`,
+          ),
+        );
+      }
     } else {
       // handler OR stream action — both resolve `action.handler` against a declared `route`-kind
       // handler (a stream handler dispatches through the api chokepoint, like a `{handler}` route —
@@ -664,6 +804,18 @@ export function lintSpec(spec: RaySpec): SpecError[] {
             'dangling_ref',
             `trigger '${trigger.name}' references unknown agent '${action.agent}'`,
             `triggers[${ti}].action.agent`,
+          ),
+        );
+      }
+      if (action.persistTo !== undefined) {
+        errors.push(
+          ...checkPersistTo(
+            action.persistTo,
+            action.agent,
+            storeByName,
+            agentById,
+            `triggers[${ti}].action`,
+            `trigger '${trigger.name}'`,
           ),
         );
       }

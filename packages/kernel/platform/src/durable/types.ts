@@ -41,6 +41,13 @@ export interface RunJob {
   readonly instructions?: string;
   /** Optional per-run override of maxTurns. */
   readonly maxTurns?: number;
+  /**
+   * Optional declared store name: when set, the run's validated `outputSchema` output is written as one
+   * row into this store after a successful run (the agent action's `persistTo`). The worker resolves the
+   * store's runtime table from the deployment's product tables at fire time. Exactly-once across a
+   * durable recovery re-dispatch (the run-header completing-transition gate).
+   */
+  readonly persistTo?: string;
 }
 
 /**

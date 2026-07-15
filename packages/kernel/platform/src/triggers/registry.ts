@@ -35,7 +35,7 @@ import type { ResolvedHandler } from '../handlers/handler-runtime.js';
  * it against the live agent registry at fire time, like every run).
  */
 export type ResolvedTriggerAction =
-  | { kind: 'agent'; agentId: string }
+  | { kind: 'agent'; agentId: string; persistTo?: string }
   | { kind: 'handler'; handlerId: string; handler: ResolvedHandler };
 
 /** A registered trigger descriptor — the stable contract the durable worker consumes. */
@@ -156,7 +156,11 @@ export function registerTriggers(spec: RaySpec, config: RegisterTriggersConfig):
             '(the deployment must declare it in agents[] / register its backend). Fail-closed at boot.',
         );
       }
-      action = { kind: 'agent', agentId };
+      action = {
+        kind: 'agent',
+        agentId,
+        ...(trigger.action.persistTo !== undefined ? { persistTo: trigger.action.persistTo } : {}),
+      };
     } else {
       const handlerId = trigger.action.handler;
       const resolved = handlers.get(handlerId);
