@@ -5,14 +5,14 @@
  * write below opens its OWN short `db.transaction(...)` (the intake-ordering law: the model runs
  * between two short txs, never inside one).
  *
- * ── THE REPLY ROW (reuses the S1 ledger columns — no schema change) ─────────────────────────────
+ * ── THE REPLY ROW (reuses the existing ledger columns — no schema change) ─────────────────────────────
  * message_id  = `reply~<user message_id>` — the '~' is OUTSIDE the client message-id alphabet
  *               (`[A-Za-z0-9_.-]`, config.ts), so a derived reply id can NEVER collide with a real
  *               client message id (a client submitting the literal text "reply~m-1" as its own
  *               message_id is rejected by the id shape at intake).
  * turn_ref    = the reply's DEDUP/single-flight authority (the ledger's global unique) — exactly
  *               one reply row can ever exist per user turn.
- * turn_seq    = the reply row's OWN next sequence (the S1 read-max+1 law).
+ * turn_seq    = the reply row's OWN next sequence (the read-max+1 law).
  * run_id      = the deterministic reply run id (from the responder — C10 convergence).
  * state       = 'replied' (terminal; persisted only after a COMPLETED run).
  * The reply row EMITS NO EVENT (only user turns trigger workflows — row-event.ts fail-closes on a
@@ -34,9 +34,9 @@
  * the reply lands AFTER it in seq order (e.g. user#1 → user#2 → reply-to-#1 at seq 3): the ledger
  * honestly records arrival order; the reply↔turn association is the derived `reply~` message id,
  * NEVER seq adjacency. Neither client sees an error when the USER turn wins the seq — the reply
- * retries here. The converse race exists too (TF-F4, stated honestly): when the REPLY persist
+ * retries here. The converse race exists too (stated honestly): when the REPLY persist
  * wins a sequence a concurrent user turn had read, THAT turn's intake loses its `seq_ref` insert
- * and surfaces the S1 loud 409 `conversation_turn_conflict` — so the 409 is NOT user-vs-user
+ * and surfaces the loud 409 `conversation_turn_conflict` — so the 409 is NOT user-vs-user
  * only; the client's same-message_id retry still converges (C10). On reply-retry exhaustion the
  * typed 503 carries the run id — the model output is durable under it and the client's
  * idempotent re-POST converges via arm 2 (no second model call).
@@ -47,7 +47,7 @@
  * model once — the ledger still converges on ONE reply row (the `turn_ref` unique) and both
  * callers return the winner's text. (The former residual (b) — a terminally-FAILED first attempt
  * pinning the deterministic run id's header at 'failed' and journal-mixing a retry's events under
- * it — is FIXED by the TF-F1 attempt-scoped run-id walk in the live responder: a retry after a
+ * it — is FIXED by the attempt-scoped run-id walk in the live responder: a retry after a
  * terminal failure runs under a FRESH deterministic attempt id with its own clean header/journal;
  * the reply row records the attempt that succeeded, and attach still only ever reuses a COMPLETED
  * header.)
@@ -75,7 +75,7 @@ export const REPLY_PERSIST_MAX_ATTEMPTS = 3;
 
 /**
  * A reply-leg error: the closed capability error shape PLUS the deterministic reply `runId`
- * (STRUCTURAL, not detail-embedded — sharpening 6: the exhaustion error must CARRY the run id).
+ * (STRUCTURAL, not detail-embedded — the exhaustion error must CARRY the run id).
  * Present whenever the responder was reached (both reply-leg codes).
  */
 export interface ReplyLegError extends ConversationCapabilityError {
@@ -89,7 +89,7 @@ function replyErr(status: number, error: string, detail: string, runId: string):
 }
 
 /**
- * (Duplicated VERBATIM from submit-turn.ts — that S1 core file stays byte-unchanged in S3, so the
+ * (Duplicated VERBATIM from submit-turn.ts — that core file stays byte-unchanged, so the
  * 23505 detector is repeated here rather than extracted through it.) True if a thrown DB error is
  * the facade-sanitized Postgres UNIQUE violation; detection only, down a bounded cause chain.
  */
@@ -104,7 +104,7 @@ function isUniqueViolation(e: unknown): boolean {
 
 /**
  * Interpret a STORED ledger row as the reply block (the dedup/convergence read). Runtime-guarded
- * fail-closed (the S2 echo-point discipline applied to the S3 read): a row under a reply turn_ref
+ * fail-closed (the echo-point discipline applied to the reply read): a row under a reply turn_ref
  * that is not an assistant/replied row with a run id is a construction bug — loud, never echoed.
  */
 function replyBlockFromRow(
@@ -128,7 +128,7 @@ function replyBlockFromRow(
 
 /**
  * Produce (or converge on) the assistant reply for one COMMITTED intake. See the module header for
- * the full law. `intake` is the S1 submit result (the user turn's facts); the caller holds NO
+ * the full law. `intake` is the submit result (the user turn's facts); the caller holds NO
  * transaction. Error results NEVER unwind the intake — the binding maps them to the reply-leg
  * error body carrying the intake facts.
  */
@@ -182,8 +182,8 @@ export async function ensureTurnReply(
   const outcome = await responder.respond({
     input: assembled.input,
     turnRef: userTurnRef,
-    // S4: forward the live sink when the SSE leg supplied one (spread so ABSENT when it did not —
-    // the S3 call shape byte-for-byte).
+    // Forward the live sink when the SSE leg supplied one (spread so ABSENT when it did not —
+    // the non-streaming call shape byte-for-byte).
     ...(opts?.onEvent ? { onEvent: opts.onEvent } : {}),
   });
   if (outcome.status !== 'completed') {

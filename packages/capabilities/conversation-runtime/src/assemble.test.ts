@@ -130,7 +130,7 @@ describe('assembleTurnInput — bounds', () => {
     expect(dataSize(assembled.input)).toBe(newestSize + rowSize);
   });
 
-  it('INJ-F2/TQ-2: context + history share ONE chars budget — both channels full, total DATA ≤ chars (boundary-exact split)', () => {
+  it('context + history share ONE chars budget — both channels full, total DATA ≤ chars (boundary-exact split)', () => {
     // Construct EQUAL-SIZE lines on both channels: 5 history entries (4 older + the answered
     // turn) and 6 context rows whose serialized lines all have the SAME length K. With
     // chars = newest + 4K: the answered turn is reserved first; the remainder is 4K; older
@@ -174,7 +174,7 @@ describe('assembleTurnInput — bounds', () => {
     expect(assembled.droppedContextRows).toBe(4);
   });
 
-  it('INJ-F2: the answered turn alone over budget evicts ALL context and ALL older history — but still survives', () => {
+  it('the answered turn alone over budget evicts ALL context and ALL older history — but still survives', () => {
     const history = [
       { turn_seq: 1, role: 'user', message: 'older turn' },
       { turn_seq: 2, role: 'user', message: 'the answered turn, larger than the whole budget' },
@@ -256,7 +256,7 @@ describe('assembleTurnInput — the trust-boundary delimiter jail (the two manda
   });
 });
 
-describe('assembleTurnInput — hostile STORE-CONTEXT rows (INJ-F1: the same jail, second channel)', () => {
+describe('assembleTurnInput — hostile STORE-CONTEXT rows (the same jail, second channel)', () => {
   const HISTORY = [{ turn_seq: 1, role: 'user', message: 'current' }];
   const DECLARED = { store: 'catalog', limit: 10 };
 

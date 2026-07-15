@@ -18,8 +18,8 @@
  * ── THE STATE MACHINE (every arm pinned in upload.test.ts) ────────────────────────────────────
  *  - NEW file_id            → blob put (content-addressed key) + pointer row (state `uploaded`).
  *  - identical re-upload    → idempotent no-op (`deduped: true`; no duplicate blob write) — a
- *    (pre- OR post-seal)      client retry is always safe. Identity is sha-ONLY (deliberate,
- *                             SM-3): a re-upload of identical bytes with a CHANGED content_type /
+ *    (pre- OR post-seal)      client retry is always safe. Identity is sha-ONLY (deliberate):
+ *                             a re-upload of identical bytes with a CHANGED content_type /
  *                             original_filename is dropped as `deduped: true` — the stored
  *                             metadata is FROZEN with the bytes; the correction path is a
  *                             divergent upload (pre-seal) or a new file_id.
@@ -27,7 +27,7 @@
  *    pre-seal                 the client correcting its staged bytes is the normal flow; the old
  *                             bytes orphan under their content key — the stated no-GC cut). The
  *                             row write is STATE-GUARDED (`state = 'uploaded'` in the update
- *                             filter — SM-1): a submit that SEALS the row between this request's
+ *                             filter): a submit that SEALS the row between this request's
  *                             read and its write makes the write match ZERO rows, and the request
  *                             re-reads + lands on the post-seal arms below — a sealed row is
  *                             never silently overwritten by a stale-read replace.
@@ -35,7 +35,7 @@
  *    post-seal                key (a race-detected arrival may have already orphaned ITS bytes
  *                             under their own content key — harmless, the stated cut) — a SEALED
  *                             file is never silently replaced. The STORED authoritative event is
- *                             RE-EMITTED best-effort first (the record DUR-1/REG-1 heal, SM-2: a
+ *                             RE-EMITTED best-effort first (the record heal: a
  *                             sealed-but-never-enqueued file is healed by any SUBMIT retry or a
  *                             DIVERGENT upload retry; an IDENTICAL post-seal upload is a pure
  *                             no-op that does NOT re-emit — deliberate, the idempotent read-like
@@ -43,7 +43,7 @@
  *                             swallowed — the deterministic 409 stands — while the fail-closed
  *                             `FileEventRejectedError` family propagates so the binding maps it
  *                             to the clean 403).
- *  - KNOWN CAVEAT — first-upload TOCTOU (BACKLOG UPSERT-GUARD-1): a concurrent FIRST upload
+ *  - KNOWN CAVEAT — first-upload TOCTOU: a concurrent FIRST upload
  *    that read "no row" and lands its upsert AFTER another client created+sealed the same
  *    file_ref RESETS the sealed row to `uploaded` (the conflict arm repoints sha/blob_key). The
  *    enqueued run + the sealed bytes stay consistent (content-addressed blob + emitted event);
@@ -60,7 +60,7 @@
  * TRUST BOUNDARY: the body/headers are UNTRUSTED CALLER DATA — bounded, hashed, and stored as bytes/DATA
  * columns; no model call, no instruction interpretation, no tenant signal (the tenant is
  * server-derived). The declared content type is allowlist-CHECKED (fail-closed 415) but stored as
- * ADVISORY data — the S3 parser sniffs magic bytes and never trusts it.
+ * ADVISORY data — the parser sniffs magic bytes and never trusts it.
  */
 import { createHash } from 'node:crypto';
 import type { StoreRow } from '@rayspec/handler-sdk';
@@ -80,7 +80,7 @@ const CONTENT_LENGTH_RE = /^\d{1,15}$/;
 const FILE_NAME_MAX_CHARS = 255;
 
 /**
- * True if `value` carries a control or invisible char — rejected in a filename (DATA shape, TS-1):
+ * True if `value` carries a control or invisible char — rejected in a filename (DATA shape):
  * C0 controls + DEL, C1 controls (0x80–0x9F), bidi controls (U+202A–U+202E embeddings/overrides,
  * U+2066–U+2069 isolates — the RLO extension-spoof class: 'report\u202Efdp.exe' RENDERS as
  * 'reportexe.pdf'), and zero-width chars (U+200B–U+200D, U+FEFF). Legitimate unicode (umlauts,
@@ -126,7 +126,7 @@ async function drainBounded(
         try {
           await reader.cancel('file byte cap exceeded (drain-time enforcement)');
         } catch {
-          // BB-1: a throwing cancel is a transport-teardown fault — the cap decision is already
+          // A throwing cancel is a transport-teardown fault — the cap decision is already
           // made and the deterministic 413 must stand; there is nothing to recover here.
         }
         return 'over_cap';
@@ -146,9 +146,9 @@ async function drainBounded(
 
 /**
  * The SEALED-row outcomes — ONE implementation shared by the pre-checked sealed path and the
- * state-guarded write's zero-match re-read (SM-1), so the race-detected path is
+ * state-guarded write's zero-match re-read, so the race-detected path is
  * behavior-identical to the pre-checked one: identical bytes → the idempotent no-op; divergent
- * bytes → the DUR-1 heal + the LOUD 409 (the module header's state machine).
+ * bytes → the stored-event heal + the LOUD 409 (the module header's state machine).
  */
 async function sealedRowOutcome(
   tenantId: string,
@@ -169,7 +169,7 @@ async function sealedRowOutcome(
       deduped: true,
     });
   }
-  // THE DUR-1 HEAL (best-effort — the record REG-1 rationale): before the loud 409, re-emit
+  // THE STORED-EVENT HEAL (best-effort — the record heal rationale): before the loud 409, re-emit
   // the STORED authoritative event. If a prior submit crashed between its seal and its emit,
   // a corrected-bytes retry lands HERE — without the re-emit the sealed file would silently
   // never get its workflow run. The emit is idempotent downstream (file-scoped event_id →
@@ -229,7 +229,7 @@ export async function uploadFile(
 
   // (2) THE CONTENT-TYPE ALLOWLIST — fail-closed 415 BEFORE any read/store. The media type is
   // normalized (parameters stripped, lowercased) for the CHECK and stored in that normalized form
-  // as ADVISORY data (never trusted — the S3 parser sniffs magic bytes).
+  // as ADVISORY data (never trusted — the parser sniffs magic bytes).
   const rawType = request.contentTypeHeader;
   const mediaType =
     rawType === undefined || rawType === null
@@ -245,7 +245,7 @@ export async function uploadFile(
     );
   }
 
-  // (3) The optional client filename — DATA ONLY (SUF-8): shape-bounded here, stored as an
+  // (3) The optional client filename — DATA ONLY: shape-bounded here, stored as an
   // escaped column, NEVER a key/path/id component.
   const rawName = request.fileNameHeader;
   let originalFilename: string | null = null;
@@ -299,7 +299,7 @@ export async function uploadFile(
     }
     // Divergent re-upload while STILL staged — LAST-WRITE-WINS (deliberate; see module header).
     // Put the new bytes under their OWN content key first, then repoint the row; the old bytes
-    // orphan under their old key (the stated no-GC cut). The repoint is STATE-GUARDED (SM-1):
+    // orphan under their old key (the stated no-GC cut). The repoint is STATE-GUARDED:
     // `state = 'uploaded'` in the update FILTER means it may only land on a row that is STILL
     // staged — a submit that sealed the row between our read above and this write matches ZERO
     // rows instead of silently overwriting the sealed row (the facade's update ANDs the filter
@@ -331,8 +331,8 @@ export async function uploadFile(
       }
       // Still staged yet zero rows matched — REACHABLE via the select-then-upsert TOCTOU of a
       // concurrent FIRST upload: the NEW-file arm's upsert conflict arm resets a just-sealed row
-      // to 'uploaded' (and repoints sha/blob_key) — the module header's KNOWN CAVEAT, tracked as
-      // BACKLOG UPSERT-GUARD-1 (structural close = a conditional-upsert seam in the platform
+      // to 'uploaded' (and repoints sha/blob_key) — the module header's KNOWN CAVEAT (structural
+      // close = a conditional-upsert seam in the platform
       // store facade). The enqueued run + the sealed bytes stay consistent (content-addressed
       // blob + emitted event); only the row pointer diverges. Fail closed here rather than guess.
       throw new Error('file-runtime upload: pointer row changed shape mid-upload (fail-closed).');

@@ -53,7 +53,7 @@ describe('RECORD_CAPABILITY_MANIFEST', () => {
     // The canonical id IS the default join …
     expect(event?.contract).toBe('record_input.record_submitted');
     expect(normalizeProductTriggerEvent('record_input', 'record_submitted')).toBe(event?.contract);
-    // … and the alias table stays audio-only (a record alias would violate the S1 convention).
+    // … and the alias table stays audio-only (a record alias would violate the default-join convention).
     expect(PRODUCT_TRIGGER_EVENT_ALIASES.some((a) => a.capability === 'record_input')).toBe(false);
   });
 

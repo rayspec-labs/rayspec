@@ -2,7 +2,7 @@
  * The submit core — seal + emit over the byte-backed pointer row (the record durability recipe):
  * deterministic tenant-scoped event id; idempotent re-submit that RE-EMITS (redelivery); the event
  * built from the STORED row only (never a request); divergent sha-assertion → loud 409 (with the
- * DUR-1 stored-event heal on a sealed row, best-effort, cross-tenant family preserved); nothing
+ * stored-event heal on a sealed row, best-effort, cross-tenant family preserved); nothing
  * staged → 409 file_not_uploaded (also the non-disclosing foreign-tenant shape).
  */
 import { createHash } from 'node:crypto';
@@ -288,7 +288,7 @@ describe('submitFile — the divergence contract (409 file_conflict)', () => {
     if (res.ok) throw new Error('unreachable');
     expect(res.status).toBe(409);
     expect(res.error).toBe('file_conflict');
-    // The DUR-1 heal: the STORED authoritative event reaches the sink exactly once.
+    // The stored-event heal: the STORED authoritative event reaches the sink exactly once.
     expect(s.emitCount()).toBe(1);
     expect(s.deliveredFor(`${TENANT_A}:f-1`)).toMatchObject({
       sha256: sha256Hex('file body v1'),
@@ -327,7 +327,7 @@ describe('submitFile — the divergence contract (409 file_conflict)', () => {
   });
 });
 
-describe('submitFile — the divergent-upload-racing-submit TOCTOU (SM-1 arm 2: the re-read consistency guard)', () => {
+describe('submitFile — the divergent-upload-racing-submit TOCTOU (arm 2: the re-read consistency guard)', () => {
   it('a divergent upload that replaces the STAGED bytes between submit’s read and its seal yields a 409 with ZERO emit (never an event for bytes the request did not verify)', async () => {
     const table = new SharedFileTable();
     const bucket = new SharedBlobBucket();
@@ -358,7 +358,7 @@ describe('submitFile — the divergent-upload-racing-submit TOCTOU (SM-1 arm 2: 
     );
 
     // ZERO emit: the sealed row now holds shaX — bytes this request's integrity decision NEVER
-    // saw. Emitting them would start a workflow on unverified bytes (the SM-1 defect).
+    // saw. Emitting them would start a workflow on unverified bytes (the re-read-consistency defect).
     expect(s.emitCount()).toBe(0);
     expect(s.deliveredFor(`${TENANT_A}:f-1`)).toBeUndefined();
     expect(res.ok).toBe(false);
@@ -380,7 +380,7 @@ describe('submitFile — the divergent-upload-racing-submit TOCTOU (SM-1 arm 2: 
   });
 });
 
-describe('submitFile — emit faults on the PRIMARY paths surface (the DUR-1 liveness decision, donor-faithful)', () => {
+describe('submitFile — emit faults on the PRIMARY paths surface (the liveness decision, donor-faithful)', () => {
   it('a transient sink fault on the FIRST submit PROPAGATES (the row stays sealed; the retry re-emits)', async () => {
     const table = new SharedFileTable();
     seedRow(table, { state: 'uploaded' });
@@ -388,7 +388,7 @@ describe('submitFile — emit faults on the PRIMARY paths surface (the DUR-1 liv
     await expect(submitFile(ctx(table), { file_id: 'f-1' }, undefined, throwing)).rejects.toThrow(
       'DBOS enqueue unavailable',
     );
-    // DP-1 (both postures, deliberately): under THIS unit-fake posture the db auto-commits, so
+    // Both postures (deliberately): under THIS unit-fake posture the db auto-commits, so
     // the seal persisted (non-atomic persist-then-emit) and the retry lands on the re-submit
     // path, which re-emits. Under the REAL-PLATFORM posture the route runs inside the engine's
     // tenant transaction, so the surfaced fault rolls the seal back and the retry re-seals from
@@ -415,7 +415,7 @@ describe('submitFile — emit faults on the PRIMARY paths surface (the DUR-1 liv
   });
 });
 
-describe('submitFile — file-id validation (the HS-2 belt, point of use)', () => {
+describe('submitFile — file-id validation (the construction belt, point of use)', () => {
   it('rejects invalid shapes (422 file_id_invalid) with zero emit', async () => {
     for (const bad of ['', 'has space', 'a:b', 'a/b', '..', '.']) {
       const s = sink();

@@ -80,7 +80,7 @@ describe('mountFileCapability — the composable fragments', () => {
     expect(mounted.basePath).toBe(DEFAULT_FILE_BASE_PATH);
     // The mount's stores equal the store-schema function (single source).
     expect(mounted.stores).toEqual(fileCapabilityStores());
-    // WHOLE-TUPLE route assertions (the S2 gate law: never just "a route exists").
+    // WHOLE-TUPLE route assertions (the gate law: never just "a route exists").
     expect(mounted.api).toEqual([
       {
         method: 'PUT',

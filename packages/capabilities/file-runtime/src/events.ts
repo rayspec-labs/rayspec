@@ -13,7 +13,7 @@ import type { SubmittedFileEvent } from './types.js';
 /**
  * The event sink the capability emits `file_submitted` through. Delivery MUST be idempotent by
  * `event.event_id`: submit emits on the first-seal path, the re-submit path, AND the
- * divergent-conflict 409 paths (the DUR-1 heal — always the STORED event, so a crash between seal
+ * divergent-conflict 409 paths (the heal — always the STORED event, so a crash between seal
  * and emit is recovered by ANY retry) — the sink treats the second delivery of one `event_id` as a
  * no-op (one workflow).
  */

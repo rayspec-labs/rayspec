@@ -12,7 +12,7 @@
  *     downstream — ONE durable run per turn.
  *  3. THE EVENT IS BUILT FROM THE STORED ROW ONLY (row-event.ts) — never from a request. The
  *     ledger is INSERT-only, so the insert's RETURNING row IS the authoritative stored row (no
- *     concurrent-mutation path exists on a persisted user turn pre-S3; the explicit re-read the
+ *     concurrent-mutation path exists on a persisted user turn; the explicit re-read the
  *     record/file donors need for their replace/seal arms has nothing to catch here — deliberate).
  *  4. DIFFERENT-TEXT-SAME-MESSAGE_ID IS LOUD, NEVER A SILENT DEDUP — a re-POST whose text differs
  *     from the stored turn is a 409 `conversation_message_conflict` with ZERO row change and ZERO
@@ -113,7 +113,7 @@ export async function submitTurn(
       'the turn body must be a JSON object of the closed shape { message_id, text }.',
     );
   }
-  // THE WHOLE-BODY BOUND (BOUNDS-1, the record whole-payload discipline): bound the WHOLE body
+  // THE WHOLE-BODY BOUND (the record whole-payload discipline): bound the WHOLE body
   // BEFORE any field validation, typed 413. The measure is SHALLOW BY DESIGN (the module header's
   // structural no-walk discipline): own key names + own STRING values, raw UTF-8 bytes. That is a
   // complete measure of the ACCEPTED language — the closed scalar shape rejects every non-string
@@ -191,13 +191,13 @@ export async function submitTurn(
   }
 
   // The DEDUP authority (requirement 2/4): an identical re-POST is a redelivery; a divergent one
-  // is a loud 409 with the DUR-1 heal.
+  // is a loud 409 with the stored-event heal.
   const tRef = turnRef(ctx.tenantId, conversationId, messageId);
   const existing = await ctx.db.select(CONVERSATION_TURNS_STORE, { turn_ref: tRef }, { limit: 1 });
   const found = existing[0];
   if (found !== undefined) {
     if (String(found.message) !== text) {
-      // THE DUR-1 HEAL — BEST-EFFORT BY DESIGN (C10-2; the record `2b688c8` heal posture): the
+      // THE STORED-EVENT HEAL — BEST-EFFORT BY DESIGN (C10-2; the record heal posture): the
       // stored turn may be persisted-but-never-enqueued, so re-emit its STORED event before the
       // permanent 409. The catch below swallows EVERY throw except the fail-closed rejection
       // family — deliberately: the 409 is a PERMANENT client condition (divergent text under a

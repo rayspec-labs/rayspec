@@ -3,7 +3,7 @@
  * uses the DEFAULT `${capability}.${event}` join (the default-join rule — no alias); the descriptor is
  * coherent (key field within the payload keys; payload keys == the ONE payload-key source); the
  * turn contract pins the runtime constants; the ROUTE TUPLES are whole (method/kind/auth for BOTH
- * routes — the S2 gate asserts manifest == mounted surface from these). The repo-level capability
+ * routes — the gate asserts manifest == mounted surface from these). The repo-level capability
  * check re-asserts these from the committed JSON — this test keeps JSON and TS from drifting.
  */
 import { readFileSync } from 'node:fs';
@@ -29,7 +29,7 @@ describe('CONVERSATION_CAPABILITY_MANIFEST', () => {
   });
 
   it('pins the manifest self-consistency literals: status runtime, Tier B, runtime-available, canonical event id in contracts', () => {
-    // Read the COMMITTED manifest.json (the source the S2 capability check consumes) so a downgrade
+    // Read the COMMITTED manifest.json (the source the capability check consumes) so a downgrade
     // of the on-disk value fails HERE directly — not only via the "equals TS source" drift test above.
     const committed = JSON.parse(readFileSync(manifestJsonPath, 'utf8')) as {
       status: string;
@@ -59,7 +59,7 @@ describe('CONVERSATION_CAPABILITY_MANIFEST', () => {
     expect(normalizeProductTriggerEvent('conversation_input', 'turn_submitted')).toBe(
       event?.contract,
     );
-    // … and the alias table stays audio-only (a conversation alias would violate the S1 convention).
+    // … and the alias table stays audio-only (a conversation alias would violate the default-join convention).
     expect(PRODUCT_TRIGGER_EVENT_ALIASES.some((a) => a.capability === 'conversation_input')).toBe(
       false,
     );
@@ -80,7 +80,7 @@ describe('CONVERSATION_CAPABILITY_MANIFEST', () => {
     expect(event?.idempotency_key_field).toBe('turn_ref');
   });
 
-  it('the message TEXT is IN the payload keys (the PM-locked payload decision, gate-pinned) alongside the CC-1 scope key', () => {
+  it('the message TEXT is IN the payload keys (the PM-locked payload decision, gate-pinned) alongside the scope key', () => {
     const event = CONVERSATION_CAPABILITY_MANIFEST.capabilities[0]?.events[0];
     // The bounded message rides the payload (the record_input business-field precedent) …
     expect(event?.payload_keys).toContain('message');

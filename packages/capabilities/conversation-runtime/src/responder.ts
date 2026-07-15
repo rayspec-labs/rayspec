@@ -75,9 +75,9 @@ export interface ResponderHistoryWindow {
  * the same `turnRef` (the live impl ATTACHES to a completed run instead of re-invoking the model —
  * the crash-window convergence path; C10).
  *
- * `onEvent` (the S4 SEAM, unused in S3): an optional live event sink the implementation forwards
+ * `onEvent` (the streaming seam, unused in the non-streaming path): an optional live event sink the implementation forwards
  * into the run (the live impl threads it as `runAgent`'s `opts.onEvent`). Typed neutrally here
- * (this package imports no platform event types); S4's SSE leg passes it — no restructuring.
+ * (this package imports no platform event types); the SSE leg passes it — no restructuring.
  */
 export interface ConversationTurnResponder {
   /** The responder's agent id (config-derived; the reply run's `agentName`). */

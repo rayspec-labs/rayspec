@@ -1,10 +1,10 @@
 /**
  * The canonical seam mapping — fail-the-fix couplings:
- *  - the payload keys equal the MANIFEST descriptor's payload_keys (the CC-1 contract) AND are
+ *  - the payload keys equal the MANIFEST descriptor's payload_keys (the contract) AND are
  *    exactly what the adapter emits — nothing more (no client channel), nothing less;
  *  - every field is the SERVER-DERIVED value from the capability event (stored-row provenance);
  *  - the raw bytes are NEVER in the payload (blob_key is a pointer, not content);
- *  - the event type is the S1 DEFAULT join with NO alias-table entry.
+ *  - the event type is the DEFAULT join with NO alias-table entry.
  */
 import type { SubmittedFileEvent } from '@rayspec/file-runtime';
 import { FILE_CAPABILITY_MANIFEST } from '@rayspec/file-runtime';
@@ -59,7 +59,7 @@ describe('submittedFileEventToWorkflowInput', () => {
     expect(input.payload.original_filename).toBeNull();
   });
 
-  it('the payload keys ARE the manifest descriptor payload_keys (the CC-1 coupling) incl. the key field — and NOTHING more', () => {
+  it('the payload keys ARE the manifest descriptor payload_keys (the coupling) incl. the key field — and NOTHING more', () => {
     const descriptor = FILE_CAPABILITY_MANIFEST.capabilities[0]?.events[0];
     expect(descriptor?.contract).toBe(FILE_SUBMITTED_EVENT_TYPE);
     expect([...(descriptor?.payload_keys ?? [])]).toEqual([...FILE_SUBMITTED_PAYLOAD_KEYS]);

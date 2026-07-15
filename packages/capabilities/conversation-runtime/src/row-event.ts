@@ -11,7 +11,7 @@ import type { SubmittedTurnEvent } from './types.js';
 
 export function submittedTurnEventFromRow(tenantId: string, row: StoreRow): SubmittedTurnEvent {
   if (row.role !== 'user') {
-    // Only user turns trigger workflows (the S3 assistant reply row emits nothing) — an event
+    // Only user turns trigger workflows (the assistant reply row emits nothing) — an event
     // built from any other row is a construction bug, fail-closed.
     throw new Error(
       `conversation-runtime: turn_submitted may only be built from a 'user' ledger row ` +

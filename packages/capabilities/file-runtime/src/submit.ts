@@ -14,9 +14,9 @@
  *  4. DIVERGENCE IS LOUD, NEVER A SILENT DEDUP — the submit body is a CLOSED shape
  *     (`{ sha256? }`): an OPTIONAL integrity assertion (the audio `total_chunks` precedent). An
  *     assertion that does not match the stored bytes is a 409 `file_conflict`; on a SEALED row
- *     that 409 carries the DUR-1 stored-event heal (best-effort — a generic transient sink fault
+ *     that 409 carries the stored-event heal (best-effort — a generic transient sink fault
  *     is swallowed, the deterministic 409 stands; the fail-closed `FileEventRejectedError` family
- *     propagates to the binding's 403 — the record REG-1 micro-fix pattern). Any OTHER body key
+ *     propagates to the binding's 403 — the record micro-fix pattern). Any OTHER body key
  *     is rejected 422 (`invalid_submit_body`) — the payload is server-derived only, so there is
  *     no spoof channel at all.
  *
@@ -24,8 +24,8 @@
  * IDENTICAL-re-submit re-emit are DELIBERATELY NOT best-effort — they are the crash-recovery
  * mechanism, so a transient sink fault SURFACES (500) to keep the client retrying until the file
  * is enqueued; swallowing it would re-open the silent zero-run. What a SURFACED first-submit
- * fault leaves behind (DP-1 — PINNED by S2's route wiring):
- *  - REAL-PLATFORM posture (S2-PROVEN, api-auth file-capability.db.test.ts): the submit route runs
+ * fault leaves behind (PINNED by the route wiring):
+ *  - REAL-PLATFORM posture (proven by api-auth file-capability.db.test.ts): the submit route runs
  *    INSIDE the engine's tenant transaction (platform route-init.ts `invokeRouteHandler`), so a
  *    surfaced fault ROLLS THE SEAL BACK — the retry re-seals from `uploaded` and emits
  *    (`deduped: false`).
@@ -127,7 +127,7 @@ export async function submitFile(
   // client believes different bytes are staged than actually are.
   if (assertedSha !== undefined && assertedSha !== String(found.sha256).toLowerCase()) {
     if (sealed) {
-      // THE DUR-1 HEAL (best-effort — the record REG-1 rationale, see the module header): the
+      // THE STORED-EVENT HEAL (best-effort — the record heal rationale, see the module header): the
       // sealed row may be persisted-but-never-enqueued; re-emit its STORED event before the
       // permanent 409. Generic transient faults are swallowed; the fail-closed rejection family
       // propagates (403).
@@ -149,7 +149,7 @@ export async function submitFile(
   }
 
   if (!sealed) {
-    // FIRST SUBMIT: seal the row, then emit (tx posture: the module header's DP-1 note).
+    // FIRST SUBMIT: seal the row, then emit (tx posture: the module header's tx-posture note).
     await ctx.db.update(
       FILE_UPLOADS_STORE,
       { file_ref: ref },
@@ -158,14 +158,14 @@ export async function submitFile(
   }
 
   // AUTHORITATIVE RE-READ: the emitted event is built from the STORED row as it now stands (the
-  // record TQ-1 posture) — never from this request's values.
+  // record re-read posture) — never from this request's values.
   const stored = await ctx.db.select(FILE_UPLOADS_STORE, { file_ref: ref }, { limit: 1 });
   const row = stored[0];
   if (row === undefined) {
     throw new Error('file-runtime submit: pointer row vanished mid-submit (fail-closed).');
   }
 
-  // THE RE-READ CONSISTENCY GUARD (SM-1, the record re-read-divergence posture restored): this
+  // THE RE-READ CONSISTENCY GUARD (the record re-read-divergence posture restored): this
   // request's decisions — the integrity 409-check and the seal itself — were made against
   // `found`. A DIVERGENT upload that replaced the still-staged bytes between that read and the
   // seal means the re-read row holds bytes this request NEVER verified; emitting them would

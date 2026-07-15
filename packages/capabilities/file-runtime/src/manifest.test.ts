@@ -3,7 +3,7 @@
  * uses the DEFAULT `${capability}.${event}` join (the default-join rule — no alias); the descriptor is
  * coherent (key field within the payload keys; payload keys == the ONE payload-key source); the
  * ingest contract pins the runtime constants; the ROUTE TUPLES are whole (method/kind/auth for
- * BOTH routes — the S2 gate asserts manifest == mounted surface from these). The repo-level
+ * BOTH routes — the gate asserts manifest == mounted surface from these). The repo-level
  * capability check re-asserts these from the committed JSON — this test keeps JSON and TS
  * from drifting.
  */
@@ -26,7 +26,7 @@ describe('FILE_CAPABILITY_MANIFEST', () => {
   });
 
   it('pins the manifest self-consistency literals: status runtime, Tier B, runtime-available, canonical event id in contracts', () => {
-    // Read the COMMITTED manifest.json (the source the S2 capability check consumes) so a downgrade
+    // Read the COMMITTED manifest.json (the source the capability check consumes) so a downgrade
     // of the on-disk value fails HERE directly — not only via the "equals TS source" drift test above.
     const committed = JSON.parse(readFileSync(manifestJsonPath, 'utf8')) as {
       status: string;
@@ -54,7 +54,7 @@ describe('FILE_CAPABILITY_MANIFEST', () => {
     // The canonical id IS the default join …
     expect(event?.contract).toBe('file_input.file_submitted');
     expect(normalizeProductTriggerEvent('file_input', 'file_submitted')).toBe(event?.contract);
-    // … and the alias table stays audio-only (a file alias would violate the S1 convention).
+    // … and the alias table stays audio-only (a file alias would violate the default-join convention).
     expect(PRODUCT_TRIGGER_EVENT_ALIASES.some((a) => a.capability === 'file_input')).toBe(false);
   });
 

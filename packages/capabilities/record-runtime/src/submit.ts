@@ -10,15 +10,15 @@
  *     recovered by the retry). The sink/dispatcher dedups downstream (C10 single-flight) — ONE
  *     durable run per record.
  *  3. PER-TENANT CAPABILITY-STORE KEYING — the `record_ref` unique embeds the server-derived
- *     tenant (stores.ts/keys.ts; the audio `session_ref` pattern — NOT the S2 global-key caveat).
+ *     tenant (stores.ts/keys.ts; the audio `session_ref` pattern — NOT the global-key caveat).
  *  4. DIFFERENT-PAYLOAD-SAME-KEY IS LOUD, NEVER A SILENT DEDUP — a re-submit whose canonical
  *     payload hash differs from the stored row is a 409 `record_conflict` with ZERO row change and
  *     ZERO emit OF THE REQUEST'S PAYLOAD (first-write-wins would silently dedup a workflow onto
  *     data the client believes replaced; the 409 makes the divergence the CLIENT's explicit
- *     problem). The STORED authoritative event IS re-emitted on this path (the DUR-1 heal below).
+ *     problem). The STORED authoritative event IS re-emitted on this path (the stored-event heal below).
  *     The emitted payload is always the AUTHORITATIVE stored row, never the raw request body.
  *
- * THE DUR-1 HEAL (liveness): the persist (tenant-db, auto-commit) and the enqueue (the sink → the
+ * THE STORED-EVENT HEAL (liveness): the persist (tenant-db, auto-commit) and the enqueue (the sink → the
  * SEPARATE DBOS system DB) are non-atomic — a crash between them leaves a persisted row with NO
  * workflow run. The identical-re-submit re-emit (requirement 2) recovers that ONLY for a retry
  * with the IDENTICAL payload; a client retrying with a CORRECTED payload would hit the 409 forever
@@ -211,7 +211,7 @@ export async function submitRecord(
       'record_id must match the configured safe-id shape (default: 1..128 ASCII letters/digits/._-).',
     );
   }
-  // HS-2 (point-of-use belt): ':' is the STRUCTURAL delimiter of `record_ref`/`event_id`
+  // The point-of-use belt: ':' is the STRUCTURAL delimiter of `record_ref`/`event_id`
   // (`${tenantId}:${recordId}`) — a record id carrying it would let two distinct (tenant, record)
   // pairs collide on one ref/idempotency key. resolveRecordConfig already rejects an override
   // pattern that admits ':' at construction; this check holds even for a hand-built config.
@@ -282,7 +282,7 @@ export async function submitRecord(
   let deduped = false;
   if (found !== undefined) {
     if (found.payload_hash !== hash) {
-      // THE DUR-1 HEAL (see the module header): before the loud 409, RE-EMIT the STORED
+      // THE STORED-EVENT HEAL (see the module header): before the loud 409, RE-EMIT the STORED
       // authoritative event — if a prior submit crashed between its persist and its emit, THIS is
       // the only path a corrected-payload retry ever reaches, and without the re-emit the
       // persisted record would silently never get its workflow run. The emit is idempotent
@@ -290,7 +290,7 @@ export async function submitRecord(
       // an already-enqueued record dedups to its existing run — zero double-run. The emitted
       // payload is the STORED row's (authoritative), NEVER this request's divergent body.
       //
-      // REG-1: the heal is BEST-EFFORT. The 409 record_conflict is the DETERMINISTIC, CORRECT
+      // The heal is BEST-EFFORT. The 409 record_conflict is the DETERMINISTIC, CORRECT
       // answer regardless of downstream health — the divergent payload conflicts either way, and
       // this is a PERMANENT client condition (a retry never resolves it). The heal is an
       // OPPORTUNISTIC self-heal riding on that terminal 409; a TRANSIENT sink/DBOS fault must NOT

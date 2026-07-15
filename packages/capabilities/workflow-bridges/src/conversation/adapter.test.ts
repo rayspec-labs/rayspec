@@ -1,12 +1,12 @@
 /**
  * The canonical seam mapping — fail-the-fix couplings:
- *  - the payload keys equal the MANIFEST descriptor's payload_keys (the CC-1 contract) AND are
+ *  - the payload keys equal the MANIFEST descriptor's payload_keys (the contract) AND are
  *    exactly what the adapter emits — nothing more (no client channel), nothing less;
  *  - every field is the SERVER-DERIVED value from the capability event (stored-row provenance);
  *  - THE C10 TURN-LOSS PIN: the idempotency field is PER-TURN — two turns of ONE conversation
  *    derive DISTINCT single-flight keys (a conversation-keyed field would collapse every later
  *    turn into the first durable run: silent turn loss);
- *  - the event type is the S1 DEFAULT join with NO alias-table entry.
+ *  - the event type is the DEFAULT join with NO alias-table entry.
  */
 import type { SubmittedTurnEvent } from '@rayspec/conversation-runtime';
 import { CONVERSATION_CAPABILITY_MANIFEST } from '@rayspec/conversation-runtime';
@@ -56,7 +56,7 @@ describe('submittedTurnEventToWorkflowInput', () => {
     });
   });
 
-  it('the payload keys ARE the manifest descriptor payload_keys (the CC-1 coupling) incl. the key field — and NOTHING more', () => {
+  it('the payload keys ARE the manifest descriptor payload_keys (the coupling) incl. the key field — and NOTHING more', () => {
     const descriptor = CONVERSATION_CAPABILITY_MANIFEST.capabilities[0]?.events[0];
     expect(descriptor?.contract).toBe(TURN_SUBMITTED_EVENT_TYPE);
     expect([...(descriptor?.payload_keys ?? [])]).toEqual([...TURN_SUBMITTED_PAYLOAD_KEYS]);
@@ -66,7 +66,7 @@ describe('submittedTurnEventToWorkflowInput', () => {
     expect(Object.keys(input.payload).sort()).toEqual([...TURN_SUBMITTED_PAYLOAD_KEYS].sort());
     // … and the descriptor's idempotency key field is among them (C10 never falls back).
     expect(TURN_SUBMITTED_PAYLOAD_KEYS).toContain(descriptor?.idempotency_key_field ?? '');
-    // The CC-1 scope key (persisted artifacts scope on `conversation`) is a payload key.
+    // The scope key (persisted artifacts scope on `conversation`) is a payload key.
     expect(TURN_SUBMITTED_PAYLOAD_KEYS).toContain('conversation_id');
   });
 

@@ -12,8 +12,8 @@
  * wrong tenant.
  *
  * The sink does NOT single-flight itself: the capability re-emits the SAME turn-scoped event on
- * every successful submit (first + re-POST) AND on the divergent-message 409 heal path (the DUR-1
- * heal — the STORED event, re-emitted so a persisted-but-never-enqueued turn is recovered by any
+ * every successful submit (first + re-POST) AND on the divergent-message 409 heal path (the
+ * STORED event, re-emitted so a persisted-but-never-enqueued turn is recovered by any
  * retry), and the dispatcher's per-turn enqueue idempotency key (the descriptor-derived
  * `payloadFieldIdempotencyKey('turn_ref')` → the tenant-namespaced `durableWorkflowRunId`) is what
  * dedups the re-emissions to ONE durable run per turn (C10). So delivery is idempotent by design

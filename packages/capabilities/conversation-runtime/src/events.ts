@@ -15,7 +15,7 @@ import type { SubmittedTurnEvent } from './types.js';
 /**
  * The event sink the capability emits `turn_submitted` through. Delivery MUST be idempotent by
  * `event.event_id`: submit emits on the first-persist path, the identical-re-POST path, AND the
- * divergent-message 409 path (the DUR-1 heal — always the STORED event, so a crash between persist
+ * divergent-message 409 path (the heal — always the STORED event, so a crash between persist
  * and emit is recovered by ANY retry) — the sink treats the second delivery of one `event_id` as a
  * no-op (one workflow).
  */

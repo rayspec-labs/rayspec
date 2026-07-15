@@ -3,7 +3,7 @@
  * the platform's generated single-column UNIQUE is GLOBAL, so the tenant id is EMBEDDED in every
  * unique ref, which is what keeps two tenants' identical client-chosen ids from colliding. That
  * makes both capability-owned stores PER-TENANT-KEYED BY CONSTRUCTION (we own this DDL — not the
- * S2 declared-store global-key caveat class). The tenant id is always SERVER-DERIVED (never
+ * declared-store global-key caveat class). The tenant id is always SERVER-DERIVED (never
  * client-supplied); the client-chosen ids exclude ':' (config/validate), so every composed ref is
  * unambiguous.
  *

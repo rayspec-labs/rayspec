@@ -1,7 +1,7 @@
 /**
  * The create core — the idempotent client-keyed conversation create: closed `{ title? }` body (no
  * spoof channel), C10 re-create dedup (same ack, zero duplicate row), the optional-title-assertion
- * divergence 409 (loud, stored authoritative), the TS-1 display-field shape bound, tenant
+ * divergence 409 (loud, stored authoritative), the display-field shape bound, tenant
  * isolation by construction (tenant-prefixed unique over ONE shared global-unique table), and the
  * concurrent-divergent-create TOCTOU (the authoritative re-read resolves LOUD).
  */
@@ -85,9 +85,9 @@ describe('createConversation — the idempotent create (C10)', () => {
     expect(res.error).toBe('conversation_conflict');
   });
 
-  it("DP-3: the dedup ack ECHOES the stored head's state — never fabricated (S1 writes only 'open'; this arm pins echo-not-fabricate through the seam)", async () => {
+  it("the dedup ack ECHOES the stored head's state — never fabricated (only 'open' is written; this arm pins echo-not-fabricate through the seam)", async () => {
     const tables = new SharedConversationTables();
-    // Seed a head row whose state differs from 'open' directly through the store seam (no S1
+    // Seed a head row whose state differs from 'open' directly through the store seam (no create
     // path writes it — the pin is that the ack reads the AUTHORITATIVE row, not a literal).
     tables.conversations.push({
       conversation_id: 'c-1',
@@ -143,7 +143,7 @@ describe('createConversation — the closed body shape (no spoof channel)', () =
     }
   });
 
-  it('bounds the title as a DISPLAY field (TS-1): control/bidi/zero-width chars and oversize/empty/non-string are 422', async () => {
+  it('bounds the title as a DISPLAY field: control/bidi/zero-width chars and oversize/empty/non-string are 422', async () => {
     for (const bad of [
       'a\nb', // C0 control
       'a\u0007b', // C0 control (BEL)
@@ -166,7 +166,7 @@ describe('createConversation — the closed body shape (no spoof channel)', () =
     }
   });
 
-  it('BOUNDS-2: the STANDALONE bidi marks U+200E (LRM), U+200F (RLM), U+061C (ALM) are rejected in the title (the TS-1 set was embeddings/isolates-only)', async () => {
+  it('the STANDALONE bidi marks U+200E (LRM), U+200F (RLM), U+061C (ALM) are rejected in the title (the original set was embeddings/isolates-only)', async () => {
     for (const bad of ['a\u200Eb', 'a\u200Fb', 'a\u061Cb']) {
       const tables = new SharedConversationTables();
       const res = await createConversation(ctx(tables), { conversation_id: 'c-1' }, { title: bad });
@@ -190,7 +190,7 @@ describe('createConversation — the closed body shape (no spoof channel)', () =
   });
 });
 
-describe('createConversation — conversation-id validation (the HS-2 belt, point of use)', () => {
+describe('createConversation — conversation-id validation (the construction belt, point of use)', () => {
   it('rejects invalid shapes (422 conversation_id_invalid)', async () => {
     for (const bad of ['', 'has space', 'a:b', 'ä-umlaut', 'x'.repeat(129)]) {
       const res = await createConversation(
@@ -253,7 +253,7 @@ describe('createConversation — the concurrent-divergent-create TOCTOU (the aut
     const tables = new SharedConversationTables();
     // Interpose on the SECOND select (the authoritative re-read): the racer creates the same id
     // with a DIFFERENT title after our upsert landed (the fakes are single-threaded, so the race
-    // interleaving is staged deterministically — the SM-1 interposer pattern).
+    // interleaving is staged deterministically — the interposer pattern).
     const inner = makeFakeConversationDb(tables, TENANT_A);
     let selects = 0;
     let raced = false;
@@ -366,12 +366,12 @@ describe('createConversation — the concurrent-divergent-create TOCTOU (the aut
 });
 
 describe('createConversation — store shape', () => {
-  it('writes ONLY the declared business columns (subset/superset semantics — MINOR-2 fake-vs-real honesty)', async () => {
+  it('writes ONLY the declared business columns (subset/superset semantics — fake-vs-real honesty)', async () => {
     const tables = new SharedConversationTables();
     await createConversation(ctx(tables), { conversation_id: 'c-1' }, { title: 'T' });
     const row = tables.conversations[0];
     if (!row) throw new Error('row missing');
-    // NOT exact-equality (MINOR-2): the REAL DB returns the declared business columns PLUS the
+    // NOT exact-equality: the REAL DB returns the declared business columns PLUS the
     // generator-INJECTED columns (id/tenant_id/created_at/deleted_at/retention_days/region —
     // stores.ts header), so `keys === business+tenant_id` holds only under the fake. The
     // fake-and-real-true invariant is two-sided: every business column was written (subset), and
