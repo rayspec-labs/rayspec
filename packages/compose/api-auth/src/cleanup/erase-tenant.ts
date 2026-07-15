@@ -15,6 +15,14 @@
  * Both row classes go through the SAME `forTenant(db, tenantId)` chokepoint (they are all tenant-scoped),
  * so a delete can only ever touch THIS tenant's rows.
  *
+ * OPT-IN JOURNAL-SCRUB MODE (`journalScrub: true`). A softer right-to-erasure posture that erases the raw
+ * run-journal CONTENT while preserving the operational/billing LEDGER: instead of row-deleting the two
+ * tenant-scoped tables that hold raw subject content — `journal_steps.output` and `conversation_items.payload`
+ * — it NULLs just that raw payload column and KEEPS the row (and every structural / idempotency / cost
+ * column). Every other table (product stores, blobs, and the remaining core tables) still hard-deletes as
+ * in the default mode. See {@link EraseTenantOpts.journalScrub} for the exact columns, the empty-replay
+ * trade, and the honest scope boundary.
+ *
  * WHAT IT DOES NOT ERASE (by design — these are a SEPARATE path / out of scope):
  * the GLOBAL `users` / `memberships` TOMBSTONES — reaped by the GDPR purge (`runScheduledCleanup`),
  *     not here (users/memberships are tenant-agnostic, no `tenant_id` — a different deletion path).
@@ -61,7 +69,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { Db, TenantDb } from '@rayspec/db';
-import { CORE_TENANT_SCOPED_TABLES, forTenant } from '@rayspec/db';
+import { CORE_TENANT_SCOPED_TABLES, forTenant, schema } from '@rayspec/db';
 import type { BlobStore } from '@rayspec/platform';
 import type { StoreSpec } from '@rayspec/spec';
 import { getTableName } from 'drizzle-orm';
@@ -108,6 +116,16 @@ export interface EraseResult {
   readonly coreTables: Record<string, number>;
   /** Total CORE rows across every core tenant-scoped table (deleted, or would-delete). */
   readonly coreTotalRows: number;
+  /**
+   * Present ONLY in journal-scrub mode (`journalScrub: true`). Per raw-payload table
+   * (`journal_steps`, `conversation_items`) → the number of rows whose raw payload column was NULLed
+   * (scrubbed / would-scrub on a dry-run). The row + all its structural/idempotency/cost columns are
+   * RETAINED — NOT deleted — so these tables are ABSENT from `coreTables` (which reports only deleted
+   * rows) whenever this field is present.
+   */
+  readonly journalScrubbed?: Record<string, number>;
+  /** Total rows scrubbed across the raw-payload tables (present only in journal-scrub mode). */
+  readonly journalScrubbedTotal?: number;
   /** The blob erasure outcome. */
   readonly blobs: EraseBlobOutcome;
   /** Echo of the erased tenant id (for the operator log / audit cross-check). */
@@ -145,6 +163,28 @@ export interface EraseTenantOpts {
   readonly enabled: boolean;
   /** Force a preview even when the gate is on (count only, ZERO deletes). Default false. */
   readonly dryRun?: boolean;
+  /**
+   * OPT-IN journal-scrub mode (default `false` = the full hard-delete). When `true`, the two
+   * tenant-scoped tables that carry RAW subject content — `journal_steps.output` (the raw model/tool
+   * output jsonb) and `conversation_items.payload` (the raw re-derived transcript jsonb) — are SCRUBBED
+   * (that one payload column set to NULL) INSTEAD of row-deleted, so the run-journal LEDGER survives:
+   * every structural, idempotency (`idempotency_key` + the unique `(tenant_id, run_id, idempotency_key)`
+   * index) and cost column (`cost_usd`/`billed_cost_usd`/`provider_cost_usd`/`cost_drift`) is retained
+   * for billing reconciliation + exactly-once integrity, while the raw payload PII is erased. Every
+   * OTHER table — the product stores, the blobs, and the remaining core tables (`runs`, `run_events`,
+   * `idempotency_keys`, and the workflow journal) — still hard-deletes exactly as in the default mode.
+   *
+   * TRADE (documented, intended): a scrubbed `status='ok'` step is STILL a replay-cache hit (its
+   * idempotency row + index survive), so a later replay of that step returns `output: null` (an EMPTY
+   * result) rather than re-executing — exactly-once is preserved and the caller sees an empty replay.
+   * Keeping the row IS the point: erase the content, keep the guarantee.
+   *
+   * SCOPE (honest): only the two RAW-payload columns named above are nulled. The DEPRECATED legacy flat
+   * `conversation_items.content`/`name` columns (written only by pre-payload rows) and `run_events.data`
+   * (already-neutralized event frames, not raw file bytes) are NOT touched by this pass; the default
+   * full-delete mode removes them. A deploy that needs those gone too uses the full delete.
+   */
+  readonly journalScrub?: boolean;
   /**
    * The deployed stores (for FK-safe ordering — children before parents). STRONGLY RECOMMENDED: with
    * it, deletion order + per-table counts are exact under any ON DELETE policy. Absent ⇒ deletion falls
@@ -257,6 +297,50 @@ async function scopedDeleteReturningCount(tdb: TenantDb, table: PgTable): Promis
     .returning();
   return rows.length;
 }
+/**
+ * SCRUB one raw-payload column of a tenant-scoped table to NULL, tenant-scoped, RETURNING the affected
+ * rows so we can count them. Same call-boundary cast as the select/delete helpers above: the
+ * chokepoint's `update` is typed against the NARROW committed union, but it STILL injects
+ * `eq(tenant_id, tenantId)` into the WHERE and strips any `tenantId` from the SET (see tenant-db.ts),
+ * so the tenant predicate is unchanged. Only the named payload column is set to NULL — the row itself
+ * and every other (structural / idempotency / cost) column are RETAINED.
+ */
+async function scopedScrubReturningCount(
+  tdb: TenantDb,
+  table: PgTable,
+  set: Record<string, null>,
+): Promise<number> {
+  const rows = await (
+    tdb.update as unknown as (
+      t: PgTable,
+      s: Record<string, null>,
+    ) => { where: () => { returning: () => Promise<unknown[]> } }
+  )(table, set)
+    .where()
+    .returning();
+  return rows.length;
+}
+
+/**
+ * The run-journal RAW-PAYLOAD scrub targets (the two tenant-scoped tables that carry raw, un-hashed
+ * subject content): `journal_steps.output` and `conversation_items.payload`. Returns the
+ * (name, table, column→NULL) triples to scrub when `journalScrub` is on; an EMPTY list otherwise, so a
+ * default (full-delete) erasure is byte-for-byte the old behaviour. The keys are the drizzle property
+ * names (`output`/`payload`) — the SET maps each to NULL, leaving every other column intact.
+ */
+function journalScrubTargets(
+  journalScrub: boolean,
+): { name: string; table: PgTable; set: Record<string, null> }[] {
+  if (!journalScrub) return [];
+  return [
+    { name: 'journal_steps', table: schema.journalSteps as PgTable, set: { output: null } },
+    {
+      name: 'conversation_items',
+      table: schema.conversationItems as PgTable,
+      set: { payload: null },
+    },
+  ];
+}
 
 /**
  * Erase one tenant's product data + core run-journal/transcript rows + blobs. See the file header for
@@ -284,8 +368,15 @@ export async function eraseTenant(opts: EraseTenantOpts): Promise<EraseResult> {
     );
   }
 
+  const journalScrub = opts.journalScrub ?? false;
   const order = orderTablesChildrenFirst(productTables, opts.stores);
   const coreOrder = orderCoreTablesChildrenFirst();
+  // In scrub mode the two raw-payload tables are SCRUBBED (payload → NULL, row kept) rather than
+  // row-deleted, so they are removed from the core DELETE order; every other core table still
+  // hard-deletes. In the default mode `scrubTargets` is empty and `coreDeleteOrder === coreOrder`.
+  const scrubTargets = journalScrubTargets(journalScrub);
+  const scrubNames = new Set(scrubTargets.map((s) => s.name));
+  const coreDeleteOrder = coreOrder.filter((c) => !scrubNames.has(c.name));
   const actuallyDelete = enabled && !dryRun;
   const mode: EraseResult['mode'] = actuallyDelete ? 'deleted' : 'dry-run';
   const dryRunReason: EraseDryRunReason | undefined = actuallyDelete
@@ -309,6 +400,7 @@ export async function eraseTenant(opts: EraseTenantOpts): Promise<EraseResult> {
 
   const tables: Record<string, number> = {};
   const coreTables: Record<string, number> = {};
+  const journalScrubbed: Record<string, number> = {};
   let blobs: EraseBlobOutcome;
 
   if (actuallyDelete) {
@@ -321,11 +413,16 @@ export async function eraseTenant(opts: EraseTenantOpts): Promise<EraseResult> {
       intentCounts[name] = await scopedSelectCount(tdb, table);
     }
     const intentCoreCounts: Record<string, number> = {};
-    for (const { name, table } of coreOrder) {
+    for (const { name, table } of coreDeleteOrder) {
       intentCoreCounts[name] = await scopedSelectCount(tdb, table);
+    }
+    const intentScrubCounts: Record<string, number> = {};
+    for (const { name, table } of scrubTargets) {
+      intentScrubCounts[name] = await scopedSelectCount(tdb, table);
     }
     const intentTotal = sum(intentCounts);
     const intentCoreTotal = sum(intentCoreCounts);
+    const intentScrubTotal = sum(intentScrubCounts);
     const requestId = randomUUID();
     // `audit` is guaranteed present here (the structural guard above threw otherwise); the `if` keeps
     // tsc happy without a non-null assertion.
@@ -340,6 +437,9 @@ export async function eraseTenant(opts: EraseTenantOpts): Promise<EraseResult> {
             totalRows: intentTotal,
             coreTables: intentCoreCounts,
             coreTotalRows: intentCoreTotal,
+            ...(journalScrub
+              ? { journalScrubbed: intentScrubCounts, journalScrubbedTotal: intentScrubTotal }
+              : {}),
             blobs: blob ? 'deleted' : 'no-backend',
             at: now.toISOString(),
           },
@@ -360,8 +460,13 @@ export async function eraseTenant(opts: EraseTenantOpts): Promise<EraseResult> {
       for (const { name, table } of order) {
         tables[name] = await scopedDeleteReturningCount(ttx, table);
       }
-      for (const { name, table } of coreOrder) {
+      for (const { name, table } of coreDeleteOrder) {
         coreTables[name] = await scopedDeleteReturningCount(ttx, table);
+      }
+      // SCRUB (scrub mode only): NULL the raw payload column, keeping the row + its ledger columns. In
+      // the same tenant transaction as the deletes above, so a failure rolls back the whole DB-half.
+      for (const { name, table, set } of scrubTargets) {
+        journalScrubbed[name] = await scopedScrubReturningCount(ttx, table, set);
       }
     });
 
@@ -375,12 +480,15 @@ export async function eraseTenant(opts: EraseTenantOpts): Promise<EraseResult> {
     }
   } else {
     // DRY-RUN: count what WOULD be deleted (tenant-scoped SELECT — product + core), delete NOTHING (rows
-    // + blobs intact).
+    // + blobs intact). In scrub mode the two payload tables report the rows that WOULD be scrubbed.
     for (const { name, table } of order) {
       tables[name] = await scopedSelectCount(tdb, table);
     }
-    for (const { name, table } of coreOrder) {
+    for (const { name, table } of coreDeleteOrder) {
       coreTables[name] = await scopedSelectCount(tdb, table);
+    }
+    for (const { name, table } of scrubTargets) {
+      journalScrubbed[name] = await scopedSelectCount(tdb, table);
     }
     blobs = blob ? 'dry-run' : 'no-backend';
   }
@@ -392,6 +500,7 @@ export async function eraseTenant(opts: EraseTenantOpts): Promise<EraseResult> {
     totalRows: sum(tables),
     coreTables,
     coreTotalRows: sum(coreTables),
+    ...(journalScrub ? { journalScrubbed, journalScrubbedTotal: sum(journalScrubbed) } : {}),
     blobs,
     tenantId,
   };
