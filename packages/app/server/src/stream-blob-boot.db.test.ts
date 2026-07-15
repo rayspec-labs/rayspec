@@ -25,7 +25,7 @@
  *
  * The deployment fixture is THIN — it loads the whole stream surface (ingest + playback +
  * mint) from a `defineExtension` PACK via `extensions[]`. Arm (a) points at THAT fixture, so the boot
- * runs the REAL pack merge (loadExtensions) before the blob guard fires — exercising the S4 mechanism
+ * runs the REAL pack merge (loadExtensions) before the blob guard fires — exercising the pack-merge mechanism
  * through the real composition root. For the happy arm (b) we deploy a small INLINE INGEST-ONLY spec
  * (no playback, so the boot completes) written to a temp rayspec.yaml; its handler module resolves to
  * the PACK's chunk-ingest.ts under RAYSPEC_HANDLER_ROOT=STREAM_DIR (the inline arm tests the
@@ -67,7 +67,7 @@ function withDbName(url: string, dbName: string): string {
 
 /**
  * The INGEST-ONLY stream spec, written to a temp rayspec.yaml so the happy arm can boot (the full
- * fixture's playback route fail-closes the rollout — S3). Faithful to examples/stream-backend minus
+ * fixture's playback route fail-closes the rollout). Faithful to examples/stream-backend minus
  * the playback route + its handler ref. The chunk-ingest handler resolves against STREAM_DIR via
  * RAYSPEC_HANDLER_ROOT, so the real chunk-ingest.ts is loaded through the path-jailed loader.
  */

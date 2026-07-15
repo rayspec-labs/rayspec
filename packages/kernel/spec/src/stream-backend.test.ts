@@ -1,8 +1,8 @@
 /**
  * The FORCING-FUNCTION test (spec layer) — the synthetic stream/blob backend deployment spec.
  *
- * S0 introduced the `stream` RouteAction member + the optional `extensions[]` section. S4 CONVERTED
- * the synthetic stream backend to the PACK mechanism: the deployment `rayspec.yaml` is now THIN —
+ * The `stream` RouteAction member + the optional `extensions[]` section back a PACK-delivered
+ * synthetic stream backend: the deployment `rayspec.yaml` is THIN —
  * `version` + `metadata` + ONE `extensions[]` ref to a `defineExtension` pack that carries the whole
  * stream surface. So at the SPEC layer (the lowest layer — no dependency on `@rayspec/platform`'s
  * `loadExtensions`), this asserts the THIN deployment spec parses ok and carries the `extensions[]`
@@ -48,7 +48,7 @@ describe('forcing function — the synthetic stream/blob backend deployment spec
   it('is THIN — the stream surface (stores/handlers/api) comes from the pack, not inline', () => {
     if (!result.ok) throw new Error('expected ok');
     // The deployment spec declares NO inline stores/handlers/api — they are contributed by the pack
-    // (merged by loadExtensions at deploy). This is the S4 conversion: the surface rides the pack.
+    // (merged by loadExtensions at deploy). The surface rides the pack.
     expect(result.value.stores).toEqual([]);
     expect(result.value.handlers).toEqual([]);
     expect(result.value.api).toEqual([]);

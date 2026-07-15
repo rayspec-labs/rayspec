@@ -59,12 +59,12 @@
  *   (h)  the concurrent double-fire converges on EXACTLY ONE reply row (the honest at-least-once
  *        note: BOTH racers may invoke the model once — end-state asserts only);
  *   (i)  erasure covers the assistant reply rows too (RAW PII — the ledger count doubles);
- *   (j)  TF-F1: a terminally-FAILED first reply attempt → typed 502 carrying the
+ *   (j)  a terminally-FAILED first reply attempt → typed 502 carrying the
  *        attempt-0 run id; the same-message_id re-POST walks onto the FRESH deterministic
  *        attempt-1 id (clean header chain: attempt 0 stays 'error', attempt 1 completes; the
  *        reply row records the succeeding attempt) — never a re-run under the failed id.
  * SEQ SHIFT (deliberate): every reply row takes its own ledger sequence, so user turns land at
- * seqs 1/3/5 and replies at 2/4/6 — the S2 arms' seq expectations are updated accordingly.
+ * seqs 1/3/5 and replies at 2/4/6 — the arms' seq expectations are updated accordingly.
  *
  * The zero-surface conditional for a NON-conversation doc (HTTP 404 on the conversation routes)
  * lives in product-boot-conditional-env.db.test.ts (no second DBOS launch here); the compose-layer
@@ -116,7 +116,7 @@ function expectedRunId(tenantId: string, workflowId: string, idempotencyKey: str
 /**
  * The INDEPENDENT oracle for the REPLY run id (product-yaml `replyRunId`, recomputed on purpose
  * — a derivation drift would break the C10 attach convergence on redelivery, RED here): v5-shaped
- * UUID over sha256(`conversation-reply:${ledger turn_ref}`). This is ATTEMPT 0 of the TF-F1 chain.
+ * UUID over sha256(`conversation-reply:${ledger turn_ref}`). This is ATTEMPT 0 of the terminal-failure retry chain.
  */
 function expectedReplyRunId(tenantId: string, conversationId: string, messageId: string): string {
   const h = createHash('sha256')
@@ -127,7 +127,7 @@ function expectedReplyRunId(tenantId: string, conversationId: string, messageId:
 
 /**
  * The INDEPENDENT oracle for a LATER reply ATTEMPT id (product-yaml `replyAttemptRunId`, n ≥ 1,
- * recomputed on purpose — TF-F1: a retry after a terminally-failed attempt must land on THIS
+ * recomputed on purpose — a retry after a terminally-failed attempt must land on THIS
  * derivation): v5-shaped UUID over sha256(`conversation-reply:${turn_ref}:attempt:${n}`).
  */
 function expectedReplyAttemptRunId(
@@ -152,10 +152,10 @@ function expectedReplyAttemptRunId(
 class DeterministicReplyBackend implements Backend {
   readonly id = 'openai' as const;
   runCalls = 0;
-  /** Arm (j) — TF-F1: fail the NEXT n runs TERMINALLY (run-core persists an 'error' header each). */
+  /** Arm (j) — fail the NEXT n runs TERMINALLY (run-core persists an 'error' header each). */
   failuresRemaining = 0;
   /**
-   * S4 — the opt-in STREAM cardinality knob: text_delta chunks emitted through `ctx.onEvent` BEFORE
+   * The opt-in STREAM cardinality knob: text_delta chunks emitted through `ctx.onEvent` BEFORE
    * the outcome (run-core persists each to run_events, then flushes it to the responder's live sink →
    * the SSE stream). Default `[]` models the OpenAI ZERO-DELTA backend (the reply arrives only in the
    * terminal frame); set it to model Pi (token) / Anthropic-Codex (message). Reset per arm.
@@ -183,7 +183,7 @@ class DeterministicReplyBackend implements Backend {
         stepCount: 1,
       } as RunResult;
     }
-    // S4: stream any configured deltas through the run's live sink (persist-before-flush by run-core).
+    // Stream any configured deltas through the run's live sink (persist-before-flush by run-core).
     for (let i = 0; i < this.deltas.length; i += 1) {
       await ctx.onEvent({ type: 'text_delta', runId: ctx.runId, text: this.deltas[i]! });
     }
@@ -377,7 +377,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
     });
   }
 
-  /** S4: submit a turn negotiating an SSE stream (Accept: text/event-stream). */
+  /** Submit a turn negotiating an SSE stream (Accept: text/event-stream). */
   function streamTurn(conversationId: string, token: string, body: unknown): Promise<Response> {
     return server!.app.request(`/conversations/${conversationId}/turns`, {
       method: 'POST',
@@ -453,7 +453,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
       await client.end();
     }
   }
-  /** The reply RUN headers (the platform `runs` table — the S3 runAgent ground truth). */
+  /** The reply RUN headers (the platform `runs` table — the runAgent ground truth). */
   async function replyRunRows(): Promise<Array<Record<string, unknown>>> {
     const client = postgres(appDbUrl, { max: 1 });
     try {
@@ -637,7 +637,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
       const body = (await turn.json()) as Record<string, unknown> & {
         reply: { message: string; turn_seq: number };
       };
-      // Seq 3 (the S3 seq shift: turn-1's reply took seq 2).
+      // Seq 3 (the seq shift: turn-1's reply took seq 2).
       expect(body.turn_seq).toBe(3);
       // ★ THE TURN-2-SAW-TURN-1 LAW through real HTTP: the deterministic backend attests BOTH turn
       // texts reached it inside the assembled input — a garbled/missing history assembly is RED.
@@ -902,7 +902,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
     async () => {
       e2eTestsRan += 1;
       // Ground-truth BASELINE (assert-before-erase): A's head + 6 ledger rows (3 user turns + the
-      // 3 S3 assistant replies — the reply rows are RAW PII too) + 3 declared rows, and B's
+      // 3 assistant replies — the reply rows are RAW PII too) + 3 declared rows, and B's
       // cross-tenant witnesses (the arm-(g) head + sealed turn, NO reply — the 403 preceded the
       // reply leg) are all present.
       expect(await headRowsFor(TENANT)).toHaveLength(1);
@@ -934,7 +934,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
   );
 
   maybe(
-    '(j) TF-F1: a terminally-FAILED first reply attempt → 502 carrying the attempt-0 run id; the re-POST converges on a FRESH attempt id with a CLEAN header chain',
+    '(j) a terminally-FAILED first reply attempt → 502 carrying the attempt-0 run id; the re-POST converges on a FRESH attempt id with a CLEAN header chain',
     async () => {
       e2eTestsRan += 1;
       // Runs AFTER erasure (arm i): tenant A's runs/ledger are empty — this arm's rows are the
@@ -961,7 +961,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
         turn_seq: 1,
       });
 
-      // ★ THE TF-F1 LAW through real HTTP: the same-message_id re-POST dedupes the intake and the
+      // ★ THE TERMINAL-FAILURE RETRY LAW through real HTTP: the same-message_id re-POST dedupes the intake and the
       // responder walks PAST the failed attempt-0 header onto the FRESH deterministic attempt-1
       // id (pre-fix: the retry re-ran under attempt 0 — its header stayed 'error' forever and
       // the fresh events deduped against the failed attempt's seqs).
@@ -1010,7 +1010,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
     120_000,
   );
 
-  // ── S4 — STREAMING EGRESS through the REAL stack (fresh conversation; distinct ids). ────────
+  // ── STREAMING EGRESS through the REAL stack (fresh conversation; distinct ids). ────────
   const CONV_SSE = 'conv-sse';
   const MSG_SSE = 'msg-sse-1';
   const MSG_SSE_ZERO = 'msg-sse-0';

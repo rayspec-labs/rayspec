@@ -829,7 +829,7 @@ describe.skipIf(!hasDb)('declared stores + store steps e2e (the composed stack)'
  * Ran-guard: a SEPARATE, NON-skipped describe that fails when the DB is REQUIRED
  * (CI / RAYSPEC_REQUIRE_DB_TESTS) but the six e2e arms did not run.
  */
-describe('S2 declared-stores e2e — ran-guard (must not silently skip in CI)', () => {
+describe('declared-stores e2e — ran-guard (must not silently skip in CI)', () => {
   it('the e2e arms ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (requireDb) {
       expect(testsRan).toBe(6);

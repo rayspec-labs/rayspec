@@ -6,7 +6,7 @@
  *      genuine `scanMigrationSql` over the EXACT emitted SQL: BLOCKED with an empty allowlist, PASSES
  *      with the proposal. No injected seam (the ND-1 trap): the destructive SQL is what `diffProductStores`
  *      actually produces, driven through the production gate. Weakening the allowlist-match
- *      normalization turns the "passes" arm RED (documented shadow-mutation in the S1 report).
+ *      normalization turns the "passes" arm RED (a documented shadow-mutation).
  *   2. GENERATOR EQUIVALENCE — `diffProductStores([], new).migrationSql === generateProductSql(new)`
  *      BYTE-FOR-BYTE (a first materialization is the CREATE-only generator).
  *   3. NO-OP — `diff(old, old)` is empty.

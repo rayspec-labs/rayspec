@@ -6,13 +6,13 @@
  *      with each of RAYSPEC_BLOB_ROOT / RAYSPEC_MEDIA_SIGNING_KEY / RAYSPEC_EXTRACTION_MODE /
  *      STT_PROVIDER individually MISSING throws the SPECIFIC ProductBootError BEFORE any DBOS launch. A
  *      conditional-demand predicate that stopped demanding a var acme-notes needs would boot green and fail
- *      only at the first real recording — this pins each demand at the boot (green pre- AND post-S4; it
+ *      only at the first real recording — this pins each demand at the boot (green both before AND after the conditional-demand change; it
  *      goes RED the instant the predicate mis-computes for acme-notes).
  *
  *   B. THE CONDITIONAL (non-audio boots demanding NOTHING — RED-first): the committed NON-audio,
  *      zero-agent, no-stt fixture (record_input only) boots the FULL server path with NONE of the four
  *      env vars set → deployMode 'materialized', the record submit + declared view routes MOUNT, and it
- *      SERVES (401 on the submit route without auth). Before S4 the boot demanded RAYSPEC_EXTRACTION_MODE
+ *      SERVES (401 on the submit route without auth). Previously the boot demanded RAYSPEC_EXTRACTION_MODE
  *      UNCONDITIONALLY (`requireEnv`), so this boot THREW — the RED this arm flips to green.
  *
  *   C. THE SINGLE-PREDICATE NON-COLLINEAR arms (F1/F2 — each demand coupled to its OWN predicate):
@@ -267,7 +267,7 @@ describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands', () => 
 
   // ── Arm B: a NON-audio, zero-agent, no-stt doc boots demanding NONE of the four (the ONE launch) ─
 
-  it('a non-audio zero-agent doc BOOTS demanding NONE of the four, composes + serves (RED before S4)', async () => {
+  it('a non-audio zero-agent doc BOOTS demanding NONE of the four, composes + serves (RED-first)', async () => {
     clearAllFour(); // NONE of the four env vars set
     intakeServer = await boot(NON_AUDIO_YAML, intakeDbUrl, { stt: false, agents: false });
 
@@ -327,8 +327,8 @@ describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands', () => 
 });
 
 // UN-SKIPPABLE ran-guard: a REQUIRED run (CI / RAYSPEC_REQUIRE_DB_TESTS) that lost
-// DATABASE_URL would otherwise SILENTLY SKIP the whole S4 boot-demand proof and read GREEN.
-describe('S4 boot-demand ran-guard', () => {
+// DATABASE_URL would otherwise SILENTLY SKIP the whole boot-demand proof and read GREEN.
+describe('boot-demand ran-guard', () => {
   it('the doc-driven env-demand arms ran under a required DB run', () => {
     // 4 acme-notes demands + F1 (non-audio agent) + F2 (stt-without-audio) + the file-only
     // blob demand + Arm B (the intake launch).

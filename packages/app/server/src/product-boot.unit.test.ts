@@ -209,7 +209,7 @@ function writeExtractionDir(
   return join(d, 'product.yaml');
 }
 
-describe('makeExtractionBackend — the boot-side backend factory (S5, fail-closed per-backend env)', () => {
+describe('makeExtractionBackend — the boot-side backend factory (fail-closed per-backend env)', () => {
   it("constructs the OpenAIAdapter for 'openai' (demands OPENAI_API_KEY)", () => {
     expect(makeExtractionBackend({ OPENAI_API_KEY: 'sk-x' }, 'openai').id).toBe('openai');
     expect(() => makeExtractionBackend({}, 'openai')).toThrow(/OPENAI_API_KEY is required/);
@@ -250,11 +250,11 @@ describe('makeExtractionBackend — the boot-side backend factory (S5, fail-clos
     expect([...WIRED_EXTRACTION_BACKENDS]).toEqual(['openai', 'anthropic', 'pi', 'codex']);
   });
 
-  // ── SHOULD-2 (S5 review): the $0-subscription billing footgun ────────────────────────────────────
+  // ── The $0-subscription billing footgun ────────────────────────────────────
   // The AnthropicAdapter passes the whole process.env to the child SDK; the SDK precedence is
   // ANTHROPIC_API_KEY > CLAUDE_CODE_OAUTH_TOKEN. So a deployment that INTENDS the $0 subscription but
   // ALSO carries a stray ANTHROPIC_API_KEY silently bills the API. We warn LOUD (boot-side, names-only).
-  it('SHOULD-2: warns when BOTH the subscription token AND a stray ANTHROPIC_API_KEY are set', () => {
+  it('warns when BOTH the subscription token AND a stray ANTHROPIC_API_KEY are set', () => {
     const OAUTH = 'ZZOAUTHSECRETZZ';
     const APIKEY = 'ZZAPIKEYSECRETZZ';
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -294,7 +294,7 @@ describe('makeExtractionBackend — the boot-side backend factory (S5, fail-clos
     }
   });
 
-  it('SHOULD-2 pure: anthropicApiKeyOverrideWarning fires ONLY when both are set', () => {
+  it('pure: anthropicApiKeyOverrideWarning fires ONLY when both are set', () => {
     expect(
       anthropicApiKeyOverrideWarning({ CLAUDE_CODE_OAUTH_TOKEN: 't', ANTHROPIC_API_KEY: 'k' }),
     ).toMatch(/OVERRIDDEN & BILLED/);
@@ -490,10 +490,10 @@ describe('resolveExtractorConfigPath — the per-agent config convention', () =>
     ).toThrow(/ambiguous for a multi-extractor/);
   });
 
-  // ── SHOULD-1 (S5 review): the belt-and-suspenders traversal jail (the SINK half; the grammar
+  // ── The belt-and-suspenders traversal jail (the SINK half; the grammar
   // SafeIdentifier is the SOURCE half). A `..`/`/` agent id (a code-built spec, or a future grammar
   // regression bypassing the parser) resolves OUTSIDE extraction/ — the jail must refuse to read it.
-  it('SHOULD-1: multi-agent — throws when an agent id path-traverses OUT of the extraction dir', () => {
+  it('multi-agent — throws when an agent id path-traverses OUT of the extraction dir', () => {
     const evilId = '../../../../../tmp/pwned';
     const spec = specWithAgents(['agent_one', evilId]);
     expect(() => resolveExtractorConfigPath({}, '/x/deploy/acme.yaml', spec, evilId)).toThrow(
@@ -504,7 +504,7 @@ describe('resolveExtractorConfigPath — the per-agent config convention', () =>
     );
   });
 
-  it('SHOULD-1: single-agent — throws when the sole agent id path-traverses out', () => {
+  it('single-agent — throws when the sole agent id path-traverses out', () => {
     const evilId = '../../../../../tmp/pwned';
     const spec = specWithAgents([evilId]);
     expect(() => resolveExtractorConfigPath({}, '/x/deploy/acme.yaml', spec, evilId)).toThrow(
@@ -599,10 +599,10 @@ describe('buildLiveAgent — multi-agent + multi-backend', () => {
     );
   });
 
-  // ── S5-MINOR-1 / S5-TQ-1: a built node genuinely BINDS to its DECLARED backend (not a shared openai
+  // ── A built node genuinely BINDS to its DECLARED backend (not a shared openai
   // one). Proof: agent_two declares `anthropic` but the env lacks the anthropic creds → construction
   // fails with the ANTHROPIC-SPECIFIC demand, naming agent_two. A shared/openai node would not demand it.
-  it('S5-MINOR-1: a node binds to its declared backend — anthropic without anthropic env throws at that agent', () => {
+  it('a node binds to its declared backend — anthropic without anthropic env throws at that agent', () => {
     const spec = specWithAgents(['agent_one', 'agent_two']);
     const specPath = writeExtractionDir([
       { id: 'agent_one', backend: 'openai' },
@@ -613,9 +613,9 @@ describe('buildLiveAgent — multi-agent + multi-backend', () => {
     );
   });
 
-  // ── S5-TQ-3: an unknown backend surfaces at buildLiveAgent, naming the AGENT + the wired set (not
+  // ── An unknown backend surfaces at buildLiveAgent, naming the AGENT + the wired set (not
   // only at the makeExtractionBackend unit) — the boot-level wrap adds the agent context.
-  it('S5-TQ-3: an unknown backend at buildLiveAgent names the agent + the wired set', () => {
+  it('an unknown backend at buildLiveAgent names the agent + the wired set', () => {
     const spec = specWithAgents(['agent_one', 'agent_two']);
     const specPath = writeExtractionDir([
       { id: 'agent_one', backend: 'openai' },
@@ -626,9 +626,9 @@ describe('buildLiveAgent — multi-agent + multi-backend', () => {
     );
   });
 
-  // ── S5-TQ-2: validated-on-native is ALLOWED but silently drops native constrained decode — make the
+  // ── Validated-on-native is ALLOWED but silently drops native constrained decode — make the
   // downgrade boot-visible (a console.warn), and pin that the semantics degrade (not reject).
-  it('S5-TQ-2: validated-on-native (openai) is ALLOWED and warns loudly (downgrade visible)', () => {
+  it('validated-on-native (openai) is ALLOWED and warns loudly (downgrade visible)', () => {
     const spec = specWithAgents(['agent_one']);
     const specPath = writeExtractionDir([
       { id: 'agent_one', backend: 'openai', mode: 'validated' },
@@ -649,7 +649,7 @@ describe('buildLiveAgent — multi-agent + multi-backend', () => {
     }
   });
 
-  it('S5-TQ-2 pure: nativeValidatedDowngradeWarning fires ONLY for a native backend in validated mode', () => {
+  it('pure: nativeValidatedDowngradeWarning fires ONLY for a native backend in validated mode', () => {
     expect(nativeValidatedDowngradeWarning('a', 'openai', 'validated', true)).toMatch(/DOWNGRADED/);
     // native mode on a native backend → no downgrade.
     expect(nativeValidatedDowngradeWarning('a', 'openai', 'native', true)).toBeNull();

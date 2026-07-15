@@ -3,8 +3,8 @@
  * entrypoint (`assembleServer` from `RAYSPEC_SPEC_PATH`) on a throwaway DATABASE + a real DBOS launch,
  * and is driven end-to-end over REAL HTTP against MATERIALIZED ground truth (fail-the-fix). It
  * composes the WHOLE file-ingest chain in ONE doc:
- *   S1 bounded upload/submit + `file_submitted` (file-scoped C10 key) · S2 conditional file mount +
- *   blob-env demand · S3 `file_input.parse_text` (text + PDF text-layer) · S4 the generic extraction
+ *   bounded upload/submit + `file_submitted` (file-scoped C10 key) · conditional file mount +
+ *   blob-env demand · `file_input.parse_text` (text + PDF text-layer) · the generic extraction
  *   branch's product shape (DETERMINISTIC executor in CI — the live proof is the sibling smoke) ·
  *   plus store_read (vendor→GL catalog) feeding BOTH the agent and the persisted snapshot,
  *   `validation.check`, store_write, and GET views.
@@ -23,7 +23,7 @@
  *       row carries fields DERIVED FROM THE DOCUMENT TEXT + the catalog-matched GL code + the catalog
  *       snapshot (read feeds write) → the bytes sit under the tenant-jailed content-addressed key;
  *   (b2) the DECLARED views serve the coded invoice over HTTP (detail + paged list);
- *   (c) a COMMITTED text-layer PDF invoice (self-made via the S3 pdf-fixture builder — the exact
+ *   (c) a COMMITTED text-layer PDF invoice (self-made via the pdf-fixture builder — the exact
  *       buildPdf call is documented in examples/invoice-intake/fixtures/) parses + codes
  *       end-to-end on the REAL pinned parser (second run, second row);
  *   (d) byte-identical re-upload + re-submit → deduped, run count UNCHANGED (C10 single-flight);
@@ -78,7 +78,7 @@ const TENANT_B = '00000000-0000-4000-8000-00000000f202';
 //   buildPdf({ pages: [{ text: 'INVOICE INV-2026-048' }, { text: 'Vendor: Musterbau AG' },
 //     { text: 'Date: 2026-06-20' }, { text: 'Item: Scaffolding rental (June) | 120000 cents' },
 //     { text: 'Total (EUR cents): 120000' }] })
-// (the S3 product-yaml test-support builder; pages join with a blank line on parse).
+// (the product-yaml test-support builder; pages join with a blank line on parse).
 const TXT_FILE_ID = 'inv-2026-047';
 const TXT_BODY = readFileSync(join(FIXTURES, 'sample-invoice.txt'), 'utf8');
 const TXT_SHA = createHash('sha256').update(TXT_BODY).digest('hex');
@@ -96,7 +96,7 @@ let e2eTestsRan = 0;
 /**
  * The DETERMINISTIC invoice extractor (the platform ships none — product-free). It DERIVES every
  * coded field from the REAL artifact values it receives:
- *  - `invoice.extracted_text` (the S3 parse node's envelope — unwrap `content`): vendor / date /
+ *  - `invoice.extracted_text` (the parse node's envelope — unwrap `content`): vendor / date /
  *    line items / total are regex-derived from the parsed document, so the arm FAILS if the parse
  *    output never reached the agent or got garbled;
  *  - `invoice.catalog_rows` (the store_read rows, a plain array): the GL code comes from the row

@@ -126,7 +126,7 @@ export const FALLBACK_VERSION = 'FALLBACK';
  *
  * `registry` defaults to the module `PRICING` (production always uses the default). It is threaded as
  * an OPTIONAL parameter so a test can drive the REAL date-walk against a multi-entry model (the live
- * registry has only single-entry models) — S2 review fix: the selection loop is now exercised by the
+ * registry has only single-entry models); the selection loop is thus exercised by the
  * real function, not a re-implemented copy.
  */
 export function priceFor(
@@ -196,7 +196,7 @@ export interface ComputedCost {
  *
  * Determinism: pure function of (model, usage, at). No clock read here — `at` is supplied. `registry`
  * defaults to the module `PRICING` (production always uses the default); it is threaded only so a test
- * can exercise the real cost math against a multi-entry model (S2 review fix).
+ * can exercise the real cost math against a multi-entry model.
  */
 export function computeCost(
   model: string,

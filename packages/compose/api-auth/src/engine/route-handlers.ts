@@ -227,7 +227,7 @@ export function makeRouteHandler(args: {
     // through the single HandlerRuntime indirection. The result is the JSON response body — OR the
     // OPT-IN branded `httpResponse({...})` envelope carrying a handler-chosen status/headers.
     //
-    // S3 — the TX-POSTURE branch: a handler ENTRY carrying `routeTx: 'handler-managed'` is
+    // The TX-POSTURE branch: a handler ENTRY carrying `routeTx: 'handler-managed'` is
     // invoked DETACHED (no engine transaction; the SAME init builder + brand strip), so it can
     // commit its intake BEFORE an in-request model run and hold no tx across it (the conversational
     // turn route). ABSENT flag (every loader-resolved handler + every other capability entry) keeps
@@ -253,7 +253,7 @@ export function makeRouteHandler(args: {
     // existing behavior (HTTP 200 + that value as the JSON body). The brand check is unambiguous — a
     // plain object (even `{ status: 'ok' }`) is NOT mis-read (it lacks the reserved brand key).
     if (isHttpResponse(result)) {
-      // S4 — a STREAMING (`sseResponse`) envelope drives a `text/event-stream` response: the
+      // A STREAMING (`sseResponse`) envelope drives a `text/event-stream` response: the
       // engine encodes each `SseFrame` to the SSE wire and exposes the live abort signal, BYPASSING
       // c.json entirely. This branch is reached ONLY when the handler chose to stream (the content-
       // negotiation lives in the handler — e.g. the conversational turn route reads `init.headers.

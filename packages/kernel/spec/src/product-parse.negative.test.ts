@@ -348,7 +348,7 @@ describe('schema_violation (shape)', () => {
     ]);
   });
 
-  // ── SHOULD-1 (S5 review): the agent id is a SafeIdentifier — a `..`/`/` id would traverse into the
+  // ── The agent id is a SafeIdentifier — a `..`/`/` id would traverse into the
   // per-agent extractor-config PATH (resolveExtractorConfigPath). The grammar rejects it fail-closed at
   // parse (schema_violation@extractors[0].id) — the SOURCE half of the defense-in-depth (the resolver jail is
   // the SINK half). Zod short-circuits before lint, so the dangling `agent.extractor` ref is NOT reported.

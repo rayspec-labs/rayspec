@@ -536,7 +536,7 @@ describe('plan — Product-YAML (0.2) projections + update mode', () => {
       views: 1,
       extractors: 1,
     });
-    // S2 (DELIBERATE pin evolution): the fixture now showcases the declared-stores vocabulary —
+    // A DELIBERATE pin evolution: the fixture now showcases the declared-stores vocabulary —
     // the plan projection derives the collection store PLUS the two `stores:` declarations.
     expect(r.stores.map((s) => s.name).sort()).toEqual([
       'reply_templates',
@@ -558,7 +558,7 @@ describe('plan — Product-YAML (0.2) projections + update mode', () => {
     expect(r.updateMode).toBe(true);
     expect(r.breakingChangeBlocked).toBe(false);
     // The new store shows up in the projection AND the delta CREATEs exactly it (additive).
-    // (S2 DELIBERATE pin evolution: the fixture's two DECLARED stores ride in the projection.)
+    // (DELIBERATE pin evolution: the fixture's two DECLARED stores ride in the projection.)
     expect(r.stores.map((s) => s.name).sort()).toEqual([
       'reply_templates',
       'ticket_artifacts',
@@ -569,7 +569,7 @@ describe('plan — Product-YAML (0.2) projections + update mode', () => {
     expect(r.migrationSql).not.toContain('CREATE TABLE "ticket_artifacts"'); // the survivor is untouched
   });
 
-  it('S2: adding a DECLARED store yields an ADDITIVE delta through the SAME diff surface (plan --against)', async () => {
+  it('adding a DECLARED store yields an ADDITIVE delta through the SAME diff surface (plan --against)', async () => {
     // v1 = the committed fixture; v2 = + ONE more declared store (unreferenced is legal — it
     // derives + materializes like any store). diffProductStores must CREATE exactly the addition
     // (with the key's backing unique index) and leave every survivor untouched.
@@ -849,7 +849,7 @@ stores:
 describe('plan — no --against byte-stability golden (0.1 first materialization)', () => {
   it('the 0.1 first-materialization output carries EXACTLY the classic keys (no update/product fields)', async () => {
     const r = await runPlan(['rayspec.yaml'], { shadowDatabaseUrl: undefined });
-    // The exact, ordered key set of the pre-S2 envelope — no additive field leaks onto this path.
+    // The exact, ordered key set of the pre-additive envelope — no additive field leaks onto this path.
     expect(Object.keys(r)).toEqual([
       'ok',
       'stores',
@@ -862,7 +862,7 @@ describe('plan — no --against byte-stability golden (0.1 first materialization
       'shadowApplied',
       'errors',
     ]);
-    // The additive S2 fields are ABSENT (undefined) on this path — the serialized bytes are unchanged.
+    // The additive fields are ABSENT (undefined) on this path — the serialized bytes are unchanged.
     const json = JSON.stringify(r);
     for (const k of ['updateMode', 'product', 'proposedAllowlist', 'notes', 'driftFindings']) {
       expect(json).not.toContain(`"${k}"`);

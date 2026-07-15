@@ -1,7 +1,7 @@
 /**
  * The SHARED Product-YAML trigger-event vocabulary.
  *
- * Before S1 the trigger normalization lived as TWO byte-identical KEEP-IN-SYNC copies
+ * Historically the trigger normalization lived as TWO byte-identical KEEP-IN-SYNC copies
  * (`product-lint.ts` `compileProductTriggerEvent` + the workflow bridge's `compileTriggerEvent`) plus a
  * THIRD hardcode in `@rayspec/product-yaml`'s capability inventory. This module is now the ONE
  * source both the parser lint and the bridge compiler import, and the descriptor contract the deploy
@@ -58,7 +58,7 @@ export function normalizeProductTriggerEvent(capability: string, event: string):
  * The per-event DESCRIPTOR contract (the vocabulary entry a deploy composition consumes). A Tier-B
  * capability declares one per emitted trigger event (e.g. `@rayspec/audio-runtime`'s
  * `CapabilityEventDescriptor` extends this); `composeProductDeploy` builds its capability inventory,
- * its persist-scope (CC-1) check, and its per-trigger idempotency-key derivation from these — never
+ * its persist-scope check, and its per-trigger idempotency-key derivation from these — never
  * from hardcodes.
  */
 export interface TriggerEventDescriptor {
@@ -74,7 +74,7 @@ export interface TriggerEventDescriptor {
   readonly idempotency: string;
   /**
    * The EXACT keys of the event's canonical payload (DATA only, never instructions). The compose-time
-   * persist-scope check (CC-1) validates a declared artifact scope against THIS event's keys — never a
+   * persist-scope check validates a declared artifact scope against THIS event's keys — never a
    * union across events (a union would re-admit scopes the triggering event cannot satisfy).
    */
   readonly payload_keys: readonly string[];

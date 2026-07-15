@@ -1,12 +1,12 @@
 /**
  * THE CONTRACT-INTAKE E2E (the shipping gate's harness). The greenfield
  * FILE-declaring Contract-Metadata-Intake product in `examples/contract-intake/` (a DIFFERENT file
- * product from the S5 invoice acceptance), boots
+ * product from the invoice acceptance), boots
  * through the REAL server entrypoint (`assembleServer` from `RAYSPEC_SPEC_PATH`) on a throwaway
  * DATABASE + a real DBOS launch, and is driven end-to-end over REAL HTTP against MATERIALIZED ground
  * truth (fail-the-fix). Same file-ingest chain as the acceptance, second independent product:
- *   S1 bounded upload/submit + `file_submitted` (file-scoped C10 key) · S2 conditional file mount +
- *   blob-env demand · S3 `file_input.parse_text` (text + PDF text-layer) · S4 the generic extraction
+ *   bounded upload/submit + `file_submitted` (file-scoped C10 key) · conditional file mount +
+ *   blob-env demand · `file_input.parse_text` (text + PDF text-layer) · the generic extraction
  *   branch's product shape (DETERMINISTIC executor in CI — the live proof is the sibling smoke) ·
  *   plus store_read (the contract-type→retention catalog) feeding BOTH the agent and the persisted
  *   snapshot, `validation.check`, store_write, and GET views.
@@ -26,7 +26,7 @@
  *       the catalog-matched retention policy + the catalog snapshot (read feeds write) → the bytes
  *       sit under the tenant-jailed content-addressed key;
  *   (b2) the DECLARED views serve the coded contract over HTTP (detail + paged list);
- *   (c) a COMMITTED text-layer PDF contract (a DPA — self-made via the S3 pdf-fixture builder; the
+ *   (c) a COMMITTED text-layer PDF contract (a DPA — self-made via the pdf-fixture builder; the
  *       exact buildPdf call is documented in examples/contract-intake/fixtures/README.md) parses
  *       + codes end-to-end on the REAL pinned parser — a DIFFERENT contract_type, so its retention
  *       policy comes from a DIFFERENT catalog row (the match is provably not canned);
@@ -85,7 +85,7 @@ const TENANT_B = '00000000-0000-4000-8000-00000000f402';
 //     { text: 'Helios Cloud Services AG and our company.' },
 //     { text: 'Effective Date: 2026-06-15' }, { text: 'Initial Term: 36 months' },
 //     { text: 'Governing Law: Ireland' }, { text: 'Total Contract Value (EUR cents): 5000000' }] })
-// (the S3 product-yaml test-support builder; pages join with a blank line on parse).
+// (the product-yaml test-support builder; pages join with a blank line on parse).
 const TXT_FILE_ID = 'ctr-2026-001';
 const TXT_BODY = readFileSync(join(FIXTURES, 'sample-contract.txt'), 'utf8');
 const TXT_SHA = createHash('sha256').update(TXT_BODY).digest('hex');
@@ -103,7 +103,7 @@ let e2eTestsRan = 0;
 /**
  * The DETERMINISTIC contract extractor (the platform ships none — product-free). It DERIVES every
  * coded field from the REAL artifact values it receives:
- *  - `contract.extracted_text` (the S3 parse node's envelope — unwrap `content`): counterparty /
+ *  - `contract.extracted_text` (the parse node's envelope — unwrap `content`): counterparty /
  *    contract type / dates / term / value are regex-derived from the parsed document, so the arm
  *    FAILS if the parse output never reached the agent or got garbled;
  *  - `contract.catalog_rows` (the store_read rows, a plain array): retention_years + review_owner

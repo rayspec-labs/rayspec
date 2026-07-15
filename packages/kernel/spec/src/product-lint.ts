@@ -132,7 +132,7 @@ const GRAPH_PRODUCTION_CLAIM = /\b(production_ready|prod(?:uction)?\s+execution|
  * A PROMPT/LLM-EXECUTION claim as a string value (banned in the graph). MIRRORS the workflow-bridge's
  * `promptExecutionPattern` BYTE-FOR-BYTE — prompt/agent execution is a Tier-B runtime concern, not YAML
  * meaning. Closing this was finding GR-1: a graph string like `llm call` passed the parser but the bridge
- * THREW on it (the S7-2 validate/compile drift). Kept in sync by the parity cross-check test.
+ * THREW on it (a validate/compile drift). Kept in sync by the parity cross-check test.
  */
 const GRAPH_PROMPT_EXECUTION = /\b(prompt\s+execution|execute\s+prompt|llm\s+call|agent\s+call)\b/i;
 
@@ -502,7 +502,7 @@ const STORE_COLUMN_DENYLIST: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The S2 store checks — section-level (names, columns, keys) + step-level (target resolution, column
+ * The store checks — section-level (names, columns, keys) + step-level (target resolution, column
  * contracts, the conflict-key law, per-type field discipline). ONE shared implementation consumed by
  * BOTH `lintProductSpec` (doc/parse time) and `composeProductDeploy` (mount time, defense-in-depth for
  * a code-built spec that bypassed the parser) — never two drifting copies. Returns the FULL list.
@@ -1139,7 +1139,7 @@ export function lintProductSpec(spec: ProductSpec): SpecError[] {
               );
             }
             break;
-          // S2: the use discipline is EXACT (mirrors artifact_persist/artifact_read + the bridge) —
+          // the use discipline is EXACT (mirrors artifact_persist/artifact_read + the bridge) —
           // the two wired operations are store.read / store.write, nothing else.
           case 'store_read':
             if (step.use !== 'store.read') {

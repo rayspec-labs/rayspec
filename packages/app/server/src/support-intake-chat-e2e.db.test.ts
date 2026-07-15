@@ -4,10 +4,10 @@
  * `RAYSPEC_SPEC_PATH`) on a throwaway DATABASE + a real DBOS launch, and is driven end-to-end over
  * REAL HTTP against MATERIALIZED ground truth (fail-the-fix). It composes
  * the WHOLE conversational chain in ONE doc:
- *   S1 conversation identity + a per-turn ledger + `turn_submitted` (per-TURN C10 key) · S2 the
- *   conditional conversation mount + the responder demand (no blob/media/STT env) · S3 the in-request
+ *   conversation identity + a per-turn ledger + `turn_submitted` (per-TURN C10 key) · the
+ *   conditional conversation mount + the responder demand (no blob/media/STT env) · the in-request
  *   multi-turn responder (bounded history window + a bounded store-context read of the seeded catalog)
- *   · S4 content-negotiated SSE egress + the async-follow-up seam · S5 (this doc) the async workflow:
+ *   · content-negotiated SSE egress + the async-follow-up seam · (this doc) the async workflow:
  *   read the seeded catalog → extract+classify a ticket from the turn → validation.check → store_write
  *   UPSERT into support_tickets (keyed on conversation_id) → GET views.
  *
@@ -170,7 +170,7 @@ function supportExtractor(): InMemoryAgentHandlerRegistry {
 class DeterministicResponderBackend implements Backend {
   readonly id = 'openai' as const;
   runCalls = 0;
-  /** S4 stream cardinality: deltas emitted through `ctx.onEvent` before the terminal outcome. */
+  /** Stream cardinality: deltas emitted through `ctx.onEvent` before the terminal outcome. */
   deltas: string[] = [];
   async resolveAuth() {
     return 'api-key' as const;
