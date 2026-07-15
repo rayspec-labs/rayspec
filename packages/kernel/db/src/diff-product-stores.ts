@@ -100,15 +100,21 @@ export interface DiffProductStoresOptions {
    */
   readonly oldConflictKeys?: StoreConflictKeys;
   /**
-   * When true, every SURVIVING table also gets an ADDITIVE, IDEMPOTENT backfill of the
-   * injected tenancy/GDPR columns (`ADD COLUMN IF NOT EXISTS` for each nullable injected column +
-   * `CREATE UNIQUE INDEX IF NOT EXISTS` for the idempotency index). This reconciles a store that was
-   * MATERIALIZED before an injected column existed (e.g. an older deployment that lacks
-   * `created_by`/`idempotency_key`): the spec diff is BLIND to injected columns (they are constant, not
-   * declared), so without this a platform-version bump would leave an old store permanently `drifted`
-   * with no reconciling migration. `IF NOT EXISTS` makes it a genuine no-op on an already-current store,
-   * so it is safe to emit unconditionally on the update path. DEFAULT off ⇒ `diff(old, old)` stays EMPTY
-   * (the NO-OP invariant) — the `rayspec plan` update path opts in; the pure golden tests do not.
+   * When true, every SURVIVING table ALSO gets an ADDITIVE, IDEMPOTENT, UNCONDITIONAL backfill of the
+   * injected tenancy/GDPR columns added after the first release (`ADD COLUMN IF NOT EXISTS` for each +
+   * `CREATE UNIQUE INDEX IF NOT EXISTS` for the idempotency index) — regardless of whether the two spec
+   * sides agree. This is the ONLY way a spec diff can reconcile a store MATERIALIZED (in a real DB)
+   * before an injected column existed (e.g. an older deployment that lacks `created_by`/`idempotency_key`):
+   * a declared spec NEVER lists the constant injected columns (the spec lint reserves their names), so a
+   * spec-vs-spec diff is otherwise BLIND to them and can never emit their ADD on its own. Turn this ON
+   * only when the caller KNOWS the live DB may predate those columns. `IF NOT EXISTS` makes it a genuine
+   * no-op on an already-current DB.
+   *
+   * DEFAULT off. With it off, a spec-vs-spec diff simply never touches the injected columns (both sides
+   * declare the same business columns and neither declares an injected one), so `diff(old, old)` is
+   * EMPTY (the NO-OP invariant) — the common yaml-vs-yaml `rayspec plan --against` case is phantom-free.
+   * The flag is the deliberate, operator-reachable escape hatch for the real-DB reconcile, surfaced by
+   * the CLI as `rayspec plan --reconcile-injected-columns`.
    */
   readonly backfillInjectedColumns?: boolean;
 }
@@ -234,7 +240,8 @@ function dropTableSql(table: string): string {
  * tenant-scoped idempotency index). Reconciles a store materialized before those columns existed without
  * ever failing on an already-current one. The always-present injected columns (id/tenant_id/created_at/
  * deleted_at/retention_days/region) are NOT re-emitted — every materialized store already carries them,
- * so `rayspec plan --against` on an unchanged spec no longer prints spurious backfill DDL for them.
+ * so even when this reconcile is explicitly requested it stays scoped to the two columns a spec diff
+ * cannot otherwise see (`created_by` / `idempotency_key`), never the always-present ones.
  */
 function injectedBackfillSql(table: string): string[] {
   const out: string[] = [];
@@ -507,6 +514,11 @@ export function diffProductStores(
   for (const store of survivingStores) {
     const oldStore = oldByName.get(store.name);
     if (!oldStore) continue; // unreachable (survivingStores are in oldByName) — narrows the type
+    // A spec-vs-spec diff compares the DECLARED business columns only. The constant injected tenancy/GDPR
+    // columns are never listed in a spec (their names are reserved), so two agreeing specs simply produce
+    // no injected-column DDL and `diff(old, old)` is EMPTY. Reconciling a real DB that predates an
+    // injected column is the caller-opt-in `backfillInjectedColumns` path below — a spec diff cannot see
+    // the live DB, so it can only reconcile on that explicit signal.
     const plan = planSurvivingTable(
       oldStore,
       store,

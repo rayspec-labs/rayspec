@@ -78,6 +78,50 @@ describe('diffProductStores — no-op', () => {
   });
 });
 
+describe('diffProductStores — injected-column real-DB reconcile (opt-in backfill flag)', () => {
+  const s = [
+    store({
+      name: 'notes',
+      columns: [
+        { name: 'title', type: 'text' },
+        { name: 'body', type: 'text' },
+      ],
+    }),
+  ];
+
+  it('a spec-vs-spec no-op is EMPTY by default — no phantom injected-column DDL', () => {
+    // The DEFAULT (flag off): both sides declare the same business columns and neither declares a
+    // constant injected column, so the diff never touches created_by / idempotency_key. `diff(old, old)`
+    // is EMPTY, not ~N phantom `ADD COLUMN IF NOT EXISTS` / idempotency-index no-ops. RED if the diff ever
+    // re-forces the unconditional backfill.
+    const r = diffProductStores(s, s);
+    expect(r.statements).toEqual([]);
+    expect(r.migrationSql).toBe('');
+    expect(r.migrationSql).not.toContain('IF NOT EXISTS');
+    expect(r.migrationSql).not.toContain('idempotency_key');
+    expect(r.migrationSql).not.toContain('created_by');
+  });
+
+  it('backfillInjectedColumns:true FORCES the injected backfill — the real-DB reconcile path', () => {
+    // A caller that KNOWS the live DB predates an injected column opts into the UNCONDITIONAL backfill.
+    // A spec diff cannot see the DB, so this explicit signal is the ONLY way it reconciles the gap. It
+    // emits — scoped to the columns added after the first release (created_by + idempotency_key + its
+    // tenant-scoped index), never the always-present ones. FAIL-THE-FIX: RED if the backfill line in
+    // planSurvivingTable is removed (the reconcile path becomes unreachable).
+    const r = diffProductStores(s, s, { backfillInjectedColumns: true });
+    expect(r.statements.filter((x) => x.includes('ADD COLUMN')).length).toBe(2);
+    expect(r.statements.some((x) => x.includes('"created_by"'))).toBe(true);
+    expect(r.statements.some((x) => x.includes('"idempotency_key"'))).toBe(true);
+    expect(
+      r.statements.some((x) =>
+        x.includes('CREATE UNIQUE INDEX IF NOT EXISTS "notes_idempotency_key_unique"'),
+      ),
+    ).toBe(true);
+    expect(r.statements.some((x) => x.includes('"deleted_at"'))).toBe(false);
+    expect(r.destructive).toBe(false); // additive / idempotent — the gate never blocks it
+  });
+});
+
 describe('diffProductStores — first materialization equals the CREATE-only generator', () => {
   it('diff([], new).migrationSql === generateProductSql(new) BYTE-FOR-BYTE', () => {
     const r = diffProductStores([], NEW_RICH);

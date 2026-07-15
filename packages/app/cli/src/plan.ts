@@ -419,10 +419,15 @@ async function planStores(inp: StorePlanInputs): Promise<PlanResult> {
     const diff = diffProductStores(inp.oldStores, inp.newStores, {
       newConflictKeys: inp.newConflictKeys,
       oldConflictKeys: inp.oldConflictKeys,
-      // Reconcile a store materialized before an injected column existed (e.g. an
-      // older deployment lacking created_by/idempotency_key). Idempotent (IF NOT EXISTS) — a
-      // no-op on an already-current store; the ONLY way `rayspec plan --against` closes the injected gap.
-      backfillInjectedColumns: true,
+      // `backfillInjectedColumns` DEFAULTS OFF. This is a spec-vs-spec diff (both sides are declared
+      // specs, not the live DB), and a declared spec never lists the constant platform-injected columns
+      // (their names are reserved), so with the flag off the diff simply never touches them: two identical
+      // specs produce an EMPTY delta — the common yaml-vs-yaml `--against` case is phantom-free (it no
+      // longer dilutes every delta with ~18 no-op backfill statements). The real-DB reconcile — an old
+      // target DB genuinely MISSING created_by / idempotency_key — is unreachable from a spec diff alone,
+      // so it is an explicit operator opt-in via `--reconcile-injected-columns` (surfaced here). When set,
+      // every surviving store emits the idempotent `ADD COLUMN IF NOT EXISTS` + idempotency-index backfill.
+      backfillInjectedColumns: inp.opts.reconcileInjectedColumns ?? false,
     });
     migrationSql = diff.migrationSql;
     proposedAllowlist = diff.proposedAllowlist;
@@ -683,6 +688,16 @@ export interface RunPlanOpts {
   against?: string;
   /** A reviewed-allowlist JSON file (AllowlistEntry[]) fed to the gate so a reviewed destructive change previews. */
   allowlist?: string;
+  /**
+   * REAL-DB reconcile opt-in (update mode only). When true, the delta ALSO carries the idempotent
+   * injected-column backfill (`ADD COLUMN IF NOT EXISTS "created_by"/"idempotency_key"` + the
+   * tenant-scoped idempotency index) for every surviving store. Use it when the target DB was
+   * materialized before those platform columns existed and genuinely lacks them — a spec-vs-spec diff
+   * cannot see the live DB, so it cannot infer the gap on its own. DEFAULT off ⇒ the common yaml-vs-yaml
+   * plan stays phantom-free. Requires `--against` (inert on a first materialization, which creates the
+   * columns fresh) — the combination without `--against` is rejected fail-closed.
+   */
+  reconcileInjectedColumns?: boolean;
 }
 
 /**
@@ -744,6 +759,25 @@ export async function runPlan(
         ],
       };
     }
+  }
+
+  // --reconcile-injected-columns: FAIL-CLOSED — it only augments an UPDATE delta. On a first
+  // materialization the injected columns are created fresh, so the flag would be silently inert; reject
+  // the combination rather than accept a no-op flag (mirrors `--allowlist requires --against`).
+  if (opts.reconcileInjectedColumns && opts.against === undefined) {
+    return {
+      ok: false,
+      phase: 'validate',
+      ...emptyProjection(),
+      errors: [
+        {
+          code: 'schema_violation',
+          message:
+            '--reconcile-injected-columns requires --against — the injected-column backfill only ' +
+            'augments an update diff (a first materialization creates those columns fresh)',
+        },
+      ],
+    };
   }
 
   // --allowlist: read (jailed) + fail-closed parse into AllowlistEntry[].
