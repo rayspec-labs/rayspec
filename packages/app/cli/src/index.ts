@@ -102,13 +102,13 @@ Output: a single JSON object on stdout. Exit 1 = not-ok; exit 2 = a CLI/usage er
 /**
  * A CLI error: a usage/argument problem (exit 2 — distinct from a not-ok spec, which is exit 1).
  * Thrown by `main` and caught at the top level so `main` can RETURN an exit code (testable in-process)
- * rather than calling `process.exit` mid-flight (which truncates a not-yet-drained stdout — GC-1).
+ * rather than calling `process.exit` mid-flight (which truncates a not-yet-drained stdout).
  */
 class CliError extends Error {}
 
 /**
  * Write a string to a stream and RESOLVE only once the chunk is flushed (the write callback fired).
- * This is the drain-safe pattern (GC-1): we must not `process.exit` while a large JSON payload is
+ * This is the drain-safe pattern: we must not `process.exit` while a large JSON payload is
  * still buffered in stdout, or it gets truncated. Awaiting the callback lets the chunk drain first.
  */
 function writeDrained(stream: NodeJS.WriteStream, s: string): Promise<void> {
@@ -125,7 +125,7 @@ function emit(obj: unknown): Promise<void> {
 /**
  * The CLI body. RETURNS the numeric exit code (0 ok · 1 not-ok spec/plan · 2 CLI/usage error) instead
  * of calling `process.exit`, so it is testable in-process and the top-level can drain stdout before
- * exiting (GC-1). A usage/argument problem is raised as a `CliError` and mapped to exit 2 by the
+ * exiting. A usage/argument problem is raised as a `CliError` and mapped to exit 2 by the
  * top-level handler (which prints it to stderr); a not-ok spec/plan result is printed to stdout (it is
  * the command's normal machine-readable output) and mapped to exit 1.
  *
@@ -138,7 +138,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   // DEV-DX: auto-load the repo-root `.env` (no-override, opt-out via RAYSPEC_SKIP_DOTENV=1) ONCE at
   // startup so `plan`'s optional shadow-apply picks up SHADOW_DATABASE_URL + DATABASE_URL out of the
   // box (matching the server boot). Harmless to `doctor` (needs no env); does NOT change plan's
-  // read-only guarantee — it only makes DATABASE_URL readable so RO-1 has a compare target.
+  // read-only guarantee — it only makes DATABASE_URL readable so the read-only guard has a compare target.
   loadLocalDotenvIfPresent();
 
   // The subcommand is the FIRST raw token; the rest is handed to that subcommand UNPARSED (each owns
@@ -284,7 +284,7 @@ function parsePlanArgs(args: readonly string[]): {
 
 /**
  * Top-level runner: invoke `main`, set `process.exitCode` (NOT `process.exit` — let the event loop
- * drain stdout, GC-1), and route CLI/unexpected errors to stderr as exit 2. A `CliError` is a clean
+ * drain stdout), and route CLI/unexpected errors to stderr as exit 2. A `CliError` is a clean
  * usage error (prints the message + USAGE); any other throw is an UNEXPECTED failure (secret-free
  * message only). All error output is drained before the process exits.
  *

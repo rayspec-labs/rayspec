@@ -194,7 +194,7 @@ describe('plan — gate blocks an unreviewed destructive migration', () => {
     expect(r.ok).toBe(true);
   });
 
-  it('ND-1: a destructive migration is BLOCKED through runPlan and SHORT-CIRCUITS the shadow', async () => {
+  it('a destructive migration is BLOCKED through runPlan and SHORT-CIRCUITS the shadow', async () => {
     // Drive the gate-BLOCKED branch through runPlan's OWN code path (not just the bare scanner) by
     // injecting a destructive DIFF, AND supply a shadow URL + a shadowApply SPY — proving the block
     // returns BEFORE the shadow runs (shadowApplied:false, the spy never called).
@@ -218,9 +218,9 @@ describe('plan — gate blocks an unreviewed destructive migration', () => {
   });
 });
 
-describe('plan — RO-1: refuse a shadow that targets the REAL DB (no admin connection opened)', () => {
+describe('plan — refuse a shadow that targets the REAL DB (no admin connection opened)', () => {
   it('SHADOW_DATABASE_URL === DATABASE_URL → ok:false phase:shadow AND shadowApply is NEVER called', async () => {
-    // Inject a shadowApply SPY: if RO-1 opens a connection / runs the shadow, the spy fires. The guard
+    // Inject a shadowApply SPY: if the read-only guard opens a connection / runs the shadow, the spy fires. The guard
     // must return ok:false phase:'shadow' WITHOUT ever calling it (so no admin connection is opened).
     let shadowCalls = 0;
     const same = 'postgres://u:p@db.internal:5432/rayspec';
@@ -242,9 +242,9 @@ describe('plan — RO-1: refuse a shadow that targets the REAL DB (no admin conn
     expect(JSON.stringify(r)).not.toContain('postgres://');
   });
 
-  it('RO-1-PORT: same host + same db, one URL with :5432 and one WITHOUT → RO-1 fires (default port normalized)', async () => {
+  it('default-port normalization: same host + same db, one URL with :5432 and one WITHOUT → the guard fires (default port normalized)', async () => {
     // `postgres://db/rayspec` (no port ⇒ 5432) and `postgres://db:5432/rayspec` resolve to the SAME
-    // real DB. Without default-port normalization RO-1 would NOT fire (port '' !== '5432') and the
+    // real DB. Without default-port normalization the guard would NOT fire (port '' !== '5432') and the
     // shadow would run against the real DB. With it, the guard refuses and the spy is never called.
     let shadowCalls = 0;
     const r = await runPlan(['rayspec.yaml'], {
@@ -263,8 +263,8 @@ describe('plan — RO-1: refuse a shadow that targets the REAL DB (no admin conn
     expect(shadowCalls).toBe(0);
   });
 
-  it('same host but a DIFFERENT db name (rayspec vs rayspec_shadow) does NOT trip RO-1', async () => {
-    // The normal setup must still run the shadow — RO-1 only fires on the SAME db name.
+  it('same host but a DIFFERENT db name (rayspec vs rayspec_shadow) does NOT trip the guard', async () => {
+    // The normal setup must still run the shadow — the guard only fires on the SAME db name.
     let shadowCalls = 0;
     const r = await runPlan(['rayspec.yaml'], {
       databaseUrl: 'postgres://u:p@db.internal:5432/rayspec',
@@ -427,11 +427,11 @@ describe('plan — --allowlist fail-closed validation', () => {
   });
 });
 
-describe('plan — update-mode RO-1: refuse a baseline-seeded shadow that targets the REAL DB', () => {
+describe('plan — update-mode read-only guard: refuse a baseline-seeded shadow that targets the REAL DB', () => {
   it('additive update + SHADOW_DATABASE_URL === DATABASE_URL → refused, and shadowApplyBaselineUpdate is NEVER called', async () => {
-    // The update-mode analogue of the first-materialize RO-1 proof (the shadowApply spy test above): an
-    // ADDITIVE delta passes the gate and REACHES the shadow resolve, so RO-1 is the thing under test.
-    // Inject the baseline-update spy — if RO-1 opened a connection / ran the shadow it would fire. The
+    // The update-mode analogue of the first-materialize read-only-guard proof (the shadowApply spy test above): an
+    // ADDITIVE delta passes the gate and REACHES the shadow resolve, so the read-only guard is the thing under test.
+    // Inject the baseline-update spy — if the read-only guard opened a connection / ran the shadow it would fire. The
     // guard must return ok:false phase:'shadow' WITHOUT ever calling it (no admin connection opened).
     let baselineCalls = 0;
     const same = 'postgres://u:p@db.internal:5432/rayspec';
@@ -455,8 +455,8 @@ describe('plan — update-mode RO-1: refuse a baseline-seeded shadow that target
     expect(JSON.stringify(r)).not.toContain('postgres://');
   });
 
-  it('additive update + DIFFERENT shadow db name → RO-1 does NOT fire, the baseline shadow RUNS (the spy fires once)', async () => {
-    // The non-vacuous companion: same host, a DIFFERENT db name, so RO-1 must NOT fire and the
+  it('additive update + DIFFERENT shadow db name → the guard does NOT fire, the baseline shadow RUNS (the spy fires once)', async () => {
+    // The non-vacuous companion: same host, a DIFFERENT db name, so the guard must NOT fire and the
     // baseline-seeded shadow DOES run — proving the spy-never-called assertion above actually bites.
     let baselineCalls = 0;
     const r = await runPlan(['upd-additive.yaml'], {

@@ -65,7 +65,7 @@ const meetingsStore: StoreSpec = {
   foreignKeys: [],
 };
 
-// F1 fixture — a store whose ONLY business column is the conflict target, so an ensure-exists upsert
+// ensure-exists fixture — a store whose ONLY business column is the conflict target, so an ensure-exists upsert
 // (`upsert('tags',['name'],{name})`) yields a genuinely EMPTY DO-UPDATE SET (the empty-set crash case).
 const tagsStore: StoreSpec = {
   name: 'tags',
@@ -73,7 +73,7 @@ const tagsStore: StoreSpec = {
   foreignKeys: [],
 };
 
-// XT-1 fixture — TWO INDIVIDUAL global uniques (business_key AND vendor). A conflict on `vendor` while
+// multi-unique fixture — TWO INDIVIDUAL global uniques (business_key AND vendor). A conflict on `vendor` while
 // the ON CONFLICT target is `business_key` is the "DIFFERENT unique" 23505 the sanitizer must neutralize.
 const gizmosStore: StoreSpec = {
   name: 'gizmos',
@@ -85,7 +85,7 @@ const gizmosStore: StoreSpec = {
   foreignKeys: [],
 };
 
-// TQ-3 fixture — a COMPOSITE global unique (business_key, vendor), no individual uniques.
+// composite-unique fixture — a COMPOSITE global unique (business_key, vendor), no individual uniques.
 const pairsStore: StoreSpec = {
   name: 'pairs',
   columns: [
@@ -96,7 +96,7 @@ const pairsStore: StoreSpec = {
   foreignKeys: [],
 };
 
-// TQ-4 fixture — a TENANT-SCOPED unique (tenant_id, business_key): the RECOMMENDED secure pattern, where
+// tenant-scoped-unique fixture — a TENANT-SCOPED unique (tenant_id, business_key): the RECOMMENDED secure pattern, where
 // two tenants may each hold the same business_key and a foreign key never conflicts.
 const scopedStore: StoreSpec = {
   name: 'scoped',
@@ -931,11 +931,11 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────────
-  // Store-facade hardening — empty DO-UPDATE SET (F1), sanitized unique-violation (XT-1),
-  // limit/offset guard (F2), concurrency (TQ-1), composite/tenant-scoped/empty-IN edge cases.
+  // Store-facade hardening — empty DO-UPDATE SET, sanitized unique-violation,
+  // limit/offset guard, concurrency, composite/tenant-scoped/empty-IN edge cases.
   // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-  it('F1 ensure-exists: an upsert whose values ARE the conflict columns uses DO NOTHING (no crash)', async () => {
+  it('ensure-exists: an upsert whose values ARE the conflict columns uses DO NOTHING (no crash)', async () => {
     testsRan += 1;
     // values == the conflict column ONLY → setValues is genuinely EMPTY. onConflictDoUpdate({set:{}})
     // throws drizzle's synchronous "No values to set"; the facade uses onConflictDoNothing instead.
@@ -951,7 +951,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     expect(await aDb.select('tags', { name: 'EX' })).toHaveLength(1);
   });
 
-  it('XT-1 sanitizes a unique-violation on a DIFFERENT global unique (no constraint name leaks)', async () => {
+  it('sanitizes a unique-violation on a DIFFERENT global unique (no constraint name leaks)', async () => {
     testsRan += 1;
     // B holds vendor='V'. A upserts a FRESH business_key (the named target → no conflict there) but
     // vendor='V' (held by B) → the INSERT hits the DIFFERENT global unique (gizmos_vendor_unique) →
@@ -990,7 +990,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     expect((caught2 as Error).message).toBe('unique constraint violation');
   });
 
-  it('F2 select limit/offset fail-closed on a non-negative-integer guard (no silent over-read)', async () => {
+  it('select limit/offset fail-closed on a non-negative-integer guard (no silent over-read)', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     await aDb.insert('meetings', { title: 'a', completed: false });
@@ -1003,7 +1003,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     await expect(aDb.select('meetings', {}, { offset: -5 })).rejects.toThrow(
       /non-negative integer/,
     );
-    // TQ-5: limit:0 is VALID — returns 0 rows (never "all rows").
+    // limit:0 is VALID — returns 0 rows (never "all rows").
     expect(await aDb.select('meetings', {}, { limit: 0 })).toHaveLength(0);
   });
 
@@ -1032,7 +1032,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     }
   });
 
-  it('TQ-1 concurrent same-key upserts: exactly ONE row, neither rejects with a 23505', async () => {
+  it('concurrent same-key upserts: exactly ONE row, neither rejects with a 23505', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     // The ON CONFLICT DO UPDATE makes the race a no-crash upsert: one INSERTs, the other UPDATEs the
@@ -1046,7 +1046,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     expect(await aDb.select('meetings', { business_key: 'R' })).toHaveLength(1);
   });
 
-  it('TQ-3 composite conflict target: insert-then-update the SAME row (both conflict cols excluded from SET)', async () => {
+  it('composite conflict target: insert-then-update the SAME row (both conflict cols excluded from SET)', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     const first = await aDb.upsert('pairs', ['business_key', 'vendor'], {
@@ -1067,7 +1067,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     expect(await aDb.select('pairs', { business_key: 'BK' })).toHaveLength(1);
   });
 
-  it('TQ-4 tenant-scoped unique (the secure pattern): per-tenant keys, scoped update, foreign key never conflicts', async () => {
+  it('tenant-scoped unique (the secure pattern): per-tenant keys, scoped update, foreign key never conflicts', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     const bDb = makeHandlerDb(forTenant(db, TENANT_B), productTables);
@@ -1110,7 +1110,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     expect(await bDb.select('scoped', { business_key: 'K2' })).toHaveLength(1);
   });
 
-  it('TQ-2 an empty-array IN filter matches NOTHING (never everything)', async () => {
+  it('an empty-array IN filter matches NOTHING (never everything)', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     await aDb.insert('meetings', { title: 'a', completed: false });

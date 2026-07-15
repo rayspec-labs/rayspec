@@ -571,7 +571,7 @@ export function mediaPrepEnabled(env: NodeJS.ProcessEnv): boolean {
 }
 
 /**
- * F4: build the loud NON-REAL-PROVIDER boot banner (or `null` when all providers are real). A prod boot
+ * Build the loud NON-REAL-PROVIDER boot banner (or `null` when all providers are real). A prod boot
  * that selects `STT_PROVIDER=fake` (no real transcription — every recording fails/empties at STT),
  * `RAYSPEC_EXTRACTION_MODE=deterministic` (no real gpt-5), or `RAYSPEC_RESPONDER_MODE=deterministic`
  * (no real conversation reply model) boots cleanly today and only fails/fakes at first
@@ -1505,7 +1505,7 @@ function resolveResponderStoreContext(
 /**
  * Build the `rollout.conversation.responder` factory for a conversation-declaring document.
  * `RAYSPEC_RESPONDER_MODE` selects WHERE the neutral Backend comes from — `live` (the
- * boot-side factory over the config's `backend`) or `deterministic` (the injected PLAN-B5 proof
+ * boot-side factory over the config's `backend`) or `deterministic` (the injected proof
  * Backend; dev/CI) — while the config resolve + validation run in BOTH modes (the e2e proves the
  * full config path with zero LLM creds). The factory closes over the raw db; the tenant is bound
  * per request from the SERVER-DERIVED value the capability binding passes.
@@ -2120,7 +2120,7 @@ export async function deployProductYamlSpec(
     }
   }
 
-  // ── 5b. F4: a NON-REAL provider selection boots fine but silently produces nothing usable in prod.
+  // ── 5b. a NON-REAL provider selection boots fine but silently produces nothing usable in prod.
   //         Do NOT fail-close (a dev/CI boot legitimately uses these) — but make it LOUD so a
   //         fake-provider prod boot is operator-visible. (A zero-agent/no-stt/non-conversation doc
   //         trips no arm; the responder mode joins the banner for a conversation doc.)

@@ -16,7 +16,7 @@
  *       the tenant-jailed content-addressed key;
  *   (c) byte-identical re-upload + re-submit → deduped, STILL one run (C10 single-flight);
  *   (d) divergent post-seal upload → 409 `file_conflict`, sealed bytes untouched, still one run
- *       (the DUR-1 heal re-emit dedups downstream);
+ *       (the heal re-emit dedups downstream);
  *   (e) oversize Content-Length → 413 BEFORE any byte is read: ZERO blob bytes, ZERO pointer row,
  *       ZERO runs; (f) disallowed mime → 415, zero side effects; (g) unauthenticated → 401;
  *   (h) cross-tenant: a SECOND org's submit hits the bridge sink's fail-closed assertion → a clean

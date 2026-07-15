@@ -131,7 +131,7 @@ const GRAPH_PRODUCTION_CLAIM = /\b(production_ready|prod(?:uction)?\s+execution|
 /**
  * A PROMPT/LLM-EXECUTION claim as a string value (banned in the graph). MIRRORS the workflow-bridge's
  * `promptExecutionPattern` BYTE-FOR-BYTE — prompt/agent execution is a Tier-B runtime concern, not YAML
- * meaning. Closing this was finding GR-1: a graph string like `llm call` passed the parser but the bridge
+ * meaning. Closing this: a graph string like `llm call` passed the parser but the bridge
  * THREW on it (a validate/compile drift). Kept in sync by the parity cross-check test.
  */
 const GRAPH_PROMPT_EXECUTION = /\b(prompt\s+execution|execute\s+prompt|llm\s+call|agent\s+call)\b/i;
@@ -154,7 +154,7 @@ const STREAMING_ROUTE_MARKER = /\b(?:playback|(?:live)?stream(?:ing|s)?)\b/i;
 // test pins the single source). The parser requires the normalized event to be a declared contract of
 // the trigger's capability (its doc-level proxy for the Tier-B event vocabulary the bridge validates
 // against its stage manifests), so a typo'd `trigger.event` fails closed here instead of only at
-// bridge-compile time (finding GR-4).
+// bridge-compile time.
 
 /**
  * Walk an arbitrary value, applying `onKey` to every object key and `onString` to every string leaf,
@@ -264,7 +264,7 @@ export function scanProductGuardrails(raw: unknown): SpecError[] {
       (str, strPath) => {
         // MIRRORS the bridge's `walkWorkflowDeclarations` string checks in ORDER (compiler.ts): product-
         // owned path → provider name → production-execution claim → prompt/LLM-execution claim. Keeping
-        // both this order and the regexes identical is the GR-1 anti-drift contract (parity-tested).
+        // both this order and the regexes identical is the anti-drift contract (parity-tested).
         if (PRODUCT_OWNED_PATH.test(str)) {
           errors.push(
             specError(
@@ -362,7 +362,7 @@ function lintContractSchema(node: unknown, path: string, errors: SpecError[]): v
       );
     }
   }
-  // SCALAR-valued keys must carry their expected scalar shape (GR-2). Without this, a NON-schema position
+  // SCALAR-valued keys must carry their expected scalar shape. Without this, a NON-schema position
   // that admits an object (e.g. `description: { handler: '/handlers/evil.ts', code: "import x from 'y'" }`)
   // escaped BOTH the contracts-exempt global guardrail scan AND this vocabulary check — smuggling
   // handler/code keys past the parser. `type`/`properties`/`items`/`required`/`enum` are shape-checked
@@ -454,7 +454,7 @@ function lintContractSchema(node: unknown, path: string, errors: SpecError[]): v
   }
   // `enum` — a non-empty array of SCALARS (string/number/boolean/null). An object/array element is not a
   // valid enum member and would smuggle a nested shape (e.g. a `{ handler, code }` map) past BOTH the
-  // contracts-exempt global guardrail scan and this vocabulary check — the same GR-2 class of hole that
+  // contracts-exempt global guardrail scan and this vocabulary check — the same class of hole that
   // `description` had. Each non-scalar element is reported at its index.
   if ('enum' in schema) {
     const en = schema.enum;
@@ -838,7 +838,7 @@ export function lintProductSpec(spec: ProductSpec): SpecError[] {
   const extractorIds = new Set(spec.extractors.map((a) => a.id));
   const contractIds = new Set(Object.keys(spec.contracts));
   // Every contract EXPLICITLY declared on a capability (its `contracts[]` list). A capability-namespaced
-  // ref must resolve to one of THESE, not to the namespace alone (GR-4): `cap.typoed_contract` used to
+  // ref must resolve to one of THESE, not to the namespace alone: `cap.typoed_contract` used to
   // resolve merely because `cap` was a declared capability, letting a typo'd Tier-B contract ref through.
   const capabilityContractRefs = new Set<string>();
   for (const cap of spec.capabilities)
@@ -846,7 +846,7 @@ export function lintProductSpec(spec: ProductSpec): SpecError[] {
 
   /**
    * A contract ref resolves iff it is a DECLARED top-level contract id OR an EXACT contract declared on
-   * some capability (`capabilities[].contracts[]`). Fail-closed (GR-4): a capability-namespaced ref whose
+   * some capability (`capabilities[].contracts[]`). Fail-closed: a capability-namespaced ref whose
    * contract is NOT declared on that capability is a `dangling_ref`, not silently accepted on the
    * namespace alone.
    */
@@ -1014,7 +1014,7 @@ export function lintProductSpec(spec: ProductSpec): SpecError[] {
         ),
       );
     } else {
-      // trigger.event must resolve to a declared contract of that capability (GR-4). We normalize via
+      // trigger.event must resolve to a declared contract of that capability. We normalize via
       // the SHARED `normalizeProductTriggerEvent` (product-events.ts — the same single source the
       // bridge compiles with), then require the normalized event ∈ the capability's declared
       // `contracts[]` — the doc-level proxy for the Tier-B event vocabulary the bridge checks against
@@ -1042,7 +1042,7 @@ export function lintProductSpec(spec: ProductSpec): SpecError[] {
     );
     const stepIds = new Set(wf.steps.map((s) => s.id));
     // Steps declared BEFORE the current one (accumulated in declaration order). `depends_on` may only
-    // reference an EARLIER step (GR-3): an unknown step is a `dangling_ref`; a KNOWN step that is not yet
+    // reference an EARLIER step: an unknown step is a `dangling_ref`; a KNOWN step that is not yet
     // declared (a forward or self reference) is an `invalid_dependency_order`. Requiring declaration-order
     // structurally forbids dependency CYCLES (a cycle needs at least one forward edge) and mirrors the
     // bridge's declaration-ordered step graph.
@@ -1170,7 +1170,7 @@ export function lintProductSpec(spec: ProductSpec): SpecError[] {
         checkRef(ref, `${base}.inputs.${k}`);
       for (const [k, ref] of Object.entries(step.outputs ?? {}))
         checkRef(ref, `${base}.outputs.${k}`);
-      // Record this step as declared — a LATER step may depend on it, an earlier one may not (GR-3).
+      // Record this step as declared — a LATER step may depend on it, an earlier one may not.
       seenStepIds.add(step.id);
     });
   });

@@ -449,7 +449,7 @@ describe('provider_native_leak (provider blobs / graph policy leaks)', () => {
   });
 });
 
-describe('prompt/production execution claims (GR-1 — graph VALUE bans, mirror the bridge)', () => {
+describe('prompt/production execution claims (graph VALUE bans, mirror the bridge)', () => {
   it('rejects a prompt/LLM-execution claim as a graph string value', () => {
     expectExact(
       BASE.replace(
@@ -516,10 +516,10 @@ describe('invalid_contract (closed declarative vocabulary)', () => {
     );
   });
 
-  it('rejects a nested OBJECT smuggled under `description` (GR-2 exemption hole — the exact evil fixture)', () => {
+  it('rejects a nested OBJECT smuggled under `description` (exemption hole — the exact evil fixture)', () => {
     // `contracts` is exempt from the global code-key scan (a DATA property may be named `code`/`handler`),
     // and `description` was never type-checked, so `description: { handler, code }` escaped BOTH scans.
-    // GR-2 closes it: a non-string `description` is `invalid_contract` — the nested handler/code never run.
+    // The scalar-shape rule closes it: a non-string `description` is `invalid_contract` — the nested handler/code never run.
     const yaml = `version: "1.0"
 product:
   id: p
@@ -534,7 +534,7 @@ contracts:
     expectExact(yaml, [['invalid_contract', 'contracts.evil.description']]);
   });
 
-  it('rejects a non-boolean additional_properties (GR-2 scalar-shape enforcement)', () => {
+  it('rejects a non-boolean additional_properties (scalar-shape enforcement)', () => {
     expectExact(
       BASE.replace(
         '  cap_a.thing:\n    type: object\n    additional_properties: false',
@@ -546,7 +546,7 @@ contracts:
 
   it('rejects a NON-SCALAR enum element (an object/array member could smuggle a nested shape)', () => {
     // A scalar enum (`enum: [a, b]`) is fine; an object element is not a valid enum member and would carry
-    // a nested map past both the contracts-exempt global scan and the vocabulary check (GR-2 class).
+    // a nested map past both the contracts-exempt global scan and the vocabulary check (the same class).
     const yaml = `version: "1.0"
 product:
   id: p
@@ -580,7 +580,7 @@ describe('dangling_ref (cross-references must resolve)', () => {
     ]);
   });
 
-  it('rejects a capability-NAMESPACED ref whose contract is not declared on that capability (GR-4)', () => {
+  it('rejects a capability-NAMESPACED ref whose contract is not declared on that capability', () => {
     // `cap_a` is a declared capability but `cap_a.typoed_contract` is NOT one of its contracts — it used
     // to resolve on the namespace ALONE. Now it must be an EXACT declared contract of that capability.
     expectExact(BASE.replace('    contract: demo.result', '    contract: cap_a.typoed_contract'), [
@@ -598,7 +598,7 @@ describe('dangling_ref (cross-references must resolve)', () => {
     );
   });
 
-  it('rejects a workflow trigger.event that resolves to no declared capability contract (GR-4)', () => {
+  it('rejects a workflow trigger.event that resolves to no declared capability contract', () => {
     expectExact(BASE.replace('event: thing_ready', 'event: thing_readyyy'), [
       ['dangling_ref', 'workflows[0].trigger.event'],
     ]);
@@ -658,7 +658,7 @@ describe('dangling_ref (cross-references must resolve)', () => {
   });
 });
 
-describe('invalid_dependency_order (GR-3 — declaration-order; cycles impossible)', () => {
+describe('invalid_dependency_order (declaration-order; cycles impossible)', () => {
   it('rejects a forward depends_on (a step depending on a LATER step)', () => {
     const yaml = `version: "1.0"
 product: { id: p, name: P }

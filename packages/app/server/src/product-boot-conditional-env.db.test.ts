@@ -15,10 +15,10 @@
  *      SERVES (401 on the submit route without auth). Previously the boot demanded RAYSPEC_EXTRACTION_MODE
  *      UNCONDITIONALLY (`requireEnv`), so this boot THREW — the RED this arm flips to green.
  *
- *   C. THE SINGLE-PREDICATE NON-COLLINEAR arms (F1/F2 — each demand coupled to its OWN predicate):
- *      F1 boots a NON-audio doc that DECLARES an agent (hasAgents=true, withAudio=false, usesStt=false)
+ *   C. THE SINGLE-PREDICATE NON-COLLINEAR arms (each demand coupled to its OWN predicate):
+ *      the agent-only arm boots a NON-audio doc that DECLARES an agent (hasAgents=true, withAudio=false, usesStt=false)
  *      with all four unset → it must throw the RAYSPEC_EXTRACTION_MODE demand, NOT RAYSPEC_BLOB_ROOT
- *      (a `withAudio && hasAgents` coupling would skip the demand → RED). F2 boots a doc with an stt.*
+ *      (a `withAudio && hasAgents` coupling would skip the demand → RED). The stt-only arm boots a doc with an stt.*
  *      step but NO audio capability → the step-5 fail-closed NAMED ProductBootError (never a raw crash).
  *
  *   D. THE GENERALIZED BLOB DEMAND: a FILE-only doc (file_input, no audio) demands
@@ -27,7 +27,7 @@
  *      that a doc NOT declaring file_input mounts ZERO file surface (404 on the file routes over HTTP)
  *      — and ZERO conversation surface likewise (404 on both conversation routes).
  *
- * DBOS-SINGLETON: exactly ONE full launch (arm B, LAST). The four acme-notes arms + F1 + F2 THROW at the env
+ * DBOS-SINGLETON: exactly ONE full launch (arm B, LAST). The four acme-notes arms + the agent-only + the stt-only arm THROW at the env
  * demands (steps 3–5 of deployProductYamlSpec), which run BEFORE the DBOS executor is even constructed —
  * so they never launch. Skips without DATABASE_URL; the un-skippable ran-guard hard-fails a REQUIRED run
  * that didn't run (the false-green class).
@@ -48,9 +48,9 @@ const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
 const ACME_YAML = resolve(here, '../../../../examples/acme-notes/acme-notes.product.yaml');
 const NON_AUDIO_YAML = resolve(here, '__fixtures__/non-audio-intake.product.yaml');
-// F1: a NON-audio doc that DECLARES an agent (hasAgents=true, withAudio=false, usesStt=false).
+// The agent-only arm: a NON-audio doc that DECLARES an agent (hasAgents=true, withAudio=false, usesStt=false).
 const NON_AUDIO_AGENT_YAML = resolve(here, '__fixtures__/non-audio-agent.product.yaml');
-// F2: an stt.* step WITHOUT the audio capability (usesStt=true, withAudio=false, hasAgents=false).
+// The stt-only arm: an stt.* step WITHOUT the audio capability (usesStt=true, withAudio=false, hasAgents=false).
 const STT_NO_AUDIO_YAML = resolve(here, '__fixtures__/stt-no-audio.product.yaml');
 // a FILE-only doc (file_input, no audio/record/stt/agents) — the generalized blob demand.
 const FILE_ONLY_YAML = resolve(here, '__fixtures__/file-ingest.product.yaml');
@@ -214,7 +214,7 @@ describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands', () => 
     armsRan += 1;
   }, 120_000);
 
-  // ── F1: a NON-audio doc that DECLARES an agent demands ONLY RAYSPEC_EXTRACTION_MODE ─────────
+  // ── The agent-only arm: a NON-audio doc that DECLARES an agent demands ONLY RAYSPEC_EXTRACTION_MODE ─────────
   // The single-predicate NON-COLLINEAR point: this doc has an agent (hasAgents=true) but NO audio
   // (withAudio=false) and NO stt.* step (usesStt=false). With ALL FOUR env vars unset the boot must
   // throw the RAYSPEC_EXTRACTION_MODE demand (step 4) — NOT RAYSPEC_BLOB_ROOT (step 3, which runs
@@ -232,7 +232,7 @@ describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands', () => 
     armsRan += 1;
   }, 120_000);
 
-  // ── F2: an stt.* step WITHOUT the audio capability fail-closes with a NAMED error (step 5) ────
+  // ── The stt-only arm: an stt.* step WITHOUT the audio capability fail-closes with a NAMED error (step 5) ────
   // The real STT media resolver reads the audio capability's blob-backed chunks, so an stt.* step with
   // no audio capability (audio_input/media_playback) is a boot misconfiguration. Step 5 must reject it
   // with the NAMED ProductBootError (never a raw TypeError on an absent blobFactory). withAudio=false
@@ -330,7 +330,7 @@ describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands', () => 
 // DATABASE_URL would otherwise SILENTLY SKIP the whole boot-demand proof and read GREEN.
 describe('boot-demand ran-guard', () => {
   it('the doc-driven env-demand arms ran under a required DB run', () => {
-    // 4 acme-notes demands + F1 (non-audio agent) + F2 (stt-without-audio) + the file-only
+    // 4 acme-notes demands + the agent-only arm (non-audio agent) + the stt-only arm (stt-without-audio) + the file-only
     // blob demand + Arm B (the intake launch).
     if (dbRequired) expect(armsRan).toBeGreaterThanOrEqual(8);
     else expect(true).toBe(true);

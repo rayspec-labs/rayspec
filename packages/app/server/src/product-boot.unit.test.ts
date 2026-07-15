@@ -97,7 +97,7 @@ describe('mediaPrepEnabled — honors RAYSPEC_MEDIA_PREP', () => {
   });
 });
 
-describe('nonRealProviderBanner — loud marker for non-real providers (F4)', () => {
+describe('nonRealProviderBanner — loud marker for non-real providers', () => {
   it('returns null when both providers are real (deepgram + live)', () => {
     expect(nonRealProviderBanner({ STT_PROVIDER: 'deepgram' }, false, 'live')).toBeNull();
   });

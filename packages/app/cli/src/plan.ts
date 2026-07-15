@@ -35,14 +35,14 @@
  * `detectDrift` oracle the boot path uses). Non-vacuous: an unappliable delta fails on apply; a delta
  * that omits or mistypes something the NEW spec declares fails the drift oracle. That oracle is spec ⊆
  * live — it does NOT verify removals (see shadow-apply.ts for why a failed-DROP is unreachable through
- * `--against`'s real path). Read-only w.r.t. the target is unchanged (RO-1 below).
+ * `--against`'s real path). Read-only w.r.t. the target is unchanged (the read-only guard below).
  *
  * READ-ONLY GUARANTEE — scoped to the real DB's CONTENTS (structural, not by convention):
  *   • no DML/DDL `plan` ever issues mutates the real target's schema or rows — every mutating
  *     statement targets a THROWAWAY DB whose name `plan` itself generated (`rayspec_plan_<…>`),
  *     CREATEd on the SHADOW server, and DROPped in a `finally` (see `shadow-apply.ts`);
  *   • the shadow connects ONLY to a URL DERIVED from `SHADOW_DATABASE_URL` (never `DATABASE_URL`);
- *   • RO-1 — a fail-closed STRUCTURAL guard REFUSES the shadow (and opens NO admin connection) when
+ *   • the read-only guard — a fail-closed STRUCTURAL guard REFUSES the shadow (and opens NO admin connection) when
  *     the resolved shadow URL points at the SAME host:port AND SAME database name as `DATABASE_URL`;
  *   • the update-mode baseline comes from the OLD SPEC FILE, never a live introspection of the target.
  *
@@ -165,7 +165,7 @@ export interface PlanResult {
   readonly driftFindings?: DriftFinding[];
 }
 
-/** The RO-1 refusal message (kept identical across first-materialize + update mode; secret-free). */
+/** The read-only guard's refusal message (kept identical across first-materialize + update mode; secret-free). */
 const RO1_REFUSE_MESSAGE =
   'refusing to shadow-apply: the shadow database resolves to the same host and database ' +
   'as DATABASE_URL — point SHADOW_DATABASE_URL at a separate throwaway database';
@@ -234,11 +234,11 @@ function emptyProjection(): {
 }
 
 /**
- * RO-1 — does `shadowUrl` resolve to the SAME real DB as `databaseUrl`? True iff they share host,
+ * The read-only guard — does `shadowUrl` resolve to the SAME real DB as `databaseUrl`? True iff they share host,
  * port AND database NAME. Same host with a DIFFERENT db name (the normal `rayspec` vs `rayspec_shadow`
  * setup) returns FALSE — that is fine. A URL that fails to parse is treated as NOT-same.
  *
- * RO-1-PORT: the default Postgres port is NORMALIZED before comparing (no port ⇒ '5432').
+ * Default-port normalization: the default Postgres port is NORMALIZED before comparing (no port ⇒ '5432').
  * (`localhost` vs `127.0.0.1` is an intentional, documented non-equal limitation.)
  */
 function shadowTargetsRealDb(shadowUrl: string, databaseUrl: string): boolean {
@@ -255,10 +255,10 @@ function shadowTargetsRealDb(shadowUrl: string, databaseUrl: string): boolean {
   return s.hostname === d.hostname && port(s) === port(d) && dbName(s) === dbName(d);
 }
 
-/** The shadow decision: skip (no url / no SQL), refuse (RO-1), or run against `url`. */
+/** The shadow decision: skip (no url / no SQL), refuse (read-only guard), or run against `url`. */
 type ShadowTarget = 'skip' | 'refuse' | { readonly url: string };
 
-/** Resolve the shadow target from opts/env, applying RO-1. Opens NO connection (pure decision). */
+/** Resolve the shadow target from opts/env, applying the read-only guard. Opens NO connection (pure decision). */
 function resolveShadowTarget(opts: RunPlanOpts, migrationSql: string): ShadowTarget {
   const shadowUrl =
     'shadowDatabaseUrl' in opts ? opts.shadowDatabaseUrl : process.env.SHADOW_DATABASE_URL;
@@ -564,7 +564,7 @@ async function planRaySpec(
     opts,
     routes,
     agents,
-    // The generator is injectable (ND-1) so a test can drive the gate-BLOCKED branch through runPlan's
+    // The generator is injectable so a test can drive the gate-BLOCKED branch through runPlan's
     // OWN code with a destructive first-materialization. Production default: generateProductSql(stores).
     firstMaterializeSql: () =>
       (opts.generateSql ?? ((s: RaySpec) => generateProductSql(s.stores)))(spec),
@@ -668,7 +668,7 @@ async function planProduct(
 
 /**
  * Test seams for `runPlan`. Each defaults to the real production implementation; tests inject these to
- * drive the gate-BLOCKED path through `runPlan`'s OWN code (`generateSql`, ND-1) and to prove RO-1 opens
+ * drive the gate-BLOCKED path through `runPlan`'s OWN code (`generateSql`) and to prove it opens
  * NO admin connection (spying `shadowApply` / `shadowApplyBaselineUpdate`). `databaseUrl` defaults to
  * `process.env.DATABASE_URL`. `against`/`allowlist` are the UPDATE-mode input file paths (jailed like
  * the spec path); the CLI parses them from `--against`/`--allowlist`.
@@ -676,13 +676,13 @@ async function planProduct(
 export interface RunPlanOpts {
   /** The shadow server URL. Key PRESENT (even `undefined`) is authoritative; ABSENT ⇒ env fallback. */
   shadowDatabaseUrl?: string | undefined;
-  /** The real-target URL RO-1 guards against. Defaults to `process.env.DATABASE_URL`. */
+  /** The real-target URL the read-only guard guards against. Defaults to `process.env.DATABASE_URL`. */
   databaseUrl?: string | undefined;
   /** First-materialization DIFF step (defaults to `generateProductSql`). Injectable to force destructive SQL. */
   generateSql?: (spec: RaySpec) => string;
-  /** The plain shadow-apply (defaults to the real one). Injectable as a spy for RO-1's no-connection proof. */
+  /** The plain shadow-apply (defaults to the real one). Injectable as a spy for the read-only guard's no-connection proof. */
   shadowApply?: typeof defaultShadowApply;
-  /** The baseline-seeded shadow (defaults to the real one). Injectable as a spy for the update-mode RO-1 proof. */
+  /** The baseline-seeded shadow (defaults to the real one). Injectable as a spy for the update-mode read-only-guard proof. */
   shadowApplyBaselineUpdate?: typeof defaultShadowApplyBaselineUpdate;
   /** UPDATE mode: the PRIOR spec file to diff against (baseline is the FILE, never live DB introspection). */
   against?: string;

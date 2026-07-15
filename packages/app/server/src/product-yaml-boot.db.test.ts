@@ -32,7 +32,7 @@ const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
 const ACME_YAML = resolve(here, '../../../../examples/acme-notes/acme-notes.product.yaml');
 
-// F1 ran-guard: this suite `skipIf(!baseUrl)`s so a credential-free dev run skips
+// ran-guard: this suite `skipIf(!baseUrl)`s so a credential-free dev run skips
 // ergonomically — but a REQUIRED run (CI / RAYSPEC_REQUIRE_DB_TESTS) that lost
 // DATABASE_URL would then SILENTLY SKIP the ledger-6.3 real-DBOS boot proof and still read GREEN. The
 // separate, NON-skipped ran-guard describe at the bottom hard-fails on exactly that. Needs NO fixture
@@ -314,7 +314,7 @@ describe.skipIf(!baseUrl)(
 );
 
 /**
- * F1 ran-guard: a SEPARATE, NON-skipped describe that fails the run when the DB is
+ * ran-guard: a SEPARATE, NON-skipped describe that fails the run when the DB is
  * REQUIRED (CI / RAYSPEC_REQUIRE_DB_TESTS) but the env-boot proof above did NOT run
  * (a lost DATABASE_URL silently skipped the ledger-6.3 real-DBOS composition). Registered LAST with no
  * beforeAll dependency, so even a setup that throws-and-skips leaves `bootTestsRan` at 0 and THIS fails.

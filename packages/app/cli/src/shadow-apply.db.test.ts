@@ -83,8 +83,8 @@ describe.skipIf(!hasDb)('shadowApply — applies + cleans up', () => {
     }
   }, 60_000);
 
-  it('SL-1: an AUTH failure (bad password) → sanitized generic error, no host/credential leak', async () => {
-    // Same real shadow host/port, but a wrong password → PostgresError 28P01. SL-1 must collapse it to
+  it('an AUTH failure (bad password) → sanitized generic error, no host/credential leak', async () => {
+    // Same real shadow host/port, but a wrong password → PostgresError 28P01. The sanitizer must collapse it to
     // the fixed generic message — never echoing the host/port/user/password.
     const good = new URL(shadowUrl());
     const bad = new URL(shadowUrl());

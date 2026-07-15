@@ -23,7 +23,7 @@
  *   (c)  identical re-POST of a persisted message → `deduped: true`, STILL the same runs (C10
  *        single-flight through the whole composed stack);
  *   (d)  divergent-text re-POST of a stored message_id → 409 `conversation_message_conflict`,
- *        the stored turn unchanged, still the same runs (the DUR-1 heal re-emit dedups);
+ *        the stored turn unchanged, still the same runs (the heal re-emit dedups);
  *   (e)  bounds, typed 413 with ZERO side effects: an over-cap message → `message_too_large`;
  *        a body past the DERIVED whole-turn-body bound → `turn_body_too_large`; no ledger row,
  *        no run either way;
@@ -712,7 +712,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
       const turns = await turnRowsFor(TENANT);
       expect(turns).toHaveLength(4);
       expect(turns[0]).toMatchObject({ message_id: MSG_1, message: TEXT_1 });
-      // …the DECLARED store, asserted DIRECTLY after the rejection (F2): still exactly the two
+      // …the DECLARED store, asserted DIRECTLY after the rejection: still exactly the two
       // workflow-written rows, msg-001's carrying the ORIGINAL text…
       const logs = await turnLogRows();
       expect(logs).toHaveLength(2);
@@ -734,7 +734,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
       });
       expect(overCap.status).toBe(413);
       expect(((await overCap.json()) as Record<string, unknown>).error).toBe('message_too_large');
-      // ZERO side effects, DIRECT in the real DB after THIS rejection (F2): the ledger AND the
+      // ZERO side effects, DIRECT in the real DB after THIS rejection: the ledger AND the
       // declared store still hold exactly the accepted turns+replies — nothing for the rejected id.
       let turns = await turnRowsFor(TENANT);
       expect(turns).toHaveLength(4);
@@ -742,7 +742,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
       expect(await turnLogRows()).toHaveLength(2);
 
       // Past the DERIVED whole-turn-body bound (cap + 4 KiB envelope headroom) — the whole-body
-      // check fires FIRST, typed differently (the BOUNDS-1 discipline made observable).
+      // check fires FIRST, typed differently (the bounds discipline made observable).
       const overBody = await submitTurn(CONV_ID, tokenA, {
         message_id: 'msg-huge',
         text: 'x'.repeat(36 * 1024 + 512),
@@ -751,7 +751,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
       expect(((await overBody.json()) as Record<string, unknown>).error).toBe(
         'turn_body_too_large',
       );
-      // The same DIRECT store asserts after the SECOND rejection (F2).
+      // The same DIRECT store asserts after the SECOND rejection.
       turns = await turnRowsFor(TENANT);
       expect(turns).toHaveLength(4);
       expect(turns.some((t) => t.message_id === 'msg-huge')).toBe(false);
@@ -1068,7 +1068,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
         const wfPk = expectedRunId(TENANT, 'log_turn', `turn_ref:${CONV_SSE}:${MSG_SSE}`);
         expect((await workflowRuns()).map((r) => r.workflow_run_id)).toContain(wfPk);
 
-        // TERMINAL ⟷ RE-POST consistency (PM sharpening 3): a C10 JSON re-POST of the SAME message
+        // TERMINAL ⟷ RE-POST consistency: a C10 JSON re-POST of the SAME message
         // returns the persisted reply, byte-equal to the stream's terminal {run_id, text, turn_seq}.
         const repost = await submitTurn(CONV_SSE, tokenA, {
           message_id: MSG_SSE,

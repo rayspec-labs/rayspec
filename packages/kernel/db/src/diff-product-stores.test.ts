@@ -4,7 +4,7 @@
  * The load-bearing proofs (fail-the-fix, not pass-the-shape):
  *   1. BYTE-FIDELITY through the REAL scan — the machine-emitted `proposedAllowlist` is scanned by the
  *      genuine `scanMigrationSql` over the EXACT emitted SQL: BLOCKED with an empty allowlist, PASSES
- *      with the proposal. No injected seam (the ND-1 trap): the destructive SQL is what `diffProductStores`
+ *      with the proposal. No injected seam: the destructive SQL is what `diffProductStores`
  *      actually produces, driven through the production gate. Weakening the allowlist-match
  *      normalization turns the "passes" arm RED (a documented shadow-mutation).
  *   2. GENERATOR EQUIVALENCE — `diffProductStores([], new).migrationSql === generateProductSql(new)`
