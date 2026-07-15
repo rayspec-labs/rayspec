@@ -276,7 +276,7 @@ export function registerDeclaredRoutes(
         auth,
         tenant,
         requirePermission(deps, 'agent:run'),
-        (c) => executeAgentRun(c, deps, agentId, c.req.param()),
+        (c) => executeAgentRun(c, deps, agentId, c.req.param(), action.persistTo),
       );
       continue;
     }

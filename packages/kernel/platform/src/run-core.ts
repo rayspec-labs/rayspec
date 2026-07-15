@@ -37,8 +37,10 @@ import {
 } from '@rayspec/core';
 import { schema, type TenantDb } from '@rayspec/db';
 import { and, desc, eq, ne, sql } from 'drizzle-orm';
+import type { PgTable } from 'drizzle-orm/pg-core';
 import { makeDispatchTool } from './dispatch.js';
 import { EventPipeline } from './event-pipeline.js';
+import { makeHandlerDb } from './handlers/store-facade.js';
 import { rehydrateConversation } from './rehydrate.js';
 import { markRunTainted } from './run-taint.js';
 
@@ -90,6 +92,20 @@ export interface RunOptions {
    * Tenant-scoped via the TenantDb chokepoint either way.
    */
   taintDb?: TenantDb;
+  /**
+   * Opt-in output persistence: the DECLARED store name to write the run's validated `outputSchema`
+   * output into after a successful run (the `persistTo` field on an agent action). Requires
+   * `productTables` (below). EXACTLY-ONCE across the sync and durable paths (see the header-persist
+   * seam). Absent ⇒ the output is returned/journaled but not written to a store.
+   */
+  persistTo?: string;
+  /**
+   * The deployment's declared product tables (store name → runtime `PgTable`), used ONLY to resolve
+   * `persistTo` for the output-persist write (reusing the store-facade insert path, so the tenant
+   * predicate + the fail-closed input guards are structural). Supplied by the composition root exactly
+   * like the api/handler store surface. Absent ⇒ `persistTo` is inert (nothing is persisted).
+   */
+  productTables?: ReadonlyMap<string, PgTable>;
 }
 
 /**
@@ -501,35 +517,60 @@ export async function runAgent(
   // setWhere is false for it, so a later spurious re-run that ERRORS can NEVER downgrade a completed run
   // back to 'error'. The identity columns (backend/authMode/agentName/model) are invariant across re-runs
   // of the same runId, so they are not refreshed; createdAt (the run's first-seen instant) is preserved.
-  await tdb
-    .insert(schema.runs, {
-      runId,
-      backend: result.backend,
-      authMode: result.authMode,
-      agentName: spec.name,
-      model: spec.model,
-      status: result.status,
-      finalText: result.finalText,
-      output: result.output ?? null,
-      // The COMPUTED cost is the journal roll-up (not the adapter's number); + the reconciliation roll-up.
-      costUsd: String(rollup.computedCostUsd),
-      providerCostUsd: rollup.providerCostUsd === null ? null : String(rollup.providerCostUsd),
-      billedCostUsd: String(rollup.billedCostUsd),
-      costDrift: rollup.costDrift,
-    })
-    .onConflictDoUpdate({
+  const runHeaderValues = {
+    runId,
+    backend: result.backend,
+    authMode: result.authMode,
+    agentName: spec.name,
+    model: spec.model,
+    status: result.status,
+    finalText: result.finalText,
+    output: result.output ?? null,
+    // The COMPUTED cost is the journal roll-up (not the adapter's number); + the reconciliation roll-up.
+    costUsd: String(rollup.computedCostUsd),
+    providerCostUsd: rollup.providerCostUsd === null ? null : String(rollup.providerCostUsd),
+    billedCostUsd: String(rollup.billedCostUsd),
+    costDrift: rollup.costDrift,
+  };
+  const runHeaderSet = {
+    status: result.status,
+    finalText: result.finalText,
+    output: result.output ?? null,
+    costUsd: String(rollup.computedCostUsd),
+    providerCostUsd: rollup.providerCostUsd === null ? null : String(rollup.providerCostUsd),
+    billedCostUsd: String(rollup.billedCostUsd),
+    costDrift: rollup.costDrift,
+  };
+
+  // OUTPUT PERSIST (opt-in `persistTo`): write the run's validated structured output as one row into a
+  // declared store, EXACTLY-ONCE, atomically with the header's completing transition. We persist ONLY a
+  // SUCCESSFUL run that produced a non-null OBJECT output (an error run / a run with no structured output
+  // has nothing to persist). When it does NOT apply, the header upsert is the SAME single statement as
+  // before (byte-identical for every existing spec — no persistTo, no transaction wrapper).
+  const shouldPersistOutput =
+    opts.persistTo !== undefined &&
+    opts.productTables !== undefined &&
+    result.status === 'completed' &&
+    typeof result.output === 'object' &&
+    result.output !== null &&
+    !Array.isArray(result.output);
+
+  if (shouldPersistOutput) {
+    await persistRunOutput(
+      tdb,
+      opts.persistTo as string,
+      opts.productTables as ReadonlyMap<string, PgTable>,
+      runHeaderValues,
+      runHeaderSet,
+      result.output,
+    );
+  } else {
+    await tdb.insert(schema.runs, runHeaderValues).onConflictDoUpdate({
       target: schema.runs.runId,
-      set: {
-        status: result.status,
-        finalText: result.finalText,
-        output: result.output ?? null,
-        costUsd: String(rollup.computedCostUsd),
-        providerCostUsd: rollup.providerCostUsd === null ? null : String(rollup.providerCostUsd),
-        billedCostUsd: String(rollup.billedCostUsd),
-        costDrift: rollup.costDrift,
-      },
+      set: runHeaderSet,
       setWhere: ne(schema.runs.status, 'completed'),
     });
+  }
 
   // Persist the re-derived neutral conversation as ConvTurn/ConvPart rows (only on the first,
   // live run). ONE ROW PER PART: a global monotonic `seq` orders parts across all turns, the row
@@ -556,6 +597,60 @@ export async function runAgent(
   }
 
   return result;
+}
+
+/**
+ * Persist a successful run's validated output into a declared store, EXACTLY-ONCE, atomically with the
+ * run-header's completing transition.
+ *
+ * The header upsert is a CONDITIONAL upsert on the runId PK whose `setWhere ne(status,'completed')` lets
+ * exactly ONE call perform the transition to a completed header — the UNIQUE PK serializes concurrent
+ * completions, and a durable recovery re-dispatch of an already-completed run LOSES that transition. We
+ * make that upsert `.returning()` and gate the store write on it: the row is written ONLY when the
+ * returning shows THIS call performed the completing transition (non-empty). A re-dispatch that finds the
+ * run already completed gets an empty returning ⇒ NO second store write (exactly-once). Both writes run
+ * in ONE transaction so the completion + the persist commit atomically: on the durable path `tdb` is
+ * ALREADY inside the run's transaction, so this NESTS as a savepoint; on the sync path it opens a fresh
+ * transaction. The store write REUSES the store-facade insert path, so the tenant predicate + the
+ * fail-closed input guards (unknown / server-controlled columns, injection values) are structural.
+ *
+ * `created_by` is left to its column default (unset): the durable path has NO route principal, and
+ * leaving it unset keeps the sync and durable paths UNIFORM (the same posture as a trigger-handler
+ * insert) rather than stamping a principal on one path and nothing on the other.
+ *
+ * IRREDUCIBLE RESIDUAL (documented, fail-closed — not silent corruption): the doctor rejects at DEPLOY
+ * every persist incompatibility it can see statically (unknown/server-controlled columns, type
+ * mismatches, uncovered NOT-NULL columns, enum-whitelist escapes). It CANNOT see a constraint the run's
+ * OUTPUT DATA violates only at runtime — a UNIQUE business column or an FK where two distinct runs
+ * produce the same business key. Such a collision (23505 / 23503) rolls back this whole transaction: the
+ * run is NOT marked completed and the output is NOT persisted (fail-closed — never a completed header
+ * with a missing/duplicate row). When two runs may legitimately produce the same business key, target a
+ * NON-unique persist store, or ensure the output value is unique per run.
+ */
+async function persistRunOutput(
+  tdb: TenantDb,
+  store: string,
+  productTables: ReadonlyMap<string, PgTable>,
+  headerValues: Record<string, unknown>,
+  headerSet: Record<string, unknown>,
+  output: unknown,
+): Promise<void> {
+  await tdb.transaction(async (txTdb) => {
+    const completed = await txTdb
+      .insert(schema.runs, headerValues)
+      .onConflictDoUpdate({
+        target: schema.runs.runId,
+        set: headerSet,
+        setWhere: ne(schema.runs.status, 'completed'),
+      })
+      .returning({ runId: schema.runs.runId });
+    // Empty returning ⇒ the run was ALREADY completed (this call lost the transition) ⇒ the winner
+    // already persisted the output ⇒ skip. This is the exactly-once gate on a durable re-dispatch.
+    if (completed.length === 0) return;
+    // Reuse the store-facade insert path (no created_by actor — see the doc above): fail-closed on
+    // unknown / server-controlled columns + injection values, tenant predicate structural.
+    await makeHandlerDb(txTdb, productTables).insert(store, output as Record<string, unknown>);
+  });
 }
 
 /** One persistable ConvPart row (tenantId is auto-stamped by the chokepoint). */

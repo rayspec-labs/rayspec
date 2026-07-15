@@ -59,6 +59,7 @@ import { forTenant, schema, type TenantDb } from '@rayspec/db';
 import type { DurableExecutor, DurableJobStatus, EnqueueResult, RunJob } from '@rayspec/platform';
 import { isRunTainted, runAgent } from '@rayspec/platform';
 import { eq } from 'drizzle-orm';
+import type { PgTable } from 'drizzle-orm/pg-core';
 
 /**
  * The neutral run-resolution the executor needs to turn a `RunJob` back into a runnable run — the
@@ -79,6 +80,13 @@ export interface ResolvedRun {
    * TenantDb so the tools' HandlerDb shares the GUC transaction (RLS-ready). Optional (no-tool agent).
    */
   readonly toolFactory?: (tdb: TenantDb) => NeutralTool[];
+  /**
+   * The deployment's declared product tables (store name → runtime `PgTable`). Threaded into `runAgent`
+   * so a job carrying `persistTo` can resolve the target store and write the run's validated output
+   * (reusing the store-facade insert path). A no-store deployment / a job without `persistTo` leaves it
+   * inert. Deployment-constant (the resolver captures it), like `backend`.
+   */
+  readonly productTables?: ReadonlyMap<string, PgTable>;
 }
 
 /** What `DbosDurableExecutor` is constructed with: a raw Db + the agent resolver the worker fires. */
@@ -419,6 +427,11 @@ export class DbosDurableExecutor implements DurableExecutor {
             runId: job.runId,
             taintDb,
             ...(tools ? { tools } : {}),
+            // Output persistence: when the job carries `persistTo`, write the run's validated output
+            // into the resolved store (exactly-once — the header completing-transition gate makes a
+            // recovery re-dispatch of an already-completed run a NO second write).
+            ...(job.persistTo !== undefined ? { persistTo: job.persistTo } : {}),
+            ...(resolved.productTables ? { productTables: resolved.productTables } : {}),
           });
         });
       },

@@ -419,6 +419,11 @@ export class DbosCronScheduler {
       tenantId,
       agentId: descriptor.action.agentId,
       input: cronAgentInput(descriptor.name),
+      // Carry the action's optional output-persist target so the off-request run writes its validated
+      // output into the declared store (exactly-once via the run-header completing-transition gate).
+      ...(descriptor.action.persistTo !== undefined
+        ? { persistTo: descriptor.action.persistTo }
+        : {}),
     });
     return true;
   }

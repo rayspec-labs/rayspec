@@ -54,6 +54,14 @@ export class FakeSpineBackend implements Backend {
    * run reaches the gate (the entry barrier), so the test can wait until every run holds its run-tx conn.
    */
   gateBeforeTool = false;
+
+  /**
+   * When set, the completed run returns THIS object as its structured `output` (instead of null) — so a
+   * job carrying `persistTo` has a validated output to write into a store. Default (unset) leaves
+   * `output: null`, byte-behaviourally unchanged for every existing spine test.
+   */
+  structuredOutput?: Record<string, unknown>;
+
   onHoldingRunTx?: () => void;
   #preToolWaiters: Array<() => void> = [];
   releasePreTool(): void {
@@ -150,7 +158,7 @@ export class FakeSpineBackend implements Backend {
       authMode: 'api-key',
       status: 'completed',
       finalText,
-      output: null,
+      output: this.structuredOutput ?? null,
       error: null,
       errorClass: null,
       conversation: [

@@ -1333,6 +1333,9 @@ async function deployDeclaredSpec(
             spec: entry.spec,
             ...(entry.toolFactory ? { toolFactory: entry.toolFactory } : {}),
             ...(entry.tools ? { tools: entry.tools } : {}),
+            // The deployment's product tables so a job carrying `persistTo` can resolve its target
+            // store and write the run's validated output off-request (exactly-once via run-core).
+            productTables,
           };
         },
       },

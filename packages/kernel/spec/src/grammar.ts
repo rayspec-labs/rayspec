@@ -339,6 +339,13 @@ export const RouteAction = z.discriminatedUnion('kind', [
       kind: z.literal('agent'),
       /** The declared agent id (lint-resolved). */
       agent: z.string().min(1),
+      /**
+       * Optional: a declared store name (lint-resolved). When set, the agent's validated
+       * `outputSchema` output is written as one row into this store after a successful run —
+       * exactly-once across the sync and durable execution paths. Omitted ⇒ the run's output is
+       * returned/journaled but not persisted to a store.
+       */
+      persistTo: z.string().min(1).optional(),
     })
     .strict(),
   z
@@ -384,7 +391,18 @@ export type ApiRouteSpec = z.infer<typeof ApiRouteSpec>;
  * property); a cron/async fire is fail-closed-rejected at runtime (not in this grammar).
  */
 export const TriggerAction = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('agent'), agent: z.string().min(1) }).strict(),
+  z
+    .object({
+      kind: z.literal('agent'),
+      agent: z.string().min(1),
+      /**
+       * Optional: a declared store name (lint-resolved). When set, the agent's validated
+       * `outputSchema` output is written as one row into this store after a successful run —
+       * exactly-once across a durable recovery re-dispatch of the same run.
+       */
+      persistTo: z.string().min(1).optional(),
+    })
+    .strict(),
   z.object({ kind: z.literal('handler'), handler: z.string().min(1) }).strict(),
 ]);
 export type TriggerAction = z.infer<typeof TriggerAction>;

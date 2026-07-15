@@ -194,6 +194,10 @@
                   "agent": {
                     "type": "string",
                     "minLength": 1
+                  },
+                  "persistTo": {
+                    "type": "string",
+                    "minLength": 1
                   }
                 },
                 "required": [
@@ -430,6 +434,10 @@
                     "const": "agent"
                   },
                   "agent": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "persistTo": {
                     "type": "string",
                     "minLength": 1
                   }
