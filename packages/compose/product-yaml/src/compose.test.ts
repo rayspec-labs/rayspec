@@ -534,7 +534,7 @@ describe('composeProductDeploy — partial-unlock honesty (fail-closed, section 
   });
 });
 
-describe('composeProductDeploy — the trigger-event vocabulary (S1)', () => {
+describe('composeProductDeploy — the trigger-event vocabulary', () => {
   it('builds the capability inventory events from the MOUNTED descriptors (no hardcode)', () => {
     const composed = composeProductDeploy(parseFixture(), rollout());
     // The dispatcher listens on EXACTLY the mounted capabilities' declared events — today the audio

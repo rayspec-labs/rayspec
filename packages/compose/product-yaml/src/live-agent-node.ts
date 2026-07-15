@@ -294,7 +294,7 @@ export function makeLiveExtractionNode(cfg: LiveExtractionNodeConfig): Capabilit
       return fail('agent_output_shape_mismatch', `step '${step.id}' declares no output artifact.`);
     }
 
-    // ── the DECLARATION-DISCRIMINATED input branch (S4) ──────────────────────────
+    // ── the DECLARATION-DISCRIMINATED input branch ───────────────────────────────
     // `closed_source_artifacts` PRESENT ⇒ the transcript path, byte-identical to pre-S4:
     // the closed span-set is the grounding source AND the model input. ABSENT ⇒ the GENERIC
     // (non-audio) path: the compiled `artifact_inputs` are required-checked (converging with the

@@ -1,5 +1,5 @@
 /**
- * The `file_input.parse_text` node (S3) — the durable blob→text parse step between the S1/S2
+ * The `file_input.parse_text` node — the durable blob→text parse step between the S1/S2
  * bounded byte-ingest and the S4 extraction: it resolves the sealed file's raw bytes through an
  * INJECTED tenant-bound `BlobStore` (the STT `BlobRemuxSttMediaResolver` composition pattern —
  * never a raw fs/db handle), parses them to text, and emits ONE bounded text artifact under the

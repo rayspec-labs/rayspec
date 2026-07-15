@@ -1,5 +1,5 @@
 /**
- * The Tier-A `store.read` / `store.write` workflow nodes (S2) — the
+ * The Tier-A `store.read` / `store.write` workflow nodes — the
  * runtime for the product profile's declared-store step types, built over the SAME tenant-bound `HandlerDb` facade
  * every other node uses (`makeHandlerDb`: name-keyed, fail-closed on undeclared stores/columns,
  * structurally tenant-predicated).

@@ -1,5 +1,5 @@
 /**
- * The Tier-A store.read / store.write nodes (S2) — unit proofs over a spying
+ * The Tier-A store.read / store.write nodes — unit proofs over a spying
  * HandlerDb fake. The C10/at-least-once LAW is pinned fail-the-fix: store.write goes through
  * `db.upsert` EXCLUSIVELY with the STORE-DECLARED conflict key — the fake exposes an `insert` spy
  * that must NEVER fire (an insert-and-recover rewrite trips this test before it can poison a run

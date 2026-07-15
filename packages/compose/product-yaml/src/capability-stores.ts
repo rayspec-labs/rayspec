@@ -1,11 +1,11 @@
 /**
- * The CAPABILITY-OWNED store composition for one Product-YAML doc (S3/S4) — the ONE
+ * The CAPABILITY-OWNED store composition for one Product-YAML doc — the ONE
  * helper the deploy composition, the server boot, and the CLI's product-profile derivation all consume, so the
  * three call sites can never drift on WHICH capability stores a doc mounts (the boot↔compose
  * lockstep hazard, killed structurally). ALL capabilities are CONDITIONAL-BY-DECLARATION: the
- * audio half joins iff the doc declares `audio_input`/`media_playback` (S4), the record half iff it
- * declares `record_input` (S3), the file half iff it declares `file_input` (S2), the
- * conversation half iff it declares `conversation_input` (S2). A doc declaring audio has its
+ * audio half joins iff the doc declares `audio_input`/`media_playback`, the record half iff it
+ * declares `record_input`, the file half iff it declares `file_input`, the
+ * conversation half iff it declares `conversation_input`. A doc declaring audio has its
  * capability store set byte-identical to the pre-S4 unconditional prepend — the compose
  * golden pins that.
  *

@@ -418,7 +418,7 @@ describe.skipIf(!baseUrl)('file-ingest — real boot + real DBOS + HTTP', () => 
       );
 
       // MATERIALIZED ground truth: the declared store row carries the SERVER-derived byte metadata
-      // AND (S3) the parse node's extracted text — the CSV passed through byte-exact via the
+      // AND the parse node's extracted text — the CSV passed through byte-exact via the
       // `{artifact}` value (upload → parse_text → store_write, end-to-end on the real DBOS path).
       const rows = await ingestedRows();
       expect(rows).toHaveLength(1);

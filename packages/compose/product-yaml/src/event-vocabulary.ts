@@ -1,5 +1,5 @@
 /**
- * The composition-side TRIGGER-EVENT VOCABULARY (S1): the per-event descriptors of
+ * The composition-side TRIGGER-EVENT VOCABULARY: the per-event descriptors of
  * the capabilities THIS composition mounts, and the two derivations `composeProductDeploy` builds
  * from them instead of hardcodes:
  *
@@ -121,7 +121,7 @@ export function triggerRegistrationForWorkflow(
 }
 
 /**
- * CC-1, per-event (S1): the artifact-persist node scopes rows by the TRIGGER payload's `<scope>_id`,
+ * CC-1, per-event: the artifact-persist node scopes rows by the TRIGGER payload's `<scope>_id`,
  * so the declared scope key must be among the SPECIFIC triggering workflow's event `payload_keys`.
  * Deliberately NOT a union across all mounted events — with a second event in the vocabulary, a
  * union would accept a scope only the OTHER event's payload carries, re-opening the exact

@@ -268,7 +268,7 @@ export function registerDeclaredRoutes(
       // DELIBERATELY NOT wrapped in a TenantDb.transaction here — that would hold a DB connection
       // across the entire model run and break run-core's streaming persist-before-flush. The agent
       // run delegates persistence to run-core's journal / EventPipeline. Moving run-core's write
-      // sites onto the GUC seam is deferred to external-exposure hardening (S0).
+      // sites onto the GUC seam is deferred to external-exposure hardening.
       registerOn(
         app,
         route.method,

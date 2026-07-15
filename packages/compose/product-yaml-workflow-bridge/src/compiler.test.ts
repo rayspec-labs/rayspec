@@ -486,7 +486,7 @@ function storeInventory() {
   };
 }
 
-describe('Product YAML workflow bridge — store_read/store_write (S2)', () => {
+describe('Product YAML workflow bridge — store_read/store_write', () => {
   it('compiles the two store step types onto capability=store nodes; the declaration-only fields do NOT leak into the compiled spec', () => {
     const spec = compileProductYamlWorkflow(storeBridgeInput(), {
       workflowId: 'log_session',

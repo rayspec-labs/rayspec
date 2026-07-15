@@ -44,8 +44,8 @@ export const CONVERSATION_EVENT_PAYLOAD_KEYS = [
 export type ConversationState = 'open';
 
 /**
- * The turn ledger lifecycle state. A USER row is terminal at `submitted` (S1); the ASSISTANT reply
- * row (S3) is terminal at `replied` — it is persisted ONLY after its model run completed, so no
+ * The turn ledger lifecycle state. A USER row is terminal at `submitted`; the ASSISTANT reply
+ * row is terminal at `replied` — it is persisted ONLY after its model run completed, so no
  * in-flight state exists on the ledger (the reply-in-progress window is represented by the ABSENCE
  * of the reply row; reply.ts documents the convergence law).
  */

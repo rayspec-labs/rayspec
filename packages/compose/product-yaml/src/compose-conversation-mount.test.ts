@@ -282,7 +282,7 @@ views:
   });
 });
 
-describe('composeProductDeploy — the S3 responder laws (S3)', () => {
+describe('composeProductDeploy — the S3 responder laws', () => {
   it('FAIL-CLOSES a conversation-declaring doc WITHOUT a wired responder (the executor-coverage mirror)', () => {
     expect(() =>
       composeProductDeploy(

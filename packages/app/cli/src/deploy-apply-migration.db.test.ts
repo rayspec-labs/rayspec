@@ -349,7 +349,7 @@ describe.skipIf(!baseUrl)(
         // Boot 3 — the LEFTOVER-ENV REBOOT: the EXACT SAME --apply-migration command against the NOW-
         // migrated DB (as if the operator left --apply-migration in a systemd/docker `Restart=always`
         // unit). Re-applying the non-idempotent `ADD COLUMN note` would raise duplicate_column (42701) and
-        // CRASH the boot (exit 1) — the pre-FIX-1 backend-path behavior. FIX-1 CLASSIFIES the live schema
+        // CRASH the boot (exit 1) — an earlier backend-path behavior. The boot CLASSIFIES the live schema
         // FIRST: it now present-matches v2, so the boot MOUNTS (zero migrations) and SERVES cleanly.
         const boot3 = spawnDeploy(
           ['v2.rayspec.yaml', '--apply-migration', '0001_add_note.sql'],

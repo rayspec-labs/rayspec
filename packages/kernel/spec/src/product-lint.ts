@@ -149,7 +149,7 @@ const GRAPH_PROMPT_EXECUTION = /\b(prompt\s+execution|execute\s+prompt|llm\s+cal
 const STREAMING_ROUTE_MARKER = /\b(?:playback|(?:live)?stream(?:ing|s)?)\b/i;
 
 // The trigger normalization (a workflow trigger's `capability` + `event` → the canonical event id)
-// is the SHARED `normalizeProductTriggerEvent` from `./product-events.js` (S1) — the ONE source the
+// is the SHARED `normalizeProductTriggerEvent` from `./product-events.js` — the ONE source the
 // bridge compiler also imports (the old KEEP-IN-SYNC local copy is gone; the cross-package parity
 // test pins the single source). The parser requires the normalized event to be a declared contract of
 // the trigger's capability (its doc-level proxy for the Tier-B event vocabulary the bridge validates
@@ -1175,7 +1175,7 @@ export function lintProductSpec(spec: ProductSpec): SpecError[] {
     });
   });
 
-  // ---- declared product stores + store steps (S2) -------------------------------------
+  // ---- declared product stores + store steps ------------------------------------------
   errors.push(...checkProductStores(spec));
 
   // ---- grounding policy refs ---------------------------------------------------------

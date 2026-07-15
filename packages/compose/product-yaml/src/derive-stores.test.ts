@@ -109,7 +109,7 @@ function declaredStore(name: string, keyColumn = 'item_code'): ProductSpec['stor
   };
 }
 
-describe('deriveProductStores — declared 0.2 stores (S2)', () => {
+describe('deriveProductStores — declared 0.2 stores', () => {
   it('emits a declared store as a STANDARD StoreSpec: declared columns, key column derives unique, no FKs', () => {
     const spec: ProductSpec = { ...acmeSpec(), stores: [declaredStore('gadget_catalog')] };
     const derived = deriveProductStores(spec, AUDIO_STORES);

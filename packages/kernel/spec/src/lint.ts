@@ -899,7 +899,7 @@ export function lintSpec(spec: RaySpec): SpecError[] {
   });
 
   // ---- extensions[] DUPLICATE ids (cross-ref/merge resolution lands in S4) ----------------
-  // The `loadExtensions` merge (S4) keys packs by `id`; two refs sharing an id would silently
+  // The `loadExtensions` merge keys packs by `id`; two refs sharing an id would silently
   // collide (one pack lost). Reject at config time — symmetric with the other section dup checks.
   errors.push(
     ...findDuplicates(

@@ -379,7 +379,7 @@ describe('diffProductStores — golden per-shape deltas', () => {
     ).toEqual([]);
   });
 
-  it('FIX-2: a NEWLY-ADDED unique column emits ADD COLUMN + CREATE UNIQUE INDEX (both additive)', () => {
+  it('a NEWLY-ADDED unique column emits ADD COLUMN + CREATE UNIQUE INDEX (both additive)', () => {
     const next = [
       store({
         name: 'items',
@@ -470,7 +470,7 @@ describe('diffProductStores — golden per-shape deltas', () => {
       }),
     ];
     const change = diffProductStores(withFk, restrictFk);
-    // FIX-1: an onDelete-only change keeps the SAME constraint name (the name encodes no policy), so
+    // an onDelete-only change keeps the SAME constraint name (the name encodes no policy), so
     // the replace MUST be DROP-then-ADD as an ADJACENT pair in the destructive segment — an ADD before
     // the DROP would fail 42710 duplicate_object on a real DB. Drop at index 0, add at index 1.
     expect(change.statements).toEqual([

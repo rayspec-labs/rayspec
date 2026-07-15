@@ -209,14 +209,14 @@ describe('parser ↔ bridge neutrality parity (GR-1 anti-drift)', () => {
     expect(prompt.errors.map((e) => e.code)).toContain('prompt_execution_claim');
   });
 
-  it('trigger-event normalization is the ONE spec function — identity, not a re-synced copy (S1)', () => {
+  it('trigger-event normalization is the ONE spec function — identity, not a re-synced copy', () => {
     // The bridge's `compileTriggerEvent` must BE `@rayspec/spec`'s `normalizeProductTriggerEvent`
     // (the same function object). Re-introducing a local copy in compiler.ts either collides with
     // this binding at compile time or breaks this identity pin — the KEEP-IN-SYNC era is over.
     expect(compileTriggerEvent).toBe(normalizeProductTriggerEvent);
   });
 
-  it('the audio alias behaves identically through the FULL parser AND the FULL bridge compile (S1)', () => {
+  it('the audio alias behaves identically through the FULL parser AND the FULL bridge compile', () => {
     // Parser side: `trigger: { capability: audio_input, event: session_finalized }` resolves ONLY via
     // the alias — the capability declares the CANONICAL id (`audio_input.finalized_session`), never
     // the raw `${capability}.${event}` join. A parser-side alias drop flips this to a dangling_ref.
@@ -266,7 +266,7 @@ workflows:
     expect(spec.trigger.event).toBe('audio_input.finalized_session');
   });
 
-  it('a non-aliased pair joins identically on both sides — <capability>.<event> (S1)', () => {
+  it('a non-aliased pair joins identically on both sides — <capability>.<event>', () => {
     // Parser side: PARSER_BASE (trigger { cap, ready } against declared contract 'cap.ready')
     // already proves the default join — re-asserted here so THIS test names the invariant.
     expect(parseProductSpec(parserDoc()).ok).toBe(true);

@@ -479,7 +479,7 @@ export const ExactVersionPin = z
  * A reference to an extension pack to load. The pack carries ALL product code (its
  * own stores/handlers/tooling/route fragments + capability impls); core validates ONLY this
  * reference shape, never the pack's contents. `config` is an OPEN passthrough record whose CONTENTS
- * are validated by the PACK's own Zod at load time (S4), NEVER by core — but the ExtensionRef
+ * are validated by the PACK's own Zod at load time, NEVER by core — but the ExtensionRef
  * wrapper itself is `.strict()`, so an unknown key ON THE REF is fail-closed-rejected.
  *
  *  - `id`      — a logical id for the pack (unique within `extensions[]`; lint-resolvable later).

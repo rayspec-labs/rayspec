@@ -167,7 +167,7 @@ export function deriveProductStores(
     for (const view of spec.views) {
       if (view.source?.kind === 'store') storeSources.add(view.source.ref);
     }
-    // A DECLARED store name is excluded from the sink candidates (S2): a store-sourced view over a
+    // A DECLARED store name is excluded from the sink candidates: a store-sourced view over a
     // declared store is that store's own read view, never the transcript sink.
     const candidates = [...storeSources].filter(
       (n) => !audioStoreNames.has(n) && !collectionNames.has(n) && !declaredNames.has(n),
