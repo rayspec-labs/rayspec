@@ -179,10 +179,15 @@ export interface EraseTenantOpts {
    * result) rather than re-executing — exactly-once is preserved and the caller sees an empty replay.
    * Keeping the row IS the point: erase the content, keep the guarantee.
    *
-   * SCOPE (honest): only the two RAW-payload columns named above are nulled. The DEPRECATED legacy flat
-   * `conversation_items.content`/`name` columns (written only by pre-payload rows) and `run_events.data`
-   * (already-neutralized event frames, not raw file bytes) are NOT touched by this pass; the default
-   * full-delete mode removes them. A deploy that needs those gone too uses the full delete.
+   * SCOPE (honest): scrub mode NULLs ONLY the two RAW-payload columns named above and KEEPS their rows;
+   * everything else — the product stores, the blobs, and EVERY other core table, INCLUDING `run_events`
+   * (and its already-neutralized `data` event frames, not raw file bytes) — is still HARD-DELETED, in
+   * scrub mode exactly as in the default mode (`run_events` is not in the scrub set, so a scrub still
+   * removes it — it is NOT retained for the full-delete mode). The one subtlety: because
+   * `conversation_items` is SCRUBBED (row kept) rather than deleted, its DEPRECATED legacy flat
+   * `content`/`name` columns (written only by pre-payload rows) SURVIVE a scrub — they sit on the retained
+   * row, and only the full-delete mode (which removes the whole row) clears them. A deploy that needs
+   * those legacy columns gone too uses the full delete.
    */
   readonly journalScrub?: boolean;
   /**
