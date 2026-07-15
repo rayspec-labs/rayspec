@@ -69,6 +69,32 @@ type _Crontab = AssertTrue<HasKey<RegisterScheduledConfig, 'crontab'>>;
 type _RegisterWorkflowForScheduled = AssertTrue<IsFn<typeof DBOS.registerWorkflow>>;
 
 /**
+ * References every wire-shape assertion above in one tuple so each is a USED symbol (each still
+ * resolves to `true` or fails to compile — the guard is unchanged). Without this, an unused-locals
+ * typecheck would flag the assertions, tempting their deletion and silently dropping the pins.
+ */
+type _WireShapeAssertions = [
+  _MaxRecoveryAttempts,
+  _RetriesAllowed,
+  _RunAdminServer,
+  _SystemDatabaseUrl,
+  _Logger,
+  _WorkerConcurrency,
+  _WorkflowID,
+  _QueueName,
+  _RegisterScheduled,
+  _Crontab,
+  _RegisterWorkflowForScheduled,
+];
+
+/**
+ * References the assertion tuple so it (and, transitively, each assertion above) counts as used.
+ * `declare` is ambient: it emits no runtime code and is exempt from unused-locals, so this keeps the
+ * compile-time pins live without changing any behavior.
+ */
+declare const _wireShapeAssertions: _WireShapeAssertions;
+
+/**
  * A non-empty export so the module is part of the build graph (the type assertions above are erased
  * at emit; this keeps the file from being tree-shaken out of the typecheck). It carries no behavior.
  */
