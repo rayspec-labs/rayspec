@@ -10,6 +10,7 @@ import type { RouteHandler } from '@rayspec/handler-sdk';
 import type { ApiRouteSpec, StoreSpec } from '@rayspec/spec';
 import { type RecordCapabilityConfig, resolveRecordConfig } from '../config.js';
 import type { RecordSubmittedSink } from '../events.js';
+import type { RecordNormalizerFactory } from '../normalizer.js';
 import { recordCapabilityStores } from '../stores.js';
 import { makeRecordSubmitHandler, type RecordHandlersConfig } from './handlers.js';
 
@@ -32,6 +33,12 @@ export interface RecordCapabilityMountConfig {
   readonly capability?: RecordCapabilityConfig;
   /** The sink `submit` emits `record_submitted` through — the workflow-ingress event seam. */
   readonly recordSubmittedSink: RecordSubmittedSink;
+  /**
+   * OPTIONAL tenant-bound normalizer factory for a declared input-normalize step (the deployment
+   * wires it iff the capability declares `input_normalize`). Absent ⇒ the submit stores the raw record
+   * unchanged — the mounted surface (stores / route / handler ids) is UNCHANGED either way.
+   */
+  readonly recordNormalizer?: RecordNormalizerFactory;
   /** Override the registered handler ids (rarely needed). */
   readonly handlerIds?: Partial<RecordHandlerIds>;
 }
@@ -70,6 +77,7 @@ export function mountRecordCapability(
   const handlersConfig: RecordHandlersConfig = {
     resolved,
     recordSubmittedSink: config.recordSubmittedSink,
+    ...(config.recordNormalizer !== undefined ? { recordNormalizer: config.recordNormalizer } : {}),
   };
 
   const handlers = new Map<string, RecordResolvedHandler>([

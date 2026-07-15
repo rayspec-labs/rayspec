@@ -6,6 +6,7 @@
 import type { httpResponse } from '@rayspec/handler-sdk';
 import { describe, expect, it } from 'vitest';
 import { createInMemoryRecordSubmittedSink, RecordEventRejectedError } from '../events.js';
+import type { RecordNormalizerFactory } from '../normalizer.js';
 import { recordCapabilityStores } from '../stores.js';
 import { makeFakeRecordDb, SharedRecordTable } from '../test-support/fake-db.js';
 import {
@@ -101,5 +102,33 @@ describe('mountRecordCapability', () => {
     await expect(faultyHandler?.(routeInit(new SharedRecordTable(), { t: 1 }))).rejects.toThrow(
       'genuine fault',
     );
+  });
+
+  it('threads a normalizer factory through the bound handler (built with the SERVER-DERIVED tenant): a submit stores the NORMALIZED value', async () => {
+    const table = new SharedRecordTable();
+    const sink = createInMemoryRecordSubmittedSink();
+    const seenTenants: string[] = [];
+    const factory: RecordNormalizerFactory = (tenantId) => {
+      seenTenants.push(tenantId);
+      return {
+        agentId: 'field_normalizer',
+        async normalize({ record }) {
+          return { status: 'normalized', record: { ...record, normalized: true } };
+        },
+      };
+    };
+    const mounted = mountRecordCapability({ recordSubmittedSink: sink, recordNormalizer: factory });
+    // The mounted SURFACE is unchanged by the normalizer (one POST route, one handler).
+    expect(mounted.api).toHaveLength(1);
+    const handler = mounted.handlers.get('record_input_submit')?.fn;
+    if (!handler) throw new Error('handler missing');
+
+    const ok = await handler(routeInit(table, { title: 'x' }));
+    expect(ok).toMatchObject({ record_id: 'rec-1', deduped: false });
+    // The factory was invoked with the SERVER-DERIVED tenant (init.tenantId).
+    expect(seenTenants).toEqual([TENANT]);
+    // The stored row + the emitted event carry the NORMALIZED value.
+    expect(table.rows[0]?.payload).toEqual({ title: 'x', normalized: true });
+    expect(sink.deliveredFor(`${TENANT}:rec-1`)?.record).toEqual({ title: 'x', normalized: true });
   });
 });

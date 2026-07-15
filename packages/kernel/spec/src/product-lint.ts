@@ -966,6 +966,20 @@ export function lintProductSpec(spec: ProductSpec): SpecError[] {
     }
   });
 
+  // ---- capabilities[].input_normalize.output_contract → resolve ----------------------
+  // A declared input-normalize step names the contract the NORMALIZED record must conform to; it must
+  // resolve to a declared/capability contract (the same discipline as an artifacts[].contract ref). The
+  // `agent` id is a config-side label (the deployment binds a normalizer to it — not a declared
+  // extractor), so it is grammar-shape-checked (SafeIdentifier) but not resolved here.
+  spec.capabilities.forEach((cap, i) => {
+    if (cap.input_normalize) {
+      checkRef(
+        cap.input_normalize.output_contract,
+        `capabilities[${i}].input_normalize.output_contract`,
+      );
+    }
+  });
+
   // ---- contracts vocabulary ----------------------------------------------------------
   for (const [id, schema] of Object.entries(spec.contracts)) {
     lintContractSchema(schema, `contracts.${id}`, errors);

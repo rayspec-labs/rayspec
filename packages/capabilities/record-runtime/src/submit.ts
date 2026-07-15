@@ -29,9 +29,17 @@
  * and "a crash between persist and emit is recovered by the retry" holds for ANY retry payload.
  *
  * TRUST BOUNDARY: the body is UNTRUSTED CALLER DATA — validated for SHAPE (object, nesting depth, size,
- * reserved keys) and stored/forwarded as a plain value; no model call, no instruction
- * interpretation, no tenant signal (the tenant is server-derived). The depth bound is what
- * keeps the size/hash computation itself from being a stack-overflow DoS — see canonical-json.ts.
+ * reserved keys) and stored/forwarded as a plain value; no tenant signal (the tenant is server-derived).
+ * The depth bound is what keeps the size/hash computation itself from being a stack-overflow DoS — see
+ * canonical-json.ts.
+ *
+ * OPTIONAL INPUT-NORMALIZE (config-declared; default OFF): a product may declare an agent that
+ * NORMALIZES the submitted record before it is persisted. When a `normalizer` is supplied, the raw
+ * shape-validated record is transformed by that agent AFTER validation and BEFORE persist, and the
+ * NORMALIZED value is re-validated (structural shape), stored, and emitted. The normalize runs ONLY on
+ * the FIRST persist and the record's idempotency identity stays the RAW input (so a re-submit converges
+ * on the stored normalized value and never re-invokes a possibly-non-deterministic agent). Fail-closed:
+ * a normalize failure REJECTS the submit and persists nothing. Absent ⇒ byte-identical to no normalize.
  */
 import {
   CanonicalJsonDepthError,
@@ -39,9 +47,11 @@ import {
   MAX_CANONICAL_JSON_DEPTH,
   recordPayloadHash,
 } from './canonical-json.js';
-import { err, ok, type RecordCapabilityResult } from './errors.js';
+import type { ResolvedRecordConfig } from './config.js';
+import { err, ok, type RecordCapabilityError, type RecordCapabilityResult } from './errors.js';
 import { RecordEventRejectedError, type RecordSubmittedSink } from './events.js';
 import { recordRef, submittedEventId } from './keys.js';
+import type { RecordNormalizeOutcome, RecordNormalizer } from './normalizer.js';
 import type { RecordCoreContext, RecordParams } from './ports.js';
 import { RECORD_SUBMISSIONS_STORE } from './stores.js';
 import {
@@ -77,16 +87,111 @@ function submittedEvent(
 }
 
 /**
- * Submit ONE record: validate shape → persist idempotently (upsert on the tenant-prefixed ref) →
- * EMIT the record-scoped `record_submitted` event from the authoritative stored row. See the
- * module header for the durability recipe. A sink's deliberate fail-closed rejection
- * (`RecordEventRejectedError`) propagates — the route binding owns the 403 mapping.
+ * Re-validate a NORMALIZED record against the record's STRUCTURAL shape before it is stored: a plain
+ * JSON object, carrying no reserved envelope key, within the depth + byte bounds. A normalize step
+ * cannot produce an invalid stored row, so every violation is a fail-closed 502 (an upstream transform
+ * produced an unusable response) — persisting nothing. `undefined` ⇒ the value is store-safe.
+ */
+function validateNormalizedShape(
+  candidate: unknown,
+  config: ResolvedRecordConfig,
+): RecordCapabilityError | undefined {
+  if (!isPlainObject(candidate)) {
+    return err(
+      502,
+      'record_normalize_invalid_output',
+      'the input-normalize step produced a non-object record — no record was stored.',
+    );
+  }
+  const reserved = RECORD_EVENT_ENVELOPE_KEYS.filter((k) => Object.hasOwn(candidate, k));
+  if (reserved.length > 0) {
+    return err(
+      502,
+      'record_normalize_invalid_output',
+      `the input-normalize step produced a record carrying the reserved envelope key(s) ${reserved
+        .map((k) => `'${k}'`)
+        .join(', ')} — no record was stored.`,
+    );
+  }
+  let bytes: number;
+  try {
+    bytes = canonicalJsonByteLength(candidate);
+  } catch (e) {
+    if (e instanceof CanonicalJsonDepthError) {
+      return err(
+        502,
+        'record_normalize_invalid_output',
+        `the input-normalize step produced a record exceeding the ${MAX_CANONICAL_JSON_DEPTH}-level ` +
+          'nesting bound — no record was stored.',
+      );
+    }
+    throw e;
+  }
+  if (bytes > config.maxRecordBytes) {
+    return err(
+      502,
+      'record_normalize_invalid_output',
+      `the input-normalize step produced a record exceeding the ${config.maxRecordBytes}-byte ` +
+        'bound — no record was stored.',
+    );
+  }
+  return undefined;
+}
+
+/**
+ * Run the declared input-normalize step over the shape-validated raw record. Fail-CLOSED: a thrown
+ * normalizer, a returned `error` outcome, and an output that fails structural re-validation ALL become
+ * a typed 502 (nothing is persisted). On success the validated normalized record is returned to be
+ * stored + emitted in place of the raw input.
+ */
+async function runNormalize(
+  normalizer: RecordNormalizer,
+  raw: Record<string, unknown>,
+  recordId: string,
+  config: ResolvedRecordConfig,
+): Promise<
+  { readonly ok: true; readonly record: Record<string, unknown> } | RecordCapabilityError
+> {
+  let outcome: RecordNormalizeOutcome;
+  try {
+    outcome = await normalizer.normalize({ record: raw, recordId });
+  } catch (e) {
+    return err(
+      502,
+      'record_normalize_failed',
+      `the input-normalize step threw (${e instanceof Error ? e.message : String(e)}) — ` +
+        'no record was stored.',
+    );
+  }
+  if (outcome.status === 'error') {
+    return err(
+      502,
+      'record_normalize_failed',
+      `the input-normalize step failed${outcome.errorClass ? ` (${outcome.errorClass})` : ''}: ` +
+        `${outcome.message} — no record was stored.`,
+    );
+  }
+  const shapeError = validateNormalizedShape(outcome.record, config);
+  if (shapeError) return shapeError;
+  return { ok: true, record: outcome.record };
+}
+
+/**
+ * Submit ONE record: validate shape → (optionally) NORMALIZE via the declared agent → persist
+ * idempotently (upsert on the tenant-prefixed ref) → EMIT the record-scoped `record_submitted` event
+ * from the authoritative stored row. See the module header for the durability recipe + the optional
+ * input-normalize step. A sink's deliberate fail-closed rejection (`RecordEventRejectedError`)
+ * propagates — the route binding owns the 403 mapping.
+ *
+ * `normalizer` (OPTIONAL): when supplied, the shape-validated raw record is transformed by it on the
+ * FIRST persist (absent ⇒ behaviour is byte-identical to no normalize).
  */
 export async function submitRecord(
   ctx: RecordCoreContext,
   params: RecordParams,
   body: unknown,
   sink: RecordSubmittedSink,
+  normalizer?: RecordNormalizer,
 ): Promise<RecordCapabilityResult<RecordSubmitResult>> {
   const recordId = params.record_id ?? '';
   if (!ctx.config.recordIdPattern.test(recordId)) {
@@ -206,12 +311,26 @@ export async function submitRecord(
     }
     deduped = true;
   } else {
-    // First persist: ATOMIC upsert on the tenant-prefixed unique ref (db.upsert ONLY — never
-    // insert-and-recover; the C10 25P02 law). A concurrent identical first-submit converges here.
+    // First persist: run the OPTIONAL declared input-normalize step (absent ⇒ this branch is
+    // byte-identical to today), then ATOMIC upsert on the tenant-prefixed unique ref (db.upsert ONLY —
+    // never insert-and-recover; the single-flight 25P02 law). A concurrent identical first-submit
+    // converges here.
+    //
+    // NORMALIZE RUNS ONLY ON FIRST PERSIST and the idempotency identity stays the RAW submitted input
+    // (`payload_hash` = hash of the raw body): a re-submit of the same record hits the found-path above
+    // and re-emits the ALREADY-normalized stored row, so a re-submit never re-runs a (possibly
+    // non-deterministic) agent and can never spuriously conflict against a fresh normalize. The
+    // NORMALIZED value is what gets stored (and, via the authoritative re-read below, emitted).
+    let toStore: Record<string, unknown> = body;
+    if (normalizer !== undefined) {
+      const normalized = await runNormalize(normalizer, body, recordId, ctx.config);
+      if (!normalized.ok) return normalized; // fail-closed: nothing persisted, nothing emitted
+      toStore = normalized.record;
+    }
     await ctx.db.upsert(RECORD_SUBMISSIONS_STORE, ['record_ref'], {
       record_id: recordId,
       record_ref: ref,
-      payload: body as never,
+      payload: toStore as never,
       payload_hash: hash,
     });
   }

@@ -47,6 +47,11 @@ export {
   makeLiveExtractionNode,
 } from './live-agent-node.js';
 export {
+  type LiveRecordNormalizerConfig,
+  makeLiveRecordNormalizer,
+  normalizeRunId,
+} from './live-record-normalizer.js';
+export {
   type LiveTurnResponderConfig,
   makeLiveTurnResponder,
   REPLY_RUN_MAX_ATTEMPTS,

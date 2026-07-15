@@ -393,6 +393,59 @@ views:
 `;
 
 /**
+ * A neutral submit-ingress product that ALSO declares an OPTIONAL input-normalize step on its
+ * record_input capability: a submitted record is transformed by the declared `field_normalizer` agent
+ * (conforming to the `intake.normalized_record` output contract) BEFORE persist. Exercises the
+ * conditional normalize wiring through the REAL parser + composition.
+ */
+export const NORMALIZE_INTAKE_YAML = `
+version: "1.0"
+product:
+  id: intake_norm
+  name: Intake Normalize
+  description: A neutral submit-ingress product with a declared input-normalize step.
+requires:
+  capabilities: [record_input]
+capabilities:
+  - id: record_input
+    tier: B
+    status: available
+    contracts: [record_input.record_submitted]
+    input_normalize:
+      agent: field_normalizer
+      output_contract: intake.normalized_record
+contracts:
+  intake.request_row:
+    type: object
+  intake.normalized_record:
+    type: object
+stores:
+  - name: intake_requests
+    columns:
+      - { name: request_ref, type: text }
+      - { name: record_id, type: text }
+      - { name: title, type: text }
+    key: [request_ref]
+workflows:
+  - id: log_request
+    trigger:
+      capability: record_input
+      event: record_submitted
+      scope: record
+    steps:
+      - id: log
+        type: store_write
+        use: store.write
+        store: intake_requests
+        values:
+          request_ref: { event: record_id }
+          record_id: { event: record_id }
+          title: { event: title }
+        outputs:
+          row: intake.request_row
+`;
+
+/**
  * F3 — a doc declaring `media_playback` ONLY (no `audio_input`). `declaresAudio` returns true for
  * EITHER audio capability id, so this pins the PARTIAL-audio decision: the audio capability is a COHESIVE
  * PAIR — declaring either half mounts the WHOLE audio surface (both `audio_sessions`/`audio_tracks`

@@ -34,6 +34,11 @@ export {
   type RecordCapabilityRouteDescriptor,
   type RecordPayloadContract,
 } from './manifest.js';
+export type {
+  RecordNormalizeOutcome,
+  RecordNormalizer,
+  RecordNormalizerFactory,
+} from './normalizer.js';
 export type { HandlerDb, RecordCoreContext, RecordParams } from './ports.js';
 export {
   RECORD_INPUT_CAPABILITY_ID,
