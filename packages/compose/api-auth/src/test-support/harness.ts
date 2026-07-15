@@ -317,6 +317,13 @@ export async function createHarness(
      * fail-closes 501 (the unwired posture a test can also exercise).
      */
     sessionReprocessor?: AppDeps['sessionReprocessor'];
+    /**
+     * trusted-proxy CIDRs wired into `deps.trustedProxies` (the rate-limiter client-identity
+     * resolution). Default UNSET ⇒ no forwarding header is trusted (the socket peer is the identity).
+     * A served-app suite behind loopback opts in (e.g. `['127.0.0.0/8', '::1/128']`) so an
+     * `X-Forwarded-For` becomes the throttle identity.
+     */
+    trustedProxies?: readonly string[];
   } = {},
 ): Promise<Harness> {
   const url = process.env.DATABASE_URL;
@@ -430,6 +437,7 @@ export async function createHarness(
     agentRegistry: opts.agentRegistry,
     engine,
     ...(opts.sessionReprocessor ? { sessionReprocessor: opts.sessionReprocessor } : {}),
+    ...(opts.trustedProxies !== undefined ? { trustedProxies: opts.trustedProxies } : {}),
   };
 
   const app = createAuthApp(deps);

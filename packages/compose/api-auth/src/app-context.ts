@@ -234,6 +234,15 @@ export interface AppDeps {
   /** Allowed Origins for cookie-authenticated CSRF checks. */
   allowedOrigins: string[];
   /**
+   * Trusted-proxy CIDRs (e.g. the deployment's load balancer / ingress hops). The rate limiter's
+   * client-identity resolution honors an `X-Forwarded-For` / `X-Real-IP` header ONLY when the socket
+   * peer is inside one of these — otherwise the SOCKET PEER is the identity, so a direct caller cannot
+   * spoof its identity (evade a per-source throttle / poison another source's bucket) via a forwarding
+   * header. Absent/empty ⇒ no forwarding header is ever trusted (the peer is always the identity); a
+   * deployment behind a proxy opts in with its proxy CIDRs (from a deploy config).
+   */
+  trustedProxies?: readonly string[];
+  /**
    * Deployer-injected EXTRA CORS request headers, appended to the platform base set (Authorization,
    * Content-Type, X-Request-Id, Idempotency-Key, Last-Event-Id). A product whose native client sends
    * a custom request header injects it here at deploy (via ALLOWED_REQUEST_HEADERS). Absent/empty ⇒

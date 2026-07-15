@@ -27,6 +27,7 @@ import type { AppDeps, AppEnv } from './app-context.js';
 import { buildAgentRegistry } from './engine/build-agent-registry.js';
 import { buildDeclaredRoutesOpenApi } from './engine/emit-openapi.js';
 import { registerDeclaredRoutes } from './engine/register-declared-routes.js';
+import { clientIpFromContext } from './http/client-ip.js';
 import { authenticate, requestId, securityHeaders } from './http/middleware.js';
 import { mountOidc } from './oidc/mount.js';
 import { registerAuthRoutes } from './routes/auth.js';
@@ -260,7 +261,9 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
     //      A real OAuth client always sends a Content-Length on its small form body.
     app.use('/oidc/*', async (c, next) => {
       if (!isOidcTokenPath(c.req.path)) return next();
-      const ip = c.req.header('x-forwarded-for') ?? c.req.header('x-real-ip') ?? 'unknown';
+      // Trusted-proxy client identity: the socket peer unless a configured trusted proxy set the
+      // forwarding header — a direct caller cannot spoof its throttle identity via X-Forwarded-For.
+      const ip = clientIpFromContext(c, deps.trustedProxies ?? []);
       const { allowed, retryAfterMs } = deps.rateLimiter.check('oauth-token', ip);
       if (!allowed) throw new ApiError('RATE_LIMITED', 'Too many requests.', { retryAfterMs });
       // Only body-bearing methods need the size bound; GET/HEAD/OPTIONS carry no token body.
