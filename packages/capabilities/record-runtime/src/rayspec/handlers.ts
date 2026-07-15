@@ -8,19 +8,18 @@
  *
  * ── THE PRE-PARSE BODY-SIZE POSTURE (deliberate) ──────────────────────────────────────────────
  * `init.body` arrives ALREADY parsed by the shared `{handler}` route interpreter
- * (route-handlers.ts `c.req.json().catch(() => undefined)`), which has no Content-Length guard —
- * so this capability CANNOT pre-parse-bound the raw body from its own layer (the parse happened
- * before the handler runs, and `content-length` is not in the interpreter's forwarded-header
+ * (route-handlers.ts), so this capability CANNOT re-bound the raw body from its own layer (the parse
+ * happened before the handler runs, and `content-length` is not in the interpreter's forwarded-header
  * allowlist). What IS guarded here: an unparseable/absent body arrives as `undefined` → the clean
  * 422 (the interpreter's catch already contains any JSON.parse blow-up, incl. deep-nesting
  * RangeErrors); the parsed value is depth-bounded (422 `record_too_deep`) BEFORE any
  * canonicalization and byte-bounded (413) after — the trust-boundary stack-overflow DoS is closed at the
- * capability core. What is NOT guarded here (a PLATFORM-wide posture, not a record-route gap): an
- * authenticated caller can still stream a large body that the shared interpreter buffers+parses
- * before this handler rejects it — the same exposure every `{handler}`/CRUD route has (only the
- * OAuth token endpoint carries a bespoke Content-Length bound, app.ts
- * OAUTH_TOKEN_MAX_BODY_BYTES). Bounding request bodies for ALL declared routes belongs in the
- * shared interpreter as its own reviewed change, not as a record-capability special case.
+ * capability core. The RAW-BYTE bound is now PLATFORM-WIDE: the shared `{handler}` interpreter drains
+ * the request body under a configured cap (a body over the cap is a 413 BEFORE it is buffered/parsed —
+ * the shared `readBoundedBody` reader), so an authenticated caller can no longer stream an unbounded
+ * body into memory ahead of this handler. Every `{handler}`/CRUD/auth route now shares that bound (the
+ * OAuth token endpoint keeps its own bespoke pre-mount Content-Length guard, app.ts
+ * OAUTH_TOKEN_MAX_BODY_BYTES).
  */
 import { httpResponse, type RouteHandler, type RouteHandlerInit } from '@rayspec/handler-sdk';
 import type { ResolvedRecordConfig } from '../config.js';

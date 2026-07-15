@@ -7,7 +7,7 @@
  * — the envelope MUST drop `details` structurally, regardless of what a caller passes in.
  */
 import { describe, expect, it } from 'vitest';
-import { DETAILS_ALLOWED, type ErrorCode, errorEnvelope } from './errors.js';
+import { DETAILS_ALLOWED, type ErrorCode, errorEnvelope, STATUS_BY_CODE } from './errors.js';
 
 const ALL_CODES: ErrorCode[] = [
   'VALIDATION_ERROR',
@@ -16,6 +16,7 @@ const ALL_CODES: ErrorCode[] = [
   'NOT_FOUND',
   'CONFLICT',
   'IDEMPOTENCY_CONFLICT',
+  'PAYLOAD_TOO_LARGE',
   'RATE_LIMITED',
   'INTERNAL',
   'UPSTREAM_ERROR',
@@ -71,5 +72,15 @@ describe('errorEnvelope details-strip', () => {
     expect([...DETAILS_ALLOWED].sort()).toEqual(
       ['FORBIDDEN', 'GATEWAY_TIMEOUT', 'RATE_LIMITED', 'VALIDATION_ERROR'].sort(),
     );
+  });
+
+  it('maps PAYLOAD_TOO_LARGE to HTTP 413 (an over-cap request body, bare — not an input echo)', () => {
+    expect(STATUS_BY_CODE.PAYLOAD_TOO_LARGE).toBe(413);
+    // It carries no details out (a too-large body reveals nothing about the caller's input).
+    expect(DETAILS_ALLOWED.has('PAYLOAD_TOO_LARGE')).toBe(false);
+    const env = errorEnvelope('PAYLOAD_TOO_LARGE', 'Request body is too large.', 'rid', {
+      leaked: true,
+    });
+    expect('details' in env.error).toBe(false);
   });
 });

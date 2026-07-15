@@ -77,6 +77,42 @@ describe('ingestChunk — the idempotent watermark contract', () => {
   });
 });
 
+describe('ingestChunk — the per-track cumulative byte cap (cost-DoS bound)', () => {
+  /** A ctx with a tiny per-track cap so the cumulative bound is exercised without huge fixtures. */
+  function cappedCtx(maxTrackBytes: number): AudioBlobContext {
+    return {
+      tenantId: TENANT,
+      db: new FakeHandlerDb(),
+      blob: new FakeBlobStore(),
+      config: resolveConfig({ allowedTracks: ['mic', 'system'], maxTrackBytes }),
+    };
+  }
+
+  it('rejects the chunk that would push a track past its cumulative cap (413) and does NOT advance', async () => {
+    const c = cappedCtx(5);
+    // 3 bytes committed (under 5).
+    const r0 = await ingest(c, 's1', 'mic', 0, new Uint8Array([1, 2, 3]));
+    expect(r0).toEqual({ ok: true, value: { next_expected_index: 1 } });
+    // The next 3-byte chunk would make committed = 6 > 5 → 413, rejected pre-store.
+    const over = await ingest(c, 's1', 'mic', 1, new Uint8Array([4, 5, 6]));
+    expect(over.ok).toBe(false);
+    if (!over.ok) expect(over.status).toBe(413);
+    // The watermark stayed at 1 and the committed total did not grow (the chunk was not stored).
+    const status = await readUploadStatus(c, { session_id: 's1', track: 'mic' });
+    expect(status.ok && status.value.next_expected_index).toBe(1);
+    expect(status.ok && status.value.committed_byte_len).toBe(3);
+  });
+
+  it('accepts a chunk that lands EXACTLY on the cap (boundary)', async () => {
+    const c = cappedCtx(5);
+    await ingest(c, 's1', 'mic', 0, new Uint8Array([1, 2, 3]));
+    const onCap = await ingest(c, 's1', 'mic', 1, new Uint8Array([4, 5]));
+    expect(onCap).toEqual({ ok: true, value: { next_expected_index: 2 } });
+    const status = await readUploadStatus(c, { session_id: 's1', track: 'mic' });
+    expect(status.ok && status.value.committed_byte_len).toBe(5);
+  });
+});
+
 describe('readUploadStatus', () => {
   it('an absent track → 200 fresh-start shape (status absent, index 0), not a 404', async () => {
     const c = ctx();

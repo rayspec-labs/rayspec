@@ -85,6 +85,31 @@ describe('register / login / me happy path', () => {
   });
 });
 
+describe('request-body byte cap (413 before any side effect)', () => {
+  it('rejects an over-cap register/login body with a 413 PAYLOAD_TOO_LARGE envelope', async () => {
+    // A tiny cap makes an ordinary auth body exceed it — the read is bounded BEFORE the argon2id work.
+    const capped = await createHarness({
+      schema: 'rayspec_test_apiauth_bodycap',
+      maxJsonBodyBytes: 16,
+    });
+    try {
+      const reg = await jsonRequest(capped.app, 'POST', '/v1/auth/register', {
+        body: { email: 'toobig@example.com', password: 'a-very-long-password-way-over-16-bytes' },
+      });
+      expect(reg.status).toBe(413);
+      expect((await reg.json()).error.code).toBe('PAYLOAD_TOO_LARGE');
+
+      const login = await jsonRequest(capped.app, 'POST', '/v1/auth/login', {
+        body: { email: 'toobig@example.com', password: 'a-very-long-password-way-over-16-bytes' },
+      });
+      expect(login.status).toBe(413);
+      expect((await login.json()).error.code).toBe('PAYLOAD_TOO_LARGE');
+    } finally {
+      await capped.close();
+    }
+  });
+});
+
 describe('user-enumeration resistance', () => {
   it('login(unknown email) and login(wrong password) are indistinguishable (status + envelope)', async () => {
     await jsonRequest(h.app, 'POST', '/v1/auth/register', {

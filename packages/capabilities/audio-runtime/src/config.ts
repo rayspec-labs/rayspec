@@ -32,6 +32,22 @@ export const DEFAULT_MEDIA_CONTENT_TYPE = 'application/octet-stream';
 /** The default upload protocol version stored on a session when the client sends none. */
 export const DEFAULT_PROTOCOL_VERSION = 2;
 
+/**
+ * The default per-chunk byte cap (8 MiB). A single ingest POST is drained under this bound and a
+ * larger body is a 413 BEFORE it is buffered/stored — so an authenticated caller cannot buffer an
+ * unbounded chunk into memory (the donor's unbounded `request.arrayBuffer()` DoS). Generous for a
+ * real audio chunk; a product may narrow it.
+ */
+export const DEFAULT_MAX_CHUNK_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The default per-track CUMULATIVE byte cap (512 MiB) — the sum of a track's committed chunk bytes.
+ * The chunk that would push a track past this is a 413, bounding the total bytes one (session, track)
+ * can accrue across many in-cap chunks (a slow-drip cost-DoS). Generous for a long recording; a
+ * product may narrow it.
+ */
+export const DEFAULT_MAX_TRACK_BYTES = 512 * 1024 * 1024;
+
 /** A track-id policy: either an explicit allowlist (Set/array) or a validator predicate. */
 export type TrackPolicy = readonly string[] | ((track: string) => boolean);
 
@@ -46,6 +62,10 @@ export interface AudioCapabilityConfig {
   readonly defaultProtocolVersion?: number;
   /** The content type served when a playable artifact recorded none (default octet-stream). */
   readonly defaultMediaContentType?: string;
+  /** Override the per-chunk ingest byte cap (default `DEFAULT_MAX_CHUNK_BYTES`, 8 MiB). */
+  readonly maxChunkBytes?: number;
+  /** Override the per-track cumulative byte cap (default `DEFAULT_MAX_TRACK_BYTES`, 512 MiB). */
+  readonly maxTrackBytes?: number;
 }
 
 /** The fully-resolved config (all defaults applied) the core logic reads. */
@@ -55,6 +75,8 @@ export interface ResolvedAudioConfig {
   readonly ttlPolicy: { floorSeconds: number; slackSeconds: number; ceilingSeconds: number };
   readonly defaultProtocolVersion: number;
   readonly defaultMediaContentType: string;
+  readonly maxChunkBytes: number;
+  readonly maxTrackBytes: number;
 }
 
 function toTrackPredicate(policy: TrackPolicy | undefined): (track: string) => boolean {
@@ -71,6 +93,8 @@ export function resolveConfig(config: AudioCapabilityConfig = {}): ResolvedAudio
     ttlPolicy: config.ttlPolicy ?? DEFAULT_TTL_POLICY,
     defaultProtocolVersion: config.defaultProtocolVersion ?? DEFAULT_PROTOCOL_VERSION,
     defaultMediaContentType: config.defaultMediaContentType ?? DEFAULT_MEDIA_CONTENT_TYPE,
+    maxChunkBytes: config.maxChunkBytes ?? DEFAULT_MAX_CHUNK_BYTES,
+    maxTrackBytes: config.maxTrackBytes ?? DEFAULT_MAX_TRACK_BYTES,
   };
 }
 

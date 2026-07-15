@@ -165,6 +165,21 @@ export async function ingestChunk(
     return err(409, 'gap', 'a gap in the chunk sequence.', { next_expected_index: nextExpected });
   }
 
+  // THE PER-TRACK CUMULATIVE BYTE CAP (cost-DoS bound): the chunk that would push this track's
+  // committed total past the configured cap is a 413 BEFORE the blob put + watermark advance — so an
+  // authenticated caller cannot accrue unbounded storage/memory across many individually-in-cap chunks.
+  // A duplicate re-POST (index < next_expected, handled above) never reaches here, so a retry of an
+  // already-counted chunk is never double-charged against the cap.
+  const committedSoFar = Number(trackRow.committed_byte_len) || 0;
+  if (committedSoFar + bytes.length > ctx.config.maxTrackBytes) {
+    return err(
+      413,
+      'track_too_large',
+      `this track's committed bytes would exceed the ${ctx.config.maxTrackBytes}-byte per-track cap.`,
+      { next_expected_index: nextExpected },
+    );
+  }
+
   // index == next_expected → store the chunk. Put-by-index FIRST (idempotent — a crash before the
   // watermark advance is safe: a retry re-puts the same key), then advance the watermark transactionally
   // with a re-read guard against a concurrent same-index race.

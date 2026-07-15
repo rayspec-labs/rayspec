@@ -20,6 +20,7 @@ import {
 } from '@rayspec/auth-core';
 import type { Context } from 'hono';
 import type { AppDeps, AppEnv } from '../app-context.js';
+import { readBoundedRequestBytes } from '../http/bounded-body.js';
 import { clientIpFromContext } from '../http/client-ip.js';
 import {
   clearRefreshCookie,
@@ -44,7 +45,10 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
     const rid = c.get('requestId');
     const ip = clientIp(c, deps);
     enforceRate(deps, 'register', ip);
-    const body = RegisterRequest.parse(await c.req.json());
+    // Drain the body under the configured byte cap (413 for an over-cap body BEFORE any work), then
+    // parse exactly as before (a malformed body still throws through to the error envelope).
+    const rawBody = await readBoundedRequestBytes(c, deps.maxJsonBodyBytes);
+    const body = RegisterRequest.parse(JSON.parse(new TextDecoder().decode(rawBody)));
     const email = normalizeEmail(body.email);
     const reg = await deps.authService.register(email, body.password, {
       ua: c.req.header('user-agent') ?? null,
@@ -75,7 +79,10 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
     const rid = c.get('requestId');
     const ip = clientIp(c, deps);
     enforceRate(deps, 'login', ip);
-    const body = LoginRequest.parse(await c.req.json());
+    // Drain the body under the configured byte cap (413 for an over-cap body BEFORE any work), then
+    // parse exactly as before (a malformed body still throws through to the error envelope).
+    const rawBody = await readBoundedRequestBytes(c, deps.maxJsonBodyBytes);
+    const body = LoginRequest.parse(JSON.parse(new TextDecoder().decode(rawBody)));
     const email = normalizeEmail(body.email);
     const result = await deps.authService.login(email, body.password, {
       ua: c.req.header('user-agent') ?? null,
