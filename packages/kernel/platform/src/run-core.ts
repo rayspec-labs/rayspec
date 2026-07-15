@@ -36,7 +36,7 @@ import {
   reconcileCost,
 } from '@rayspec/core';
 import { schema, type TenantDb } from '@rayspec/db';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, ne, sql } from 'drizzle-orm';
 import { makeDispatchTool } from './dispatch.js';
 import { EventPipeline } from './event-pipeline.js';
 import { rehydrateConversation } from './rehydrate.js';
@@ -482,8 +482,23 @@ export async function runAgent(
   // recorded, so the rollup reflects the steps that ARE journaled; the upsert is no-op anyway.
   const rollup = await rollupRunCost(tdb, runId);
 
-  // Persist run header (idempotent on replay — upsert by runId; tenant_id auto-stamped).
-  // output is ALWAYS-PRESENT and may be null; persist it verbatim.
+  // Persist the run header. output is ALWAYS-PRESENT and may be null; persist it verbatim.
+  //
+  // On the FIRST (no-conflict) run this is a plain insert — byte-identical to before. But a runId can be
+  // executed MORE THAN ONCE: the durable executor's recovery re-dispatch re-runs runAgent under the same
+  // runId (replay=false) after a lost checkpoint, and a replay can fall through to a live re-run. When an
+  // EARLIER attempt ERRORED it already persisted a header at status='error', finalText=''. A plain
+  // .onConflictDoNothing() would then leave that stale header in place even after the re-run COMPLETED —
+  // so getRunObservability reports the completed run as errored, and the durable executor's double-bill
+  // short-circuit (which keys strictly on status='completed') is defeated, letting an untainted,
+  // already-completed run be re-dispatched and re-billed.
+  //
+  // So the header is a CONDITIONAL upsert on the runId PK, mirroring the journal step-row heal: on
+  // conflict, refresh the outcome + cost columns ONLY when the existing header is NOT already 'completed'
+  // (`setWhere ne(status,'completed')`). A 'completed' header is authoritative and terminal — the
+  // setWhere is false for it, so a later spurious re-run that ERRORS can NEVER downgrade a completed run
+  // back to 'error'. The identity columns (backend/authMode/agentName/model) are invariant across re-runs
+  // of the same runId, so they are not refreshed; createdAt (the run's first-seen instant) is preserved.
   await tdb
     .insert(schema.runs, {
       runId,
@@ -500,7 +515,19 @@ export async function runAgent(
       billedCostUsd: String(rollup.billedCostUsd),
       costDrift: rollup.costDrift,
     })
-    .onConflictDoNothing();
+    .onConflictDoUpdate({
+      target: schema.runs.runId,
+      set: {
+        status: result.status,
+        finalText: result.finalText,
+        output: result.output ?? null,
+        costUsd: String(rollup.computedCostUsd),
+        providerCostUsd: rollup.providerCostUsd === null ? null : String(rollup.providerCostUsd),
+        billedCostUsd: String(rollup.billedCostUsd),
+        costDrift: rollup.costDrift,
+      },
+      setWhere: ne(schema.runs.status, 'completed'),
+    });
 
   // Persist the re-derived neutral conversation as ConvTurn/ConvPart rows (only on the first,
   // live run). ONE ROW PER PART: a global monotonic `seq` orders parts across all turns, the row
@@ -508,6 +535,17 @@ export async function runAgent(
   // (for tool parts), and the FULL neutral ConvPart as the `payload` jsonb — the attacker-controlled
   // data that rehydrateConversation re-validates ON READ. The legacy text columns are left
   // null (deprecated).
+  //
+  // KNOWN LATENT residual (not production-reachable today): this is gated on `!replay`, so a run that
+  // heals via a REPLAY which fell through to a LIVE model re-run (an adapter that re-calls the model on a
+  // replay-cache MISS) produces a fresh transcript that is NOT persisted here. No production path is
+  // affected: the durable executor's recovery re-dispatch runs with replay=FALSE (so `!replay` holds and
+  // the transcript IS persisted), and no production caller passes a replay id. Persisting under the
+  // replay path is deliberately NOT done because conversation_items has no (tenant,run,seq) unique index
+  // and this is a plain insert (not an upsert): a replayed runId ALREADY carries its original transcript,
+  // so a second unconditional insert would DUPLICATE the rows (corrupting the ordered rehydrate read)
+  // rather than heal them. A correct fix needs an idempotent (delete-then-insert, or an upsert on a new
+  // unique key) persist — a schema change deferred out of this narrowly-scoped header/journal heal.
   if (!replay && result.conversation.length > 0) {
     const rows = flattenConversationToRows(runId, result.conversation);
     if (rows.length > 0) {

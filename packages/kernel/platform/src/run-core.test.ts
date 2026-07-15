@@ -11,6 +11,7 @@ import { schema } from '@rayspec/db';
 import { and, asc, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { makeJournalSink, runAgent } from './run-core.js';
+import { getRunObservability } from './run-observability.js';
 import {
   forTenant,
   makeTestDb,
@@ -721,5 +722,240 @@ describe('run-core error-step healing on re-run', () => {
     expect(after[0]?.stepId).toBe(before[0]?.stepId);
     expect(after[0]?.status).toBe('ok');
     expect(after[0]?.output).toEqual(before[0]?.output);
+  });
+});
+
+/**
+ * A backend that models the durable executor's recovery RE-DISPATCH: the first dispatch of a runId
+ * fails transiently (journals a `status='error'` step, returns an error run with no conversation), and
+ * a SECOND dispatch of the SAME runId (replay=false — exactly how the executor re-runs a lost-checkpoint
+ * job) succeeds, re-recording the step under the same key (healing the journal error→ok) and returning a
+ * COMPLETED run. Used to prove the `runs` HEADER is reconciled to the healed terminal outcome, not left
+ * stale at 'error'.
+ */
+class RedispatchHealBackend implements Backend {
+  readonly id = 'openai' as const;
+  attempts = 0;
+
+  async resolveAuth() {
+    return 'api-key' as const;
+  }
+
+  async run(spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
+    this.attempts += 1;
+    const idemKey = `llm:${spec.name}`;
+    if (this.attempts === 1) {
+      // First dispatch: a transient (e.g. 429) failure — one error step, an error run, no transcript.
+      await ctx.journal.record({
+        type: 'llm',
+        idempotencyKey: idemKey,
+        inputHash: `hash:${spec.input}`,
+        output: null,
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        costUsd: 0,
+        latencyMs: 1,
+        status: 'error',
+        authMode: 'api-key',
+      });
+      return {
+        runId: ctx.runId,
+        backend: this.id,
+        authMode: 'api-key',
+        status: 'error',
+        finalText: '',
+        output: null,
+        error: 'transient upstream error',
+        errorClass: null,
+        conversation: [],
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        costUsd: 0,
+        stepCount: 1,
+      };
+    }
+    // Recovery re-dispatch (same runId, replay=false): the transient error cleared — re-execute the
+    // step (healing the journal error row → ok) and return a COMPLETED run.
+    await ctx.journal.record({
+      type: 'llm',
+      idempotencyKey: idemKey,
+      inputHash: `hash:${spec.input}`,
+      output: { finalText: 'healed answer' },
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      costUsd: 0,
+      latencyMs: 1,
+      status: 'ok',
+      authMode: 'api-key',
+    });
+    return {
+      runId: ctx.runId,
+      backend: this.id,
+      authMode: 'api-key',
+      status: 'completed',
+      finalText: 'healed answer',
+      output: null,
+      error: null,
+      errorClass: null,
+      conversation: [
+        { role: 'assistant', index: 0, parts: [{ kind: 'text', text: 'healed answer' }] },
+      ],
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      costUsd: 0,
+      stepCount: 1,
+    };
+  }
+}
+
+/**
+ * A backend that succeeds on its first dispatch then, on a SPURIOUS re-dispatch of the SAME (already
+ * completed) runId, hits a transient error. Proves a completed header is TERMINAL: the re-run's error
+ * must NEVER downgrade it back to 'error' (the header reconcile's `setWhere` forbids that).
+ */
+class CompleteThenSpuriousErrorBackend implements Backend {
+  readonly id = 'openai' as const;
+  attempts = 0;
+
+  async resolveAuth() {
+    return 'api-key' as const;
+  }
+
+  async run(spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
+    this.attempts += 1;
+    const idemKey = `llm:${spec.name}`;
+    if (this.attempts === 1) {
+      await ctx.journal.record({
+        type: 'llm',
+        idempotencyKey: idemKey,
+        inputHash: `hash:${spec.input}`,
+        output: { finalText: 'good answer' },
+        usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+        costUsd: 0,
+        latencyMs: 1,
+        status: 'ok',
+        authMode: 'api-key',
+      });
+      return {
+        runId: ctx.runId,
+        backend: this.id,
+        authMode: 'api-key',
+        status: 'completed',
+        finalText: 'good answer',
+        output: null,
+        error: null,
+        errorClass: null,
+        conversation: [
+          { role: 'assistant', index: 0, parts: [{ kind: 'text', text: 'good answer' }] },
+        ],
+        usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+        costUsd: 0,
+        stepCount: 1,
+      };
+    }
+    // Spurious re-dispatch of an already-completed run: a transient error. The journal step is already
+    // 'ok' (record()'s setWhere leaves it untouched); the backend returns an error run.
+    await ctx.journal.record({
+      type: 'llm',
+      idempotencyKey: idemKey,
+      inputHash: `hash:${spec.input}`,
+      output: null,
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      costUsd: 0,
+      latencyMs: 1,
+      status: 'error',
+      authMode: 'api-key',
+    });
+    return {
+      runId: ctx.runId,
+      backend: this.id,
+      authMode: 'api-key',
+      status: 'error',
+      finalText: '',
+      output: null,
+      error: 'transient upstream error',
+      errorClass: null,
+      conversation: [],
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      costUsd: 0,
+      stepCount: 1,
+    };
+  }
+}
+
+describe('run-core run-header reconcile on heal', () => {
+  it('reconciles the run header error→completed when a re-dispatch heals the run', async () => {
+    const tdb = forTenant(db, TENANT_A);
+    const backend = new RedispatchHealBackend();
+    const runId = 'heal-header-run';
+
+    // First dispatch fails transiently → the header is persisted at status='error', finalText=''.
+    const first = await runAgent(tdb, backend, spec, { runId });
+    expect(first.status).toBe('error');
+    const errHeader = await db.select().from(schema.runs).where(eq(schema.runs.runId, runId));
+    expect(errHeader).toHaveLength(1);
+    expect(errHeader[0]?.status).toBe('error');
+    expect(errHeader[0]?.finalText).toBe('');
+
+    // Recovery re-dispatch (same runId, replay=false — the durable executor's recovery path) heals it.
+    const second = await runAgent(tdb, backend, spec, { runId });
+    expect(second.status).toBe('completed');
+
+    // FAIL-THE-FIX: with the header persisted via .onConflictDoNothing() this row STAYS 'error'/'' for
+    // a run that actually completed; the conditional upsert reconciles it to the healed outcome.
+    const healed = await db.select().from(schema.runs).where(eq(schema.runs.runId, runId));
+    expect(healed).toHaveLength(1);
+    expect(healed[0]?.status).toBe('completed');
+    expect(healed[0]?.finalText).toBe('healed answer');
+  });
+
+  it('a healed run reads as completed via observability and satisfies the double-bill short-circuit', async () => {
+    const tdb = forTenant(db, TENANT_A);
+    const backend = new RedispatchHealBackend();
+    const runId = 'heal-observe-run';
+
+    await runAgent(tdb, backend, spec, { runId }); // errors
+    const res = await runAgent(tdb, backend, spec, { runId }); // heals
+    expect(res.status).toBe('completed');
+
+    // The observability read reports the run as completed (it derives status from the header). With the
+    // stale header it would report 'error' — a completed run mislabeled as errored.
+    const obs = await getRunObservability(tdb, runId);
+    expect(obs.exists).toBe(true);
+    expect(obs.status).toBe('completed');
+    expect(obs.quarantined).toBe(false);
+
+    // The durable executor's double-bill short-circuit keys STRICTLY on runs.status==='completed'
+    // (RUN_STATUS_SUCCEEDED). A stale 'error' header would make it return false → the untainted run is
+    // re-dispatched and re-billed. Assert the exact column value that guard reads.
+    const header = await db
+      .select({ status: schema.runs.status })
+      .from(schema.runs)
+      .where(eq(schema.runs.runId, runId));
+    expect(header[0]?.status).toBe('completed');
+  });
+
+  it('never downgrades an already-completed header: a spurious error re-run leaves it completed', async () => {
+    const tdb = forTenant(db, TENANT_A);
+    const backend = new CompleteThenSpuriousErrorBackend();
+    const runId = 'no-downgrade-run';
+
+    const first = await runAgent(tdb, backend, spec, { runId });
+    expect(first.status).toBe('completed');
+
+    const second = await runAgent(tdb, backend, spec, { runId });
+    expect(second.status).toBe('error');
+
+    // The header MUST stay 'completed' — the reconcile's setWhere (only a NON-completed header is
+    // updated) forbids a completed→error downgrade. A naive unconditional upsert would flip it to
+    // 'error' (this is the guard against the fix's own regression).
+    const header = await db.select().from(schema.runs).where(eq(schema.runs.runId, runId));
+    expect(header).toHaveLength(1);
+    expect(header[0]?.status).toBe('completed');
+    expect(header[0]?.finalText).toBe('good answer');
+
+    // The journal step stayed 'ok' too (the step-row heal only supersedes an error row, never an ok one).
+    const steps = await db
+      .select()
+      .from(schema.journalSteps)
+      .where(eq(schema.journalSteps.runId, runId));
+    expect(steps).toHaveLength(1);
+    expect(steps[0]?.status).toBe('ok');
   });
 });
