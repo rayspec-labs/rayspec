@@ -10,6 +10,17 @@ import type { BootedServer } from './composition-root.js';
 
 const RULE = '─'.repeat(86);
 
+/**
+ * Build the base URL for the ACTUAL bound address — the banner must never claim `127.0.0.1` while the
+ * server is actually listening on another interface. Pass the listener's real `address`/`port` (from
+ * `@hono/node-server`'s listen callback). An IPv6 literal is bracketed so the URL stays well-formed
+ * (e.g. `::1` → `http://[::1]:8080`, `::` → `http://[::]:8080`).
+ */
+export function bootBaseUrl(address: string, port: number): string {
+  const host = address.includes(':') ? `[${address}]` : address;
+  return `http://${host}:${port}`;
+}
+
 /** Build the multi-line boot banner for a booted server listening on `base`. */
 export function bootBanner(server: BootedServer, base: string): string {
   const lines: string[] = [];

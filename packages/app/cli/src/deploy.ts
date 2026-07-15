@@ -67,14 +67,16 @@ export type DeployOutcome =
   | { readonly kind: 'served' };
 
 /**
- * Parse `deploy`'s args: exactly one positional spec path, plus `--dry-run`, an optional `--port`, and
- * the reviewed-forward-migration flags `--apply-migration <delta.sql>` (+ its optional
- * `--allowlist <file.json>`). An unknown flag is a strict parse error (mapped to exit 2).
+ * Parse `deploy`'s args: exactly one positional spec path, plus `--dry-run`, an optional `--port` and
+ * `--host` (the listen interface — LOOPBACK unless explicitly set), and the reviewed-forward-migration
+ * flags `--apply-migration <delta.sql>` (+ its optional `--allowlist <file.json>`). An unknown flag is a
+ * strict parse error (mapped to exit 2).
  */
 export function parseDeployArgs(args: readonly string[]): {
   positionals: string[];
   dryRun: boolean;
   port?: string;
+  host?: string;
   applyMigration?: string;
   allowlist?: string;
 } {
@@ -86,6 +88,7 @@ export function parseDeployArgs(args: readonly string[]): {
       options: {
         'dry-run': { type: 'boolean' },
         port: { type: 'string' },
+        host: { type: 'string' },
         'apply-migration': { type: 'string' },
         allowlist: { type: 'string' },
       },
@@ -94,6 +97,7 @@ export function parseDeployArgs(args: readonly string[]): {
       positionals,
       dryRun: values['dry-run'] === true,
       ...(values.port !== undefined ? { port: values.port } : {}),
+      ...(values.host !== undefined ? { host: values.host } : {}),
       ...(values['apply-migration'] !== undefined
         ? { applyMigration: values['apply-migration'] }
         : {}),
@@ -111,7 +115,7 @@ export function parseDeployArgs(args: readonly string[]): {
  * open port + signal handlers keep the process alive until SIGINT/SIGTERM).
  */
 export async function runDeploy(args: readonly string[]): Promise<DeployOutcome> {
-  const { positionals, dryRun, port, applyMigration, allowlist } = parseDeployArgs(args);
+  const { positionals, dryRun, port, host, applyMigration, allowlist } = parseDeployArgs(args);
 
   // Pre-flight the spec path (jail + size cap). assembleServer RE-READS it via RAYSPEC_SPEC_PATH; this
   // early read gives an actionable error before any boot side effect + jails the operator-supplied path.
@@ -171,7 +175,7 @@ export async function runDeploy(args: readonly string[]): Promise<DeployOutcome>
     );
   }
 
-  await serveDeployment(specPath, port, migrationPath, allowlistPath);
+  await serveDeployment(specPath, port, migrationPath, allowlistPath, host);
   return { kind: 'served' };
 }
 
@@ -302,11 +306,15 @@ export async function serveDeployment(
   portOverride?: string,
   migrationPath?: string,
   allowlistPath?: string,
+  hostOverride?: string,
 ): Promise<void> {
   // RAYSPEC_SPEC_PATH is how loadServerConfig/assembleServer find the doc — set it from the positional
   // (the operator typed the path once). An explicit --port overrides the PORT env.
   process.env.RAYSPEC_SPEC_PATH = specPath;
   if (portOverride !== undefined) process.env.PORT = portOverride;
+  // A non-loopback bind is an EXPLICIT operator choice: --host sets RAYSPEC_HOST, which loadServerConfig
+  // resolves into config.host (unset ⇒ 127.0.0.1 loopback default). Mirrors the --port/PORT wiring.
+  if (hostOverride !== undefined) process.env.RAYSPEC_HOST = hostOverride;
 
   // The reviewed forward-DELTA apply seam. Setting RAYSPEC_UPDATE_MIGRATION (from --apply-migration)
   // switches the boot into UPDATE mode: the gated deploy() engine scans the delta (a DESTRUCTIVE
@@ -334,6 +342,7 @@ export async function serveDeployment(
     assembleServer,
     BootConfigError,
     bootBanner,
+    bootBaseUrl,
     DeployError,
     loadServerConfig,
   } = await import('@rayspec/server');
@@ -351,9 +360,14 @@ export async function serveDeployment(
     // Shut the sanctioned door after the ONE boot registration (deploy owns its process, boots once).
     sealProductStores();
 
-    const httpServer = serve({ fetch: server.app.fetch, port: config.port }, (info) => {
-      console.log(bootBanner(server, `http://127.0.0.1:${info.port}`));
-    });
+    const httpServer = serve(
+      { fetch: server.app.fetch, hostname: config.host, port: config.port },
+      (info) => {
+        // Log the ACTUAL bound address (info.address), never a hard-coded loopback (parity with
+        // rayspec-serve) — a non-loopback --host/RAYSPEC_HOST bind must show in the banner.
+        console.log(bootBanner(server, bootBaseUrl(info.address, info.port)));
+      },
+    );
 
     const shutdown = (signal: string): void => {
       console.log(`\n[rayspec deploy] ${signal} received — shutting down…`);

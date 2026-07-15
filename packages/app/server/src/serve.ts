@@ -24,7 +24,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { DeployError } from '@rayspec/api-auth';
-import { bootBanner } from './banner.js';
+import { bootBanner, bootBaseUrl } from './banner.js';
 import { assembleServer, BootConfigError, loadServerConfig } from './composition-root.js';
 import { ProductBootError } from './product-boot.js';
 import { assembleOptsFromEnv } from './serve-opts.js';
@@ -65,10 +65,14 @@ async function main(): Promise<void> {
   const config = loadServerConfig();
   const server = await assembleServer(config, assembleOptsFromEnv(config));
 
-  const httpServer = serve({ fetch: server.app.fetch, port: config.port }, (info) => {
-    const base = `http://127.0.0.1:${info.port}`;
-    console.log(bootBanner(server, base));
-  });
+  const httpServer = serve(
+    { fetch: server.app.fetch, hostname: config.host, port: config.port },
+    (info) => {
+      // Log the ACTUAL bound address (info.address), never a hard-coded loopback — a non-loopback
+      // RAYSPEC_HOST bind must be visible in the banner rather than masked behind a false 127.0.0.1.
+      console.log(bootBanner(server, bootBaseUrl(info.address, info.port)));
+    },
+  );
 
   // Graceful shutdown: stop accepting connections, end the DB pool, exit. Wired to SIGINT/SIGTERM.
   const shutdown = (signal: string) => {

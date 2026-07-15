@@ -38,6 +38,7 @@ vi.mock('@rayspec/server', () => {
     }),
     BootConfigError,
     bootBanner: () => 'banner',
+    bootBaseUrl: () => 'http://127.0.0.1:0',
     DeployError,
     loadServerConfig: () => ({ port: 0 }),
   };

@@ -104,6 +104,15 @@ import { mountFrontend } from './serve-static.js';
 /** The default local port (overridable via PORT). Local DX only — not a reserved well-known port. */
 export const DEFAULT_PORT = 8080;
 
+/**
+ * The default TCP listen host — LOOPBACK only. This entrypoint assembles the LOCAL /
+ * pre-external-hardening platform (no RLS / per-tenant sandbox / DPoP yet), so it must NOT be reachable
+ * off-box unless the operator EXPLICITLY opts in via RAYSPEC_HOST (or `rayspec deploy --host`). Binding
+ * a non-loopback interface (e.g. `0.0.0.0` / `::`, all interfaces) is a deliberate, typed operator
+ * choice made only once the external-exposure hardening gate is met — never the silent default.
+ */
+export const DEFAULT_HOST = '127.0.0.1';
+
 /** A built app + the metadata the entrypoint logs in its boot banner. */
 export interface BootedServer {
   /** The assembled Hono app (auth routes + OIDC mount + optional declared routes + /health). */
@@ -205,6 +214,13 @@ export interface ServerConfig {
   /** The OIDC issuer (drives emitted URLs). Defaults to http://127.0.0.1:<port>/oidc. */
   issuer: string;
   port: number;
+  /**
+   * The TCP listen host. LOOPBACK by default (`127.0.0.1`) — the LOCAL / pre-external-hardening server
+   * must not be reachable off-box without an explicit operator opt-in. Set RAYSPEC_HOST (or
+   * `rayspec deploy --host`) to bind another interface (e.g. `0.0.0.0` for all interfaces); the boot
+   * banner then logs the ACTUAL bound address, never a hard-coded loopback.
+   */
+  host: string;
   /**
    * OPTIONAL absolute path to a `rayspec.yaml` to deploy at boot (the declarative engine). The
    * platform ships none — the deployer injects it (RAYSPEC_SPEC_PATH). Absent ⇒ auth-only boot.
@@ -380,6 +396,11 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
 
   const port = parsePort(env.PORT);
 
+  // The TCP listen host — LOOPBACK default. A non-loopback bind (e.g. 0.0.0.0 = all interfaces) requires
+  // an EXPLICIT RAYSPEC_HOST (or `rayspec deploy --host`): the LOCAL / pre-external-hardening server must
+  // never be reachable off-box by default. Unset/blank ⇒ 127.0.0.1 (DEFAULT_HOST).
+  const host = env.RAYSPEC_HOST?.trim() || DEFAULT_HOST;
+
   // CORS: EXPLICIT allow-list, EMPTY default. A real boot NEVER silently allows a localhost origin.
   // ALLOWED_ORIGINS is comma-separated; blank entries are dropped; unset/blank ⇒ [] (no cross-origin).
   // ORIGIN-NULL-1 (hardening): ALSO drop the special tokens `null` (case-insensitive) and
@@ -433,6 +454,7 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     allowedRequestHeaders,
     issuer: env.OIDC_ISSUER?.trim() || `http://127.0.0.1:${port}/oidc`,
     port,
+    host,
     dbosSystemDatabaseUrl,
     cleanup,
     accessTokenTtlSeconds,
