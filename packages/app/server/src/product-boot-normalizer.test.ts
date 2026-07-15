@@ -153,6 +153,25 @@ describe('resolveRecordNormalizerConfig — the strict <agent_id>.normalizer.jso
       /could not read\/parse/,
     );
   });
+
+  it('fail-closes on a non-SafeIdentifier agent id — before the path is built (the responder mirror)', () => {
+    // The declared agent id names the config FILE, so an id carrying an uppercase letter or a
+    // metacharacter is rejected as a SafeIdentifier violation, not silently turned into a filename.
+    // (Asserting the SafeIdentifier-specific reject, NOT a bare ProductBootError: without the guard a
+    // 'Bad-Id' would fall through to the "does not exist" arm — the pattern is what fails-the-fix.)
+    for (const badId of ['Bad_Id', 'field-normalizer', 'field normalizer']) {
+      const specPath = productDir({ 'field_normalizer.normalizer.json': validConfig() });
+      expect(() => resolveRecordNormalizerConfig(specPath, badId)).toThrow(/SafeIdentifier only/);
+    }
+  });
+
+  it("fail-closes on a '../'-traversal agent id NAMING the SafeIdentifier rule (a byte before the jail)", () => {
+    // A '../'-style id would otherwise reach jailToRecordDir and trip its path-traversal guard; the
+    // SafeIdentifier check catches it FIRST with the id-shape message — that ordering is the invariant
+    // (without the guard this same id throws the jail's "escapes the deployment record directory").
+    const specPath = productDir({ 'field_normalizer.normalizer.json': validConfig() });
+    expect(() => resolveRecordNormalizerConfig(specPath, '../evil')).toThrow(/SafeIdentifier only/);
+  });
 });
 
 describe('buildNormalizeOutputSchema — the declared output_contract → native JSON schema', () => {

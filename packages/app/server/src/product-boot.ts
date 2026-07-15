@@ -1623,6 +1623,21 @@ export function resolveRecordNormalizerConfig(
         `create record/${agentId}.normalizer.json (instructions/model/backend). Fail-closed.`,
     );
   }
+  // Belt-and-suspenders: the declared agent id names the record/<agent_id>.normalizer.json config
+  // file, so re-assert its SafeIdentifier shape OUTSIDE the grammar (the responder mirror) before it
+  // is ever used to build a filesystem path — even though the grammar already constrains
+  // input_normalize.agent to the id pattern (defense-in-depth against a spec built in code that
+  // bypasses parse, and a loud boot reject a byte before jailToRecordDir's traversal guard).
+  try {
+    assertSafeIdentifier(agentId, `input_normalize agent id '${agentId}'`);
+  } catch (e) {
+    throw new ProductBootError(
+      `the declared input_normalize agent id '${agentId}': ${
+        e instanceof Error ? e.message : String(e)
+      } (the agent id names the record/<agent_id>.normalizer.json config file — SafeIdentifier only). ` +
+        'Fail-closed.',
+    );
+  }
   const file = `${agentId}.normalizer.json`;
   const path = jailToRecordDir(recordDir, resolvePath(recordDir, file), agentId);
   if (!existsSync(path)) {
