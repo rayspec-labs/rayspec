@@ -202,11 +202,11 @@ contracts:
     );
   });
 
-  it('a reserved list-query control keyword (order/after/limit) as a column name is rejected', () => {
+  it('a reserved list-query control keyword (order/after/limit/search) as a column name is rejected', () => {
     // Symmetric with the backend store lint: a column named after a list-query control key would be
     // un-filterable + would emit a duplicate OpenAPI query param. Fail-the-fix: without the
     // RESERVED_QUERY_KEYWORDS check these parse+lint clean (valid safe-identifiers).
-    for (const kw of ['order', 'after', 'limit']) {
+    for (const kw of ['order', 'after', 'limit', 'search']) {
       expectCode(
         FIELDLOG_YAML.replace('{ name: label, type: text', `{ name: ${kw}, type: text`),
         'reserved_query_keyword',

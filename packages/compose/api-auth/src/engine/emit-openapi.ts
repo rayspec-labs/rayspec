@@ -339,6 +339,21 @@ function inFilterParam(name: string): OpenApiParameter {
   };
 }
 
+/**
+ * The `<col>__contains` SUBSTRING-filter param for a TEXT column (matches store-query.ts, which runs a
+ * case-insensitive `ILIKE '%term%'` on that column with the term's LIKE wildcards escaped). A raw string
+ * term — the wire form is the literal `?<col>__contains=term`.
+ */
+function containsFilterParam(name: string): OpenApiParameter {
+  return {
+    name: `${name}__contains`,
+    in: 'query',
+    required: false,
+    description: `Case-insensitive substring filter on '${name}': matches a row whose '${name}' CONTAINS the given term (the term's wildcards are matched literally).`,
+    schema: { type: 'string' },
+  };
+}
+
 function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
   const params: OpenApiParameter[] = [
     {
@@ -371,14 +386,18 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
   // column is skipped — defense-in-depth), PLUS the injected `created_by`. Collected FIRST, with their
   // names, so the `<col>__in` set-filter companions below can be DE-DUPLICATED against them.
   const equalityNames = new Set<string>();
+  // The TEXT columns (business + injected created_by) that back the substring-search surface
+  // (`?search=` OR-combined + `?<col>__contains=`) — collected alongside the equality params.
+  const textNames = new Set<string>();
   for (const col of store.columns) {
     if (col.type === 'jsonb') continue; // jsonb is not filterable — omit rather than over-claim
-    // Defense-in-depth: a column named after a control key (order/after/limit) is already
+    // Defense-in-depth: a column named after a control key (order/after/limit/search) is already
     // rejected at config by the linter (@rayspec/spec RESERVED_QUERY_KEYWORDS), but skip it here too so a
     // code-built spec that bypassed the parser can never emit a DUPLICATE query parameter (control param
     // + filter param sharing name+in) → keeping the emitted document a VALID OpenAPI 3.1 doc.
     if (CONTROL_KEYS.has(col.name)) continue;
     equalityNames.add(col.name);
+    if (col.type === 'text') textNames.add(col.name);
     params.push({
       name: col.name,
       in: 'query',
@@ -387,8 +406,10 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
       schema: filterParamSchema(col.type),
     });
   }
-  // The injected created_by equality filter (always present on a list op).
+  // The injected created_by equality filter (always present on a list op); it is a text column, so it
+  // also backs a `created_by__contains` substring filter.
   equalityNames.add('created_by');
+  textNames.add('created_by');
   params.push({
     name: 'created_by',
     in: 'query',
@@ -396,6 +417,19 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
     description: 'Equality filter on the injected created_by actor stamp.',
     schema: { type: 'string' },
   });
+  // The substring-search control param — emitted ONLY when the store has a text column to search (on a
+  // text-less store `?search=` 400s, so documenting it would over-claim). Matches store-query.ts.
+  if (textNames.size > 0) {
+    params.push({
+      name: 'search',
+      in: 'query',
+      required: false,
+      description:
+        'Case-insensitive substring search: matches a row where ANY text column CONTAINS the given ' +
+        'term (the term is matched literally — its wildcards do not act as wildcards).',
+      schema: { type: 'string' },
+    });
+  }
   // The `<col>__in` SET-filter companions — one per equality column, EXCEPT when the companion name is
   // ITSELF a declared equality param. That collision arises when a column is literally named `<x>__in`
   // (its own equality param clashes with `<x>`'s IN-companion) or a business column is named
@@ -406,6 +440,14 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
   for (const name of equalityNames) {
     if (equalityNames.has(`${name}__in`)) continue;
     params.push(inFilterParam(name));
+  }
+  // The `<col>__contains` SUBSTRING-filter companions — one per TEXT column, EXCEPT when the companion
+  // name is ITSELF a declared equality param (a column literally named `<x>__contains`). In that case
+  // the exact-named EQUALITY param wins — mirroring the runtime Precedence-1 (store-query.ts) — so the
+  // companion is DROPPED and the emitted document never carries a duplicate (name+in) parameter.
+  for (const name of textNames) {
+    if (equalityNames.has(`${name}__contains`)) continue;
+    params.push(containsFilterParam(name));
   }
   return params;
 }

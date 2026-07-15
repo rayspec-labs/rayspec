@@ -399,7 +399,7 @@ describe('negative — reserved list-query control keyword as a column name', ()
   // (control param + per-column filter param, same name+location) → an invalid OpenAPI 3.1 doc.
   // Fail-the-fix: without the RESERVED_QUERY_KEYWORDS check the spec parses+lints CLEAN (the keyword is a
   // valid safe-identifier), so each rejection below goes RED.
-  for (const kw of ['order', 'after', 'limit'] as const) {
+  for (const kw of ['order', 'after', 'limit', 'search'] as const) {
     it(`rejects a business column named '${kw}'`, () => {
       const yaml = BASE.replace(
         '      - { name: label, type: text }',
