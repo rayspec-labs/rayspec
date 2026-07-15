@@ -1,10 +1,10 @@
 /**
- * PARSER ↔ BRIDGE neutrality PARITY cross-check (finding GR-1 anti-drift guard).
+ * PARSER ↔ BRIDGE neutrality PARITY cross-check (the neutrality anti-drift guard).
  *
  * The Product-YAML parser (`@rayspec/spec` `parseProductSpec` → `scanProductGuardrails`) and THIS bridge
  * (`validateProductYamlWorkflowBridgeInput` → `walkWorkflowDeclarations`) each enforce a neutrality walk
  * over the executable `workflows`/`extractors` graph. They live in two packages with DUPLICATED rule tables,
- * so they can DRIFT — the S7-2 validate/compile hazard GR-1 caught: a doc whose graph carried e.g. an
+ * so they can DRIFT — the validate/compile hazard this guards against: a doc whose graph carried e.g. an
  * `llm call` string PASSED `parseProductSpec` but the bridge THREW on it.
  *
  * This test is the anti-drift forcing function. It does NOT byte-compare the two private rule tables
@@ -23,7 +23,7 @@
  * direction (parser LOOSER than the bridge) is exactly what this locks. The representative probes touch
  * only a few keys; the exhaustive KEY-SET table cross-check (last test) locks the full superset invariant.
  *
- * SINCE S1 this file ALSO pins the trigger-event normalization SINGLE SOURCE: the
+ * This file ALSO pins the trigger-event normalization SINGLE SOURCE: the
  * bridge's `compileTriggerEvent` must BE `@rayspec/spec`'s `normalizeProductTriggerEvent` (identity),
  * and the audio alias + the default join must behave identically through the FULL parser and the FULL
  * bridge compile (behavior) — a re-introduced local copy or a divergence fails here.
@@ -167,11 +167,11 @@ const PROBES: Probe[] = [
   // it proves parity but is not a single-rule isolation of the graph path check (see the header).
   valueProbe('product-owned handler PATH as a VALUE', 'packs/x/handlers/y.ts'),
   valueProbe('provider NAME as a VALUE', 'deepgram'),
-  valueProbe('production-execution claim as a VALUE (GR-1 gap)', 'production_ready'),
-  valueProbe('prompt/LLM-execution claim as a VALUE (GR-1 gap)', 'llm call'),
+  valueProbe('production-execution claim as a VALUE (the parity gap)', 'production_ready'),
+  valueProbe('prompt/LLM-execution claim as a VALUE (the parity gap)', 'llm call'),
 ];
 
-describe('parser ↔ bridge neutrality parity (GR-1 anti-drift)', () => {
+describe('parser ↔ bridge neutrality parity (anti-drift)', () => {
   it('PARSER_BASE (no injection) parses ok — so any injection is the SOLE defect', () => {
     const res = parseProductSpec(parserDoc());
     if (!res.ok) throw new Error(`base must parse:\n${JSON.stringify(res.errors, null, 2)}`);
@@ -199,8 +199,8 @@ describe('parser ↔ bridge neutrality parity (GR-1 anti-drift)', () => {
     });
   }
 
-  it('the two GR-1 execution-claim codes match the bridge code NAMES exactly', () => {
-    // "the same code the bridge family uses" (GR-1): the parser emits `production_execution_claim` /
+  it('the two execution-claim codes match the bridge code NAMES exactly', () => {
+    // "the same code the bridge family uses": the parser emits `production_execution_claim` /
     // `prompt_execution_claim` — byte-identical to the bridge's `ProductYamlWorkflowBridgeErrorCode`s.
     const prod = parseProductSpec(parserDoc({ purpose: 'production_ready' }));
     const prompt = parseProductSpec(parserDoc({ purpose: 'llm call' }));

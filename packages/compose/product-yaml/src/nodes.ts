@@ -63,7 +63,7 @@ function fail(
 }
 
 /** Resolve the LAST upstream artifact of `kind` (a later producer supersedes an earlier one).
- *  Exported for the S2 store nodes (store-nodes.ts) — ONE resolution rule across all nodes. */
+ *  Exported for the store nodes (store-nodes.ts) — ONE resolution rule across all nodes. */
 export function lastArtifactOfKind(
   ctx: CapabilityInvocationContext,
   kind: string,
@@ -333,7 +333,7 @@ export function makeSttTranscribeSessionNode(cfg: SttSessionNodeConfig): Capabil
     // logged in the catch below) and the play-token honestly serves not_ready_409 — it MUST NOT fail
     // this node / poison the extraction downstream. Idempotent (registerPlayableArtifact = put-by-key).
     //
-    // MP-2 (deliberate, NOT deduped): the STT adapter's media resolver already remuxed this track's
+    // Deliberate, NOT deduped: the STT adapter's media resolver already remuxed this track's
     // chunks to feed the transcription request, so the same `-c copy` remux runs twice per track. This
     // is left INTENTIONALLY. The two remuxes belong to DIFFERENT failure domains — the resolver's is on
     // the CRITICAL transcription path (a remux failure there correctly fails STT: no audio ⇒ no
@@ -661,7 +661,7 @@ export function makeArtifactPersistNode(cfg: ArtifactPersistNodeConfig): Capabil
         cfg.db,
         rows,
         { column: scopeColumn, id: scopeId },
-        // MAT-1: the reconcile scope is DECLARED (spec kinds + bound stores), never derived from
+        // The reconcile scope is DECLARED (spec kinds + bound stores), never derived from
         // this run's rows — a re-extract yielding zero members of a kind still reconciles it.
         declaredReconcileScope(cfg.spec, cfg.collectionStores),
       );

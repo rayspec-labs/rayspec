@@ -5,7 +5,7 @@
  *   • the MOUNTED descriptor registry is exactly the audio vocabulary (the inventory source);
  *   • the per-trigger idempotency key derivation FOLLOWS THE DESCRIPTOR's declared key field (not a
  *     hardwired session default) and is fail-closed on a missing descriptor (the C10 contract);
- *   • the CC-1 persist-scope check is PER-EVENT, never a union across events — the two-descriptor
+ *   • the persist-scope check is PER-EVENT, never a union across events — the two-descriptor
  *     union case is the fail-the-fix arm (a union-based implementation FAILS this suite).
  *
  * The end-to-end audio byte-identity (the composed dispatcher enqueues with EXACTLY
@@ -25,7 +25,7 @@ import {
 
 const AUDIO_EVENT = 'audio_input.finalized_session';
 
-/** A synthetic SECOND event (S3-shaped) — exists ONLY to prove per-event binding vs a union. */
+/** A synthetic SECOND event (generic-key-shaped) — exists ONLY to prove per-event binding vs a union. */
 const TICKET_DESCRIPTOR: TriggerEventDescriptor = {
   id: 'ticket_received',
   contract: 'ticket_input.ticket_received',
@@ -78,7 +78,7 @@ describe('mountedTriggerEventDescriptors (the inventory source)', () => {
   });
 });
 
-describe('mountedTriggerEventDescriptors — the fail-closed coherence guards (TB-1)', () => {
+describe('mountedTriggerEventDescriptors — the fail-closed coherence guards', () => {
   // These three guards were UNREACHABLE before the additive `capabilities` test seam (the function
   // read only the frozen audio manifest, which trivially satisfies all three). Each arm feeds a
   // synthetic capability list that violates exactly one guard — RED-proven by neutering the guard.
@@ -142,7 +142,7 @@ describe('mountedTriggerEventDescriptors — the fail-closed coherence guards (T
 
 describe('triggerRegistrationForWorkflow (C10: explicit descriptor-derived keys)', () => {
   it('derives the CLEAN GENERIC key for a NON-audio descriptor — not a hardwired session default, not the legacy suffix', () => {
-    // DELIBERATE S3 EVOLUTION of the S1 pin (the S1 residual named this): a NEW event's key uses
+    // DELIBERATE: a NEW event's key uses
     // the generic `<field>:<value>` format (payloadFieldIdempotencyKey) — the `:finalized` suffix
     // is AUDIO-ONLY legacy (byte-frozen live run identity, pinned below + in compose.test.ts).
     const registration = triggerRegistrationForWorkflow(
@@ -152,13 +152,13 @@ describe('triggerRegistrationForWorkflow (C10: explicit descriptor-derived keys)
     expect(registration.workflow.id).toBe('wf_x');
     // A ticket event keys on ticket_id — proof the derivation follows the descriptor. If the
     // implementation fell back to the dispatcher's session_id default, this would be 'event:evt-1';
-    // if it reverted to the S1 blanket legacy format, this would be 'ticket_id:t-9:finalized'.
+    // if it reverted to the blanket legacy format, this would be 'ticket_id:t-9:finalized'.
     expect(registration.idempotencyKeyForEvent?.(inputEvent({ ticket_id: 't-9' }))).toBe(
       'ticket_id:t-9',
     );
   });
 
-  it('derives the REAL record_input descriptor key in the generic format (the S3 mounted event)', () => {
+  it('derives the REAL record_input descriptor key in the generic format (the mounted event)', () => {
     const capabilities = [
       ...AUDIO_CAPABILITY_MANIFEST.capabilities,
       ...RECORD_CAPABILITY_MANIFEST.capabilities,
@@ -199,7 +199,7 @@ describe('triggerRegistrationForWorkflow (C10: explicit descriptor-derived keys)
   });
 });
 
-describe('requirePersistScopeInTriggerPayload (CC-1 per-event, NEVER a union)', () => {
+describe('requirePersistScopeInTriggerPayload (per-event, NEVER a union)', () => {
   it('accepts a scope the SPECIFIC triggering event carries', () => {
     expect(() =>
       requirePersistScopeInTriggerPayload({
@@ -212,7 +212,7 @@ describe('requirePersistScopeInTriggerPayload (CC-1 per-event, NEVER a union)', 
     ).not.toThrow();
   });
 
-  it("REJECTS a scope only ANOTHER event's payload carries — the union re-opening CC-1 closed", () => {
+  it("REJECTS a scope only ANOTHER event's payload carries — the union re-opening this closed", () => {
     // With BOTH descriptors registered, scope 'ticket' (→ 'ticket_id') is in the UNION of payload
     // keys but NOT in the audio trigger's own contract. A union-based check would pass this and
     // every artifact.persist run would fail 'persist_scope_missing' at run time. Per-event rejects.

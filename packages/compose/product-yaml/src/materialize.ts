@@ -45,7 +45,7 @@
  * (pre-read + skip); `reconcile_stale_rows` → non-human-edited rows of a re-extract that no longer
  * produces them are deleted, over the DECLARED reconcile scope (`declaredReconcileScope` — the
  * spec's reconcile-enabled kinds + their bound stores, independent of what the current extraction
- * produced, so a whole-kind removal still reconciles; MAT-1). Both run through the tenant-bound
+ * produced, so a whole-kind removal still reconciles). Both run through the tenant-bound
  * `HandlerDb` facade (the structural tenant predicate underneath).
  */
 import { closedReferenceGroundingChecker } from '@rayspec/grounding-runtime';
@@ -351,7 +351,7 @@ export interface PlannedCollectionRow {
 /**
  * The DECLARED reconcile scope: which artifact kinds carry `lifecycle.reconcile_stale_rows` and
  * which bound stores hold their rows. Derived from the PRODUCT SPEC (never from what one extraction
- * happened to produce) — the MAT-1 law: a re-extract that yields ZERO members of a reconcile-declared
+ * happened to produce) — the reconcile law: a re-extract that yields ZERO members of a reconcile-declared
  * kind must still delete that kind's prior non-human-edited rows. A reconcile set derived from the
  * planned rows would silently drop a whole-kind removal from the reconcile pass (the rows survive and
  * the views keep serving them as grounded).
@@ -470,7 +470,7 @@ export interface CollectionPersistOutcome {
  * `INSERT … ON CONFLICT (artifact_ref) DO UPDATE` (the C1 idiom) keyed by the tenant-namespaced ref.
  *
  * `reconcile` is the DECLARED reconcile scope (`declaredReconcileScope`) — derived from the product
- * spec's reconcile-enabled kinds + their bound stores, NEVER from `planned` (MAT-1): a re-extract
+ * spec's reconcile-enabled kinds + their bound stores, NEVER from `planned`: a re-extract
  * that yields zero members of a reconcile-declared kind still deletes that kind's prior
  * non-human-edited rows, and a store whose planned rows all vanished is still scanned.
  */

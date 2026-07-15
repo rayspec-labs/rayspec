@@ -26,11 +26,11 @@ import {
 } from './test-support/fixture.js';
 
 /**
- * TB-2: a PARTIAL module mock over the event vocabulary — ONLY `mountedTriggerEventDescriptors` is
+ * A PARTIAL module mock over the event vocabulary — ONLY `mountedTriggerEventDescriptors` is
  * overridable, and only while a test sets `vocabularyMock.override` (undefined ⇒ the REAL
  * implementation, so every other describe block in this file runs the genuine vocabulary). This is
  * the revert-net for compose's WIRING: audio's real descriptor values coincide byte-for-byte with
- * the pre-S1 hardcodes, so only a descriptor map the pre-S1 hardcodes could NOT produce proves the
+ * the original hardcodes, so only a descriptor map the original hardcodes could NOT produce proves the
  * wiring actually SOURCES the registry.
  */
 const vocabularyMock = vi.hoisted(() => ({
@@ -70,7 +70,7 @@ function rollout(overrides: Partial<ProductYamlRollout> = {}): ProductYamlRollou
   };
 }
 
-/** The S2 fieldlog rollout: NO stt/agents (the fixture uses neither); stores derived from the doc. */
+/** The fieldlog rollout: NO stt/agents (the fixture uses neither); stores derived from the doc. */
 function fieldlogRollout(overrides: Partial<ProductYamlRollout> = {}): ProductYamlRollout {
   const spec = parseFixture(FIELDLOG_YAML);
   const derived = deriveProductStores(spec, new Set(['audio_sessions', 'audio_tracks']));
@@ -170,7 +170,7 @@ describe('composeProductDeploy — healthy composition', () => {
       'artifact.persist',
       'artifact.read',
       'grounding.check',
-      // S2 (DELIBERATE pin evolution): the declared-store step runtime is wired unconditionally
+      // DELIBERATE: the declared-store step runtime is wired unconditionally
       // (spec-driven, fail-closed; a doc without store steps never dispatches these ops).
       'store.read',
       'store.write',
@@ -228,7 +228,7 @@ describe('composeProductDeploy — healthy composition', () => {
   });
 });
 
-describe('composeProductDeploy — declared stores + store steps (S2, healthy)', () => {
+describe('composeProductDeploy — declared stores + store steps (healthy)', () => {
   it('composes the fieldlog fixture: store steps compile onto store.read/store.write, the declared stores join the read surface, the store-sourced view mounts', () => {
     const composed = composeProductDeploy(parseFixture(FIELDLOG_YAML), fieldlogRollout());
 
@@ -281,7 +281,7 @@ describe('composeProductDeploy — partial-unlock honesty (fail-closed, section 
     expectReject(yaml, rollout(), 'unsupported_spec', /capability 'stt' is declared 'reserved'/);
   });
 
-  it('S2: a CODE-BUILT spec whose store step targets an undeclared store is rejected at compose (the shared checker re-run)', () => {
+  it('a CODE-BUILT spec whose store step targets an undeclared store is rejected at compose (the shared checker re-run)', () => {
     // The parser/lint reject this at doc level; compose re-runs the SHARED checkProductStores as
     // defense-in-depth for a code-built spec that bypassed the parser — mutate post-parse.
     const spec = parseFixture(FIELDLOG_YAML);
@@ -307,7 +307,7 @@ describe('composeProductDeploy — partial-unlock honesty (fail-closed, section 
     expect((thrown as ProductComposeError).message).toMatch(/ghost_store/);
   });
 
-  it('S2: a CODE-BUILT spec whose write values name a column outside the store contract is rejected at compose', () => {
+  it('a CODE-BUILT spec whose write values name a column outside the store contract is rejected at compose', () => {
     const spec = parseFixture(FIELDLOG_YAML);
     const wf = spec.workflows[0];
     if (!wf) throw new Error('fixture workflow missing');
@@ -335,7 +335,7 @@ describe('composeProductDeploy — partial-unlock honesty (fail-closed, section 
     expect((thrown as ProductComposeError).message).toMatch(/ghost_col/);
   });
 
-  it('CW-1: a declared store SHADOWING a capability-owned (audio) store is rejected by the compose re-run BEFORE derive/rollout — naming the collision', () => {
+  it('a declared store SHADOWING a capability-owned (audio) store is rejected by the compose re-run BEFORE derive/rollout — naming the collision', () => {
     // The doc-level parse CANNOT catch this (spec has no runtime store names — the parser passes no
     // capability set), so it parses clean; compose passes the REAL wired set (AUDIO_STORE_NAMES) to
     // the shared checker and must reject at 'unsupported_spec' — NOT stumble later into a confusing
@@ -348,7 +348,7 @@ describe('composeProductDeploy — partial-unlock honesty (fail-closed, section 
     expectReject(yaml, fieldlogRollout(), 'unsupported_spec', /audio_sessions.*capability-owned/s);
   });
 
-  it('CW-2: a rollout.stores entry corresponding to NO declared/collection/transcript/audio store is rejected, naming the stray (roll out)', () => {
+  it('a rollout.stores entry corresponding to NO declared/collection/transcript/audio store is rejected, naming the stray (roll out)', () => {
     // A stray rollout store would otherwise MATERIALIZE as a real table nothing declared — accepted
     // silently pre-fix. Fail-closed: every composed store must be inside the known union.
     const spec = parseFixture(FIELDLOG_YAML);
@@ -369,7 +369,7 @@ describe('composeProductDeploy — partial-unlock honesty (fail-closed, section 
     expect((thrown as ProductComposeError).message).toMatch(/stray_ledger/);
   });
 
-  it('S2: a rollout whose stores OMIT a declared store is rejected at compose, naming it (roll out)', () => {
+  it('a rollout whose stores OMIT a declared store is rejected at compose, naming it (roll out)', () => {
     const spec = parseFixture(FIELDLOG_YAML);
     const derived = deriveProductStores(spec, new Set(['audio_sessions', 'audio_tracks']));
     const withoutCatalog = derived.stores.filter((s) => s.name !== 'equipment_catalog');
@@ -431,7 +431,7 @@ describe('composeProductDeploy — partial-unlock honesty (fail-closed, section 
     );
   });
 
-  it('rejects a persist scope the TRIGGER payload contract cannot satisfy, naming artifact + scope + trigger (CC-1)', () => {
+  it('rejects a persist scope the TRIGGER payload contract cannot satisfy, naming artifact + scope + trigger', () => {
     // Declare scope 'project' on BOTH artifact kinds (artifact-level 4-space indent only — the
     // workflow trigger's own `scope: session` is 6-space and untouched)…
     const yaml = NOTETOOL_YAML.replaceAll('\n    scope: session', '\n    scope: project');
@@ -492,7 +492,7 @@ describe('composeProductDeploy — partial-unlock honesty (fail-closed, section 
     );
   });
 
-  it('rejects a basePath override that breaks the play-token route coincidence — never a silent second route (CC-3)', () => {
+  it('rejects a basePath override that breaks the play-token route coincidence — never a silent second route', () => {
     // rollout.audio.basePath moves the audio capability's play-token route to
     // 'POST /media/{...}/play-token' while the delegated view still declares
     // 'POST /sessions/{...}/play-token'. Pre-fix the byte-equal route merge saw NO collision and
@@ -538,7 +538,7 @@ describe('composeProductDeploy — the trigger-event vocabulary', () => {
   it('builds the capability inventory events from the MOUNTED descriptors (no hardcode)', () => {
     const composed = composeProductDeploy(parseFixture(), rollout());
     // The dispatcher listens on EXACTLY the mounted capabilities' declared events — today the audio
-    // descriptor, so the composed set is byte-identical to the pre-S1 hardcode. Dropping a mounted
+    // descriptor, so the composed set is byte-identical to the original hardcode. Dropping a mounted
     // capability's descriptor breaks this (and the whole healthy-composition suite: the workflow's
     // trigger event would no longer compile against the inventory).
     expect(composed.triggerEvents).toEqual([...mountedTriggerEventDescriptors().keys()]);
@@ -570,7 +570,7 @@ describe('composeProductDeploy — the trigger-event vocabulary', () => {
   });
 });
 
-describe('composeProductDeploy — the record_input capability (S3: conditional mount + the generic key)', () => {
+describe('composeProductDeploy — the record_input capability (conditional mount + the generic key)', () => {
   /** The intake rollout: no stt/agents (the fixture uses neither); stores derived from the doc. */
   function intakeRollout(overrides: Partial<ProductYamlRollout> = {}): ProductYamlRollout {
     const spec = parseFixture(INTAKE_YAML);
@@ -607,7 +607,7 @@ describe('composeProductDeploy — the record_input capability (S3: conditional 
     expect(composed.triggerEvents).toEqual(['record_input.record_submitted']);
   });
 
-  it('enqueues through the composed ingress with the CLEAN GENERIC key `record_id:<id>` (S3 — never the audio suffix)', async () => {
+  it('enqueues through the composed ingress with the CLEAN GENERIC key `record_id:<id>` (never the audio suffix)', async () => {
     const enqueuer = new RecordingEnqueuer();
     const composed = composeProductDeploy(parseFixture(INTAKE_YAML), intakeRollout({ enqueuer }));
     const result = await composed.ingress.emit({
@@ -623,7 +623,7 @@ describe('composeProductDeploy — the record_input capability (S3: conditional 
     });
     expect(result.enqueued).toHaveLength(1);
     expect(enqueuer.calls[0]?.workflow.id).toBe('log_request');
-    // ★ THE S3 KEY PIN: the record event derives the generic `<field>:<value>` format — the
+    // ★ THE KEY PIN: the record event derives the generic `<field>:<value>` format — the
     // legacy ':finalized' suffix is audio-only (its own pin above stays byte-identical).
     expect(enqueuer.calls[0]?.idempotencyKey).toBe('record_id:rec-1');
   });
@@ -638,10 +638,10 @@ describe('composeProductDeploy — the record_input capability (S3: conditional 
     expect(composed.triggerEvents).toEqual(['audio_input.finalized_session']);
   });
 
-  it('CC-1 through the COMPOSE call site: a persisting workflow on the record event with a scope outside ITS payload keys is rejected naming the RECORD contract (closes the S2 descriptors-argument residual)', () => {
+  it('the persist-scope check through the COMPOSE call site: a persisting workflow on the record event with a scope outside ITS payload keys is rejected naming the RECORD contract', () => {
     // The intake doc, evolved to persist an artifact with scope 'session' — satisfiable by the
     // AUDIO event's payload but NOT by the record event's (no 'session_id' among its keys). A
-    // union-across-events (or an audio-hardcoded CC-1 argument) would compose this GREEN; the
+    // union-across-events (or an audio-hardcoded persist-scope argument) would compose this GREEN; the
     // per-event registry rejects it naming the record event's OWN payload keys.
     const yaml = INTAKE_YAML.replace(
       'contracts:\n  intake.request_row:',
@@ -706,13 +706,13 @@ artifacts:
     expect(thrown).toBeInstanceOf(ProductComposeError);
     expect((thrown as ProductComposeError).step).toBe('unsupported_spec');
     // The message names the RECORD event and ITS OWN payload keys — proof compose passed the
-    // registry (audio + record) descriptors to the CC-1 check, not a hardcoded audio contract.
+    // registry (audio + record) descriptors to the persist-scope check, not a hardcoded audio contract.
     expect((thrown as ProductComposeError).message).toMatch(
       /scope 'session'.*'record_input\.record_submitted'.*'session_id'.*record_id, tenant_id, source_capability/s,
     );
   });
 
-  it('CW-1 through compose: a DECLARED store shadowing the record capability store is rejected when the capability is declared', () => {
+  it('through compose: a DECLARED store shadowing the record capability store is rejected when the capability is declared', () => {
     const yaml = INTAKE_YAML.replace(
       `stores:
   - name: intake_requests`,
@@ -725,7 +725,7 @@ artifacts:
     );
     let thrown: unknown;
     try {
-      // Parse-level lint cannot know the mounted capability stores; compose passes them (CW-1).
+      // Parse-level lint cannot know the mounted capability stores; compose passes them.
       // Bypass the parser's own store lint by parsing the doc as-is (the shadow name is
       // lint-legal at parse time) and let compose's checkProductStores(…, capability names) fire.
       const spec = parseFixture(yaml);
@@ -738,8 +738,8 @@ artifacts:
   });
 });
 
-describe('composeProductDeploy — the wiring SOURCES the vocabulary (TB-2 revert-nets, mocked registry)', () => {
-  // Audio's descriptor values coincide byte-for-byte with the pre-S1 hardcodes (that coincidence is
+describe('composeProductDeploy — the wiring SOURCES the vocabulary (revert-nets, mocked registry)', () => {
+  // Audio's descriptor values coincide byte-for-byte with the original hardcodes (that coincidence is
   // deliberate — live run identity), so no real-vocabulary test can distinguish "compose reads the
   // registry" from "compose reverted to the hardcodes". These two arms mock the registry into
   // shapes the hardcodes cannot produce.
@@ -757,8 +757,8 @@ describe('composeProductDeploy — the wiring SOURCES the vocabulary (TB-2 rever
 
   it('derives the enqueue idempotency key from the DESCRIPTOR — nets the trigger-registration wiring', async () => {
     // The audio descriptor with its key field moved to 'tenant_id' — still within payload_keys, so
-    // every coherence/CC-1 check passes and the fixture composes. If compose's trigger registration
-    // reverted to the pre-S1 `({ workflow })`, the dispatcher's implicit default
+    // every coherence/persist-scope check passes and the fixture composes. If compose's trigger registration
+    // reverted to the original `({ workflow })`, the dispatcher's implicit default
     // (sessionScopedIdempotencyKey('session_id')) would enqueue 'session_id:sess-abc:finalized' — RED.
     vocabularyMock.override = () =>
       new Map([
@@ -784,22 +784,22 @@ describe('composeProductDeploy — the wiring SOURCES the vocabulary (TB-2 rever
   it('an EMPTY vocabulary fails compose through the descriptor-built INVENTORY — nets the events wiring', () => {
     // With an empty registry the descriptor-built inventory declares NO events, so the bridge
     // rejects the workflow's trigger fail-closed (unknown_trigger_event). The message assertion
-    // pins the INVENTORY path specifically: if `inventory.events` reverted to the pre-S1 hardcoded
+    // pins the INVENTORY path specifically: if `inventory.events` reverted to the original hardcoded
     // set, the bridge would compile and the failure would instead come from
     // triggerRegistrationForWorkflow ('no mounted capability declares a descriptor') — RED here.
     //
     // HONEST SCOPE: beyond the inventory site this arm nets the descriptor-consumption sites
     // COLLECTIVELY, not each in isolation. A single-site revert of the OTHER consumers (the
-    // trigger-registration argument at the dispatcher, or the CC-1 `descriptors:` argument) keeps
+    // trigger-registration argument at the dispatcher, or the persist-scope `descriptors:` argument) keeps
     // this arm green because compose still fails fail-closed at the remaining descriptor consumers
     // (triggerRegistrationForWorkflow's missing-descriptor rejection and/or
     // requirePersistScopeInTriggerPayload's missing-descriptor rejection). Those single-site
     // reverts are netted elsewhere: the trigger-registration wiring by the descriptor-derived-key
-    // arm above; the CC-1 per-event FUNCTION logic by event-vocabulary.test.ts's union test (which
+    // arm above; the persist-scope per-event FUNCTION logic by event-vocabulary.test.ts's union test (which
     // calls requirePersistScopeInTriggerPayload directly — compose's `descriptors:` ARGUMENT wiring
-    // at the CC-1 call site is itself not compose-level netted; honest residual:
+    // at the persist-scope call site is itself not compose-level netted; honest residual:
     // the single `eventDescriptors` var feeds all three consumers and arm 1 proves it is
-    // registry-sourced, so an isolated CC-1-argument hardcode has no natural revert target).
+    // registry-sourced, so an isolated persist-scope-argument hardcode has no natural revert target).
     vocabularyMock.override = () => new Map();
     expectReject(
       NOTETOOL_YAML,
@@ -835,16 +835,16 @@ describe('composeProductDeploy — the liveAgent extraction seam (item 1)', () =
       tenantId: TENANT,
     });
     // The live node is built at registry-build time (per run + per agent), closing over the run's
-    // tenant AND the declared agent id (S5: buildNodeForAgent is called once per declared agent).
+    // tenant AND the declared agent id (buildNodeForAgent is called once per declared agent).
     expect(built).toEqual([{ agentId: 'note_extractor', tenantId: TENANT }]);
-    // CS-1: the live branch registers the compiled `agent.<id>` op key (key-less proof, no provider
+    // The live branch registers the compiled `agent.<id>` op key (key-less proof, no provider
     // smoke needed) — mirrors the deterministic branch's registry.ids() assertion above.
     expect(registry.ids()).toEqual([
       'agent.note_extractor',
       'artifact.persist',
       'artifact.read',
       'grounding.check',
-      // S2 (DELIBERATE pin evolution): the declared-store step runtime is wired unconditionally
+      // DELIBERATE: the declared-store step runtime is wired unconditionally
       // (spec-driven, fail-closed; a doc without store steps never dispatches these ops).
       'store.read',
       'store.write',
@@ -874,11 +874,11 @@ describe('composeProductDeploy — the liveAgent extraction seam (item 1)', () =
     );
   });
 
-  it('S5: registers a DISTINCT node per DECLARED agent (the per-agent map, not one shared node)', () => {
+  it('registers a DISTINCT node per DECLARED agent (the per-agent map, not one shared node)', () => {
     // A 2-declared-agent document. The registration loop registers `agent.<id>` for EVERY declared
     // extractor (driven by spec.extractors, not workflow usage), so this exercises the per-agent map directly.
-    // RED (pre-S5): a single shared buildNode registered the SAME node object under both ids; S5 calls
-    // buildNodeForAgent(agentId, …) once per agent, so each agent id maps to its OWN distinct node.
+    // RED (before the per-agent map): a single shared buildNode registered the SAME node object under both ids; the
+    // per-agent build calls buildNodeForAgent(agentId, …) once per agent, so each agent id maps to its OWN distinct node.
     const base = parseFixture();
     const firstAgent = base.extractors[0];
     if (!firstAgent) throw new Error('the fixture must declare at least one extractor');
@@ -918,7 +918,7 @@ describe('composeProductDeploy — the liveAgent extraction seam (item 1)', () =
   });
 });
 
-describe('makeFailSoftMediaPrep — the FAIL-SOFT media-prep hook (MP-1)', () => {
+describe('makeFailSoftMediaPrep — the FAIL-SOFT media-prep hook', () => {
   // A minimal ctx — the injected prepareTrackMedia ignores db/blob; only tenantId is read (for the log).
   const ctx = {
     tenantId: TENANT,
@@ -933,7 +933,7 @@ describe('makeFailSoftMediaPrep — the FAIL-SOFT media-prep hook (MP-1)', () =>
     const hook = makeFailSoftMediaPrep({
       // The REAL constraint the STT node's throw-fake could NOT reproduce: a RemuxError becomes a
       // RETURNED err(500) (media-prep.ts:98-99), never a throw. The pre-fix compose closure `await`ed
-      // and DISCARDED this — so a broken ffmpeg produced NO operator log (the MP-1 silent-swallow).
+      // and DISCARDED this — so a broken ffmpeg produced NO operator log (the silent-swallow).
       prepareTrackMedia: async (_ctx, p) => {
         calledWith = p;
         return err(500, 'media_prep_failed', 'media prep failed (remux): ffmpeg exited 1');
@@ -944,7 +944,7 @@ describe('makeFailSoftMediaPrep — the FAIL-SOFT media-prep hook (MP-1)', () =>
     // Fail-soft: the hook RESOLVES (never throws) even though media prep failed.
     await expect(hook({ session_id: 's1', track: 'mic' })).resolves.toBeUndefined();
     expect(calledWith).toEqual({ session_id: 's1', track: 'mic' });
-    // MP-1: NEVER a silent swallow — exactly one loud structured line carrying status + error code.
+    // NEVER a silent swallow — exactly one loud structured line carrying status + error code.
     expect(logged).toHaveLength(1);
     expect(JSON.parse(logged[0] as string)).toMatchObject({
       event: 'media_prep_failed',

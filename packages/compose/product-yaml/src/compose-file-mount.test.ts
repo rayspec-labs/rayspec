@@ -1,6 +1,6 @@
 /**
- * S2 — the file_input conditional mount at the COMPOSE layer (the record S3
- * test pattern, extended for the binary two-route surface):
+ * The file_input conditional mount at the COMPOSE layer (following the record
+ * conditional-mount test pattern, extended for the binary two-route surface):
  *
  *   1. WHEN DECLARED: the capability-owned store + BOTH routes — asserted as WHOLE TUPLES
  *      (method/path/action.kind/action.mode/action.handler), not path strings, because the upload
@@ -9,7 +9,7 @@
  *      would still "exist" by path but buffer/parse JSON — + the handler map + the DEFAULT-join
  *      trigger vocabulary.
  *   2. THE C10 KEY PIN: the composed ingress derives the CLEAN GENERIC `file_id:<id>` idempotency
- *      key (the S3 record law — the ':finalized' suffix stays audio-only, byte-frozen).
+ *      key (the record law — the ':finalized' suffix stays audio-only, byte-frozen).
  *   3. THE CONDITIONAL (fail-the-fix): a doc NOT declaring file_input mounts ZERO file surface —
  *      no store, no routes, no handlers, no trigger event (both the record-only and the audio doc).
  *   4. ROLLOUT THREADING: `rollout.file.basePath` moves both mounted routes; a
@@ -49,7 +49,7 @@ function fileRollout(
   };
 }
 
-describe('composeProductDeploy — the file_input capability (S2: conditional mount + the generic key)', () => {
+describe('composeProductDeploy — the file_input capability (conditional mount + the generic key)', () => {
   it('mounts the file capability WHEN DECLARED: store + BOTH routes as WHOLE TUPLES + handlers + trigger event', () => {
     const spec = parseFixture(FILE_INTAKE_YAML);
     expect(declaresFileInput(spec)).toBe(true);
@@ -144,7 +144,7 @@ describe('composeProductDeploy — the file_input capability (S2: conditional mo
   });
 
   it('threads rollout.file.capability into the REAL config resolution (an invalid cap fail-closes at compose)', () => {
-    // resolveFileConfig rejects a non-positive byte cap AT CONSTRUCTION (the S1 fail-closed belt);
+    // resolveFileConfig rejects a non-positive byte cap AT CONSTRUCTION (the fail-closed belt);
     // reaching that error through composeProductDeploy proves the override seam is actually wired.
     expect(() =>
       composeProductDeploy(
@@ -200,7 +200,7 @@ views:
   });
 });
 
-// ── S3: the `file_input.parse_text` node wiring ─────────────────────────────────────────────
+// ── the `file_input.parse_text` node wiring ─────────────────────────────────────────────
 
 /** A tenant-recording stub blob factory (compose only WIRES; the node reads at run time). */
 function stubBlobFactory(seen: string[] = []): (tenantId: string) => BlobStore {
@@ -217,7 +217,7 @@ function stubBlobFactory(seen: string[] = []): (tenantId: string) => BlobStore {
   };
 }
 
-describe('composeProductDeploy — file_input.parse_text (S3: the injected blob reader)', () => {
+describe('composeProductDeploy — file_input.parse_text (the injected blob reader)', () => {
   it('registers the parse node TENANT-BOUND when the doc declares file_input and rollout.file.blob is supplied', () => {
     const seenTenants: string[] = [];
     const composed = composeProductDeploy(
@@ -271,7 +271,7 @@ describe('composeProductDeploy — file_input.parse_text (S3: the injected blob 
     ).toThrow(/does not declare the 'file_input' capability/);
   });
 
-  it('does NOT register the parse node for a file doc with no parse step and no reader (S2 shape unchanged)', () => {
+  it('does NOT register the parse node for a file doc with no parse step and no reader (file-mount shape unchanged)', () => {
     const composed = composeProductDeploy(parseFixture(FILE_INTAKE_YAML), fileRollout());
     const registry = composed.buildNodeRegistry({
       tdb: {} as never,
@@ -296,7 +296,7 @@ describe('composeProductDeploy — file_input.parse_text (S3: the injected blob 
   it('fail-closes a pdfParseTimeoutMs override AT/ABOVE the compiled step timeout (typed-timeout-wins)', () => {
     // The documented invariant: the node's typed `pdf_parse_timeout` fires BEFORE the engine's
     // generic step timeout. An override >= the compiled step's timeout_policy would silently
-    // invert that — cross-checked against the COMPILED value, fail-closed at compose (WIRE-1).
+    // invert that — cross-checked against the COMPILED value, fail-closed at compose.
     expect(() =>
       composeProductDeploy(
         parseFixture(FILE_PARSE_YAML),

@@ -1,9 +1,7 @@
 /**
- * S4 — `composeCapabilityStores` conditional-by-declaration for BOTH capabilities.
- * Before S4, audio's stores were spread UNCONDITIONALLY (a doc declaring audio was byte-behavior-identical);
- * S4 makes the audio half conditional on the doc declaring `audio_input`/`media_playback`, alongside the
- * S3 record half (conditional on `record_input`). This pins the predicate directly (the helper had no
- * dedicated unit test before S4 — the "audio unconditional" behavior was only implicit).
+ * `composeCapabilityStores` conditional-by-declaration for BOTH capabilities.
+ * The audio half is conditional on the doc declaring `audio_input`/`media_playback`, alongside the
+ * record half (conditional on `record_input`). This pins the predicate directly.
  */
 import { AUDIO_STORE_NAMES } from '@rayspec/audio-runtime';
 import { RECORD_STORE_NAMES } from '@rayspec/record-runtime';
@@ -35,7 +33,7 @@ describe('composeCapabilityStores — conditional-by-declaration', () => {
     expect(composeCapabilityStores(spec).stores.map((s) => s.name)).toEqual(AUDIO_STORE_LIST);
   });
 
-  it('a NON-audio doc (INTAKE, record_input only) mounts NO audio stores — RED before S4', () => {
+  it('a NON-audio doc (INTAKE, record_input only) mounts NO audio stores — RED-first', () => {
     const spec = parseFixture(INTAKE_YAML);
     expect(declaresAudio(spec)).toBe(false);
     expect(declaresRecordInput(spec)).toBe(true);

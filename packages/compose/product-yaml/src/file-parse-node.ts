@@ -1,13 +1,13 @@
 /**
- * The `file_input.parse_text` node — the durable blob→text parse step between the S1/S2
- * bounded byte-ingest and the S4 extraction: it resolves the sealed file's raw bytes through an
+ * The `file_input.parse_text` node — the durable blob→text parse step between the
+ * bounded byte-ingest and the extraction: it resolves the sealed file's raw bytes through an
  * INJECTED tenant-bound `BlobStore` (the STT `BlobRemuxSttMediaResolver` composition pattern —
  * never a raw fs/db handle), parses them to text, and emits ONE bounded text artifact under the
- * step's declared output ref. It calls NO LLM (extraction is S4) and runs INSIDE the workflow
+ * step's declared output ref. It calls NO LLM (extraction is a later step) and runs INSIDE the workflow
  * (journaled, re-run safe): a pure read → deterministic parse → artifact.
  *
  * ── PARSER SELECTION BY MAGIC-BYTE SNIFF (never the declared type) ──────────────────────
- * The stored `content_type` is advisory attacker-influenced DATA (the S1 config docstring), so the
+ * The stored `content_type` is advisory attacker-influenced DATA (see the config docstring), so the
  * parser is selected by SNIFFING the bytes. The sniff must be AS TOLERANT as the parser it routes
  * to, or a parseable PDF leaks down the text path and its raw source is emitted as "extracted
  * text": pdf.js forward-scans its first `peekBytes(1024)` for the `%PDF-` header, so the sniff
@@ -46,7 +46,7 @@
  *    BOTH paths (decoded text length / joined page-text length). Over-cap FAILS CLOSED
  *    (`file_text_too_large`) — NEVER silent truncation: extraction correctness depends on
  *    completeness, and a silently-truncated invoice is worse than a named refusal (the documented
- *    S3 truncate-vs-fail decision).
+ *    truncate-vs-fail decision).
  *  - `pdfParseTimeoutMs` (default 20,000 — deliberately UNDER the compiled step's 30 s
  *    `timeout_policy`, and compose CROSS-CHECKS any override against the compiled step value, so
  *    the TYPED `pdf_parse_timeout` always wins over a generic engine timeout): a wall-clock race
@@ -59,8 +59,8 @@
  *    race bounds only the AWAIT — the inlined pdf.js parses on THIS thread, so a purely
  *    CPU-pinned parse is not preempted. A single-page decompression bomb (OOM) and a
  *    CPU-pathological PDF (an on-thread stall for the DBOS lease) are KNOWN availability-only
- *    residuals, accepted under the trusted single-node beta posture and tracked as BACKLOG
- * `-PARSE-HARDENING-1` (structural close = off-thread parse + bounded sequential
+ *    residuals, accepted under the trusted single-node beta posture and tracked for a later
+ *    hardening pass (structural close = off-thread parse + bounded sequential
  * extraction + a CPU watchdog — due before external-exposure hardening / any untrusted self-serve exposure).
  *
  * ── FAILURE SEMANTICS (typed, split by recoverability) ──────────────────────────────────────────
@@ -76,7 +76,7 @@
  *
  * ── THE ARTIFACT (bounded) ───────────────────────────────────────────────────────────────
  * `{ ref, kind, content, metadata }` — the envelope shape `unwrapArtifactValue` unwraps to the
- * plain text string, so a `store_write` `{artifact}` value or the S4 extraction consumes the TEXT
+ * plain text string, so a `store_write` `{artifact}` value or the later extraction consumes the TEXT
  * (a text-column write stays type-clean). `metadata` (sniffed kind, declared type, mismatch flag,
  * char count, page count) rides alongside as DATA. The extracted text is UNTRUSTED CONTENT — it is
  * emitted as an artifact VALUE only, never anything instruction-shaped. Raw bytes NEVER become an
@@ -256,7 +256,7 @@ export function makeFileParseNode(cfg: FileParseNodeConfig): CapabilityNodeHandl
       );
     }
 
-    // The blob key rides the METADATA-ONLY trigger payload (bytes never in the event — S1).
+    // The blob key rides the METADATA-ONLY trigger payload (bytes never in the event).
     const blobKey = ctx.input_event.payload.blob_key;
     if (typeof blobKey !== 'string' || blobKey.length === 0) {
       return fail(
@@ -359,7 +359,7 @@ export function makeFileParseNode(cfg: FileParseNodeConfig): CapabilityNodeHandl
         );
       }
       // The uniform empty-text contract: BOTH paths fail closed on nothing-to-extract (the PDF
-      // twin is `scanned_pdf_no_text_layer`) — never a completed empty artifact into S4.
+      // twin is `scanned_pdf_no_text_layer`) — never a completed empty artifact into the later extraction.
       if (text.trim().length === 0) {
         return fail(
           'no_extractable_text',
