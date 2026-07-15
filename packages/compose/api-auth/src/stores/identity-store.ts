@@ -91,7 +91,12 @@ export class IdentityStore {
    *  - SOFT-DELETE the user's memberships (live-membership authz then denies them everywhere);
    *  - REVOKE every PERSONAL api-key the user minted (`api_keys.created_by = userId`) — these have
    *    NO FK to users, so a user delete would otherwise leave a live credential the user owned.
-   * The append-only auth_audit/journal retain only hashes/metadata (untouched here).
+   * The append-only auth_audit retains only hashes/metadata (untouched here). The run-journal is
+   * DIFFERENT: `journal_steps.output` and `conversation_items.payload` are RAW jsonb payloads (not
+   * hashes), so a per-user soft-delete does NOT erase run content. That raw payload is erased for a
+   * whole tenant by the erasure path's opt-in journal-scrub (`eraseTenant({ journalScrub: true })`,
+   * which NULLs those columns while keeping the ledger) — journal rows are tenant/run-scoped, not
+   * per-user, so there is no per-subject journal target to scrub here.
    */
   async deleteUser(userId: string): Promise<void> {
     const now = new Date();

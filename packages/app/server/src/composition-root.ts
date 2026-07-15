@@ -174,8 +174,15 @@ export interface BootedServer {
    * operator previews before / verifies after. Undefined for an auth-only / no-product boot (a spec with
    * zero product stores). NOT internet-facing by itself — an operator/ops wrapper triggers it (pre-hardening;
    * a tenant self-service erasure route is a later, hardening-adjacent decision).
+   *
+   * `journalScrub: true` selects the softer content-erasure posture: the raw run-journal payload columns
+   * (`journal_steps.output`, `conversation_items.payload`) are NULLed while the billing/exactly-once
+   * ledger rows are kept; everything else still hard-deletes (see `eraseTenant`'s `journalScrub`).
    */
-  eraseTenantNow?: (tenantId: string, opts?: { dryRun?: boolean }) => Promise<EraseResult>;
+  eraseTenantNow?: (
+    tenantId: string,
+    opts?: { dryRun?: boolean; journalScrub?: boolean },
+  ) => Promise<EraseResult>;
   /** Close the underlying DB pool (the entrypoint wires this to SIGINT/SIGTERM). */
   close: () => Promise<void>;
 }
@@ -1555,7 +1562,10 @@ async function deployDeclaredSpec(
   // unset ⇒ every call is a DRY-RUN preview (counts, ZERO deletes).
   let eraseTenantNow: BootedServer['eraseTenantNow'];
   if (specStores.length > 0) {
-    eraseTenantNow = (tenantId: string, eraseOpts?: { dryRun?: boolean }): Promise<EraseResult> =>
+    eraseTenantNow = (
+      tenantId: string,
+      eraseOpts?: { dryRun?: boolean; journalScrub?: boolean },
+    ): Promise<EraseResult> =>
       eraseTenant({
         db,
         tenantId,
@@ -1566,6 +1576,7 @@ async function deployDeclaredSpec(
         audit: baseDeps.auditStore,
         enabled: config.erasureEnabled,
         dryRun: eraseOpts?.dryRun ?? false,
+        journalScrub: eraseOpts?.journalScrub ?? false,
         stores: specStores,
       });
   }

@@ -2008,13 +2008,13 @@ export async function deployProductYamlSpec(
 
   const eraseTenantNow: BootedServer['eraseTenantNow'] = (
     targetTenant: string,
-    eraseOpts?: { dryRun?: boolean },
+    eraseOpts?: { dryRun?: boolean; journalScrub?: boolean },
   ) =>
     eraseTenant({
       db,
       tenantId: targetTenant,
       productTables,
-      // S4: a deploy that moves NO blob bytes (non-audio, non-file) wires no
+      // A deploy that moves NO blob bytes (non-audio, non-file) wires no
       // blob factory — eraseTenant tolerates an absent blob store (blobs:'no-backend'). Any doc
       // that DOES (audio or file_input) supplies its tenant-bound blob store, so a tenant erasure
       // sweeps the uploaded file blobs too (closing the sweep's GDPR-hole insufficiency).
@@ -2022,6 +2022,7 @@ export async function deployProductYamlSpec(
       audit: baseDeps.auditStore,
       enabled: config.erasureEnabled,
       dryRun: eraseOpts?.dryRun ?? false,
+      journalScrub: eraseOpts?.journalScrub ?? false,
       stores: composedStores,
     });
 

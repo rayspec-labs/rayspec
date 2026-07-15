@@ -18,6 +18,12 @@
  *      (runs/journal_steps/conversation_items/run_events/idempotency_keys) are erased for T1 too, and
  *      T2's core rows stay FULLY INTACT (cross-tenant isolation on the core tables, not just product).
  *   9. AUDIT-REQUIRED: an enabled (real) erasure with NO audit store ABORTS (zero deletes).
+ *  10. JOURNAL-SCRUB: `journalScrub:true` NULLs the raw payloads (`journal_steps.output`,
+ *      `conversation_items.payload`) while KEEPING the rows + every idempotency/cost column (the unique
+ *      journal index still bites), and reports the scrubbed counts distinctly.
+ *  11. JOURNAL-SCRUB CROSS-TENANT: a T1 scrub leaves T2's raw payloads + ledger FULLY INTACT.
+ *  12. JOURNAL-SCRUB PREVIEW: a `journalScrub` dry-run / gate-off run REPORTS the would-scrub counts but
+ *      mutates NOTHING (the raw payloads stay present) — the irreversible-safety preview contract.
  *
  * DB ISOLATION: a whole throwaway DATABASE (not a schema) — the platform migration chain materializes
  * orgs + the platform tables; the generated product SQL materializes the two product stores. The
@@ -87,7 +93,7 @@ const SUITE_DB = `rayspec_erase_${process.pid}`;
 // Ran-guard counter: a DELETE-isolation proof must NEVER silently self-skip in CI.
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
 let scenariosRan = 0;
-const SCENARIO_COUNT = 9;
+const SCENARIO_COUNT = 12;
 
 describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs blob + audit)', () => {
   const baseUrl = process.env.DATABASE_URL;
@@ -203,6 +209,28 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
   async function coreRowCount(tenantId: string, name: CoreName): Promise<number> {
     return (await forTenant(db, tenantId).select(coreTable[name]).all()).length;
   }
+  // Raw-payload read-backs for the journal-scrub scenarios (the row shapes we assert on).
+  type JournalRow = {
+    idempotencyKey: string;
+    inputHash: string;
+    status: string;
+    output: unknown;
+    costUsd: string;
+    billedCostUsd: string;
+    providerCostUsd: string | null;
+    costDrift: boolean;
+  };
+  type ConvRow = { role: string; payload: unknown };
+  async function journalRows(tenantId: string): Promise<JournalRow[]> {
+    return (await forTenant(db, tenantId)
+      .select(schema.journalSteps as never)
+      .all()) as unknown as JournalRow[];
+  }
+  async function convRows(tenantId: string): Promise<ConvRow[]> {
+    return (await forTenant(db, tenantId)
+      .select(schema.conversationItems as never)
+      .all()) as unknown as ConvRow[];
+  }
   async function wipeCore(tenantId: string): Promise<void> {
     // run-family run_id is a plain text column (no enforced FK), so any order is safe.
     for (const name of CORE_NAMES) await forTenant(db, tenantId).delete(coreTable[name]).where();
@@ -232,6 +260,13 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
         inputHash: 'h',
         status: 'ok',
         authMode: 'api-key',
+        // Raw output payload + distinctive cost ledger — so the scrub scenarios can assert the payload
+        // is NULLed while the cost columns survive UNCHANGED.
+        output: { secret: `${tenantId}-raw-llm-output` },
+        costUsd: '0.0123',
+        billedCostUsd: '0.0100',
+        providerCostUsd: '0.0111',
+        costDrift: true,
       },
       {
         runId,
@@ -241,11 +276,16 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
         inputHash: 'h',
         status: 'ok',
         authMode: 'api-key',
+        output: { secret: `${tenantId}-raw-tool-output` },
+        costUsd: '0.0055',
+        billedCostUsd: '0.0000',
+        providerCostUsd: null,
+        costDrift: false,
       },
     ]);
     await tdb.insert(schema.conversationItems as never, [
-      { runId, seq: '0', role: 'user' },
-      { runId, seq: '1', role: 'assistant' },
+      { runId, seq: '0', role: 'user', payload: { text: `${tenantId}-raw-user-msg` } },
+      { runId, seq: '1', role: 'assistant', payload: { text: `${tenantId}-raw-assistant-msg` } },
     ]);
     await tdb.insert(schema.runEvents as never, {
       runId,
@@ -538,6 +578,200 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
       expect(await blobPresent(T1, 'rec/0')).toBe(true);
       // No audit record was written (nothing happened).
       expect(await audit.countForTenantEvent(T1, 'tenant_data_erased')).toBe(0);
+      scenariosRan++;
+    },
+  );
+
+  maybe(
+    '10. journalScrub — T1 raw payloads NULLed, journal STRUCTURE (idempotency + cost + status) intact',
+    async () => {
+      await seedCore(T1);
+
+      // BEFORE: the raw payloads are present (so the null-after assertion is meaningful, not vacuous).
+      const before = await journalRows(T1);
+      expect(before.length).toBe(2);
+      expect(before.every((r) => r.output !== null)).toBe(true);
+      const convBefore = await convRows(T1);
+      expect(convBefore.length).toBe(2);
+      expect(convBefore.every((r) => r.payload !== null)).toBe(true);
+
+      const res = await eraseTenant({
+        db,
+        tenantId: T1,
+        productTables,
+        blob: blobFactory(T1),
+        audit,
+        enabled: true,
+        journalScrub: true,
+        stores: STORES,
+      });
+      expect(res.mode).toBe('deleted');
+      // The scrub is REPORTED distinctly: the two payload tables show scrubbed-row counts and are
+      // ABSENT from coreTables (they were NOT deleted).
+      expect(res.journalScrubbed).toEqual({ journal_steps: 2, conversation_items: 2 });
+      expect(res.journalScrubbedTotal).toBe(4);
+      expect(res.coreTables.journal_steps).toBeUndefined();
+      expect(res.coreTables.conversation_items).toBeUndefined();
+
+      // (a) SCRUB EFFECT — the raw payloads are NULL, the ROWS SURVIVE.
+      const after = await journalRows(T1);
+      expect(after.length).toBe(2); // rows kept (not deleted)
+      expect(after.every((r) => r.output === null)).toBe(true); // raw output erased
+      const convAfter = await convRows(T1);
+      expect(convAfter.length).toBe(2);
+      expect(convAfter.every((r) => r.payload === null)).toBe(true); // raw transcript erased
+
+      // (b) STRUCTURE PRESERVED — the exactly-once markers + the whole cost ledger are UNCHANGED on the
+      // surviving rows.
+      const k0 = after.find((r) => r.idempotencyKey === `${T1}-k0`);
+      const k1 = after.find((r) => r.idempotencyKey === `${T1}-k1`);
+      expect(k0).toBeDefined();
+      expect(k1).toBeDefined();
+      expect(k0?.status).toBe('ok');
+      expect(k0?.inputHash).toBe('h');
+      expect(k0?.costUsd).toBe('0.0123');
+      expect(k0?.billedCostUsd).toBe('0.0100');
+      expect(k0?.providerCostUsd).toBe('0.0111');
+      expect(k0?.costDrift).toBe(true);
+      expect(k1?.billedCostUsd).toBe('0.0000');
+      expect(k1?.providerCostUsd).toBe(null);
+
+      // (c) the unique (tenant_id, run_id, idempotency_key) index STILL enforces exactly-once — a
+      // duplicate insert on the SURVIVING scrubbed key must RAISE (the scrub kept the row + its index).
+      await expect(
+        forTenant(db, T1).insert(schema.journalSteps as never, {
+          runId: `${T1}-r0`,
+          backend: 'openai',
+          type: 'llm',
+          idempotencyKey: `${T1}-k0`, // collides with the surviving scrubbed row
+          inputHash: 'h',
+          status: 'ok',
+          authMode: 'api-key',
+        }),
+      ).rejects.toThrow();
+
+      // The OTHER core tables were hard-deleted as normal (ledger-preservation is scoped to the two
+      // payload tables); the product rows + blobs were hard-deleted too.
+      expect(await coreRowCount(T1, 'runs')).toBe(0);
+      expect(await coreRowCount(T1, 'run_events')).toBe(0);
+      expect(await coreRowCount(T1, 'idempotency_keys')).toBe(0);
+      expect(await rowCount(T1, 'documents')).toBe(0);
+      expect(await blobPresent(T1, 'rec/0')).toBe(false);
+
+      // The out-of-band audit record carries the scrub counts distinctly.
+      const rows = await audit.readForTenant(T1);
+      const erasure = rows.find((r) => r.event === 'tenant_data_erased');
+      const meta = erasure?.meta as {
+        journalScrubbed?: Record<string, number>;
+        journalScrubbedTotal?: number;
+      };
+      expect(meta.journalScrubbed).toEqual({ journal_steps: 2, conversation_items: 2 });
+      expect(meta.journalScrubbedTotal).toBe(4);
+      scenariosRan++;
+    },
+  );
+
+  maybe(
+    '11. journalScrub — FOREIGN tenant payloads FULLY INTACT (cross-tenant isolation on the scrub)',
+    async () => {
+      await seedCore(T1);
+      await seedCore(T2);
+
+      await eraseTenant({
+        db,
+        tenantId: T1,
+        productTables,
+        blob: blobFactory(T1),
+        audit,
+        enabled: true,
+        journalScrub: true,
+        stores: STORES,
+      });
+
+      // T1 — scrubbed (raw payloads NULL).
+      const t1j = await journalRows(T1);
+      expect(t1j.length).toBe(2);
+      expect(t1j.every((r) => r.output === null)).toBe(true);
+
+      // T2 — the raw payloads are UNTOUCHED (an un-scoped scrub UPDATE would make this RED).
+      const t2j = await journalRows(T2);
+      expect(t2j.length).toBe(2);
+      expect(t2j.every((r) => r.output !== null)).toBe(true);
+      const t2c = await convRows(T2);
+      expect(t2c.length).toBe(2);
+      expect(t2c.every((r) => r.payload !== null)).toBe(true);
+      // T2's whole ledger + core rows survive untouched (the scrub of T1 deleted none of T2's rows).
+      expect(await coreRowCount(T2, 'runs')).toBe(1);
+      expect(await coreRowCount(T2, 'journal_steps')).toBe(2);
+      expect(await coreRowCount(T2, 'run_events')).toBe(1);
+      scenariosRan++;
+    },
+  );
+
+  maybe(
+    '12. journalScrub PREVIEW — dryRun + gate-off report the would-scrub counts but mutate NOTHING',
+    async () => {
+      await seedCore(T1);
+
+      // BEFORE: the raw payloads are present, so "still non-null after the preview" is a real assertion.
+      const before = await journalRows(T1);
+      expect(before.length).toBe(2);
+      expect(before.every((r) => r.output !== null)).toBe(true);
+      const convBefore = await convRows(T1);
+      expect(convBefore.length).toBe(2);
+      expect(convBefore.every((r) => r.payload !== null)).toBe(true);
+
+      // Asserts the preview contract for one call: reports the would-scrub counts, mutates NOTHING.
+      async function assertPreviewMutatesNothing(
+        res: EraseResult,
+        expectReason: 'dry-run-requested' | 'gate-disabled',
+      ): Promise<void> {
+        expect(res.mode).toBe('dry-run');
+        expect(res.dryRunReason).toBe(expectReason);
+        // The would-scrub counts are correct + non-zero (the preview REPORTS what it would scrub) …
+        expect(res.journalScrubbed).toEqual({ journal_steps: 2, conversation_items: 2 });
+        expect(res.journalScrubbedTotal).toBe(4);
+        // … and the payload tables stay ABSENT from coreTables (scrub targets, not delete targets).
+        expect(res.coreTables.journal_steps).toBeUndefined();
+        expect(res.coreTables.conversation_items).toBeUndefined();
+        // GROUND TRUTH: the raw payloads (and their rows) are STILL PRESENT after the preview — a preview
+        // that actually NULLed the payloads would flip these to `=== null` and go RED.
+        const j = await journalRows(T1);
+        expect(j.length).toBe(2);
+        expect(j.every((r) => r.output !== null)).toBe(true);
+        const c = await convRows(T1);
+        expect(c.length).toBe(2);
+        expect(c.every((r) => r.payload !== null)).toBe(true);
+        // A preview writes NO audit record (nothing irreversible happened).
+        expect(await audit.countForTenantEvent(T1, 'tenant_data_erased')).toBe(0);
+      }
+
+      // (A) explicit dryRun preview (gate ON): counts reported, nothing mutated.
+      const dry = await eraseTenant({
+        db,
+        tenantId: T1,
+        productTables,
+        blob: blobFactory(T1),
+        audit,
+        enabled: true,
+        dryRun: true,
+        journalScrub: true,
+        stores: STORES,
+      });
+      await assertPreviewMutatesNothing(dry, 'dry-run-requested');
+
+      // (B) gate-off preview (the default operator gate): ALSO previews — counts reported, nothing mutated.
+      const off = await eraseTenant({
+        db,
+        tenantId: T1,
+        productTables,
+        blob: blobFactory(T1),
+        audit,
+        enabled: false,
+        journalScrub: true,
+        stores: STORES,
+      });
+      await assertPreviewMutatesNothing(off, 'gate-disabled');
       scenariosRan++;
     },
   );
