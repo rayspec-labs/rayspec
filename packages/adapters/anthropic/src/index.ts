@@ -83,7 +83,7 @@ import {
   statSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createSdkMcpServer, query, tool } from '@anthropic-ai/claude-agent-sdk';
 import type {
   AgentSpec,
@@ -131,6 +131,28 @@ export interface AuthSelfCheck {
   oauthTokenPresent: boolean;
 }
 
+/**
+ * Reject a hostile raw tenant id BEFORE it reaches any path op (fail-closed, no silent path
+ * collapse): a path separator (`/` or `\`), a `..` traversal segment, a NUL, an absolute-path
+ * marker, or an empty id. With separators already rejected, the only remaining `..` traversal form
+ * is the bare `..`. The post-resolve + realpath containment checks in configDirFor stay as
+ * defense-in-depth (they are NOT removed).
+ */
+function assertSafeTenantId(tenantId: string): void {
+  if (
+    tenantId.length === 0 ||
+    tenantId.includes('\0') ||
+    tenantId.includes('/') ||
+    tenantId.includes('\\') ||
+    tenantId === '..' ||
+    isAbsolute(tenantId)
+  ) {
+    throw new Error(
+      `anthropic adapter: refusing an unsafe tenant id — a path separator, '..' traversal, absolute path, or empty id can never be contained under the configured root (tenant '${tenantId}').`,
+    );
+  }
+}
+
 export class AnthropicAdapter implements Backend {
   readonly id = 'anthropic' as const;
   private readonly configRoot: string;
@@ -139,10 +161,33 @@ export class AnthropicAdapter implements Backend {
   constructor(opts: AnthropicAdapterOptions) {
     this.configRoot = opts.configRoot;
     this.execPath = opts.pathToClaudeCodeExecutable;
+    this.assertConfigRoot();
+  }
+
+  /**
+   * Boot-time guard on the config ROOT itself: the per-tenant child dirs are 0o700-guarded, but a
+   * group/world-accessible ROOT would undermine the whole isolation. Assert an existing root has no
+   * group/other bits (fail-closed), or create it 0o700 when absent (idempotent) — which also gives
+   * configDirFor its precondition that the parent exists for the non-recursive per-tenant create.
+   */
+  private assertConfigRoot(): void {
+    const existing = lstatSync(this.configRoot, { throwIfNoEntry: false });
+    if (existing === undefined) {
+      mkdirSync(this.configRoot, { recursive: true, mode: 0o700 });
+      return;
+    }
+    if (existing.mode & 0o077) {
+      throw new Error(
+        `anthropic adapter: config root is group/world-accessible (${this.configRoot}).`,
+      );
+    }
   }
 
   /** Per-tenant config dir — created on demand, isolates credentials + JSONL transcripts. */
   configDirFor(tenantId: string): string {
+    // Validate the RAW tenantId BEFORE any path op (fail-closed, no silent path collapse). The
+    // post-resolve + realpath containment checks below stay as defense-in-depth.
+    assertSafeTenantId(tenantId);
     const dir = join(this.configRoot, `tenant-${tenantId}`);
     // Containment: the target must be a DIRECT child named tenant-<id>. A separator or traversal in
     // tenantId that would place the dir anywhere else is refused, never created.
@@ -151,20 +196,29 @@ export class AnthropicAdapter implements Backend {
         `anthropic adapter: refusing tenant config dir outside the configured root (tenant '${tenantId}').`,
       );
     }
-    const existing = lstatSync(dir, { throwIfNoEntry: false });
-    if (existing === undefined) {
-      // 0o700 so a tenant's credentials + on-disk JSONL transcripts are never group/world-readable.
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-    } else if (existing.isSymbolicLink() || !existing.isDirectory()) {
-      // Never follow a symlink (or a non-directory) into place — it could redirect a tenant's dir.
-      throw new Error(
-        `anthropic adapter: tenant config path is a symlink or not a directory (tenant '${tenantId}').`,
-      );
-    } else if (existing.mode & 0o077) {
-      // An existing dir reachable by group/world is not trustworthy for credential isolation.
-      throw new Error(
-        `anthropic adapter: tenant config dir is group/world-accessible (tenant '${tenantId}').`,
-      );
+    // ATOMIC create: a NON-recursive mkdir either creates the dir fresh (0o700) or throws EEXIST —
+    // no check-then-create race. A concurrently-planted entry surfaces as EEXIST and is validated on
+    // the branch below, never silently accepted (recursive:true would no-op on an existing path,
+    // skipping validation). 0o700 so a tenant's credentials + on-disk JSONL transcripts are never
+    // group/world-readable.
+    try {
+      mkdirSync(dir, { mode: 0o700 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err;
+      // The path already existed — validate the pre-existing entry.
+      const existing = lstatSync(dir);
+      if (existing.isSymbolicLink() || !existing.isDirectory()) {
+        // Never follow a symlink (or a non-directory) into place — it could redirect a tenant's dir.
+        throw new Error(
+          `anthropic adapter: tenant config path is a symlink or not a directory (tenant '${tenantId}').`,
+        );
+      }
+      if (existing.mode & 0o077) {
+        // An existing dir reachable by group/world is not trustworthy for credential isolation.
+        throw new Error(
+          `anthropic adapter: tenant config dir is group/world-accessible (tenant '${tenantId}').`,
+        );
+      }
     }
     // Realpath containment: after resolving every symlink, the real dir must still sit directly under
     // the real configured root (defeats a symlinked path component between the root and the dir).

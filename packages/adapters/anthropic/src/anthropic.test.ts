@@ -8,7 +8,15 @@
  *   - JSONL session re-derivation round-trips into neutral ConvItems
  *   - the FAITHFUL recursive tool-arg Zod projection validate-and-repair
  */
-import { mkdirSync, mkdtempSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -70,6 +78,81 @@ describe('A.1 tenant config-dir hardening (credential isolation on disk)', () =>
     expect(second).toBe(first);
     expect(statSync(first).mode & 0o077).toBe(0);
   });
+});
+
+describe('config-dir hardening — atomic create, validated on the EEXIST branch (1a)', () => {
+  // A concurrently-planted (or pre-existing) entry surfaces as EEXIST from the non-recursive mkdir
+  // and is validated, never silently accepted. Capping the EEXIST-branch validation lets the bad
+  // entry through — the deterministic fail-the-fix (the pure race window is not unit-testable; see
+  // the report). chmod defeats umask so the mode is unambiguous regardless of the runner's umask.
+
+  it('rejects a pre-existing group/world-accessible tenant dir (mode-check on EEXIST)', () => {
+    const root = tmpRoot();
+    const bad = join(root, 'tenant-alpha');
+    mkdirSync(bad, { mode: 0o700 });
+    chmodSync(bad, 0o077);
+    const adapter = new AnthropicAdapter({ configRoot: root });
+    // Cap the EEXIST mode-check → this bad dir is returned instead of thrown → RED.
+    expect(() => adapter.configDirFor('alpha')).toThrow(/group|world|access/);
+  });
+
+  it('rejects a pre-existing regular file at the tenant path (not-a-directory on EEXIST)', () => {
+    const root = tmpRoot();
+    writeFileSync(join(root, 'tenant-alpha'), 'x', { mode: 0o600 });
+    const adapter = new AnthropicAdapter({ configRoot: root });
+    // Cap the isDirectory-check → a 0o600 file passes the mode-check + realpath → accepted → RED.
+    expect(() => adapter.configDirFor('alpha')).toThrow(/symlink|not a directory/);
+  });
+
+  it('rejects a pre-existing symlink at the tenant path (never follows it into place)', () => {
+    const root = tmpRoot();
+    // Symlink to a real dir DIRECTLY under root so realpath-containment passes — the EEXIST symlink
+    // check is then the sole guard.
+    mkdirSync(join(root, 'real'), { mode: 0o700 });
+    symlinkSync(join(root, 'real'), join(root, 'tenant-alpha'));
+    const adapter = new AnthropicAdapter({ configRoot: root });
+    expect(() => adapter.configDirFor('alpha')).toThrow(/symlink|not a directory/);
+  });
+
+  it('a fresh create is atomic and yields a private dir (no group/world bits)', () => {
+    const adapter = new AnthropicAdapter({ configRoot: tmpRoot() });
+    const dir = adapter.configDirFor('fresh');
+    expect(statSync(dir).isDirectory()).toBe(true);
+    expect(statSync(dir).mode & 0o077).toBe(0);
+  });
+});
+
+describe('config-dir hardening — config root mode asserted at boot (1b)', () => {
+  it('rejects a group/world-accessible config root at construction', () => {
+    const root = tmpRoot();
+    chmodSync(root, 0o750);
+    // Cap assertConfigRoot → construction succeeds → RED.
+    expect(() => new AnthropicAdapter({ configRoot: root })).toThrow(
+      /config root is group\/world-accessible/,
+    );
+  });
+
+  it('creates an absent config root private (0o700), giving the non-recursive create its parent', () => {
+    const root = join(tmpRoot(), 'nested', 'anthropic-root');
+    new AnthropicAdapter({ configRoot: root });
+    expect(statSync(root).isDirectory()).toBe(true);
+    expect(statSync(root).mode & 0o077).toBe(0);
+  });
+});
+
+describe('config-dir hardening — tenantId validated BEFORE any path op (1c)', () => {
+  // A hostile raw tenantId is rejected fail-closed before join/resolve — no directory is created.
+  // Cap the validator → the empty and bare-`..` ids reach mkdir and CREATE a directory (RED); the
+  // separator ids ('a/b', '../evil') are additionally caught by the pre-existing containment check.
+  for (const bad of ['../evil', 'a/b', '..', '']) {
+    it(`rejects tenantId ${JSON.stringify(bad)} and creates no directory`, () => {
+      const root = tmpRoot();
+      const adapter = new AnthropicAdapter({ configRoot: root });
+      const before = readdirSync(root);
+      expect(() => adapter.configDirFor(bad)).toThrow();
+      expect(readdirSync(root)).toEqual(before);
+    });
+  }
 });
 
 describe('A.1 bundled binary verification', () => {
