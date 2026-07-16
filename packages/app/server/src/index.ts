@@ -21,7 +21,7 @@ export { DeployError, type PlannedMigration } from '@rayspec/api-auth';
 // `BootedServer.drift`. It originates in @rayspec/db (drift-detect.ts); the server already depends on
 // @rayspec/db, so re-exporting here spares a consumer a direct db dep. Additive — a pure type re-export.
 export type { DriftFinding } from '@rayspec/db';
-export { bootBanner } from './banner.js';
+export { bootBanner, bootBaseUrl } from './banner.js';
 export {
   type AgentBackendsFactory,
   applyMigrations,

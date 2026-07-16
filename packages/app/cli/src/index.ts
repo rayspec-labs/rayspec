@@ -63,12 +63,15 @@ READ-ONLY diagnostic floor (never mutates a real/target DB; never prints secrets
                                 VIEW surface (read routes → paths/params/response schemas). Product profile only.
 
 PRODUCTION-MUTATING (boots + serves a real deployment; mutates the target DB):
-  rayspec deploy <spec.yaml> [--port <n>] [--apply-migration <delta.sql> [--allowlist <file.json>]]
+  rayspec deploy <spec.yaml> [--port <n>] [--host <addr>] [--apply-migration <delta.sql> [--allowlist <file.json>]]
                                 Assemble the platform from the ambient env, register the product
                                 stores through the SANCTIONED validating registrar, apply the committed
                                 migration chain + roll out the declared product, and SERVE on PORT
-                                (default 8080) until SIGINT/SIGTERM. Reads config from env (see the
-                                @rayspec/server package README); fails closed on a missing secret.
+                                (default 8080) until SIGINT/SIGTERM. Binds LOOPBACK (127.0.0.1) by
+                                default; --host <addr> (e.g. 0.0.0.0) is an explicit opt-in to another
+                                interface — the banner logs the ACTUAL bound address. Reads config from
+                                env (see the @rayspec/server package README); fails closed on a missing
+                                secret.
                                 With --apply-migration, boot in UPDATE mode: apply the reviewed FORWARD
                                 delta <delta.sql> to the EXISTING schema in place (existing rows
                                 survive). A DESTRUCTIVE statement is BLOCKED unless covered by the
