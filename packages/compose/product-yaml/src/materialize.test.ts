@@ -211,6 +211,41 @@ describe('applyGroundingPolicy — a declared quote_field with no quote is an un
     expect(app.unsupportedClaims).toBe(1);
   });
 
+  it('drops the member when the empty-quote mode is prune, because pruning empties an evidence-required claim', () => {
+    // prune sets the member's evidence to [] (no cited span backs the missing quote); the 'finding'
+    // kind is evidence-required (see the first block: 'fully ungrounded' + 'no evidence at all' are
+    // dropped on empty post-prune evidence), so on_empty_evidence then drops it — never persists.
+    const app = applyGroundingPolicy(
+      specWithQuoteField('prune'),
+      candidateWithQuote(''),
+      'notetool.notes',
+      CLOSED,
+    );
+    const finding = app.kinds.find((k) => k.artifact.kind === 'finding');
+    expect(finding?.members).toHaveLength(0);
+    expect(app.droppedMembers).toBe(1);
+    expect(app.unsupportedClaims).toBe(1);
+  });
+
+  it('fails when the declared quote_field value is a number (a non-string is an unquoted claim)', () => {
+    expect(() =>
+      applyGroundingPolicy(
+        specWithQuoteField('fail'),
+        candidateWithQuote(42),
+        'notetool.notes',
+        CLOSED,
+      ),
+    ).toThrow(MaterializeError);
+    expect(() =>
+      applyGroundingPolicy(
+        specWithQuoteField('fail'),
+        candidateWithQuote(42),
+        'notetool.notes',
+        CLOSED,
+      ),
+    ).toThrow(/quote_field/);
+  });
+
   it('does NOT fire for a member whose declared quote IS a verbatim subset of a cited span', () => {
     const app = applyGroundingPolicy(
       specWithQuoteField('fail'),
