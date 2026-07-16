@@ -1,0 +1,50 @@
+name: CodeQL
+
+# Static analysis (SAST) for the JavaScript/TypeScript sources. This complements — never replaces —
+# the two scanners already in ci.yml: gitleaks (committed-secret scan) and osv-scanner (dependency
+# advisories). Those find secrets and known-vulnerable dependencies; CodeQL reasons about the code
+# itself (taint flow, injection, unsafe patterns) and reports findings to the repo's code-scanning
+# view. Purely additive: it is its own workflow and touches none of the ci.yml lanes.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly re-scan so a newly published CodeQL query surfaces against code that has not changed since
+    # its last push. Monday 07:00 UTC.
+    - cron: '0 7 * * 1'
+
+# Superseded runs on the same ref are pointless once a newer commit exists — cancel them.
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (JavaScript/TypeScript)
+    runs-on: ubuntu-latest
+    permissions:
+      # Upload the SARIF results to the code-scanning view.
+      security-events: write
+      # Read the workflow run metadata (needed for code scanning on private repos; harmless on public).
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # One combined JavaScript/TypeScript database — no build step: CodeQL analyses the sources
+      # directly for this language, so there is nothing to compile and no autobuild step is needed.
+      # security-extended layers the extended security queries on top of the default suite for broader
+      # coverage; drop it to fall back to the default query set if the extra findings are too noisy.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3.37.0
+        with:
+          languages: javascript-typescript
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3.37.0
+        with:
+          category: /language:javascript-typescript
