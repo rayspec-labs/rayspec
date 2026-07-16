@@ -41,6 +41,26 @@ describe('loadServerConfig — the listen host defaults to loopback', () => {
   });
 });
 
+describe('loadServerConfig — trusted-proxy CIDRs (RAYSPEC_TRUSTED_PROXIES)', () => {
+  it('defaults to an EMPTY list (no forwarding header trusted) when unset', () => {
+    expect(loadServerConfig({ ...BASE_ENV }).trustedProxies).toEqual([]);
+  });
+
+  it('parses a comma-separated CIDR list into trimmed entries', () => {
+    expect(
+      loadServerConfig({ ...BASE_ENV, RAYSPEC_TRUSTED_PROXIES: '10.0.0.0/8, 192.168.0.0/16' })
+        .trustedProxies,
+    ).toEqual(['10.0.0.0/8', '192.168.0.0/16']);
+  });
+
+  it('drops blank/whitespace entries (a stray comma cannot become a trusted CIDR)', () => {
+    expect(
+      loadServerConfig({ ...BASE_ENV, RAYSPEC_TRUSTED_PROXIES: ' 10.0.0.0/8 , ,  ' })
+        .trustedProxies,
+    ).toEqual(['10.0.0.0/8']);
+  });
+});
+
 describe('bootBaseUrl — the banner reflects the ACTUAL bound address', () => {
   it('formats an IPv4 bind verbatim (including a non-loopback address)', () => {
     expect(bootBaseUrl('127.0.0.1', 8080)).toBe('http://127.0.0.1:8080');

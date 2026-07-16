@@ -239,7 +239,7 @@ export interface AppDeps {
    * peer is inside one of these — otherwise the SOCKET PEER is the identity, so a direct caller cannot
    * spoof its identity (evade a per-source throttle / poison another source's bucket) via a forwarding
    * header. Absent/empty ⇒ no forwarding header is ever trusted (the peer is always the identity); a
-   * deployment behind a proxy opts in with its proxy CIDRs (from a deploy config).
+   * deployment behind a proxy opts in with its proxy CIDRs via the RAYSPEC_TRUSTED_PROXIES deploy env.
    */
   trustedProxies?: readonly string[];
   /**

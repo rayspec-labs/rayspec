@@ -211,6 +211,14 @@ export interface ServerConfig {
   allowedOrigins: string[];
   /** Deployer-injected extra CORS request headers — ALLOWED_REQUEST_HEADERS, comma-separated; empty default. */
   allowedRequestHeaders: string[];
+  /**
+   * Trusted-proxy CIDRs — RAYSPEC_TRUSTED_PROXIES, comma-separated; EMPTY default. The rate-limiter's
+   * client-identity resolution honors an `X-Forwarded-For` / `X-Real-IP` header ONLY when the socket
+   * peer is inside one of these (the deployment's real reverse-proxy / ingress / LB hops); otherwise
+   * the socket peer IS the identity, so a direct caller cannot spoof its throttle identity via a
+   * forwarding header. Empty ⇒ no forwarding header is ever trusted (the peer is always the identity).
+   */
+  trustedProxies: string[];
   /** The OIDC issuer (drives emitted URLs). Defaults to http://127.0.0.1:<port>/oidc. */
   issuer: string;
   port: number;
@@ -423,6 +431,16 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     .map((h) => h.trim())
     .filter((h) => h.length > 0);
 
+  // Trusted-proxy CIDRs (RAYSPEC_TRUSTED_PROXIES), comma-separated; blank entries dropped; unset/blank
+  // ⇒ [] (no forwarding header is ever trusted — the socket peer is the rate-limit / audit identity).
+  // A deployment behind a reverse proxy (nginx / ingress / LB) opts in by naming its proxy-hop CIDRs,
+  // so the real client's X-Forwarded-For becomes the per-source throttle identity instead of collapsing
+  // every request onto the single proxy peer. Mirrors ALLOWED_REQUEST_HEADERS parsing.
+  const trustedProxies = (env.RAYSPEC_TRUSTED_PROXIES ?? '')
+    .split(',')
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+
   // The DBOS SYSTEM database url (separate DB; used only for a durableWorker spec). Set
   // explicitly via DBOS_SYSTEM_DATABASE_URL, else derive from DATABASE_URL by swapping the db name to
   // `<appdb>_dbos_sys` (DBOS auto-creates it). Fail closed on a malformed DATABASE_URL we cannot parse.
@@ -452,6 +470,7 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     apiKeyPepper: apiKeyPepper as string,
     allowedOrigins,
     allowedRequestHeaders,
+    trustedProxies,
     issuer: env.OIDC_ISSUER?.trim() || `http://127.0.0.1:${port}/oidc`,
     port,
     host,
@@ -751,6 +770,9 @@ export async function assembleServer(
     allowedOrigins: config.allowedOrigins,
     // Deployer-injected extra CORS request headers (ALLOWED_REQUEST_HEADERS); [] ⇒ base set only.
     allowedRequestHeaders: config.allowedRequestHeaders,
+    // Trusted-proxy CIDRs (RAYSPEC_TRUSTED_PROXIES); [] ⇒ the socket peer is always the rate-limit
+    // identity (no forwarding header trusted). A proxied deployment opts in with its proxy-hop CIDRs.
+    trustedProxies: config.trustedProxies,
     // The body-refresh operator gate (default false ⇒ cookie-only, today's posture).
     bodyRefreshEnabled: config.bodyRefreshEnabled,
   };
