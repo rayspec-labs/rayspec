@@ -26,6 +26,7 @@ import type { OpenAPIHono } from '@hono/zod-openapi';
 import { ApiError } from '@rayspec/auth-core';
 import { z } from 'zod';
 import type { AppDeps, AppEnv } from '../app-context.js';
+import { readBoundedJson } from '../http/bounded-body.js';
 import { requireAuth, requirePermission, resolveTenant } from '../http/middleware.js';
 
 /**
@@ -62,7 +63,9 @@ export function registerReprocessRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
         );
       }
 
-      const body = ReprocessRequest.parse(await c.req.json().catch(() => ({})));
+      // Drain the (optional) body under the configured byte cap — a 413 for an over-cap body BEFORE
+      // any reprocess side effect; an absent/invalid body is the valid empty request (`{}`).
+      const body = ReprocessRequest.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
 
       // Tenant-scoped by construction: the reprocessor re-reads the session's authoritative state
       // scoped to THIS server-derived tenant. A foreign/absent session → found:false → uniform 404.

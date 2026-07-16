@@ -15,6 +15,7 @@ export const ErrorCode = z.enum([
   'NOT_FOUND', // 404 — missing OR cross-tenant (no existence leak)
   'CONFLICT', // 409 — uniqueness / state conflict
   'IDEMPOTENCY_CONFLICT', // 409 — same Idempotency-Key, different body
+  'PAYLOAD_TOO_LARGE', // 413 — request body exceeds the configured byte cap (rejected pre-side-effect)
   'RATE_LIMITED', // 429 — rate limit / anti-DoS lock
   'INTERNAL', // 500 — unexpected server error
   'UPSTREAM_ERROR', // 502 — an upstream provider 5xx surfaced on a live run
@@ -31,6 +32,7 @@ export const STATUS_BY_CODE: Record<ErrorCode, number> = {
   NOT_FOUND: 404,
   CONFLICT: 409,
   IDEMPOTENCY_CONFLICT: 409,
+  PAYLOAD_TOO_LARGE: 413,
   RATE_LIMITED: 429,
   INTERNAL: 500,
   UPSTREAM_ERROR: 502,

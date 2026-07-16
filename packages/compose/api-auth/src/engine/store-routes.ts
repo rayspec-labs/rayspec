@@ -35,6 +35,7 @@ import { and, eq, getTableColumns, isNull, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { Context } from 'hono';
 import type { AppDeps, AppEnv } from '../app-context.js';
+import { readBoundedJson } from '../http/bounded-body.js';
 import { principalActor } from './principal-actor.js';
 import { buildListQuery, nextCursor } from './store-query.js';
 import {
@@ -311,7 +312,9 @@ export function makeStoreHandler(args: {
             return c.json(serializeRow(store, row));
           }
           case 'create': {
-            const raw = await c.req.json().catch(() => ({}));
+            // Drain the body under the configured byte cap (413 pre-parse for an over-cap body),
+            // then the same best-effort parse (an absent/invalid body ⇒ `{}` → the schema 400 below).
+            const raw = await readBoundedJson(c, deps.maxJsonBodyBytes, {});
             // Accept snake_case OR camelCase per declared column (both variants → 400) before parse.
             const body = createSchema.parse(normalizeBodyCasing(store, raw)); // VALIDATION_ERROR on unknown/bad field
             const values = toDbValues(store, body as Record<string, unknown>);
@@ -359,7 +362,8 @@ export function makeStoreHandler(args: {
           }
           case 'update': {
             const id = requireUuidId(c);
-            const raw = await c.req.json().catch(() => ({}));
+            // Drain the body under the configured byte cap (413 pre-parse for an over-cap body).
+            const raw = await readBoundedJson(c, deps.maxJsonBodyBytes, {});
             // Tolerant casing (never touches created_by — not a declared column, stays reserved).
             const body = updateSchema.parse(normalizeBodyCasing(store, raw));
             const values = toDbValues(store, body as Record<string, unknown>);

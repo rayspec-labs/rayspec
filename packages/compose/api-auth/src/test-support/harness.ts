@@ -324,6 +324,12 @@ export async function createHarness(
      * `X-Forwarded-For` becomes the throttle identity.
      */
     trustedProxies?: readonly string[];
+    /**
+     * override the per-request JSON/body byte cap (`deps.maxJsonBodyBytes`). Default UNSET ⇒ the
+     * 1 MiB `DEFAULT_MAX_JSON_BODY_BYTES`. A body-cap test passes a tiny value to exercise the 413
+     * without a multi-megabyte fixture.
+     */
+    maxJsonBodyBytes?: number;
   } = {},
 ): Promise<Harness> {
   const url = process.env.DATABASE_URL;
@@ -438,6 +444,7 @@ export async function createHarness(
     engine,
     ...(opts.sessionReprocessor ? { sessionReprocessor: opts.sessionReprocessor } : {}),
     ...(opts.trustedProxies !== undefined ? { trustedProxies: opts.trustedProxies } : {}),
+    ...(opts.maxJsonBodyBytes !== undefined ? { maxJsonBodyBytes: opts.maxJsonBodyBytes } : {}),
   };
 
   const app = createAuthApp(deps);

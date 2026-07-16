@@ -33,6 +33,7 @@ import type { PgTable } from 'drizzle-orm/pg-core';
 import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { AppDeps, AppEnv } from '../app-context.js';
+import { readBoundedJson } from '../http/bounded-body.js';
 import type { MediaTokenService } from '../media/media-token.js';
 import { makeEnqueueAgentRunCapability } from '../routes/runs.js';
 import { principalActor } from './principal-actor.js';
@@ -217,11 +218,12 @@ export function makeRouteHandler(args: {
     // a pack handler can never enqueue cross-tenant. `undefined` when no durable worker is wired ⇒
     // init.enqueue is omitted (a handler that needs it fail-closes loudly — like blob/mintPlayToken).
     const enqueue = makeEnqueueAgentRunCapability(deps, tenantId);
-    // read the request body for a body-bearing method (DATA the handler may use). Parsed
-    // best-effort like the store-route CRUD path (`c.req.json().catch`) — an absent/invalid body yields
-    // `undefined` ⇒ init.body is omitted (a GET handler is unchanged). Never throws on a bad body here.
+    // read the request body for a body-bearing method (DATA the handler may use). Drained under the
+    // configured byte cap (a body over the cap is a 413 BEFORE any handler side effect), then parsed
+    // best-effort like the store-route CRUD path — an absent/invalid body yields `undefined` ⇒
+    // init.body is omitted (a GET handler is unchanged). Never throws on a bad (but in-cap) body here.
     const requestBody = BODY_METHODS.has(c.req.method.toUpperCase())
-      ? await c.req.json().catch(() => undefined)
+      ? await readBoundedJson(c, deps.maxJsonBodyBytes, undefined)
       : undefined;
     // invokeRouteHandler opens the TenantDb.transaction (GUC) + builds the HandlerInit + routes
     // through the single HandlerRuntime indirection. The result is the JSON response body — OR the

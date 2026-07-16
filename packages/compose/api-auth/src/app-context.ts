@@ -294,6 +294,14 @@ export interface AppDeps {
    */
   sessionReprocessor?: SessionReprocessor;
   /**
+   * OPTIONAL override for the per-request JSON/body byte cap the route interpreters enforce on
+   * body-bearing routes (register/login, the declared `{handler}` + store CRUD routes, reprocess). A
+   * body over the cap is rejected with a 413 BEFORE it is buffered/parsed, so an authenticated caller
+   * cannot stream an unbounded body into memory. Absent ⇒ `DEFAULT_MAX_JSON_BODY_BYTES` (1 MiB), which
+   * is generous for a JSON API body; a deploy may tune it (a test sets it tiny to exercise the 413).
+   */
+  maxJsonBodyBytes?: number;
+  /**
    * OPTIONAL server-side error logger (DI seam). `createAuthApp`'s OUTERMOST middleware emits exactly
    * ONE line for EVERY 5xx response through this — both a THROWN error (mapped by `onError`) AND a
    * directly-RETURNED 5xx (e.g. the sync-run 502/504), carrying requestId + status + (for a thrown

@@ -12,12 +12,13 @@ import {
   httpResponse,
   type RouteHandler,
   type RouteHandlerInit,
+  readBoundedBody,
   type StreamRouteHandler,
   type StreamRouteHandlerInit,
 } from '@rayspec/handler-sdk';
 import type { ResolvedAudioConfig } from '../config.js';
 import type { AudioCapabilityError, AudioCapabilityResult } from '../errors.js';
-import { AudioCapabilityWiringError } from '../errors.js';
+import { AudioCapabilityWiringError, err } from '../errors.js';
 import { SessionEventRejectedError, type SessionFinalizedSink } from '../events.js';
 import { mintPlaybackToken, streamMedia } from '../playback.js';
 import type { AudioBlobContext, AudioCoreContext } from '../ports.js';
@@ -74,9 +75,27 @@ function toHandlerReturn<T>(result: AudioCapabilityResult<T>): T | HttpResponse<
 export function makeChunkIngestHandler(config: AudioHandlersConfig): StreamRouteHandler {
   return async (init: StreamRouteHandlerInit): Promise<Response> => {
     const ctx = blobContext(init, config.resolved);
-    const bytes = new Uint8Array(await init.request.arrayBuffer());
+    // BOUNDED body read: drain the raw request under the per-chunk cap instead of the donor's
+    // unbounded `request.arrayBuffer()` — an over-cap chunk is a 413 BEFORE the bytes are buffered
+    // into memory or stored (the shared file-runtime byte-bound pattern, generalized).
+    const drained = await readBoundedBody(
+      {
+        contentLength: init.request.headers.get('content-length'),
+        body: init.request.body,
+      },
+      { maxBytes: config.resolved.maxChunkBytes },
+    );
+    if (!drained.ok) {
+      return toRawResponse(
+        err(
+          413,
+          'chunk_too_large',
+          `the chunk body exceeds the ${config.resolved.maxChunkBytes}-byte per-chunk cap.`,
+        ),
+      );
+    }
     const contentType = init.request.headers.get('content-type') ?? undefined;
-    const result = await ingestChunk(ctx, init.params, bytes, contentType);
+    const result = await ingestChunk(ctx, init.params, drained.bytes, contentType);
     return toRawResponse(result);
   };
 }

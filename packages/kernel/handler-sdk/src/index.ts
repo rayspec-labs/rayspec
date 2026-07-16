@@ -31,7 +31,19 @@
 // platform internal, or runtime state — so re-exporting them keeps handler-sdk a thin, serializable-
 // seam SDK. A pack handler is confined to @rayspec/handler-sdk by the `gate:handler-imports` tripwire,
 // so this conduit is how it CONSUMES the harvested tokenizer instead of keeping its own copy.
-export { tokenRunSubset, uax29Tokens } from '@rayspec/core';
+// The shared bounded body reader — re-exported from @rayspec/core on the same conduit as the
+// tokenizer (a stateless, dependency-free byte primitive; not a capability or platform internal). A
+// capability binding (e.g. audio ingest) uses it to cap the bytes it buffers from the raw request
+// instead of an unbounded `request.arrayBuffer()`.
+export {
+  type BoundedBodyOptions,
+  type BoundedBodyOutcome,
+  type BoundedBodySource,
+  drainBounded,
+  readBoundedBody,
+  tokenRunSubset,
+  uax29Tokens,
+} from '@rayspec/core';
 
 // The neutral, tenant-bound BlobStore capability contract — the OTHER injected handle a
 // handler may receive (opaque-key binary storage; interface only, impl injected at the composition

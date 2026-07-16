@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_TTL_POLICY, parseProtocolVersion, resolveConfig } from './config.js';
+import {
+  DEFAULT_MAX_CHUNK_BYTES,
+  DEFAULT_MAX_TRACK_BYTES,
+  DEFAULT_TTL_POLICY,
+  parseProtocolVersion,
+  resolveConfig,
+} from './config.js';
 
 describe('resolveConfig — track policy', () => {
   it('the default track policy admits safe lowercase ids (mic/system) and rejects unsafe ones', () => {
@@ -41,6 +47,20 @@ describe('resolveConfig — session pattern + TTL defaults', () => {
       slackSeconds: 60,
       ceilingSeconds: 86400,
     });
+  });
+});
+
+describe('resolveConfig — byte caps (per-chunk + per-track)', () => {
+  it('applies the frozen default byte caps when the product configures none', () => {
+    const c = resolveConfig();
+    expect(c.maxChunkBytes).toBe(DEFAULT_MAX_CHUNK_BYTES);
+    expect(c.maxTrackBytes).toBe(DEFAULT_MAX_TRACK_BYTES);
+  });
+
+  it('honors explicit product overrides for both caps', () => {
+    const c = resolveConfig({ maxChunkBytes: 1024, maxTrackBytes: 4096 });
+    expect(c.maxChunkBytes).toBe(1024);
+    expect(c.maxTrackBytes).toBe(4096);
   });
 });
 
