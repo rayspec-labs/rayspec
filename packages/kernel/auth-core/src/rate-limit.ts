@@ -122,6 +122,10 @@ export const DEFAULT_POLICIES: Record<string, RateLimitPolicy> = {
   register: { max: 5, windowMs: 60_000 },
   refresh: { max: 30, windowMs: 60_000 },
   'oauth-token': { max: 30, windowMs: 60_000 },
+  // Session reprocess mints a FRESH durable run each call (dedup is deliberately bypassed), so an
+  // unthrottled caller can re-drive the same session's workflow without bound — a cost-DoS. Cap the
+  // reprocesses of one (tenant, session) per window; the route keys the bucket by `${tenant}:${session}`.
+  reprocess: { max: 5, windowMs: 60_000 },
 };
 
 /** Duration of the refresh-reuse anti-DoS lock (a stale token cannot be a repeatable DoS). */

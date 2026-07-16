@@ -123,6 +123,61 @@ describe('POST /v1/sessions/:id/reprocess (the reprocess affordance)', () => {
     expect(res.status).toBe(401);
     expect(reprocessor.calls).toHaveLength(0);
   });
+
+  it('rate-limits repeated reprocess of the SAME session (429 after the quota, before the reprocessor)', async () => {
+    const a = await principal('reproc-quota@example.test', 'Org Quota');
+    reprocessor.ownerTenantId = a.orgId;
+    h.deps.rateLimiter.clearAll(); // deterministic: start the reprocess bucket empty
+    // The default reprocess quota is 5 per (tenant, session) per window.
+    for (let i = 0; i < 5; i++) {
+      const ok = await jsonRequest(h.app, 'POST', '/v1/sessions/sess-1/reprocess', {
+        headers: { authorization: `Bearer ${a.token}` },
+      });
+      expect(ok.status).toBe(202);
+    }
+    const blocked = await jsonRequest(h.app, 'POST', '/v1/sessions/sess-1/reprocess', {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(blocked.status).toBe(429);
+    expect((await blocked.json()).error.code).toBe('RATE_LIMITED');
+    // The 6th call was rejected BEFORE the reprocessor ran — only the 5 in-quota calls reached it.
+    expect(reprocessor.calls).toHaveLength(5);
+  });
+
+  it('writes an immutable session_reprocessed audit event (actor, tenant, session, reason, run ids)', async () => {
+    const a = await principal('reproc-audit@example.test', 'Org Audit');
+    reprocessor.ownerTenantId = a.orgId;
+    h.deps.rateLimiter.clearAll();
+    const res = await jsonRequest(h.app, 'POST', '/v1/sessions/sess-1/reprocess', {
+      headers: { authorization: `Bearer ${a.token}` },
+      body: { reason: 're-run after fix' },
+    });
+    expect(res.status).toBe(202);
+
+    const rows = await h.deps.auditStore.readForTenant(a.orgId);
+    const reprocRows = rows.filter((r) => r.event === 'session_reprocessed');
+    expect(reprocRows).toHaveLength(1);
+    const row = reprocRows[0];
+    expect(row?.actorOrgId).toBe(a.orgId); // the server-derived tenant scope
+    expect(row?.actorUserId).toBeTruthy(); // the acting user principal
+    const meta = row?.meta as Record<string, unknown>;
+    expect(meta.sessionId).toBe('sess-1');
+    expect(meta.reason).toBe('re-run after fix');
+    expect(meta.runIds).toEqual(['fresh-run-1']); // the resulting FRESH run id(s)
+  });
+
+  it('writes NO reprocess audit event for a 404 (foreign/absent session — nothing was enqueued)', async () => {
+    const a = await principal('reproc-noaudit-a@example.test', 'Org NoAudit A');
+    const b = await principal('reproc-noaudit-b@example.test', 'Org NoAudit B');
+    reprocessor.ownerTenantId = a.orgId; // sess-1 belongs to A only
+    h.deps.rateLimiter.clearAll();
+    const res = await jsonRequest(h.app, 'POST', '/v1/sessions/sess-1/reprocess', {
+      headers: { authorization: `Bearer ${b.token}` },
+    });
+    expect(res.status).toBe(404);
+    const bRows = await h.deps.auditStore.readForTenant(b.orgId);
+    expect(bRows.filter((r) => r.event === 'session_reprocessed')).toHaveLength(0);
+  });
 });
 
 describe('POST /v1/sessions/:id/reprocess with a reprocessor that found the session but enqueued NOTHING', () => {

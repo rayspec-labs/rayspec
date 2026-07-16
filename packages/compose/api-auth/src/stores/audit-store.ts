@@ -81,6 +81,42 @@ export class AuditStore {
   }
 
   /**
+   * append ONE out-of-band session-reprocess record (its own committed insert). A reprocess re-drives
+   * a session's finalized workflow as a FRESH durable run (a cost-sensitive operational action), so it
+   * leaves an immutable trail: the acting principal, the tenant scope, the session, the operator's
+   * advisory reason, and the resulting run ids. Like {@link append} it is BEST-EFFORT and swallows a
+   * write failure — the runs are ALREADY enqueued when this is called, so a failed audit must not turn
+   * a successful reprocess into a 500 that a client would retry into MORE runs (the same availability
+   * posture; the row is best-effort-durable via its own commit).
+   *
+   * The event name is a fixed literal — NOT an `AuthEventName` (a reprocess is a platform operational
+   * action, not an auth-surface event), mirroring {@link appendErasure}'s `tenant_data_erased`.
+   * `actorOrgId` is the SERVER-DERIVED tenant (the scope key `readForTenant` surfaces it under);
+   * `meta` carries the session id, the resulting run ids, the advisory reason, and the actor tag —
+   * ids/flags only, no secret.
+   */
+  async appendReprocess(record: {
+    tenantId: string;
+    actorUserId?: string | null;
+    requestId: string;
+    meta: Record<string, unknown>;
+  }): Promise<void> {
+    try {
+      await this.db.insert(schema.authAudit).values({
+        actorOrgId: record.tenantId,
+        actorUserId: record.actorUserId ?? null,
+        event: 'session_reprocessed',
+        requestId: record.requestId,
+        targetHash: null,
+        ipHash: null,
+        meta: record.meta,
+      });
+    } catch {
+      // Best-effort: the runs are already enqueued; a failed audit must not fail the request.
+    }
+  }
+
+  /**
    * Read audit rows for ONE tenant (read-gated). The actor_org_id IS the tenant scope here —
    * a tenant can only read rows where it is the authoritative actor org. NEVER returns another
    * tenant's rows.
