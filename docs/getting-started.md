@@ -21,9 +21,18 @@ real authenticated request. You will:
 ## Prerequisites
 
 - **Node** `>=22`
-- **pnpm** `10.12.4`
+- **pnpm** `10.12.4`. The simplest way to get exactly this version is Corepack (bundled
+  with Node): `corepack prepare pnpm@10.12.4 --activate`. If your environment has no
+  Corepack, prefix the commands below with a one-off pin instead, e.g.
+  `npx -y pnpm@10.12.4 install`.
 - **Postgres** you can reach. The repo ships a local one via Docker Compose
   (`pnpm db:up`, listening on port `5433`); or point at your own.
+
+> **Don't work from a cloud-synced folder.** Clone and build outside iCloud Drive,
+> Dropbox, OneDrive, or any folder a sync client watches. Those clients churn
+> `node_modules` while a build writes to it, which can lock or corrupt files
+> mid-install and produce mysterious, non-reproducible failures. A plain local
+> directory (e.g. `~/code/rayspec`) avoids it.
 
 ---
 
@@ -35,6 +44,12 @@ pnpm install
 pnpm build          # builds all packages, including the two CLI bins
 pnpm db:up          # starts the local Postgres on port 5433
 ```
+
+> **Cold-store install warnings are benign.** The first `pnpm install` on a machine
+> with a cold pnpm store may print one or more `WARN … Failed to create bin at …`
+> lines as it populates the content-addressable store. They are non-fatal — as long as
+> `pnpm install` exits `0` the workspace is fully installed, and a second `pnpm install`
+> runs clean. You can ignore them.
 
 > **Already ran this before?** `pnpm db:up` will report `the container name
 > "/rayspec-pg" is already in use` — you have the container from an earlier run.
@@ -184,6 +199,10 @@ surface, with no product routes yet.
 ```bash
 $RAYSPEC_SERVE
 # → boot banner; listening on http://localhost:8080
+
+# The server binds 8080 by default; set PORT to use another (the same PORT
+# documented in .env.example). Every curl below then targets that port.
+PORT=8099 $RAYSPEC_SERVE
 ```
 
 The boot prints a loud banner noting this is a local, single-node,
