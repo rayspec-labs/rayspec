@@ -316,7 +316,7 @@ function mockQueryWithBuiltinAndMcpCall(builtinId: string, mcpId: string) {
   };
 }
 
-describe('Anthropic adapter: A1 built-in-tool restriction + quarantine (§10.A headline fix)', () => {
+describe('Anthropic adapter: built-in-tool restriction + quarantine (the untrusted-content boundary)', () => {
   it('passes tools:[] (built-ins disabled) + a canUseTool deny hook allowing only mcp__rayspec__*', async () => {
     const calls: unknown[] = [];
     const tool = recordingTool(calls);
@@ -400,7 +400,7 @@ describe('Anthropic adapter: A1 built-in-tool restriction + quarantine (§10.A h
   });
 });
 
-describe('Anthropic adapter: in-proc MCP tool bridge routes through ctx.dispatchTool (§10.A)', () => {
+describe('Anthropic adapter: in-proc MCP tool bridge routes through ctx.dispatchTool', () => {
   it('invokes the handler ONLY via the dispatcher, opaque-wraps, journals ONE tool step, correlates parts', async () => {
     const calls: unknown[] = [];
     const tool = recordingTool(calls);
@@ -472,7 +472,7 @@ describe('Anthropic adapter: in-proc MCP tool bridge routes through ctx.dispatch
   });
 });
 
-describe('Anthropic adapter: C1 — a legit tool whose sole property is named `args` is NOT unwrapped', () => {
+describe('Anthropic adapter: a legit tool whose sole property is named `args` is NOT unwrapped', () => {
   it('passes { args: ... } straight to the dispatcher (no single-args unwrap for a real projected shape)', async () => {
     // A tool whose object schema's ONLY property is literally named `args` (a real field, not the
     // fallback blob). The projection produces a REAL shape (type:object with properties), so the
@@ -591,7 +591,7 @@ describe('Anthropic adapter: C1 — a legit tool whose sole property is named `a
   });
 });
 
-describe('Anthropic adapter: C4 non-success result branch (subtype !== success)', () => {
+describe('Anthropic adapter: non-success result branch (subtype !== success)', () => {
   it('a result with subtype=error_max_turns yields status=error + error message + output:null', async () => {
     const journal = new FakeJournal();
     querySpy.mockImplementation(() => ({

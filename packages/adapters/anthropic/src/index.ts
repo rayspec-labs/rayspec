@@ -43,14 +43,14 @@
  *   - Options.allowedTools?: string[]                                          (sdk.d.ts:1287)
  *       MCP tools are exposed to the model as `mcp__<serverName>__<toolName>`; we allowlist them.
  *       allowedTools is NOT a restrictor — sdk.d.ts:1282-1283: "To restrict which tools are
- *       available, use the `tools` option instead." (A1.)
+ *       available, use the `tools` option instead."
  *   - Options.tools?: string[] | {type:'preset';preset:'claude_code'}          (sdk.d.ts:1343-1346)
  *       THE built-in-tool restrictor: `[]` DISABLES ALL built-in tools (Bash/Read/Write/Edit/Grep/
  *       Glob/WebFetch/ToolSearch/…); a preset/omitted enables the full Claude Code preset. We pass
  *       `tools: []` so NO built-in tool can ever execute. VERIFIED LIVE (sdk 0.3.185,
  *       claude-haiku-4-5): with `tools:[]` the in-proc MCP tool mcp__rayspec__get_weather STILL
  *       fires through the bridge (MCP comes from mcpServers+allowedTools — orthogonal to the built-in
- *       preset) and ZERO built-in tool_use blocks appear. (A1 — the headline untrusted-content boundary fix.)
+ *       preset) and ZERO built-in tool_use blocks appear. (the headline untrusted-content boundary fix.)
  *   - Options.canUseTool?: CanUseTool                                          (sdk.d.ts:188,1292)
  *       Per-tool-call permission hook (toolName,input)=>{behavior:'allow'|'deny'}. DEFENSE-IN-DEPTH:
  *       we install a hook that ALLOWS only `mcp__<MCP_SERVER_NAME>__*` and DENIES everything else, so
@@ -68,7 +68,7 @@
  *   that CAN run is dispatched through ctx.dispatchTool and therefore opaque-wrapped + journaled
  *   exactly as OpenAI/Pi. As belt-and-suspenders the conversation re-derivation also QUARANTINES any
  *   tool_use/tool_result block whose name is not one of this run's MCP tools, so a stray built-in's
- *   raw output can never land in the neutral transcript even if one somehow fired (A1).
+ *   raw output can never land in the neutral transcript even if one somehow fired.
  *
  * No SDK type escapes this file — everything returned is a neutral RunResult.
  */
@@ -114,7 +114,7 @@ const MCP_SERVER_NAME = 'rayspec';
  */
 export const ANTHROPIC_SDK_VERSION = '0.3.185';
 
-/** Provenance tag recorded on every journal step (A6): SDK + adapter version. */
+/** Provenance tag recorded on every journal step: SDK + adapter version. */
 export const ANTHROPIC_PRODUCED_BY = `@anthropic-ai/claude-agent-sdk@${ANTHROPIC_SDK_VERSION}+adapter-anthropic`;
 
 export interface AnthropicAdapterOptions {
@@ -297,7 +297,7 @@ export class AnthropicAdapter implements Backend {
     const preCheck = this.envAuthCheck();
     let authMode: AuthMode = ctx.authMode ?? preCheck.authMode;
 
-    // C2: run-core is the SINGLE per-run seq authority. Emit SEQ-LESS through ctx.onEvent;
+    // Run-core is the SINGLE per-run seq authority. Emit SEQ-LESS through ctx.onEvent;
     // run-core's wrapped sink stamps the one monotonic seq across the adapter's events AND
     // dispatchTool's tool events. No adapter-local makeEventIngest (deleted).
     const emit = (e: NeutralEventInput) => ctx.onEvent?.(e as NeutralEvent);
@@ -328,7 +328,7 @@ export class AnthropicAdapter implements Backend {
     // the gate (gate:adapter-handlers) verifies every tool path routes through dispatchTool.
     const { mcpServers, allowedTools, toolEvents } = this.buildToolBridge(spec, ctx, emit);
 
-    // A1: the SET of tool names that ARE sanctioned (the in-proc MCP tools, both the bare neutral
+    // The SET of tool names that ARE sanctioned (the in-proc MCP tools, both the bare neutral
     // name e.g. `get_weather` and the model-facing `mcp__rayspec__get_weather`). Used by (a) the
     // canUseTool deny hook to allow ONLY these and (b) the re-derivation quarantine to exclude any
     // block whose name is not one of them — so a stray built-in's raw output never enters the SoT.
@@ -395,13 +395,13 @@ export class AnthropicAdapter implements Backend {
           // The in-proc MCP tool bridge + its allowlist (mcp__rayspec__<tool>).
           ...(mcpServers ? { mcpServers } : {}),
           ...(allowedTools.length > 0 ? { allowedTools } : {}),
-          // A1 (the headline untrusted-content boundary fix): DISABLE ALL built-in tools (Bash/Read/Write/Edit/Grep/Glob/
+          // The untrusted-content boundary: DISABLE ALL built-in tools (Bash/Read/Write/Edit/Grep/Glob/
           // WebFetch/ToolSearch/…). `tools: []` is the documented restrictor (sdk.d.ts:1343-1346);
           // allowedTools is NOT a restrictor. The in-proc MCP tools come from mcpServers+allowedTools
           // and stay callable (verified live) — so the ONLY callable tools are the dispatchTool-backed
           // MCP ones. NO built-in tool can run outside the untrusted-content boundary chokepoint.
           tools: [],
-          // A1 defense-in-depth: a per-call permission hook that ALLOWS only the sanctioned MCP tools
+          // Defense-in-depth: a per-call permission hook that ALLOWS only the sanctioned MCP tools
           // and DENIES everything else. Even if a built-in were ever reachable it cannot execute.
           canUseTool: makeMcpOnlyPermission(sanctionedToolNames),
           // Fully isolated per-tenant run.
@@ -558,7 +558,7 @@ export class AnthropicAdapter implements Backend {
         // costUsd is RE-COMPUTED authoritatively in run-core from the registry; the SDK's
         // total_cost_usd is surfaced as the PROVIDER cost on the FINAL step for reconciliation.
         costUsd: isFinal ? cost : 0,
-        // PROVIDER cost (A3): Anthropic SDKResultSuccess.total_cost_usd (sdk.d.ts:3875) on
+        // PROVIDER cost: Anthropic SDKResultSuccess.total_cost_usd (sdk.d.ts:3875) on
         // the FINAL llm step only (it is the whole-run reported cost). Earlier turns report none.
         // N1: mirror Pi's guard — surface providerCostUsd ONLY when total_cost_usd was
         // actually present (!== undefined); never default to 0 (a fabricated $0 would trip a FALSE
@@ -634,7 +634,7 @@ export class AnthropicAdapter implements Backend {
       // still runs inside ctx.dispatchTool against the neutral JSON-Schema; this shape only shapes the
       // model-facing call.
       //
-      // C1: track PER TOOL whether the projection FELL BACK to the single `{ args: z.unknown() }`
+      // Track PER TOOL whether the projection FELL BACK to the single `{ args: z.unknown() }`
       // shape (a non-object/unschemaable spec). The single-`args` UNWRAP must ONLY apply for that
       // fallback — otherwise a legit tool whose sole real property is literally named `args` would be
       // corrupted (its `{ args: ... }` object wrongly unwrapped). For a real projected shape we pass
@@ -652,7 +652,7 @@ export class AnthropicAdapter implements Backend {
           const toolCallId = extractMcpToolCallId(extra);
           // The model's actual arguments arrive as the shaped object; pass them straight to the
           // dispatcher (which re-validates against the neutral JSON-Schema inputSchema). Only unwrap a
-          // single-`args` blob when THIS tool's projection used the args-fallback shape (C1).
+          // single-`args` blob when THIS tool's projection used the args-fallback shape.
           const argsForDispatch = usedArgsFallback ? unwrapMcpArgs(rawArgs) : rawArgs;
           if (!ctx.dispatchTool) {
             // No dispatcher means no tools were wired — fail closed (never run anything inline).
@@ -1022,7 +1022,7 @@ export function jsonSchemaToZodType(node: unknown): z.ZodTypeAny {
  */
 export function jsonSchemaToZodShape(parameters: Record<string, unknown>): {
   shape: Record<string, z.ZodTypeAny>;
-  /** True iff the projection fell back to the single `{ args: z.unknown() }` shape (C1). */
+  /** True iff the projection fell back to the single `{ args: z.unknown() }` shape. */
   usedArgsFallback: boolean;
 } {
   const props = parameters?.properties;
@@ -1048,7 +1048,7 @@ type McpPermissionResult =
   | { behavior: 'deny'; message: string };
 
 /**
- * Build the A1 defense-in-depth permission hook (canUseTool). It ALLOWS a tool call ONLY when the
+ * Build the defense-in-depth permission hook (canUseTool). It ALLOWS a tool call ONLY when the
  * tool name is one of this run's sanctioned in-proc MCP tools (`mcp__<server>__*` or its bare neutral
  * name); every other tool — including any built-in (Bash/Read/Write/Edit/ToolSearch/…) — is DENIED.
  * Combined with `tools: []` this guarantees the ONLY callable tools are the dispatchTool-backed MCP
@@ -1063,7 +1063,7 @@ function makeMcpOnlyPermission(
     }
     return {
       behavior: 'deny',
-      message: `tool '${toolName}' is not a sanctioned MCP tool (built-in tools are disabled — §10.A)`,
+      message: `tool '${toolName}' is not a sanctioned MCP tool (built-in tools are disabled)`,
     };
   };
 }
@@ -1161,7 +1161,7 @@ function countToolParts(conversation: ConvTurn[]): number {
  *  - user text block             -> user turn, text part
  * tool_call/tool_result correlate by the SDK's real tool_use id, so a call pairs with its result.
  *
- * A1 QUARANTINE (defense-in-depth): if `sanctioned` is provided, any tool_use/tool_result block whose
+ * QUARANTINE (defense-in-depth): if `sanctioned` is provided, any tool_use/tool_result block whose
  * tool name is NOT a sanctioned in-proc MCP tool is EXCLUDED from the neutral transcript (and its id
  * is tracked so the matching tool_result is dropped too). So even if a built-in ever fired, its raw,
  * un-opaque-wrapped, un-journaled output can never land in the RaySpec-owned transcript.
@@ -1204,7 +1204,7 @@ export function deriveConversationFromObserved(
       if (block.type === 'tool_use' && block.id && block.name) {
         const name = String(block.name);
         if (!isSanctionedTool(name, sanctioned)) {
-          // A1 quarantine: a non-MCP (built-in) tool_use — exclude it AND its eventual result.
+          // Quarantine: a non-MCP (built-in) tool_use — exclude it AND its eventual result.
           quarantinedIds.add(String(block.id));
           continue;
         }
@@ -1220,7 +1220,7 @@ export function deriveConversationFromObserved(
       }
       if (block.type === 'tool_result' && block.tool_use_id) {
         const id = String(block.tool_use_id);
-        // A1 quarantine: drop a result whose call was quarantined OR whose correlated tool is non-MCP.
+        // Quarantine: drop a result whose call was quarantined OR whose correlated tool is non-MCP.
         if (quarantinedIds.has(id) || !isSanctionedResult(turns, id, sanctioned)) continue;
         push('tool', [
           {
@@ -1242,7 +1242,7 @@ export function deriveConversationFromObserved(
 }
 
 /**
- * A1 quarantine predicate: is `name` a sanctioned in-proc MCP tool? When `sanctioned` is undefined
+ * Quarantine predicate: is `name` a sanctioned in-proc MCP tool? When `sanctioned` is undefined
  * (e.g. a fixtured re-derivation with no allowlist) quarantine is OFF (legacy behavior) — but the
  * run() path ALWAYS passes the set, so production re-derivation always quarantines.
  */
@@ -1252,7 +1252,7 @@ function isSanctionedTool(name: string, sanctioned?: Set<string>): boolean {
 }
 
 /**
- * A1 quarantine predicate for a tool_result: a result is sanctioned iff its correlated tool_call (by
+ * Quarantine predicate for a tool_result: a result is sanctioned iff its correlated tool_call (by
  * id) was a sanctioned tool. If no matching call is found (e.g. the call block was already
  * quarantined/absent), it is NOT sanctioned — drop it.
  */
@@ -1322,7 +1322,7 @@ function normalizeToolResultContent(content: unknown): unknown {
  * Exported so the round-trip acceptance can exercise the REAL code path. Returns NON-system turns
  * (the caller prepends the trusted system turn) — a stored 'system' line is dropped.
  *
- * A1 QUARANTINE: when `sanctioned` is provided, any tool_use/tool_result block whose tool name is not
+ * QUARANTINE: when `sanctioned` is provided, any tool_use/tool_result block whose tool name is not
  * a sanctioned in-proc MCP tool is EXCLUDED — a stray built-in's raw output never enters the SoT.
  */
 export function reDeriveJsonl(
@@ -1361,7 +1361,7 @@ export function reDeriveJsonl(
         } else if (block.type === 'tool_use' && block.id && block.name) {
           const name = String(block.name);
           if (!isSanctionedTool(name, sanctioned)) {
-            quarantinedIds.add(String(block.id)); // A1 quarantine: drop built-in tool_use + its result
+            quarantinedIds.add(String(block.id)); // Quarantine: drop built-in tool_use + its result
             continue;
           }
           parts.push({
@@ -1372,7 +1372,7 @@ export function reDeriveJsonl(
           });
         } else if (block.type === 'tool_result' && block.tool_use_id) {
           const id = String(block.tool_use_id);
-          // A1 quarantine: drop a result whose call was quarantined OR whose tool is non-MCP.
+          // Quarantine: drop a result whose call was quarantined OR whose tool is non-MCP.
           if (quarantinedIds.has(id) || !isSanctionedResult(turns, id, sanctioned)) continue;
           parts.push({
             kind: 'tool_result',
@@ -1472,7 +1472,7 @@ function prependTrustedSystem(spec: AgentSpec, rest: ConvTurn[]): ConvTurn[] {
 
 /**
  * Strip a leading coerced-system turn (a 'user' turn whose single text part is the instructions) so
- * the trusted system turn can be re-prepended on replay — mirrors the OpenAI adapter's C3 handling
+ * the trusted system turn can be re-prepended on replay — mirrors the OpenAI adapter's handling
  * (rehydrate.ts coerces a stored 'system' row to 'user').
  */
 function stripLeadingSystem(rehydrated: ConvTurn[]): ConvTurn[] {

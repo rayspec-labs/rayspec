@@ -246,7 +246,7 @@ describe('auth_mode reconciliation (P1 Slice-4 mislabel fix) — fixtured, no li
   });
 });
 
-describe('A1 quarantine: deriveConversationFromObserved excludes non-MCP (built-in) tool blocks', () => {
+describe('Quarantine: deriveConversationFromObserved excludes non-MCP (built-in) tool blocks', () => {
   const spec = {
     name: 'weather-agent',
     instructions: 'You are concise.',
@@ -382,7 +382,7 @@ describe('A.1 JSONL session re-derivation round-trip', () => {
  * instead of falling through to a late dispatchTool rejection (the MaxTurns churn). The over-rejection
  * guard: it must NOT reject args the neutral schema would accept (a SUBSET, never stricter).
  */
-describe('P5-STRICT-1 deep tool-arg Zod projection validate-and-repair (mirrors the SDK MCP validate)', () => {
+describe('Deep tool-arg Zod projection validate-and-repair (mirrors the SDK MCP validate)', () => {
   // A realistic structured tool arg: an array of objects with a nested required field + an
   // enum — the exact shape the OLD shallow projection (array→array(unknown)) could not validate.
   const params = {
