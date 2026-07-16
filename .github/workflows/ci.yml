@@ -242,7 +242,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:17e67d7b9890c99b055ba1e0d5c5be4ec27c9d3a72bda32db24a5e5d8a85af0c
         env:
           POSTGRES_USER: rayspec
           POSTGRES_PASSWORD: rayspec
@@ -354,7 +354,7 @@ jobs:
     environment: live
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:17e67d7b9890c99b055ba1e0d5c5be4ec27c9d3a72bda32db24a5e5d8a85af0c
         env:
           POSTGRES_USER: rayspec
           POSTGRES_PASSWORD: rayspec
@@ -394,13 +394,15 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       # Fail-fast credential preflight, before the minutes of install/build/live calls. It proves the
-      # required live credentials are PRESENT — not that any test ran. For the LLM backends, that a
-      # credential actually drives a live call is separately enforced by the parity live smoke's
-      # required-backend guard. For the speech-to-text live test — whose ONLY skip trigger is an absent
-      # DEEPGRAM_API_KEY — presence is the sole thing standing between a green lane and an unexercised
-      # STT adapter, so this step is that suite's backstop. It does NOT protect against an
-      # environment-forwarding regression downstream. It reports only WHICH variables are missing,
-      # never any value, length, or prefix.
+      # required live credentials are PRESENT and — for the two providers with a clean, cheap,
+      # auth-gated, ZERO-SPEND endpoint (OpenAI, Deepgram) — that the credential actually authenticates.
+      # For the LLM backends, that a credential drives a live call is separately enforced by the parity
+      # live smoke's required-backend guard. For the speech-to-text live test — whose ONLY skip trigger
+      # is an absent DEEPGRAM_API_KEY — presence + the validity ping below is what stands between a green
+      # lane and an unexercised STT adapter, so this step is that suite's backstop. It does NOT protect
+      # against an environment-forwarding regression downstream. It reports only WHICH variables are
+      # missing and, on a validity failure, ONLY the provider name and the HTTP status — never any value,
+      # length, prefix, or response body.
       - name: Live credential preflight
         env:
           RUN_CODEX: ${{ inputs.run_codex }}
@@ -417,7 +419,36 @@ jobs:
             echo "Live credential preflight FAILED — missing/empty: ${missing[*]}" >&2
             exit 1
           fi
-          echo "Live credential preflight OK — required credentials present."
+
+          # ── Credential VALIDITY (OpenAI + Deepgram) ─────────────────────────────────────────────
+          # Presence is necessary but not sufficient: a present-but-revoked key green-passes the checks
+          # above yet fails every live call minutes later. For the two providers with a clean, cheap,
+          # auth-gated, ZERO-SPEND endpoint we additionally prove the key authenticates. Both are
+          # metadata reads (no model invoked, no transcription) so they cost nothing:
+          #   • OpenAI   GET /v1/models   — auth-gated, Bearer, $0 (also covers `pi`, on OPENAI_API_KEY)
+          #   • Deepgram GET /v1/projects — Management API, `Authorization: Token <key>`, $0
+          # anthropic + codex stay PRESENCE-ONLY on purpose: their credentials are OAuth-subscription
+          # tokens whose validity is already enforced downstream by the parity live smoke's
+          # required-backend guard (which forces each named backend to drive a real call), and a raw
+          # OAuth-subscription validity ping is version-fragile and would risk false-failing the single
+          # manually-dispatched live run — so presence + that downstream guard is the deliberate check
+          # for these two. `|| true` guards the assignment so a transport failure surfaces as HTTP 000
+          # through the same provider-named, key-free message rather than a bare non-zero exit.
+          fail_validity() {
+            echo "Live credential validity FAILED — ${1} returned HTTP ${2}." >&2
+            exit 1
+          }
+          if [ -n "${OPENAI_API_KEY:-}" ]; then
+            code="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${OPENAI_API_KEY}" https://api.openai.com/v1/models || true)"
+            [ "${code}" = "200" ] || fail_validity OPENAI_API_KEY "${code}"
+          fi
+          if [ -n "${DEEPGRAM_API_KEY:-}" ]; then
+            code="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Token ${DEEPGRAM_API_KEY}" https://api.deepgram.com/v1/projects || true)"
+            [ "${code}" = "200" ] || fail_validity DEEPGRAM_API_KEY "${code}"
+          fi
+          echo "Live credential preflight OK — required credentials present; OpenAI + Deepgram valid."
 
       - name: Create shadow DB
         run: |

@@ -26,6 +26,7 @@ import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { assembleServer, type BootedServer, loadServerConfig } from './composition-root.js';
+import { logRedactedRunFailure } from './live-smoke-diagnostics.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const hasKey = Boolean(process.env.OPENAI_API_KEY);
@@ -223,6 +224,15 @@ describe.skipIf(!canRun)(
 
         // Wait for the ONE durable run (parse → catalog → REAL gpt-5 → validate → persist).
         const runId = expectedRunId(TENANT, 'code_contract', `file_id:${FILE_ID}`);
+        // On any failure/timeout, surface WHY (redacted) on stderr before the assertion that follows.
+        const diagnose = async () => {
+          const diag = postgres(appDbUrl, { max: 1 });
+          try {
+            await logRedactedRunFailure(diag, runId);
+          } finally {
+            await diag.end();
+          }
+        };
         const deadline = Date.now() + 150_000;
         let run: { status: string; error: unknown } | undefined;
         for (;;) {
@@ -237,11 +247,15 @@ describe.skipIf(!canRun)(
             await client.end();
           }
           if (run && (run.status === 'completed' || run.status === 'terminal_failure')) break;
-          if (Date.now() > deadline) throw new Error(`live run did not reach a terminal status`);
+          if (Date.now() > deadline) {
+            await diagnose();
+            throw new Error(`live run did not reach a terminal status`);
+          }
           await new Promise((r) => setTimeout(r, 500));
         }
         // eslint-disable-next-line no-console
         console.log('[contract-live] run:', run?.status, run?.error ?? '');
+        if (run?.status !== 'completed') await diagnose();
         expect(run?.status).toBe('completed');
 
         // GROUNDED ground truth: the coded row's fields must match what the DOCUMENT states, and

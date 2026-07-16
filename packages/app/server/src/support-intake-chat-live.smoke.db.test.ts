@@ -24,6 +24,7 @@ import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { assembleServer, type BootedServer, loadServerConfig } from './composition-root.js';
+import { logRedactedRunFailure } from './live-smoke-diagnostics.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const hasKey = Boolean(process.env.OPENAI_API_KEY);
@@ -207,12 +208,24 @@ describe.skipIf(!canRun)(
             [runId],
           )) as unknown as Array<{ status: string; error: unknown }>;
           const run = rows[0];
-          if (run && (run.status === 'completed' || run.status === 'terminal_failure')) return run;
+          if (run && (run.status === 'completed' || run.status === 'terminal_failure')) {
+            // A non-completed terminal fails the caller's assertion — surface WHY (redacted) first,
+            // reusing the open connection before it is closed by the finally below.
+            if (run.status !== 'completed') await logRedactedRunFailure(client, runId);
+            return run;
+          }
         } finally {
           await client.end();
         }
-        if (Date.now() > deadline)
+        if (Date.now() > deadline) {
+          const diag = postgres(appDbUrl, { max: 1 });
+          try {
+            await logRedactedRunFailure(diag, runId);
+          } finally {
+            await diag.end();
+          }
           throw new Error(`live run ${runId} did not reach a terminal status`);
+        }
         await new Promise((r) => setTimeout(r, 500));
       }
     }
