@@ -2,7 +2,7 @@
  * PRODUCT-FAMILY (0.2) UPDATE-SEAM acceptance — the ENV-DRIVEN Product-YAML
  * update-apply seam (product-boot.ts), end-to-end on GROUND TRUTH through the REAL composition root +
  * the REAL `deploy()` gate, against throwaway DATABASEs. This is the 0.2 analog of the composition-root
- * S3 proof (update-mode.db.test.ts): a neutral product (the acme-notes.v1/v2 fixture — NOT the shipped
+ * update proof (update-mode.db.test.ts): a neutral product (the acme-notes.v1/v2 fixture — NOT the shipped
  * examples/acme-notes anchor) EVOLVES its Tier-A store set; the derived-store delta is reproduced
  * in-process via the SAME `deriveProductStores` + `diffProductStores` the CLI (`rayspec plan <new>
  * --against <old>`) uses; the env-driven update boot (`RAYSPEC_UPDATE_MIGRATION`) applies it, existing
@@ -340,7 +340,7 @@ describe.skipIf(!baseUrl)(
         const incompletePath = writeDelta(v1, v2Partial, '0001_incomplete_add_pinned');
 
         // Boot v2 (target) in UPDATE mode with the incomplete delta. deploy() applies CREATE pinned_moments
-        // (committed), then the post-migrate drift check finds highlights still missing → the S4 gate throws
+        // (committed), then the post-migrate drift check finds highlights still missing → the drift gate throws
         // a ProductBootError BEFORE executor.start() (no DBOS launch). Against the UNGATED product-boot this
         // resolves to a BootedServer (deployMode 'updated', non-empty drift) — the delayed-brick RED.
         const err = await boot(V2_YAML, incompleteDbUrl, incompletePath).catch((e: unknown) => e);

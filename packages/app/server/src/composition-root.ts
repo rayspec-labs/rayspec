@@ -581,7 +581,7 @@ function parsePort(raw: string | undefined): number {
  * re-run against an already-migrated DB is a no-op. Bootstraps a CLEAN empty DB AND no-ops
  * on an up-to-date one, so the boot is safe to run repeatedly.
  *
- * MIG-2 (concurrency): the migrator takes NO advisory lock. Two boots racing against the SAME fresh
+ * Concurrency: the migrator takes NO advisory lock. Two boots racing against the SAME fresh
  * empty DB would both try to apply 0000's non-`IF NOT EXISTS` CREATEs — one wins, the other's
  * transaction aborts cleanly (full rollback, no corruption). A LOCAL single-node boot does not hit
  * this; a future multi-replica deploy would gate migrations on a single runner.
@@ -1056,7 +1056,7 @@ async function deployDeclaredSpec(
   // real pack file) + any capability instances the packs provide. The MERGED spec is what every
   // downstream step (product tables / migration SQL / blob guard / deploy()'s re-parse + handler load)
   // sees — so a pack store rides the UNCHANGED migration gate + chokepoint probe (NO new migration
-  // path), a pack route the existing api interpreter (incl. the S2/S3 stream arms), a pack handler the
+  // path), a pack route the existing api interpreter (incl. the stream arms), a pack handler the
   // existing path-jailed loader. `deploy()` / the migration pipeline / the chokepoint stay
   // BYTE-UNCHANGED — the multi-root resolution rides the existing `rollout.importer` seam.
   const {

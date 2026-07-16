@@ -5,8 +5,8 @@
  * `{kind:'handler'}` JSON routes — behind the SAME auth/tenancy chain every route uses), and the
  * resolved handler map the engine dispatches. ADDITIVE composition only — no kill-set file is
  * touched; a deployment supplies a mount base path + the event sink and gets a fully-wired
- * conversational-ingress capability. (S1 ships the fragments UNMOUNTED; the conditional compose
- * mount is S2.)
+ * conversational-ingress capability. (the fragments ship UNMOUNTED; the conditional compose
+ * mount wires them in.)
  */
 import type { RouteHandler } from '@rayspec/handler-sdk';
 import type { ApiRouteSpec, StoreSpec } from '@rayspec/spec';

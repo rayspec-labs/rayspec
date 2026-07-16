@@ -209,10 +209,10 @@ views:
 `;
 
 /**
- * The S2 DECLARED-STORES fixture: a neutral, audio-triggered product whose
+ * The DECLARED-STORES fixture: a neutral, audio-triggered product whose
  * workflow is store_read → store_write over two DECLARED 0.2 stores, plus a store-sourced view over
  * the written store. Exercises the whole new vocabulary through the REAL parser; mountable by
- * `composeProductDeploy` (audio trigger — today's only real trigger event until S3).
+ * `composeProductDeploy` (audio trigger — a real trigger event).
  */
 export const FIELDLOG_YAML = `
 version: "1.0"
@@ -308,10 +308,10 @@ views:
 `;
 
 /**
- * The S3 SUBMIT-INGRESS fixture: a neutral product whose workflow triggers on
- * the record_input capability's `record_submitted` event (the S1 DEFAULT join — no alias) and
+ * The SUBMIT-INGRESS fixture: a neutral product whose workflow triggers on
+ * the record_input capability's `record_submitted` event (the DEFAULT join — no alias) and
  * whose ONLY business step is a store_write sourcing BOTH an envelope key (`record_id`) AND a
- * MERGED top-level business field (`title`) from the trigger payload — the S3 payload contract,
+ * MERGED top-level business field (`title`) from the trigger payload — the payload contract,
  * exercised through the REAL parser. Mountable by `composeProductDeploy` iff the record capability
  * is declared (the conditional mount).
  */
@@ -446,7 +446,7 @@ workflows:
 `;
 
 /**
- * F3 — a doc declaring `media_playback` ONLY (no `audio_input`). `declaresAudio` returns true for
+ * A doc declaring `media_playback` ONLY (no `audio_input`). `declaresAudio` returns true for
  * EITHER audio capability id, so this pins the PARTIAL-audio decision: the audio capability is a COHESIVE
  * PAIR — declaring either half mounts the WHOLE audio surface (both `audio_sessions`/`audio_tracks`
  * stores + all five audio_input/media_playback routes/handlers). This mirrors `FIELDLOG_YAML`
@@ -459,7 +459,7 @@ version: "1.0"
 product:
   id: playbackonly
   name: PlaybackOnly
-  description: A doc declaring media_playback ONLY (no audio_input) — pins the S4 partial-audio mount as all-or-nothing.
+  description: A doc declaring media_playback ONLY (no audio_input) — pins the partial-audio mount as all-or-nothing.
 requires:
   capabilities: [media_playback]
 capabilities:
@@ -480,7 +480,7 @@ stores:
 
 /**
  * A neutral FILE-ingest product (file_input only — no audio, no record, no stt, no agents): the
- * S2 conditional-mount fixture. One declared store fed by a deterministic store_write off the
+ * conditional-mount fixture. One declared store fed by a deterministic store_write off the
  * `file_submitted` trigger — the minimal doc that proves the file capability mounts (stores +
  * BOTH routes + trigger vocabulary) and NOTHING else rides in.
  */
@@ -531,7 +531,7 @@ workflows:
 `;
 
 /**
- * The S3 PARSE fixture: `FILE_INTAKE_YAML` extended with the `file_input.parse_text`
+ * The PARSE fixture: `FILE_INTAKE_YAML` extended with the `file_input.parse_text`
  * capability step feeding the extracted text into the declared store via an `{artifact}` value —
  * the minimal upload→parse→store pipeline (still no audio/record/stt/agents).
  */
@@ -589,7 +589,7 @@ workflows:
 
 /**
  * A neutral CONVERSATION-ingress product (conversation_input only — no audio/record/file/stt/
- * agents): the S2 conditional-mount fixture. One declared store fed by a deterministic
+ * agents): the conditional-mount fixture. One declared store fed by a deterministic
  * store_write off the `turn_submitted` trigger — the minimal doc that proves the conversation
  * capability mounts (BOTH capability-owned stores + BOTH routes + the trigger vocabulary) and
  * NOTHING else rides in. The store_write sources the whole payload class: envelope keys

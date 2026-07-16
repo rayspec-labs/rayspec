@@ -323,7 +323,7 @@ describe.skipIf(!hasDb)('record submit-ingress e2e (the composed stack)', () => 
     spec = parsed.value;
 
     // The composed store surface EXACTLY as the boot path composes it: the SHARED spec-aware
-    // capability-store helper (S4: BOTH capabilities conditional-by-declaration — this doc declares
+    // capability-store helper (BOTH capabilities conditional-by-declaration — this doc declares
     // ONLY record_input, so record_submissions joins and NO audio store does) + deriveProductStores.
     const capability = composeCapabilityStores(spec);
     const derived = deriveProductStores(spec, capability.names);
@@ -340,9 +340,9 @@ describe.skipIf(!hasDb)('record submit-ingress e2e (the composed stack)', () => 
 
     blobDir = mkdtempSync(join(tmpdir(), 'rayspec-intake-e2e-'));
     const blobFactory = makeFsBlobStoreFactory(blobDir);
-    // The audio capability still mounts unconditionally (S4's job) — fake its env like every
+    // The audio capability still mounts unconditionally — fake its env like every
     // composed-stack test does; nothing in THIS suite drives the audio surface.
-    const media = createMediaTokenService('s3-intake-media-secret-at-least-32-bytes');
+    const media = createMediaTokenService('intake-media-secret-at-least-32-bytes');
 
     result = await deploy<ReturnType<typeof createAuthApp>>({
       specSource: INTAKE_YAML,
@@ -668,7 +668,7 @@ describe.skipIf(!hasDb)('record submit-ingress e2e (the composed stack)', () => 
  * Ran-guard: a SEPARATE, NON-skipped describe that fails when the DB is REQUIRED
  * (CI / RAYSPEC_REQUIRE_DB_TESTS) but the eight e2e arms did not run.
  */
-describe('S3 record-ingress e2e — ran-guard (must not silently skip in CI)', () => {
+describe('record-ingress e2e — ran-guard (must not silently skip in CI)', () => {
   it('the e2e arms ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (requireDb) {
       expect(testsRan).toBe(8);

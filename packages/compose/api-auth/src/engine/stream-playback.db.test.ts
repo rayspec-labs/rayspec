@@ -50,7 +50,7 @@ if (requireDb && !hasDb) {
   );
 }
 
-const MEDIA_SECRET = 'p5s3-media-secret-at-least-32-bytes-xx';
+const MEDIA_SECRET = 'media-secret-at-least-32-bytes-xxxxxxxx';
 
 /** POST a raw BINARY chunk (the ingest route). */
 async function postChunk(
@@ -87,7 +87,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
     const merged = await loadStreamPack();
     const spec = merged.spec;
     handlers = merged.handlers;
-    blobDir = mkdtempSync(join(tmpdir(), 'rayspec-stream-s3-'));
+    blobDir = mkdtempSync(join(tmpdir(), 'rayspec-stream-playback-'));
     blobFactory = makeFsBlobStoreFactory(blobDir);
     // The SAME media secret the harness wires into the engine — so the test can ALSO mint forged /
     // cross-tenant / expired tokens directly with the real signer for the RED-first battery.
@@ -99,7 +99,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
       mediaTokenService: media,
       // A tiny per-user cap so the semaphore 429 is deterministic — but big enough for the happy paths.
       playbackMaxStreamsPerUser: 2,
-      schema: 'rayspec_test_p5s3',
+      schema: 'rayspec_test_stream_playback',
     });
   });
   beforeEach(async () => {
@@ -168,7 +168,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
   // ──────────────────────────────────────────────────────────────────────────────────────────────
 
   it('the mint route (Bearer) mints a token, and playback (media-JWT) serves the exact bytes (200)', async () => {
-    const a = await principal('s3-happy@example.com', 'S3Happy');
+    const a = await principal('happy@example.com', 'Happy');
     const bytes = new Uint8Array([10, 20, 30, 40, 50, 60, 70, 80]);
     await ingest(a, 'upl-1', 0, bytes);
 
@@ -195,7 +195,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
   // ──────────────────────────────────────────────────────────────────────────────────────────────
 
   it('DENIES a FORGED token (signed with a different media secret) → 401', async () => {
-    const a = await principal('s3-forged@example.com', 'S3Forged');
+    const a = await principal('forged@example.com', 'Forged');
     await ingest(a, 'upl-1', 0, new Uint8Array([1, 2, 3]));
     const forged = await createMediaTokenService('a-DIFFERENT-media-secret-32-bytes-xx').mint({
       tenantId: a.orgId,
@@ -208,7 +208,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
   });
 
   it('DENIES a SWAPPED-tenantId token (re-signed without our secret) → 401', async () => {
-    const a = await principal('s3-swap@example.com', 'S3Swap');
+    const a = await principal('swap@example.com', 'Swap');
     await ingest(a, 'upl-1', 0, new Uint8Array([1, 2, 3]));
     // An attacker who knows a victim's org id forges a token claiming it — but cannot sign with our
     // media secret, so it is signed with a wrong key → 401 (the signature, not the claim, is the gate).
@@ -226,8 +226,8 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
     // tenant-A media token for a resource B owns CANNOT read B's bytes: A's blob handle is bound to A's
     // root (no bytes there) AND A's DB scope has no pointer row → 404. (The DB-check-ISOLATING RED-first
     // proof is the SEPARATE test below — here both layers agree on 404.)
-    const a = await principal('s3-tenA@example.com', 'S3TenA');
-    const b = await principal('s3-tenB@example.com', 'S3TenB');
+    const a = await principal('tenA@example.com', 'TenA');
+    const b = await principal('tenB@example.com', 'TenB');
     await ingest(b, 'upl-X', 0, new Uint8Array([9, 9, 9])); // B owns upl-X/0; A does not.
     const aToken = await media.mint({
       tenantId: a.orgId,
@@ -259,7 +259,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
     //   (!row) return 404;` so it fabricates a row from the key (serve off the token's mediaResource,
     //   skipping the init.db.select). THIS test then FLIPS from 404 to 200 (A reads its own
     //   pointer-less bytes) — that flip is the proof the DB re-validation is the load-bearing gate here.
-    const a = await principal('s3-nopointer@example.com', 'S3NoPointer');
+    const a = await principal('nopointer@example.com', 'NoPointer');
     // Put bytes DIRECTLY into A's OWN tenant-bound blob at the resource key — WITHOUT going through the
     // ingest route, so there is NO DB pointer row for it. (The blob handle is tenant-bound; this is A's
     // own root.)
@@ -279,7 +279,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
   });
 
   it('DENIES an alg:none token → 401 (alg-confusion)', async () => {
-    const a = await principal('s3-none@example.com', 'S3None');
+    const a = await principal('none@example.com', 'None');
     await ingest(a, 'upl-1', 0, new Uint8Array([1]));
     const none = new UnsecuredJWT({ tenantId: a.orgId, resource: 'upl-1/0', sub: a.userId })
       .setIssuer('rayspec-media')
@@ -291,7 +291,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
   });
 
   it('DENIES an RS256-signed token in ?token= → 401 (alg-confusion)', async () => {
-    const a = await principal('s3-rs@example.com', 'S3Rs');
+    const a = await principal('rs@example.com', 'Rs');
     await ingest(a, 'upl-1', 0, new Uint8Array([1]));
     const { generateKeyPair } = await import('jose');
     const { privateKey } = await generateKeyPair('RS256', { extractable: true });
@@ -306,14 +306,14 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
   });
 
   it('DENIES a normal API Bearer/JWKS token used in ?token= → 401 (distinct key chains)', async () => {
-    const a = await principal('s3-apitok@example.com', 'S3ApiTok');
+    const a = await principal('apitok@example.com', 'ApiTok');
     await ingest(a, 'upl-1', 0, new Uint8Array([1]));
     // The RS256 API access token (a.token) is NOT an HS256 media token → the verifier rejects it.
     expect((await h.app.request(playbackUrl('upl-1', 0, a.token))).status).toBe(401);
   });
 
   it('DENIES an EXPIRED token → 401', async () => {
-    const a = await principal('s3-exp@example.com', 'S3Exp');
+    const a = await principal('exp@example.com', 'Exp');
     await ingest(a, 'upl-1', 0, new Uint8Array([1]));
     const tok = await media.mint({
       tenantId: a.orgId,
@@ -326,7 +326,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
   });
 
   it('DENIES a tokenless playback GET → 401', async () => {
-    const a = await principal('s3-notoken@example.com', 'S3NoTok');
+    const a = await principal('notoken@example.com', 'NoTok');
     await ingest(a, 'upl-1', 0, new Uint8Array([1]));
     expect((await h.app.request('/uploads/upl-1/chunks/0/playback')).status).toBe(401);
   });
@@ -336,7 +336,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
   // ──────────────────────────────────────────────────────────────────────────────────────────────
 
   it('a VALID media token does NOT authenticate the normal API surface', async () => {
-    const a = await principal('s3-iso@example.com', 'S3Iso');
+    const a = await principal('iso@example.com', 'Iso');
     await ingest(a, 'upl-1', 0, new Uint8Array([1]));
     const mediaToken = await media.mint({
       tenantId: a.orgId,
@@ -358,7 +358,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
   // ──────────────────────────────────────────────────────────────────────────────────────────────
 
   it('Range/206: byte-range correctness (Content-Range + Content-Length exact)', async () => {
-    const a = await principal('s3-range@example.com', 'S3Range');
+    const a = await principal('range@example.com', 'Range');
     const bytes = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     await ingest(a, 'upl-1', 0, bytes);
     const token = await media.mint({
@@ -378,7 +378,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
   });
 
   it('Range/206: an open-ended range bytes=7- → the tail', async () => {
-    const a = await principal('s3-tail@example.com', 'S3Tail');
+    const a = await principal('tail@example.com', 'Tail');
     const bytes = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     await ingest(a, 'upl-1', 0, bytes);
     const token = await media.mint({
@@ -396,7 +396,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
   });
 
   it('416 on an unsatisfiable range (start past EOF)', async () => {
-    const a = await principal('s3-416@example.com', 'S3_416');
+    const a = await principal('range416@example.com', 'Range416');
     const bytes = new Uint8Array([0, 1, 2]);
     await ingest(a, 'upl-1', 0, bytes);
     const token = await media.mint({
@@ -413,7 +413,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
   });
 
   it('conditional-GET: If-None-Match → 304', async () => {
-    const a = await principal('s3-304@example.com', 'S3_304');
+    const a = await principal('cond304@example.com', 'Cond304');
     await ingest(a, 'upl-1', 0, new Uint8Array([1, 2, 3]));
     const token = await media.mint({
       tenantId: a.orgId,
@@ -432,7 +432,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
   });
 
   it('If-Range mismatch → serves the full 200 (not 206)', async () => {
-    const a = await principal('s3-ifrange@example.com', 'S3IfRange');
+    const a = await principal('ifrange@example.com', 'IfRange');
     const bytes = new Uint8Array([0, 1, 2, 3, 4]);
     await ingest(a, 'upl-1', 0, bytes);
     const token = await media.mint({
@@ -454,7 +454,7 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
   // ──────────────────────────────────────────────────────────────────────────────────────────────
 
   it('semaphore: the (N+1)th concurrent stream for one user → 429 + Retry-After; a permit releases on end', async () => {
-    const a = await principal('s3-sema@example.com', 'S3Sema');
+    const a = await principal('sema@example.com', 'Sema');
     // Three uploads so three distinct resources/tokens (cap is 2).
     const tokens: string[] = [];
     for (let i = 0; i < 3; i++) {

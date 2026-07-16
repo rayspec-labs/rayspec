@@ -100,7 +100,7 @@ describe('compose-acme-notes byte-identity golden (compose guardrail — must st
   });
 });
 
-describe('conditional audio mount — a NON-audio doc mounts NO audio surface (S4, RED-first)', () => {
+describe('conditional audio mount — a NON-audio doc mounts NO audio surface (RED-first)', () => {
   it('INTAKE (record_input, no audio) composes with ZERO audio stores / routes / handlers / trigger', () => {
     const composed = composeProductDeploy(parseFixture(INTAKE_YAML), intakeRollout());
     const storeNames = composed.engineSpec.stores.map((s) => s.name);
@@ -141,7 +141,7 @@ describe('conditional audio mount — a NON-audio doc mounts NO audio surface (S
   });
 });
 
-// ── F3: the PARTIAL-audio edge — media_playback-ONLY mounts the WHOLE audio surface ────────────
+// ── the PARTIAL-audio edge — media_playback-ONLY mounts the WHOLE audio surface ────────────
 // DECISION: audio is a COHESIVE all-or-nothing PAIR. `declaresAudio` returns true for EITHER
 // `audio_input` OR `media_playback`, and `mountAudioCapability` realizes both ids as ONE runtime
 // capability, so declaring media_playback-only mounts the FULL audio surface — INCLUDING the three
@@ -151,7 +151,7 @@ describe('conditional audio mount — a NON-audio doc mounts NO audio surface (S
 // (2) the extra auth-gated routes are harmless when unused, whereas a reject-partial gate would need an
 // asymmetric, product-opinionated rule to tell "playback-only (reject)" from "input-only (accept)". We
 // PIN mount-both so a future refactor that silently mounted only the declared half goes RED here.
-describe('conditional audio mount — media_playback-ONLY mounts the FULL audio surface (F3, all-or-nothing pair)', () => {
+describe('conditional audio mount — media_playback-ONLY mounts the FULL audio surface (all-or-nothing pair)', () => {
   it('a media_playback-only doc (no audio_input) mounts BOTH audio stores + all five audio routes/handlers', () => {
     const spec = parseFixture(MEDIA_PLAYBACK_ONLY_YAML);
     const derived = deriveProductStores(spec, composeCapabilityStores(spec).names);
@@ -192,14 +192,14 @@ describe('conditional audio mount — media_playback-ONLY mounts the FULL audio 
   });
 });
 
-// ── F1 (compose half): a NON-audio doc that DECLARES an agent composes with NO audio/stt surface ─
+// ── the compose half: a NON-audio doc that DECLARES an agent composes with NO audio/stt surface ─
 // The env-demand COUPLING (this doc demands ONLY RAYSPEC_EXTRACTION_MODE) is proven at the boot layer
 // in packages/server/src/product-boot-conditional-env.db.test.ts; a SECOND full DBOS launch there is
 // unsafe (DBOS is a process-global singleton and the boot path never sets deregisterOnShutdown), so the
 // POSITIVE "this agent doc composes/would-boot fine with blob/media/stt unset" half is pinned HERE, at
 // the compose layer (no launch). Reads the SAME committed server fixture the boot test demands against,
 // so the two layers share ONE source of truth.
-describe('conditional mount — a NON-audio doc that DECLARES an agent composes with NO audio/stt surface (F1)', () => {
+describe('conditional mount — a NON-audio doc that DECLARES an agent composes with NO audio/stt surface', () => {
   it('the non-audio-agent fixture composes the record + declared-store surface, ZERO audio, ZERO stt', () => {
     const yaml = readFileSync(
       resolve(__dirname, '../../../app/server/src/__fixtures__/non-audio-agent.product.yaml'),

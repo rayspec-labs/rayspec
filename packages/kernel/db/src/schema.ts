@@ -146,7 +146,7 @@ export const sessions = pgTable(
 /**
  * api_keys — org-scoped + the M2M client-credentials seam. Plaintext is shown ONCE; only
  * the public `key_prefix` (indexed for O(1) lookup) + the HMAC-SHA256-with-pepper `key_hash`
- * are stored (Slice -1: HMAC, not argon2id — fast on the hot per-request auth path; sound
+ * are stored (HMAC, not argon2id — fast on the hot per-request auth path; sound
  * for ≥128-bit machine secrets). `m2m_client` reuses key_prefix as client_id + key_hash as
  * the client-secret hash.
  */

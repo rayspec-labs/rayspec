@@ -439,9 +439,9 @@ describe('Product YAML workflow bridge', () => {
   });
 });
 
-// ── the S2 store steps ─────────────────────────────────────────────
+// ── the store steps ─────────────────────────────────────────────
 
-/** A minimal store-step bridge input (audio-triggered — the only real trigger event until S3). */
+/** A minimal store-step bridge input (audio-triggered — a real trigger event). */
 function storeBridgeInput(): ProductYamlBridgeInput {
   return {
     version: '1.0',

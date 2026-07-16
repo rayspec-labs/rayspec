@@ -8,8 +8,8 @@
  * The platform's generated single-column UNIQUE is GLOBAL, so `record_ref` embeds the
  * SERVER-DERIVED tenant id (`${tenantId}:${record_id}` — keys.ts). That prefix makes the store
  * PER-TENANT-KEYED BY CONSTRUCTION: two tenants' identical `record_id` values can never collide,
- * so this capability-owned store does NOT carry the S2 declared-store deployment-global-key caveat
- * (BACKLOG PY-STORE-KEY-1) — we own this DDL and key it per-tenant cheaply, exactly like the audio
+ * so this capability-owned store does NOT carry the declared-store deployment-global-key caveat
+ * — we own this DDL and key it per-tenant cheaply, exactly like the audio
  * capability's `session_ref`/`track_ref`.
  */
 import type { StoreSpec } from '@rayspec/spec';
@@ -23,7 +23,7 @@ export const RECORD_SUBMISSIONS_STORE = 'record_submissions';
 /**
  * The capability's store names as a set — the single source for store-derivation callers (the
  * server boot + the CLI pass it to `deriveProductStores`, unioned with the audio names, to tell
- * capability-owned stores apart from a product's declared stores — the LAYER-DRY-1 pattern).
+ * capability-owned stores apart from a product's declared stores — the shared store-name-derivation pattern).
  */
 export const RECORD_STORE_NAMES: ReadonlySet<string> = new Set([RECORD_SUBMISSIONS_STORE]);
 

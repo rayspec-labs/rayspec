@@ -40,7 +40,7 @@ describe('throwawayDbName', () => {
   });
 });
 
-describe('shadowApply — SL-1/ND-4: a connection failure never leaks host/port/credentials', () => {
+describe('shadowApply — a connection failure never leaks host/port/credentials', () => {
   // No DB needed: postgres.js fails to CONNECT to these unreachable hosts (ENOTFOUND/ECONNREFUSED).
   // The returned error must be the FIXED generic message — no postgres://, host, port, user, password.
   const SECRET_HOSTS = [

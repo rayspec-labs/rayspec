@@ -456,7 +456,7 @@ export type TriggerSpec = z.infer<typeof TriggerSpec>;
  *
  * Accepted: `1.2.3`, `1.2.3-rc.1`, `1.0.0-linux.1`, `2.0.0+exp.sha`, `10.20.30` (exact prerelease/
  * build metadata — including the letter `x` inside it — is still an exact pin). We do NOT resolve
- * the pack here (its own loader, S4, resolves + validates the actual published version); this is the
+ * the pack here (its own loader resolves + validates the actual published version); this is the
  * fail-closed "is it EXACTLY one version?" guard at the grammar boundary.
  *
  * Implemented as `.regex()` (NOT `.refine()`): a `.regex()` serializes into the exported JSON-Schema
@@ -483,7 +483,7 @@ export const ExactVersionPin = z
  * wrapper itself is `.strict()`, so an unknown key ON THE REF is fail-closed-rejected.
  *
  *  - `id`      — a logical id for the pack (unique within `extensions[]`; lint-resolvable later).
- *  - `module`  — the pack module/directory reference (resolved + path-jailed by `loadExtensions`, S4).
+ *  - `module`  — the pack module/directory reference (resolved + path-jailed by `loadExtensions`).
  *  - `version` — an EXACT version pin (no range — see `ExactVersionPin`).
  *  - `config`  — optional opaque pack-validated config (passthrough; core does not inspect it).
  */

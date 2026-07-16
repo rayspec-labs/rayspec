@@ -7,21 +7,21 @@
  * (status-code mapping, the sink-rejection 403); the contract lives in the core
  * (create.ts / submit-turn.ts / reply.ts).
  *
- * ── THE S3 TURN FLOW (the routeTx:'handler-managed' posture — THREE legs, one request) ─────────
+ * ── THE TURN FLOW (the routeTx:'handler-managed' posture — THREE legs, one request) ─────────
  * The turn-submit handler ENTRY opts into handler-managed transactions (mount.ts sets the flag),
  * so the engine holds NO route transaction and this binding choreographs:
  *
- *   LEG 1 — INTAKE (its own short tx): `init.db.transaction` around the UNCHANGED S1 `submitTurn`
+ *   LEG 1 — INTAKE (its own short tx): `init.db.transaction` around the `submitTurn`
  *   core. Inside that real outer tx the core's nested insert tx is still a SAVEPOINT, so the
  *   concurrent-turn typed-409 law holds byte-identically. The tx COMMITS when the leg resolves — the intake
  *   (turn persist + event emit) is DURABLE before any model work (the intake-ordering law; a
  *   model fault can never roll it back).
- *   COMMIT-THEN-403 (preserved S2 semantics, pin-mandated): a sink's deliberate fail-closed
+ *   COMMIT-THEN-403 (pin-mandated): a sink's deliberate fail-closed
  *   `ConversationEventRejectedError` is caught INSIDE the tx callback and carried out as a
  *   sentinel — the persisted turn row COMMITS (persist-then-emit is the crash-recovery order; the
  *   e2e's honest-intermediate-state arm) and the binding maps it to the clean 403 AFTER the
  *   commit, with ZERO model work. A GENUINE sink fault still throws THROUGH the tx (leg 1 rolls
- *   back → the platform 500 → a client retry re-persists + re-emits — the same recovery the S2
+ *   back → the platform 500 → a client retry re-persists + re-emits — the same recovery the
  *   engine-tx shape had).
  *
  *   LEG 2+3 — THE REPLY (`ensureTurnReply`, reply.ts): runs with NO transaction held; the model
@@ -117,7 +117,7 @@ type IntakeOutcome =
  * may stream. Then:
  *   - `Accept: text/event-stream` → an `sseResponse` whose producer runs leg 2+3 (`ensureTurnReply`)
  *     with a live `onEvent` that forwards the reply run's `text_delta` events ONLY as pass-through SSE
- *     frames (the SS-2 allowlist — tool/reasoning/lifecycle events stay durable in run_events, off the
+ *     frames (the client-stream allowlist — tool/reasoning/lifecycle events stay durable in run_events, off the
  *     client stream), then emits ONE terminal `conversation_reply` (the guaranteed complete reply —
  *     load-bearing for a zero-delta backend) or `conversation_reply_error` frame. The reply PERSISTS
  *     server-side regardless of the client connection; a disconnected client reconnects by re-POSTing
@@ -138,7 +138,7 @@ export function makeTurnSubmitHandler(config: ConversationHandlersConfig): Route
         return { kind: 'err', result } as const;
       } catch (e) {
         // COMMIT-THEN-403 (module header): the deliberate fail-closed rejection is a sentinel, so
-        // the persisted turn row COMMITS (nothing was enqueued — the S2 semantics, byte-preserved).
+        // the persisted turn row COMMITS (nothing was enqueued — the fail-closed semantics, byte-preserved).
         // Any OTHER throw crosses the tx (leg 1 rolls back) and surfaces as the platform 500.
         if (e instanceof ConversationEventRejectedError) {
           return { kind: 'rejected', rejection: e } as const;
@@ -163,7 +163,7 @@ export function makeTurnSubmitHandler(config: ConversationHandlersConfig): Route
       return sseResponse(makeTurnReplyProducer(ctx, responder, intake.value));
     }
 
-    // JSON (the S3 path, byte-identical): no live sink; reply.ts owns its short txs + convergence.
+    // JSON (the non-streaming path, byte-identical): no live sink; reply.ts owns its short txs + convergence.
     const reply = await ensureTurnReply(ctx, responder, intake.value);
     if (!reply.ok) {
       const body: ConversationReplyErrorBody = {
@@ -222,11 +222,11 @@ function wantsEventStream(headers: RouteHandlerInit['headers']): boolean {
  * Build the SSE producer that streams ONE turn's reply. The engine drives it (route-handlers.ts):
  *  1. a leading `conversation_intake` frame — the COMMITTED intake facts (durable; leg 1 already ran);
  *  2. the reply run's `text_delta` events ONLY, forwarded as pass-through frames (id = seq, event =
- *     `text_delta`) — the SS-2 client-stream allowlist (neutralEventToFrame). Honest per-backend
+ *     `text_delta`) — the client-stream allowlist (neutralEventToFrame). Honest per-backend
  *     cardinality: Pi = token deltas, Anthropic/Codex = ONE whole-message delta, OpenAI = NONE. The
  *     streamed delta count is therefore a LOWER bound on the reply content (a zero-delta backend
  *     streams no text_delta at all); the AUTHORITATIVE whole reply is the terminal frame below, and
- *     real per-backend N is pinned by S5's live smoke, not by the delta count here (PBC-2/PBC-3).
+ *     real per-backend N is pinned by the live smoke, not by the delta count here.
  *  3. a terminal `conversation_reply` frame carrying the WHOLE reply (`run_id`/`text`/`turn_seq`/
  *     `usage?`) — built from `ensureTurnReply`'s RETURN (lifecycle-independent: it does NOT depend on
  *     seeing a `run_completed` event), so it is the guaranteed delivery even when zero deltas flowed —
@@ -269,7 +269,7 @@ function makeTurnReplyProducer(
         },
       });
     } catch (err) {
-      // SS-3: an UNEXPECTED fault (the model leg or the persist threw outright). The SSE 200 headers
+      // An UNEXPECTED fault (the model leg or the persist threw outright). The SSE 200 headers
       // are already flushed, so this can never become a JSON 500 — emit the typed error frame the
       // asymmetry would otherwise hide, then close cleanly. The intake is DURABLE (leg 1 committed);
       // the client re-POSTs the SAME message_id to converge (C10). Best-effort errorClass/run_id.
@@ -315,7 +315,7 @@ function makeTurnReplyProducer(
   };
 }
 
-/** Best-effort neutral `errorClass` off an unknown thrown value (SS-3 — present when the throw carries one). */
+/** Best-effort neutral `errorClass` off an unknown thrown value (present when the throw carries one). */
 function errorClassOf(err: unknown): string | undefined {
   if (typeof err === 'object' && err !== null) {
     const c = (err as { errorClass?: unknown }).errorClass;
@@ -324,7 +324,7 @@ function errorClassOf(err: unknown): string | undefined {
   return undefined;
 }
 
-/** Best-effort `runId` off an unknown thrown value (SS-3 — present when the throw carries one). */
+/** Best-effort `runId` off an unknown thrown value (present when the throw carries one). */
 function runIdOf(err: unknown): string | undefined {
   if (typeof err === 'object' && err !== null) {
     const r = (err as { runId?: unknown }).runId;

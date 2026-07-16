@@ -13,17 +13,17 @@ export class FakeTurnResponder implements ConversationTurnResponder {
   readonly calls: Array<{ input: string; turnRef: string }> = [];
   /** Optional hook fired before returning (simulates concurrent activity mid-"model-run"). */
   beforeReturn?: () => Promise<void>;
-  /** S4: true iff `respond` was handed a live `onEvent` sink (the SSE thread). */
+  /** True iff `respond` was handed a live `onEvent` sink (the SSE thread). */
   receivedOnEvent = false;
   /**
-   * S4 — the per-backend STREAM cardinality knob. Events forwarded through the received `onEvent`
+   * The per-backend STREAM cardinality knob. Events forwarded through the received `onEvent`
    * BEFORE the outcome resolves (simulating a live run). Default `[]` models the OpenAI ZERO-DELTA
    * backend (no stream text → the reply arrives ONLY in the terminal frame). Set it to token/message
    * `text_delta` shapes to model Pi / Anthropic-Codex.
    */
   emit: unknown[] = [];
   /**
-   * S4 SS-3 — the UNEXPECTED-THROW knob: when set, `respond` THROWS this AFTER firing any `emit`
+   * The UNEXPECTED-THROW knob: when set, `respond` THROWS this AFTER firing any `emit`
    * events (models an infra/persist fault mid-stream — the `{ok:false}` Result path is `outcome`,
    * NOT this). The producer must still stream a terminal `conversation_reply_error` frame. A throw
    * carrying `errorClass`/`runId` exercises the best-effort extraction on the error frame.

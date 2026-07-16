@@ -322,7 +322,7 @@ export type ExtractorSpec = z.infer<typeof ExtractorSpec>;
  *  - the columns are EXACTLY the backend `StoreColumn` vocabulary (imported from grammar.ts, which stays
  *    byte-frozen), so the DERIVED output (`deriveProductStores`) is a standard `StoreSpec` and the
  *    whole existing store machinery — `generateProductSql` (tenancy/GDPR injection), `diffProductStores`,
- *    drift/classify, the S4 update seam, `eraseTenant` — consumes declared stores UNCHANGED;
+ *    drift/classify, the update seam, `eraseTenant` — consumes declared stores UNCHANGED;
  *  - authors declare BUSINESS columns only; the tenancy/GDPR columns (`id`/`tenant_id`/`created_at`/
  *    `deleted_at`/`retention_days`/`region`) are INJECTED downstream exactly like collection stores get
  *    them (declaring one is rejected by lint, `reserved_column_name`);
@@ -600,7 +600,7 @@ export type ViewAbsentState = z.infer<typeof ViewAbsentState>;
  * additive vocabulary), and `.strict()` still rejects unknown keys fail-closed. The committed
  * schema and the fixtures are regenerated/updated DELIBERATELY with this change (never silently).
  *
- * SEMANTIC SPLIT (CL-BRIDGE-MINOR-1): `source` (+ `read`) declare the BACKING DATA and are validated
+ * SEMANTIC SPLIT: `source` (+ `read`) declare the BACKING DATA and are validated
  * kind-aware (store name / declared artifact / capability contract — a contract id NEVER satisfies a
  * source); `response_contract` (+ `read.shape`) declare the DTO and are validated by the separate
  * shape⊆contract conformance pass. See product-views.ts + product-views-lint.ts.

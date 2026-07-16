@@ -381,7 +381,7 @@ function coerceForColumn(col: PgColumn, name: string, value: unknown, op: string
 }
 
 /**
- * F2 guard: validate a `select` `limit`/`offset` BEFORE it reaches drizzle. An unvalidated value is a
+ * limit/offset guard: validate a `select` `limit`/`offset` BEFORE it reaches drizzle. An unvalidated value is a
  * FAIL-OPEN hazard — a negative / NaN `limit` makes drizzle SILENTLY DROP the LIMIT clause (returns ALL
  * tenant rows, a quiet over-read), and a negative `offset` emits a raw DB error. Require a NON-NEGATIVE
  * INTEGER (throwing the same shape resolveColumn/coerceForColumn do). `0` is VALID — `LIMIT 0` returns 0
@@ -396,7 +396,7 @@ function assertNonNegativeInt(field: string, value: number): void {
     throw new StoreInputError(
       `HandlerDb: select '${field}' must be a non-negative integer (got ${JSON.stringify(value)}) — ` +
         'a negative/NaN value would silently drop the clause or raise a raw DB error. Rejected ' +
-        'fail-closed (F2).',
+        'fail-closed.',
       'A supplied pagination value is not a permitted value.',
     );
   }
@@ -436,7 +436,7 @@ function isUniqueViolation(err: unknown): boolean {
  * (chunk-ingest et al. — they detect the concurrent-same-index race via `err.code`/`err.cause?.code`)
  * still recognize + recover the race instead of 500ing. NON-enumerable means a `JSON.stringify(err)` at
  * the model boundary CANNOT expose it, and `String(err)` is just the neutral message — so the raw
- * constraint NAME (the cross-tenant existence oracle the XT-1 sanitize exists to hide) still never
+ * constraint NAME (the cross-tenant existence oracle the sanitize exists to hide) still never
  * reaches the model. (We preserve only the SQLSTATE, never the constraint/column name.)
  */
 function sanitizeDbError(err: unknown): unknown {
@@ -520,7 +520,7 @@ export function makeHandlerDb(
         });
         q = q.orderBy(...order);
       }
-      // F2: guard limit/offset fail-closed — a negative/NaN limit would SILENTLY drop the LIMIT clause
+      // guard limit/offset fail-closed — a negative/NaN limit would SILENTLY drop the LIMIT clause
       // (return ALL tenant rows), a negative offset would raise a raw DB error. (limit:0 stays valid.)
       if (opts?.limit !== undefined) {
         assertNonNegativeInt('limit', opts.limit);
@@ -603,7 +603,7 @@ export function makeHandlerDb(
       }
       const tenantCol = resolveColumn(table, 'tenant_id');
       const builder = tdb.insert(table as never, dbValues);
-      // FIX 1 — EMPTY DO-UPDATE SET: when `values` is a SUBSET of `conflictColumns` (an ensure-exists
+      // EMPTY DO-UPDATE SET: when `values` is a SUBSET of `conflictColumns` (an ensure-exists
       // upsert, e.g. upsert('tags',['name'],{name})), the SET-exclusion loop above yields `setValues={}`,
       // and `.onConflictDoUpdate({set:{}})` throws drizzle's synchronous "No values to set". Use DO
       // NOTHING instead: ensure-exists semantics — on a conflict (same OR foreign tenant) it no-ops, on no

@@ -539,8 +539,8 @@ export interface StreamRouteHandlerInit extends HandlerInit {
 /**
  * A `stream` ROUTE handler: `(init) => Response`. Reads the raw request, moves bytes through the
  * tenant-bound `BlobStore`, returns a raw Web `Response` (the ingest 200-ack / the Range/206 playback).
- * RESERVED for the S2/S3 interpreter to invoke — declared here so the contract a pack author writes
- * against is fixed at S1.
+ * RESERVED for the stream-route interpreter to invoke — declared here so the contract a pack author
+ * writes against is fixed up front.
  */
 export type StreamRouteHandler = (init: StreamRouteHandlerInit) => Promise<Response> | Response;
 

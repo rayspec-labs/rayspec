@@ -7,7 +7,7 @@
  *
  * The field mapping (canonical):
  *   - `type`        ← the constant trigger event id `record_input.record_submitted`
- *                     (the S1 DEFAULT `${capability}.${event}` join — NO alias-table entry);
+ *                     (the DEFAULT `${capability}.${event}` join — NO alias-table entry);
  *   - `id`          ← the submitted-record `event_id` (= `${tenant_id}:${record_id}`, record-scoped);
  *   - `occurred_at` ← the submit timestamp;
  *   - `payload`     ← THE MERGED PAYLOAD CONTRACT: the submitted business fields spread TOP-LEVEL,
@@ -20,7 +20,7 @@
  *                     instructions (the trust boundary).
  *
  * `payload.record_id` is what the descriptor-derived `payloadFieldIdempotencyKey('record_id')`
- * keys the durable run on (`record_id:<id>` — the S3 generic format; the `:finalized` suffix stays
+ * keys the durable run on (`record_id:<id>` — the generic format; the `:finalized` suffix stays
  * audio-only, byte-frozen live run identity). Because `id` is ALSO record-scoped, the dispatcher's
  * missing-field fallback (`event:${id}`) stays per-record-stable too. So a client re-submit
  * (retry = redelivery) converges on ONE durable run (C10 single-flight).
@@ -30,13 +30,13 @@ import type { WorkflowInputEvent } from '@rayspec/foundation';
 import type { SubmittedRecordEvent } from '@rayspec/record-runtime';
 import { RECORD_EVENT_ENVELOPE_KEYS } from '@rayspec/record-runtime';
 
-/** The neutral workflow trigger event id a record submit maps onto (the S1 default join). */
+/** The neutral workflow trigger event id a record submit maps onto (the default join). */
 export const RECORD_SUBMITTED_EVENT_TYPE = 'record_input.record_submitted';
 
 /**
  * The FIXED ENVELOPE keys of the `record_submitted` trigger payload — re-exported from the ONE
  * capability source (`@rayspec/record-runtime` types.ts) and coupled fail-the-fix to the emitted
- * payload by adapter.test.ts. This is the compose-time CC-1 truth: a declared persist scope whose
+ * payload by adapter.test.ts. This is the compose-time truth: a declared persist scope whose
  * `<scope>_id` is not among THESE keys can never be satisfied at run time (the merged business
  * fields are per-product data, NOT a stable contract), so `composeProductDeploy` rejects it at
  * deploy.

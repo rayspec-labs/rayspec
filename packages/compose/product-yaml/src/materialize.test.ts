@@ -177,7 +177,7 @@ describe('buildCollectionRows (the canonical row contract)', () => {
 
 describe('persistCollectionRows (the DECLARED lifecycle, executed)', () => {
   const spec = parseFixture();
-  // The DECLARED reconcile scope (MAT-1): derived from the spec, not from a run's planned rows.
+  // The DECLARED reconcile scope: derived from the spec, not from a run's planned rows.
   const RECONCILE = declaredReconcileScope(spec, COLLECTIONS);
 
   function plannedRows(doc = candidateDoc()) {
@@ -325,7 +325,7 @@ describe('persistCollectionRows (the DECLARED lifecycle, executed)', () => {
     expect(kept?.dismissed).toBe(true);
   });
 
-  it('reconcile_stale_rows on WHOLE-KIND removal: a re-extract with ZERO members of a declared kind deletes ALL its prior non-human-edited rows (MAT-1)', async () => {
+  it('reconcile_stale_rows on WHOLE-KIND removal: a re-extract with ZERO members of a declared kind deletes ALL its prior non-human-edited rows', async () => {
     const db = new FakeHandlerDb();
     await persistCollectionRows(db, plannedRows(), SCOPE, RECONCILE);
     // A human edits finding:2 — the whole-kind reconcile must spare it (both directions asserted).
@@ -348,12 +348,12 @@ describe('persistCollectionRows (the DECLARED lifecycle, executed)', () => {
     expect(kept?.human_edited).toBe(true);
   });
 
-  it('reconcile scans the DECLARED store set: whole-kind removal deletes stale rows in a store the planned rows never touch (MAT-1, STORE half)', async () => {
+  it('reconcile scans the DECLARED store set: whole-kind removal deletes stale rows in a store the planned rows never touch (STORE half)', async () => {
     // Two collections bound to two DIFFERENT stores: the always-produced digest projection lives in
     // store A, the reconcile-declared 'finding' kind in store B. A whole-kind removal then plans
     // rows for store A ONLY — so a store loop derived from the PLANNED rows would never visit
     // store B and the stale finding rows would survive. Only the spec-derived store set
-    // (declaredReconcileScope.stores) reaches them: this pins the STORE-derivation half of MAT-1
+    // (declaredReconcileScope.stores) reaches them: this pins the STORE-derivation half
     // (the single-store fixture above cannot — the digest row keeps its one store in any
     // planned-derived set).
     const spec2 = parseFixture();
@@ -430,7 +430,7 @@ describe('persistCollectionRows (the DECLARED lifecycle, executed)', () => {
   });
 });
 
-describe('declaredReconcileScope (the MAT-1 declared authority)', () => {
+describe('declaredReconcileScope (the declared authority)', () => {
   const spec = parseFixture();
 
   it('derives the reconcile-enabled kinds + their bound stores from the SPEC', () => {

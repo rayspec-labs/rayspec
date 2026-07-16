@@ -146,7 +146,7 @@ describe.skipIf(!hasDb)('rayspec plan — READ-ONLY against the target (fail-the
       );
       expect(leaked.length).toBe(0);
 
-      // ND-2: WHOLE-DB proof — the product tables appear in NO schema of the target DB (not just the
+      // WHOLE-DB proof — the product tables appear in NO schema of the target DB (not just the
       // isolated test schema). If a regression made plan write to DATABASE_URL/public (instead of the
       // throwaway shadow DB), widgets/parts would show up SOMEWHERE here → RED. This catches an
       // accidental write to the real target's `public` (or any) schema that a schema-scoped check misses.

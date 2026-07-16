@@ -20,7 +20,7 @@
  * (re-applying a non-idempotent delta would 42P07/42P01 crash-loop the boot), an UNAPPLIED subset removal
  * (a reviewed drop target STILL EXISTS) APPLIES the delta, and an undeterminable destructive statement
  * REFUSES fail-closed. A post-migrate drift GATE then fail-closes an under-reconciling delta (a delayed
- * brick). Unset ⇒ behavior-identical to the pre-S4 mount/materialize boot (the drifted-refuse error TEXT
+ * brick). Unset ⇒ behavior-identical to the prior mount/materialize boot (the drifted-refuse error TEXT
  * now also points at the update seam).
  *
  * This lives in the composition root (server) — the DBOS wiring belongs here (server/src is where the
@@ -128,7 +128,7 @@ export interface DeployedProductBoot {
   deployMode: BootedServer['deployMode'];
   /**
    * The REPORT-ONLY drift `deploy()` computed post-migrate, surfaced additively so the
-   * composition root / tests can assert the reconciled end-state (mirrors S3's classic BootedServer.drift).
+   * composition root / tests can assert the reconciled end-state (mirrors the classic BootedServer.drift).
    * EMPTY on every SUCCESSFUL boot: a mount/materialize boot only proceeds on a non-drifted schema (so
    * its post-deploy drift is []); an env-driven UPDATE boot whose reviewed delta UNDER-reconciles fails
    * closed BELOW with a `ProductBootError` rather than returning a green boot with residual drift.
@@ -559,7 +559,7 @@ export async function planUpdateBoot(
  * Honor `RAYSPEC_MEDIA_PREP` (the env table advertised it but the boot never read it):
  * `ffmpeg` (or unset ⇒ default `ffmpeg`) wires the fail-soft media-prep hook; `off` disables it (no
  * playable-artifact prep — playback stays 409); any OTHER value fail-closes with a named ProductBootError
- * (the S13.2 env contract: every declared env fail-closes on an invalid value). Returns whether to wire it.
+ * (the env contract: every declared env fail-closes on an invalid value). Returns whether to wire it.
  */
 export function mediaPrepEnabled(env: NodeJS.ProcessEnv): boolean {
   const raw = env.RAYSPEC_MEDIA_PREP?.trim();
@@ -571,7 +571,7 @@ export function mediaPrepEnabled(env: NodeJS.ProcessEnv): boolean {
 }
 
 /**
- * F4: build the loud NON-REAL-PROVIDER boot banner (or `null` when all providers are real). A prod boot
+ * Build the loud NON-REAL-PROVIDER boot banner (or `null` when all providers are real). A prod boot
  * that selects `STT_PROVIDER=fake` (no real transcription — every recording fails/empties at STT),
  * `RAYSPEC_EXTRACTION_MODE=deterministic` (no real gpt-5), or `RAYSPEC_RESPONDER_MODE=deterministic`
  * (no real conversation reply model) boots cleanly today and only fails/fakes at first
@@ -686,7 +686,7 @@ interface ExtractorConfig {
   output_schema_name: string;
   /**
    * DEPRECATED alias for `structured_output_mode` (kept for back-compat): `true` ⇒ native; an explicit
-   * `false` ⇒ validated; absence ⇒ the S5 native DEFAULT. `structured_output_mode` wins when present.
+   * `false` ⇒ validated; absence ⇒ the native DEFAULT. `structured_output_mode` wins when present.
    */
   require_native_structured_output?: boolean;
   /**
@@ -725,7 +725,7 @@ export const WIRED_EXTRACTION_BACKENDS = ['openai', 'anthropic', 'pi', 'codex'] 
  *                OPENAI_API_KEY/CODEX_API_KEY — subscription-only).
  */
 /**
- * S5 review (SHOULD-2 — the $0-subscription billing footgun): the AnthropicAdapter passes the WHOLE
+ * The $0-subscription billing footgun: the AnthropicAdapter passes the WHOLE
  * `process.env` to the child SDK, and the SDK's credential precedence is `ANTHROPIC_API_KEY >
  * CLAUDE_CODE_OAUTH_TOKEN`. So a deployment that INTENDS the $0 subscription (sets CLAUDE_CODE_OAUTH_TOKEN)
  * but ALSO carries a stray `ANTHROPIC_API_KEY` would SILENTLY bill the API — the subscription token is
@@ -1004,7 +1004,7 @@ export function resolveInputContext(
 }
 
 /**
- * S5 review (S5-TQ-2 — validated-on-native visibility): running a NATIVE-CAPABLE backend
+ * Validated-on-native visibility: running a NATIVE-CAPABLE backend
  * (openai/anthropic/codex) in `structured_output_mode: validated` is ALLOWED but silently DROPS native
  * constrained decode (falls back to validate-and-repair). That downgrade was previously invisible. This
  * makes it boot-visible: returns a banner when a native-capable backend runs validated, else null. It is
@@ -1022,12 +1022,12 @@ export function nativeValidatedDowngradeWarning(
     `    backend '${backend}' supports NATIVE constrained decode, but the extractor config selects\n` +
     "    structured_output_mode: 'validated' — the run will use validate-and-repair (emulated), NOT\n" +
     '    native strict output. If you want the stronger native guarantee, set structured_output_mode:\n' +
-    "    'native' (the S5 default). This is allowed; it is only a heads-up.\n"
+    "    'native' (the default). This is allowed; it is only a heads-up.\n"
   );
 }
 
 /**
- * Belt-and-suspenders PATH-TRAVERSAL jail (S5 review, SHOULD-1 — the SINK half): a per-agent config
+ * Belt-and-suspenders PATH-TRAVERSAL jail (the SINK half): a per-agent config
  * path DERIVED from an extractor id MUST stay inside the deployment's `extraction/` dir. The grammar
  * (`ExtractorSpec.id` is a `SafeIdentifier`) closes the SOURCE at parse; this closes the
  * `readFileSync` sink even if a future grammar change reopens the source or a code-built spec bypasses
@@ -1047,12 +1047,12 @@ function jailToExtractionDir(extractionDir: string, resolved: string, agentId: s
 }
 
 /**
- * Resolve the extractor-config PATH for ONE declared agent (S5 per-agent convention):
+ * Resolve the extractor-config PATH for ONE declared agent (the per-agent convention):
  * `<specDir>/extraction/<agent_id>.extractor.json`. A SINGLE-agent document keeps the legacy default
  * (`<specDir>/extraction/extractor.json`) + the `RAYSPEC_EXTRACTION_CONFIG` single-file override, so
  * a single-agent product resolves BYTE-IDENTICALLY (no per-agent file exists ⇒ the bare default). A
  * multi-agent document REQUIRES a per-agent file and REJECTS the ambiguous single-file override.
- * Every path DERIVED from the agent id runs through `jailToExtractionDir` (SHOULD-1 traversal guard).
+ * Every path DERIVED from the agent id runs through `jailToExtractionDir` (the traversal guard).
  */
 export function resolveExtractorConfigPath(
   env: NodeJS.ProcessEnv,
@@ -1124,7 +1124,7 @@ interface ResolvedExtractor {
 }
 
 /**
- * Build the `rollout.liveAgent` seam (S5 — per-agent, multi-backend). For EACH declared agent it
+ * Build the `rollout.liveAgent` seam (per-agent, multi-backend). For EACH declared agent it
  * resolves a per-agent extractor config (the single-agent legacy default keeps a single-agent product byte-identical),
  * constructs the config's backend via the boot-side factory (openai/anthropic/pi/codex), enforces the
  * fork-4 structured-output policy (native-default; fail-closed at boot on an emulating backend), and
@@ -1172,7 +1172,7 @@ export function buildLiveAgent(
       extractor.extraction_constraints ?? [],
     );
 
-    // S5-TQ-3: name the offending extractor when the boot-side factory rejects (unknown/unwired backend,
+    // Name the offending extractor when the boot-side factory rejects (unknown/unwired backend,
     // missing per-backend env) — the factory itself is agent-agnostic, so wrap for legible boot errors.
     let backend: Backend;
     try {
@@ -1184,7 +1184,7 @@ export function buildLiveAgent(
       throw e;
     }
     const mode = resolveStructuredOutputMode(cfg);
-    // S5-TQ-2: a validated-on-native downgrade is legitimate but lossy — make it boot-visible.
+    // A validated-on-native downgrade is legitimate but lossy — make it boot-visible.
     const downgradeWarning = nativeValidatedDowngradeWarning(
       extractor.id,
       cfg.backend,
@@ -1198,7 +1198,7 @@ export function buildLiveAgent(
     if (mode === 'native' && !capabilitiesFor(backend.id).nativeStructuredOutput) {
       throw new ProductBootError(
         `extractor '${extractor.id}': the extractor config demands NATIVE structured output ` +
-          `(structured_output_mode: native — the S5 default) but backend '${cfg.backend}' only ` +
+          `(structured_output_mode: native — the default) but backend '${cfg.backend}' only ` +
           'EMULATES it (validate-and-repair, not native constrained decode). Set ' +
           "structured_output_mode: 'validated' to allow emulation, or choose a native backend " +
           '(openai | anthropic | codex). Fail-closed.',
@@ -1259,9 +1259,9 @@ export interface ResponderConfig {
   instructions: string;
   /** The reply model (config-side). */
   model: string;
-  /** The reply backend id (the S5 factory's vocabulary: openai | anthropic | pi | codex). */
+  /** The reply backend id (the backend factory's vocabulary: openai | anthropic | pi | codex). */
   backend: string;
-  /** The bounded history window (defaults = the capability's S1 constants). */
+  /** The bounded history window (defaults = the capability's constants). */
   history_window?: { turns?: number; chars?: number };
   /** The optional bounded store-context read (compose cross-checks the store; shape-checked here). */
   store_context?: { store?: unknown; filter?: unknown; limit?: unknown };
@@ -1269,7 +1269,7 @@ export interface ResponderConfig {
 
 /**
  * Belt-and-suspenders PATH-TRAVERSAL jail for the conversation dir (the `jailToExtractionDir`
- * SHOULD-1 mirror): a responder-config path derived from a filename stem MUST stay inside the
+ * mirror): a responder-config path derived from a filename stem MUST stay inside the
  * deployment's `conversation/` dir. Fail-closed, naming the offender.
  */
 function jailToConversationDir(conversationDir: string, resolved: string, stem: string): string {
@@ -1437,7 +1437,7 @@ export function resolveResponderConfig(
   return { ...cfg, agentId: stem };
 }
 
-/** Validate + default one history_window axis (positive safe integer; the S1 constants default). */
+/** Validate + default one history_window axis (positive safe integer; the capability constants default). */
 function responderWindowAxis(value: unknown, fallback: number, what: string): number {
   if (value === undefined) return fallback;
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
@@ -1504,8 +1504,8 @@ function resolveResponderStoreContext(
 
 /**
  * Build the `rollout.conversation.responder` factory for a conversation-declaring document.
- * `RAYSPEC_RESPONDER_MODE` selects WHERE the neutral Backend comes from — `live` (the S5
- * boot-side factory over the config's `backend`) or `deterministic` (the injected PLAN-B5 proof
+ * `RAYSPEC_RESPONDER_MODE` selects WHERE the neutral Backend comes from — `live` (the
+ * boot-side factory over the config's `backend`) or `deterministic` (the injected proof
  * Backend; dev/CI) — while the config resolve + validation run in BOTH modes (the e2e proves the
  * full config path with zero LLM creds). The factory closes over the raw db; the tenant is bound
  * per request from the SERVER-DERIVED value the capability binding passes.
@@ -1920,7 +1920,7 @@ export async function deployProductYamlSpec(
     'the deployment tenant every workflow run + dispatcher binds to (single-node posture)',
   );
 
-  // ── S4: DOC-DRIVEN env demands — each capability's env is demanded iff the spec USES it ────────
+  // ── DOC-DRIVEN env demands — each capability's env is demanded iff the spec USES it ────────
   // `withAudio` (declares audio_input/media_playback — the SAME predicate compose's conditional mount
   // keys off) ⇒ demand RAYSPEC_BLOB_ROOT + RAYSPEC_MEDIA_SIGNING_KEY (the audio stream/playback
   // byte-movers). `withFileInput` (the SAME compose predicate for the file mount) ⇒ demand
@@ -1935,7 +1935,7 @@ export async function deployProductYamlSpec(
   // `withConversationInput` (the SAME compose predicate for the conversation mount) ⇒
   // demand RAYSPEC_RESPONDER_MODE + the per-product responder config (a submitted turn produces a
   // REAL reply; compose fail-closes without a wired responder). A non-conversation doc demands
-  // NEITHER — the S2 negative-env law grows by exactly this one conditional demand.
+  // NEITHER — the negative-env law grows by exactly this one conditional demand.
   const withConversationInput = declaresConversationInput(spec);
   // `recordNormalizeDecl` (the record_input capability's declared OPTIONAL input-normalize step) ⇒
   // demand RAYSPEC_NORMALIZE_MODE + the per-product record/<agent_id>.normalizer.json (a submitted
@@ -1947,8 +1947,8 @@ export async function deployProductYamlSpec(
   const hasAgents = spec.extractors.length > 0;
 
   // ── 1. derive the Tier-A store bindings from the YAML (product-free) ──────────────────────────
-  // S3: the capability-owned half comes from the SHARED spec-aware helper (composeCapabilityStores
-  // — audio unconditional until S4; record_submissions iff the doc declares record_input), the
+  // The capability-owned half comes from the SHARED spec-aware helper (composeCapabilityStores
+  // — audio formerly unconditional, now doc-conditional; record_submissions iff the doc declares record_input), the
   // SAME source `composeProductDeploy` mounts from, so boot DDL and composed engineSpec can never
   // drift on which capability stores exist (the lockstep hazard, killed structurally).
   const capabilityStores = composeCapabilityStores(spec);
@@ -1986,7 +1986,7 @@ export async function deployProductYamlSpec(
     // apply; absent → refuse actionably; present-matching → PROBE the delta's destructive targets live
     // — a leftover env MOUNTS + loud log, but an UNAPPLIED pure-subset removal (a drop target
     // still exists) APPLIES, and an undeterminable destructive statement REFUSES fail-closed.
-    // (S4: audio is now conditional, so a doc composing ZERO stores — no capability/declared/collection
+    // (audio is now conditional, so a doc composing ZERO stores — no capability/declared/collection
     // stores — classifies 'present-matching' [classifyProductSchema: stores.length===0, UNIT-PINNED at
     // the db layer in classify-product-schema.test.ts], so the update path here never crashes on a
     // zero-store doc. NOTE — this specific zero-store→present-matching boot path is UNPROVEN-BY-TEST at
@@ -2003,7 +2003,7 @@ export async function deployProductYamlSpec(
     migrations = plan.migrations;
     deployMode = plan.deployMode;
   } else {
-    // The plain (no update env) mount/materialize path — behavior-identical to the pre-S4 boot (the
+    // The plain (no update env) mount/materialize path — behavior-identical to the prior boot (the
     // drifted-refuse error TEXT now also points at the update seam).
     if (schemaState === 'drifted') {
       throw new ProductBootError(
@@ -2120,7 +2120,7 @@ export async function deployProductYamlSpec(
     }
   }
 
-  // ── 5b. F4: a NON-REAL provider selection boots fine but silently produces nothing usable in prod.
+  // ── 5b. a NON-REAL provider selection boots fine but silently produces nothing usable in prod.
   //         Do NOT fail-close (a dev/CI boot legitimately uses these) — but make it LOUD so a
   //         fake-provider prod boot is operator-visible. (A zero-agent/no-stt/non-conversation doc
   //         trips no arm; the responder mode joins the banner for a conversation doc.)
@@ -2231,13 +2231,13 @@ export async function deployProductYamlSpec(
     stores: derived.stores,
     ...(derived.transcripts ? { transcripts: derived.transcripts } : {}),
     artifactCollections: derived.artifactCollections,
-    // S4: stt/mediaPrep ride only when the doc uses them (compose requires rollout.stt iff usesStt).
+    // stt/mediaPrep ride only when the doc uses them (compose requires rollout.stt iff usesStt).
     ...(stt ? { stt: { adapter: stt } } : {}),
     ...(liveAgent ? { liveAgent } : {}),
     ...(agents ? { agents } : {}),
     // media-prep is honored via RAYSPEC_MEDIA_PREP (ffmpeg | off; unset ⇒ ffmpeg). `off`
     // omits the hook entirely (playback stays the honest 409); an invalid value fail-closed above.
-    // S4: only when the doc declares AUDIO — `&&` short-circuits so RAYSPEC_MEDIA_PREP is not even
+    // only when the doc declares AUDIO — `&&` short-circuits so RAYSPEC_MEDIA_PREP is not even
     // read for a non-audio doc. (keyed on `withAudio`, not the generalized blobFactory —
     // media prep remuxes AUDIO chunks; a file-only doc has a blob factory but nothing to prep.)
     ...(withAudio && blobFactory !== undefined && mediaPrepEnabled(env)
@@ -2294,7 +2294,7 @@ export async function deployProductYamlSpec(
       productTables,
       escapeHatchRoot,
       buildApp<App>(engine: DeclarativeEngine): App {
-        // S4: the byte-movers ride only when the doc demands them — the blob
+        // the byte-movers ride only when the doc demands them — the blob
         // factory for audio OR file_input (stream routes), the media-token service for audio only
         // (both `undefined` otherwise — DeclarativeEngine.blobFactory/mediaTokenService are optional).
         const engineWithByteMovers: DeclarativeEngine = {
@@ -2328,7 +2328,7 @@ export async function deployProductYamlSpec(
   // present-matching subset DROP that must fully reconcile to the smaller spec. A delta that applies cleanly but UNDER-reconciles
   // (e.g. adds one of two new stores) would otherwise boot GREEN as `deployMode: 'updated'` — and the NEXT
   // plain reboot (no update env) would then classify 'drifted' and fail-close, bricking the live deployment
-  // on a DELAY. We fail NOW instead (BEFORE the DBOS launch below). This mirrors the composition-root S3
+  // on a DELAY. We fail NOW instead (BEFORE the DBOS launch below). This mirrors the composition-root drift
   // gate exactly, for the LIVE env-driven boot path.
   if (deployMode === 'updated' && result.drift.length > 0) {
     throw new ProductBootError(

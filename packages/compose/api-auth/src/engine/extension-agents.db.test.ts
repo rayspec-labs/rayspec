@@ -122,7 +122,7 @@ describe.skipIf(!hasDb)('pack `agents` fragment registered + runnable', () => {
   describe('END-TO-END through the REAL run surface', () => {
     let h: Harness;
     let backend: FakeRunBackend;
-    const SCHEMA = 'rayspec_test_p5s50_agents';
+    const SCHEMA = 'rayspec_test_extension_agents';
 
     beforeAll(async () => {
       const { spec, handlers } = await loadAgentPack();
@@ -171,7 +171,7 @@ describe.skipIf(!hasDb)('pack `agents` fragment registered + runnable', () => {
     }
 
     it('the PACK AGENT runs through the {agent} run surface + journals through runAgent (registered)', async () => {
-      const { orgId, token } = await principal('s50-agent@example.com', 'S50AgentOrg');
+      const { orgId, token } = await principal('agent@example.com', 'AgentOrg');
 
       // The pack agent is resolvable on the SAME run surface a deployment agent uses — no special case.
       const run = await jsonRequest(h.app, 'POST', '/v1/agents/note_summarizer/runs', {
@@ -203,17 +203,17 @@ describe.skipIf(!hasDb)('pack `agents` fragment registered + runnable', () => {
         engineSpec: spec,
         engineHandlers: handlers,
         agentBackends: new Map<BackendId, FakeRunBackend>([['openai', noAgentBackend]]),
-        schema: 'rayspec_test_p5s50_noagents',
+        schema: 'rayspec_test_extension_noagents',
       });
       try {
         const reg = await jsonRequest(h2.app, 'POST', '/v1/auth/register', {
-          body: { email: 's50-noagent@example.com', password: 'a-long-enough-password' },
+          body: { email: 'noagent@example.com', password: 'a-long-enough-password' },
         });
         const t0 = (await reg.json()).accessToken as string;
         const orgId = (
           await (
             await jsonRequest(h2.app, 'POST', '/v1/orgs', {
-              body: { name: 'S50NoAgentOrg' },
+              body: { name: 'NoAgentOrg' },
               headers: { authorization: `Bearer ${t0}` },
             })
           ).json()

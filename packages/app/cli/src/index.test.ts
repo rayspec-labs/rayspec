@@ -1,5 +1,5 @@
 /**
- * `rayspec` CLI entrypoint — exit-code + argv contract (ND-3) + drain-safe stdout (GC-1).
+ * `rayspec` CLI entrypoint — exit-code + argv contract + drain-safe stdout.
  *
  * `main(args)` is the testable CLI body: it RETURNS a numeric exit code (0 ok · 1 not-ok spec/plan)
  * and THROWS a `CliError` for a usage/argument problem (which the top-level maps to exit 2). We drive
@@ -10,7 +10,7 @@
  *  - an unknown command → throws CliError (exit 2);
  *  - an unknown `--flag` → throws CliError (exit 2) (strict parseArgs).
  *
- * GC-1: emit uses a drain callback, so a large payload is flushed before exit — we assert the JSON is
+ * emit uses a drain callback, so a large payload is flushed before exit — we assert the JSON is
  * COMPLETE (parses + closing brace present), not truncated.
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -74,7 +74,7 @@ describe('main — exit codes + stream routing', () => {
     expect(code).toBe(0);
     const out = outChunks.join('');
     expect(errChunks.join('')).toBe('');
-    // Complete (not truncated) JSON — GC-1.
+    // Complete (not truncated) JSON.
     const parsed = JSON.parse(out);
     expect(parsed.ok).toBe(true);
   });
@@ -227,7 +227,7 @@ stores:
   });
 });
 
-describe('main — GC-1 drain-safe stdout (no truncation)', () => {
+describe('main — drain-safe stdout (no truncation)', () => {
   it('emits a complete, parseable JSON payload (closing brace present)', async () => {
     const prev = process.env.SHADOW_DATABASE_URL;
     delete process.env.SHADOW_DATABASE_URL;

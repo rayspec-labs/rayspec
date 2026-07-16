@@ -130,7 +130,7 @@ describe('@rayspec/grounding-runtime', () => {
     const persist = await runtime.execute(
       workflow(
         {
-          artifact: { kind: 'candidate.answer', content, metadata: { stage: '8' } },
+          artifact: { kind: 'candidate.answer', content, metadata: { note: 'ignored' } },
           namespace: 'tenant-local',
           scope: 'session-1',
         },

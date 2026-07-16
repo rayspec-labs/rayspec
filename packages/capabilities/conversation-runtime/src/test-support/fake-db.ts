@@ -10,13 +10,13 @@
  *    tenants (and would catch a regression that dropped the prefix).
  *  - `insert` throws the facade's SANITIZED unique-violation shape on ANY violated unique: a
  *    neutral `Error('unique constraint violation')` carrying `code === '23505'` NON-ENUMERABLY
- *    (the XT-1 sanitize — no constraint name; submit-turn's race detection keys on exactly this).
+ *    (the sanitized shape — no constraint name; submit-turn's race detection keys on exactly this).
  *  - the facade's upsert semantics: DO-UPDATE is TENANT-SCOPED (a conflict on a foreign tenant's
  *    row writes nothing and returns `undefined`); tenant_id is auto-stamped on insert; a conflict
  *    on a NON-target unique throws the same sanitized error insert does.
  *  - select/update/delete are tenant-scoped structurally (every op filters by the bound tenant);
  *    select honors the C11 `orderBy`/`limit` options (submit-turn's tail read depends on them).
- *  - THE TX-POISON LAW (the F1 harvest — probe-verified against the REAL stack, drizzle +
+ *  - THE TX-POISON LAW (probe-verified against the REAL stack, drizzle +
  *    postgres.js): a route handler runs INSIDE the engine's tenant transaction, and a unique
  *    violation raised there UNSCOPED poisons that tx — postgres.js REMEMBERS the error and rejects
  *    the outer transaction promise with it even when the handler caught it (the typed 409 is
@@ -66,7 +66,7 @@ function abortedTransaction(): Error {
   return aborted;
 }
 
-/** The fake `HandlerDb` + the tx-poison observability the F1 unit arms assert on. */
+/** The fake `HandlerDb` + the tx-poison observability the unit arms assert on. */
 export interface FakeConversationDb extends HandlerDb {
   /** TRUE once an UNSCOPED (non-savepoint) unique violation poisoned this request's tx. */
   readonly poisoned: boolean;
@@ -144,7 +144,7 @@ export function makeFakeConversationDb(
         });
       }
       // C11 paging exactly like the real facade (store-facade.ts): OFFSET first, then LIMIT
-      // (drizzle emits both; the S3 history-window read depends on offset paging).
+      // (drizzle emits both; the history-window read depends on offset paging).
       if (opts?.offset !== undefined) rows = rows.slice(opts.offset);
       if (opts?.limit !== undefined) rows = rows.slice(0, opts.limit);
       return rows.map((r) => ({ ...r }) as StoreRow);

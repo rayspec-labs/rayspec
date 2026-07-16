@@ -39,8 +39,8 @@ import { eq } from 'drizzle-orm';
 import { unwrapArtifactValue } from './materialize.js';
 
 /**
- * The GENERIC (non-transcript) branch's input-context declaration (S4
- * PY-LIVE-EXTRACT-NONAUDIO-1). It lives in the per-agent `extractor.json` under
+ * The GENERIC (non-transcript) branch's input-context declaration. It lives in
+ * the per-agent `extractor.json` under
  * `input_context` — extraction concerns are EXTRACTOR-CONFIG-side, never YAML graph keys (the
  * `structured_output_mode` precedent) — and declares EXPLICITLY what reaches the model: an allowlist
  * of trigger-payload business fields plus whether the compiled `artifact_inputs` values are
@@ -121,7 +121,7 @@ function formatTranscriptLines(spans: readonly unknown[]): string {
   return lines.join('\n');
 }
 
-// ── the GENERIC (non-transcript) input assembly (S4 — PY-LIVE-EXTRACT-NONAUDIO-1) ────────────
+// ── the GENERIC (non-transcript) input assembly ────────────
 
 /**
  * framing for the generic input: everything serialized below the preamble is UNTRUSTED DATA
@@ -295,10 +295,10 @@ export function makeLiveExtractionNode(cfg: LiveExtractionNodeConfig): Capabilit
     }
 
     // ── the DECLARATION-DISCRIMINATED input branch ───────────────────────────────
-    // `closed_source_artifacts` PRESENT ⇒ the transcript path, byte-identical to pre-S4:
+    // `closed_source_artifacts` PRESENT ⇒ the transcript path, byte-identical to the earlier form:
     // the closed span-set is the grounding source AND the model input. ABSENT ⇒ the GENERIC
     // (non-audio) path: the compiled `artifact_inputs` are required-checked (converging with the
-    // deterministic node's buildExecutionInput — EXTRACT-GAP-3) and serialized together with the
+    // deterministic node's buildExecutionInput) and serialized together with the
     // extractor-config `input_context` payload-field allowlist into a neutral labeled input.
     const spanRef = extraction.acceptance_boundary.closed_source_artifacts?.[0];
     let modelInput: string;

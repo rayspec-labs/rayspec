@@ -1,7 +1,7 @@
 /**
  * Capability configuration (the record/file `config.ts` mirror, extended for the conversational
  * bounds): the accepted conversation/message-id shapes, the per-turn message byte bound, and the
- * S3 history read-window bounds, with product-neutral defaults a deployment may narrow. Every
+ * history read-window bounds, with product-neutral defaults a deployment may narrow. Every
  * override is CONSTRUCTION-VALIDATED fail-closed (deploy-time loud) — a malformed bound must never
  * silently disable a cap.
  */
@@ -14,7 +14,7 @@ export const DEFAULT_MESSAGE_ID_RE = /^[A-Za-z0-9_.-]{1,128}$/;
 
 /**
  * The default per-turn message byte bound: 32 KiB of UTF-8 (413 above it). Rationale (documented,
- * gate-pinned in S2): the message TEXT is a payload business field of the `turn_submitted` trigger
+ * gate-pinned): the message TEXT is a payload business field of the `turn_submitted` trigger
  * event (the record_input top-level-merge precedent — that is what lets a declared async workflow
  * consume it via the existing `input_context.payload_fields` path), so it is copied verbatim into
  * the durable journal's `input_event` row on every run and must stay journal-friendly. The record
@@ -28,7 +28,7 @@ export const DEFAULT_MESSAGE_ID_RE = /^[A-Za-z0-9_.-]{1,128}$/;
 export const DEFAULT_MAX_MESSAGE_BYTES = 32 * 1024;
 
 /**
- * The HARD CEILING on `maxMessageBytes` overrides (CONTRACT-MINOR-1): the rationale above makes
+ * The HARD CEILING on `maxMessageBytes` overrides: the rationale above makes
  * journal-friendliness a CLASS bound, not a default — the record capability caps its WHOLE
  * canonical payload at 64 KiB for exactly that reason, so 64 KiB is the donor-consistent ceiling
  * for the one field that rides our payload. HONEST NUANCE: this ceiling caps the
@@ -43,7 +43,7 @@ export const DEFAULT_MAX_MESSAGE_BYTES = 32 * 1024;
 export const MAX_MESSAGE_BYTES_CEILING = 64 * 1024;
 
 /**
- * The fixed envelope headroom of the WHOLE-turn-body bound (BOUNDS-1, the record whole-payload
+ * The fixed envelope headroom of the WHOLE-turn-body bound (the record whole-payload
  * discipline): the closed turn body carries, besides the text, only the `message_id` (≤128 chars
  * by the safe-id shape) and the two key names — 4 KiB is generous for that envelope. The resolved
  * `maxTurnBodyBytes` is DERIVED (`maxMessageBytes + this`), never independently overridable, so it
@@ -63,9 +63,9 @@ export const TURN_BODY_ENVELOPE_HEADROOM_BYTES = 4 * 1024;
 export const DEFAULT_MAX_HISTORY_TURNS = 20;
 
 /**
- * The default history read-window in CHARACTERS (the second axis of the S3 bound): even inside the
+ * The default history read-window in CHARACTERS (the second axis of the history bound): even inside the
  * turn window, the serialized DATA contribution of the assembled model input — the history block
- * AND the optional store-context block together, ONE shared budget (INJ-F2/TQ-2; the split policy
+ * AND the optional store-context block together, ONE shared budget (the split policy
  * is pinned on `assembleTurnInput`) — is capped at 64Ki chars, so a window of cap-sized messages
  * cannot multiply into an unbounded model input. (~16k tokens — a deliberate ceiling, stated not
  * hidden; the plan's cost-posture pin.)
@@ -74,13 +74,13 @@ export const DEFAULT_MAX_HISTORY_CHARS = 64 * 1024;
 
 /**
  * The conversation-title DATA-shape bound (chars). The title is a display column, never a
- * key/path/id component (the file `original_filename` SUF-8 mirror) — bounded + control-char
- * rejected (TS-1), not configurable (there is no legitimate need for a longer display title).
+ * key/path/id component (the file `original_filename` mirror) — bounded + control-char
+ * rejected, not configurable (there is no legitimate need for a longer display title).
  */
 export const MAX_CONVERSATION_TITLE_CHARS = 255;
 
 /**
- * HS-2 (the record/file construction belt): probe strings an id-pattern override must NOT accept.
+ * The record/file construction belt: probe strings an id-pattern override must NOT accept.
  * ':' is the STRUCTURAL delimiter of every ref this capability derives (`conversation_ref` =
  * `${tenantId}:${conversationId}`, `turn_ref`/`seq_ref` = `${tenantId}:${conversationId}:<tail>`,
  * and the event id — keys.ts): a pattern admitting it would let two distinct (tenant, conversation,
@@ -92,15 +92,15 @@ export const MAX_CONVERSATION_TITLE_CHARS = 255;
 const DELIMITER_PROBES = [':', 'a:b', ':a', 'a:'] as const;
 
 /**
- * TF-F2 (S3 review): probe strings a MESSAGE-id-pattern override must ADDITIONALLY not accept.
+ * Probe strings a MESSAGE-id-pattern override must ADDITIONALLY not accept.
  * '~' is the reserved NAMESPACE separator of the derived assistant reply message id
  * (`reply~<message_id>` — reply.ts): the reply leg's dedup/convergence authority relies on a
  * derived reply id NEVER colliding with a client-chosen message id, which holds because a client id
  * in the reply namespace is REJECTED at intake. That rejection is GUARANTEED by validate.ts's
  * point-of-use belt (any id starting with `REPLY_MESSAGE_ID_PREFIX` is a typed 422), NOT by this
- * probe belt: probing is CONSTRUCTION-TIME CONVENIENCE only — it is provably incomplete (BELT-1: an
+ * probe belt: probing is CONSTRUCTION-TIME CONVENIENCE only — it is provably incomplete (an
  * anchored override like `/^reply~[0-9]$/` accepts NONE of these canaries yet admits 'reply~5'), the
- * same limit HS-2's delimiter probes carry (a regex's accepted language can't be cheaply inspected
+ * same limit the delimiter probes carry (a regex's accepted language can't be cheaply inspected
  * in general). The probes still earn their keep by failing an OBVIOUS '~'-admitting override loud at
  * deploy time. Applies to `messageIdPattern` ONLY — conversation ids never carry the reply namespace
  * (the prefix is prepended to MESSAGE ids), so a '~' in a conversation id is inert and stays a
@@ -115,9 +115,9 @@ export interface ConversationCapabilityConfig {
   readonly messageIdPattern?: RegExp;
   /** Override the per-turn message UTF-8 byte cap (default `DEFAULT_MAX_MESSAGE_BYTES`). */
   readonly maxMessageBytes?: number;
-  /** Override the S3 history window in turns (default `DEFAULT_MAX_HISTORY_TURNS`). */
+  /** Override the history window in turns (default `DEFAULT_MAX_HISTORY_TURNS`). */
   readonly maxHistoryTurns?: number;
-  /** Override the S3 history window in chars (default `DEFAULT_MAX_HISTORY_CHARS`). */
+  /** Override the history window in chars (default `DEFAULT_MAX_HISTORY_CHARS`). */
   readonly maxHistoryChars?: number;
 }
 
@@ -137,7 +137,7 @@ export interface ResolvedConversationConfig {
 /** Probe one id-pattern override against the delimiter probes — fail-closed at construction. */
 function assertPatternExcludesDelimiter(pattern: RegExp, what: string): void {
   // Probe with a flag-stripped copy so a sticky/global override's `lastIndex` state can't skew
-  // the check (the record/file HS-2 posture). Fail CLOSED at construction (deploy-time loud) —
+  // the check (the record/file posture). Fail CLOSED at construction (deploy-time loud) —
   // never a silently corrupt ref/idempotency key.
   const probeSafe = new RegExp(pattern.source, pattern.flags.replace(/[gy]/g, ''));
   for (const probe of DELIMITER_PROBES) {
@@ -152,7 +152,7 @@ function assertPatternExcludesDelimiter(pattern: RegExp, what: string): void {
 }
 
 /**
- * TF-F2: probe a MESSAGE-id-pattern override against the reply-namespace probes — fail-closed at
+ * Probe a MESSAGE-id-pattern override against the reply-namespace probes — fail-closed at
  * construction (see `REPLY_NAMESPACE_PROBES`). Same flag-stripped probing posture as the
  * delimiter belt.
  */
@@ -213,14 +213,14 @@ export function resolveConversationConfig(
   assertPositiveInt(
     maxHistoryTurns,
     'maxHistoryTurns',
-    'a malformed window would unbound the S3 history read',
+    'a malformed window would unbound the history read',
   );
 
   const maxHistoryChars = config?.maxHistoryChars ?? DEFAULT_MAX_HISTORY_CHARS;
   assertPositiveInt(
     maxHistoryChars,
     'maxHistoryChars',
-    'a malformed window would unbound the S3 history assembly',
+    'a malformed window would unbound the history assembly',
   );
 
   return {

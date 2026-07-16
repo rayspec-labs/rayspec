@@ -2,12 +2,12 @@
  * THE LIVE SMOKE (real provider). The SAME Invoice-Intake product the
  * merge-gated deterministic e2e proves, booted on the REAL composed stack with
  * RAYSPEC_EXTRACTION_MODE=live and driven with ONE real document: upload the committed sample text
- * invoice → REAL `file_input.parse_text` → the S4 GENERIC live-extraction branch assembles the model
+ * invoice → REAL `file_input.parse_text` → the GENERIC live-extraction branch assembles the model
  * input (parsed document text + the vendor→GL catalog + the extractor-config payload fields) → ONE
  * REAL gpt-5 call through `runAgent` (native strict structured output) → `validation.check` →
  * store_write → the declared view serves the coded invoice.
  *
- * This is the end-to-end proof S4 could only mock (its unit pins assert the ASSEMBLED spec.input via
+ * This is the end-to-end proof the generic-extraction branch could only mock (its unit pins assert the ASSEMBLED spec.input via
  * a fake runAgent): a real non-audio product's live extraction on the composed stack, grounded
  * against a real document. Asserts the coded fields are GROUNDED in the document (exact total in
  * cents, the printed vendor) and the GL code comes from the SEEDED catalog (never invented).
@@ -123,7 +123,7 @@ describe.skipIf(!canRun)(
       process.env.RAYSPEC_PRODUCT_TENANT_ID = TENANT;
       process.env.RAYSPEC_BLOB_ROOT = blobDir;
       // THE LIVE PATH: the boot reads extraction/invoice_extractor.extractor.json (backend openai,
-      // gpt-5, native structured output, the S4 input_context) and wires the REAL runAgent node.
+      // gpt-5, native structured output, the input_context) and wires the REAL runAgent node.
       process.env.RAYSPEC_EXTRACTION_MODE = 'live';
       delete process.env.RAYSPEC_MEDIA_SIGNING_KEY;
       delete process.env.STT_PROVIDER;

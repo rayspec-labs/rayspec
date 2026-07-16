@@ -298,7 +298,7 @@ describe('durable-worker boot — real composition root wires + runs an async of
       expect(completed!.stepCount).toBeGreaterThanOrEqual(1);
 
       // 4. The durable run_events stream persisted (run_started … run_completed) — the resumable read
-      //    path the client streams completion from (F5). Tenant-scoped via the same authed token.
+      //    path the client streams completion from. Tenant-scoped via the same authed token.
       const events = await server!.app.request(`/v1/runs/${runId}/events`, {
         headers: { authorization: `Bearer ${accessToken}`, accept: 'text/event-stream' },
       });

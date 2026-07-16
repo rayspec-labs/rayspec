@@ -88,7 +88,7 @@ psql -d postgres -c "CREATE DATABASE $DRYRUN_DB OWNER $PGUSER;" >/dev/null
 # incremental deploy (the cost columns would never be created -> runtime failure). This lexical-from-
 # empty apply CANNOT catch that (it applies every file regardless of `when`), so assert monotonicity
 # of `when` (strictly increasing with idx) directly against meta/_journal.json before the apply.
-echo "== ASSERT journal \`when\` is strictly monotonic with idx (drizzle incremental-skip guard, S3) =="
+echo "== ASSERT journal \`when\` is strictly monotonic with idx (drizzle incremental-skip guard) =="
 node -e '
   const j = require("'"$MIGRATION_DIR"'/meta/_journal.json");
   const es = [...j.entries].sort((a,b)=>a.idx-b.idx);
@@ -246,7 +246,7 @@ INSERT INTO journal_steps
 VALUES
   ('r-cost', '00000000-0000-0000-0000-0000000000f5', 'anthropic', 'llm', 'k0', 'h0', 'ok',
    'subscription-oauth-official-harness', '0.01', '0.013', '0', true,
-   '@anthropic-ai/claude-agent-sdk@0.3.185+adapter-anthropic@p2s4', 'claude-haiku-4-5@2025-10-15'),
+   '@anthropic-ai/claude-agent-sdk@0.3.185+adapter-anthropic@v1', 'claude-haiku-4-5@2025-10-15'),
   ('r-cost', '00000000-0000-0000-0000-0000000000f5', 'openai', 'llm', 'k1', 'h1', 'ok',
    'api-key', '0.01', NULL, '0.01', false,
    '@openai/agents@0.11.8+adapter-openai', 'FALLBACK');

@@ -33,7 +33,7 @@ afterEach(() => {
 
 /** Build a throwaway product dir with a spec path + optional conversation/ files. */
 function productDir(files: Record<string, unknown> | undefined): string {
-  const root = mkdtempSync(join(tmpdir(), 'w3cv-responder-'));
+  const root = mkdtempSync(join(tmpdir(), 'responder-'));
   dirs.push(root);
   if (files !== undefined) {
     mkdirSync(join(root, 'conversation'));

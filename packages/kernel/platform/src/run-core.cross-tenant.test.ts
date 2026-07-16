@@ -12,7 +12,7 @@
  * cache-miss BEFORE backend.run, so the model never runs and A's row is untouched.
  *
  * It is RED against the pre-fix run-core (the model runs, A's row stays authoritative) and
- * GREEN only with FIX 1 (lookup predicate) + FIX 2 (run-header pre-check) together.
+ * GREEN only with the lookup predicate + run-header pre-check together.
  */
 import type { AgentSpec, Backend, RunContext, RunResult } from '@rayspec/core';
 import { schema } from '@rayspec/db';

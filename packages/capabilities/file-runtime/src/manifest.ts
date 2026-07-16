@@ -6,7 +6,7 @@
  * events add NO alias-table entry; the alias table stays audio-only).
  *
  * ZERO product vocabulary. This is the SOURCE OF TRUTH; the committed `manifest.json` at the
- * package root MUST equal it (asserted by manifest.test.ts) and is what the S2 file-input
+ * package root MUST equal it (asserted by manifest.test.ts) and is what the file-input
  * capability check reads.
  *
  * ── THE PAYLOAD CONTRACT (stated here deliberately — see types.ts for the full rationale) ──────
@@ -25,7 +25,7 @@ import { FILE_EVENT_PAYLOAD_KEYS } from './types.js';
  * The file realization of the SHARED per-event descriptor contract (`TriggerEventDescriptor`,
  * `@rayspec/spec` product-events.ts). This extension only NARROWS the dedup-scope label:
  * file-scoped single-flight (a re-submit of one file converges on one durable run). The derived
- * idempotency key uses the S3 GENERIC format `file_id:<id>` (payloadFieldIdempotencyKey — no
+ * idempotency key uses the GENERIC format `file_id:<id>` (payloadFieldIdempotencyKey — no
  * legacy suffix; the `:finalized` format is audio-only, byte-frozen live run identity).
  */
 export interface FileCapabilityEventDescriptor extends TriggerEventDescriptor {
@@ -54,7 +54,7 @@ export interface FileCapabilityDescriptor {
   readonly events: readonly FileCapabilityEventDescriptor[];
 }
 
-/** The byte-ingest contract block (gate-pinned against the runtime constants in S2). */
+/** The byte-ingest contract block (gate-pinned against the runtime constants). */
 export interface FileIngestContract {
   /** The raw bytes NEVER ride the trigger payload — they stay behind the tenant-jailed blob key. */
   readonly bytes_in_event_payload: false;
@@ -76,7 +76,7 @@ export interface FileCapabilityManifest {
 
 /**
  * The route path templates relative to the mount base — the ONE source both this manifest and
- * `mountFileCapability` consume (the S2 gate pins manifest == mounted surface; shared constants
+ * `mountFileCapability` consume (the gate pins manifest == mounted surface; shared constants
  * are what keep them from drifting).
  */
 export const FILE_UPLOAD_ROUTE_SUBPATH = '/{file_id}';

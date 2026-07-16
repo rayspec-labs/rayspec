@@ -19,14 +19,14 @@
  *     database name OVERWRITTEN to a name this module just generated.
  *   • the admin connection AND the `CREATE DATABASE`/`DROP DATABASE` it issues run on the SHADOW
  *     SERVER (the `shadowDatabaseUrl` host) — they create/drop only the throwaway DB this module
- *     named. The caller (`plan.ts`, RO-1) additionally REFUSES to run a shadow whose URL resolves to
+ *     named. The caller (`plan.ts`, the read-only guard) additionally REFUSES to run a shadow whose URL resolves to
  *     the SAME host:port AND database as `DATABASE_URL`, so the shadow server is never the real DB.
  *   • the throwaway name is `rayspec_plan_` + pid + random — it cannot pre-exist (a `CREATE DATABASE`
  *     of an existing name errors), so we never adopt/mutate a DB we did not just create.
  *   • the DROP is the last thing we do, in a `finally`.
  *
- * NO secrets leak (SL-1/SL-2): this module returns only `{ ok }` or `{ ok:false, error }`. The
- * sanitizer is STRUCTURALLY FAIL-CLOSED by code REGION, not by an error-code allowlist (SL-1-INCOMPLETE
+ * NO secrets leak (the secret-safe contract): this module returns only `{ ok }` or `{ ok:false, error }`. The
+ * sanitizer is STRUCTURALLY FAIL-CLOSED by code REGION, not by an error-code allowlist (a fail-closed-by-region
  * hardening): ANY throw from the admin-connect / `CREATE DATABASE` region OR the throwaway-connect /
  * `orgs`-seed region (all infrastructure) collapses to a fixed generic string — postgres.js / Node can
  * embed the host:port (with no `@` authority, e.g. `connect EHOSTUNREACH 10.0.0.5:5432`,
@@ -84,7 +84,7 @@ type SanitizePhase = 'connect' | 'apply';
 
 /**
  * Sanitize a thrown error into a secret-free `error` string — STRUCTURALLY fail-closed by `phase`
- * (SL-1-INCOMPLETE hardening). For `phase: 'connect'` (any infra region) we ALWAYS return the fixed
+ * (a fail-closed-by-region hardening). For `phase: 'connect'` (any infra region) we ALWAYS return the fixed
  * {@link GENERIC_CONNECT_ERROR} — never the verbatim message — so no host/port/user/password can leak,
  * regardless of the error code (EHOSTUNREACH/ENETUNREACH/TLS codes and bare `host:port` messages that
  * no code allowlist catches). For `phase: 'apply'` (the spec's migration SQL) we surface the verbatim
@@ -159,9 +159,9 @@ CREATE TABLE orgs (
 /**
  * Apply `migrationSql` against a throwaway DB on the SHADOW server, read-only w.r.t. the real target.
  * Returns `{ ok:true }` if the seed + migration applied cleanly; `{ ok:false, error }` (secret-free)
- * otherwise. The error is sanitized STRUCTURALLY by region (SL-1-INCOMPLETE): any failure of the
+ * otherwise. The error is sanitized STRUCTURALLY by region (fail-closed-by-region): any failure of the
  * connect / CREATE-DATABASE / throwaway-connect / `orgs`-seed infrastructure collapses to a fixed
- * generic message (no host/credential ever echoed, regardless of error code — SL-1); ONLY a failure of
+ * generic message (no host/credential ever echoed, regardless of error code); ONLY a failure of
  * the spec's migration APPLY is surfaced verbatim (it describes the SQL). ALWAYS drops the throwaway
  * DB in a `finally`.
  *

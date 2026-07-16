@@ -1,5 +1,5 @@
 /**
- * Config resolution invariants — the record HS-2 belt, WIDENED for bytes: `fileRef`/event-id join
+ * Config resolution invariants — the record capability's delimiter belt, WIDENED for bytes: `fileRef`/event-id join
  * on ':' AND the blob key embeds the file id as a PATH component (`files/${fileId}`), so a file id
  * that can carry ':' corrupts refs/keys and one that can carry path chars ('/', '\', a '..'/'.'
  * dot-segment) could steer the blob key. The DEFAULT pattern excludes the delimiters by

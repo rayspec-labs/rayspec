@@ -18,7 +18,7 @@
 
 /**
  * The FIXED EVENT ENVELOPE — the server-derived keys of every `record_submitted` payload, and
- * therefore (a) the manifest descriptor's `payload_keys` (the CC-1 persist-scope contract), and
+ * therefore (a) the manifest descriptor's `payload_keys` (the persist-scope contract), and
  * (b) the RESERVED keys a submission body must not carry (submit rejects them 422). ONE source —
  * the manifest, the submit validation, and the seam adapter all consume THIS array (gate-pinned).
  */

@@ -47,7 +47,7 @@ describe('finalizedSessionEventToWorkflowInput', () => {
     );
   });
 
-  it('AUDIO_FINALIZED_SESSION_PAYLOAD_KEYS is EXACTLY the emitted payload key set (CC-1 coupling)', () => {
+  it('AUDIO_FINALIZED_SESSION_PAYLOAD_KEYS is EXACTLY the emitted payload key set (the coupling)', () => {
     // The compose-time scope validation trusts this constant as the trigger payload CONTRACT — if
     // the mapping ever gains/loses a payload key without updating the constant, this test fails.
     const wf = finalizedSessionEventToWorkflowInput(finalizedEvent());
@@ -79,8 +79,8 @@ describe('finalizedSessionEventToWorkflowInput', () => {
     expect(key(mic)).toBe(key(system));
   });
 
-  it('the manifest event DESCRIPTOR is the adapter contract (S1 registry coupling)', () => {
-    // The deploy composition consumes the MANIFEST descriptor (payload_keys for the CC-1 scope
+  it('the manifest event DESCRIPTOR is the adapter contract (the registry coupling)', () => {
+    // The deploy composition consumes the MANIFEST descriptor (payload_keys for the scope
     // check; idempotency_key_field for the single-flight key) — this couples it fail-the-fix to the
     // adapter, the code that ACTUALLY emits the payload. A descriptor/adapter drift fails here.
     const audio = AUDIO_CAPABILITY_MANIFEST.capabilities.find((c) => c.id === 'audio_input');

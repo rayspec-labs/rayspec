@@ -12,9 +12,9 @@
  *   (2) PACK STORE rides the UNCHANGED migration gate + chokepoint probe: the pack-contributed
  *       `blob_chunks` table EXISTS in the live DB (the migration applied it — NO new migration path),
  *       and a real tenant-scoped write/read round-trips through it (the chokepoint admitted it).
- *   (3) MERGED ROUTES SERVE: a real binary INGEST POST → 200-ack (the S2 stream arm, via the pack);
+ *   (3) MERGED ROUTES SERVE: a real binary INGEST POST → 200-ack (the ingest stream arm, via the pack);
  *       a real PLAYBACK GET with a minted media token + a Range header → 206 with the exact bytes (the
- *       S3 stream arm, via the pack). The whole stream surface is CARRIED by the pack mechanism.
+ *       playback stream arm, via the pack). The whole stream surface is CARRIED by the pack mechanism.
  *   (4) VERSION-PIN FAIL-CLOSED (fail-the-fix): a thin spec pinning a version the pack does NOT
  *       declare ABORTS the boot with the SKEW error (never a silent skip).
  *
@@ -42,7 +42,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const STREAM_DIR = resolve(here, '../../../../examples/stream-backend');
 const FULL_YAML_PATH = resolve(STREAM_DIR, 'rayspec.yaml');
 
-const MEDIA_SECRET = 'p5s4-media-secret-at-least-32-bytes-xx';
+const MEDIA_SECRET = 'media-secret-at-least-32-bytes-xxxxxxxx';
 
 function adminUrl(url: string): string {
   const u = new URL(url);
@@ -206,7 +206,7 @@ extensions:
         await sql.end();
       }
 
-      // (3a) the merged INGEST route serves (the S2 stream arm, via the pack): a raw binary POST → 200.
+      // (3a) the merged INGEST route serves (the ingest stream arm, via the pack): a raw binary POST → 200.
       const { orgId, token } = await principal(server.app, 'pack-e2e@example.test', 'Pack E2E Co');
       const bytes = new Uint8Array([0x00, 0x01, 0x02, 0xff, 0xfe, 0x10, 0x20, 0x30]);
       const ingest = await server.app.request('/uploads/upl-pack/chunks/0', {
@@ -226,7 +226,7 @@ extensions:
       const playToken = (await mintRes.json()).token as string;
       expect(typeof playToken).toBe('string');
 
-      // (3c) the merged PLAYBACK route serves a Range/206 with the exact bytes (the S3 stream arm).
+      // (3c) the merged PLAYBACK route serves a Range/206 with the exact bytes (the playback stream arm).
       const playback = await server.app.request(
         `/uploads/upl-pack/chunks/0/playback?token=${encodeURIComponent(playToken)}`,
         { method: 'GET', headers: { range: 'bytes=0-3' } },

@@ -6,7 +6,7 @@
  * finding has a matching entry here — so a destructive change can never silently pass; it has to
  * be acknowledged in a reviewed code change.
  *
- * MIG-3: `match` must equal the ENTIRE collapsed statement (trailing `;` optional), not an
+ * The exact-equality rule: `match` must equal the ENTIRE collapsed statement (trailing `;` optional), not an
  * unanchored substring — so an entry clears exactly the one statement it reviewed and cannot
  * accidentally clear a different, unreviewed statement that merely contains the same characters.
  */

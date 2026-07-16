@@ -44,7 +44,7 @@ describe('priceFor — effective-dating + provenance', () => {
 
   describe('multi-entry date-walk — exercises the REAL priceFor (registry param, not a re-impl)', () => {
     // A synthetic multi-entry model fed to the REAL priceFor via its optional registry parameter
-    // (the live registry has only single-entry models). S2 review fix: the date-walk SELECTION loop
+    // (the live registry has only single-entry models); the date-walk SELECTION loop
     // inside priceFor is now exercised by the actual function — not a re-implemented copy.
     const registry = PricingRegistry.parse({
       'demo-model': [

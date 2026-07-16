@@ -13,7 +13,7 @@
  *
  * The sink does NOT single-flight itself: the capability re-emits the SAME file-scoped event on
  * every successful submit (first + re-submit) AND on the divergent-conflict 409 heal paths (the
- * DUR-1 heal — the STORED event, re-emitted so a sealed-but-never-enqueued file is recovered by
+ * STORED event, re-emitted so a sealed-but-never-enqueued file is recovered by
  * any retry), and the dispatcher's per-file enqueue idempotency key (the descriptor-derived
  * `payloadFieldIdempotencyKey('file_id')` → the tenant-namespaced `durableWorkflowRunId`) is what
  * dedups the re-emissions to ONE durable run (C10). So delivery is idempotent by design

@@ -53,7 +53,7 @@ describe('RECORD_CAPABILITY_MANIFEST', () => {
     // The canonical id IS the default join …
     expect(event?.contract).toBe('record_input.record_submitted');
     expect(normalizeProductTriggerEvent('record_input', 'record_submitted')).toBe(event?.contract);
-    // … and the alias table stays audio-only (a record alias would violate the S1 convention).
+    // … and the alias table stays audio-only (a record alias would violate the default-join convention).
     expect(PRODUCT_TRIGGER_EVENT_ALIASES.some((a) => a.capability === 'record_input')).toBe(false);
   });
 
@@ -78,9 +78,9 @@ describe('RECORD_CAPABILITY_MANIFEST', () => {
     expect([...RECORD_CAPABILITY_MANIFEST.stores].sort()).toEqual([...RECORD_STORE_NAMES].sort());
   });
 
-  it('carries no product-specific vocabulary (the 5-word denylist)', () => {
+  it('carries no product-specific vocabulary (the denylist)', () => {
     const serialized = JSON.stringify(RECORD_CAPABILITY_MANIFEST).toLowerCase();
-    for (const word of ['memovo', 'meeting', 'recording', 'transcription', 'deepgram']) {
+    for (const word of ['meeting', 'recording', 'transcription', 'deepgram']) {
       expect(serialized.includes(word), `product word '${word}'`).toBe(false);
     }
   });

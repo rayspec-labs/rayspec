@@ -40,7 +40,7 @@ export const CONVERSATION_EVENT_PAYLOAD_KEYS = [
   'message',
 ] as const;
 
-/** The conversation head lifecycle state (S1: every conversation is `open`; closing is a later fork). */
+/** The conversation head lifecycle state (every conversation is `open`; closing is a later fork). */
 export type ConversationState = 'open';
 
 /**
@@ -51,7 +51,7 @@ export type ConversationState = 'open';
  */
 export type TurnState = 'submitted' | 'replied';
 
-/** The speaking role of one ledger row. S1 persists only `user`; S3 adds the `assistant` reply row. */
+/** The speaking role of one ledger row. A user turn is `user`; the assistant reply row is `assistant`. */
 export type TurnRole = 'user' | 'assistant';
 
 /**
@@ -76,7 +76,7 @@ export interface SubmittedTurnEvent {
   readonly turn_ref: string;
   /** The turn's position in the conversation (1-based, assigned by the ledger). */
   readonly turn_seq: number;
-  /** Always `user` in S1 (only user turns trigger workflows; the S3 reply row emits nothing). */
+  /** Always `user` (only user turns trigger workflows; the reply row emits nothing). */
   readonly role: 'user';
   /** The bounded message TEXT — RAW DATA, never instructions (the module-header boundary). */
   readonly message: string;
@@ -89,7 +89,7 @@ export interface SubmittedTurnEvent {
 /**
  * The create route's success result (the `conversation_input.create` contract).
  *
- * TITLE SEMANTICS (DP-1, deliberate): the create body's optional `title` is a CREATION-TIME
+ * TITLE SEMANTICS (deliberate): the create body's optional `title` is a CREATION-TIME
  * ASSERTION — the exact file `{ sha256? }` role (absent = no assertion; equal = dedup; divergent
  * = loud 409) — NOT mutable display state. There is NO title-update path in v1: no route can
  * change a stored title (a rename surface is a later slice/consumer decision, not an accidental
@@ -99,7 +99,7 @@ export interface ConversationCreateResult {
   readonly conversation_id: string;
   /**
    * The conversation state after this create — ECHOED from the stored/authoritative head row
-   * (never fabricated; S1 only ever writes `open`).
+   * (never fabricated; only `open` is ever written).
    */
   readonly state: ConversationState;
   /** True when this create was an idempotent re-create of an existing conversation (C10). */

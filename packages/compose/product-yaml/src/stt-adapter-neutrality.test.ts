@@ -5,22 +5,22 @@
  * the neutral `@rayspec/stt-port` contract, and a compose-layer test may READ the port + adapter source
  * (it never mutates them). The three invariants:
  *
- *   CN-1  the neutral STT port (`packages/kernel/stt-port/src`) contains ZERO provider-named symbols —
+ *   • the neutral STT port (`packages/kernel/stt-port/src`) contains ZERO provider-named symbols —
  *         its shipped modules (the `SttAdapter` contract, transcript types, registry, media-resolver,
  *         normalizer, and fake adapter) must never name a concrete provider. (A source scan — it catches
  *         a provider-named TYPE or id a runtime `Object.keys` check would miss. Test files are excluded:
  *         a test that asserts a provider name is ABSENT legitimately spells it in a negative assertion.)
- *   CN-2  the provider-neutral public surface (`types.ts` + the exported `NormalizeTranscriptInput`)
+ *   • the provider-neutral public surface (`types.ts` + the exported `NormalizeTranscriptInput`)
  *         declares ONLY allowlisted field names — a structural oracle (exact set equality), not a
  *         3-token denylist, so a provider-native field leaking into the public contract fails until
  *         the allowlist is deliberately edited (and the addition reviewed as provider-neutral).
- *   SHC-1/2  live provider access (a network call OR reading the provider key) is CONFINED to the
+ *   • live provider access (a network call OR reading the provider key) is CONFINED to the
  *         manifest-declared provider adapter file(s) plus the one env-gated live integration test.
  *         BOTH the provider adapter package AND the neutral port are scanned; anything else with
  *         network/key access fails closed (the neutral port must be entirely network- and key-free).
  *
  * The adapter source is byte-frozen, so a fail-the-fix that would need to MUTATE it is proven instead
- * on a SYNTHETIC leaky sample (as CN-1's matcher self-test already is). Where a real assertion can go
+ * on a SYNTHETIC leaky sample (as the port-scan matcher self-test already is). Where a real assertion can go
  * red without mutating the frozen source (the extractor self-test; the real-access detection on the
  * frozen adapter), it does.
  */
@@ -40,14 +40,14 @@ const sttNormalizerPath = join(sttPortSrcRoot, 'normalizer.ts');
  * The manifest-declared confined provider files (the STT-runtime manifest's
  * `provider_adapter_files` + the deepgram adapter's `live_integration_test`): the ONLY files
  * permitted to make a live provider call / read the provider key. Everything else in the package
- * must be network- and key-free (SHC-1/SHC-2).
+ * must be network- and key-free (the confinement invariant).
  */
 const CONFINED_PROVIDER_FILES = [
   join(sttAdapterPackageRoot, 'src/deepgram-adapter.ts'),
   join(sttAdapterPackageRoot, 'src/deepgram-adapter.live.test.ts'),
 ];
 
-// ── Confinement scan config (SHC-1 / SHC-2) — the same constants the removed harness used ─────────
+// ── Confinement scan config — the same constants the removed harness used ─────────
 /** Executable source extensions scanned for network/key access (README/manifest can name the strings
  *  legitimately, so non-code files are not scanned). */
 const CODE_FILE_EXTENSIONS = new Set([
@@ -88,7 +88,7 @@ const NETWORK_MODULES = new Set([
 /** An env-var name matching this is key-like — reading it outside the confined set is a breach. */
 const KEY_LIKE_ENV = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|APIKEY|DEEPGRAM)/i;
 
-// ── Neutral-surface allowlist (CN-2) ──────────────────────────────────────────────────────────────
+// ── Neutral-surface allowlist ──────────────────────────────────────────────────────────────
 /** The COMPLETE set of field names permitted on the provider-neutral public surface (`types.ts` +
  *  the exported `NormalizeTranscriptInput`). The gate diffs the field names extracted by
  *  `extractTypeFieldNames` against this golden list with EXACT set equality, so any new/removed
@@ -149,7 +149,7 @@ function rel(path: string): string {
   return relative(repoRoot, path).split('\\').join('/');
 }
 
-/** Strip `//` line comments and block comments (the CN-1 barrel check — a name in prose must not trip). */
+/** Strip `//` line comments and block comments (the port-neutrality scan — a name in prose must not trip). */
 function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
 }
@@ -308,7 +308,7 @@ function walkCodeFiles(root: string): string[] {
 }
 
 /**
- * Extract the field names declared on a TypeScript surface — the load-bearing half of the CN-2
+ * Extract the field names declared on a TypeScript surface — the load-bearing half of the neutral-surface
  * structural allowlist, so it is deliberately more than a line-anchored regex. What it catches:
  *  - FORMATTED one-property-per-line signatures (the common case the biome/lint layer keeps the
  *    surface in);
@@ -347,7 +347,7 @@ function sliceInterfaceBlock(text: string, name: string): string {
   return text.slice(braceStart);
 }
 
-describe('STT port neutrality (CN-1)', () => {
+describe('STT port neutrality', () => {
   it('the neutral STT port contains zero provider-named symbols in any shipped (non-test) source', () => {
     const offenders: string[] = [];
     for (const path of walkCodeFiles(sttPortSrcRoot)) {
@@ -376,7 +376,7 @@ describe('STT port neutrality (CN-1)', () => {
   });
 });
 
-describe('STT provider-neutral public surface (CN-2 structural allowlist)', () => {
+describe('STT provider-neutral public surface (structural allowlist)', () => {
   it('the neutral surface (types.ts + NormalizeTranscriptInput) exposes ONLY allowlisted field names', () => {
     const extracted = new Set<string>([
       ...extractTypeFieldNames(readText(sttTypesPath)),
@@ -457,7 +457,7 @@ describe('STT provider-neutral public surface (CN-2 structural allowlist)', () =
   });
 });
 
-describe('STT live-provider confinement (SHC-1 / SHC-2)', () => {
+describe('STT live-provider confinement', () => {
   it('confines ALL live provider access to the manifest-declared provider adapter file(s)', () => {
     const declared = new Set(CONFINED_PROVIDER_FILES.map((path) => resolve(path)));
     for (const path of declared) {

@@ -316,7 +316,7 @@ function makeFsBlobStore(root: string, tenantId: string): BlobStore {
       if (!header) return { notFound: true, key };
       // The Range is into the LOGICAL bytes (offset 0 = the first byte AFTER the header); translate to
       // the physical file by shifting past the header. node `createReadStream` `end` is INCLUSIVE.
-      // S3: offset/length VALIDATION (negative / beyond-EOF → 416) is the playback arm — not here.
+      // offset/length VALIDATION (negative / beyond-EOF → 416) lives in the playback arm — not here.
       const dataStart = header.dataStart;
       const streamOpts: { start?: number; end?: number } = {};
       if (opts?.offset !== undefined || opts?.length !== undefined) {

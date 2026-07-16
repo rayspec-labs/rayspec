@@ -1,5 +1,5 @@
 /**
- * Config resolution invariants — HS-2: the `record_ref`/event-id delimiter law. `recordRef` and
+ * Config resolution invariants — the `record_ref`/event-id delimiter law. `recordRef` and
  * `submittedEventId` join `${tenantId}:${recordId}` on ':', so a record id that can carry ':' would
  * make two distinct (tenant, record) pairs collide on one ref/key (a narrow but real correctness
  * bug). The DEFAULT pattern excludes ':' by construction; an OVERRIDE that admits it is rejected
@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_RECORD_ID_RE, resolveRecordConfig } from './config.js';
 
-describe('resolveRecordConfig — the record_ref delimiter law (HS-2)', () => {
+describe('resolveRecordConfig — the record_ref delimiter law', () => {
   it("the DEFAULT record-id pattern excludes ':' (the tenant:record ref delimiter)", () => {
     for (const probe of [':', 'a:b', ':a', 'a:']) {
       expect(DEFAULT_RECORD_ID_RE.test(probe), `probe '${probe}'`).toBe(false);

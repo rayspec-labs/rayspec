@@ -6,7 +6,7 @@
  * validation cannot drift; the runtime only ADDS mount-only checks such as store existence against
  * the injected read surface and column existence against the declared store columns).
  *
- * THE TWO SEPARATE VALIDATIONS (CL-BRIDGE-MINOR-1 resolved):
+ * THE TWO SEPARATE VALIDATIONS:
  *  1. SOURCE resolution (backing data) — KIND-AWARE:
  *     - `store`          → a Tier-A/B store NAME (safe identifier). NEVER resolved against contracts;
  *                          a contract-id-shaped ref (or the view's own response contract) is rejected.
@@ -219,7 +219,7 @@ export function lintProductViews(input: ViewLintInput): SpecError[] {
       }
     }
 
-    // ---- source: KIND-AWARE resolution (CL-BRIDGE-MINOR-1) --------------------------------
+    // ---- source: KIND-AWARE resolution --------------------------------
     if (view.source) {
       const ref = view.source.ref;
       const srcPath = `${base}.source.ref`;
@@ -228,7 +228,7 @@ export function lintProductViews(input: ViewLintInput): SpecError[] {
           if (ref === view.response_contract) {
             invalid(
               `view '${view.id}' store source ref '${ref}' names the view's own response contract — ` +
-                'a source declares BACKING DATA (a store name), not the DTO shape (CL-BRIDGE-MINOR-1)',
+                'a source declares BACKING DATA (a store name), not the DTO shape',
               srcPath,
             );
           } else if (!SafeIdentifier.safeParse(ref).success) {
@@ -249,7 +249,7 @@ export function lintProductViews(input: ViewLintInput): SpecError[] {
                 `view '${view.id}' artifact_query source ref '${ref}' does not resolve to a declared ` +
                   `artifact kind or collection${
                     conflated
-                      ? ' — it names a CONTRACT; a source declares BACKING DATA (what the view reads), not the DTO shape it returns (CL-BRIDGE-MINOR-1)'
+                      ? ' — it names a CONTRACT; a source declares BACKING DATA (what the view reads), not the DTO shape it returns'
                       : ''
                   }`,
                 srcPath,
@@ -524,7 +524,7 @@ export function lintProductViews(input: ViewLintInput): SpecError[] {
       }
     }
 
-    // ---- response-contract CONFORMANCE (the DTO half of CL-BRIDGE-MINOR-1) ---------------------
+    // ---- response-contract CONFORMANCE (the DTO half) ---------------------
     const contract = input.contracts[view.response_contract] as ContractNode | undefined;
     if (contract) {
       conformShape(read.shape, contract, `${readPath}.shape`, {

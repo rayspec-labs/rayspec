@@ -13,7 +13,7 @@ import type { SubmittedRecordEvent } from './types.js';
 /**
  * The event sink the capability emits `record_submitted` through. Delivery MUST be idempotent by
  * `event.event_id`: submit emits on the first-persist path, the identical-re-submit path, AND the
- * divergent-conflict 409 path (the DUR-1 heal — always the STORED event, so a crash between
+ * divergent-conflict 409 path (the heal — always the STORED event, so a crash between
  * persist and emit is recovered by ANY retry payload) — the sink treats the second delivery of
  * one `event_id` as a no-op (one workflow).
  */

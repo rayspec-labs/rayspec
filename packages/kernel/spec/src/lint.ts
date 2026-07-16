@@ -52,7 +52,7 @@ const Ajv2020Ctor = ((Ajv2020Module as { default?: unknown }).default ?? Ajv2020
 ) => AjvInstance;
 
 /**
- * Column names the Slice-1 generator INJECTS on every product table (the tenancy/GDPR pattern —
+ * Column names the table generator INJECTS on every product table (the tenancy/GDPR pattern —
  * see packages/db/src/schema.ts). An author-declared business column with one of these names
  * would shadow/collide with the injected column, so the linter rejects it fail-closed.
  */
@@ -898,7 +898,7 @@ export function lintSpec(spec: RaySpec): SpecError[] {
     }
   });
 
-  // ---- extensions[] DUPLICATE ids (cross-ref/merge resolution lands in S4) ----------------
+  // ---- extensions[] DUPLICATE ids (cross-ref/merge resolution lands in `loadExtensions`) ----------------
   // The `loadExtensions` merge keys packs by `id`; two refs sharing an id would silently
   // collide (one pack lost). Reject at config time — symmetric with the other section dup checks.
   errors.push(

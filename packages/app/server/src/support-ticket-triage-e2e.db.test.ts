@@ -5,8 +5,8 @@
  * `RAYSPEC_SPEC_PATH`) on a throwaway DATABASE + a real DBOS launch, and drives it end-to-end over REAL
  * HTTP against MATERIALIZED ground truth (fail-the-fix). It is the fully-working LIVE data-plane
  * (no extraction agent ⇒ NO RAYSPEC_EXTRACTION_MODE, NO deterministic executor, no LLM in the path):
- *   S1 record_submitted trigger · S2 declared stores + store_read (FILTERED catalog) → store_write ·
- *   S3 record_input ingress · S4 conditional-no-audio-no-agent (demands NEITHER blob/media/stt NOR
+ *   record_submitted trigger · declared stores + store_read (FILTERED catalog) → store_write ·
+ *   record_input ingress · conditional-no-audio-no-agent (demands NEITHER blob/media/stt NOR
  *   extraction env).
  *
  * Arm: boot (deployMode 'materialized', no extraction/audio env) → POST /records/{id}/submit → the REAL
@@ -296,7 +296,7 @@ describe.skipIf(!baseUrl)('support-ticket-triage e2e — real boot + real DBOS +
 
       // Re-submit the SAME ticket with an IDENTICAL payload (reordered) → deduped → STILL one run + one
       // row (C10 single-flight). NOTE: the payload MUST be byte-identical after canonicalization — a
-      // DIVERGENT re-submit (a dropped/changed field) is correctly rejected 409 by S3's sha256 guard.
+      // DIVERGENT re-submit (a dropped/changed field) is correctly rejected 409 by the sha256 guard.
       const again = await submit(
         RECORD,
         {

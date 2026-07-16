@@ -1,5 +1,5 @@
 /**
- * S3 — `file_input.parse_text` unit proofs (RED-first; self-made fixtures only).
+ * `file_input.parse_text` unit proofs (RED-first; self-made fixtures only).
  *
  * The fake BlobStore enforces the REAL port constraints (fail-the-fix): `get` returns the TYPED
  * `BlobNotFound` value (never a throw) for an absent key, and a genuine I/O fault THROWS — so the
@@ -45,7 +45,7 @@ const TEXT_LAYER_PDF_TEXT = 'Hello RaySpec PDF fixture.';
 const OUTPUT_REF = 'fileintake.extracted_text';
 const BLOB_KEY = 'files/f-1/deadbeef';
 
-/** Prepend raw bytes (a BOM / whitespace run) to a fixture — the SNIFF-1 leading-bytes shapes. */
+/** Prepend raw bytes (a BOM / whitespace run) to a fixture — the leading-bytes shapes. */
 function withPrefix(prefix: readonly number[], bytes: Uint8Array): Uint8Array {
   const out = new Uint8Array(prefix.length + bytes.length);
   out.set(prefix, 0);

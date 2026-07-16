@@ -81,7 +81,7 @@ describe.skipIf(!hasDb)('the first-submit emit-fault posture (real engine tx)', 
       handlers: [],
       extensions: [],
     };
-    blobDir = mkdtempSync(join(tmpdir(), 'rayspec-w2fi-dp1-'));
+    blobDir = mkdtempSync(join(tmpdir(), 'rayspec-file-cap-'));
     blobFactory = makeFsBlobStoreFactory(blobDir);
     // Every capability-store unique (here file_uploads.file_ref) is a durable ON CONFLICT
     // target → keep its unique index SINGLE-column (a compound one would 42P10 the upsert).
@@ -96,7 +96,7 @@ describe.skipIf(!hasDb)('the first-submit emit-fault posture (real engine tx)', 
       engineHandlers: mounted.handlers as ReadonlyMap<string, ResolvedHandler>,
       blobFactory,
       conflictKeys,
-      schema: 'rayspec_test_w2fi_dp1',
+      schema: 'rayspec_test_file_cap',
     });
   });
   afterAll(async () => {

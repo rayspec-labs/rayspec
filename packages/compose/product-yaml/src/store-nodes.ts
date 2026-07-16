@@ -23,7 +23,7 @@
  *    scalar → typed failure); `{const}` is the literal; `{artifact}` (write-values only) resolves the
  *    LAST upstream artifact of the declared contract ref (absent → typed failure — never a silent
  *    null write). A type mismatch the declarations cannot see statically (e.g. an object artifact
- *    into a text column) is rejected by the facade's column-type-aware SF-1 guard at run time.
+ *    into a text column) is rejected by the facade's column-type-aware guard at run time.
  */
 
 import type {
@@ -195,7 +195,7 @@ export function makeStoreReadNode(cfg: StoreNodeConfig): CapabilityNodeHandler {
  * then **upsert EXCLUSIVELY on the store's declared conflict key** (see the module header — the
  * C10/at-least-once law).
  *
- * THE `undefined`-RESULT LAW (SEC-TEN-1/S2-XT-WRITE-BLIND fix — loud, never silent). The facade's
+ * THE `undefined`-RESULT LAW (the cross-tenant write-blindness fix — loud, never silent). The facade's
  * return contract (store-facade.ts) makes `undefined` mean, per arm:
  *  - DO-UPDATE arm (this node whenever `values` carries any NON-key column): the conflict row on the
  *    named key EXISTS but the tenant-scoped `setWhere` matched ZERO rows — i.e. a FOREIGN tenant
@@ -232,9 +232,9 @@ export function makeStoreWriteNode(cfg: StoreNodeConfig): CapabilityNodeHandler 
     // is always a STRING; a NON-STRING resolved value (a number/boolean from an {event:}/{artifact:}
     // source) is by definition NOT a member, so it is rejected HERE regardless of JS type — matching the
     // HTTP route's `z.enum`, which rejects a non-member number as a VALIDATION_ERROR. (This closes a real
-    // bypass: SF-1 (`assertValidValue`, store-facade.ts) does NOT reject a scalar non-string — it ACCEPTS
+    // bypass: `assertValidValue` (store-facade.ts) does NOT reject a scalar non-string — it ACCEPTS
     // string/number/boolean/null/Date — so without this a numeric value would slip past BOTH the enum
-    // check AND SF-1 and reach Postgres, breaking the HTTP/workflow parity.) null/undefined is a
+    // check AND the facade guard and reach Postgres, breaking the HTTP/workflow parity.) null/undefined is a
     // NULLABILITY concern (deferred to the column's NOT NULL / nullable enforcement at the DB, mirroring
     // the HTTP `z.enum().nullable()` posture — not an out-of-whitelist VALUE). The failure message names
     // the store + COLUMN, never the offending VALUE (no cross-tenant oracle).
@@ -274,8 +274,8 @@ export function makeStoreWriteNode(cfg: StoreNodeConfig): CapabilityNodeHandler 
         `store_write step '${step.id}' could not apply its write to store '${store.name}': the row ` +
           `identified by key column '${keyColumn}' exists but is not writable by this tenant. The ` +
           'conflict key is deployment-global in this beta posture, so another tenant may already ' +
-          'hold this key (see LIMITATIONS; the tenant-scoped composite key is BACKLOG ' +
-          'PY-STORE-KEY-1). The write was NOT applied — failing loudly instead of reporting success.',
+          'hold this key (see LIMITATIONS; a tenant-scoped composite key is a known limitation). ' +
+          'The write was NOT applied — failing loudly instead of reporting success.',
       );
       const hasNonKeyValues = Object.keys(values).some((c) => !store.key.includes(c));
       // DO-UPDATE arm: unambiguous (see the docstring) — the typed failure, no verify-read.

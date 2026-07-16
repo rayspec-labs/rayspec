@@ -131,9 +131,9 @@ function* walk(dir) {
 }
 
 // raw-db handle factories: makeDb AND makeDbWithSchema (the (WithSchema)? branch is the fix
-// for the F1 gap where a SECOND factory slipped past a `\bmakeDb\b`-only detector).
+// for the gap where a SECOND factory slipped past a `\bmakeDb\b`-only detector).
 const RAW_FACTORY_RE = /\bmakeDb(WithSchema)?\b/;
-// F2: catch `.unscoped()` AND its bracket/computed-access equivalents — `tdb["unscoped"]()` /
+// Also catch `.unscoped()` AND its bracket/computed-access equivalents — `tdb["unscoped"]()` /
 // `tdb['unscoped']()` — which the dot-only regex missed, so a forbidden escape-hatch call could
 // be smuggled past the gate as a computed member access. PLUS a bare `unscoped` token backstop
 // (the method exists ONLY on TenantDb, so the identifier appearing in CODE is the tripwire even
@@ -346,7 +346,7 @@ function detectDbScopedTablesViolation(rel, src) {
 
 // --- self-test: prove the detector fires for both factories + .unscoped() ----------------
 // A regression where makeDbWithSchema (or makeDb) silently slips past the detector is exactly
-// the F1 finding; this asserts the detector still catches both before the gate scans anything.
+// the earlier gap; this asserts the detector still catches both before the gate scans anything.
 function selfTest() {
   const cases = [
     { src: "import { makeDb } from '@rayspec/db/testing';", expect: true },
@@ -354,7 +354,7 @@ function selfTest() {
     { src: 'const db = makeDb(url);', expect: true },
     { src: 'const db = makeDbWithSchema(url, schema);', expect: true },
     { src: 'const raw = tdb.unscoped();', expect: true },
-    // F2: bracket/computed-member forms + the bare-token backstop must all fire.
+    // bracket/computed-member forms + the bare-token backstop must all fire.
     { src: 'const raw = tdb["unscoped"]();', expect: true },
     { src: "const raw = tdb['unscoped']();", expect: true },
     { src: 'const m = "unscoped"; tdb[m]();', expect: true },

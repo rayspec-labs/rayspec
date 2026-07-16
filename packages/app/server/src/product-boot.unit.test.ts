@@ -89,7 +89,7 @@ describe('mediaPrepEnabled — honors RAYSPEC_MEDIA_PREP', () => {
   it('DISABLES media-prep for RAYSPEC_MEDIA_PREP=off', () => {
     expect(mediaPrepEnabled({ RAYSPEC_MEDIA_PREP: 'off' })).toBe(false);
   });
-  it('fail-closes on any OTHER value, naming it (the S13.2 env contract)', () => {
+  it('fail-closes on any OTHER value, naming it (the env contract)', () => {
     expect(() => mediaPrepEnabled({ RAYSPEC_MEDIA_PREP: 'yes' })).toThrow(ProductBootError);
     expect(() => mediaPrepEnabled({ RAYSPEC_MEDIA_PREP: 'yes' })).toThrow(
       /RAYSPEC_MEDIA_PREP 'yes' is not supported/,
@@ -97,7 +97,7 @@ describe('mediaPrepEnabled — honors RAYSPEC_MEDIA_PREP', () => {
   });
 });
 
-describe('nonRealProviderBanner — loud marker for non-real providers (F4)', () => {
+describe('nonRealProviderBanner — loud marker for non-real providers', () => {
   it('returns null when both providers are real (deepgram + live)', () => {
     expect(nonRealProviderBanner({ STT_PROVIDER: 'deepgram' }, false, 'live')).toBeNull();
   });
@@ -161,12 +161,12 @@ describe('buildLiveAgent (fail-closed)', () => {
 
 // ── multi-agent + multi-backend live extraction ──────────────────────────────────────────────────
 
-const S5_TMP_DIRS: string[] = [];
+const TMP_DIRS: string[] = [];
 afterAll(() => {
-  for (const d of S5_TMP_DIRS) rmSync(d, { recursive: true, force: true });
+  for (const d of TMP_DIRS) rmSync(d, { recursive: true, force: true });
 });
 const FAKE_TDB = {} as never;
-const S5_TENANT = '00000000-0000-0000-0000-0000000000d5';
+const LIVE_TENANT = '00000000-0000-0000-0000-0000000000d5';
 
 /** acmeSpec re-shaped to declare N extractors with the given ids (extraction contract cloned). */
 function specWithAgents(ids: string[]): ProductSpec {
@@ -186,8 +186,8 @@ function writeExtractionDir(
     inputContext?: unknown;
   }>,
 ): string {
-  const d = mkdtempSync(join(tmpdir(), 'rayspec-s5-'));
-  S5_TMP_DIRS.push(d);
+  const d = mkdtempSync(join(tmpdir(), 'rayspec-boot-'));
+  TMP_DIRS.push(d);
   const extractionDir = join(d, 'extraction');
   mkdirSync(extractionDir, { recursive: true });
   for (const c of configs) {
@@ -209,7 +209,7 @@ function writeExtractionDir(
   return join(d, 'product.yaml');
 }
 
-describe('makeExtractionBackend — the boot-side backend factory (S5, fail-closed per-backend env)', () => {
+describe('makeExtractionBackend — the boot-side backend factory (fail-closed per-backend env)', () => {
   it("constructs the OpenAIAdapter for 'openai' (demands OPENAI_API_KEY)", () => {
     expect(makeExtractionBackend({ OPENAI_API_KEY: 'sk-x' }, 'openai').id).toBe('openai');
     expect(() => makeExtractionBackend({}, 'openai')).toThrow(/OPENAI_API_KEY is required/);
@@ -250,11 +250,11 @@ describe('makeExtractionBackend — the boot-side backend factory (S5, fail-clos
     expect([...WIRED_EXTRACTION_BACKENDS]).toEqual(['openai', 'anthropic', 'pi', 'codex']);
   });
 
-  // ── SHOULD-2 (S5 review): the $0-subscription billing footgun ────────────────────────────────────
+  // ── The $0-subscription billing footgun ────────────────────────────────────
   // The AnthropicAdapter passes the whole process.env to the child SDK; the SDK precedence is
   // ANTHROPIC_API_KEY > CLAUDE_CODE_OAUTH_TOKEN. So a deployment that INTENDS the $0 subscription but
   // ALSO carries a stray ANTHROPIC_API_KEY silently bills the API. We warn LOUD (boot-side, names-only).
-  it('SHOULD-2: warns when BOTH the subscription token AND a stray ANTHROPIC_API_KEY are set', () => {
+  it('warns when BOTH the subscription token AND a stray ANTHROPIC_API_KEY are set', () => {
     const OAUTH = 'ZZOAUTHSECRETZZ';
     const APIKEY = 'ZZAPIKEYSECRETZZ';
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -294,7 +294,7 @@ describe('makeExtractionBackend — the boot-side backend factory (S5, fail-clos
     }
   });
 
-  it('SHOULD-2 pure: anthropicApiKeyOverrideWarning fires ONLY when both are set', () => {
+  it('pure: anthropicApiKeyOverrideWarning fires ONLY when both are set', () => {
     expect(
       anthropicApiKeyOverrideWarning({ CLAUDE_CODE_OAUTH_TOKEN: 't', ANTHROPIC_API_KEY: 'k' }),
     ).toMatch(/OVERRIDDEN & BILLED/);
@@ -490,10 +490,10 @@ describe('resolveExtractorConfigPath — the per-agent config convention', () =>
     ).toThrow(/ambiguous for a multi-extractor/);
   });
 
-  // ── SHOULD-1 (S5 review): the belt-and-suspenders traversal jail (the SINK half; the grammar
+  // ── The belt-and-suspenders traversal jail (the SINK half; the grammar
   // SafeIdentifier is the SOURCE half). A `..`/`/` agent id (a code-built spec, or a future grammar
   // regression bypassing the parser) resolves OUTSIDE extraction/ — the jail must refuse to read it.
-  it('SHOULD-1: multi-agent — throws when an agent id path-traverses OUT of the extraction dir', () => {
+  it('multi-agent — throws when an agent id path-traverses OUT of the extraction dir', () => {
     const evilId = '../../../../../tmp/pwned';
     const spec = specWithAgents(['agent_one', evilId]);
     expect(() => resolveExtractorConfigPath({}, '/x/deploy/acme.yaml', spec, evilId)).toThrow(
@@ -504,7 +504,7 @@ describe('resolveExtractorConfigPath — the per-agent config convention', () =>
     );
   });
 
-  it('SHOULD-1: single-agent — throws when the sole agent id path-traverses out', () => {
+  it('single-agent — throws when the sole agent id path-traverses out', () => {
     const evilId = '../../../../../tmp/pwned';
     const spec = specWithAgents([evilId]);
     expect(() => resolveExtractorConfigPath({}, '/x/deploy/acme.yaml', spec, evilId)).toThrow(
@@ -529,8 +529,8 @@ describe('buildLiveAgent — multi-agent + multi-backend', () => {
     expect(live.agentIds).toEqual(['agent_one', 'agent_two']);
     // The SAME declared extraction agent shape runs on OpenAI AND Anthropic: each agent builds its own
     // node closing over its own backend/config — the nodes are distinct object identities.
-    const nodeOne = live.buildNodeForAgent('agent_one', { tdb: FAKE_TDB, tenantId: S5_TENANT });
-    const nodeTwo = live.buildNodeForAgent('agent_two', { tdb: FAKE_TDB, tenantId: S5_TENANT });
+    const nodeOne = live.buildNodeForAgent('agent_one', { tdb: FAKE_TDB, tenantId: LIVE_TENANT });
+    const nodeTwo = live.buildNodeForAgent('agent_two', { tdb: FAKE_TDB, tenantId: LIVE_TENANT });
     expect(typeof nodeOne).toBe('function');
     expect(typeof nodeTwo).toBe('function');
     expect(nodeOne).not.toBe(nodeTwo);
@@ -557,15 +557,15 @@ describe('buildLiveAgent — multi-agent + multi-backend', () => {
     const env = { OPENAI_API_KEY: 'sk-x' };
     const live = buildLiveAgent(env, specPath, spec);
     expect(live.agentIds).toEqual(['agent_one', 'agent_two']);
-    expect(typeof live.buildNodeForAgent('agent_two', { tdb: FAKE_TDB, tenantId: S5_TENANT })).toBe(
-      'function',
-    );
+    expect(
+      typeof live.buildNodeForAgent('agent_two', { tdb: FAKE_TDB, tenantId: LIVE_TENANT }),
+    ).toBe('function');
   });
   it('rejects when a per-agent config names the WRONG agent (config/agent mismatch)', () => {
     const spec = specWithAgents(['agent_one', 'agent_two']);
     // Write agent_two's file but with agent_id pointing at a different id.
-    const d = mkdtempSync(join(tmpdir(), 'rayspec-s5-'));
-    S5_TMP_DIRS.push(d);
+    const d = mkdtempSync(join(tmpdir(), 'rayspec-boot-'));
+    TMP_DIRS.push(d);
     const extractionDir = join(d, 'extraction');
     mkdirSync(extractionDir, { recursive: true });
     for (const id of ['agent_one', 'agent_two']) {
@@ -599,10 +599,10 @@ describe('buildLiveAgent — multi-agent + multi-backend', () => {
     );
   });
 
-  // ── S5-MINOR-1 / S5-TQ-1: a built node genuinely BINDS to its DECLARED backend (not a shared openai
+  // ── A built node genuinely BINDS to its DECLARED backend (not a shared openai
   // one). Proof: agent_two declares `anthropic` but the env lacks the anthropic creds → construction
   // fails with the ANTHROPIC-SPECIFIC demand, naming agent_two. A shared/openai node would not demand it.
-  it('S5-MINOR-1: a node binds to its declared backend — anthropic without anthropic env throws at that agent', () => {
+  it('a node binds to its declared backend — anthropic without anthropic env throws at that agent', () => {
     const spec = specWithAgents(['agent_one', 'agent_two']);
     const specPath = writeExtractionDir([
       { id: 'agent_one', backend: 'openai' },
@@ -613,9 +613,9 @@ describe('buildLiveAgent — multi-agent + multi-backend', () => {
     );
   });
 
-  // ── S5-TQ-3: an unknown backend surfaces at buildLiveAgent, naming the AGENT + the wired set (not
+  // ── An unknown backend surfaces at buildLiveAgent, naming the AGENT + the wired set (not
   // only at the makeExtractionBackend unit) — the boot-level wrap adds the agent context.
-  it('S5-TQ-3: an unknown backend at buildLiveAgent names the agent + the wired set', () => {
+  it('an unknown backend at buildLiveAgent names the agent + the wired set', () => {
     const spec = specWithAgents(['agent_one', 'agent_two']);
     const specPath = writeExtractionDir([
       { id: 'agent_one', backend: 'openai' },
@@ -626,9 +626,9 @@ describe('buildLiveAgent — multi-agent + multi-backend', () => {
     );
   });
 
-  // ── S5-TQ-2: validated-on-native is ALLOWED but silently drops native constrained decode — make the
+  // ── Validated-on-native is ALLOWED but silently drops native constrained decode — make the
   // downgrade boot-visible (a console.warn), and pin that the semantics degrade (not reject).
-  it('S5-TQ-2: validated-on-native (openai) is ALLOWED and warns loudly (downgrade visible)', () => {
+  it('validated-on-native (openai) is ALLOWED and warns loudly (downgrade visible)', () => {
     const spec = specWithAgents(['agent_one']);
     const specPath = writeExtractionDir([
       { id: 'agent_one', backend: 'openai', mode: 'validated' },
@@ -639,7 +639,7 @@ describe('buildLiveAgent — multi-agent + multi-backend', () => {
       // ALLOWED: it builds (validated-on-native degrades, it does NOT fail-closed like native-on-pi).
       expect(live.agentIds).toEqual(['agent_one']);
       expect(
-        typeof live.buildNodeForAgent('agent_one', { tdb: FAKE_TDB, tenantId: S5_TENANT }),
+        typeof live.buildNodeForAgent('agent_one', { tdb: FAKE_TDB, tenantId: LIVE_TENANT }),
       ).toBe('function');
       // VISIBLE: the downgrade warning fired.
       const warned = spy.mock.calls.map((c) => String(c[0])).join('\n');
@@ -649,7 +649,7 @@ describe('buildLiveAgent — multi-agent + multi-backend', () => {
     }
   });
 
-  it('S5-TQ-2 pure: nativeValidatedDowngradeWarning fires ONLY for a native backend in validated mode', () => {
+  it('pure: nativeValidatedDowngradeWarning fires ONLY for a native backend in validated mode', () => {
     expect(nativeValidatedDowngradeWarning('a', 'openai', 'validated', true)).toMatch(/DOWNGRADED/);
     // native mode on a native backend → no downgrade.
     expect(nativeValidatedDowngradeWarning('a', 'openai', 'native', true)).toBeNull();
@@ -773,9 +773,9 @@ describe('buildLiveAgent — the GENERIC-branch input_context demand (boot fail-
     ]);
     const live = buildLiveAgent({ OPENAI_API_KEY: 'sk-x' }, specPath, spec);
     expect(live.agentIds).toEqual(['doc_agent']);
-    expect(typeof live.buildNodeForAgent('doc_agent', { tdb: FAKE_TDB, tenantId: S5_TENANT })).toBe(
-      'function',
-    );
+    expect(
+      typeof live.buildNodeForAgent('doc_agent', { tdb: FAKE_TDB, tenantId: LIVE_TENANT }),
+    ).toBe('function');
   });
 
   it('REJECTS a malformed input_context, naming the defect (shape-validated at boot)', () => {
@@ -867,7 +867,7 @@ describe('buildLiveAgent — the GENERIC-branch input_context demand (boot fail-
     const live = buildLiveAgent({ OPENAI_API_KEY: 'sk-test' }, EXPENSE_YAML, expenseSpec());
     expect(live.agentIds).toEqual(['expense_coder']);
     expect(
-      typeof live.buildNodeForAgent('expense_coder', { tdb: FAKE_TDB, tenantId: S5_TENANT }),
+      typeof live.buildNodeForAgent('expense_coder', { tdb: FAKE_TDB, tenantId: LIVE_TENANT }),
     ).toBe('function');
   });
 });

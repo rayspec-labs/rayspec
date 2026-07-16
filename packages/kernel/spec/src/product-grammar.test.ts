@@ -36,7 +36,7 @@ describe('product grammar shape pins', () => {
     );
   });
 
-  it('WorkflowStep carries exactly the expected fields (the S2 store fields are a DELIBERATE addition)', () => {
+  it('WorkflowStep carries exactly the expected fields (the store fields are a DELIBERATE addition)', () => {
     expect(Object.keys(WorkflowStep.shape).sort()).toEqual(
       [
         'depends_on',

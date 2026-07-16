@@ -184,7 +184,7 @@ describe('stt.transcribe_session node', () => {
     );
   });
 
-  it('media-prep is FAIL-SOFT but LOUD: a throwing hook is caught + LOGGED; transcripts persist + node completes (MP-1)', async () => {
+  it('media-prep is FAIL-SOFT but LOUD: a throwing hook is caught + LOGGED; transcripts persist + node completes', async () => {
     const db = new FakeHandlerDb();
     sealTracks(db);
     const prepped: string[] = [];
@@ -207,7 +207,7 @@ describe('stt.transcribe_session node', () => {
     expect(prepped).toEqual(['mic', 'system']); // called best-effort per sealed track
     // the transcripts persisted regardless (play-token separately stays not_ready_409).
     expect(db.rows('track_transcripts').map((r) => r.track)).toEqual(['mic', 'system']);
-    // MP-1: the swallow is NEVER silent — a loud structured line fires PER failed track.
+    // The swallow is NEVER silent — a loud structured line fires PER failed track.
     expect(logged).toHaveLength(2);
     const first = JSON.parse(logged[0] as string) as Record<string, unknown>;
     expect(first).toMatchObject({

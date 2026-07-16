@@ -7,7 +7,7 @@ import {
   recordPayloadHash,
 } from './canonical-json.js';
 
-/** `depth` nested arrays around a scalar (the HS-1 hostile shape: tiny bytes, deep recursion). */
+/** `depth` nested arrays around a scalar (the hostile shape: tiny bytes, deep recursion). */
 function nestedArrays(depth: number): unknown {
   let v: unknown = 1;
   for (let i = 0; i < depth; i += 1) v = [v];
@@ -33,7 +33,7 @@ describe('canonicalJson / recordPayloadHash', () => {
     expect(canonicalJsonByteLength({ s: 'é' })).toBe(Buffer.byteLength('{"s":"é"}', 'utf8'));
   });
 
-  it('HS-1: bounds nesting depth with the TYPED error — never a stack-overflow RangeError', () => {
+  it('bounds nesting depth with the TYPED error — never a stack-overflow RangeError', () => {
     // The hostile shape the finding names: ~3000 nested arrays, ~6KB — far under the byte cap.
     // Before the bound this blew the call stack INSIDE the size computation (RangeError → 500).
     expect(() => canonicalJson(nestedArrays(3000))).toThrow(CanonicalJsonDepthError);

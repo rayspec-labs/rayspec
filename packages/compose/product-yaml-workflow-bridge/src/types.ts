@@ -40,7 +40,7 @@ export interface ProductYamlWorkflowStep {
   retry?: {
     max_attempts?: number;
   };
-  // ── the S2 store-step DECLARATION fields — additive, loose (the parser is the
+  // ── the store-step DECLARATION fields — additive, loose (the parser is the
   // strict gate). The bridge walks them for neutrality and validates the type/use discipline; it
   // deliberately does NOT compile them into the WorkflowStepSpec (the store nodes re-read the
   // validated ProductSpec by workflow id + step id).

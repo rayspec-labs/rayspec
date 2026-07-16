@@ -2,9 +2,9 @@
  * Test-support: load the synthetic stream-backend deployment spec AND merge its extension PACK via the
  * REAL `loadExtensions` mechanism.
  *
- * Post-S4 the stream-backend `rayspec.yaml` is THIN — `version` + `metadata` + one `extensions[]`
+ * The stream-backend `rayspec.yaml` is THIN — `version` + `metadata` + one `extensions[]`
  * ref; the whole stream surface (stores + ingest/playback/mint handlers + routes) lives in a
- * `defineExtension` pack under `examples/stream-backend/packs/stream-pack`. So the S2 ingest + S3
+ * `defineExtension` pack under `examples/stream-backend/packs/stream-pack`. So the ingest +
  * playback acceptance tests load the MERGED spec through the EXACT mechanism a real deployment uses:
  *   1. parseSpec(thin YAML) → the deployment spec (just the `extensions[]` ref);
  *   2. loadExtensions(spec.extensions, …) → the pack's merged store/handler/api fragments + the
@@ -13,7 +13,7 @@
  *   4. loadHandlers(deploymentRoot, mergedSpec.handlers, loaded.importer) — the SAME path-jailed loader
  *      a deployment uses, with the multi-root importer redirecting the virtual paths to the pack files.
  *
- * This is the real acceptance: the S2/S3 stream surface is now CARRIED by the pack mechanism end-to-end
+ * This is the real acceptance: the stream surface is now CARRIED by the pack mechanism end-to-end
  * (the same surface, now via extensions[]). Used by stream-ingest.db.test.ts + stream-playback.db.test.ts.
  */
 import { readFileSync } from 'node:fs';
@@ -72,8 +72,8 @@ export async function loadStreamPack(): Promise<LoadedStreamPack> {
 
 /**
  * The INGEST-ONLY variant of the merged spec (drops the playback route + its handler ref) — used by
- * the S2 ingest acceptance so the boot completes without the playback-route media-token requirement.
- * Mirrors the pre-S4 `ingestOnlySpec` helper, now over the pack-merged spec.
+ * the ingest acceptance so the boot completes without the playback-route media-token requirement.
+ * Mirrors the earlier `ingestOnlySpec` helper, now over the pack-merged spec.
  */
 export function ingestOnly(merged: LoadedStreamPack): LoadedStreamPack {
   const spec: RaySpec = {

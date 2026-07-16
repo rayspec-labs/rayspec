@@ -20,8 +20,8 @@ describe('capability manifest', () => {
     expect(event?.idempotency).toBe('session_scoped');
   });
 
-  it('declares the S1 descriptor contract: the EXACT payload keys + the idempotency key field', () => {
-    // The compose-time CC-1 scope check and the per-trigger single-flight key derivation consume
+  it('declares the descriptor contract: the EXACT payload keys + the idempotency key field', () => {
+    // The compose-time scope check and the per-trigger single-flight key derivation consume
     // THESE fields (the shared TriggerEventDescriptor contract). The payload keys are coupled
     // fail-the-fix to the seam adapter's emitted payload in @rayspec/audio-workflow-bridge
     // (adapter.test.ts); the key field feeds the byte-frozen live key `session_id:<id>:finalized`.
@@ -43,7 +43,7 @@ describe('capability manifest', () => {
 
   it('contains ZERO product-specific vocabulary (product-neutral Tier B capability)', () => {
     const serialized = JSON.stringify(AUDIO_CAPABILITY_MANIFEST).toLowerCase();
-    for (const word of ['memovo', 'meeting', 'recording', 'transcription', 'deepgram']) {
+    for (const word of ['meeting', 'recording', 'transcription', 'deepgram']) {
       expect(serialized).not.toContain(word);
     }
   });

@@ -3,7 +3,7 @@
  * ride on top of the configured id pattern and hold EVEN for a hand-built / pathological config the
  * construction probes never rejected:
  *  - the ':' belt — ':' is the delimiter of every derived ref/idempotency key (keys.ts);
- *  - the reply-namespace belt (BELT-1) — a message id must NOT start with `REPLY_MESSAGE_ID_PREFIX`
+ *  - the reply-namespace belt — a message id must NOT start with `REPLY_MESSAGE_ID_PREFIX`
  *    ('reply~'), the reserved namespace of the DERIVED assistant reply id (reply.ts). The construction
  *    probe belt (config.ts `REPLY_NAMESPACE_PROBES`) is convenience only: an anchored override like
  *    `/^reply~[0-9]$/` passes EVERY probe yet admits 'reply~5', so the point-of-use belt is the
@@ -31,11 +31,11 @@ function handBuilt(messageIdPattern: RegExp): ResolvedConversationConfig {
   };
 }
 
-describe('validateMessageId — the reply-namespace point-of-use belt (BELT-1)', () => {
-  it('BELT-1: the anchored `/^reply~[0-9]$/` override PASSES every construction probe (the probe belt is provably incomplete) — the point-of-use belt is the guarantee', () => {
+describe('validateMessageId — the reply-namespace point-of-use belt', () => {
+  it('the anchored `/^reply~[0-9]$/` override PASSES every construction probe (the probe belt is provably incomplete) — the point-of-use belt is the guarantee', () => {
     // The construction belt ACCEPTS this pattern: it never matches any REPLY_NAMESPACE_PROBES
     // canary ('~','reply~x','a~b','~a','a~'), so resolveConversationConfig does NOT throw — this is
-    // the exact hole BELT-1 reported.
+    // the exact hole this belt closes.
     const resolved = resolveConversationConfig({ messageIdPattern: /^reply~[0-9]$/ });
     expect(resolved.messageIdPattern.test('reply~5')).toBe(true);
 
@@ -54,7 +54,7 @@ describe('validateMessageId — the reply-namespace point-of-use belt (BELT-1)',
     expect(res.error).toBe('message_id_invalid');
   });
 
-  it('BELT-1: the belt holds for a hand-built (resolver-bypassing) config admitting BOTH a bare id and its reply-namespaced form', () => {
+  it('the belt holds for a hand-built (resolver-bypassing) config admitting BOTH a bare id and its reply-namespaced form', () => {
     // A broad '~'-admitting pattern the resolver would have rejected at construction.
     const config = handBuilt(/^[a-z0-9~-]{1,64}$/);
 
@@ -105,7 +105,7 @@ describe('validateMessageId — the reply-namespace point-of-use belt (BELT-1)',
     expect(denied.ok).toBe(false);
   });
 
-  it("the existing ':' belt still fires at point-of-use (regression guard — untouched by BELT-1)", () => {
+  it("the existing ':' belt still fires at point-of-use (regression guard — untouched by the reply-namespace belt)", () => {
     // A hand-built pattern admitting ':' (the resolver would reject it) — the ':' belt rejects it.
     const config = handBuilt(/^[a-z0-9:~-]{1,64}$/);
     const res = validateMessageId(config, 'a:b');

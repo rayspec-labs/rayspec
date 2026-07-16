@@ -37,7 +37,7 @@ requires:
     - validation
 
 capabilities:
-  # The generic Tier-B submit-ingress capability (S3). `available` + runtime-backed ⇒ it MOUNTS
+  # The generic Tier-B submit-ingress capability. `available` + runtime-backed ⇒ it MOUNTS
   # (POST /records/{record_id}/submit) — the boot demands no product code for it.
   - id: record_input
     tier: B
@@ -179,7 +179,7 @@ workflows:
       event: record_submitted
       scope: record
     steps:
-      # S2 store_read — a bounded catalog lookup feeding both the coder and the persisted snapshot.
+      # store_read — a bounded catalog lookup feeding both the coder and the persisted snapshot.
       - id: read_policies
         type: store_read
         use: store.read
@@ -187,7 +187,7 @@ workflows:
         limit: 50
         outputs:
           catalog: expense_claim.policy_rows
-      # S5 single-turn extraction — codes the claim (deterministic in CI; live via extraction/).
+      # single-turn extraction — codes the claim (deterministic in CI; live via extraction/).
       - id: code
         type: agent
         use: agent.expense_coder
@@ -207,7 +207,7 @@ workflows:
         outputs:
           validation_result: validation.result
         on_error: fail
-      # S2 store_write — UPSERT on the declared conflict key (claim_ref). The raw claim fields come
+      # store_write — UPSERT on the declared conflict key (claim_ref). The raw claim fields come
       # from the trigger payload (`{ event: … }`); the coded output + the catalog snapshot are the
       # upstream artifacts.
       - id: persist

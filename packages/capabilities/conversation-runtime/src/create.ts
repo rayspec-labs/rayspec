@@ -13,14 +13,14 @@
  *     retry is always safe); present-and-equal = dedup; present-and-DIVERGENT = a LOUD 409
  *     `conversation_conflict` (the stored conversation is authoritative and unchanged — never a
  *     silent title swallow; the record different-payload-same-key law).
- *     TITLE SEMANTICS (DP-1, deliberate): the title is an OPTIONAL CREATION-TIME ASSERTION — the
+ *     TITLE SEMANTICS (deliberate): the title is an OPTIONAL CREATION-TIME ASSERTION — the
  *     exact file `{ sha256? }` role — NOT mutable display state. There is NO title-update path in
  *     v1 (no route can change a stored title; a rename surface is a later slice/consumer
  *     decision, not an accidental omission).
  *  3. FIRST PERSIST = ATOMIC upsert on the tenant-prefixed unique `conversation_ref` (db.upsert
  *     ONLY — never insert-and-recover; the C10 25P02 law). Two concurrent identical first-creates
  *     converge on one row/one ack.
- *  4. AUTHORITATIVE RE-READ (the record TQ-1 posture): a concurrent DIVERGENT racer that overwrote
+ *  4. AUTHORITATIVE RE-READ (the record re-read posture): a concurrent DIVERGENT racer that overwrote
  *     the head between our upsert and the re-read surfaces as a title mismatch → the loud 409
  *     (this request's title did not win). The guard MIRRORS the found-path (C10-1): only a
  *     request that ASSERTED a title can lose — a BARE create asserted nothing, so a titled
@@ -116,7 +116,7 @@ export async function createConversation(
     }
     return ok({
       conversation_id: conversationId,
-      // DP-3: ECHO the stored head's state — an ack never fabricates. S1 only ever writes 'open',
+      // ECHO the stored head's state — an ack never fabricates. Only 'open' is ever written,
       // so the cast is a seam, not a hole; a later state-bearing slice inherits the echo for free.
       state: String(found.state) as ConversationState,
       deduped: true,
@@ -168,7 +168,7 @@ export async function createConversation(
 
   return ok({
     conversation_id: conversationId,
-    // Echo the re-read row's state (DP-3 — every v1 creator writes 'open', so this is our own
+    // Echo the re-read row's state (every v1 creator writes 'open', so this is our own
     // write's value; the echo keeps the no-fabrication law uniform across all three acks).
     state: String(row.state) as ConversationState,
     deduped: false,

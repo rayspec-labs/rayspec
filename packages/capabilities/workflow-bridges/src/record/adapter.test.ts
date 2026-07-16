@@ -1,10 +1,10 @@
 /**
  * The canonical seam mapping — fail-the-fix couplings:
- *  - the envelope keys equal the MANIFEST descriptor's payload_keys (the CC-1 contract) AND are
+ *  - the envelope keys equal the MANIFEST descriptor's payload_keys (the contract) AND are
  *    exactly what the adapter stamps over the payload;
  *  - business fields merge TOP-LEVEL (the store_write `{event:}` reachability law);
  *  - the ENVELOPE WINS a key collision (defense-in-depth under the route's reserved-key rejection);
- *  - the event type is the S1 DEFAULT join with NO alias-table entry.
+ *  - the event type is the DEFAULT join with NO alias-table entry.
  */
 
 import type { SubmittedRecordEvent } from '@rayspec/record-runtime';
@@ -62,7 +62,7 @@ describe('submittedRecordEventToWorkflowInput', () => {
     });
   });
 
-  it('the envelope keys ARE the manifest descriptor payload_keys (the CC-1 coupling) incl. the key field', () => {
+  it('the envelope keys ARE the manifest descriptor payload_keys (the coupling) incl. the key field', () => {
     const descriptor = RECORD_CAPABILITY_MANIFEST.capabilities[0]?.events[0];
     expect(descriptor?.contract).toBe(RECORD_SUBMITTED_EVENT_TYPE);
     expect([...(descriptor?.payload_keys ?? [])]).toEqual([...RECORD_SUBMITTED_ENVELOPE_KEYS]);
