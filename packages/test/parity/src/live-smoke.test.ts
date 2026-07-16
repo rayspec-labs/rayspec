@@ -1,18 +1,21 @@
 /**
- * LIVE cross-backend smoke tests — SELF-SKIPPING when credentials are absent.
+ * LIVE cross-backend smoke tests — SELF-SKIPPING unless explicitly opted in (see below).
  *
  * Runs the REAL adapters live (no DB; in-memory journal via the harness) and asserts the live
  * RunResult satisfies the SAME shape parity the committed fixtures encode — so a real SDK change
  * that breaks the neutral shape fails HERE locally (and re-recording the fixture is required).
  *
- * The deterministic CI lanes pass NO provider creds and set no RAYSPEC_REQUIRE_LIVE_TESTS, so every
- * case below self-skips there; the deterministic fixture suite (parity.test.ts) is the standing gate.
- * The live lane sets the provider creds AND RAYSPEC_REQUIRE_LIVE_TESTS=true (both forwarded through
- * turbo's `test.env` allowlist), so these suites RUN there and a missing credential fails LOUDLY.
+ * A live block runs ONLY when the operator EXPLICITLY opts in — RAYSPEC_REQUIRE_LIVE_TESTS=true — AND
+ * the backend credential is present. Credential presence is NECESSARY but NOT SUFFICIENT: without the
+ * opt-in every block below self-skips, so a bare `pnpm gate:parity` (or `pnpm test`) can never burn a
+ * real API call / subscription just because a developer happens to have OPENAI_API_KEY or
+ * ~/.codex/auth.json in their environment. The deterministic fixture suite (parity.test.ts) is the
+ * standing gate; the live lane sets the provider creds AND RAYSPEC_REQUIRE_LIVE_TESTS=true (both
+ * forwarded through turbo's `test.env` allowlist), so these suites RUN there and a missing credential
+ * fails LOUDLY.
  *
- * A live test with no cred self-skips (never silently pass blind) — UNLESS the run declares which
- * backends it requires: with RAYSPEC_REQUIRE_LIVE_TESTS=true a missing/blind backend is a hard fail,
- * so a live run can never report success while exercising zero providers (see the guard below).
+ * When the opt-in IS set, the guard below additionally turns a missing/blind REQUIRED backend into a
+ * hard fail — a live run can never report success while exercising zero providers.
  */
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,6 +29,7 @@ import { RunResult } from '@rayspec/core';
 import { describe, expect, it } from 'vitest';
 import { captureRun } from './harness.js';
 import { runResultShape, scenarioShape } from './index.js';
+import { liveTestEnabled } from './live-gate.js';
 import { scenariosForModel } from './scenarios.js';
 
 const openaiKey = process.env.OPENAI_API_KEY;
@@ -50,6 +54,11 @@ const LIVE_CRED_PRESENT: Record<string, boolean> = {
   codex: hasCodex,
 };
 
+// The EXPLICIT opt-in for any live-provider call. Credential presence is necessary but NOT sufficient
+// (see the file header): every live block below additionally requires this, so a bare `pnpm gate:parity`
+// with a provider cred in the ambient env never silently spends. The CI live lane sets it.
+const liveOptIn = process.env.RAYSPEC_REQUIRE_LIVE_TESTS === 'true';
+
 // A live run must never report success while exercising zero providers. When RAYSPEC_REQUIRE_LIVE_TESTS
 // is set, a missing/blind backend is a HARD FAIL:
 //   • RAYSPEC_LIVE_BACKENDS names the backends this run MUST exercise (comma-separated). An unknown
@@ -58,7 +67,7 @@ const LIVE_CRED_PRESENT: Record<string, boolean> = {
 //     and the not-required blocks legitimately self-skip.)
 //   • With RAYSPEC_LIVE_BACKENDS empty (e.g. a bare local `pnpm test`), fall back to the coarse guard:
 //     fail only when NOT ONE cred is present, so partial local creds still skip the missing blocks.
-if (process.env.RAYSPEC_REQUIRE_LIVE_TESTS === 'true') {
+if (liveOptIn) {
   const required = (process.env.RAYSPEC_LIVE_BACKENDS ?? '')
     .split(',')
     .map((name) => name.trim())
@@ -168,19 +177,29 @@ async function smokeBackend(
   }
 }
 
-describe.skipIf(!hasOpenAI)('LIVE: OpenAI shape parity (OPENAI_API_KEY present)', () => {
-  it('runs all scenarios live + satisfies the shape invariants', async () => {
-    await smokeBackend(new OpenAIAdapter({ apiKey: openaiKey as string }), openaiModel, 'api-key');
-  });
-});
+describe.skipIf(!liveTestEnabled(liveOptIn, hasOpenAI))(
+  'LIVE: OpenAI shape parity (OPENAI_API_KEY present)',
+  () => {
+    it('runs all scenarios live + satisfies the shape invariants', async () => {
+      await smokeBackend(
+        new OpenAIAdapter({ apiKey: openaiKey as string }),
+        openaiModel,
+        'api-key',
+      );
+    });
+  },
+);
 
-describe.skipIf(!hasOpenAI)('LIVE: Pi shape parity (OpenAI key only — compliance)', () => {
-  it('runs all scenarios live + satisfies the shape invariants', async () => {
-    await smokeBackend(new PiAdapter({ apiKey: openaiKey as string }), openaiModel, 'api-key');
-  });
-});
+describe.skipIf(!liveTestEnabled(liveOptIn, hasOpenAI))(
+  'LIVE: Pi shape parity (OpenAI key only — compliance)',
+  () => {
+    it('runs all scenarios live + satisfies the shape invariants', async () => {
+      await smokeBackend(new PiAdapter({ apiKey: openaiKey as string }), openaiModel, 'api-key');
+    });
+  },
+);
 
-describe.skipIf(!hasAnthropic)(
+describe.skipIf(!liveTestEnabled(liveOptIn, hasAnthropic))(
   'LIVE: Anthropic shape parity (CLAUDE_CODE_OAUTH_TOKEN present)',
   () => {
     it('runs all scenarios live (subscription official-harness) + satisfies the shape invariants', async () => {
@@ -194,28 +213,29 @@ describe.skipIf(!hasAnthropic)(
   },
 );
 
-describe.skipIf(!hasCodex)('LIVE: Codex shape parity (ChatGPT OAuth subscription)', () => {
-  it('runs all scenarios live (subscription) + satisfies the shape invariants; auth=codex-subscription-oauth', async () => {
-    const codex = new CodexAdapter();
-    // The subscription-ONLY auth gate: a present auth.json must be the OAuth form (else self-skip-ish).
-    const auth = await codex.resolveAuth();
-    if (auth !== 'codex-subscription-oauth') {
-      // An api-key auth.json is NOT the subscription path (the api-key OpenAI adapter owns that). When a
-      // run REQUIRES live backends, a codex auth.json that is not the subscription form is a HARD FAIL —
-      // otherwise this block would pass green with zero assertions. A local dev with an api-key auth.json
-      // still gets a benign skip when live tests are not required.
-      if (process.env.RAYSPEC_REQUIRE_LIVE_TESTS === 'true') {
+describe.skipIf(!liveTestEnabled(liveOptIn, hasCodex))(
+  'LIVE: Codex shape parity (ChatGPT OAuth subscription)',
+  () => {
+    it('runs all scenarios live (subscription) + satisfies the shape invariants; auth=codex-subscription-oauth', async () => {
+      const codex = new CodexAdapter();
+      // The subscription-ONLY auth gate: a present auth.json must be the OAuth form (else self-skip-ish).
+      const auth = await codex.resolveAuth();
+      if (auth !== 'codex-subscription-oauth') {
+        // This block runs ONLY when opted in — the describe.skipIf above gates on
+        // liveTestEnabled(liveOptIn, hasCodex) — so a codex auth.json that is not the subscription form
+        // is a HARD FAIL: the live smoke asserts ONLY the subscription path (the api-key OpenAI adapter
+        // owns the api-key path), and passing here with zero assertions would be a false green. A local
+        // dev with an api-key auth.json gets a benign skip from the describe.skipIf, not here.
         throw new Error(
           `packages/test/parity/src/live-smoke.test.ts: codex auth resolved to '${auth}', not 'codex-subscription-oauth' — the live smoke asserts ONLY the subscription path; refusing to pass with zero assertions while RAYSPEC_REQUIRE_LIVE_TESTS is set.`,
         );
       }
-      return;
-    }
-    await smokeBackend(codex, codexModel, 'codex-subscription-oauth');
-  });
-});
+      await smokeBackend(codex, codexModel, 'codex-subscription-oauth');
+    });
+  },
+);
 
-describe.skipIf(!hasOpenAI || !hasAnthropic)(
+describe.skipIf(!liveTestEnabled(liveOptIn, hasOpenAI && hasAnthropic))(
   'LIVE: the SAME spec yields the SAME RunResult key+type shape on all three live backends',
   () => {
     it('openai == pi == anthropic on RunResult keys + per-key types (live, multi-turn-tool)', async () => {
