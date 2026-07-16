@@ -29,6 +29,7 @@
     "gate:sbom-fresh": "node scripts/check-sbom-fresh.mjs",
     "gen:dependency-sbom": "node scripts/gen-dependency-sbom.mjs",
     "check:deploy-entrypoint": "node scripts/check-deploy-entrypoint-imports.mjs",
+    "test:gate-portability": "node scripts/check-no-pack-imports.spacepath.test.mjs",
     "gate:migrations": "pnpm --filter @rayspec/db gate:migrations",
     "gate:shadow-dryrun": "pnpm --filter @rayspec/db gate:shadow-dryrun",
     "gate:migrate-clean": "pnpm --filter @rayspec/db gate:migrate-clean",

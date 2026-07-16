@@ -213,16 +213,18 @@ for (const file of pkgJsonFiles) {
 }
 
 // ── fail-closed: a scan that read NOTHING must never certify the seam as clean ────────────────────
-// The open-core platform ALWAYS has code under packages/scripts/examples AND package.json files under
-// packages/examples. If BOTH scans came up empty, the repo root did not resolve to the real tree (e.g.
-// a checkout path this script could not read) and the gate scanned zero files — so its "no violations"
-// verdict is meaningless. Exit NON-ZERO rather than PASS on an empty scan; this is the fail-OPEN hole
-// that the fileURLToPath fix + this guard together close.
-if (platformScanned === 0 && pkgJsonFiles.length === 0) {
+// The gate's PRIMARY job is clause (a): the static products/sdks seam-import scan over
+// packages/scripts/examples (it increments platformScanned). The open-core platform ALWAYS has code
+// there, so platformScanned is many files in a healthy checkout. ZERO means the repo root did not
+// resolve to the real tree (e.g. a checkout path this script could not read) and clause (a) validated
+// nothing — so a "no violations" verdict is meaningless, regardless of whether a stray package.json was
+// still found elsewhere. Fail CLOSED on the primary scan alone; this is the fail-OPEN hole that the
+// fileURLToPath fix + this guard together close.
+if (platformScanned === 0) {
   console.error(
-    'no-pack gate FAILED: scanned 0 platform source files and 0 package.json files. The repo root ' +
-      `('${repoRoot}') resolved to nothing scannable, so a PASS would be meaningless. Refusing to ` +
-      'certify the platform/product seam on an empty scan (fail-closed) — check the checkout path.',
+    'no-pack gate FAILED: scanned 0 platform source files under packages/scripts/examples. The repo ' +
+      `root ('${repoRoot}') resolved to nothing scannable, so a PASS would be meaningless. Refusing ` +
+      'to certify the platform/product seam on an empty scan (fail-closed) — check the checkout path.',
   );
   process.exit(1);
 }
