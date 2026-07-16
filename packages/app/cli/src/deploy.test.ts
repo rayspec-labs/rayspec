@@ -121,6 +121,15 @@ describe('rayspec deploy — structural guards (stays on the sanctioned path)', 
   it('seals the sanctioned door after boot', () => {
     expect(code).toMatch(/sealProductStores\s*\(\s*\)/);
   });
+
+  it('binds the RESOLVED host (hostname: config.host) and logs the real bind, never a hard-coded loopback', () => {
+    // The loopback-default wiring must reach the listener: `rayspec deploy` passes `hostname: config.host`
+    // to serve() and logs the ACTUAL bound address (bootBaseUrl(info.address)). A boot test can't catch a
+    // dropped hostname — an all-interfaces bind also answers on 127.0.0.1 — so guard the wiring at the
+    // source, in parity with the rayspec-serve entrypoint's guard in @rayspec/server.
+    expect(code).toMatch(/hostname:\s*config\.host/);
+    expect(code).toMatch(/bootBaseUrl\(\s*info\.address/);
+  });
 });
 
 /**

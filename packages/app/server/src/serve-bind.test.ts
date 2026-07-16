@@ -4,9 +4,15 @@
  * The server assembles the LOCAL / pre-external-hardening platform, so it must bind LOOPBACK by default
  * and reach another interface ONLY on an explicit RAYSPEC_HOST opt-in. And the banner must reflect the
  * ACTUAL bound address (`bootBaseUrl(info.address, …)`), never a hard-coded 127.0.0.1 that would lie
- * about a non-loopback bind. Both are pure (no DB / no port bind) so they run deterministically here;
- * the real `serve({ hostname })` pass-through is exercised by the boot path in CI.
+ * about a non-loopback bind. The config resolution + URL formatting below are pure units; the actual
+ * `serve({ hostname: config.host })` wiring at the entrypoint is guarded by a source assertion at the
+ * foot of this file — a boot test cannot catch a dropped hostname, because an all-interfaces bind
+ * (0.0.0.0/::) also answers on 127.0.0.1, so the boot suite would stay green if the pass-through
+ * regressed to the all-interfaces default.
  */
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { bootBaseUrl } from './banner.js';
 import { DEFAULT_HOST, loadServerConfig } from './composition-root.js';
@@ -44,5 +50,27 @@ describe('bootBaseUrl — the banner reflects the ACTUAL bound address', () => {
   it('brackets an IPv6 literal so the URL stays well-formed', () => {
     expect(bootBaseUrl('::1', 8080)).toBe('http://[::1]:8080');
     expect(bootBaseUrl('::', 8080)).toBe('http://[::]:8080');
+  });
+});
+
+// A source-level guard WITH TEETH for the actual serve() wiring. The units above cover host RESOLUTION
+// and URL FORMATTING, but neither proves the resolved host reaches the listener. This asserts, against
+// the entrypoint source, that rayspec-serve passes `hostname: config.host` to serve() (so the loopback
+// default is not silently the all-interfaces default) and logs the ACTUAL bound address
+// (bootBaseUrl(info.address, …)) rather than a hard-coded loopback that would misreport the bind.
+// Reverting either — dropping `hostname` or restoring the `http://127.0.0.1:${info.port}` banner —
+// REDs a case here, where a boot test cannot (an all-interfaces bind also answers on 127.0.0.1). The
+// cli deploy entrypoint's identical wiring is guarded the same way in packages/app/cli/src/deploy.test.ts.
+describe('serve.ts — passes the resolved host to the listener and logs the real bind', () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'serve.ts'), 'utf8');
+  // Strip comments so the assertions read the CODE, not prose that merely names the wiring.
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+
+  it('binds the RESOLVED host (hostname: config.host)', () => {
+    expect(code).toMatch(/hostname:\s*config\.host/);
+  });
+
+  it('logs the ACTUAL bound address via bootBaseUrl(info.address, …)', () => {
+    expect(code).toMatch(/bootBaseUrl\(\s*info\.address/);
   });
 });
