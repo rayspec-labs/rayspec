@@ -113,9 +113,11 @@ artifact is unaffected by the quote check. The check is **fail-closed** on a mis
 or malformed span-text carrier (no text ⇒ unsupported, never a silent pass). How an
 unsupported claim is then handled follows
 the declared `grounding.on_unquoted_claim` mode — `fail` | `prune` | `drop` |
-`ignore`, **default `ignore`** (advisory finding only). **Known limitation:** an
-**empty** quote string (`''`) is not verified — a zero-length quote skips the check
-(a declared-but-empty quote is treated as "no quote to check", not a failure).
+`ignore`, **default `ignore`** (advisory finding only). A member that declares a
+`quote_field` but carries **no usable quote** — absent, non-string, or an **empty**
+string (`''`) — is itself an **unquoted claim**: there is nothing to verify against a
+cited span, so it takes the same `on_unquoted_claim` consequence (a zero-length quote
+never silently skips the check).
 
 ## The complete worked example
 
