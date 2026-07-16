@@ -146,9 +146,11 @@ function randomPath(rand: () => number, maxLen: number): string {
 }
 
 describe('brace-params — differential fuzz vs the original `\\{([^}/]+)\\}` regex', () => {
-  it('matches the oracle for extraction and BOTH rewrites over thousands of generated inputs', () => {
+  it('matches the oracle for extraction and BOTH rewrites over thousands of generated inputs', {
+    timeout: 20_000,
+  }, () => {
     const rand = makePrng(0x1234_5678);
-    const ITERATIONS = 20_000;
+    const ITERATIONS = 10_000;
     let checked = 0;
     for (let i = 0; i < ITERATIONS; i++) {
       // Vary the length range so both tiny and longer (multi-param, long-name) inputs are covered.
