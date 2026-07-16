@@ -238,12 +238,15 @@ export function applyGroundingPolicy(
       const stringEvidence = member.rawEvidence.filter((e): e is string => typeof e === 'string');
       prunedCitations += member.rawEvidence.length - stringEvidence.length; // non-string = invalid
       // A verbatim quote to verify iff this artifact declares a quote_field AND the member carries a
-      // non-empty string value for it. When a quote_field IS declared but the member carries no such
-      // value (absent, non-string, or empty), the member is itself an UNQUOTED CLAIM: there is nothing
-      // to verify against a span, so it takes the on_unquoted_claim consequence directly (never a
-      // silent pass — an empty quote must not slip past a declared quote_field).
+      // non-blank string value for it. When a quote_field IS declared but the member carries no such
+      // value (absent, non-string, empty, or WHITESPACE-ONLY), the member is itself an UNQUOTED CLAIM:
+      // a blank quote has no word tokens to verify against a span (the checker would classify it
+      // unsupported anyway), so it takes the on_unquoted_claim consequence directly via the precise
+      // "absent/blank" classification below — never a silent pass, and never the misleading
+      // "not a verbatim subset" wording that only fits a genuinely-present-but-unmatched quote.
       const rawQuote = quoteField ? member.payload[quoteField] : undefined;
-      const quote = typeof rawQuote === 'string' && rawQuote.length > 0 ? rawQuote : undefined;
+      const quote =
+        typeof rawQuote === 'string' && rawQuote.trim().length > 0 ? rawQuote : undefined;
       const missingQuote = quoteField !== undefined && quote === undefined;
       // The Tier-B mechanical checker: out-of-set citations are reported + separated (never repaired);
       // when a quote is present it ALSO verifies the quote against the cited spans' text (per-span).
@@ -270,7 +273,7 @@ export function applyGroundingPolicy(
           throw new MaterializeError(
             `artifact kind '${artifact.kind}': the declared quote_field '${quoteField}' ` +
               (missingQuote
-                ? 'is absent, empty, or not a string on a member (on_unquoted_claim: fail).'
+                ? 'is absent, empty, blank, or not a string on a member (on_unquoted_claim: fail).'
                 : 'value is not a verbatim token-run subset of any cited source span (on_unquoted_claim: fail).'),
           );
         }

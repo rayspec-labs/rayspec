@@ -37,6 +37,7 @@ import {
 } from '@rayspec/auth-core';
 import { isUniqueViolation } from '@rayspec/db';
 import type { AppDeps, AppEnv } from '../app-context.js';
+import { readBoundedJson } from '../http/bounded-body.js';
 import { requireAuth, requirePermission, resolveTenant } from '../http/middleware.js';
 
 export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
@@ -44,7 +45,7 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
   app.post('/v1/orgs', requireAuth(), requireBearerForMutation(), async (c) => {
     const principal = c.get('principal');
     if (!principal?.userId) throw forbidden();
-    const body = CreateOrgRequest.parse(await c.req.json());
+    const body = CreateOrgRequest.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
     const slug = body.slug
       ? body.slug.toLowerCase()
       : await deps.orgStore.deriveUniqueSlug(body.name);
@@ -146,7 +147,9 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
       const orgId = c.get('tenantId');
       if (!orgId) throw new ApiError('NOT_FOUND', 'Not found.');
       const targetUserId = c.req.param('userId');
-      const body = ChangeMemberRoleRequest.parse(await c.req.json());
+      const body = ChangeMemberRoleRequest.parse(
+        await readBoundedJson(c, deps.maxJsonBodyBytes, {}),
+      );
       const outcome = await deps.orgStore.setRole(orgId, targetUserId, body.role);
       if (outcome === 'not_found') throw new ApiError('NOT_FOUND', 'Not found.');
       if (outcome === 'last_owner') {
@@ -210,7 +213,7 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
       const principal = c.get('principal');
       const orgId = c.get('tenantId');
       if (!orgId || !principal?.userId) throw forbidden();
-      const body = AddOrgMemberRequest.parse(await c.req.json());
+      const body = AddOrgMemberRequest.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
       let email: string;
       try {
         email = normalizeEmail(body.email);
@@ -309,7 +312,13 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
       const principal = c.get('principal');
       const orgId = c.get('tenantId');
       if (!orgId || !principal?.userId) throw forbidden();
-      const rawBody = await c.req.json();
+      // Fallback `undefined` (NOT `{}`): an empty or unparseable body must be a 400 VALIDATION_ERROR,
+      // not a silent scopeless mint. `readBoundedJson` returns the fallback for an empty OR malformed
+      // body, so a `{}` fallback would parse to `{ scopes: [] }` and mint a real (dead) scopeless key
+      // on no input at all. `undefined` makes `MintApiKeyRequest.parse` reject it — the same 400 the
+      // sibling create/role/member routes return for a missing required body. An over-cap body still
+      // 413s first, and an EXPLICIT `{}` body is a deliberate scopeless mint and stays valid.
+      const rawBody = await readBoundedJson(c, deps.maxJsonBodyBytes, undefined);
       const body = MintApiKeyRequest.parse(rawBody);
 
       // Idempotency-Key: TENANT-SCOPED, EXACTLY-ONCE mint via reserve-before-mint (the run-core

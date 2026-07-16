@@ -62,6 +62,7 @@ import {
   assembleOptsFromEnv,
   assembleServer,
   bootBanner,
+  bootBaseUrl,
   loadServerConfig,
   type PlannedMigration,
   type ServerConfig,
@@ -366,18 +367,23 @@ async function main(): Promise<void> {
   const config = loadServerConfig();
   const server = await assembleServer(config, buildAssembleOpts(config, updateMigrations));
 
-  const httpServer = serve({ fetch: server.app.fetch, port: config.port }, (info) => {
-    const base = `http://127.0.0.1:${info.port}`;
-    console.log(bootBanner(server, base));
-    console.log(`  Spec:         ${resolve(specPath)}`);
-    console.log(
-      `  Dev database: ${devDbName}   ` +
-        (isUpdate
-          ? '(EXISTING — reviewed delta applied in place; data preserved)'
-          : '(fresh; migration-chain bootstrapped; NOT public)'),
-    );
-    console.log(`  Now smoke it: BASE=${base} bash <path to the backend's own smoke test>.sh\n`);
-  });
+  const httpServer = serve(
+    { fetch: server.app.fetch, hostname: config.host, port: config.port },
+    (info) => {
+      // Log the ACTUAL bound address (info.address), never a hard-coded loopback — a non-loopback
+      // RAYSPEC_HOST bind must be visible in the banner rather than masked behind a false 127.0.0.1.
+      const base = bootBaseUrl(info.address, info.port);
+      console.log(bootBanner(server, base));
+      console.log(`  Spec:         ${resolve(specPath)}`);
+      console.log(
+        `  Dev database: ${devDbName}   ` +
+          (isUpdate
+            ? '(EXISTING — reviewed delta applied in place; data preserved)'
+            : '(fresh; migration-chain bootstrapped; NOT public)'),
+      );
+      console.log(`  Now smoke it: BASE=${base} bash <path to the backend's own smoke test>.sh\n`);
+    },
+  );
 
   // Graceful shutdown: stop accepting connections + drain the server's pools so a Ctrl-C releases
   // everything cleanly.

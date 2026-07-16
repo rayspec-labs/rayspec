@@ -20,7 +20,7 @@ import {
 } from '@rayspec/auth-core';
 import type { Context } from 'hono';
 import type { AppDeps, AppEnv } from '../app-context.js';
-import { readBoundedRequestBytes } from '../http/bounded-body.js';
+import { readBoundedJson, readBoundedRequestBytes } from '../http/bounded-body.js';
 import { clientIpFromContext } from '../http/client-ip.js';
 import {
   clearRefreshCookie,
@@ -114,7 +114,10 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
     enforceRate(deps, 'refresh', ip);
 
     const cookieSecret = readRefreshCookie(c.req.header('cookie'));
-    const body = RefreshRequest.parse(await safeJson(c));
+    // Drain the body under the configured byte cap (413 for an over-cap body BEFORE any work). The
+    // route stays lenient to an ABSENT body (cookie-only refresh): an empty/unparseable body reads as
+    // `{}` exactly as before, so a cookie-only refresh is unaffected — only the byte total is bounded.
+    const body = RefreshRequest.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
     const bodySecret = body.refreshToken;
 
     // If the secret came from the COOKIE, enforce CSRF (Origin/Sec-Fetch-Site). A body secret is
@@ -260,17 +263,6 @@ function setRefresh(c: any, secret: string): void {
 // biome-ignore lint/suspicious/noExplicitAny: Hono context typing varies per route registration.
 function clearRefresh(c: any): void {
   c.header('Set-Cookie', clearRefreshCookie(), { append: true });
-}
-
-/** Parse a JSON body that may be absent (refresh via cookie sends no body). */
-// biome-ignore lint/suspicious/noExplicitAny: Hono context.
-async function safeJson(c: any): Promise<unknown> {
-  try {
-    const text = await c.req.text();
-    return text ? JSON.parse(text) : {};
-  } catch {
-    return {};
-  }
 }
 
 function roleOf(role: string): 'owner' | 'admin' | 'member' {

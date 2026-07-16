@@ -369,6 +369,48 @@ describe('Idempotency-Key on mint (tenant-scoped)', () => {
   });
 });
 
+describe('api-key mint: an empty or malformed body is rejected without minting', () => {
+  it('an empty body and a malformed-JSON body each → 400, and NO scopeless key is minted', async () => {
+    const t0 = await registerUser('mint-badbody@example.com');
+    const orgId = await createOrg(t0, 'MintBadBodyCo');
+    const orgToken = await switchOrg(t0, orgId);
+    const bearer = { authorization: `Bearer ${orgToken}` };
+
+    // Baseline: the org has no api-keys yet.
+    const before = await (
+      await jsonRequest(h.app, 'GET', `/v1/orgs/${orgId}/api-keys`, { headers: bearer })
+    ).json();
+    expect(before.keys.length).toBe(0);
+
+    // (a) EMPTY body (no body sent at all) → the bounded reader returns the fallback. With the
+    // `undefined` fallback this is `MintApiKeyRequest.parse(undefined)` → ZodError → 400. (With the old
+    // `{}` fallback it parsed to `{ scopes: [] }` and minted a scopeless key with a 201 — so this
+    // assertion goes RED without the fix.)
+    const empty = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/api-keys`, {
+      headers: bearer,
+    });
+    expect(empty.status).toBe(400);
+    expect((await empty.json()).error.code).toBe('VALIDATION_ERROR');
+
+    // (b) MALFORMED JSON body (non-empty, under the cap, unparseable) → JSON.parse throws → the SAME
+    // fallback path → 400. Sent as a RAW body: `jsonRequest` always JSON-stringifies its `body`, so it
+    // cannot express invalid JSON — go straight to `app.request` with an invalid JSON string.
+    const malformed = await h.app.request(`/v1/orgs/${orgId}/api-keys`, {
+      method: 'POST',
+      headers: { ...bearer, 'content-type': 'application/json' },
+      body: '{ this is not valid json',
+    });
+    expect(malformed.status).toBe(400);
+    expect((await malformed.json()).error.code).toBe('VALIDATION_ERROR');
+
+    // No side effect on either bad input: the list is still empty (no dead scopeless key was created).
+    const after = await (
+      await jsonRequest(h.app, 'GET', `/v1/orgs/${orgId}/api-keys`, { headers: bearer })
+    ).json();
+    expect(after.keys.length).toBe(0);
+  });
+});
+
 describe('CSRF: a cookie-only request to a mutating endpoint is rejected', () => {
   it('POST /v1/orgs with NO Bearer (cookie principal only) → 403', async () => {
     // Register to get a cookie session, then attempt to create an org with ONLY the cookie.
@@ -961,5 +1003,63 @@ describe('OrgStore.addMember — atomicity + role invariants (store-level, fail-
     const second = await h.deps.orgStore.addMember(orgId, targetId);
     expect(second).toEqual({ role: 'member', activated: false });
     expect(await activeCount(orgId, targetId)).toBe(1);
+  });
+});
+
+describe('request-body byte cap (413 before any side effect)', () => {
+  it('rejects an over-cap body on org-create / role-change / add-member / api-key mint with a 413', async () => {
+    // A moderate cap: the auth/org SETUP bodies fit under it (so a real signer issues the tokens), then
+    // each mutating route gets an over-cap body → 413 BEFORE any parse / DB write. A separate harness
+    // (its own signer) is required because the tokens must validate against the SAME signer.
+    const capped = await createHarness({
+      schema: 'rayspec_test_apiauth_orgs_bodycap',
+      maxJsonBodyBytes: 256,
+    });
+    try {
+      const bearer = (t: string): Record<string, string> => ({ authorization: `Bearer ${t}` });
+      const reg = await jsonRequest(capped.app, 'POST', '/v1/auth/register', {
+        body: { email: 'capowner@example.com', password: 'a-sufficiently-long-password' },
+      });
+      expect(reg.status).toBe(201);
+      const token = (await reg.json()).accessToken as string;
+      const orgRes = await jsonRequest(capped.app, 'POST', '/v1/orgs', {
+        body: { name: 'CapOrg' },
+        headers: bearer(token),
+      });
+      expect(orgRes.status).toBe(201);
+      const orgId = (await orgRes.json()).id as string;
+      const switchRes = await jsonRequest(capped.app, 'POST', `/v1/orgs/${orgId}/switch`, {
+        headers: bearer(token),
+      });
+      expect(switchRes.status).toBe(200);
+      const orgToken = (await switchRes.json()).accessToken as string;
+
+      const big = 'A'.repeat(600); // pushes each body well over the 256-byte cap
+      const targetUserId = '00000000-0000-4000-8000-0000000000ff';
+
+      const overCap: Array<[string, string, Record<string, string>, unknown]> = [
+        ['POST', '/v1/orgs', bearer(token), { name: big }],
+        [
+          'POST',
+          `/v1/orgs/${orgId}/members/${targetUserId}/role`,
+          bearer(orgToken),
+          { role: 'admin', pad: big },
+        ],
+        ['POST', `/v1/orgs/${orgId}/members`, bearer(orgToken), { email: `${big}@example.com` }],
+        [
+          'POST',
+          `/v1/orgs/${orgId}/api-keys`,
+          bearer(orgToken),
+          { scopes: ['agent:run'], pad: big },
+        ],
+      ];
+      for (const [method, path, headers, body] of overCap) {
+        const res = await jsonRequest(capped.app, method, path, { body, headers });
+        expect(res.status).toBe(413);
+        expect((await res.json()).error.code).toBe('PAYLOAD_TOO_LARGE');
+      }
+    } finally {
+      await capped.close();
+    }
   });
 });

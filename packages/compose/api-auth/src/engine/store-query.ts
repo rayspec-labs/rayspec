@@ -89,6 +89,17 @@ const SEARCH_KEY = 'search';
 const CONTAINS_SUFFIX = '__contains';
 
 /**
+ * The maximum length of a `?search=` / `?<col>__contains=` term. A caller-supplied substring feeds an
+ * `ILIKE '%term%'` scan, so an unbounded term is a needless work/DoS lever (a multi-megabyte term makes
+ * every row's pattern-match arbitrarily expensive) — bound it, mirroring the `limit`/`__in` caps. The
+ * measure is Unicode CODE POINTS (`[...term].length`, which iterates by code point so a surrogate pair
+ * counts as one), not UTF-16 units (`term.length`) or bytes: "256 characters" then means what a caller
+ * intuitively sees, and a term of multibyte characters (CJK / emoji) is bounded by the same visible
+ * count as an ASCII one rather than being throttled ~2–4× earlier on its byte/UTF-16 length.
+ */
+const MAX_SEARCH_TERM = 256;
+
+/**
  * Escape a user term's LIKE metacharacters so a substring search matches them LITERALLY. Backslash-
  * escapes `%`, `_`, and the backslash escape char itself; the fragment then bracket-wraps the ESCAPED
  * term with the substring wildcards (`%…%`) and pairs it with an explicit `ESCAPE '\'` clause — so the
@@ -362,6 +373,9 @@ export function buildListQuery(
         if (rawValue === '') {
           validationError(`Filter '${key}' must not be empty.`);
         }
+        if ([...rawValue].length > MAX_SEARCH_TERM) {
+          validationError(`Filter '${key}' must be at most ${MAX_SEARCH_TERM} characters.`);
+        }
         predicates.push(containsPredicate(drizzleColumn(table, prefix), rawValue));
         continue;
       }
@@ -380,6 +394,9 @@ export function buildListQuery(
   if (rawSearch !== null) {
     if (rawSearch === '') {
       validationError("Query 'search' must not be empty.");
+    }
+    if ([...rawSearch].length > MAX_SEARCH_TERM) {
+      validationError(`Query 'search' must be at most ${MAX_SEARCH_TERM} characters.`);
     }
     const textColumns = store.columns.filter((c) => c.type === 'text');
     if (textColumns.length === 0) {
