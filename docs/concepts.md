@@ -119,7 +119,9 @@ boundary.
 
 Two practical notes on the declarative surface versus the handler escape hatch.
 First, the declarative `store` `list` op supports a narrow, fail-closed query
-surface — equality filters, single-column ordering, and keyset pagination — all
+surface — equality filters, an opt-in case-insensitive substring search
+(`?search=` / `?<column>__contains=`), single-column ordering, and keyset
+pagination — all
 folded through the tenant predicate, capped at a fixed page size (it signals
 truncation with an `X-Result-Truncated` header and returns an `X-Next-Cursor`). A
 read that needs an **offset** page or a total **count** is a `handler` route, whose
@@ -239,7 +241,8 @@ for common ingress shapes, which a product profile requests by name:
   pluggable provider).
 - **file** — accept and process an uploaded document.
 - **conversation** — a multi-turn chat surface with a per-turn ledger.
-- **record** — capture a structured record for downstream processing.
+- **record** — capture a structured record for downstream processing (optionally
+  normalized by a declared agent, and re-validated, before it is stored).
 
 Each capability is a declared dependency, not product code you write: the product
 spec says *I need audio ingress*, and the platform wires the runtime for it.

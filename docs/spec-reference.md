@@ -232,16 +232,19 @@ api:
   - **`agent`** — invoke a declared agent over the run surface. Fields: `agent`
     (a declared agent id) and an optional `persistTo` (a declared store name). When
     `persistTo` is set, a successful run's validated `outputSchema` output is written
-    as one row into that store — exactly once, atomically with the run's completion.
+    as one row into that store — exactly once, atomically with the run header's
+    completing transition, on both the in-request (synchronous) and off-request
+    (durable / recovery) execution paths.
     The agent's output properties must map to the store's writable business columns,
     and the doctor rejects at **deploy** any persist that cannot succeed: an unknown
     store, a missing/mismatched `outputSchema`, a property that is not a writable
-    column or has an incompatible type, a NOT-NULL store column the output does not
-    reliably produce (no matching property, a property absent from the schema's
-    `required` array, or a property whose type admits `null`), or an `enum` property
-    whose members escape the column's whitelist. A runtime-**data** constraint the
-    doctor cannot see statically — a `unique` business column or a foreign key that
-    two distinct runs' output values violate — fails the whole run **fail-closed**:
+    column or has an incompatible type, a NOT-NULL store column without a default
+    that the output does not reliably produce (no matching property, a property
+    absent from the schema's `required` array, or a property whose type admits
+    `null`), or an `enum` property whose members escape the column's whitelist. A
+    runtime-**data** constraint the doctor cannot see statically — a `unique`
+    business column or a foreign key that two distinct runs' output values violate
+    — fails the whole run **fail-closed**:
     the run is not marked completed and nothing is persisted (never a completed run
     with a missing or duplicate row). Target a non-`unique` store, or ensure the
     output value is unique per run, when two runs may produce the same business key.
@@ -293,8 +296,9 @@ the tenant predicate, so no query can cross tenants; an unrecognized query
 parameter is rejected (`400 VALIDATION_ERROR`).
 
 - **Equality filters** — `?<column>=<value>` on any declared column, plus the
-  injected `created_by`. Multiple filters are AND-combined. Equality only: there
-  are no range, `OR`, `LIKE`, or full-text operators.
+  injected `created_by`. Multiple filters are AND-combined. There are no range or
+  `OR` operators; the only substring match is the opt-in `search` / `__contains`
+  surface below.
 - **Set filters** — `?<column>__in=v1,v2,…` matches any of a comma-separated value
   list (SQL `IN`) on a filterable column, so a "status is `open` OR `in_progress`"
   read is one query. The distinct `__in` suffix keeps plain `?<column>=<value>`
@@ -305,6 +309,16 @@ parameter is rejected (`400 VALIDATION_ERROR`).
   predicate). Fail-closed: an empty/blank element, more than 100 values, a
   non-filterable (`jsonb`) column, or an unknown prefix column each return
   `400 VALIDATION_ERROR`.
+- **Substring search** — an opt-in, case-insensitive substring match, distinct
+  from the exact filters above. `?search=<term>` matches the term against **all**
+  of the store's declared `text` columns (an `OR` across them); `?<column>__contains=<term>`
+  matches one declared `text` column. Both are case-insensitive `LIKE` matches
+  whose user term is a **bound parameter** with the `LIKE` metacharacters `%` and
+  `_` escaped (via `ESCAPE`), so a literal `%` or `_` in the term matches literally
+  and never acts as a wildcard. Search folds into the same AND-chain as the
+  equality and set filters and is **keyset-stable** — it composes with `order` and
+  the `after` cursor unchanged. `search` is a **reserved** query word: a store that
+  declares a column literally named `search` fails lint, so the two never collide.
 - **Ordering** — `?order=<column>.asc|desc`. The order column must be
   **non-nullable**: a declared non-nullable column, or the injected `id` /
   `created_at`. A nullable column (and the nullable injected `created_by`) is
@@ -433,7 +447,10 @@ triggers:
 - `schedule` — a cron expression; required when `kind: cron`.
 - `event` — a logical event name; required when `kind: event`.
 - `action` — a discriminated union on `kind`:
-  - **`agent`** — fire a declared agent. Field: `agent`.
+  - **`agent`** — fire a declared agent. Fields: `agent`, and an optional
+    `persistTo` (a declared store name) that persists the run's validated
+    `outputSchema` output as one store row with the same exactly-once,
+    deploy-validated semantics described for the [`agent` route action](#api) above.
   - **`handler`** — fire a declared trigger-handler. Field: `handler`.
 
 Firing a scheduled trigger requires a durable worker (see `deployment`); the run
@@ -646,6 +663,38 @@ The wired capability ids are `audio_input`, `media_playback`, `record_input`,
   - `provider_policy` — optional declarative provider/model selection
     (`default_provider`, `default_model`, `adapter_visibility`).
   - `runtime_notes` — optional non-normative string.
+
+### `input_normalize` on `record_input`
+
+The `record_input` capability accepts an optional `input_normalize` block that
+runs a declared agent over a submitted record **before** it is persisted:
+
+```yaml
+capabilities:
+  - id: record_input
+    tier: B
+    status: available
+    contracts: [record_input.record_submitted]
+    input_normalize:
+      agent: normalize_record             # a declared agent id
+      output_contract: record.normalized  # the contract the normalized record must satisfy
+```
+
+- `agent` — a declared agent that transforms the submitted record.
+- `output_contract` — the contract the normalized record is re-validated against
+  before it is stored.
+
+The submitted record is transformed by the agent, re-validated against
+`output_contract`, and only then persisted — the stored and emitted value is the
+**normalized** one. It runs synchronously through the neutral agent path.
+Normalization is **fail-closed**: if the agent or the re-validation fails, nothing
+is persisted and the client sees a generic error — raw provider or database text is
+never leaked. It is **idempotent**, keyed on the canonical hash of the submitted
+payload: a retry of the same payload converges (the record normalizes once), while
+a corrected resubmission re-normalizes. Declaring `input_normalize` requires a
+wired normalizer config at `record/<agent>.normalizer.json` (path-jailed and
+validated) — declaring it without that config fails closed at deploy. A
+`record_input` capability without `input_normalize` is byte-identical to before.
 
 ## `artifacts`
 

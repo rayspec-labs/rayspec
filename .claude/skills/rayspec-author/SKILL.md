@@ -190,8 +190,9 @@ are how the generated CRUD surface behaves. Know them so your PRD assumptions an
   Sending BOTH variants of the SAME column in one body is a **400** (ambiguous). **Responses are ALWAYS
   snake_case** — every exposed key (business + injected) is serialized snake_case, timestamps as ISO-8601.
 - **List query power** (on a `list` route). All narrow and fail-closed:
-  - **Equality filters** — `?<column>=<value>`, AND-combined (no ranges / OR / full-text). Filterable
-    columns are the declared business columns **plus the injected `created_by`**.
+  - **Equality filters** — `?<column>=<value>`, AND-combined (no ranges / OR; the only substring match is
+    the opt-in `search` / `__contains` surface below). Filterable columns are the declared business
+    columns **plus the injected `created_by`**.
   - **Set filter — `?<column>__in=v1,v2,…`** (a SQL `IN`, folded into the SAME AND-chain, so it composes
     with equality filters + the keyset cursor). The **`__in` SUFFIX is distinct** (not a bare `?col=a,b`):
     plain equality stays byte-identical and unambiguous on a comma-bearing value, and a real column
@@ -199,6 +200,12 @@ are how the generated CRUD surface behaves. Know them so your PRD assumptions an
     (business columns + `created_by`). **Fail-closed 400** on: an EMPTY element (`?c__in=`, `a,,b`), MORE
     than **100** values, a non-filterable (`jsonb`) column, or an unknown prefix column. Each element is
     type-coerced exactly like an equality value.
+  - **Substring search (opt-in)** — `?search=<term>` = a case-insensitive OR match across ALL of the
+    store's declared `text` columns; `?<column>__contains=<term>` = a case-insensitive match on ONE
+    declared `text` column. The user term is a **bound parameter** with the `LIKE` wildcards `%`/`_`
+    escaped (via `ESCAPE`), so they match literally (never as a wildcard). Both fold into the SAME
+    AND-chain and stay **keyset-stable** (compose with `order` + the `after` cursor). **`search` is a
+    RESERVED query word** — a store that declares a column literally named `search` fails lint.
   - **Ordering** — `?order=<column>.asc|desc`. Only **NON-nullable** columns are sortable (the declared
     non-nullable business columns + the injected `id` / `created_at`); the default is `id asc`. A nullable
     column — and `created_by` — is filterable but a **400** as an order column (keyset stability needs a
@@ -910,10 +917,22 @@ When set, the FK targets a NAMED column of the parent and becomes a **tenant-sco
 action: { kind: store, store: <store name>, op: <StoreOp> }   # op: list | get | create | update | delete
 # invoke a declared agent over the run surface (sync/SSE):
 action: { kind: agent, agent: <agent id> }
+# ...optionally persist the run's validated outputSchema output as ONE store row (exactly-once):
+action: { kind: agent, agent: <agent id>, persistTo: <store name> }
 ```
 
 (The grammar also has `kind: handler` and `kind: stream` — BOTH OUT OF SCOPE; do not use them. A
 `{handler}` route is a later iteration; a `stream` route needs blob wiring neither iteration produces.)
+
+- **Optional `persistTo` on an agent action** — `persistTo: <store>` writes the run's validated
+  `outputSchema` output as ONE row into `<store>`, exactly once, atomically with the run's completion
+  (on both the sync in-request and durable / off-request paths). Safety is a **deploy**-time check, not
+  runtime: `doctor`/boot fails closed unless every output property maps to a writable business column of a
+  compatible type (forward) AND every NOT-NULL, no-default business column is produced by a required,
+  non-nullable output property (reverse; where a column and its mapped property both declare an `enum`,
+  the property's enum must be a subset of the column's whitelist). A runtime `unique`/foreign-key
+  collision fails the WHOLE run fail-closed — nothing persisted. Requires an `outputSchema` on the agent,
+  and is also available on a `triggers[]` agent action.
 
 ### `agents[]` — `AgentSpecConfig` (wraps the neutral `core.AgentSpec`)
 
@@ -1609,6 +1628,15 @@ env), `validation` (`validation.check`), `artifact` (`artifact.persist`/`artifac
 (needs a `grounding:` policy), and the audio set `audio_input`/`media_playback` (declare ONLY for an
 audio product). A workflow `trigger.capability`/`step.use` that names anything NOT runtime-backed fails
 the mount fail-closed.
+
+**Optional `input_normalize` on `record_input`** — a `record_input` capability may declare
+`input_normalize: { agent: <agent id>, output_contract: <contract id> }` to run a declared agent over a
+submitted record BEFORE it is persisted: the record is transformed, re-validated against `output_contract`,
+then stored — the stored + emitted value is the NORMALIZED one. It runs synchronously through the neutral
+agent path, is **fail-closed** (a failure persists nothing and never leaks raw provider/DB text to the
+client), and is **idempotent** on the canonical payload hash (a retry converges; a corrected resubmit
+re-normalizes). It requires a wired `record/<agent>.normalizer.json` config (path-jailed + validated) —
+declaring `input_normalize` without it fails closed at deploy. A `record_input` without it is byte-identical.
 
 ### `artifacts[]` — product-owned meaning + output contract
 
