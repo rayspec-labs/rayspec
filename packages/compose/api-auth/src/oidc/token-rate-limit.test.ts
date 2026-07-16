@@ -47,6 +47,10 @@ beforeAll(async () => {
     schema: 'rayspec_test_apiauth_ratelimit',
     withOidc: true,
     oidcIssuer: `${base}/oidc`,
+    // The served app runs behind the loopback peer; trust it so the request's X-Forwarded-For becomes
+    // the throttle identity (the per-source assertions below), exactly as a real deployment trusts its
+    // LB. Without this the identity would collapse to the single loopback peer.
+    trustedProxies: ['127.0.0.0/8', '::1/128'],
     oidcClients: [
       {
         client_id: CLIENT.client_id,
@@ -193,5 +197,70 @@ describe('OIDC token guard cannot be bypassed by path variants or an unbounded b
     });
     expect(res.status).toBe(400);
     expect((await res.json()).error.code).toBe('VALIDATION_ERROR');
+  });
+});
+
+describe('OIDC token guard identity cannot be spoofed via X-Forwarded-For (untrusted peer)', () => {
+  // A SEPARATE served app that trusts NO proxy — so the socket peer (loopback) is the throttle
+  // identity and a forwarding header is ignored. This is the trusted-proxy security property: an
+  // attacker rotating X-Forwarded-For must NOT mint a fresh per-source budget on each request.
+  let hs: Harness;
+  let spoofServer: Server;
+  let spoofBase: string;
+
+  beforeAll(async () => {
+    const port = await new Promise<number>((resolve) => {
+      const probe = createServer();
+      probe.listen(0, '127.0.0.1', () => {
+        const addr = probe.address();
+        const p = typeof addr === 'object' && addr ? addr.port : 0;
+        probe.close(() => resolve(p));
+      });
+    });
+    spoofBase = `http://127.0.0.1:${port}`;
+    hs = await createHarness({
+      schema: 'rayspec_test_apiauth_ratelimit_spoof',
+      withOidc: true,
+      oidcIssuer: `${spoofBase}/oidc`,
+      // NO trustedProxies → the loopback peer is the identity; X-Forwarded-For is ignored.
+      oidcClients: [
+        {
+          client_id: CLIENT.client_id,
+          client_secret: CLIENT.client_secret,
+          grant_types: ['client_credentials'],
+          response_types: [],
+          redirect_uris: [],
+          token_endpoint_auth_method: 'client_secret_basic',
+        },
+      ],
+    });
+    spoofServer = serve({ fetch: hs.app.fetch, port, hostname: '127.0.0.1' }) as unknown as Server;
+    await new Promise((r) => setTimeout(r, 50));
+  });
+  afterAll(async () => {
+    await new Promise<void>((resolve) => spoofServer.close(() => resolve()));
+    await hs.close();
+  });
+
+  it('rotating X-Forwarded-For does not evade the per-peer throttle (all requests share the peer bucket)', async () => {
+    const basic = Buffer.from(`${CLIENT.client_id}:${CLIENT.client_secret}`).toString('base64');
+    const hit = (spoofedIp: string) =>
+      fetch(`${spoofBase}/oidc/token`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          authorization: `Basic ${basic}`,
+          'x-forwarded-for': spoofedIp, // a DIFFERENT forged source each call
+        },
+        body: legitBody(),
+      });
+    // The 'oauth-token' budget is 30/min. If the guard trusted X-Forwarded-For, 30 distinct forged
+    // sources would each get their own budget and none would throttle. Because the untrusted header is
+    // ignored, all 30 count against the ONE loopback peer bucket — so the 31st (any forged IP) is 429.
+    for (let i = 0; i < 30; i++) {
+      expect((await hit(`203.0.113.${i}`)).status).toBe(200);
+    }
+    const throttled = await hit('8.8.8.8');
+    expect(throttled.status).toBe(429);
   });
 });

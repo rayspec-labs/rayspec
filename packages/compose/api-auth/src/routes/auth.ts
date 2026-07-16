@@ -7,6 +7,7 @@
  * on unknown email (the service handles the dummy work). Audit events are committed OUT-OF-BAND.
  */
 
+import { createHash } from 'node:crypto';
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import {
   ApiError,
@@ -17,7 +18,9 @@ import {
   RegisterRequest,
   type TokenResponse,
 } from '@rayspec/auth-core';
+import type { Context } from 'hono';
 import type { AppDeps, AppEnv } from '../app-context.js';
+import { clientIpFromContext } from '../http/client-ip.js';
 import {
   clearRefreshCookie,
   isCsrfSafeForCookieEndpoint,
@@ -29,19 +32,17 @@ import { SESSION_TTL_MS } from '../services/auth-service.js';
 
 const SESSION_TTL_SECONDS = Math.floor(SESSION_TTL_MS / 1000);
 
-/** Hash an IP for the audit log (no raw IP stored). */
-import { createHash } from 'node:crypto';
-
-function ipHashOf(c: { req: { header: (k: string) => string | undefined } }): string | null {
-  const ip = c.req.header('x-forwarded-for') ?? c.req.header('x-real-ip');
-  return ip ? createHash('sha256').update(ip).digest('hex') : null;
+/** Hash the RESOLVED client IP for the audit log (no raw IP stored; 'unknown' ⇒ no hash). */
+function ipHashOf(c: Context<AppEnv>, deps: AppDeps): string | null {
+  const ip = clientIp(c, deps);
+  return ip === 'unknown' ? null : createHash('sha256').update(ip).digest('hex');
 }
 
 export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
   // POST /v1/auth/register
   app.post('/v1/auth/register', async (c) => {
     const rid = c.get('requestId');
-    const ip = clientIp(c);
+    const ip = clientIp(c, deps);
     enforceRate(deps, 'register', ip);
     const body = RegisterRequest.parse(await c.req.json());
     const email = normalizeEmail(body.email);
@@ -61,7 +62,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
       activeOrgId = org.id;
       reg.audit.push({ event: 'org_create', actorUserId: reg.userId, actorOrgId: org.id });
     }
-    await deps.auditStore.appendMany(reg.audit, rid, ipHashOf(c));
+    await deps.auditStore.appendMany(reg.audit, rid, ipHashOf(c, deps));
     const refreshToken = deliverRefresh(c, deps, reg.refreshSecret, body.deliverRefreshTokenInBody);
     return c.json(
       tokenResponse(reg.accessToken, activeOrgId, deps.signer.accessTokenTtlSeconds, refreshToken),
@@ -72,7 +73,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
   // POST /v1/auth/login
   app.post('/v1/auth/login', async (c) => {
     const rid = c.get('requestId');
-    const ip = clientIp(c);
+    const ip = clientIp(c, deps);
     enforceRate(deps, 'login', ip);
     const body = LoginRequest.parse(await c.req.json());
     const email = normalizeEmail(body.email);
@@ -81,7 +82,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
       ip,
     });
     deps.rateLimiter.reset('login', ip); // a clean login resets the counter
-    await deps.auditStore.appendMany(result.audit, rid, ipHashOf(c));
+    await deps.auditStore.appendMany(result.audit, rid, ipHashOf(c, deps));
     const refreshToken = deliverRefresh(
       c,
       deps,
@@ -102,7 +103,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
   // POST /v1/auth/refresh — cookie (Origin/Sec-Fetch-Site checked) OR body (desktop/CLI).
   app.post('/v1/auth/refresh', async (c) => {
     const rid = c.get('requestId');
-    const ip = clientIp(c);
+    const ip = clientIp(c, deps);
     enforceRate(deps, 'refresh', ip);
 
     const cookieSecret = readRefreshCookie(c.req.header('cookie'));
@@ -127,14 +128,14 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
     });
     if (outcome.reuseDetected) {
       // Reuse → family revoked; audit out-of-band + per-source lock (anti-DoS) + uniform 401.
-      await deps.auditStore.appendMany(outcome.audit, rid, ipHashOf(c));
+      await deps.auditStore.appendMany(outcome.audit, rid, ipHashOf(c, deps));
       deps.rateLimiter.lockSource('refresh', ip);
       clearRefresh(c);
       throw new ApiError('UNAUTHENTICATED', 'Authentication failed.');
     }
     const result = outcome.result;
     if (!result) throw new ApiError('UNAUTHENTICATED', 'Authentication failed.');
-    await deps.auditStore.appendMany(outcome.audit, rid, ipHashOf(c));
+    await deps.auditStore.appendMany(outcome.audit, rid, ipHashOf(c, deps));
     // Rotate the secret (changed unless we re-issued within the grace window). Deliver on ONE
     // channel: the body for a gated+opted-in non-browser client, else the rotated cookie as today.
     // BL-1: body-deliver ONLY when the presented secret was BODY-SOURCED. A cookie-sourced refresh
@@ -165,7 +166,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
       );
       if (!safe) throw new ApiError('FORBIDDEN', 'Cross-site request rejected.');
       const out = await deps.authService.logout(secret);
-      await deps.auditStore.appendMany(out.audit, rid, ipHashOf(c));
+      await deps.auditStore.appendMany(out.audit, rid, ipHashOf(c, deps));
     }
     clearRefresh(c);
     return c.body(null, 204);
@@ -229,8 +230,13 @@ function deliverRefresh(
   return undefined;
 }
 
-function clientIp(c: { req: { header: (k: string) => string | undefined } }): string {
-  return c.req.header('x-forwarded-for') ?? c.req.header('x-real-ip') ?? 'unknown';
+/**
+ * The rate-limit/audit client identity: the socket peer unless a configured trusted proxy set the
+ * forwarding header (see `clientIpFromContext`) — a caller cannot spoof its throttle identity via
+ * `X-Forwarded-For`. 'unknown' when no peer is resolvable.
+ */
+function clientIp(c: Context<AppEnv>, deps: AppDeps): string {
+  return clientIpFromContext(c, deps.trustedProxies ?? []);
 }
 
 function enforceRate(deps: AppDeps, bucket: string, id: string): void {

@@ -17,15 +17,37 @@ export interface RateLimitStore {
   reset(key: string): void;
 }
 
-/** In-process store. NOT shared across processes — fine for single-node. */
+/**
+ * The default hard cap on the number of tracked (window / lock) keys. Bounds the store's memory so a
+ * flood of distinct keys (high-cardinality traffic) cannot grow it without limit — the OOM vector a
+ * never-pruned per-key Map otherwise carried. 100k keys is far above any single node's legitimate
+ * concurrent-source cardinality yet a trivial memory footprint.
+ */
+export const DEFAULT_MAX_RATE_LIMIT_ENTRIES = 100_000;
+
+/**
+ * In-process store. NOT shared across processes — fine for single-node. BOUNDED + SELF-PRUNING: each
+ * time a new/expired window (or a lock) is (re)inserted at or above the cap, expired entries are swept
+ * and, if still full, the oldest are evicted — so the maps never exceed `maxEntries`. The clock is
+ * injectable (defaults to `Date.now`) so the expiry paths are deterministically testable.
+ */
 export class InMemoryRateLimitStore implements RateLimitStore {
   private readonly windows = new Map<string, { count: number; resetAt: number }>();
   private readonly locks = new Map<string, number>();
+  private readonly maxEntries: number;
+  private readonly now: () => number;
+
+  constructor(maxEntries: number = DEFAULT_MAX_RATE_LIMIT_ENTRIES, now: () => number = Date.now) {
+    this.maxEntries = Math.max(1, maxEntries);
+    this.now = now;
+  }
 
   hit(key: string, windowMs: number): { count: number; resetAt: number } {
-    const now = Date.now();
+    const now = this.now();
     const cur = this.windows.get(key);
     if (!cur || cur.resetAt <= now) {
+      // A NEW or expired key is about to (re)enter the map — the only growth path — so bound it here.
+      this.prune(this.windows, now, (v) => v.resetAt);
       const fresh = { count: 1, resetAt: now + windowMs };
       this.windows.set(key, fresh);
       return fresh;
@@ -35,13 +57,15 @@ export class InMemoryRateLimitStore implements RateLimitStore {
   }
 
   lock(key: string, ms: number): void {
-    this.locks.set(key, Date.now() + ms);
+    const now = this.now();
+    this.prune(this.locks, now, (until) => until);
+    this.locks.set(key, now + ms);
   }
 
   isLocked(key: string): boolean {
     const until = this.locks.get(key);
     if (until === undefined) return false;
-    if (until <= Date.now()) {
+    if (until <= this.now()) {
       this.locks.delete(key);
       return false;
     }
@@ -57,6 +81,30 @@ export class InMemoryRateLimitStore implements RateLimitStore {
   clearAll(): void {
     this.windows.clear();
     this.locks.clear();
+  }
+
+  /** The number of tracked windows (observability + makes the max-size bound assertable). */
+  size(): number {
+    return this.windows.size;
+  }
+
+  /**
+   * Bound `map` to `maxEntries`: a no-op until it reaches the cap, then sweep every entry whose
+   * `expiryOf(value) <= now` and — if still at/over the cap (all live) — evict the OLDEST-inserted
+   * (a Map iterates in insertion order, so the front is the oldest) until it is under the cap. Called
+   * only on the (re)insert path, so the steady-state hot path (incrementing a live counter) pays
+   * nothing.
+   */
+  private prune<V>(map: Map<string, V>, now: number, expiryOf: (value: V) => number): void {
+    if (map.size < this.maxEntries) return;
+    for (const [k, v] of map) {
+      if (expiryOf(v) <= now) map.delete(k);
+    }
+    while (map.size >= this.maxEntries) {
+      const oldest = map.keys().next().value;
+      if (oldest === undefined) break;
+      map.delete(oldest);
+    }
   }
 }
 
