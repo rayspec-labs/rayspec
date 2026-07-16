@@ -631,7 +631,7 @@ describe('Anthropic adapter: non-success result branch (subtype !== success)', (
   });
 });
 
-describe('Anthropic adapter: N1 — no total_cost_usd => provider cost ABSENT (no fabricated $0, no false drift)', () => {
+describe('Anthropic adapter: no total_cost_usd => provider cost ABSENT (no fabricated $0, no false drift)', () => {
   it('a success result WITHOUT total_cost_usd records NO providerCostUsd on the final llm step', async () => {
     const journal = new FakeJournal();
     // A success result that omits total_cost_usd (e.g. a partial/older SDK shape). The adapter must
@@ -751,7 +751,7 @@ describe('Anthropic adapter: native structured output via outputFormat (no promp
  * Case 2 (two DISTINCT message.id ⇒ two real calls) must still yield TWO `llm` steps — proves the
  * coalesce does NOT over-collapse genuinely separate calls.
  */
-describe('Anthropic adapter: P5-COST-1 — coalesce assistant stream frames into real model calls', () => {
+describe('Anthropic adapter: coalesce assistant stream frames into real model calls', () => {
   it('ONE real call emitted as TWO frames (same message.id, same usage) => EXACTLY ONE llm step (not two)', async () => {
     const journal = new FakeJournal();
     // A SINGLE real model call delivered as a thinking-block frame + a text-block frame. Both frames

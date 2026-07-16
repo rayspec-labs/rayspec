@@ -34,7 +34,7 @@ function tmpRoot() {
   return mkdtempSync(join(tmpdir(), 'rayspec-a1-'));
 }
 
-describe('A.1 per-tenant config-dir isolation', () => {
+describe('Per-tenant config-dir isolation', () => {
   it('creates distinct config dirs per tenant', () => {
     const adapter = new AnthropicAdapter({ configRoot: tmpRoot() });
     const a = adapter.configDirFor('alpha');
@@ -45,7 +45,7 @@ describe('A.1 per-tenant config-dir isolation', () => {
   });
 });
 
-describe('A.1 tenant config-dir hardening (credential isolation on disk)', () => {
+describe('tenant config-dir hardening (credential isolation on disk)', () => {
   it('creates the tenant dir private — mode 0700, no group/world access', () => {
     const adapter = new AnthropicAdapter({ configRoot: tmpRoot() });
     const dir = adapter.configDirFor('alpha');
@@ -155,7 +155,7 @@ describe('config-dir hardening — tenantId validated BEFORE any path op (1c)', 
   }
 });
 
-describe('A.1 bundled binary verification', () => {
+describe('bundled binary verification', () => {
   it('verifies the bundled claude binary runs', () => {
     const adapter = new AnthropicAdapter({ configRoot: tmpRoot() });
     const res = adapter.verifyBinary();
@@ -165,7 +165,7 @@ describe('A.1 bundled binary verification', () => {
   });
 });
 
-describe('A.1 auth-mode self-check (trustworthy)', () => {
+describe('auth-mode self-check (trustworthy)', () => {
   const savedKey = process.env.ANTHROPIC_API_KEY;
   const savedTok = process.env.CLAUDE_CODE_OAUTH_TOKEN;
   const restore = (name: string, val: string | undefined) => {
@@ -205,7 +205,7 @@ describe('A.1 auth-mode self-check (trustworthy)', () => {
   });
 });
 
-describe('auth_mode reconciliation (P1 Slice-4 mislabel fix) — fixtured, no live token', () => {
+describe('auth_mode reconciliation — fixtured, no live token', () => {
   // A live check (claude-agent-sdk 0.3.185) found a SUCCESSFUL
   // subscription run reports system/init apiKeySource='none' (NOT 'oauth'), so the prior logic
   // mislabeled it 'unauthenticated'. These drive the reconciliation from a FIXTURED apiKeySource
@@ -340,7 +340,7 @@ describe('Quarantine: deriveConversationFromObserved excludes non-MCP (built-in)
   });
 });
 
-describe('A.1 JSONL session re-derivation round-trip', () => {
+describe('JSONL session re-derivation round-trip', () => {
   it('re-derives a neutral transcript from a CLI-style JSONL session file', async () => {
     const adapter = new AnthropicAdapter({ configRoot: tmpRoot() });
     const configDir = adapter.configDirFor('gamma');
