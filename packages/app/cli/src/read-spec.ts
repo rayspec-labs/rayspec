@@ -16,7 +16,7 @@
  * into the command's JSON error envelope + exit 1. NO secrets ever appear in these messages (only the
  * operator-supplied path, which the operator already knows).
  */
-import { realpathSync } from 'node:fs';
+import { constants as fsConstants, realpathSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 
@@ -119,9 +119,15 @@ export async function readSpecFile(absPath: string): Promise<string> {
   // TOCTOU where the path could be swapped between the checks and the read. `open` failing with ENOENT is
   // a race-delete after the realpath resolve (→ not_found, matching the old statSync-catch); any other
   // open failure (e.g. an unreadable file) → read_failed, exactly as the old separate `open` did.
+  //
+  // NON-BLOCKING open (O_NONBLOCK): opening a FIFO/named pipe with a plain O_RDONLY BLOCKS until a writer
+  // appears — the not_a_file check below would be unreachable and the read would hang indefinitely.
+  // O_NONBLOCK returns immediately, so a FIFO reaches the fstat and is classified not_a_file like any
+  // other non-regular file. On a regular file O_NONBLOCK is a no-op for the read. (O_NONBLOCK is absent
+  // on some platforms — fall back to 0, i.e. plain O_RDONLY, there.)
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    handle = await open(realPath, 'r');
+    handle = await open(realPath, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0));
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
       throw new ReadSpecError('not_found', `spec file not found: ${absPath}`);

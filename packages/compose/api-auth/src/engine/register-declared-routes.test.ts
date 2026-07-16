@@ -343,34 +343,39 @@ describe('registerDeclaredRoutes — {handler} readonly gates store:read (defaul
   });
 });
 
-describe('toHonoPath — `{param}` → `:param` conversion (bounded, linear scan)', () => {
+describe('toHonoPath — `{param}` → `:param` conversion (linear, no-regex scan)', () => {
   it('converts every legitimate declared path EXACTLY as before', () => {
     expect(toHonoPath('/widgets')).toBe('/widgets');
     expect(toHonoPath('/widgets/{id}')).toBe('/widgets/:id');
     expect(toHonoPath('/x/{a}/y/{b}')).toBe('/x/:a/y/:b');
     expect(toHonoPath('/uploads/{key}/chunk')).toBe('/uploads/:key/chunk');
-    // A long-but-realistic param (well under the 128-char bound) still converts.
     const long = `long_${'x'.repeat(100)}`;
     expect(toHonoPath(`/r/{${long}}`)).toBe(`/r/:${long}`);
   });
 
-  it('a long whitespace/`{`-run input does not hang the rewrite (bounded quantifier)', () => {
-    // The `[^}/]{1,128}` bound keeps the scan strictly linear on a pathological unclosed brace.
+  it('a long unclosed-`{`-run input does not hang the rewrite (linear scan)', () => {
+    // The single forward scan is strictly linear on a pathological unclosed brace — no backtracking.
     const pathological = `/x/{${'a'.repeat(200_000)}`; // 200k chars, no closing brace
     const start = Date.now();
     const out = toHonoPath(pathological);
     expect(Date.now() - start).toBeLessThan(1000);
-    // No closing `}` ⇒ nothing to rewrite ⇒ returned unchanged (same as the unbounded regex would).
+    // No closing `}` ⇒ nothing to rewrite ⇒ returned unchanged.
     expect(out).toBe(pathological);
   });
 
-  it('an over-128-char param name is left un-rewritten (the security bound; never a valid spec path)', () => {
-    // FAIL-THE-FIX: the old unbounded `[^}/]+` rewrote ANY length; the bound stops at 128 so a
-    // 200-char param no longer matches and is passed through verbatim (a param name this long is
-    // structurally invalid and never reaches here from the grammar).
-    const huge = 'a'.repeat(200);
-    expect(toHonoPath(`/r/{${huge}}`)).toBe(`/r/{${huge}}`);
+  it('a 129+-char param name is rewritten too — the scan is length-SAFE, not length-capped (fail-the-fix)', () => {
+    // A route path is only `z.string().min(1)` — a param name has no length cap anywhere, so a 129+
+    // char name is schema-legal and MUST still convert. FAIL-THE-FIX: a `[^}/]{1,128}` bounded regex
+    // would silently leave `/r/{<129 chars>}` un-rewritten (the brace becomes a literal segment); the
+    // no-regex scan converts it just like a short name, and still stays linear.
+    const long129 = 'a'.repeat(129);
+    expect(toHonoPath(`/r/{${long129}}`)).toBe(`/r/:${long129}`);
+    const long5000 = 'z'.repeat(5000);
+    expect(toHonoPath(`/r/{${long5000}}`)).toBe(`/r/:${long5000}`);
+    // ~65 emoji already exceed 128 UTF-16 code units (2 units each) — still rewritten.
+    const emoji = '😀'.repeat(65);
+    expect(toHonoPath(`/r/{${emoji}}/s/{ok}`)).toBe(`/r/:${emoji}/s/:ok`);
     // A neighbouring in-bound param on the same path still converts normally.
-    expect(toHonoPath(`/r/{ok}/s/{${huge}}`)).toBe(`/r/:ok/s/{${huge}}`);
+    expect(toHonoPath(`/r/{ok}/s/{${long129}}`)).toBe(`/r/:ok/s/:${long129}`);
   });
 });

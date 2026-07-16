@@ -6,6 +6,7 @@
  * Runs inside a temp dir set as the CWD (so realpath + the CWD re-jail resolve to in-tree paths).
  */
 
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -79,4 +80,32 @@ describe('readSpecFile — single-handle read (no stat→open race)', () => {
     writeFileSync(join(tmp, 'big.yaml'), 'a'.repeat(MAX_SPEC_BYTES + 1), 'utf8');
     expect(await readKind('big.yaml')).toBe('too_large');
   });
+
+  // FIFO/named pipe: the open is NON-BLOCKING (O_NONBLOCK), so a FIFO with no writer is classified
+  // not_a_file at the fstat instead of BLOCKING the open forever. A blocking `open(fifo, 'r')` would
+  // hang until a writer appears — this test races the read against a 2s timer to make that hang a
+  // FAILURE. (POSIX-only: skipped where `mkfifo` is unavailable, e.g. Windows.)
+  it.skipIf(process.platform === 'win32')(
+    'a FIFO (named pipe, no writer) → not_a_file WITHIN a short timeout, never hangs (fail-the-fix)',
+    async () => {
+      const fifoPath = join(tmp, 'pipe.yaml');
+      execFileSync('mkfifo', [fifoPath]);
+      // Race the read against a 2s timer. The non-blocking open returns fast → not_a_file; a revert to a
+      // blocking open never resolves → the timer wins → `__timeout__` → the assertion FAILS (RED).
+      const readResult = readSpecFile(abs('pipe.yaml')).then(
+        () => 'resolved' as const,
+        (e: unknown) => e,
+      );
+      const timer = new Promise<'__timeout__'>((r) => {
+        setTimeout(() => r('__timeout__'), 2000);
+      });
+      const result = await Promise.race([readResult, timer]);
+      expect(
+        result,
+        'readSpecFile hung on a FIFO (blocking open) instead of returning fast',
+      ).not.toBe('__timeout__');
+      expect(result).toBeInstanceOf(ReadSpecError);
+      expect((result as ReadSpecError).kind).toBe('not_a_file');
+    },
+  );
 });

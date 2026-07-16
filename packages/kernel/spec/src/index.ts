@@ -10,6 +10,7 @@
 // Product-YAML family: the Product-YAML program document grammar/parser/linter + the
 // dispatch layer that routes a raw spec to the right family. Additive — the RaySpec surface above
 // is unchanged.
+export * from './brace-params.js';
 export * from './detect.js';
 export * from './errors.js';
 export * from './export.js';

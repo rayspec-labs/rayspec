@@ -24,7 +24,15 @@
  * OPAQUE (their bodies are arbitrary trusted-author product logic the platform cannot statically know).
  */
 
-import type { ApiRouteSpec, ColumnType, RaySpec, StoreOp, StoreSpec } from '@rayspec/spec';
+import {
+  type ApiRouteSpec,
+  braceParamNames,
+  type ColumnType,
+  type RaySpec,
+  rewriteBraceParams,
+  type StoreOp,
+  type StoreSpec,
+} from '@rayspec/spec';
 import { z } from 'zod';
 import { StartRunRequest } from '../routes/runs.js';
 import { INJECTED_COLUMN_TS_NAMES } from './injected-columns-view.js';
@@ -148,7 +156,11 @@ const INJECTED_RESPONSE_PROPS: Record<string, Record<string, unknown>> = {
  * real wire shape, not a guess.
  */
 function storeRowSchema(store: StoreSpec): Record<string, unknown> {
-  const properties: Record<string, Record<string, unknown>> = {};
+  // Prototype-free accumulator: the keys are author-derived column names, so a column named
+  // `__proto__`/`constructor` lands as a plain own-property here, never a prototype mutation (on a plain
+  // `{}` such a key would be silently dropped/reparented). Behaviour is otherwise identical — own
+  // enumerable keys serialize the same, and the doc is JSON-serialized (no prototype method is called).
+  const properties: Record<string, Record<string, unknown>> = Object.create(null);
   // Injected columns first (the same set serializeRow re-keys to snake_case).
   for (const snake of Object.keys(INJECTED_COLUMN_TS_NAMES)) {
     properties[snake] = INJECTED_RESPONSE_PROPS[snake] ?? {};
@@ -167,16 +179,8 @@ function storeRowSchema(store: StoreSpec): Record<string, unknown> {
 
 /** Path params parsed from a declared OpenAPI-style path (`/meetings/{id}/x` → `['id']`). */
 function pathParamNames(path: string): string[] {
-  const out: string[] = [];
-  // The param-name run is bounded (a `{param}` identifier is short) so the scan stays strictly linear.
-  const re = /\{([^}/]{1,128})\}/g;
-  let m: RegExpExecArray | null;
-  // biome-ignore lint/suspicious/noAssignInExpressions: standard global-regex exec loop.
-  while ((m = re.exec(path)) !== null) {
-    const name = m[1];
-    if (name) out.push(name);
-  }
-  return out;
+  // Shared linear, no-regex scan (byte-exact `\{([^}/]+)\}` extraction, no length cap on the name).
+  return braceParamNames(path);
 }
 
 /** The OpenAPI `parameters` array for a path's `{param}`s (every declared path param is a string). */
@@ -194,11 +198,10 @@ function pathParameters(path: string): OpenApiParameter[] | undefined {
  * unique-operationId requirement + codegen). The marker text is itself slug-collapsed afterward.
  */
 function operationId(method: string, path: string): string {
-  const slug = path
+  const slug = rewriteBraceParams(path, (name) => `_by_${name}_`)
     // `{name}` → `_by_name_` (the leading/trailing `_` keep it a distinct token after collapse), so a
     // brace segment is structurally distinguishable from a literal segment of the same characters. The
-    // param-name run is bounded (a `{param}` identifier is short) so the scan stays strictly linear.
-    .replace(/\{([^}/]{1,128})\}/g, '_by_$1_')
+    // brace rewrite is a linear, no-regex forward scan (no length cap on the param name).
     .replace(/[^a-zA-Z0-9]+/g, '_')
     .replace(/^_|_$/g, '');
   return `${method.toLowerCase()}_${slug || 'root'}`;
