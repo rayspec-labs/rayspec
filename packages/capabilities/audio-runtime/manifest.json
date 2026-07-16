@@ -1,5 +1,4 @@
 {
-  "stage": "3",
   "status": "runtime",
   "package": "@rayspec/audio-runtime",
   "capabilities": [

@@ -50,8 +50,7 @@ export interface CapabilityDescriptor {
 }
 
 export interface AudioCapabilityManifest {
-  readonly stage: '3';
-  /** RUNTIME realization (distinct from the frozen contract-only doc manifest). */
+  /** RUNTIME realization of the capability surface. */
   readonly status: 'runtime';
   readonly package: '@rayspec/audio-runtime';
   readonly capabilities: readonly CapabilityDescriptor[];
@@ -60,7 +59,6 @@ export interface AudioCapabilityManifest {
 }
 
 export const AUDIO_CAPABILITY_MANIFEST: AudioCapabilityManifest = {
-  stage: '3',
   status: 'runtime',
   package: '@rayspec/audio-runtime',
   capabilities: [
