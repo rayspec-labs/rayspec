@@ -600,7 +600,7 @@ export type ViewAbsentState = z.infer<typeof ViewAbsentState>;
  * additive vocabulary), and `.strict()` still rejects unknown keys fail-closed. The committed
  * schema and the fixtures are regenerated/updated DELIBERATELY with this change (never silently).
  *
- * SEMANTIC SPLIT (CL-BRIDGE-MINOR-1): `source` (+ `read`) declare the BACKING DATA and are validated
+ * SEMANTIC SPLIT: `source` (+ `read`) declare the BACKING DATA and are validated
  * kind-aware (store name / declared artifact / capability contract — a contract id NEVER satisfies a
  * source); `response_contract` (+ `read.shape`) declare the DTO and are validated by the separate
  * shape⊆contract conformance pass. See product-views.ts + product-views-lint.ts.

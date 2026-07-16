@@ -42,7 +42,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const STREAM_DIR = resolve(here, '../../../../examples/stream-backend');
 const FULL_YAML_PATH = resolve(STREAM_DIR, 'rayspec.yaml');
 
-const MEDIA_SECRET = 'p5s4-media-secret-at-least-32-bytes-xx';
+const MEDIA_SECRET = 'media-secret-at-least-32-bytes-xxxxxxxx';
 
 function adminUrl(url: string): string {
   const u = new URL(url);

@@ -58,8 +58,8 @@ const FILE_ONLY_YAML = resolve(here, '__fixtures__/file-ingest.product.yaml');
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
 let armsRan = 0;
 
-const DEMAND_DB = `rayspec_s4_demand_${process.pid}`; // shared, read-only (the throw arms never write)
-const INTAKE_DB = `rayspec_s4_intake_${process.pid}`; // the ONE full boot + launch
+const DEMAND_DB = `rayspec_boot_demand_${process.pid}`; // shared, read-only (the throw arms never write)
+const INTAKE_DB = `rayspec_boot_intake_${process.pid}`; // the ONE full boot + launch
 const TENANT = '00000000-0000-4000-8000-0000000000e4';
 
 function adminUrl(url: string): string {
@@ -106,7 +106,7 @@ describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands', () => 
     process.env.STT_PROVIDER = 'fake';
     process.env.RAYSPEC_EXTRACTION_MODE = 'deterministic';
     process.env.RAYSPEC_BLOB_ROOT = blobDir;
-    process.env.RAYSPEC_MEDIA_SIGNING_KEY = 's4-media-secret-at-least-32-bytes-xxxxxxxx';
+    process.env.RAYSPEC_MEDIA_SIGNING_KEY = 'media-secret-at-least-32-bytes-xxxxxxxx';
   }
   function clearAllFour(): void {
     delete process.env.STT_PROVIDER;
@@ -144,11 +144,11 @@ describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands', () => 
       await admin.end();
     }
 
-    blobDir = mkdtempSync(join(tmpdir(), 'rayspec-s4-'));
+    blobDir = mkdtempSync(join(tmpdir(), 'rayspec-boot-'));
     for (const k of ENV) saved[k] = process.env[k];
     const { privateKey } = await generateKeyPair('RS256', { extractable: true });
     process.env.RAYSPEC_JWT_SIGNING_KEY = await exportPKCS8(privateKey);
-    process.env.RAYSPEC_API_KEY_PEPPER = 's4-pepper-only';
+    process.env.RAYSPEC_API_KEY_PEPPER = 'boot-pepper-only';
     delete process.env.ALLOWED_ORIGINS;
     process.env.PORT = '8806';
     delete process.env.DBOS_SYSTEM_DATABASE_URL;

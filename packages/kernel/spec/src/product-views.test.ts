@@ -72,7 +72,7 @@ function errorsOf(yaml: string): SpecError[] {
   return res.errors;
 }
 
-describe('CL-BRIDGE-MINOR-1 — view source (backing data) ≠ response contract (DTO shape)', () => {
+describe('view source (backing data) ≠ response contract (DTO shape)', () => {
   it('REJECTS an INTERPRETED artifact_query source whose ref is the view’s own response contract (the conflation)', () => {
     const errors = errorsOf(
       doc({

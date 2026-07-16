@@ -166,7 +166,7 @@ describe.skipIf(!hasDb)('route-handler init.enqueue durable seam', () => {
   let h: Harness;
   let stub: StubExecutor;
   let backend: FakeRunBackend;
-  const SCHEMA = 'rayspec_test_p5s52a_enqueue';
+  const SCHEMA = 'rayspec_test_route_handler_enqueue';
 
   beforeAll(async () => {
     backend = new FakeRunBackend();
@@ -218,7 +218,7 @@ describe.skipIf(!hasDb)('route-handler init.enqueue durable seam', () => {
   }
 
   it('(1) the handler enqueues a durable agent run for THIS tenant (one job, the reserved runId, the right RunJob)', async () => {
-    const { orgId, token } = await principal('s52a-enq@example.com', 'S52AEnqOrg');
+    const { orgId, token } = await principal('enq@example.com', 'EnqOrg');
     const res = await jsonRequest(h.app, 'POST', '/finalize/transcribe-agent', {
       headers: { authorization: `Bearer ${token}` },
     });
@@ -240,8 +240,8 @@ describe.skipIf(!hasDb)('route-handler init.enqueue durable seam', () => {
   });
 
   it('(2) TENANT-SCOPED BY CONSTRUCTION: tenant A and tenant B each enqueue ONLY their OWN tenant (no cross-tenant)', async () => {
-    const a = await principal('s52a-tenantA@example.com', 'S52ATenantA');
-    const b = await principal('s52a-tenantB@example.com', 'S52ATenantB');
+    const a = await principal('tenantA@example.com', 'TenantA');
+    const b = await principal('tenantB@example.com', 'TenantB');
     expect(a.orgId).not.toBe(b.orgId);
 
     // Tenant A's request → the closure was built bound to A's server-derived tenant.
@@ -265,7 +265,7 @@ describe.skipIf(!hasDb)('route-handler init.enqueue durable seam', () => {
   });
 
   it('(3) REGISTRY-BOUND: enqueueing an UNDECLARED agent fail-closes (NOT_FOUND); no job enqueued', async () => {
-    const { token } = await principal('s52a-undeclared@example.com', 'S52AUndeclaredOrg');
+    const { token } = await principal('undeclared@example.com', 'UndeclaredOrg');
     const res = await jsonRequest(h.app, 'POST', '/finalize/no-such-agent', {
       headers: { authorization: `Bearer ${token}` },
     });
@@ -277,7 +277,7 @@ describe.skipIf(!hasDb)('route-handler init.enqueue durable seam', () => {
 
   it('(4) FAIL-CLOSED WHEN UNWIRED: with no durable executor, init.enqueue is absent (handler fail-closes), no job', async () => {
     h.deps.durableExecutor = undefined; // no durable worker wired
-    const { token } = await principal('s52a-unwired@example.com', 'S52AUnwiredOrg');
+    const { token } = await principal('unwired@example.com', 'UnwiredOrg');
     const res = await jsonRequest(h.app, 'POST', '/finalize/transcribe-agent', {
       headers: { authorization: `Bearer ${token}` },
     });
@@ -294,8 +294,8 @@ describe.skipIf(!hasDb)('route-handler init.enqueue durable seam', () => {
     // tenant-namespaced server-side, else both land on ONE global DBOS workflow id and the second
     // tenant's job is silently dropped (a tenant-isolation/availability defect). Fail-the-fix: revert
     // the seam to `req.runId ?? randomUUID()` (verbatim) → the two job.runIds become EQUAL → this REDs.
-    const a = await principal('s52a-pinA@example.com', 'S52APinA');
-    const b = await principal('s52a-pinB@example.com', 'S52APinB');
+    const a = await principal('pinA@example.com', 'PinA');
+    const b = await principal('pinB@example.com', 'PinB');
     expect(a.orgId).not.toBe(b.orgId);
 
     await jsonRequest(h.app, 'POST', '/finalize/transcribe-agent?run_id=shared-pin', {
@@ -317,7 +317,7 @@ describe.skipIf(!hasDb)('route-handler init.enqueue durable seam', () => {
   it('PINNED runId is DETERMINISTIC within a tenant: the SAME (tenant, runId) derives the SAME durable id both calls', async () => {
     // Exactly-once / crash-reconcile preserved WITHIN a tenant: pinning the same value twice (same tenant)
     // derives the SAME durable runId, and the handler's returned runId echoes that derived value.
-    const { orgId, token } = await principal('s52a-pindet@example.com', 'S52APinDet');
+    const { orgId, token } = await principal('pindet@example.com', 'PinDet');
     const headers = { authorization: `Bearer ${token}` };
     const first = await jsonRequest(h.app, 'POST', '/finalize/transcribe-agent?run_id=p', {
       headers,
@@ -342,7 +342,7 @@ describe.skipIf(!hasDb)('route-handler init.enqueue durable seam', () => {
   });
 
   it('IDEMPOTENCY: two POSTs with the SAME idempotency key enqueue exactly ONE job (same runId)', async () => {
-    const { orgId, token } = await principal('s52a-idem@example.com', 'S52AIdemOrg');
+    const { orgId, token } = await principal('idem@example.com', 'IdemOrg');
     const headers = { authorization: `Bearer ${token}` };
     const first = await jsonRequest(h.app, 'POST', '/finalize/transcribe-agent?idem=track-42', {
       headers,

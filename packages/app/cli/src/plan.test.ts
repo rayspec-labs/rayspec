@@ -580,10 +580,10 @@ describe('plan — Product-YAML (0.2) projections + update mode', () => {
       `      - { name: reason, type: text, nullable: true }\n` +
       `    key: [queue_ref]\n`;
     const v2 = SUPPORT_TRIAGE_YAML.replace('\ncontracts:\n', `${added}\ncontracts:\n`);
-    writeFileSync(join(dir, 'st-s2-v1.yaml'), SUPPORT_TRIAGE_YAML, 'utf8');
-    writeFileSync(join(dir, 'st-s2-v2.yaml'), v2, 'utf8');
-    const r = await runPlan(['st-s2-v2.yaml'], {
-      against: 'st-s2-v1.yaml',
+    writeFileSync(join(dir, 'st-v1.yaml'), SUPPORT_TRIAGE_YAML, 'utf8');
+    writeFileSync(join(dir, 'st-v2.yaml'), v2, 'utf8');
+    const r = await runPlan(['st-v2.yaml'], {
+      against: 'st-v1.yaml',
       shadowDatabaseUrl: undefined,
     });
     expect(r.ok).toBe(true);
@@ -595,8 +595,8 @@ describe('plan — Product-YAML (0.2) projections + update mode', () => {
     expect(r.migrationSql).not.toContain('CREATE TABLE "triage_log"');
 
     // And the REMOVAL direction: v1→v2 reversed proposes dropping exactly the declared store.
-    const rev = await runPlan(['st-s2-v1.yaml'], {
-      against: 'st-s2-v2.yaml',
+    const rev = await runPlan(['st-v1.yaml'], {
+      against: 'st-v2.yaml',
       shadowDatabaseUrl: undefined,
     });
     expect(rev.ok).toBe(false); // destructive without an allowlist — BLOCKED (the gate)

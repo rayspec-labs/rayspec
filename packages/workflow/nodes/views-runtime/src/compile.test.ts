@@ -349,11 +349,11 @@ describe('auth + mountability (deny-by-default; nothing skipped)', () => {
 });
 
 describe('the parser lint runs INSIDE the mount (a code-built spec cannot bypass it)', () => {
-  it('REJECTS the CL-BRIDGE-MINOR-1 conflation at mount time', () => {
+  it('REJECTS a source that names its own response contract (backing data vs DTO shape) at mount time', () => {
     const v = goodView();
     v.source = { kind: 'artifact_query', ref: 'open_response' }; // = its response contract
     const err = compileError(v);
-    expect(err).toContain('CL-BRIDGE-MINOR-1');
+    expect(err).toContain('not the DTO shape');
   });
 
   it('REJECTS an out-of-context field at mount time (context table enforced here too)', () => {

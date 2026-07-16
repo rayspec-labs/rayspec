@@ -73,13 +73,13 @@ describe.skipIf(!hasDb)('stream INGEST primitive end-to-end', () => {
     handlers = merged.handlers;
     // A per-suite temp dir for the fs blob backend — the SAME makeFsBlobStoreFactory the composition
     // root injects, over an isolated dir (cleaned in afterAll). This is the live blob injection path.
-    blobDir = mkdtempSync(join(tmpdir(), 'rayspec-stream-s2-'));
+    blobDir = mkdtempSync(join(tmpdir(), 'rayspec-stream-ingest-'));
     blobFactory = makeFsBlobStoreFactory(blobDir);
     h = await createHarness({
       engineSpec: merged.spec,
       engineHandlers: handlers,
       blobFactory,
-      schema: 'rayspec_test_p5s2',
+      schema: 'rayspec_test_stream_ingest',
     });
   });
   beforeEach(async () => {
@@ -124,7 +124,7 @@ describe.skipIf(!hasDb)('stream INGEST primitive end-to-end', () => {
   });
 
   it('a RAW binary POST round-trips the raw branch (no JSON parse) + the exact bytes land in the blob', async () => {
-    const { orgId, token } = await principal('s2-raw@example.com', 'S2RawOrg');
+    const { orgId, token } = await principal('raw@example.com', 'RawOrg');
     // Binary bytes that are NOT valid JSON (a leading 0x00 byte etc.) — if the platform tried to
     // c.req.json() this body it would 400; the raw branch must accept it.
     const bytes = new Uint8Array([0x00, 0x01, 0x02, 0xff, 0xfe, 0x7b, 0x6e, 0x6f]);
@@ -143,7 +143,7 @@ describe.skipIf(!hasDb)('stream INGEST primitive end-to-end', () => {
   });
 
   it('the idempotent 200-ack / 200-no-op / 409-gap contract (vs the REAL UNIQUE), watermark advances', async () => {
-    const { orgId, token } = await principal('s2-idem@example.com', 'S2IdemOrg');
+    const { orgId, token } = await principal('idem@example.com', 'IdemOrg');
     const upl = 'upl-idem';
 
     // index 0 == next_expected (watermark -1) → 200, watermark advances to 0.
@@ -176,7 +176,7 @@ describe.skipIf(!hasDb)('stream INGEST primitive end-to-end', () => {
     // put but the pointer insert never committed" by pre-putting the blob for index 0 directly (the
     // blob is tenant-bound), then doing the real ingest: it re-puts the same key (no-op overwrite) and
     // inserts the pointer once. A SECOND ingest of index 0 is then the idempotent no-op (one row).
-    const { orgId, token } = await principal('s2-crash@example.com', 'S2CrashOrg');
+    const { orgId, token } = await principal('crash@example.com', 'CrashOrg');
     const upl = 'upl-crash';
     const blob = blobFactory(orgId);
     await blob.put('upl-crash/0', new Uint8Array([7, 7, 7])); // the "crashed-before-pointer" bytes
@@ -192,7 +192,7 @@ describe.skipIf(!hasDb)('stream INGEST primitive end-to-end', () => {
   });
 
   it('CONCURRENT same-index POSTs collide on the UNIQUE: one wins, none 500s, exactly one row', async () => {
-    const { orgId, token } = await principal('s2-conc@example.com', 'S2ConcOrg');
+    const { orgId, token } = await principal('conc@example.com', 'ConcOrg');
     const upl = 'upl-conc';
     // Fire N concurrent index-0 POSTs. All see watermark -1 (next_expected 0) and race the insert; the
     // UNIQUE(chunk_ref) admits exactly one, the losers catch 23505 → 200 no-op. None may 500.
@@ -211,8 +211,8 @@ describe.skipIf(!hasDb)('stream INGEST primitive end-to-end', () => {
   });
 
   it('TENANT-SCOPED: tenant A ingest is invisible to tenant B (same upload/index is a fresh ack in B)', async () => {
-    const a = await principal('s2-tenA@example.com', 'S2TenAOrg');
-    const b = await principal('s2-tenB@example.com', 'S2TenBOrg');
+    const a = await principal('tenA@example.com', 'TenAOrg');
+    const b = await principal('tenB@example.com', 'TenBOrg');
     const upl = 'shared-upload-id';
 
     // A ingests index 0 + 1.
@@ -269,7 +269,7 @@ describe.skipIf(!hasDb)('stream INGEST primitive end-to-end', () => {
  * by raw SQL on the isolated schema (the table is product, not a core `schema.*` export).
  */
 async function countChunks(h: Harness, orgId: string, uploadId: string): Promise<number> {
-  // The harness schema is the isolated `rayspec_test_p5s2`; the pool's search_path resolves it.
+  // The harness schema is the isolated `rayspec_test_stream_ingest`; the pool's search_path resolves it.
   const rows = (await h.db.$client.unsafe(
     'select count(*)::int as n from blob_chunks where tenant_id = $1 and upload_id = $2',
     [orgId, uploadId],

@@ -161,12 +161,12 @@ describe('buildLiveAgent (fail-closed)', () => {
 
 // ── multi-agent + multi-backend live extraction ──────────────────────────────────────────────────
 
-const S5_TMP_DIRS: string[] = [];
+const TMP_DIRS: string[] = [];
 afterAll(() => {
-  for (const d of S5_TMP_DIRS) rmSync(d, { recursive: true, force: true });
+  for (const d of TMP_DIRS) rmSync(d, { recursive: true, force: true });
 });
 const FAKE_TDB = {} as never;
-const S5_TENANT = '00000000-0000-0000-0000-0000000000d5';
+const LIVE_TENANT = '00000000-0000-0000-0000-0000000000d5';
 
 /** acmeSpec re-shaped to declare N extractors with the given ids (extraction contract cloned). */
 function specWithAgents(ids: string[]): ProductSpec {
@@ -186,8 +186,8 @@ function writeExtractionDir(
     inputContext?: unknown;
   }>,
 ): string {
-  const d = mkdtempSync(join(tmpdir(), 'rayspec-s5-'));
-  S5_TMP_DIRS.push(d);
+  const d = mkdtempSync(join(tmpdir(), 'rayspec-boot-'));
+  TMP_DIRS.push(d);
   const extractionDir = join(d, 'extraction');
   mkdirSync(extractionDir, { recursive: true });
   for (const c of configs) {
@@ -529,8 +529,8 @@ describe('buildLiveAgent — multi-agent + multi-backend', () => {
     expect(live.agentIds).toEqual(['agent_one', 'agent_two']);
     // The SAME declared extraction agent shape runs on OpenAI AND Anthropic: each agent builds its own
     // node closing over its own backend/config — the nodes are distinct object identities.
-    const nodeOne = live.buildNodeForAgent('agent_one', { tdb: FAKE_TDB, tenantId: S5_TENANT });
-    const nodeTwo = live.buildNodeForAgent('agent_two', { tdb: FAKE_TDB, tenantId: S5_TENANT });
+    const nodeOne = live.buildNodeForAgent('agent_one', { tdb: FAKE_TDB, tenantId: LIVE_TENANT });
+    const nodeTwo = live.buildNodeForAgent('agent_two', { tdb: FAKE_TDB, tenantId: LIVE_TENANT });
     expect(typeof nodeOne).toBe('function');
     expect(typeof nodeTwo).toBe('function');
     expect(nodeOne).not.toBe(nodeTwo);
@@ -557,15 +557,15 @@ describe('buildLiveAgent — multi-agent + multi-backend', () => {
     const env = { OPENAI_API_KEY: 'sk-x' };
     const live = buildLiveAgent(env, specPath, spec);
     expect(live.agentIds).toEqual(['agent_one', 'agent_two']);
-    expect(typeof live.buildNodeForAgent('agent_two', { tdb: FAKE_TDB, tenantId: S5_TENANT })).toBe(
+    expect(typeof live.buildNodeForAgent('agent_two', { tdb: FAKE_TDB, tenantId: LIVE_TENANT })).toBe(
       'function',
     );
   });
   it('rejects when a per-agent config names the WRONG agent (config/agent mismatch)', () => {
     const spec = specWithAgents(['agent_one', 'agent_two']);
     // Write agent_two's file but with agent_id pointing at a different id.
-    const d = mkdtempSync(join(tmpdir(), 'rayspec-s5-'));
-    S5_TMP_DIRS.push(d);
+    const d = mkdtempSync(join(tmpdir(), 'rayspec-boot-'));
+    TMP_DIRS.push(d);
     const extractionDir = join(d, 'extraction');
     mkdirSync(extractionDir, { recursive: true });
     for (const id of ['agent_one', 'agent_two']) {
@@ -639,7 +639,7 @@ describe('buildLiveAgent — multi-agent + multi-backend', () => {
       // ALLOWED: it builds (validated-on-native degrades, it does NOT fail-closed like native-on-pi).
       expect(live.agentIds).toEqual(['agent_one']);
       expect(
-        typeof live.buildNodeForAgent('agent_one', { tdb: FAKE_TDB, tenantId: S5_TENANT }),
+        typeof live.buildNodeForAgent('agent_one', { tdb: FAKE_TDB, tenantId: LIVE_TENANT }),
       ).toBe('function');
       // VISIBLE: the downgrade warning fired.
       const warned = spy.mock.calls.map((c) => String(c[0])).join('\n');
@@ -773,7 +773,7 @@ describe('buildLiveAgent — the GENERIC-branch input_context demand (boot fail-
     ]);
     const live = buildLiveAgent({ OPENAI_API_KEY: 'sk-x' }, specPath, spec);
     expect(live.agentIds).toEqual(['doc_agent']);
-    expect(typeof live.buildNodeForAgent('doc_agent', { tdb: FAKE_TDB, tenantId: S5_TENANT })).toBe(
+    expect(typeof live.buildNodeForAgent('doc_agent', { tdb: FAKE_TDB, tenantId: LIVE_TENANT })).toBe(
       'function',
     );
   });
@@ -867,7 +867,7 @@ describe('buildLiveAgent — the GENERIC-branch input_context demand (boot fail-
     const live = buildLiveAgent({ OPENAI_API_KEY: 'sk-test' }, EXPENSE_YAML, expenseSpec());
     expect(live.agentIds).toEqual(['expense_coder']);
     expect(
-      typeof live.buildNodeForAgent('expense_coder', { tdb: FAKE_TDB, tenantId: S5_TENANT }),
+      typeof live.buildNodeForAgent('expense_coder', { tdb: FAKE_TDB, tenantId: LIVE_TENANT }),
     ).toBe('function');
   });
 });
