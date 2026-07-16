@@ -5,6 +5,63 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-07-16
+
+### Security
+
+- **The local server now binds to loopback (`127.0.0.1`) by default.** A freshly
+  started instance no longer listens on all network interfaces; it is not reachable
+  from the network until a host is explicitly configured, closing an
+  accidental-exposure default.
+- **Request bodies are size-bounded on every ingress path.** Both the JSON and the
+  audio-upload routes now reject an oversized payload before it is buffered, bounding
+  the memory a single request can consume.
+- **Rate-limit identity is derived from a trusted peer, and the limiter store is
+  bounded.** A spoofed client identifier can no longer evade the limit, and the
+  limiter's memory footprint is capped so a flood of distinct identifiers cannot grow
+  it without bound.
+- **The session-reprocess affordance is now rate-limited and recorded**, so repeated
+  reprocessing of a session is bounded and observable.
+- **An incoming `x-request-id` is constrained to a short, printable allow-list**
+  before it is echoed or logged, so an untrusted header value cannot inject control
+  characters downstream.
+- **A declared `quote_field` that carries no quote is now rejected** under the
+  unquoted-claim policy, rather than being silently accepted as an unquoted claim.
+- **The per-tenant Anthropic credential directory is hardened against loose or hostile
+  paths.** It is created with mode `0700`; a resolved path that is not a direct child
+  of the configured root, an existing symlink or non-directory, or a group- or
+  world-accessible directory is refused at startup (fail-closed), with containment
+  re-checked against the real path. The adapter's interface and behaviour are
+  otherwise unchanged.
+- **Supply-chain integrity of the build is strengthened.** CI actions are pinned to
+  verified commit SHAs, the `gitleaks` download is verified against a pinned SHA-256,
+  and a CodeQL static-analysis workflow now runs over the codebase.
+
+### Changed
+
+- **The live provider parity smoke suites are now behind an explicit opt-in.** They
+  run only when `RAYSPEC_REQUIRE_LIVE_TESTS=true`, with the exercised backends selected
+  via `RAYSPEC_LIVE_BACKENDS`; without the opt-in an ordinary test run never reaches a
+  live provider or spends against a real credential.
+- **Build and gate tooling resolve repository roots portably** and fail closed on an
+  empty scan, so a seam gate cannot pass vacuously.
+
+### Fixed
+
+- **An authentication test asserting that a password is never leaked is now
+  deterministic**, removing a source of intermittent test failures.
+
+### Upgrade notes
+
+- **Anthropic credential directory permissions — one-time action may be required.**
+  Anthropic credential directories are now created with mode `0700`, and the adapter
+  refuses to start when a credential directory is group- or world-accessible. If you
+  upgrade an existing installation whose credential directory still exists with `0755`
+  (or any group/other permissions), run `chmod 0700` on that directory once after
+  upgrading — otherwise the Anthropic adapter will not start.
+
+Minor hardening follow-ups are tracked for v1.4.1.
+
 ## [1.3.3] - 2026-07-16
 
 ### Added
