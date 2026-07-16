@@ -49,6 +49,12 @@ describe('emitProductViewsOpenApi', () => {
       '/sessions/{session_id}/{track}/transcript',
     ]);
     expect(doc.paths['/sessions']?.get?.operationId).toBe('view_session_list');
+
+    // Prototype-pollution hardening: the accumulators carry NO prototype, so an `__proto__`/`constructor`
+    // shaped view path or method key lands as a plain own-property, never a prototype mutation. (FAIL-THE-
+    // FIX: a plain `{}` accumulator has `Object.prototype`; this is null only with `Object.create(null)`.)
+    expect(Object.getPrototypeOf(doc.paths)).toBeNull();
+    expect(Object.getPrototypeOf(doc.paths['/sessions'])).toBeNull();
   });
 
   it('derives params from the declarations (presets + enums + pagination clamp docs)', () => {
@@ -196,6 +202,46 @@ views:
     const trackProps = trackItems.properties as Record<string, Record<string, unknown>>;
     expect(trackProps.transcript_word_count?.type).toEqual(['integer', 'null']);
     expect(sessions.items.required).toContain('note_counts');
+  });
+
+  it('DEFENSIVE: a contract property + a contract id named `__proto__` are retained as OWN properties (prototype-safe accumulators, fail-the-fix)', () => {
+    // Author-derived contract PROPERTY names (→ the per-node `outProps` map) and contract IDS (→
+    // `components.schemas`, since `encodeRef` returns the id verbatim) both feed plain-object
+    // accumulators. On a plain `{}` an `obj['__proto__'] = x` hits the __proto__ setter → the entry is
+    // silently DROPPED and the object reparented; the null-prototype accumulators keep it. Built via
+    // JSON.parse so `__proto__` is a genuine OWN key (an object literal `{ __proto__: … }` would set the
+    // prototype instead of creating a property).
+    const contracts = JSON.parse(
+      '{"main":{"type":"object","properties":{"__proto__":{"type":"string"},"ok":{"ref":"__proto__"}}},"__proto__":{"type":"integer"}}',
+    );
+    const view = {
+      id: 'v',
+      route: { method: 'GET', path: '/x' },
+      auth: 'bearer_tenant',
+      response_contract: 'main',
+    };
+    const doc = emitProductViewsOpenApi({
+      views: [view] as never,
+      contracts,
+      info: { title: 't', version: '0' },
+    });
+
+    // 1. The per-node `properties` accumulator (outProps) retains the `__proto__` property.
+    const schema = (
+      doc.paths['/x']?.get?.responses['200'] as {
+        content: Record<string, { schema: Record<string, unknown> }>;
+      }
+    ).content['application/json'].schema;
+    const props = schema.properties as Record<string, unknown>;
+    expect(Object.getPrototypeOf(props)).toBeNull();
+    expect(Object.hasOwn(props, '__proto__')).toBe(true);
+    expect(JSON.stringify(props)).toContain('"__proto__"');
+
+    // 2. The `components.schemas` accumulator retains a `__proto__`-named contract id.
+    const schemas = doc.components.schemas as Record<string, unknown>;
+    expect(Object.getPrototypeOf(schemas)).toBeNull();
+    expect(Object.hasOwn(schemas, '__proto__')).toBe(true);
+    expect(JSON.stringify(schemas)).toContain('"__proto__"');
   });
 
   it('EVERY emitted $ref resolves inside the document (no dangling contract pointers)', () => {

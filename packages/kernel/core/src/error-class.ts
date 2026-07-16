@@ -267,9 +267,13 @@ function classifyUpstreamErrorUnsafe(err: unknown): ClassifiedError {
   // an explicit refusal stop-reason. CLS-2: NOT the bare NOUN `refusal` in a benign field LABEL
   // ("safety refusal: none" / "refusal: passed/false"), and NOT a generic "declined for X" (only
   // "declined TO …"), so an ordinary error string is never mis-tagged a refusal.
+  // The `\s*(?:[:=]\s*)?` separator is the exact-same-language, backtracking-free form of `\s*[:=]?\s*`:
+  // a whitespace run can only be consumed by one side of the mandatory `[:=]`, so a long whitespace pad
+  // no longer causes super-linear scanning (the two adjacent `\s*` were the polynomial-ReDoS shape).
   if (
-    /\brefused\b|\bdeclined\s+to\b|stop[ _-]?reason\s*[:=]?\s*refus/.test(m) ||
-    (/\brefusal\b/.test(m) && !/\brefusal\s*[:=]?\s*(?:none|passed|false|absent|n\/a|0)\b/.test(m))
+    /\brefused\b|\bdeclined\s+to\b|stop[ _-]?reason\s*(?:[:=]\s*)?refus/.test(m) ||
+    (/\brefusal\b/.test(m) &&
+      !/\brefusal\s*(?:[:=]\s*)?(?:none|passed|false|absent|n\/a|0)\b/.test(m))
   ) {
     return { errorClass: 'model_refusal', message };
   }

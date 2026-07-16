@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { MIGRATION_ALLOWLIST } from './migration-scan.allowlist.js';
-import { scanMigrationSql } from './migration-scan.js';
+import { scanMigrationSql, stripTerminator } from './migration-scan.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const drizzleDir = join(here, '..', 'drizzle');
@@ -314,5 +314,62 @@ describe('ADD COLUMN NOT NULL (no default) + SET NOT NULL detectors', () => {
       },
     ]);
     expect(r.pass).toBe(true);
+  });
+});
+
+describe('allowlist match is `;`-insensitive via a bounded terminator strip (no `\\s*;\\s*$` ReDoS)', () => {
+  const STMT = 'TRUNCATE TABLE foo;';
+
+  it('an allowlist match clears the statement regardless of its trailing `;`/whitespace', () => {
+    for (const match of [
+      'TRUNCATE TABLE foo', // no terminator
+      'TRUNCATE TABLE foo;', // exact
+      'TRUNCATE TABLE foo ;  ', // whitespace around the terminator + trailing space
+      '  TRUNCATE TABLE foo  ', // surrounding whitespace, no terminator
+    ]) {
+      const r = scanMigrationSql(STMT, [{ kind: 'truncate', match, reason: 'reviewed' }]);
+      expect(r.pass, match).toBe(true);
+    }
+  });
+
+  it('a huge trailing-whitespace allowlist match does not hang the scan (bounded strip)', () => {
+    // FAIL-THE-FIX: the allowlist `match` string is fed to `stripTerminator`; with the old anchored
+    // `\s*;\s*$` a 200k-space no-`;` tail was quadratic. The match doesn't equal the statement, so the
+    // finding stays (pass=false) — but the scan must return quickly.
+    const pathological = `TRUNCATE TABLE bar${' '.repeat(200_000)}`;
+    const start = Date.now();
+    const r = scanMigrationSql(STMT, [{ kind: 'truncate', match: pathological, reason: 'x' }]);
+    expect(Date.now() - start).toBeLessThan(1000);
+    expect(r.pass).toBe(false);
+  });
+});
+
+describe('stripTerminator: `.trimEnd()` is byte-identical to the old `/\\s+$/` replace, without its ReDoS shape', () => {
+  // A self-contained replica of the PRE-fix implementation, kept ONLY here as the byte-parity oracle.
+  function oldStripTerminator(s: string): string {
+    const trimmedEnd = s.replace(/\s+$/, '');
+    const stripped = trimmedEnd.endsWith(';') ? trimmedEnd.slice(0, -1) : trimmedEnd;
+    return stripped.trim();
+  }
+
+  it('matches the old regex-based implementation byte-for-byte over a battery of edge cases', () => {
+    const battery = ['', '  ;  ', 'abc;', 'abc ; ', 'x\t\t', ';', 'a;b', 'no semi   ', '\n\t ; \n'];
+    for (const s of battery) {
+      expect(stripTerminator(s)).toBe(oldStripTerminator(s));
+    }
+  });
+
+  it('TIMING TEETH: a huge no-`;` leading-whitespace input returns fast (reverting to `/\\s+$/` blows the budget)', () => {
+    // All the whitespace is LEADING, followed by a non-whitespace char — the exact shape that made the
+    // old end-anchored `/\s+$/` catastrophically slow (~5.2s measured on this input) trying to match at
+    // every start position and failing. `.trimEnd()` has no such backtracking.
+    const input = `${'\t'.repeat(50_000)}X`;
+    const start = Date.now();
+    const result = stripTerminator(input);
+    expect(Date.now() - start).toBeLessThan(50);
+    // `stripTerminator`'s final `.trim()` still strips the LEADING tab run (as it always has, on both
+    // implementations — proven above by the byte-parity battery); the trailing `X` has no whitespace to
+    // strip, which is the property under test, not full-string identity.
+    expect(result).toBe('X');
   });
 });

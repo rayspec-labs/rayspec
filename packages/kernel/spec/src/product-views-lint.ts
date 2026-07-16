@@ -24,6 +24,7 @@
  * violation is an `invalid_view` (or `dangling_ref` where a plain cross-reference dangles) — never a
  * silent skip (the FAIL-OPEN lesson: reject loudly, never silently skip).
  */
+import { braceParamNames } from './brace-params.js';
 import { type SpecError, specError } from './errors.js';
 import { SafeIdentifier } from './grammar.js';
 import type {
@@ -53,16 +54,9 @@ export interface ViewLintInput {
   capabilities: readonly CapabilitySpec[];
 }
 
-/** Extract `{param}` names from a declared route path. */
+/** Extract `{param}` names from a declared route path (shared linear, no-regex scan). */
 export function viewPathParams(path: string): string[] {
-  const out: string[] = [];
-  const re = /\{([^}/]+)\}/g;
-  let m: RegExpExecArray | null;
-  // biome-ignore lint/suspicious/noAssignInExpressions: standard global-regex exec loop.
-  while ((m = re.exec(path)) !== null) {
-    if (m[1]) out.push(m[1]);
-  }
-  return out;
+  return braceParamNames(path);
 }
 
 /** The shape contexts a field can appear in (each with its own allowed-kind set). */

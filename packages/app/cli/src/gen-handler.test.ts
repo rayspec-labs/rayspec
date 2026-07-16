@@ -90,6 +90,16 @@ describe('runGenHandler — fail-closed', () => {
     await expect(runGenHandler(['--holes', 'x.json'])).rejects.toThrow(/--out/);
   });
 
+  it('ok:false holes_too_large on an oversized file (fstat cap preserved through the fd read)', async () => {
+    // The size cap is enforced by fstat'ing the OPEN handle before reading it (no statSync→readFile race);
+    // > MAX_HOLES_BYTES (256 KiB) ⇒ holes_too_large, never a full read of an oversized file.
+    writeFileSync(join(tmp, 'big.json'), 'x'.repeat(256 * 1024 + 64), 'utf8');
+    const result = await runGenHandler(['--holes', 'big.json', '--out', 'out']);
+    expect(result.ok).toBe(false);
+    expect(result.errors[0]?.code).toBe('holes_too_large');
+    expect(result.errors[0]?.message).toMatch(/exceeds the \d+-byte cap/);
+  });
+
   it('throws on a --holes path that escapes the CWD', async () => {
     await expect(runGenHandler(['--holes', '../../../etc/passwd', '--out', 'out'])).rejects.toThrow(
       /escapes the working directory|not found/,

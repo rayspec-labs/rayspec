@@ -306,6 +306,48 @@ describe('classifyUpstreamError — CLS-2: refusal over-match (a benign field la
   });
 });
 
+describe('classifyUpstreamError — CLS-2 refusal separators are bounded (no polynomial scan)', () => {
+  // The refusal branches now use the backtracking-free `\s*(?:[:=]\s*)?` separator (same language as the
+  // old `\s*[:=]?\s*`, but without the two adjacent whitespace stars that made it polynomial-ReDoS).
+  // These lock that every legitimate separator shape classifies EXACTLY as before.
+  it('every separator shape of "stop reason … refusal" still → model_refusal', () => {
+    for (const m of [
+      'stop_reason:refusal',
+      'stop_reason: refusal',
+      'stop reason = refusal',
+      'stop-reason   refusal detected',
+      'stop reason:refusal',
+    ]) {
+      expect(classifyUpstreamError(new Error(m)).errorClass, m).toBe('model_refusal');
+    }
+  });
+
+  it('every separator shape of a benign "refusal <sep> none|passed|false|absent" still → internal', () => {
+    for (const m of [
+      'refusal: none',
+      'refusal:none',
+      'refusal = false',
+      'moderation refusal   passed',
+      'safety refusal: absent',
+    ]) {
+      expect(classifyUpstreamError(new Error(m)).errorClass, m).toBe('internal');
+    }
+  });
+
+  it('a huge whitespace pad after the refusal anchors does not hang the classifier', () => {
+    // FAIL-THE-FIX: with the old `\s*[:=]?\s*` adjacency this pair took multiple seconds (quadratic);
+    // the bounded form completes in well under a millisecond. The classifications are unchanged.
+    const pad = ' '.repeat(50_000);
+    const start = Date.now();
+    const c1 = classifyUpstreamError(new Error(`stop reason${pad}!`)); // never reaches "refus"
+    const c2 = classifyUpstreamError(new Error(`refusal${pad}x`)); // bare-noun refusal, no benign label
+    const elapsed = Date.now() - start;
+    expect(c1.errorClass).toBe('internal');
+    expect(c2.errorClass).toBe('model_refusal');
+    expect(elapsed).toBeLessThan(2000);
+  });
+});
+
 describe('classifyUpstreamError — CLS-3/CLS-4/CLS-5: throw-safety, status preference, header parse', () => {
   it('CLS-3: a hostile error with a throwing getter never crashes the classifier → internal', () => {
     const hostile = {

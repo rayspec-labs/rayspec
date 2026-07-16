@@ -85,8 +85,15 @@ export interface AllowlistEntry {
 }
 
 /** Strip a single trailing `;` (and surrounding space) so allowlist match is `;`-insensitive. */
-function stripTerminator(s: string): string {
-  return s.replace(/\s*;\s*$/, '').trim();
+export function stripTerminator(s: string): string {
+  // `.trimEnd()` (native, linear) instead of a regex `s.replace(/\s+$/, '')` — that replace is ITSELF
+  // a polynomial-ReDoS shape (an end-anchored `\s+` against a long non-matching whitespace run
+  // backtracks per start position: ~5.2s measured on 50k tabs + a trailing non-whitespace char).
+  // `.trimEnd()` has no backtracking (no regex at all) and is byte-identical: it drops exactly the
+  // same trailing-whitespace run a correct `/\s+$/` replace would.
+  const trimmedEnd = s.trimEnd();
+  const stripped = trimmedEnd.endsWith(';') ? trimmedEnd.slice(0, -1) : trimmedEnd;
+  return stripped.trim();
 }
 
 // Each detector is whitespace-tolerant (collapses runs of whitespace incl. newlines) and

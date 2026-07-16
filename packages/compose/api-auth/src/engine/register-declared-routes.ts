@@ -41,7 +41,7 @@ import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { Permission } from '@rayspec/auth-core';
 import type { StoreConflictKeys } from '@rayspec/db';
 import type { BlobStoreFactory, ResolvedHandler } from '@rayspec/platform';
-import type { HttpMethod, RaySpec, StoreOp } from '@rayspec/spec';
+import { type HttpMethod, type RaySpec, rewriteBraceParams, type StoreOp } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { Context, MiddlewareHandler } from 'hono';
 import type { AppDeps, AppEnv } from '../app-context.js';
@@ -60,7 +60,8 @@ import { makeStreamIngestHandler, makeStreamPlaybackHandler } from './stream-rou
  * registration.)
  */
 export function toHonoPath(path: string): string {
-  return path.replace(/\{([^}/]+)\}/g, ':$1');
+  // A no-regex, single forward scan → strictly linear, with no length cap on the param name.
+  return rewriteBraceParams(path, (name) => `:${name}`);
 }
 
 /**

@@ -309,11 +309,13 @@ function assertStoreIdentifiers(store: StoreSpec): void {
  * test weakens this function and asserts the "passes-with-proposed-allowlist" proof goes RED.
  */
 function normalizeStatementForMatch(statement: string): string {
-  return statement
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/\s*;\s*$/, '')
-    .trim();
+  // Collapse whitespace runs to single spaces + trim (linear), then strip at most one trailing `;` via a
+  // linear `endsWith` + slice — NOT an anchored `\s*;\s*$` (whose two `\s*` around the optional `;` are a
+  // polynomial-ReDoS shape on a long no-`;` whitespace tail). Output is byte-identical: after the collapse
+  // the only whitespace adjacent to a trailing `;` is a single space, which the closing `trim()` removes.
+  const collapsed = statement.replace(/\s+/g, ' ').trim();
+  const stripped = collapsed.endsWith(';') ? collapsed.slice(0, -1) : collapsed;
+  return stripped.trim();
 }
 
 // ---------------------------------------------------------------------------------------
@@ -645,13 +647,19 @@ function assembleMigrationSql(
 const MIGRATION_FILE_RE = /^(\d{4})_.*\.sql$/;
 const MAX_MIGRATION_SEQUENCE = 9999;
 
+/** Strip leading + trailing `_` runs with a linear index walk (the `^_+|_+$` regex is a ReDoS shape). */
+function trimUnderscores(s: string): string {
+  let start = 0;
+  let end = s.length;
+  while (start < end && s.charCodeAt(start) === 0x5f /* '_' */) start++;
+  while (end > start && s.charCodeAt(end - 1) === 0x5f) end--;
+  return s.slice(start, end);
+}
+
 /** Sanitize a free-text label into a safe migration-filename slug (`[a-z0-9_]`, non-empty, bounded). */
 function sanitizeLabel(label: string): string {
-  const slug = label
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 48);
+  const collapsed = label.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  const slug = trimUnderscores(collapsed).slice(0, 48);
   return slug.length > 0 ? slug : 'update';
 }
 

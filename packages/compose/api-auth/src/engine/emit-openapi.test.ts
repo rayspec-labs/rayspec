@@ -122,6 +122,56 @@ describe('buildDeclaredRoutesOpenApi — product-agnostic emission', () => {
     expect(Object.keys(doc.paths['/widgets']).sort()).toEqual(['get', 'post']);
     // GET + PATCH + DELETE on /widgets/{id} merge into one path item.
     expect(Object.keys(doc.paths['/widgets/{id}']).sort()).toEqual(['delete', 'get', 'patch']);
+
+    // Prototype-pollution hardening: the accumulators have NO prototype, so an `__proto__`/`constructor`
+    // shaped path or method key lands as a plain own-property, never a prototype mutation. (FAIL-THE-FIX:
+    // a plain `{}` accumulator has `Object.prototype`, so this is null only with the `Object.create(null)`.)
+    expect(Object.getPrototypeOf(doc.paths)).toBeNull();
+    expect(Object.getPrototypeOf(doc.paths['/widgets'])).toBeNull();
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it('DEFENSIVE: a store column named `__proto__` is retained as an OWN property (prototype-safe row schema, fail-the-fix)', () => {
+    // `__proto__` matches SafeIdentifier (a leading underscore) and there is NO dunder guard on backend
+    // store columns, so a code-built spec can carry it. On a plain `{}` accumulator the assignment
+    // `properties['__proto__'] = x` hits the __proto__ SETTER → the column is silently DROPPED and the
+    // object is reparented. The null-prototype accumulator keeps it as a real own property. Built via the
+    // grammar parse only (no lintSpec) to reach the emitter with a code-built column, defence-in-depth.
+    const spec = RaySpec.parse({
+      version: '1.0',
+      metadata: { name: 'proto-col-backend' },
+      stores: [
+        {
+          name: 'widgets',
+          columns: [
+            { name: '__proto__', type: 'text' }, // dunder-shaped, SafeIdentifier-legal
+            { name: 'title', type: 'text' },
+          ],
+        },
+      ],
+      api: [
+        {
+          method: 'GET',
+          path: '/widgets/{id}',
+          action: { kind: 'store', store: 'widgets', op: 'get' },
+        },
+      ],
+    });
+    const doc = buildDeclaredRoutesOpenApi(spec);
+    const row = doc.paths['/widgets/{id}'].get.responses['200']?.content?.['application/json']
+      .schema as { properties: Record<string, unknown> };
+    const props = row.properties;
+    // The accumulator has NO prototype (fail-the-fix: a plain `{}` would be Object.prototype, and after
+    // the `__proto__` assignment it would be REPARENTED to the column's schema object — never null).
+    expect(Object.getPrototypeOf(props)).toBeNull();
+    // `__proto__` is a REAL own property (fail-the-fix: on `{}` the assignment is dropped, so it is absent).
+    expect(Object.hasOwn(props, '__proto__')).toBe(true);
+    expect(Object.keys(props)).toContain('__proto__');
+    // It survives JSON serialization as an own key (the emitted document is JSON-serialized downstream).
+    expect(JSON.stringify(props)).toContain('"__proto__"');
+    // The sibling business column + the injected columns are unaffected.
+    expect(Object.keys(props)).toContain('title');
+    expect(Object.keys(props)).toContain('id');
   });
 
   it('a {store} CREATE body is derived from the StoreSpec — business cols present, injected cols absent', () => {

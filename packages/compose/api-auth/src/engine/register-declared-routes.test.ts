@@ -20,7 +20,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AgentRegistry, AppDeps, AppEnv } from '../app-context.js';
 import { requirePermission } from '../http/middleware.js';
 import type { MediaTokenService } from '../media/media-token.js';
-import { registerDeclaredRoutes } from './register-declared-routes.js';
+import { registerDeclaredRoutes, toHonoPath } from './register-declared-routes.js';
 
 // Spy on `requirePermission` so a route-registration test can assert WHICH permission a declared
 // route is wired behind (the middleware itself is never run here — the registrar throws/records at
@@ -340,5 +340,42 @@ describe('registerDeclaredRoutes — {handler} readonly gates store:read (defaul
 
   it('an explicit readonly:false handler route is gated store:write (fail-closed on false)', () => {
     expect(permForHandlerRoute(false)).toBe('store:write');
+  });
+});
+
+describe('toHonoPath — `{param}` → `:param` conversion (linear, no-regex scan)', () => {
+  it('converts every legitimate declared path EXACTLY as before', () => {
+    expect(toHonoPath('/widgets')).toBe('/widgets');
+    expect(toHonoPath('/widgets/{id}')).toBe('/widgets/:id');
+    expect(toHonoPath('/x/{a}/y/{b}')).toBe('/x/:a/y/:b');
+    expect(toHonoPath('/uploads/{key}/chunk')).toBe('/uploads/:key/chunk');
+    const long = `long_${'x'.repeat(100)}`;
+    expect(toHonoPath(`/r/{${long}}`)).toBe(`/r/:${long}`);
+  });
+
+  it('a long unclosed-`{`-run input does not hang the rewrite (linear scan)', () => {
+    // The single forward scan is strictly linear on a pathological unclosed brace — no backtracking.
+    const pathological = `/x/{${'a'.repeat(200_000)}`; // 200k chars, no closing brace
+    const start = Date.now();
+    const out = toHonoPath(pathological);
+    expect(Date.now() - start).toBeLessThan(1000);
+    // No closing `}` ⇒ nothing to rewrite ⇒ returned unchanged.
+    expect(out).toBe(pathological);
+  });
+
+  it('a 129+-char param name is rewritten too — the scan is length-SAFE, not length-capped (fail-the-fix)', () => {
+    // A route path is only `z.string().min(1)` — a param name has no length cap anywhere, so a 129+
+    // char name is schema-legal and MUST still convert. FAIL-THE-FIX: a `[^}/]{1,128}` bounded regex
+    // would silently leave `/r/{<129 chars>}` un-rewritten (the brace becomes a literal segment); the
+    // no-regex scan converts it just like a short name, and still stays linear.
+    const long129 = 'a'.repeat(129);
+    expect(toHonoPath(`/r/{${long129}}`)).toBe(`/r/:${long129}`);
+    const long5000 = 'z'.repeat(5000);
+    expect(toHonoPath(`/r/{${long5000}}`)).toBe(`/r/:${long5000}`);
+    // ~65 emoji already exceed 128 UTF-16 code units (2 units each) — still rewritten.
+    const emoji = '😀'.repeat(65);
+    expect(toHonoPath(`/r/{${emoji}}/s/{ok}`)).toBe(`/r/:${emoji}/s/:ok`);
+    // A neighbouring in-bound param on the same path still converts normally.
+    expect(toHonoPath(`/r/{ok}/s/{${long129}}`)).toBe(`/r/:ok/s/:${long129}`);
   });
 });

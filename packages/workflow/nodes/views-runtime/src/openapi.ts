@@ -124,7 +124,10 @@ function contractNodeToSchema(
 
   const props = node.properties;
   if (props !== null && typeof props === 'object' && !Array.isArray(props)) {
-    const outProps: Record<string, unknown> = {};
+    // Prototype-free accumulator: the keys are author-derived contract property names, so a property
+    // named `__proto__`/`constructor` lands as a plain own-property here, never a prototype mutation (on
+    // a plain `{}` such a key would be silently dropped). Own enumerable keys serialize identically.
+    const outProps: Record<string, unknown> = Object.create(null);
     for (const [name, sub] of Object.entries(props as Record<string, unknown>)) {
       if (sub !== null && typeof sub === 'object' && !Array.isArray(sub)) {
         outProps[name] = contractNodeToSchema(sub as Record<string, unknown>, contracts, wanted);
@@ -205,7 +208,10 @@ export function emitProductViewsOpenApi(config: {
   info: { title: string; version: string; description?: string };
 }): ViewsOpenApiDocument {
   const wanted = new Set<string>();
-  const paths: Record<string, Record<string, ViewsOpenApiOperation>> = {};
+  // Prototype-free accumulator: the keys are author-derived (the declared view path + method), so an
+  // `__proto__`/`constructor` path key lands as a plain own-property, never a prototype mutation.
+  // Behaviour is otherwise identical (own enumerable keys serialize the same).
+  const paths: Record<string, Record<string, ViewsOpenApiOperation>> = Object.create(null);
 
   for (const view of config.views) {
     const params = parametersFor(view);
@@ -282,14 +288,17 @@ export function emitProductViewsOpenApi(config: {
 
     let item = paths[view.route.path];
     if (!item) {
-      item = {};
+      item = Object.create(null) as Record<string, ViewsOpenApiOperation>;
       paths[view.route.path] = item;
     }
     item[view.route.method.toLowerCase()] = op;
   }
 
-  // Emit every $ref'd contract into components.schemas (transitively — refs may ref further).
-  const schemas: Record<string, Record<string, unknown>> = {};
+  // Emit every $ref'd contract into components.schemas (transitively — refs may ref further). Built on a
+  // null prototype: `encodeRef` returns the contract id verbatim, so an author-chosen contract id
+  // `__proto__`/`constructor` reaches this map unsanitized and must land as a plain own-property, never a
+  // prototype mutation (on a plain `{}` such a key would be silently dropped). Own keys serialize the same.
+  const schemas: Record<string, Record<string, unknown>> = Object.create(null);
   const emitted = new Set<string>();
   while (wanted.size > emitted.size) {
     for (const id of [...wanted]) {
