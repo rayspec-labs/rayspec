@@ -19,12 +19,7 @@ interface RuntimeManifest {
 }
 
 const manifestJsonPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'manifest.json');
-const forbiddenProductWords = [
-  'meeting',
-  'recording',
-  'transcription',
-  'deepgram',
-] as const;
+const forbiddenProductWords = ['meeting', 'recording', 'transcription', 'deepgram'] as const;
 
 function actualSurface(): {
   stores: string[];

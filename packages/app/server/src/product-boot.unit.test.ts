@@ -557,9 +557,9 @@ describe('buildLiveAgent — multi-agent + multi-backend', () => {
     const env = { OPENAI_API_KEY: 'sk-x' };
     const live = buildLiveAgent(env, specPath, spec);
     expect(live.agentIds).toEqual(['agent_one', 'agent_two']);
-    expect(typeof live.buildNodeForAgent('agent_two', { tdb: FAKE_TDB, tenantId: LIVE_TENANT })).toBe(
-      'function',
-    );
+    expect(
+      typeof live.buildNodeForAgent('agent_two', { tdb: FAKE_TDB, tenantId: LIVE_TENANT }),
+    ).toBe('function');
   });
   it('rejects when a per-agent config names the WRONG agent (config/agent mismatch)', () => {
     const spec = specWithAgents(['agent_one', 'agent_two']);
@@ -773,9 +773,9 @@ describe('buildLiveAgent — the GENERIC-branch input_context demand (boot fail-
     ]);
     const live = buildLiveAgent({ OPENAI_API_KEY: 'sk-x' }, specPath, spec);
     expect(live.agentIds).toEqual(['doc_agent']);
-    expect(typeof live.buildNodeForAgent('doc_agent', { tdb: FAKE_TDB, tenantId: LIVE_TENANT })).toBe(
-      'function',
-    );
+    expect(
+      typeof live.buildNodeForAgent('doc_agent', { tdb: FAKE_TDB, tenantId: LIVE_TENANT }),
+    ).toBe('function');
   });
 
   it('REJECTS a malformed input_context, naming the defect (shape-validated at boot)', () => {
