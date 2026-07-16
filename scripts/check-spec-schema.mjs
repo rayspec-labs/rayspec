@@ -22,9 +22,12 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const repoRoot = join(dirname(new URL(import.meta.url).pathname), '..');
+// Resolve the repo root from THIS file via fileURLToPath — a checkout path with a space (or any
+// other percent-encodable character) survives, where `new URL(import.meta.url).pathname` would leave
+// a literal `%20` in the path and break every join below.
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 /** The BUILT exporter (dist) — the gate runs after `pnpm build` in the CI/local chain. */
 const SPEC_DIST = join(repoRoot, 'packages', 'kernel', 'spec', 'dist', 'index.js');
 

@@ -46,8 +46,13 @@
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, extname, join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const repoRoot = join(dirname(new URL(import.meta.url).pathname), '..');
+// Resolve the repo root from THIS file via fileURLToPath — a checkout path with a space (or any
+// other percent-encodable character) survives, where `new URL(import.meta.url).pathname` would leave
+// a literal `%20` in the path and break every join below (and, worse for THIS gate, silently make the
+// whole scan read zero files — see the fail-closed guard at the end).
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 // The platform/product seam: `products/` + `sdks/` are consumer-owned trees the platform must not
 // depend on at build time. `deployments/` is consumer-owned too, but it is handled separately by
@@ -119,6 +124,10 @@ function* walk(root) {
 }
 
 const violations = [];
+// Count the platform source files clause (a) actually READ — a healthy checkout has many. ZERO means
+// the repo root resolved to nothing scannable, which must fail CLOSED (see the guard below), never
+// silently PASS on an empty scan.
+let platformScanned = 0;
 
 // ── (a) static products/sdks seam imports in the open-core platform surface ───────────────────────
 // NOT deployments/ (consumer-owned — it legitimately references a `products/` path directly) and NOT
@@ -126,6 +135,7 @@ const violations = [];
 for (const base of ['packages', 'scripts', 'examples']) {
   for (const file of walk(join(repoRoot, base))) {
     if (!CODE_EXT.has(extname(file))) continue;
+    platformScanned += 1;
     const lines = readFileSync(file, 'utf8').split('\n');
     lines.forEach((line, i) => {
       if (isSeamImport(line)) {
@@ -200,6 +210,23 @@ for (const file of pkgJsonFiles) {
       }
     }
   }
+}
+
+// ── fail-closed: a scan that read NOTHING must never certify the seam as clean ────────────────────
+// The gate's PRIMARY job is clause (a): the static products/sdks seam-import scan over
+// packages/scripts/examples (it increments platformScanned). The open-core platform ALWAYS has code
+// there, so platformScanned is many files in a healthy checkout. ZERO means the repo root did not
+// resolve to the real tree (e.g. a checkout path this script could not read) and clause (a) validated
+// nothing — so a "no violations" verdict is meaningless, regardless of whether a stray package.json was
+// still found elsewhere. Fail CLOSED on the primary scan alone; this is the fail-OPEN hole that the
+// fileURLToPath fix + this guard together close.
+if (platformScanned === 0) {
+  console.error(
+    'no-pack gate FAILED: scanned 0 platform source files under packages/scripts/examples. The repo ' +
+      `root ('${repoRoot}') resolved to nothing scannable, so a PASS would be meaningless. Refusing ` +
+      'to certify the platform/product seam on an empty scan (fail-closed) — check the checkout path.',
+  );
+  process.exit(1);
 }
 
 if (violations.length > 0) {

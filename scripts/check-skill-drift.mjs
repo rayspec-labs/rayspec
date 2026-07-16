@@ -19,8 +19,12 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const repoRoot = join(dirname(new URL(import.meta.url).pathname), '..');
+// Resolve the repo root from THIS file via fileURLToPath — a checkout path with a space (or any
+// other percent-encodable character) survives, where `new URL(import.meta.url).pathname` would leave
+// a literal `%20` in the path and break every join below.
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const SKILL = '.claude/skills/rayspec-author/SKILL.md';
 const GRAMMAR = 'packages/kernel/spec/src/grammar.ts';

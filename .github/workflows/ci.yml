@@ -160,6 +160,13 @@ jobs:
       - name: No-pack regression gate
         run: pnpm gate:no-pack
 
+      # The no-pack gate derives its repo root from import.meta.url; a checkout path containing a space
+      # (or any percent-encodable character) must not silently zero the scan and fail OPEN. This
+      # standalone regression drives the REAL gate from a space path and proves it detects a seam
+      # import, passes a clean tree, and fails CLOSED on an empty scan. DB-free / secret-free → lane 1.
+      - name: No-pack path-portability regression
+        run: pnpm test:gate-portability
+
       # The neutral reference product (examples/acme-notes/**) must carry ZERO product-domain meaning —
       # a forcing function on the fixtures the platform gates/goldens/e2e are pinned against.
       - name: Fixture-neutrality gate
