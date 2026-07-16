@@ -257,6 +257,65 @@ describe('applyGroundingPolicy — a declared quote_field with no quote is an un
     expect(finding?.members.map((m) => m.payload.text)).toEqual(['grounded claim']);
     expect(app.unsupportedClaims).toBe(0);
   });
+
+  it('classifies a WHITESPACE-ONLY quote as absent/blank (the precise message), not an unmatched span', () => {
+    // A whitespace-only quote carries no word tokens, so it can never be a verbatim subset of any span
+    // — it is an unquoted claim, and the failure message must say so ("absent/empty/blank"), NOT the
+    // misleading "not a verbatim token-run subset" wording that only fits a genuinely-present quote.
+    expect(() =>
+      applyGroundingPolicy(
+        specWithQuoteField('fail'),
+        candidateWithQuote('   '),
+        'notetool.notes',
+        CLOSED,
+      ),
+    ).toThrow(/is absent, empty, blank, or not a string/);
+  });
+
+  it('treats a whitespace-only quote identically to a genuinely-absent quote (outcome AND message)', () => {
+    // The reword must not change behaviour: a whitespace-only quote and a genuinely-absent one take the
+    // SAME consequence + counters in every mode, and under `fail` throw the SAME message. (The message
+    // equality is the fail-the-fix: before the fix a blank quote took the "unmatched span" branch, so
+    // its message differed from the absent case.)
+    const members = (app: ReturnType<typeof applyGroundingPolicy>): (string | undefined)[] =>
+      app.kinds
+        .find((k) => k.artifact.kind === 'finding')
+        ?.members.map((m) => m.payload.text as string | undefined) ?? [];
+    for (const mode of ['drop', 'prune', 'ignore'] as const) {
+      const blank = applyGroundingPolicy(
+        specWithQuoteField(mode),
+        candidateWithQuote('   '),
+        'notetool.notes',
+        CLOSED,
+      );
+      const absent = applyGroundingPolicy(
+        specWithQuoteField(mode),
+        candidateWithQuote(undefined),
+        'notetool.notes',
+        CLOSED,
+      );
+      expect(members(blank)).toEqual(members(absent));
+      expect(blank.droppedMembers).toBe(absent.droppedMembers);
+      expect(blank.prunedCitations).toBe(absent.prunedCitations);
+      expect(blank.unsupportedClaims).toBe(absent.unsupportedClaims);
+    }
+    // Under `fail`, both throw — and with the SAME message (the blank/absent classification).
+    const failMessage = (quote: unknown): string => {
+      try {
+        applyGroundingPolicy(
+          specWithQuoteField('fail'),
+          candidateWithQuote(quote),
+          'notetool.notes',
+          CLOSED,
+        );
+      } catch (e) {
+        return (e as Error).message;
+      }
+      throw new Error('expected applyGroundingPolicy to throw under on_unquoted_claim: fail');
+    };
+    expect(failMessage('   ')).toBe(failMessage(undefined));
+    expect(failMessage('   ')).toMatch(/is absent, empty, blank, or not a string/);
+  });
 });
 
 describe('buildCollectionRows (the canonical row contract)', () => {
