@@ -312,7 +312,13 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
       const principal = c.get('principal');
       const orgId = c.get('tenantId');
       if (!orgId || !principal?.userId) throw forbidden();
-      const rawBody = await readBoundedJson(c, deps.maxJsonBodyBytes, {});
+      // Fallback `undefined` (NOT `{}`): an empty or unparseable body must be a 400 VALIDATION_ERROR,
+      // not a silent scopeless mint. `readBoundedJson` returns the fallback for an empty OR malformed
+      // body, so a `{}` fallback would parse to `{ scopes: [] }` and mint a real (dead) scopeless key
+      // on no input at all. `undefined` makes `MintApiKeyRequest.parse` reject it — the same 400 the
+      // sibling create/role/member routes return for a missing required body. An over-cap body still
+      // 413s first, and an EXPLICIT `{}` body is a deliberate scopeless mint and stays valid.
+      const rawBody = await readBoundedJson(c, deps.maxJsonBodyBytes, undefined);
       const body = MintApiKeyRequest.parse(rawBody);
 
       // Idempotency-Key: TENANT-SCOPED, EXACTLY-ONCE mint via reserve-before-mint (the run-core

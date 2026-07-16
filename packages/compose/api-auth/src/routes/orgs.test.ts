@@ -369,6 +369,48 @@ describe('Idempotency-Key on mint (tenant-scoped)', () => {
   });
 });
 
+describe('api-key mint: an empty or malformed body is rejected without minting', () => {
+  it('an empty body and a malformed-JSON body each → 400, and NO scopeless key is minted', async () => {
+    const t0 = await registerUser('mint-badbody@example.com');
+    const orgId = await createOrg(t0, 'MintBadBodyCo');
+    const orgToken = await switchOrg(t0, orgId);
+    const bearer = { authorization: `Bearer ${orgToken}` };
+
+    // Baseline: the org has no api-keys yet.
+    const before = await (
+      await jsonRequest(h.app, 'GET', `/v1/orgs/${orgId}/api-keys`, { headers: bearer })
+    ).json();
+    expect(before.keys.length).toBe(0);
+
+    // (a) EMPTY body (no body sent at all) → the bounded reader returns the fallback. With the
+    // `undefined` fallback this is `MintApiKeyRequest.parse(undefined)` → ZodError → 400. (With the old
+    // `{}` fallback it parsed to `{ scopes: [] }` and minted a scopeless key with a 201 — so this
+    // assertion goes RED without the fix.)
+    const empty = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/api-keys`, {
+      headers: bearer,
+    });
+    expect(empty.status).toBe(400);
+    expect((await empty.json()).error.code).toBe('VALIDATION_ERROR');
+
+    // (b) MALFORMED JSON body (non-empty, under the cap, unparseable) → JSON.parse throws → the SAME
+    // fallback path → 400. Sent as a RAW body: `jsonRequest` always JSON-stringifies its `body`, so it
+    // cannot express invalid JSON — go straight to `app.request` with an invalid JSON string.
+    const malformed = await h.app.request(`/v1/orgs/${orgId}/api-keys`, {
+      method: 'POST',
+      headers: { ...bearer, 'content-type': 'application/json' },
+      body: '{ this is not valid json',
+    });
+    expect(malformed.status).toBe(400);
+    expect((await malformed.json()).error.code).toBe('VALIDATION_ERROR');
+
+    // No side effect on either bad input: the list is still empty (no dead scopeless key was created).
+    const after = await (
+      await jsonRequest(h.app, 'GET', `/v1/orgs/${orgId}/api-keys`, { headers: bearer })
+    ).json();
+    expect(after.keys.length).toBe(0);
+  });
+});
+
 describe('CSRF: a cookie-only request to a mutating endpoint is rejected', () => {
   it('POST /v1/orgs with NO Bearer (cookie principal only) → 403', async () => {
     // Register to get a cookie session, then attempt to create an org with ONLY the cookie.
