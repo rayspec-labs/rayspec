@@ -45,11 +45,14 @@ pnpm build          # builds all packages, including the two CLI bins
 pnpm db:up          # starts the local Postgres on port 5433
 ```
 
-> **Cold-store install warnings are benign.** The first `pnpm install` on a machine
-> with a cold pnpm store may print one or more `WARN … Failed to create bin at …`
-> lines as it populates the content-addressable store. They are non-fatal — as long as
-> `pnpm install` exits `0` the workspace is fully installed, and a second `pnpm install`
-> runs clean. You can ignore them.
+> **`Failed to create bin` warnings on a fresh checkout are benign.** The first
+> `pnpm install` runs *before* `pnpm build`, and the two workspace bins (`rayspec` →
+> `./dist/index.js`, `rayspec-serve` → `./dist/serve.js`) point at `dist/` files that
+> don't exist yet — so pnpm prints one or more `WARN … Failed to create bin at …`
+> lines because it can't link a bin to a target that isn't built yet. They are
+> non-fatal: the `pnpm build` on the next line produces the `dist/` files, and
+> re-running `pnpm install` after a build creates the bins cleanly. As long as `pnpm
+> install` exits `0`, you can ignore them.
 
 > **Already ran this before?** `pnpm db:up` will report `the container name
 > "/rayspec-pg" is already in use` — you have the container from an earlier run.

@@ -56,6 +56,10 @@ describe('describeConnectError — composes the underlying connect detail', () =
     expect(out).toContain('ECONNREFUSED');
     expect(out).toContain('::1:5433');
     expect(out).toContain('127.0.0.1:5433');
+    // The bare syscall code is appended LAST and only when nothing more specific already names it, so
+    // it must NOT lead the line here — a per-address message already carries `ECONNREFUSED`. (Before
+    // the reorder the output began with a redundant `ECONNREFUSED: …`.)
+    expect(out).not.toMatch(/^ECONNREFUSED:/);
   });
 
   it('surfaces a nested cause when the top-level message lacks the detail', () => {

@@ -67,9 +67,6 @@ export function describeConnectError(e: unknown): string {
     if (typeof s === 'string' && s.length > 0 && !parts.some((p) => p.includes(s))) parts.push(s);
   };
   add(e.message);
-  // The syscall code (ECONNREFUSED / ETIMEDOUT / ENOTFOUND / EPERM …), surfaced when the message
-  // above did not already name it (an empty-message AggregateError still carries the code here).
-  add((e as { code?: unknown }).code);
   // AggregateError from a multi-address connect (incl. the default localhost → ::1 + 127.0.0.1):
   // the top-level message is empty; the real per-address failures live here.
   const errs = (e as { errors?: unknown }).errors;
@@ -82,6 +79,11 @@ export function describeConnectError(e: unknown): string {
     add(cause.message);
     add((cause as { code?: unknown }).code);
   }
+  // The syscall code (ECONNREFUSED / ETIMEDOUT / ENOTFOUND / EPERM …), appended LAST and only when
+  // nothing more specific (the message, a per-address failure, or the cause) already names it — so an
+  // empty-message AggregateError still surfaces its code, without a redundant bare code LEADING the
+  // line when a per-address message already carries it.
+  add((e as { code?: unknown }).code);
   return parts.join(': ') || String(e);
 }
 

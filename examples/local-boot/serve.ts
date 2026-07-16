@@ -61,6 +61,7 @@ import type { AllowlistEntry } from '@rayspec/db';
 import {
   assembleOptsFromEnv,
   assembleServer,
+  BootTimeoutError,
   bootBanner,
   bootBaseUrl,
   loadServerConfig,
@@ -417,7 +418,13 @@ const isEntrypoint =
   process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isEntrypoint) {
   main().catch((err) => {
-    console.error('[local-boot] boot failed:', err instanceof Error ? err.stack : err);
+    if (err instanceof BootTimeoutError) {
+      // A boot timeout is an operator-actionable diagnostic (see @rayspec/server boot-timeout) — print
+      // the message only, no stack. Anything else is genuinely unexpected: keep the full stack.
+      console.error(`[local-boot] ${err.message}`);
+    } else {
+      console.error('[local-boot] boot failed:', err instanceof Error ? err.stack : err);
+    }
     process.exit(1);
   });
 }
