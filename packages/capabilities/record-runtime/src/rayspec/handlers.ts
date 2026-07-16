@@ -19,10 +19,12 @@
  * it is buffered/parsed — the shared `readBoundedBody`/`readBoundedJson` reader), so an authenticated
  * caller can no longer stream an unbounded body into memory ahead of this handler. That upstream bound
  * covers the config-declared ingress: the `{handler}` interpreter, the declarative store CRUD routes,
- * the session-reprocess route, the audio capability, and the auth register/login endpoints. It is NOT
- * yet platform-wide: several BUILT-IN JSON routes (the org mutations, the legacy runs body, the auth
- * refresh text read) still parse an unbounded `c.req.json()/.text()`, and the OAuth token endpoint keeps
- * its own bespoke pre-mount Content-Length guard (app.ts OAUTH_TOKEN_MAX_BODY_BYTES).
+ * the session-reprocess route, the audio capability, and the auth register/login endpoints — and now
+ * the remaining BUILT-IN JSON routes too (the org mutations, the runs body, the auth refresh read),
+ * which are drain-bounded through the same `readBoundedJson`/`readBoundedRequestBytes` reader. The only
+ * body-bearing built-in surfaces NOT on that reader are the deliberately-raw stream-ingest route (whose
+ * body is bounded downstream in the tenant-bound blob store) and the OAuth token endpoint (which keeps
+ * its own bespoke pre-mount Content-Length guard, app.ts OAUTH_TOKEN_MAX_BODY_BYTES).
  */
 import { httpResponse, type RouteHandler, type RouteHandlerInit } from '@rayspec/handler-sdk';
 import type { ResolvedRecordConfig } from '../config.js';
