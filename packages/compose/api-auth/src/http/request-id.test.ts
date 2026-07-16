@@ -1,9 +1,11 @@
 /**
  * The `requestId` middleware's incoming-value hygiene.
  *
- * A caller-supplied `x-request-id` is echoed back (into the error envelope) AND written to the audit
- * log, so accepting it raw is a log-injection vector: a value carrying a newline could forge or wrap a
- * log/audit line, and an unbounded value bloats every row. The middleware now echoes an incoming id
+ * A caller-supplied `x-request-id` is interpolated into the single-line 5xx server log
+ * (`logServerError`) and echoed back in the error envelope, so accepting it raw is a log-injection
+ * vector: a value carrying a newline could forge or wrap a server log line, and an unbounded value
+ * bloats the audit row it is also stored in. (The audit-store write is a parameterized column, not a
+ * text line — the plaintext log sink is the injectable one.) The middleware now echoes an incoming id
  * ONLY when it matches a short printable allow-list (`^[A-Za-z0-9._-]{1,128}$`), otherwise it mints a
  * fresh UUID.
  *
