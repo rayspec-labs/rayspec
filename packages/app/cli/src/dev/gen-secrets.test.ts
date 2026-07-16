@@ -136,13 +136,14 @@ describe('dev gen-secrets — single-handle write edge branches (no check-then-w
     if (process.platform !== 'win32') expect(statSync(target).mode & 0o777).toBe(0o600);
   });
 
-  it('a PRE-EXISTING empty file gains the keys WITHOUT the fresh-file header comment', async () => {
-    // An empty-but-present file is the append path (no header) — distinct from an ABSENT file (header).
+  it('a PRE-EXISTING empty file is treated as fresh (single-open a+ cannot distinguish it from absent) and DOES get the header', async () => {
+    // The single-open race-free `a+` cycle has no way to tell an empty-but-present file apart from an
+    // absent one (both read back as ''), so both take the fresh path and get the header.
     writeFileSync(target, '', 'utf8');
     const result = await runGenSecrets(['--out', target]);
     expect(result.ok).toBe(true);
     const content = readFileSync(target, 'utf8');
-    expect(content.startsWith('#')).toBe(false); // no header written onto a present file
+    expect(content.startsWith('#')).toBe(true); // header written onto the empty file, same as absent
     expect(parseEnv(content).RAYSPEC_JWT_SIGNING_KEY).toBeTruthy();
     if (process.platform !== 'win32') expect(statSync(target).mode & 0o777).toBe(0o600);
   });
