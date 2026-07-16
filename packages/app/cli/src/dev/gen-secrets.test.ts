@@ -121,6 +121,41 @@ describe('dev gen-secrets — mints the 3 boot secrets', () => {
   });
 });
 
+describe('dev gen-secrets — single-handle write edge branches (no check-then-write race)', () => {
+  it('inserts the newline separator when the existing file has NO trailing newline', async () => {
+    writeFileSync(target, 'RAYSPEC_API_KEY_PEPPER=SEED', 'utf8'); // deliberately no trailing '\n'
+    const result = await runGenSecrets(['--out', target]);
+    expect(result.keys.RAYSPEC_API_KEY_PEPPER).toBe('already-present');
+    const content = readFileSync(target, 'utf8');
+    // The seed stays on its own line — a '\n' was inserted before the appended keys (not glued on).
+    expect(content.split('\n')[0]).toBe('RAYSPEC_API_KEY_PEPPER=SEED');
+    const env = parseEnv(content);
+    expect(env.RAYSPEC_API_KEY_PEPPER).toBe('SEED'); // pre-existing value untouched
+    expect(env.RAYSPEC_JWT_SIGNING_KEY).toContain('\\n'); // newly minted
+    expect(env.RAYSPEC_MEDIA_SIGNING_KEY).toBeTruthy();
+    if (process.platform !== 'win32') expect(statSync(target).mode & 0o777).toBe(0o600);
+  });
+
+  it('a PRE-EXISTING empty file gains the keys WITHOUT the fresh-file header comment', async () => {
+    // An empty-but-present file is the append path (no header) — distinct from an ABSENT file (header).
+    writeFileSync(target, '', 'utf8');
+    const result = await runGenSecrets(['--out', target]);
+    expect(result.ok).toBe(true);
+    const content = readFileSync(target, 'utf8');
+    expect(content.startsWith('#')).toBe(false); // no header written onto a present file
+    expect(parseEnv(content).RAYSPEC_JWT_SIGNING_KEY).toBeTruthy();
+    if (process.platform !== 'win32') expect(statSync(target).mode & 0o777).toBe(0o600);
+  });
+
+  it('tightens mode to 600 when appending to a loose-permission partial file', async () => {
+    writeFileSync(target, 'RAYSPEC_API_KEY_PEPPER=SEED\n', { mode: 0o644 });
+    await runGenSecrets(['--out', target]); // appends JWT + MEDIA → chmods the same handle
+    if (process.platform !== 'win32') {
+      expect(statSync(target).mode & 0o777).toBe(0o600);
+    }
+  });
+});
+
 describe('dev gen-secrets — NEVER echoes a secret value (b) [end-to-end via main]', () => {
   it('the emitted JSON contains NONE of the minted values, nor the raw PEM', async () => {
     const outChunks: string[] = [];

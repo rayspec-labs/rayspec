@@ -16,7 +16,7 @@
  * into the command's JSON error envelope + exit 1. NO secrets ever appear in these messages (only the
  * operator-supplied path, which the operator already knows).
  */
-import { realpathSync, statSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 
@@ -115,27 +115,32 @@ export async function readSpecFile(absPath: string): Promise<string> {
         `directory that contains the spec, or move the spec inside the current working directory (${process.cwd()})`,
     );
   }
-  let st: ReturnType<typeof statSync>;
-  try {
-    st = statSync(realPath);
-  } catch {
-    throw new ReadSpecError('not_found', `spec file not found: ${absPath}`);
-  }
-  if (!st.isFile()) {
-    throw new ReadSpecError('not_a_file', `spec path is not a regular file: ${absPath}`);
-  }
-  if (st.size > MAX_SPEC_BYTES) {
-    throw new ReadSpecError(
-      'too_large',
-      `spec file is ${st.size} bytes — exceeds the ${MAX_SPEC_BYTES}-byte cap`,
-    );
-  }
-
-  // Bounded read: pull at most MAX_SPEC_BYTES + 1 bytes; if we got more than the cap, the file grew
-  // between stat and read (TOCTOU) — reject rather than trust the stale stat.
+  // Open the real target ONCE, then fstat + bounded-read through the SAME handle — no `statSync`→`open`
+  // TOCTOU where the path could be swapped between the checks and the read. `open` failing with ENOENT is
+  // a race-delete after the realpath resolve (→ not_found, matching the old statSync-catch); any other
+  // open failure (e.g. an unreadable file) → read_failed, exactly as the old separate `open` did.
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     handle = await open(realPath, 'r');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new ReadSpecError('not_found', `spec file not found: ${absPath}`);
+    }
+    throw new ReadSpecError('read_failed', `failed to read spec file: ${absPath}`);
+  }
+  try {
+    const st = await handle.stat();
+    if (!st.isFile()) {
+      throw new ReadSpecError('not_a_file', `spec path is not a regular file: ${absPath}`);
+    }
+    if (st.size > MAX_SPEC_BYTES) {
+      throw new ReadSpecError(
+        'too_large',
+        `spec file is ${st.size} bytes — exceeds the ${MAX_SPEC_BYTES}-byte cap`,
+      );
+    }
+    // Bounded read: pull at most MAX_SPEC_BYTES + 1 bytes; if we got more than the cap, the file grew
+    // between the fstat and the read (TOCTOU) — reject rather than trust the stale stat.
     const buf = Buffer.alloc(MAX_SPEC_BYTES + 1);
     const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
     if (bytesRead > MAX_SPEC_BYTES) {

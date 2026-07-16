@@ -56,7 +56,8 @@ export interface ViewLintInput {
 /** Extract `{param}` names from a declared route path. */
 export function viewPathParams(path: string): string[] {
   const out: string[] = [];
-  const re = /\{([^}/]+)\}/g;
+  // The param-name run is bounded (a `{param}` identifier is short) so the scan stays strictly linear.
+  const re = /\{([^}/]{1,128})\}/g;
   let m: RegExpExecArray | null;
   // biome-ignore lint/suspicious/noAssignInExpressions: standard global-regex exec loop.
   while ((m = re.exec(path)) !== null) {

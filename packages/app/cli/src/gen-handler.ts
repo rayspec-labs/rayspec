@@ -22,7 +22,7 @@
  * filename (no path separators) so the output cannot be redirected outside `--out`.
  */
 import { realpathSync, statSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, open, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { HolesError } from './gen-handler/holes.js';
@@ -117,9 +117,13 @@ export async function runGenHandler(args: readonly string[]): Promise<GenHandler
   const holesPath = resolveJailed(values.holes, '--holes', { mustExist: true, mustBeFile: true });
 
   // Read the holes JSON (size-capped — a hole-set is small JSON, an oversized file is a mistake/DoS).
+  // Open ONCE and enforce the cap by fstat'ing the OPEN handle (then read through it) — no `statSync`
+  // check-then-read race where the path could be swapped between the size check and the read.
   let text: string;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    const st = statSync(holesPath);
+    handle = await open(holesPath, 'r');
+    const st = await handle.stat();
     if (st.size > MAX_HOLES_BYTES) {
       return {
         ok: false,
@@ -131,7 +135,7 @@ export async function runGenHandler(args: readonly string[]): Promise<GenHandler
         ],
       };
     }
-    text = await readFile(holesPath, 'utf8');
+    text = await handle.readFile('utf8');
   } catch {
     return {
       ok: false,
@@ -139,6 +143,8 @@ export async function runGenHandler(args: readonly string[]): Promise<GenHandler
         { code: 'holes_read_failed', message: `failed to read holes: ${String(values.holes)}` },
       ],
     };
+  } finally {
+    await handle?.close();
   }
 
   let holes: unknown;

@@ -168,7 +168,8 @@ function storeRowSchema(store: StoreSpec): Record<string, unknown> {
 /** Path params parsed from a declared OpenAPI-style path (`/meetings/{id}/x` → `['id']`). */
 function pathParamNames(path: string): string[] {
   const out: string[] = [];
-  const re = /\{([^}/]+)\}/g;
+  // The param-name run is bounded (a `{param}` identifier is short) so the scan stays strictly linear.
+  const re = /\{([^}/]{1,128})\}/g;
   let m: RegExpExecArray | null;
   // biome-ignore lint/suspicious/noAssignInExpressions: standard global-regex exec loop.
   while ((m = re.exec(path)) !== null) {
@@ -195,8 +196,9 @@ function pathParameters(path: string): OpenApiParameter[] | undefined {
 function operationId(method: string, path: string): string {
   const slug = path
     // `{name}` → `_by_name_` (the leading/trailing `_` keep it a distinct token after collapse), so a
-    // brace segment is structurally distinguishable from a literal segment of the same characters.
-    .replace(/\{([^}/]+)\}/g, '_by_$1_')
+    // brace segment is structurally distinguishable from a literal segment of the same characters. The
+    // param-name run is bounded (a `{param}` identifier is short) so the scan stays strictly linear.
+    .replace(/\{([^}/]{1,128})\}/g, '_by_$1_')
     .replace(/[^a-zA-Z0-9]+/g, '_')
     .replace(/^_|_$/g, '');
   return `${method.toLowerCase()}_${slug || 'root'}`;
@@ -573,13 +575,16 @@ function storeOperation(
  */
 export function buildDeclaredRoutesOpenApi(spec: RaySpec): OpenApiDocument {
   const storeByName = new Map(spec.stores.map((s) => [s.name, s]));
-  const paths: Record<string, OpenApiPathItem> = {};
+  // Prototype-free accumulators: the keys are author-derived (the declared path + method), so building
+  // them on a null prototype makes an `__proto__`/`constructor` path key a plain own-property, never a
+  // prototype mutation. Behaviour is otherwise identical (own enumerable keys serialize the same).
+  const paths: Record<string, OpenApiPathItem> = Object.create(null);
   for (const route of spec.api) {
     const op = operationForRoute(route, storeByName);
     if (!op) continue; // skip an unresolvable route rather than emit a broken entry
     let item = paths[route.path];
     if (!item) {
-      item = {};
+      item = Object.create(null) as OpenApiPathItem;
       paths[route.path] = item;
     }
     item[route.method.toLowerCase()] = op;

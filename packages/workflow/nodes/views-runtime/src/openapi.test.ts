@@ -49,6 +49,12 @@ describe('emitProductViewsOpenApi', () => {
       '/sessions/{session_id}/{track}/transcript',
     ]);
     expect(doc.paths['/sessions']?.get?.operationId).toBe('view_session_list');
+
+    // Prototype-pollution hardening: the accumulators carry NO prototype, so an `__proto__`/`constructor`
+    // shaped view path or method key lands as a plain own-property, never a prototype mutation. (FAIL-THE-
+    // FIX: a plain `{}` accumulator has `Object.prototype`; this is null only with `Object.create(null)`.)
+    expect(Object.getPrototypeOf(doc.paths)).toBeNull();
+    expect(Object.getPrototypeOf(doc.paths['/sessions'])).toBeNull();
   });
 
   it('derives params from the declarations (presets + enums + pagination clamp docs)', () => {

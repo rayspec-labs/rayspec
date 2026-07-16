@@ -205,7 +205,10 @@ export function emitProductViewsOpenApi(config: {
   info: { title: string; version: string; description?: string };
 }): ViewsOpenApiDocument {
   const wanted = new Set<string>();
-  const paths: Record<string, Record<string, ViewsOpenApiOperation>> = {};
+  // Prototype-free accumulator: the keys are author-derived (the declared view path + method), so an
+  // `__proto__`/`constructor` path key lands as a plain own-property, never a prototype mutation.
+  // Behaviour is otherwise identical (own enumerable keys serialize the same).
+  const paths: Record<string, Record<string, ViewsOpenApiOperation>> = Object.create(null);
 
   for (const view of config.views) {
     const params = parametersFor(view);
@@ -282,7 +285,7 @@ export function emitProductViewsOpenApi(config: {
 
     let item = paths[view.route.path];
     if (!item) {
-      item = {};
+      item = Object.create(null) as Record<string, ViewsOpenApiOperation>;
       paths[view.route.path] = item;
     }
     item[view.route.method.toLowerCase()] = op;

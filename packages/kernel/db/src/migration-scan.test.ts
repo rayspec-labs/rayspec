@@ -316,3 +316,30 @@ describe('ADD COLUMN NOT NULL (no default) + SET NOT NULL detectors', () => {
     expect(r.pass).toBe(true);
   });
 });
+
+describe('allowlist match is `;`-insensitive via a bounded terminator strip (no `\\s*;\\s*$` ReDoS)', () => {
+  const STMT = 'TRUNCATE TABLE foo;';
+
+  it('an allowlist match clears the statement regardless of its trailing `;`/whitespace', () => {
+    for (const match of [
+      'TRUNCATE TABLE foo', // no terminator
+      'TRUNCATE TABLE foo;', // exact
+      'TRUNCATE TABLE foo ;  ', // whitespace around the terminator + trailing space
+      '  TRUNCATE TABLE foo  ', // surrounding whitespace, no terminator
+    ]) {
+      const r = scanMigrationSql(STMT, [{ kind: 'truncate', match, reason: 'reviewed' }]);
+      expect(r.pass, match).toBe(true);
+    }
+  });
+
+  it('a huge trailing-whitespace allowlist match does not hang the scan (bounded strip)', () => {
+    // FAIL-THE-FIX: the allowlist `match` string is fed to `stripTerminator`; with the old anchored
+    // `\s*;\s*$` a 200k-space no-`;` tail was quadratic. The match doesn't equal the statement, so the
+    // finding stays (pass=false) — but the scan must return quickly.
+    const pathological = `TRUNCATE TABLE bar${' '.repeat(200_000)}`;
+    const start = Date.now();
+    const r = scanMigrationSql(STMT, [{ kind: 'truncate', match: pathological, reason: 'x' }]);
+    expect(Date.now() - start).toBeLessThan(1000);
+    expect(r.pass).toBe(false);
+  });
+});

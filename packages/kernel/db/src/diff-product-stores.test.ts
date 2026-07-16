@@ -657,6 +657,18 @@ describe('nextMigrationFilename — versioned append convention', () => {
     expect(nextMigrationFilename([], '__weird__')).toBe('0000_weird.sql');
   });
 
+  it('trims leading/trailing underscores with the linear index walk (no `^_+|_+$` regex)', () => {
+    // Guards the linear `trimUnderscores` replacement for the ReDoS-shaped `^_+|_+$`: same slug output.
+    expect(nextMigrationFilename([], '---leading')).toBe('0000_leading.sql');
+    expect(nextMigrationFilename([], 'trailing---')).toBe('0000_trailing.sql');
+    expect(nextMigrationFilename([], '  __ Mixed._Case __  ')).toBe('0000_mixed_case.sql');
+    expect(nextMigrationFilename([], '!!!')).toBe('0000_update.sql'); // all-punct ⇒ empty ⇒ fallback
+    // A pathological all-non-alnum label sanitizes fast (the prior collapse + linear trim stay linear).
+    const start = Date.now();
+    expect(nextMigrationFilename([], '_'.repeat(200_000))).toBe('0000_update.sql');
+    expect(Date.now() - start).toBeLessThan(1000);
+  });
+
   it('ignores non-migration filenames when computing the next sequence', () => {
     expect(nextMigrationFilename(['README.md', 'meta', 'not-a-migration.sql'])).toBe(
       '0000_update.sql',

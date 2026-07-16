@@ -20,7 +20,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AgentRegistry, AppDeps, AppEnv } from '../app-context.js';
 import { requirePermission } from '../http/middleware.js';
 import type { MediaTokenService } from '../media/media-token.js';
-import { registerDeclaredRoutes } from './register-declared-routes.js';
+import { registerDeclaredRoutes, toHonoPath } from './register-declared-routes.js';
 
 // Spy on `requirePermission` so a route-registration test can assert WHICH permission a declared
 // route is wired behind (the middleware itself is never run here — the registrar throws/records at
@@ -340,5 +340,37 @@ describe('registerDeclaredRoutes — {handler} readonly gates store:read (defaul
 
   it('an explicit readonly:false handler route is gated store:write (fail-closed on false)', () => {
     expect(permForHandlerRoute(false)).toBe('store:write');
+  });
+});
+
+describe('toHonoPath — `{param}` → `:param` conversion (bounded, linear scan)', () => {
+  it('converts every legitimate declared path EXACTLY as before', () => {
+    expect(toHonoPath('/widgets')).toBe('/widgets');
+    expect(toHonoPath('/widgets/{id}')).toBe('/widgets/:id');
+    expect(toHonoPath('/x/{a}/y/{b}')).toBe('/x/:a/y/:b');
+    expect(toHonoPath('/uploads/{key}/chunk')).toBe('/uploads/:key/chunk');
+    // A long-but-realistic param (well under the 128-char bound) still converts.
+    const long = `long_${'x'.repeat(100)}`;
+    expect(toHonoPath(`/r/{${long}}`)).toBe(`/r/:${long}`);
+  });
+
+  it('a long whitespace/`{`-run input does not hang the rewrite (bounded quantifier)', () => {
+    // The `[^}/]{1,128}` bound keeps the scan strictly linear on a pathological unclosed brace.
+    const pathological = `/x/{${'a'.repeat(200_000)}`; // 200k chars, no closing brace
+    const start = Date.now();
+    const out = toHonoPath(pathological);
+    expect(Date.now() - start).toBeLessThan(1000);
+    // No closing `}` ⇒ nothing to rewrite ⇒ returned unchanged (same as the unbounded regex would).
+    expect(out).toBe(pathological);
+  });
+
+  it('an over-128-char param name is left un-rewritten (the security bound; never a valid spec path)', () => {
+    // FAIL-THE-FIX: the old unbounded `[^}/]+` rewrote ANY length; the bound stops at 128 so a
+    // 200-char param no longer matches and is passed through verbatim (a param name this long is
+    // structurally invalid and never reaches here from the grammar).
+    const huge = 'a'.repeat(200);
+    expect(toHonoPath(`/r/{${huge}}`)).toBe(`/r/{${huge}}`);
+    // A neighbouring in-bound param on the same path still converts normally.
+    expect(toHonoPath(`/r/{ok}/s/{${huge}}`)).toBe(`/r/:ok/s/{${huge}}`);
   });
 });

@@ -122,6 +122,13 @@ describe('buildDeclaredRoutesOpenApi — product-agnostic emission', () => {
     expect(Object.keys(doc.paths['/widgets']).sort()).toEqual(['get', 'post']);
     // GET + PATCH + DELETE on /widgets/{id} merge into one path item.
     expect(Object.keys(doc.paths['/widgets/{id}']).sort()).toEqual(['delete', 'get', 'patch']);
+
+    // Prototype-pollution hardening: the accumulators have NO prototype, so an `__proto__`/`constructor`
+    // shaped path or method key lands as a plain own-property, never a prototype mutation. (FAIL-THE-FIX:
+    // a plain `{}` accumulator has `Object.prototype`, so this is null only with the `Object.create(null)`.)
+    expect(Object.getPrototypeOf(doc.paths)).toBeNull();
+    expect(Object.getPrototypeOf(doc.paths['/widgets'])).toBeNull();
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
   it('a {store} CREATE body is derived from the StoreSpec — business cols present, injected cols absent', () => {

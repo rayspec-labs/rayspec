@@ -60,7 +60,8 @@ import { makeStreamIngestHandler, makeStreamPlaybackHandler } from './stream-rou
  * registration.)
  */
 export function toHonoPath(path: string): string {
-  return path.replace(/\{([^}/]+)\}/g, ':$1');
+  // The param-name run is bounded (a `{param}` identifier is short) so the rewrite stays strictly linear.
+  return path.replace(/\{([^}/]{1,128})\}/g, ':$1');
 }
 
 /**
