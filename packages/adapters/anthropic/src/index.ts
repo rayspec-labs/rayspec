@@ -348,13 +348,13 @@ export class AnthropicAdapter implements Backend {
     let apiKeySource = preCheck.apiKeySource;
     let status: 'completed' | 'error' = 'completed';
     let errorMessage: string | undefined;
-    // OBS-01: the neutral class of a failed run. The Anthropic child (Claude Agent SDK query())
+    // The neutral class of a failed run. The Anthropic child (Claude Agent SDK query())
     // has NO HTTP status object — a non-success `result` carries only a `subtype`, and a thrown error
     // is a stringified child error. So we classify the SUBTYPE explicitly (below) and run a THROWN
     // error through classifyUpstreamError (message heuristics for rate-limit/overloaded/timeout).
     // Default `internal` — never a mis-tag. NEUTRAL vocabulary: no SDK error shape leaks out.
     let errorClass: ErrorClass = 'internal';
-    // OBS-01: a Retry-After (seconds) the classifier captured from a THROWN child error (rate-limit/
+    // A Retry-After (seconds) the classifier captured from a THROWN child error (rate-limit/
     // 5xx), recorded into the failing journal step output so the sync endpoint can surface the header.
     let errorRetryAfter: number | undefined;
     // Per-REAL-MODEL-CALL usage — the REAL per-step ledger source.
@@ -374,7 +374,7 @@ export class AnthropicAdapter implements Backend {
     let lastAssistantMessageId: string | undefined;
     let aggUsage: Usage = emptyUsage();
     let cost = 0;
-    // N1: track whether the SDK ACTUALLY reported a provider cost. total_cost_usd may be
+    // Track whether the SDK ACTUALLY reported a provider cost. total_cost_usd may be
     // absent (e.g. an error/partial result); we must NOT fabricate a $0 provider cost (which would
     // surface a FALSE cost_drift against the non-zero computed cost). Stays undefined until present.
     let providerCost: number | undefined;
@@ -478,7 +478,7 @@ export class AnthropicAdapter implements Backend {
           } else {
             status = 'error';
             errorMessage = `result subtype=${m.subtype}`;
-            // OBS-01: classify the SDK result error subtype into the neutral class. The CLI
+            // Classify the SDK result error subtype into the neutral class. The CLI
             // exposes these four error subtypes (sdk.d.ts:3839). `error_max_turns` is a loop/turn
             // exhaustion → the neutral `timeout` class (a deadline-style limit); the budget/retry/
             // generic execution subtypes have no upstream-network analogue → honestly `internal`
@@ -489,7 +489,7 @@ export class AnthropicAdapter implements Backend {
       }
     } catch (err) {
       status = 'error';
-      // OBS-01: a THROWN child error — classify (preserving the cause). The child may surface a
+      // A THROWN child error — classify (preserving the cause). The child may surface a
       // rate-limit / overloaded / timeout in its message; the heuristic catches those, else `internal`.
       const classified = classifyUpstreamError(err);
       errorMessage = classified.message;
@@ -536,7 +536,7 @@ export class AnthropicAdapter implements Backend {
         inputHash: hashJson({ input: spec.input, turn: i }),
         // Persist a NEUTRAL, SDK-free projection (final marker on the last). The opaque payload is
         // the replay cache source. The FINAL llm step carries finalText/output/sessionId/apiKeySource.
-        // OBS-01: on the FINAL step of an ERROR run, also record { error, errorClass } in the
+        // On the FINAL step of an ERROR run, also record { error, errorClass } in the
         // output jsonb so GET /v1/runs/{id} can DERIVE the classified error from the failing step.
         output: isFinal
           ? {
@@ -560,7 +560,7 @@ export class AnthropicAdapter implements Backend {
         costUsd: isFinal ? cost : 0,
         // PROVIDER cost: Anthropic SDKResultSuccess.total_cost_usd (sdk.d.ts:3875) on
         // the FINAL llm step only (it is the whole-run reported cost). Earlier turns report none.
-        // N1: mirror Pi's guard — surface providerCostUsd ONLY when total_cost_usd was
+        // Mirror Pi's guard — surface providerCostUsd ONLY when total_cost_usd was
         // actually present (!== undefined); never default to 0 (a fabricated $0 would trip a FALSE
         // cost_drift against the non-zero computed cost). Absent -> journal provider_cost_usd NULL.
         ...(isFinal && providerCost !== undefined ? { providerCostUsd: providerCost } : {}),
@@ -592,7 +592,7 @@ export class AnthropicAdapter implements Backend {
       output,
       // Key-presence: error ALWAYS present (the message on error, null otherwise).
       error: errorMessage ?? null,
-      // OBS-01: errorClass is always-present — the neutral class on error, null on success.
+      // errorClass is always-present — the neutral class on error, null on success.
       // Guard on `status` (not on the `errorClass` default) so a completed run is unambiguously null.
       errorClass: status === 'error' ? errorClass : null,
       conversation,
@@ -753,7 +753,7 @@ export class AnthropicAdapter implements Backend {
       finalText,
       output,
       error: null,
-      // OBS-01: errorClass is always-present — null on the (replay) success path.
+      // errorClass is always-present — null on the (replay) success path.
       errorClass: null,
       conversation: rehydrated,
       // Usage/cost are DROPPED on replay (no new spend) — metered on the live run.

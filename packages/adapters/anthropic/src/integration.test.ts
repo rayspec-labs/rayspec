@@ -222,7 +222,7 @@ function mockQueryWithToolCall(toolCallId: string) {
 }
 
 /**
- * A1: a mock query() that yields a BUILT-IN tool block (ToolSearch — NOT one of our MCP tools)
+ * A mock query() that yields a BUILT-IN tool block (ToolSearch — NOT one of our MCP tools)
  * alongside the legit MCP get_weather call. Proves the re-derivation QUARANTINE excludes the built-in
  * tool_use + its raw tool_result from the neutral transcript, and that the built-in is never
  * journaled (only the dispatched MCP tool is). The built-in is given a DISTINCT tool_use id.
@@ -434,7 +434,7 @@ describe('Anthropic adapter: in-proc MCP tool bridge routes through ctx.dispatch
       expect(callPart.toolCallId).toBe('toolu_REAL_123');
       expect(resultPart.toolCallId).toBe('toolu_REAL_123');
     }
-    // A2: EVERY tool_result in the transcript is the opaque dispatched kind:'tool_data' (no raw,
+    // EVERY tool_result in the transcript is the opaque dispatched kind:'tool_data' (no raw,
     // un-opaque-wrapped output ever lands in the SoT) AND EVERY tool_call is a sanctioned MCP tool.
     const allResults = parts.filter((p) => p.kind === 'tool_result');
     expect(allResults.length).toBeGreaterThanOrEqual(1);
@@ -634,7 +634,7 @@ describe('Anthropic adapter: non-success result branch (subtype !== success)', (
 describe('Anthropic adapter: N1 — no total_cost_usd => provider cost ABSENT (no fabricated $0, no false drift)', () => {
   it('a success result WITHOUT total_cost_usd records NO providerCostUsd on the final llm step', async () => {
     const journal = new FakeJournal();
-    // A success result that omits total_cost_usd (e.g. a partial/older SDK shape). N1: the adapter must
+    // A success result that omits total_cost_usd (e.g. a partial/older SDK shape). The adapter must
     // NOT fabricate providerCostUsd:0 — that would later trip a FALSE cost_drift vs the non-zero
     // computed cost. The step is left WITHOUT providerCostUsd (run-core journals provider_cost_usd=NULL).
     querySpy.mockImplementation(() => ({
