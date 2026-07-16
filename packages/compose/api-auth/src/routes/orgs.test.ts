@@ -963,3 +963,61 @@ describe('OrgStore.addMember — atomicity + role invariants (store-level, fail-
     expect(await activeCount(orgId, targetId)).toBe(1);
   });
 });
+
+describe('request-body byte cap (413 before any side effect)', () => {
+  it('rejects an over-cap body on org-create / role-change / add-member / api-key mint with a 413', async () => {
+    // A moderate cap: the auth/org SETUP bodies fit under it (so a real signer issues the tokens), then
+    // each mutating route gets an over-cap body → 413 BEFORE any parse / DB write. A separate harness
+    // (its own signer) is required because the tokens must validate against the SAME signer.
+    const capped = await createHarness({
+      schema: 'rayspec_test_apiauth_orgs_bodycap',
+      maxJsonBodyBytes: 256,
+    });
+    try {
+      const bearer = (t: string): Record<string, string> => ({ authorization: `Bearer ${t}` });
+      const reg = await jsonRequest(capped.app, 'POST', '/v1/auth/register', {
+        body: { email: 'capowner@example.com', password: 'a-sufficiently-long-password' },
+      });
+      expect(reg.status).toBe(201);
+      const token = (await reg.json()).accessToken as string;
+      const orgRes = await jsonRequest(capped.app, 'POST', '/v1/orgs', {
+        body: { name: 'CapOrg' },
+        headers: bearer(token),
+      });
+      expect(orgRes.status).toBe(201);
+      const orgId = (await orgRes.json()).id as string;
+      const switchRes = await jsonRequest(capped.app, 'POST', `/v1/orgs/${orgId}/switch`, {
+        headers: bearer(token),
+      });
+      expect(switchRes.status).toBe(200);
+      const orgToken = (await switchRes.json()).accessToken as string;
+
+      const big = 'A'.repeat(600); // pushes each body well over the 256-byte cap
+      const targetUserId = '00000000-0000-4000-8000-0000000000ff';
+
+      const overCap: Array<[string, string, Record<string, string>, unknown]> = [
+        ['POST', '/v1/orgs', bearer(token), { name: big }],
+        [
+          'POST',
+          `/v1/orgs/${orgId}/members/${targetUserId}/role`,
+          bearer(orgToken),
+          { role: 'admin', pad: big },
+        ],
+        ['POST', `/v1/orgs/${orgId}/members`, bearer(orgToken), { email: `${big}@example.com` }],
+        [
+          'POST',
+          `/v1/orgs/${orgId}/api-keys`,
+          bearer(orgToken),
+          { scopes: ['agent:run'], pad: big },
+        ],
+      ];
+      for (const [method, path, headers, body] of overCap) {
+        const res = await jsonRequest(capped.app, method, path, { body, headers });
+        expect(res.status).toBe(413);
+        expect((await res.json()).error.code).toBe('PAYLOAD_TOO_LARGE');
+      }
+    } finally {
+      await capped.close();
+    }
+  });
+});

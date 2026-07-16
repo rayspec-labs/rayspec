@@ -45,6 +45,7 @@ import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import type { AgentRegistryEntry, AppDeps, AppEnv } from '../app-context.js';
+import { readBoundedJson } from '../http/bounded-body.js';
 import { requireAuth, requirePermission, resolveTenant } from '../http/middleware.js';
 
 /** The HTTP status codes the sync run endpoint maps an errorClass to (Hono's c.json status arg). */
@@ -138,7 +139,7 @@ export async function executeAgentRun(
   const entry = deps.agentRegistry?.get(agentId);
   if (!entry) throw new ApiError('NOT_FOUND', 'Not found.');
 
-  const rawBody = await c.req.json().catch(() => ({}));
+  const rawBody = await readBoundedJson(c, deps.maxJsonBodyBytes, {});
   const body = StartRunRequest.parse(rawBody);
 
   // bind the declared route's path params into the run input as a clearly-delimited, trusted

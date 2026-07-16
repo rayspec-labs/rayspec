@@ -41,8 +41,10 @@ function hasRefreshSetCookie(res: Response): boolean {
  * Assert an auth response body leaks neither the plaintext password nor its stored hash.
  *
  * The `accessToken` is an OPAQUE bearer credential — a JWT whose base64url signature is random, so it
- * can coincidentally spell a dictionary word (`hash` at ~(2/64)^4 ≈ 0.3% per token), which made a
- * blanket `JSON.stringify(body).not.toMatch(/…hash…/)` flake. Scan the real leak surface instead: the
+ * can coincidentally spell a dictionary word (`hash`, the shortest trigger, appears in a token's random
+ * ~342-char base64url RS256 signature with probability ≈ (342−3)·(2/64)^4 ≈ 3.2e-4 ≈ 0.03% per token —
+ * empirically 74/200 000 ≈ 0.037%), which made a blanket `JSON.stringify(body).not.toMatch(/…hash…/)`
+ * flake. Scan the real leak surface instead: the
  * NON-token fields, plus the token's DECODED claims (a JWT payload is readable, so a secret smuggled
  * into a claim IS a leak) — never the random signature. Also assert the literal password never appears,
  * so the invariant is the actual "no password / no argon2 hash", not a proxy for it.
@@ -127,6 +129,30 @@ describe('request-body byte cap (413 before any side effect)', () => {
       });
       expect(login.status).toBe(413);
       expect((await login.json()).error.code).toBe('PAYLOAD_TOO_LARGE');
+    } finally {
+      await capped.close();
+    }
+  });
+
+  it('rejects an over-cap refresh body with a 413 (and stays lenient to an absent body)', async () => {
+    const capped = await createHarness({
+      schema: 'rayspec_test_apiauth_refresh_bodycap',
+      maxJsonBodyBytes: 16,
+    });
+    try {
+      // An over-cap BODY-sourced refresh is a 413 BEFORE the token is looked up (without the bound it
+      // would read unbounded, find an invalid token, and 401 — so this asserts the 413, not the 401).
+      const over = await jsonRequest(capped.app, 'POST', '/v1/auth/refresh', {
+        body: { refreshToken: 'a-refresh-secret-far-longer-than-sixteen-bytes' },
+      });
+      expect(over.status).toBe(413);
+      expect((await over.json()).error.code).toBe('PAYLOAD_TOO_LARGE');
+
+      // The cookie-only path sends NO body — it must stay lenient (empty body → {}), never a 413.
+      const noBody = await jsonRequest(capped.app, 'POST', '/v1/auth/refresh', {
+        headers: { cookie: 'not-a-real-cookie=x', 'sec-fetch-site': 'same-origin' },
+      });
+      expect(noBody.status).toBe(401); // no valid secret → 401, NOT 413 — the absent body was accepted
     } finally {
       await capped.close();
     }

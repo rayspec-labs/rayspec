@@ -930,3 +930,43 @@ describe('cross-tenant isolation (CI-BLOCKING for the runs surface)', () => {
     expect(aGet.status).toBe(200);
   });
 });
+
+describe('POST /v1/agents/:id/runs request-body byte cap (413 before the run executes)', () => {
+  it('rejects an over-cap run body with a 413 and never executes the agent', async () => {
+    // A moderate cap: the auth/org setup bodies fit under it, then the run body is over-cap → 413 BEFORE
+    // runAgent is reached. A separate harness (its own signer) is required so the token validates; it
+    // carries the SAME agent registry so the agent RESOLVES (the 413 must fire after resolve, not a 404).
+    const capped = await createHarness({
+      agentRegistry: registry,
+      schema: 'rayspec_test_apiauth_runs_bodycap',
+      maxJsonBodyBytes: 256,
+    });
+    try {
+      const runsBefore = backend.liveRuns;
+      const reg = await jsonRequest(capped.app, 'POST', '/v1/auth/register', {
+        body: { email: 'runcap@example.com', password: 'a-long-enough-password' },
+      });
+      const t0 = (await reg.json()).accessToken as string;
+      const orgRes = await jsonRequest(capped.app, 'POST', '/v1/orgs', {
+        body: { name: 'RunCapOrg' },
+        headers: { authorization: `Bearer ${t0}` },
+      });
+      const orgId = (await orgRes.json()).id as string;
+      const switchRes = await jsonRequest(capped.app, 'POST', `/v1/orgs/${orgId}/switch`, {
+        headers: { authorization: `Bearer ${t0}` },
+      });
+      const token = (await switchRes.json()).accessToken as string;
+
+      const res = await jsonRequest(capped.app, 'POST', '/v1/agents/echo-agent/runs', {
+        body: { input: 'x'.repeat(500) }, // ~515-byte body, over the 256-byte cap
+        headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+      });
+      expect(res.status).toBe(413);
+      expect((await res.json()).error.code).toBe('PAYLOAD_TOO_LARGE');
+      // The run never executed — the bound fired before runAgent.
+      expect(backend.liveRuns).toBe(runsBefore);
+    } finally {
+      await capped.close();
+    }
+  });
+});
