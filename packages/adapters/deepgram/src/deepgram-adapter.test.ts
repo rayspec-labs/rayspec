@@ -410,6 +410,52 @@ describe('DeepgramSttAdapter — secret hygiene', () => {
   });
 });
 
+describe('DeepgramSttAdapter — base URL normalization', () => {
+  const parityCases: Array<{ configured: string; expected: string }> = [
+    { configured: 'https://api.deepgram.com//', expected: 'https://api.deepgram.com' },
+    { configured: 'https://x/', expected: 'https://x' },
+    { configured: 'https://x', expected: 'https://x' },
+    { configured: 'https://x///a///', expected: 'https://x///a' },
+  ];
+
+  for (const { configured, expected } of parityCases) {
+    it(`strips trailing slashes from ${JSON.stringify(configured)}`, async () => {
+      const { fetchImpl, calls } = fetchReturning(loadFixtureText('normal-paragraphs.json'));
+      const adapter = new DeepgramSttAdapter({
+        resolver: resolverFor(),
+        apiKey: SECRET_KEY,
+        env: {},
+        fetchImpl,
+        baseUrl: configured,
+      });
+      await adapter.transcribeTrack(trackRequest());
+      expect(calls[0]?.url.startsWith(`${expected}/v1/listen?`)).toBe(true);
+    });
+  }
+
+  // ReDoS regression: a long run of slashes NOT anchored at the end used to blow up the previous
+  // `/\/+$/` regex (polynomial backtracking). The linear backward scan must resolve this instantly
+  // and leave the string unchanged (no trailing slash to strip).
+  it('normalizes a pathological non-trailing slash run in linear time (ReDoS regression)', async () => {
+    const pathological = `https://x${'/'.repeat(200_000)}a`;
+    const { fetchImpl, calls } = fetchReturning(loadFixtureText('normal-paragraphs.json'));
+    const adapter = new DeepgramSttAdapter({
+      resolver: resolverFor(),
+      apiKey: SECRET_KEY,
+      env: {},
+      fetchImpl,
+      baseUrl: pathological,
+    });
+
+    const start = Date.now();
+    await adapter.transcribeTrack(trackRequest());
+    const elapsedMs = Date.now() - start;
+
+    expect(calls[0]?.url.startsWith(`${pathological}/v1/listen?`)).toBe(true);
+    expect(elapsedMs).toBeLessThan(50);
+  });
+});
+
 describe('DeepgramSttAdapter — session fan-out', () => {
   it('transcribes each finalized track in the session', async () => {
     const resolver = new StaticSttMediaResolver()

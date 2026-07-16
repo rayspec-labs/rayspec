@@ -259,7 +259,11 @@ export class DeepgramSttAdapter implements SttAdapter {
   private resolveBaseUrl(): string {
     const configured =
       this.baseUrlOption?.trim() || this.env.DEEPGRAM_BASE_URL?.trim() || DEFAULT_DEEPGRAM_BASE_URL;
-    return configured.replace(/\/+$/, '');
+    // Strip trailing '/' with a linear backward scan (the previous `/\/+$/` is a polynomial-backtracking
+    // regex on a long slash run). Byte-identical result for every input.
+    let end = configured.length;
+    while (end > 0 && configured.charCodeAt(end - 1) === 47 /* '/' */) end--;
+    return configured.slice(0, end);
   }
 
   private buildListenUrl(
