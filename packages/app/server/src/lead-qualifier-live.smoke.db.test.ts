@@ -25,6 +25,7 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { agentBackendsFactoryFromEnv } from './agent-backends-from-env.js';
 import { assembleServer, type BootedServer, loadServerConfig } from './composition-root.js';
+import { logRedactedRunFailure } from './live-smoke-diagnostics.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const hasKey = Boolean(process.env.OPENAI_API_KEY);
@@ -197,8 +198,17 @@ describe.skipIf(!canRun)('lead-qualifier LIVE smoke — a real agent qualifies a
             break;
           }
         }
-        if (Date.now() > deadline)
+        if (Date.now() > deadline) {
+          // The view never flipped to `qualified` in time — surface the durable run's failure (redacted)
+          // by its run_id before throwing, so the deadline is diagnosable from the log.
+          const diag = postgres(appDbUrl, { max: 1 });
+          try {
+            await logRedactedRunFailure(diag, String(created.run_id));
+          } finally {
+            await diag.end();
+          }
           throw new Error('live qualify run did not complete before the deadline');
+        }
         await new Promise((r) => setTimeout(r, 500));
       }
 
