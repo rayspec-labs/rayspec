@@ -6,7 +6,10 @@
 services:
   postgres:
     image: postgres:16
-    container_name: rayspec-pg
+    # container_name + host port default to rayspec-pg / 5433 (what every doc and test expects).
+    # Override BOTH — together with COMPOSE_PROJECT_NAME (which namespaces the data volume) — to run a
+    # second, fully isolated instance on the same machine. See docs/getting-started.md.
+    container_name: ${RAYSPEC_PG_CONTAINER:-rayspec-pg}
     restart: unless-stopped
     environment:
       POSTGRES_USER: rayspec
@@ -14,7 +17,7 @@ services:
       POSTGRES_DB: rayspec
     ports:
       # Host 5433 -> container 5432, to avoid colliding with a local PG on 5432.
-      - "5433:5432"
+      - "${RAYSPEC_PG_PORT:-5433}:5432"
     volumes:
       - rayspec-pgdata:/var/lib/postgresql/data
       - ./scripts/init-shadow-db.sql:/docker-entrypoint-initdb.d/10-init-shadow-db.sql:ro

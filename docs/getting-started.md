@@ -40,6 +40,23 @@ pnpm db:up          # starts the local Postgres on port 5433
 > "/rayspec-pg" is already in use` — you have the container from an earlier run.
 > Start the existing one instead: `docker start rayspec-pg`.
 
+> **Running a second, isolated instance.** The container name (`rayspec-pg`) and the
+> host port (`5433`) are the two things Compose does *not* namespace per project, so a
+> plain second `up` would collide on both. Override them, and set a distinct
+> `COMPOSE_PROJECT_NAME` (which gives the new instance its own data volume), to run a
+> fully separate database alongside the default one:
+>
+> ```bash
+> RAYSPEC_PG_CONTAINER=rayspec-pg-2 RAYSPEC_PG_PORT=5434 COMPOSE_PROJECT_NAME=rayspec2 \
+>   docker compose up -d
+> ```
+>
+> Separate container, separate host port, separate (project-namespaced) volume — no
+> collision with the default instance, and the two databases share no data. Point a
+> second backend at it with `DATABASE_URL=postgresql://rayspec:rayspec@localhost:5434/rayspec`.
+> Tear just it down with `docker compose -p rayspec2 down -v` (the `-v` also drops its
+> volume; the default instance is untouched).
+
 The build produces the two executables you'll use. In a published install they
 land on your `PATH` as `rayspec` and `rayspec-serve`; from the monorepo they are
 the built entry files. Define two shell shortcuts (run everything from the repo
