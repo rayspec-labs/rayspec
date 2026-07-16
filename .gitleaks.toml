@@ -42,4 +42,9 @@ regexes = [
   # match and is still caught. This replaces the old blanket "*.test.ts + test-support/ paths are exempt"
   # allowlist, under which any real secret dropped into a test file passed silently.
   '''^correct-horse-battery-staple-9$''',
+  # The ONE planted fake JWT the redaction unit test uses to prove `Bearer <token>` masking. It is a
+  # deliberately non-secret placeholder (payload `{"sub":"fake"}`, a literal "placeholder" signature),
+  # too long to stay on a single line with an inline `gitleaks:allow`. Anchored to its EXACT value so it
+  # is waved only here; any OTHER JWT in the same file is still caught.
+  '''^eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiJmYWtlIn0\.c2lnbmF0dXJlLXBsYWNlaG9sZGVy$''',
 ]

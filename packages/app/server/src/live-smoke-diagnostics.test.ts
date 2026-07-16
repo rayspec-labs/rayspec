@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  formatRedactedAgentRunFailure,
   formatRedactedRunFailure,
   type NodeFailureRow,
   type RunFailureRow,
@@ -8,9 +9,17 @@ import {
 
 // Deliberately fake, planted "secrets" — never real credentials. If redaction is removed, these
 // substrings survive into the diagnostic and the assertions below fail (the fail-the-fix property).
-const FAKE_SK = 'sk-THISISAFAKEKEY0123456789abcdef';
+// The shapes are intentionally realistic (the point — they keep the redaction test honest), which
+// trips the secret scanner; each shorter literal is a SINGLE-LINE constant with an inline
+// `gitleaks:allow`, while the over-length JWT (too long to stay on one line under the formatter) is
+// waved by its exact value in .gitleaks.toml.
+const FAKE_SK = 'sk-THISISAFAKEKEY0123456789abcdef'; // gitleaks:allow
 const FAKE_BEARER_TOKEN =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWtlIn0.c2lnbmF0dXJlLXBsYWNlaG9sZGVy';
+// A short, dotted DSN password that slips UNDER the generic ≥20-char run — only the DSN pattern masks it.
+const FAKE_DSN = 'postgres://svc_app:hunter2secret@db.internal:5432/appdb'; // gitleaks:allow
+// A short base64 Basic-auth credential (< 20 chars) — only the Basic pattern masks it.
+const FAKE_BASIC = 'Basic YWJjOjEyMw=='; // gitleaks:allow
 
 describe('redact', () => {
   it('masks an sk- key and a Bearer token, and never leaks the secret substrings', () => {
@@ -18,6 +27,22 @@ describe('redact', () => {
     expect(clean).not.toContain(FAKE_SK);
     expect(clean).not.toContain(FAKE_BEARER_TOKEN);
     expect(clean).toContain('[REDACTED]');
+  });
+
+  it('masks ONLY the password in a connection string, keeping scheme/user/host visible', () => {
+    const clean = redact(`could not connect: ${FAKE_DSN}`);
+    // The password is gone…
+    expect(clean).not.toContain('hunter2secret');
+    expect(clean).toContain('[REDACTED]');
+    // …but the scheme/user/host stay for diagnostic value.
+    expect(clean).toContain('postgres://svc_app:[REDACTED]@db.internal:5432/appdb');
+  });
+
+  it('masks a Basic auth credential shorter than the generic 20-char floor', () => {
+    const clean = redact(`upstream said: ${FAKE_BASIC}`);
+    // Removing the Basic pattern would leak this — the generic run cannot (it is under 20 chars).
+    expect(clean).not.toContain('YWJjOjEyMw==');
+    expect(clean).toContain('Basic [REDACTED]');
   });
 
   it('bounds the length of a long message', () => {
@@ -28,6 +53,23 @@ describe('redact', () => {
 
   it('collapses to a single line', () => {
     expect(redact('line one\nline two\ttabbed')).not.toContain('\n');
+  });
+});
+
+describe('formatRedactedAgentRunFailure', () => {
+  it('names the agent journal, surfaces the run status, and tallies the steps by status', () => {
+    const line = formatRedactedAgentRunFailure('run-agent-1', 'error', [
+      { status: 'completed', n: 2 },
+      { status: 'error', n: 1 },
+    ]);
+    expect(line).toContain('journal=agent');
+    expect(line).toContain('status=error');
+    expect(line).toContain('steps=completed:2, error:1');
+    expect(line).not.toContain('\n');
+  });
+
+  it('reports an empty journal without throwing', () => {
+    expect(formatRedactedAgentRunFailure('run-agent-2', 'failed', [])).toContain('steps=<none>');
   });
 });
 
