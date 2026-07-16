@@ -5,6 +5,80 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3] - 2026-07-16
+
+### Added
+
+- **Persist a validated agent output to a store (`persistTo`).** An agent action —
+  on both an api route and a trigger — may now declare `persistTo: <store>`. On a
+  successful run the validated `outputSchema` output is written as one row into that
+  store, exactly once, atomically with the run header's completing transition, across
+  both the synchronous (in-request) and durable (off-request / recovery) execution
+  paths. Safety is enforced at **deploy**, not runtime: the doctor validates the
+  mapping in both directions and fails closed at boot on any mismatch — forward
+  (every output property maps to a writable business column of a compatible type) and
+  reverse (every NOT-NULL, no-default business column is reliably produced by a
+  present, required, non-nullable output property; where a column and its mapped
+  property both declare an `enum`, the property's enum must be a subset of the
+  column's whitelist).
+- **Declarative record-input normalization (`input_normalize`).** The `record_input`
+  capability accepts an optional `input_normalize: { agent, output_contract }` that
+  runs a declared agent over a submitted record before it is persisted: the record is
+  transformed, re-validated, then stored — the stored and emitted value is the
+  normalized one. It runs synchronously through the neutral agent path; a failure is
+  fail-closed (nothing is persisted) and never leaks raw provider or database text to
+  the client. It is idempotent, keyed on the canonical payload hash, so a retry
+  converges while a corrected resubmission re-normalizes. It is wired via a
+  `record/<agent>.normalizer.json` config (path-jailed and validated); declaring it
+  without a wired normalizer fails closed at deploy. A record capability without it is
+  byte-identical to before.
+- **Server-side substring search on `list` routes (`?search=` / `?<col>__contains=`).**
+  The declarative `list` op gains an opt-in, additive, keyset-stable search:
+  `?search=<term>` is a case-insensitive `OR` match across the store's declared text
+  columns, and `?<column>__contains=<term>` matches one declared text column. User
+  terms are bound parameters with the `LIKE` wildcards `%` and `_` escaped (`ESCAPE`),
+  so they match literally rather than as wildcards. Search folds into the same
+  AND-chain as the equality and set filters and composes with ordering and the keyset
+  cursor. `search` is a reserved query word — a store that declares a column named
+  `search` fails lint.
+- **`created_by` on escape-hatch handler inserts.** A handler-managed store insert now
+  stamps the injected `created_by` column from the authenticated caller
+  (server-derived and un-spoofable), matching the declarative `store` create path. A
+  posture with no request principal is unaffected.
+
+### Changed
+
+- **Handler-facade input-validation rejections now return `400`** (previously `500`).
+  An unknown column, a server-controlled column, an `enum`-whitelist violation, an
+  injection attempt, an invalid timestamp, or a negative pagination value now surface
+  as a typed `400` error rather than an internal `500`. The client-facing message
+  stays generic and no internal detail ever leaves the server.
+- **A spec-vs-spec plan no longer emits phantom platform-column deltas.** Running
+  `rayspec plan <spec> --against <copy>` on two identical specs now produces no diff.
+  The real-database injected-column reconcile stays reachable behind a new opt-in
+  `--reconcile-injected-columns` flag (an update-mode flag that requires `--against`).
+- **Opt-in run-journal payload scrub during tenant erasure.** Passing
+  `journalScrub: true` to a tenant erasure NULLs the raw journal payload columns while
+  keeping the journal rows and their idempotency and cost columns intact — closing the
+  content-erasure gap where a per-subject purge left raw payloads behind. The default
+  behaviour is byte-identical (no scrub).
+
+### Fixed
+
+- **A journaled error step-row no longer bricks an agent re-run.** The run-journal
+  writer now upserts a step on its unique key — replacing an `error` predecessor, but
+  never overwriting a successful row — and reconciles the run header to the healed
+  terminal outcome without ever downgrading an already-completed run. A re-run of a
+  previously-failed step now succeeds, and both run observability and the
+  double-charge guard see the true result.
+
+### Documentation
+
+- Documented `persistTo` (agent output persistence) and `input_normalize` (record-input
+  normalization) in the spec reference and the authoring skill, and the new server-side
+  substring search (`?search=` / `?<column>__contains=`) under the `list`-route query
+  surface — correcting the earlier "no `LIKE`/full-text operators" note.
+
 ## [1.3.2] - 2026-07-14
 
 ### Added
