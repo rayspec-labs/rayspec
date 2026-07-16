@@ -11,7 +11,7 @@
  *
  * LOAD-BEARING INVARIANT (the whole point of the slice): every proposed `AllowlistEntry.match` is
  * BYTE-FAITHFUL to what `scanMigrationSql` computes for that statement — the SAME whitespace-collapse
- * + trailing-`;` strip the scan's MIG-3 matcher uses (`normalizeStatementForMatch` below mirrors the
+ * + trailing-`;` strip the scan's exact-equality statement matcher uses (`normalizeStatementForMatch` below mirrors the
  * scan's `collapse` + `stripTerminator`). A drift of a single space would re-BLOCK a reviewed change
  * at deploy time, collapsing the update UX — so a test drives the EXACT emitted statement through the
  * REAL scan: BLOCKED with an empty allowlist, PASSES with this module's `proposedAllowlist`.
@@ -302,7 +302,7 @@ function assertStoreIdentifiers(store: StoreSpec): void {
 // ---------------------------------------------------------------------------------------
 
 /**
- * Normalize a statement to the EXACT form the scan's MIG-3 matcher compares against: collapse runs of
+ * Normalize a statement to the EXACT form the scan's exact-equality statement matcher compares against: collapse runs of
  * whitespace (incl. newlines) to single spaces, trim, and strip a single trailing `;`. This MUST stay
  * bit-identical to `scanMigrationSql`'s `collapse(...)` + `stripTerminator(...)` — a proposed
  * `AllowlistEntry.match` that deviates re-BLOCKS the reviewed statement at deploy. A shadow-mutation

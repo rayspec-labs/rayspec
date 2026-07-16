@@ -364,7 +364,7 @@ describe.skipIf(!hasDb)('declared stores + store steps e2e (the composed stack)'
 
     blobDir = mkdtempSync(join(tmpdir(), 'rayspec-fieldlog-e2e-'));
     const blobFactory = makeFsBlobStoreFactory(blobDir);
-    const media = createMediaTokenService('s2-fieldlog-media-secret-at-least-32-bytes');
+    const media = createMediaTokenService('fieldlog-media-secret-at-least-32-bytes');
 
     result = await deploy<ReturnType<typeof createAuthApp>>({
       specSource: FIELDLOG_YAML,

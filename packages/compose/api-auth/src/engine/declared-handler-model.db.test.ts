@@ -346,7 +346,7 @@ describe.skipIf(!hasDb)('declared agent + tooling + handler model end-to-end', (
       engineSpec: spec,
       engineHandlers: handlers,
       agentBackends: backends,
-      schema: 'rayspec_test_slice3',
+      schema: 'rayspec_test_handler_model',
     });
   });
   beforeEach(async () => {

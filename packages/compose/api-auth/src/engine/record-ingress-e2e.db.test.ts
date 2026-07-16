@@ -342,7 +342,7 @@ describe.skipIf(!hasDb)('record submit-ingress e2e (the composed stack)', () => 
     const blobFactory = makeFsBlobStoreFactory(blobDir);
     // The audio capability still mounts unconditionally — fake its env like every
     // composed-stack test does; nothing in THIS suite drives the audio surface.
-    const media = createMediaTokenService('s3-intake-media-secret-at-least-32-bytes');
+    const media = createMediaTokenService('intake-media-secret-at-least-32-bytes');
 
     result = await deploy<ReturnType<typeof createAuthApp>>({
       specSource: INTAKE_YAML,

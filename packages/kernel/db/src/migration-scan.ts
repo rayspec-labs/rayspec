@@ -18,7 +18,7 @@
  * appears INSIDE a single-quoted string or a dollar-quoted ($tag$...$tag$) body is NOT treated
  * as a comment / statement terminator. A naive per-line `--.*$` strip truncated the line at a
  * `--` inside a literal and silently dropped the rest of the statement (and any DROP/TRUNCATE
- * after it) before the destructive detectors ran — the MIG-2 finding. Genuine `--` line
+ * after it) before the destructive detectors ran. Genuine `--` line
  * comments and slash-star block comments are still removed.
  */
 
@@ -67,7 +67,7 @@ export interface ScanResult {
  * so an entry is tied to the EXACT statement it reviewed, not a brittle line number that shifts
  * when the file is edited.
  *
- * MIG-3: the match is anchored to the full statement (exact equality), NOT an unanchored
+ * The exact-equality rule: the match is anchored to the full statement (exact equality), NOT an unanchored
  * `.includes()` substring. A substring match meant a short, reviewed `match` could silently clear
  * a DIFFERENT, unreviewed statement that merely happened to contain those characters (e.g. a
  * `match` of `TRUNCATE TABLE "x"` clearing a later `TRUNCATE TABLE "x", "secrets"`). Full-statement
@@ -266,7 +266,7 @@ function splitStatements(sql: string): RawStatement[] {
 /**
  * Replace the BODY of every single-quoted string literal + dollar-quoted body with spaces, so a
  * destructive KEYWORD appearing inside a literal (e.g. `INSERT INTO t (s) VALUES ('DROP TABLE x')`)
- * is NOT mistaken for a statement (MIG-2 false-positive fix). The splitter already preserves
+ * is NOT mistaken for a statement (the literal-stripping guard against false positives). The splitter already preserves
  * literal boundaries; here we blank only the CONTENT so the surrounding structure (and line count)
  * is intact. `''` is the escaped quote inside a string. Length is preserved (space-for-char) so any
  * positional reasoning stays valid.
@@ -323,7 +323,7 @@ function stripStringLiteralBodies(s: string): string {
  * Scan migration SQL for destructive statements. Uses the literal-aware `splitStatements`
  * tokenizer (comments + `;` terminators inside string/dollar-quote literals are NOT mistaken
  * for structure), maps each statement back to its starting line, runs every detector on a
- * literal-stripped copy (MIG-2: a destructive keyword inside a string literal is NOT flagged), and
+ * literal-stripped copy (the literal-stripping guard: a destructive keyword inside a string literal is NOT flagged), and
  * marks a finding `allowed` only if a matching allowlist entry (same kind + full-statement
  * equality) exists. `pass` is true iff no UN-allowlisted destructive finding remains.
  */
@@ -333,12 +333,12 @@ export function scanMigrationSql(sql: string, allowlist: AllowlistEntry[] = []):
 
   for (const stmt of statements) {
     const collapsedStmt = stripTerminator(stmt.text);
-    // MIG-2: detectors run on the literal-stripped text so a destructive keyword inside a string
+    // The literal-stripping guard: detectors run on the literal-stripped text so a destructive keyword inside a string
     // literal is not a false positive; the finding TEXT + allowlist match use the ORIGINAL stmt.
     const detectText = stripStringLiteralBodies(stmt.text);
     for (const det of DETECTORS) {
       if (det.re.test(detectText)) {
-        // MIG-3: the allowlist entry must match the ENTIRE statement (exact equality after
+        // The exact-equality rule: the allowlist entry must match the ENTIRE statement (exact equality after
         // collapsing whitespace + stripping a trailing `;`), not be a contained substring.
         const allowed = allowlist.some(
           (a) => a.kind === det.kind && stripTerminator(a.match) === collapsedStmt,

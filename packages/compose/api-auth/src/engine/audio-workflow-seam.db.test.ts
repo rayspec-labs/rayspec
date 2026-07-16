@@ -151,7 +151,7 @@ describe.skipIf(!hasDb)('Audio/Media → durable workflow seam, composed', () =>
     });
     const spec = buildAudioCapabilitySpec(mounted, { name: 'audio-workflow-seam-test' });
     handlers = mounted.handlers as ReadonlyMap<string, ResolvedHandler>;
-    blobDir = mkdtempSync(join(tmpdir(), 'rayspec-audio-d2i-'));
+    blobDir = mkdtempSync(join(tmpdir(), 'rayspec-audio-seam-'));
     blobFactory = makeFsBlobStoreFactory(blobDir);
     media = createMediaTokenService(MEDIA_SECRET);
     h = await createHarness({
@@ -159,7 +159,7 @@ describe.skipIf(!hasDb)('Audio/Media → durable workflow seam, composed', () =>
       engineHandlers: handlers,
       blobFactory,
       mediaTokenService: media,
-      schema: 'rayspec_test_audio_d2i',
+      schema: 'rayspec_test_audio_seam',
     });
   });
   beforeEach(async () => {
@@ -231,7 +231,7 @@ describe.skipIf(!hasDb)('Audio/Media → durable workflow seam, composed', () =>
     });
 
   it('DUAL-TRACK finalize → EXACTLY ONE durable run, tenant-scoped, session payload intact', async () => {
-    const a = await principal('d2i-dual@example.com', 'D2iDual');
+    const a = await principal('dual@example.com', 'Dual');
     const enqueuer = wireWorkflow(a.orgId);
 
     expect((await postChunk('s1', 'mic', 0, a.token, new Uint8Array([1]))).status).toBe(200);
@@ -271,7 +271,7 @@ describe.skipIf(!hasDb)('Audio/Media → durable workflow seam, composed', () =>
   });
 
   it('RE-FINALIZE (idempotent 200) re-emits → still EXACTLY ONE durable run (never a second)', async () => {
-    const a = await principal('d2i-refin@example.com', 'D2iRefin');
+    const a = await principal('refin@example.com', 'Refin');
     const enqueuer = wireWorkflow(a.orgId);
 
     await postChunk('s2', 'mic', 0, a.token, new Uint8Array([9]));
@@ -291,7 +291,7 @@ describe.skipIf(!hasDb)('Audio/Media → durable workflow seam, composed', () =>
     // guarantees ≥1 durable run for the session (the run's own completeness guard then waits for the
     // straggler before transcribing). A producer-side "withhold until every track sealed" would emit
     // ZERO here and the session would never be transcribed — this is the anti-regression proof.
-    const a = await principal('d2i-stagger@example.com', 'D2iStagger');
+    const a = await principal('stagger@example.com', 'Stagger');
     const enqueuer = wireWorkflow(a.orgId);
 
     // mic + system both received a chunk (both track rows exist, `recording`), but only mic finalizes.

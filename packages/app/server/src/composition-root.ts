@@ -581,7 +581,7 @@ function parsePort(raw: string | undefined): number {
  * re-run against an already-migrated DB is a no-op. Bootstraps a CLEAN empty DB AND no-ops
  * on an up-to-date one, so the boot is safe to run repeatedly.
  *
- * MIG-2 (concurrency): the migrator takes NO advisory lock. Two boots racing against the SAME fresh
+ * Concurrency: the migrator takes NO advisory lock. Two boots racing against the SAME fresh
  * empty DB would both try to apply 0000's non-`IF NOT EXISTS` CREATEs — one wins, the other's
  * transaction aborts cleanly (full rollback, no corruption). A LOCAL single-node boot does not hit
  * this; a future multi-replica deploy would gate migrations on a single runner.

@@ -74,7 +74,7 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
     // The neutral test product spec (stores + routes come from the neutral capability).
     const spec = buildAudioCapabilitySpec(mounted, { name: 'audio-capability-test' });
     handlers = mounted.handlers as ReadonlyMap<string, ResolvedHandler>;
-    blobDir = mkdtempSync(join(tmpdir(), 'rayspec-audio-d4b-'));
+    blobDir = mkdtempSync(join(tmpdir(), 'rayspec-audio-cap-'));
     blobFactory = makeFsBlobStoreFactory(blobDir);
     media = createMediaTokenService(MEDIA_SECRET);
     h = await createHarness({
@@ -82,7 +82,7 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
       engineHandlers: handlers,
       blobFactory,
       mediaTokenService: media,
-      schema: 'rayspec_test_audio_d4b',
+      schema: 'rayspec_test_audio_capability',
     });
   });
   beforeEach(async () => {
@@ -191,7 +191,7 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
   // ──────────────────────────────────────────────────────────────────────────────────────────────
 
   it('neutral product: upload → finalize → media-prep → mint → stream the exact bytes back', async () => {
-    const a = await principal('d4b-flow@example.com', 'D4bFlow');
+    const a = await principal('flow@example.com', 'Flow');
     const c0 = new Uint8Array([1, 2, 3, 4]);
     const c1 = new Uint8Array([5, 6, 7, 8, 9]);
     expect((await postChunk('s1', 'mic', 0, a.token, c0)).status).toBe(200);
@@ -224,7 +224,7 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
   });
 
   it('a not-yet-prepared track → play-token 409 not_ready', async () => {
-    const a = await principal('d4b-nr@example.com', 'D4bNotReady');
+    const a = await principal('nr@example.com', 'NotReady');
     await postChunk('s1', 'mic', 0, a.token, new Uint8Array([1]));
     await finalize('s1', 'mic', a.token, 1);
     const mint = await mintPlayToken('s1', 'mic', a.token);
@@ -237,7 +237,7 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
   // ──────────────────────────────────────────────────────────────────────────────────────────────
 
   it('the 200-advance / 409-gap / 200-no-op contract over HTTP', async () => {
-    const a = await principal('d4b-wm@example.com', 'D4bWm');
+    const a = await principal('wm@example.com', 'Wm');
     expect(await (await postChunk('s2', 'mic', 0, a.token, new Uint8Array([1]))).json()).toEqual({
       next_expected_index: 1,
     });
@@ -259,7 +259,7 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
   });
 
   it('CONCURRENT first-chunk POSTs collide on the UNIQUE: one row, none 500s', async () => {
-    const a = await principal('d4b-conc@example.com', 'D4bConc');
+    const a = await principal('conc@example.com', 'Conc');
     const results = await Promise.all(
       Array.from({ length: 6 }, () => postChunk('s3', 'mic', 0, a.token, new Uint8Array([0x42]))),
     );
@@ -271,7 +271,7 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
   });
 
   it('DUAL-TRACK finalize converges on EXACTLY ONE session-scoped event', async () => {
-    const a = await principal('d4b-dual@example.com', 'D4bDual');
+    const a = await principal('dual@example.com', 'Dual');
     await postChunk('s4', 'mic', 0, a.token, new Uint8Array([1]));
     await postChunk('s4', 'system', 0, a.token, new Uint8Array([2]));
     await finalize('s4', 'mic', a.token, 1);
@@ -286,8 +286,8 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
   // ──────────────────────────────────────────────────────────────────────────────────────────────
 
   it('ingest + upload-status are tenant-scoped (A is invisible to B)', async () => {
-    const a = await principal('d4b-tenA@example.com', 'D4bTenA');
-    const b = await principal('d4b-tenB@example.com', 'D4bTenB');
+    const a = await principal('tenA@example.com', 'TenA');
+    const b = await principal('tenB@example.com', 'TenB');
     await postChunk('shared', 'mic', 0, a.token, new Uint8Array([1]));
     await postChunk('shared', 'mic', 1, a.token, new Uint8Array([2]));
 
@@ -309,8 +309,8 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
   });
 
   it("finalize is tenant-scoped (B cannot finalize A's track → 404)", async () => {
-    const a = await principal('d4b-finA@example.com', 'D4bFinA');
-    const b = await principal('d4b-finB@example.com', 'D4bFinB');
+    const a = await principal('finA@example.com', 'FinA');
+    const b = await principal('finB@example.com', 'FinB');
     await postChunk('s5', 'mic', 0, a.token, new Uint8Array([1]));
     // B has never started this track under its own tenant → 404.
     const bFin = await finalize('s5', 'mic', b.token, 1);
@@ -318,8 +318,8 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
   });
 
   it("play-token is tenant-scoped (B cannot mint for A's recording → 404)", async () => {
-    const a = await principal('d4b-mintA@example.com', 'D4bMintA');
-    const b = await principal('d4b-mintB@example.com', 'D4bMintB');
+    const a = await principal('mintA@example.com', 'MintA');
+    const b = await principal('mintB@example.com', 'MintB');
     await postChunk('s6', 'mic', 0, a.token, new Uint8Array([1]));
     await finalize('s6', 'mic', a.token, 1);
     await prepareForPlayback(a.orgId, 's6', 'mic');
@@ -366,7 +366,7 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
   }
 
   it('valid media token → 200 + exact bytes; Range → 206; If-None-Match → 304; bad range → 416', async () => {
-    const a = await principal('d4b-play@example.com', 'D4bPlay');
+    const a = await principal('play@example.com', 'Play');
     await seedPlayable(a.orgId, a.token, 's7');
     const tok = await media.mint({
       tenantId: a.orgId,
@@ -399,7 +399,7 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
   });
 
   it('a token bound to a DIFFERENT resource → 403 (no cross-resource replay)', async () => {
-    const a = await principal('d4b-bind@example.com', 'D4bBind');
+    const a = await principal('bind@example.com', 'Bind');
     await seedPlayable(a.orgId, a.token, 's8');
     // A valid token for s8/mic, replayed against a DIFFERENT route resource (s9/mic).
     const tok = await media.mint({
@@ -412,8 +412,8 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
   });
 
   it("a tenant-A media token against tenant-B's resource → 404 (DB ownership re-validation)", async () => {
-    const a = await principal('d4b-xtA@example.com', 'D4bXtA');
-    const b = await principal('d4b-xtB@example.com', 'D4bXtB');
+    const a = await principal('xtA@example.com', 'XtA');
+    const b = await principal('xtB@example.com', 'XtB');
     await seedPlayable(b.orgId, b.token, 's10'); // B owns s10/mic
     // A forges a token claiming its OWN tenant for B's resource key — A's tenant scope has no track row.
     const aTok = await media.mint({
@@ -436,7 +436,7 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
   });
 
   it('a FORGED media token (different secret) → 401 (the platform media verifier)', async () => {
-    const a = await principal('d4b-forge@example.com', 'D4bForge');
+    const a = await principal('forge@example.com', 'Forge');
     await seedPlayable(a.orgId, a.token, 's11');
     const forged = await createMediaTokenService('a-DIFFERENT-media-secret-32-bytes-xx').mint({
       tenantId: a.orgId,

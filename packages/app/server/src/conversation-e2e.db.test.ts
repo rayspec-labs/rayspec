@@ -85,7 +85,7 @@ const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
 const CONVERSATION_YAML = resolve(here, '__fixtures__/conversation-intake.product.yaml');
 
-const SUITE_DB = `rayspec_w3cv_conv_${process.pid}`;
+const SUITE_DB = `rayspec_conv_${process.pid}`;
 const TENANT = '00000000-0000-4000-8000-00000000c301';
 const TENANT_B = '00000000-0000-4000-8000-00000000c302';
 const CONV_ID = 'conv-001';
@@ -262,7 +262,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
     for (const k of ENV) saved[k] = process.env[k];
     const { privateKey } = await generateKeyPair('RS256', { extractable: true });
     process.env.RAYSPEC_JWT_SIGNING_KEY = await exportPKCS8(privateKey);
-    process.env.RAYSPEC_API_KEY_PEPPER = 'w3cv-conv-pepper';
+    process.env.RAYSPEC_API_KEY_PEPPER = 'conv-pepper';
     process.env.DATABASE_URL = appDbUrl;
     delete process.env.ALLOWED_ORIGINS;
     process.env.PORT = '8809';
@@ -320,7 +320,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
   }, 60_000);
 
   async function tokenFor(tenant: string): Promise<string> {
-    const email = `w3cv-${tenant.slice(-4)}-${Date.now()}@example.com`;
+    const email = `conv-${tenant.slice(-4)}-${Date.now()}@example.com`;
     const reg = await server!.app.request('/v1/auth/register', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

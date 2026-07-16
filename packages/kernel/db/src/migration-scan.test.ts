@@ -81,7 +81,7 @@ describe('the identity migration requires an explicit allowlist (no silent pass)
   });
 });
 
-describe('comment-strip is literal-aware (MIG-2 regression)', () => {
+describe('comment-strip is literal-aware (literal-stripping guard regression)', () => {
   it('a `--` inside a single-quoted literal does NOT hide a following DROP TABLE', () => {
     // The naive per-line `--.*$` strip truncated the line at `--123` and dropped the next
     // statement; here the DROP TABLE that follows the literal MUST still be flagged.
@@ -221,7 +221,7 @@ describe('C5: EVERY committed migration passes the scan with its reviewed allowl
   });
 });
 
-describe('MIG-3: allowlist match is anchored to the FULL statement', () => {
+describe('exact-equality rule: allowlist match is anchored to the FULL statement', () => {
   it('an allowlist match that is only a SUBSTRING of the statement does NOT clear it', () => {
     const sql = 'TRUNCATE TABLE "users", "secrets";';
     // A reviewer-supplied substring (a different, narrower TRUNCATE) must not clear this one.

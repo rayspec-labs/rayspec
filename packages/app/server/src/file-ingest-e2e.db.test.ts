@@ -54,7 +54,7 @@ const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
 const FILE_YAML = resolve(here, '__fixtures__/file-ingest.product.yaml');
 
-const SUITE_DB = `rayspec_w2fi_file_${process.pid}`;
+const SUITE_DB = `rayspec_file_ingest_${process.pid}`;
 const TENANT = '00000000-0000-4000-8000-00000000f101';
 const TENANT_B = '00000000-0000-4000-8000-00000000f102';
 const FILE_ID = 'inv-001';
@@ -138,11 +138,11 @@ describe.skipIf(!baseUrl)('file-ingest — real boot + real DBOS + HTTP', () => 
       await admin.end();
     }
 
-    blobDir = mkdtempSync(join(tmpdir(), 'rayspec-w2fi-'));
+    blobDir = mkdtempSync(join(tmpdir(), 'rayspec-file-'));
     for (const k of ENV) saved[k] = process.env[k];
     const { privateKey } = await generateKeyPair('RS256', { extractable: true });
     process.env.RAYSPEC_JWT_SIGNING_KEY = await exportPKCS8(privateKey);
-    process.env.RAYSPEC_API_KEY_PEPPER = 'w2fi-file-pepper';
+    process.env.RAYSPEC_API_KEY_PEPPER = 'file-ingest-pepper';
     process.env.DATABASE_URL = appDbUrl;
     delete process.env.ALLOWED_ORIGINS;
     process.env.PORT = '8808';
@@ -195,7 +195,7 @@ describe.skipIf(!baseUrl)('file-ingest — real boot + real DBOS + HTTP', () => 
   }, 60_000);
 
   async function tokenFor(tenant: string): Promise<string> {
-    const email = `w2fi-${tenant.slice(-4)}-${Date.now()}@example.com`;
+    const email = `file-${tenant.slice(-4)}-${Date.now()}@example.com`;
     const reg = await server!.app.request('/v1/auth/register', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
