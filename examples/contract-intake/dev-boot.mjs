@@ -41,7 +41,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { registerProductStores } from '@rayspec/db/composition';
-import { assembleServer, loadServerConfig } from '@rayspec/server';
+import { assembleServer, bootBaseUrl, loadServerConfig } from '@rayspec/server';
 import postgres from 'postgres';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -140,6 +140,8 @@ try {
   await seed.end();
 }
 
-serve({ fetch: server.app.fetch, port: config.port }, (info) => {
-  console.log(`[dev-boot] UP — http://127.0.0.1:${info.port} (deployMode=${server.deployMode})`);
+serve({ fetch: server.app.fetch, hostname: config.host, port: config.port }, (info) => {
+  console.log(
+    `[dev-boot] UP — ${bootBaseUrl(info.address, info.port)} (deployMode=${server.deployMode})`,
+  );
 });

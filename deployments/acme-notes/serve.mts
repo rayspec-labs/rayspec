@@ -14,7 +14,13 @@
  */
 import { serve } from '@hono/node-server';
 import { registerProductStores } from '@rayspec/db/composition';
-import { assembleServer, BootConfigError, bootBanner, loadServerConfig } from '@rayspec/server';
+import {
+  assembleServer,
+  BootConfigError,
+  bootBanner,
+  bootBaseUrl,
+  loadServerConfig,
+} from '@rayspec/server';
 
 async function main(): Promise<void> {
   const config = loadServerConfig();
@@ -25,9 +31,12 @@ async function main(): Promise<void> {
     registerProductTables: registerProductStores,
   });
 
-  const httpServer = serve({ fetch: server.app.fetch, port: config.port }, (info) => {
-    console.log(bootBanner(server, `http://127.0.0.1:${info.port}`));
-  });
+  const httpServer = serve(
+    { fetch: server.app.fetch, hostname: config.host, port: config.port },
+    (info) => {
+      console.log(bootBanner(server, bootBaseUrl(info.address, info.port)));
+    },
+  );
 
   const shutdown = (signal: string): void => {
     console.log(`\n[acme-notes-serve] ${signal} received — shutting down…`);
