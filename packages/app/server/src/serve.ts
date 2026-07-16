@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { DeployError } from '@rayspec/api-auth';
 import { bootBanner, bootBaseUrl } from './banner.js';
+import { BootTimeoutError, resolveBootTimeoutMs, withBootTimeout } from './boot-timeout.js';
 import { assembleServer, BootConfigError, loadServerConfig } from './composition-root.js';
 import { ProductBootError } from './product-boot.js';
 import { assembleOptsFromEnv } from './serve-opts.js';
@@ -61,9 +62,20 @@ function loadLocalDotenvIfPresent(): void {
 }
 
 async function main(): Promise<void> {
+  // Print a progress line BEFORE the (potentially slow) assemble step so a hang is never silent — the
+  // banner below prints only once the whole boot succeeds. Names the phases this boot is about to run.
+  console.log(
+    '[rayspec-serve] booting — loading config, connecting to the database, applying migrations…',
+  );
   loadLocalDotenvIfPresent();
   const config = loadServerConfig();
-  const server = await assembleServer(config, assembleOptsFromEnv(config));
+  // Guard the assemble step (DB connect → migration chain → product boot) with a boot timeout so a hung
+  // boot is DIAGNOSED (see boot-timeout.ts) rather than hanging forever. The happy path is unchanged: a
+  // normal boot completes well under the timeout and the timer is cleared.
+  const server = await withBootTimeout(
+    assembleServer(config, assembleOptsFromEnv(config)),
+    resolveBootTimeoutMs(),
+  );
 
   const httpServer = serve(
     { fetch: server.app.fetch, hostname: config.host, port: config.port },
@@ -108,11 +120,12 @@ if (isProcessEntrypoint()) {
     if (
       err instanceof BootConfigError ||
       err instanceof DeployError ||
-      err instanceof ProductBootError
+      err instanceof ProductBootError ||
+      err instanceof BootTimeoutError
     ) {
       // A fail-closed CONFIG abort (a missing secret / a gated destructive delta / a missing agent
-      // credential) — an operator-actionable message, not an unexpected crash. Print the message only,
-      // no stack. Anything else is genuinely unexpected: keep the stack.
+      // credential) or a boot timeout — an operator-actionable message, not an unexpected crash. Print
+      // the message only, no stack. Anything else is genuinely unexpected: keep the stack.
       console.error(`[rayspec-serve] ${err.message}`);
     } else {
       console.error('[rayspec-serve] boot failed:', err instanceof Error ? err.stack : err);

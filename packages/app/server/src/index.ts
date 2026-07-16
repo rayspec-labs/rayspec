@@ -22,6 +22,15 @@ export { DeployError, type PlannedMigration } from '@rayspec/api-auth';
 // @rayspec/db, so re-exporting here spares a consumer a direct db dep. Additive — a pure type re-export.
 export type { DriftFinding } from '@rayspec/db';
 export { bootBanner, bootBaseUrl } from './banner.js';
+// The boot-timeout guard — shared by the `rayspec-serve` bin (serve.ts) and the local-boot dev wrapper
+// so a hung assemble step is diagnosed rather than silent. Pure (timer race); no entrypoint side effect.
+export {
+  BootTimeoutError,
+  bootTimeoutMessage,
+  DEFAULT_BOOT_TIMEOUT_MS,
+  resolveBootTimeoutMs,
+  withBootTimeout,
+} from './boot-timeout.js';
 export {
   type AgentBackendsFactory,
   applyMigrations,

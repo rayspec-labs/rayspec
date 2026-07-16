@@ -21,9 +21,18 @@ real authenticated request. You will:
 ## Prerequisites
 
 - **Node** `>=22`
-- **pnpm** `10.12.4`
+- **pnpm** `10.12.4`. The simplest way to get exactly this version is Corepack (bundled
+  with Node): `corepack prepare pnpm@10.12.4 --activate`. If your environment has no
+  Corepack, prefix the commands below with a one-off pin instead, e.g.
+  `npx -y pnpm@10.12.4 install`.
 - **Postgres** you can reach. The repo ships a local one via Docker Compose
   (`pnpm db:up`, listening on port `5433`); or point at your own.
+
+> **Don't work from a cloud-synced folder.** Clone and build outside iCloud Drive,
+> Dropbox, OneDrive, or any folder a sync client watches. Those clients churn
+> `node_modules` while a build writes to it, which can lock or corrupt files
+> mid-install and produce mysterious, non-reproducible failures. A plain local
+> directory (e.g. `~/code/rayspec`) avoids it.
 
 ---
 
@@ -36,9 +45,35 @@ pnpm build          # builds all packages, including the two CLI bins
 pnpm db:up          # starts the local Postgres on port 5433
 ```
 
+> **`Failed to create bin` warnings on a fresh checkout are benign.** The first
+> `pnpm install` runs *before* `pnpm build`, and the two workspace bins (`rayspec` →
+> `./dist/index.js`, `rayspec-serve` → `./dist/serve.js`) point at `dist/` files that
+> don't exist yet — so pnpm prints one or more `WARN … Failed to create bin at …`
+> lines because it can't link a bin to a target that isn't built yet. They are
+> non-fatal: the `pnpm build` on the next line produces the `dist/` files, and
+> re-running `pnpm install` after a build creates the bins cleanly. As long as `pnpm
+> install` exits `0`, you can ignore them.
+
 > **Already ran this before?** `pnpm db:up` will report `the container name
 > "/rayspec-pg" is already in use` — you have the container from an earlier run.
 > Start the existing one instead: `docker start rayspec-pg`.
+
+> **Running a second, isolated instance.** The container name (`rayspec-pg`) and the
+> host port (`5433`) are the two things Compose does *not* namespace per project, so a
+> plain second `up` would collide on both. Override them, and set a distinct
+> `COMPOSE_PROJECT_NAME` (which gives the new instance its own data volume), to run a
+> fully separate database alongside the default one:
+>
+> ```bash
+> RAYSPEC_PG_CONTAINER=rayspec-pg-2 RAYSPEC_PG_PORT=5434 COMPOSE_PROJECT_NAME=rayspec2 \
+>   docker compose up -d
+> ```
+>
+> Separate container, separate host port, separate (project-namespaced) volume — no
+> collision with the default instance, and the two databases share no data. Point a
+> second backend at it with `DATABASE_URL=postgresql://rayspec:rayspec@localhost:5434/rayspec`.
+> Tear just it down with `docker compose -p rayspec2 down -v` (the `-v` also drops its
+> volume; the default instance is untouched).
 
 The build produces the two executables you'll use. In a published install they
 land on your `PATH` as `rayspec` and `rayspec-serve`; from the monorepo they are
@@ -167,6 +202,10 @@ surface, with no product routes yet.
 ```bash
 $RAYSPEC_SERVE
 # → boot banner; listening on http://localhost:8080
+
+# The server binds 8080 by default; set PORT to use another (the same PORT
+# documented in .env.example). Every curl below then targets that port.
+PORT=8099 $RAYSPEC_SERVE
 ```
 
 The boot prints a loud banner noting this is a local, single-node,

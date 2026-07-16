@@ -61,11 +61,14 @@ import type { AllowlistEntry } from '@rayspec/db';
 import {
   assembleOptsFromEnv,
   assembleServer,
+  BootTimeoutError,
   bootBanner,
   bootBaseUrl,
   loadServerConfig,
   type PlannedMigration,
+  resolveBootTimeoutMs,
   type ServerConfig,
+  withBootTimeout,
 } from '@rayspec/server';
 import postgres from 'postgres';
 
@@ -285,6 +288,11 @@ async function provisionDevDatabase(baseUrl: string, devDbName: string): Promise
 }
 
 async function main(): Promise<void> {
+  // Progress line BEFORE the (potentially slow) dev-DB provisioning + assemble step, so a hang is never
+  // silent — the banner below prints only once the whole boot succeeds.
+  console.log(
+    '[local-boot] booting — provisioning the dev database, connecting, applying migrations…',
+  );
   loadEnv(resolve(REPO_ROOT, '.env'));
 
   const baseUrl = requireEnv('DATABASE_URL');
@@ -365,7 +373,13 @@ async function main(): Promise<void> {
   // applied); deploy() throws a DeployError at [lint/gate] if the delta carries an unreviewed
   // destructive statement, which propagates here and aborts the boot (never a silent apply).
   const config = loadServerConfig();
-  const server = await assembleServer(config, buildAssembleOpts(config, updateMigrations));
+  // Guard the assemble step (migration chain → product boot) with a boot timeout so a hung boot is
+  // diagnosed rather than silent; the happy path is unchanged (a normal boot clears the timer well
+  // under it). Overridable via RAYSPEC_BOOT_TIMEOUT_MS.
+  const server = await withBootTimeout(
+    assembleServer(config, buildAssembleOpts(config, updateMigrations)),
+    resolveBootTimeoutMs(),
+  );
 
   const httpServer = serve(
     { fetch: server.app.fetch, hostname: config.host, port: config.port },
@@ -404,7 +418,13 @@ const isEntrypoint =
   process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isEntrypoint) {
   main().catch((err) => {
-    console.error('[local-boot] boot failed:', err instanceof Error ? err.stack : err);
+    if (err instanceof BootTimeoutError) {
+      // A boot timeout is an operator-actionable diagnostic (see @rayspec/server boot-timeout) — print
+      // the message only, no stack. Anything else is genuinely unexpected: keep the full stack.
+      console.error(`[local-boot] ${err.message}`);
+    } else {
+      console.error('[local-boot] boot failed:', err instanceof Error ? err.stack : err);
+    }
     process.exit(1);
   });
 }

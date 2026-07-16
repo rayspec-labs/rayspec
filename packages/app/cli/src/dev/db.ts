@@ -49,6 +49,45 @@ function redact(message: string): string {
 }
 
 /**
+ * Compose an ACTIONABLE description of a database-connection failure so an unreachable or dead port
+ * surfaces a real reason instead of a blank line.
+ *
+ * postgres.js rejects with the raw Node socket error. Usually its top-level `.message` carries the
+ * syscall (`connect ECONNREFUSED 127.0.0.1:5433`). BUT when the host resolves to several addresses —
+ * which the default `localhost` does (`::1` and `127.0.0.1`) — Node throws an `AggregateError` whose
+ * top-level `.message` is EMPTY, with the per-address failures in `.errors[]` and the syscall on
+ * `.code`; other paths nest the underlying error on `.cause`. Draw from all of those, de-duplicated,
+ * so whichever layer holds the detail reaches the operator. The caller still runs the result through
+ * `redact()`, so no connection string or password can leak.
+ */
+export function describeConnectError(e: unknown): string {
+  if (!(e instanceof Error)) return String(e);
+  const parts: string[] = [];
+  const add = (s: unknown): void => {
+    if (typeof s === 'string' && s.length > 0 && !parts.some((p) => p.includes(s))) parts.push(s);
+  };
+  add(e.message);
+  // AggregateError from a multi-address connect (incl. the default localhost → ::1 + 127.0.0.1):
+  // the top-level message is empty; the real per-address failures live here.
+  const errs = (e as { errors?: unknown }).errors;
+  if (Array.isArray(errs)) {
+    for (const sub of errs) if (sub instanceof Error) add(sub.message);
+  }
+  // A nested cause (some runtime/driver paths wrap the socket error rather than throwing it directly).
+  const cause = (e as { cause?: unknown }).cause;
+  if (cause instanceof Error) {
+    add(cause.message);
+    add((cause as { code?: unknown }).code);
+  }
+  // The syscall code (ECONNREFUSED / ETIMEDOUT / ENOTFOUND / EPERM …), appended LAST and only when
+  // nothing more specific (the message, a per-address failure, or the cause) already names it — so an
+  // empty-message AggregateError still surfaces its code, without a redundant bare code LEADING the
+  // line when a per-address message already carries it.
+  add((e as { code?: unknown }).code);
+  return parts.join(': ') || String(e);
+}
+
+/**
  * `rayspec dev db [--database-url <url>] [--name <db>]` — create-if-absent. Returns a value-free
  * summary; the caller emits it as JSON. Throws `DevCliError` on a usage problem (→ exit 2); an
  * operational failure (bad/unreachable DB) is returned as `ok:false` (→ exit 1) with a redacted message.
@@ -139,7 +178,7 @@ export async function runDevDb(args: readonly string[]): Promise<DevDbResult> {
     return {
       ok: false,
       command: 'dev db',
-      errors: [{ code: 'DB_ERROR', message: redact(e instanceof Error ? e.message : String(e)) }],
+      errors: [{ code: 'DB_ERROR', message: redact(describeConnectError(e)) }],
     };
   } finally {
     await sql.end();
