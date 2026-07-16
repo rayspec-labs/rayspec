@@ -37,6 +37,28 @@ function hasRefreshSetCookie(res: Response): boolean {
   );
 }
 
+/**
+ * Assert an auth response body leaks neither the plaintext password nor its stored hash.
+ *
+ * The `accessToken` is an OPAQUE bearer credential — a JWT whose base64url signature is random, so it
+ * can coincidentally spell a dictionary word (`hash` at ~(2/64)^4 ≈ 0.3% per token), which made a
+ * blanket `JSON.stringify(body).not.toMatch(/…hash…/)` flake. Scan the real leak surface instead: the
+ * NON-token fields, plus the token's DECODED claims (a JWT payload is readable, so a secret smuggled
+ * into a claim IS a leak) — never the random signature. Also assert the literal password never appears,
+ * so the invariant is the actual "no password / no argon2 hash", not a proxy for it.
+ */
+function assertNoSecretLeak(body: Record<string, unknown>, plaintextPassword: string): void {
+  const { accessToken, ...rest } = body as { accessToken?: unknown };
+  const restJson = JSON.stringify(rest);
+  expect(restJson).not.toMatch(/password|hash|\$argon2/i);
+  expect(restJson).not.toContain(plaintextPassword);
+  if (typeof accessToken === 'string') {
+    const claims = Buffer.from(accessToken.split('.')[1] ?? '', 'base64url').toString('utf8');
+    expect(claims).not.toMatch(/password|hash|\$argon2/i);
+    expect(claims).not.toContain(plaintextPassword);
+  }
+}
+
 describe('register / login / me happy path', () => {
   it('registers, logs in, and returns the user via /me; never leaks the password hash', async () => {
     const reg = await jsonRequest(h.app, 'POST', '/v1/auth/register', {
@@ -46,7 +68,7 @@ describe('register / login / me happy path', () => {
     const regBody = await reg.json();
     expect(regBody.accessToken).toBeTruthy();
     expect(regBody.tokenType).toBe('Bearer');
-    expect(JSON.stringify(regBody)).not.toMatch(/password|hash|\$argon2/i);
+    assertNoSecretLeak(regBody, 'correct horse battery');
     // The refresh cookie is host-prefixed, HttpOnly, Secure, SameSite=Strict.
     const setCookie = reg.headers.getSetCookie?.() ?? [];
     const refreshSc = setCookie.find((s) => s.startsWith(REFRESH_COOKIE_NAME));
@@ -61,6 +83,7 @@ describe('register / login / me happy path', () => {
     });
     expect(login.status).toBe(200);
     const loginBody = await login.json();
+    assertNoSecretLeak(loginBody, 'correct horse battery');
     const token = loginBody.accessToken as string;
 
     const me = await jsonRequest(h.app, 'GET', '/v1/auth/me', {
@@ -70,7 +93,7 @@ describe('register / login / me happy path', () => {
     const meBody = await me.json();
     expect(meBody.email).toBe('alice@example.com');
     expect(meBody.memberships).toEqual([]);
-    expect(JSON.stringify(meBody)).not.toMatch(/password|hash/i);
+    assertNoSecretLeak(meBody, 'correct horse battery');
   });
 
   it('collapses confusable/whitespace email variants to one row (register-then-login)', async () => {
