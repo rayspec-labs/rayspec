@@ -14,12 +14,15 @@
  * 422 (the interpreter's catch already contains any JSON.parse blow-up, incl. deep-nesting
  * RangeErrors); the parsed value is depth-bounded (422 `record_too_deep`) BEFORE any
  * canonicalization and byte-bounded (413) after — the trust-boundary stack-overflow DoS is closed at the
- * capability core. The RAW-BYTE bound is now PLATFORM-WIDE: the shared `{handler}` interpreter drains
- * the request body under a configured cap (a body over the cap is a 413 BEFORE it is buffered/parsed —
- * the shared `readBoundedBody` reader), so an authenticated caller can no longer stream an unbounded
- * body into memory ahead of this handler. Every `{handler}`/CRUD/auth route now shares that bound (the
- * OAuth token endpoint keeps its own bespoke pre-mount Content-Length guard, app.ts
- * OAUTH_TOKEN_MAX_BODY_BYTES).
+ * capability core. The RAW-BYTE bound now also sits UPSTREAM of this handler: the shared `{handler}`
+ * route interpreter drains the request body under a configured cap (a body over the cap is a 413 BEFORE
+ * it is buffered/parsed — the shared `readBoundedBody`/`readBoundedJson` reader), so an authenticated
+ * caller can no longer stream an unbounded body into memory ahead of this handler. That upstream bound
+ * covers the config-declared ingress: the `{handler}` interpreter, the declarative store CRUD routes,
+ * the session-reprocess route, the audio capability, and the auth register/login endpoints. It is NOT
+ * yet platform-wide: several BUILT-IN JSON routes (the org mutations, the legacy runs body, the auth
+ * refresh text read) still parse an unbounded `c.req.json()/.text()`, and the OAuth token endpoint keeps
+ * its own bespoke pre-mount Content-Length guard (app.ts OAUTH_TOKEN_MAX_BODY_BYTES).
  */
 import { httpResponse, type RouteHandler, type RouteHandlerInit } from '@rayspec/handler-sdk';
 import type { ResolvedRecordConfig } from '../config.js';
