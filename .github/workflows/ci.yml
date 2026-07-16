@@ -60,7 +60,7 @@ jobs:
       # app config. DEV/TEST-ONLY, an explicit NON-secret placeholder (allowlisted in .gitleaks.toml).
       RAYSPEC_API_KEY_PEPPER: ci-dev-pepper-not-a-real-secret
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           # gitleaks (dir mode) scans the working tree; full history is fetched so a future
           # history-mode scan / PR-range diff has what it needs.
@@ -77,11 +77,11 @@ jobs:
           curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GL}/gitleaks_${GL}_linux_x64.tar.gz" | tar -xz -C /tmp gitleaks
           /tmp/gitleaks dir . --redact --no-banner --exit-code 1
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
           version: 10.12.4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
@@ -260,18 +260,18 @@ jobs:
       # DB suites can NOT silently self-skip: the un-skippable ran-guards hard-fail if the DB is absent.
       RAYSPEC_REQUIRE_DB_TESTS: 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Create shadow DB
         run: |
           PGPASSWORD=rayspec psql -h localhost -p 5433 -U rayspec -d postgres \
             -c "CREATE DATABASE rayspec_shadow OWNER rayspec;"
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
           version: 10.12.4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
@@ -388,7 +388,7 @@ jobs:
       # BILLS the API instead of using the $0 subscription harness — and its stray-key self-check would
       # flag it. The subscription OAuth token above is the only anthropic credential this lane provides.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       # Fail-fast credential preflight, before the minutes of install/build/live calls. It proves the
       # required live credentials are PRESENT — not that any test ran. For the LLM backends, that a
@@ -421,11 +421,11 @@ jobs:
           PGPASSWORD=rayspec psql -h localhost -p 5433 -U rayspec -d postgres \
             -c "CREATE DATABASE rayspec_shadow OWNER rayspec;"
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
           version: 10.12.4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
