@@ -221,16 +221,14 @@ describe.skipIf(!liveTestEnabled(liveOptIn, hasCodex))(
       // The subscription-ONLY auth gate: a present auth.json must be the OAuth form (else self-skip-ish).
       const auth = await codex.resolveAuth();
       if (auth !== 'codex-subscription-oauth') {
-        // An api-key auth.json is NOT the subscription path (the api-key OpenAI adapter owns that). When a
-        // run REQUIRES live backends, a codex auth.json that is not the subscription form is a HARD FAIL —
-        // otherwise this block would pass green with zero assertions. A local dev with an api-key auth.json
-        // still gets a benign skip when live tests are not required.
-        if (liveOptIn) {
-          throw new Error(
-            `packages/test/parity/src/live-smoke.test.ts: codex auth resolved to '${auth}', not 'codex-subscription-oauth' — the live smoke asserts ONLY the subscription path; refusing to pass with zero assertions while RAYSPEC_REQUIRE_LIVE_TESTS is set.`,
-          );
-        }
-        return;
+        // This block runs ONLY when opted in — the describe.skipIf above gates on
+        // liveTestEnabled(liveOptIn, hasCodex) — so a codex auth.json that is not the subscription form
+        // is a HARD FAIL: the live smoke asserts ONLY the subscription path (the api-key OpenAI adapter
+        // owns the api-key path), and passing here with zero assertions would be a false green. A local
+        // dev with an api-key auth.json gets a benign skip from the describe.skipIf, not here.
+        throw new Error(
+          `packages/test/parity/src/live-smoke.test.ts: codex auth resolved to '${auth}', not 'codex-subscription-oauth' — the live smoke asserts ONLY the subscription path; refusing to pass with zero assertions while RAYSPEC_REQUIRE_LIVE_TESTS is set.`,
+        );
       }
       await smokeBackend(codex, codexModel, 'codex-subscription-oauth');
     });
