@@ -2302,7 +2302,7 @@ export async function deployProductYamlSpec(
           // Thread the product-profile conflict-key carve-out (computed above from
           // `deriveConflictKeys`) onto the engine so a store-route 409 on a GLOBAL-unique key column
           // uses the generic message (no cross-tenant existence oracle), while a tenant-scoped author-
-          // `unique` column is still named. deploy() builds `engine` WITHOUT this (frozen surface, byte-stable);
+          // `unique` column is still named. deploy() builds `engine` WITHOUT this (a frozen surface);
           // we add it HERE, in the deployer-owned buildApp seam, so the frozen surface stays untouched.
           conflictKeys,
           ...(blobFactory ? { blobFactory } : {}),

@@ -25,7 +25,7 @@
  *    no `count` or the view declares an in-memory `exclude`.
  *  - ABSENT (single): no row → the DECLARED `read.absent` DTO (200) or `409 { error: 'not_ready' }`
  *    per `absent_state` — never an improvised shape, never a 404 for a mid-processing read model.
- *  - CONDITIONAL READ (`conditional_read: etag`, GET) — ADDITIVE vs the frozen precedent (the canonical
+ *  - CONDITIONAL READ (`conditional_read: etag`, GET) — ADDITIVE vs the frozen precedent (the earlier
  *    read routes served neither an ETag nor a 304): a strong ETag (sha-256 of the canonical DTO
  *    JSON) is set on the 200; a matching `If-None-Match` → bodyless 304 with the same ETag.
  *    `If-Range` is NOT a view behavior (byte-range serving is Tier-B media capability — the

@@ -66,7 +66,7 @@ export interface LiveExtractionInputContext {
 export interface LiveExtractionNodeConfig {
   /** The neutral backend instance (production: an OpenAIAdapter; the deployment constructs it). */
   readonly backend: Backend;
-  /** The extraction model (the canonical default: `gpt-5`). */
+  /** The extraction model (e.g. `gpt-5`). */
   readonly model: string;
   /** The ASSEMBLED instructions: the base prompt + the DECLARED extraction_constraints. */
   readonly instructions: string;

@@ -22,7 +22,7 @@
  * ffprobe run via `node:child_process` — the sanctioned trusted-author runtime side-channel
  * (before the external-exposure hardening; the real confinement is the per-tenant sandbox isolate).
  *
- * ⚠ WHY THE REMUX ALONE CANNOT CATCH A SHORT *INPUT* (honest, empirically validated): a byte-truncated
+ * ⚠ WHY THE REMUX ALONE CANNOT CATCH A SHORT *INPUT* (honest, from first principles): a byte-truncated
  * Ogg-Opus chunk is still INTERNALLY VALID (Ogg is page-structured), so ffprobe reports the chunk's
  * own shorter duration with NO error and the concat faithfully copies those pages — the remux has no
  * independent notion of "how long the recording SHOULD be". The independent full-length expectation

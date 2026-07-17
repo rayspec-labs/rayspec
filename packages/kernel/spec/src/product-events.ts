@@ -10,7 +10,7 @@
  * behavior), so a re-introduced local copy or a behavioral divergence fails CI.
  *
  * This is a PRODUCT-side module: it must never import a runtime package (the Tier-B runtimes import
- * @rayspec/spec, not the reverse), and it is NOT `grammar.ts` (frozen surface, byte-stable).
+ * @rayspec/spec, not the reverse), and it is NOT `grammar.ts` (a frozen surface).
  */
 
 /**
