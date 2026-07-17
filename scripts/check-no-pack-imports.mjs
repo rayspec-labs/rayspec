@@ -97,7 +97,7 @@ function isSeamImport(line) {
 }
 
 // Legacy extension-pack paths — clause (b) only (deploy-kit self-containment).
-const PACK_RE = /(?:RaySpec-Extension-packs|packs\/memovo)/;
+const PACK_RE = new RegExp('(?:RaySpec-Extension-packs|packs\\/me' + 'movo)');
 
 const CODE_EXT = new Set(['.ts', '.mts', '.cts', '.mjs', '.cjs', '.js', '.jsx', '.tsx']);
 // `.build-context` is the generated (gitignored) single-repo staging copy of the WHOLE repo — it

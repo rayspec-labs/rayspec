@@ -427,8 +427,8 @@ function selfTest() {
       src: 'tool({ name, execute: async (args) => { if (fast(args)) return inline(args); return other(args); } })',
       expect: true,
     },
-    // ---- a concise-arrow body that MENTIONS dispatchTool only inside the OLD 400-char window but
-    //      whose ACTUAL inline handler runs first (the #3 window bypass): no dispatchTool CALL ----
+    // ---- a concise-arrow body that MENTIONS dispatchTool only inside the OLD fixed-length scan
+    //      window but whose ACTUAL inline handler runs first (the flat-window bypass): no dispatchTool CALL ----
     {
       rel: 'packages/adapters/openai/src/x.ts',
       src: `tool({ name, execute: (args) => inlineRun(args) }); const note = "${'x'.repeat(50)} dispatchTool(here)";`,
