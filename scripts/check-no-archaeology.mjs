@@ -40,28 +40,22 @@
  * ALLOWLIST PHILOSOPHY (guard against a false-green from an over-broad allowlist):
  *   - Prefer file+token+line specificity over a blanket whole-file skip. Every allowlist entry cites
  *     a reason. A whole-file skip hides ANY future archaeology in that file, so it is used for exactly
- *     TWO files: this gate script and its token registry (both necessarily NAME every forbidden word).
- *     The neutrality/denylist checker scripts are token-SCOPED to product-* — they legitimately name
- *     product words, but a NON-product token re-accreting in them still FAILS.
+ *     TWO files: this gate script and its token registry (both necessarily reference the forbidden
+ *     vocabulary — the registry ENCODES it, fragment-assembling or hashing the human-readable words so
+ *     they never appear contiguously in source). The neutrality/denylist checker scripts are
+ *     token-SCOPED to the product- / build- vocabulary they legitimately name, but a NON-product /
+ *     NON-build token re-accreting in them still FAILS.
  *   - Enumeration is TRACKED-file-based (git ls-files), not a closed extension allowlist, so a
  *     `.txt`/extension-less tracked file under a ROOT cannot bypass the scan.
- *   - Each residual bucket is TOKEN-SCOPED: it allows only the specific token TYPES that are
- *     legitimately present, so a NEW token type (e.g. a fresh `Slice 3` in an allowlisted file) still
- *     FAILS. This is what makes the gate anti-re-accretion rather than a rubber stamp.
- *   - The kill-set files are frozen (a maintainer-approved comment-scrub cannot touch code or strings).
- *     Their residual archaeology lives in string literals / test-name strings / DDL SQL
- *     comments-in-template-literals / audio-fixture identifiers — allowlisted as code (non-comment)
- *     only. A NEW pure-comment archaeology line in a kill-set file still FAILS (catches re-accretion in
- *     the one place already swept).
- *
- * DEFERRED residual buckets (DO NOT scrub — deferred/frozen; each reaches ZERO here by allowlist;
- * named below by the verdict each produces in the --list breakdown):
- *   rf-grammar-secrefs   grammar.ts §-refs — a frozen kill-set residual; a scrub needs a
- *                        maintainer-approved pass.
- *   rf-killset-strings   frozen non-pure-comment archaeology in the kill-set files.
- *   rf-killset-buildhist frozen adapter comments carrying build-migration phrases (build-* tokens)
- *                        — a frozen kill-set residual; scoped to build-* tokens in a KILLSET_FILE
- *                        only, so a NEW build-phrase in non-kill-set source still FAILS.
+ *   - Each token-scoped KEEP allows only the specific token TYPES legitimately present in that file
+ *     (e.g. product-* words in a neutrality denylist), so a NEW token type there — a fresh phase or
+ *     slice label in an allowlisted file — still FAILS. This is what makes the gate anti-re-accretion
+ *     rather than a rubber stamp.
+ *   - There are NO per-file frozen-residual allowlists: the scanned source carries zero build-history
+ *     archaeology, so every allowlist below is a functional KEEP for a file that must NAME forbidden
+ *     vocabulary to do its job (this gate + its registry, the neutrality/denylist checkers, the
+ *     skill-drift checker, and the migration-algorithm's own phase labels). A frozen source file with
+ *     residual archaeology would be scrubbed at the source, not allowlisted here.
  *
  *   node check-no-archaeology.mjs           # summary; exit 1 if any un-allowlisted archaeology
  *   node check-no-archaeology.mjs --list    # every un-allowlisted hit + the by-reason breakdown
@@ -212,51 +206,7 @@ const NEUTRALITY_TEST_RE =
 // (KEEP-3) diff-product-stores migration-ALGORITHM phase labels (Phase A/B/C/D, space form, A–D only).
 const KEEP_ALGO_PHASE_FILE = /kernel\/db\/(src\/)?diff-product-stores/;
 
-// (rf-grammar-secrefs) exact file target — a frozen kill-set residual.
-const GRAMMAR_TS = 'packages/kernel/spec/src/grammar.ts';
-
-// (rf-killset-strings) frozen kill-set files (the 6 canonical elements, at their tiered paths).
-const KILLSET_FILE =
-  /^packages\/kernel\/(core\/src\/neutral|db\/src\/tenant-db|platform\/src\/dispatch|spec\/src\/grammar)\.ts$|^packages\/compose\/api-auth\/src\/engine\/deploy\.ts$|^packages\/adapters\//;
-
-/**
- * Strip a trailing `//` line comment, quote-aware so a `//` INSIDE a string/template literal (e.g. a
- * `https://…` URL or a `//`-bearing DDL string) is NOT mistaken for a comment. Returns the code portion.
- */
-function stripLineComment(line) {
-  let inString = null;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (inString) {
-      if (c === '\\') {
-        i++; // skip the escaped char
-        continue;
-      }
-      if (c === inString) inString = null;
-    } else if (c === "'" || c === '"' || c === '`') {
-      inString = c;
-    } else if (c === '/' && line[i + 1] === '/') {
-      return line.slice(0, i);
-    }
-  }
-  return line;
-}
-
-function isKillsetByteFrozen(rel, line, re) {
-  if (!KILLSET_FILE.test(rel)) return false;
-  // Inside the kill-set, ONLY archaeology that lives in CODE (a string/error/test-name/DDL-comment-in-
-  // template-literal/StageN identifier) is a frozen residual. Archaeology that lives in a COMMENT —
-  // whether a pure-comment line (leading `*`, `//`, `/*`) OR a trailing `// …` inline comment — would be
-  // a missed comment-scrub and must FAIL. So: reject a pure-comment line outright, then strip a
-  // quote-aware trailing line comment and re-test — if the token no longer matches the code portion, it
-  // lived only in the comment ⇒ NOT allowlisted (FAIL). The quote-aware strip avoids misfiring on `//`
-  // in strings.
-  const t = line.trimStart();
-  if (t.startsWith('*') || t.startsWith('//') || t.startsWith('/*')) return false;
-  return re.test(stripLineComment(line));
-}
-
-function classify(rel, line, token, re) {
+function classify(rel, line, token) {
   // ── functional KEEPs ──
   if (KEEP_REGISTRY_FILES.has(rel)) return 'keep'; // the gate machinery + its pure-data token registry
   // The sibling neutrality/denylist checkers legitimately NAME forbidden vocabulary in their denylists +
@@ -274,15 +224,6 @@ function classify(rel, line, token, re) {
   // destructive/dropped) — scoped to the SPACE form A–D. A future `Phase E`/`Phase-E` there FAILS.
   if (KEEP_ALGO_PHASE_FILE.test(rel) && token === 'phase-word' && /\bPhase [A-D]\b/.test(line))
     return 'keep';
-
-  // ── documented deferred/frozen residuals (each token-scoped or line-specific) ──
-  if (rel === GRAMMAR_TS && token === 'section-ref') return 'rf-grammar-secrefs';
-  // The frozen adapter carries build-migration phrases (build-* tokens) in its comments — a
-  // frozen kill-set residual (the adapters are frozen, so these cannot be scrubbed without a
-  // maintainer-approved pass). Scoped to the build-* phrase tokens inside a KILLSET_FILE ONLY; a NEW
-  // build-phrase in NON-kill-set source (or a non-build token here) still FAILS.
-  if (token.startsWith('build-') && KILLSET_FILE.test(rel)) return 'rf-killset-buildhist';
-  if (isKillsetByteFrozen(rel, line, re)) return 'rf-killset-strings';
 
   return 'FAIL';
 }
@@ -319,7 +260,7 @@ for (const rel of trackedTextFiles()) {
     for (const [name, re] of TOKENS) {
       if (re.test(line)) {
         const rec = { rel, line: i + 1, token: name, text: line.trim().slice(0, 140) };
-        const verdict = classify(rel, line, name, re);
+        const verdict = classify(rel, line, name);
         if (verdict === 'FAIL') fails.push(rec);
         else allowed.push({ ...rec, verdict });
       }

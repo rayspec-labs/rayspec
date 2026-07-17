@@ -3,48 +3,56 @@
  *
  * PURE DATA. This module is the single source of the forbidden build-history token vocabulary that
  * check-no-archaeology.mjs scans for. It is deliberately kept separate from the gate machinery so the
- * gate SCRIPT stays generic and this file is the ONE place the forbidden words are spelled out.
+ * gate SCRIPT stays generic and this file is the ONE place the forbidden words are encoded.
  *
- * Because this file lives under a scanned ROOT and necessarily NAMES every forbidden token, it is
+ * Because this file lives under a scanned ROOT and necessarily encodes every forbidden token, it is
  * whole-file-skipped by the gate (like the gate script itself) — one of exactly two legitimate
  * whole-file skips, justified because it is a pure-data token list with NO prose that could hide a hit.
  *
- * Token families: phase labels in both delimiter forms (`Phase C` / `Phase-C`, and `P3`), slice labels
- * (`Slice 2` + the abbreviated `S2 F1` / hyphenated `S2-F1`), wave (`wave 3`, `W3FI`), iteration
- * (`It.2`), decision numbers (`D41`, `PY-D4`), mission/version build-labels (`DX-v<n>`), plan/mission/goal labels (`GOAL2`, `Goal-3`, `S5.0`,
- * `Fork #2`, `M5-…`), §-section cross-refs, `stage#` pipeline labels, leaked product-domain names,
- * authoring-tool / process-narration references, and build-history migration phrases.
+ * To keep the file itself free of the very build-history strings it detects, every human-readable
+ * forbidden PHRASE is ASSEMBLED AT RUNTIME from fragments (so the contiguous literal never appears in
+ * this source) while the compiled RegExp still matches that phrase exactly. Only pattern-shape
+ * fragments (`\d`, character classes, anchors) and short structural codes stay written out.
+ *
+ * Token families: phase labels in both delimiter forms (a `Phase <letter>` word form and a short
+ * `P<n>` form), slice labels (a `Slice <n>` word form plus an abbreviated slice+finding form in both
+ * space and hyphen delimiters), wave labels, iteration labels, decision-number tokens (a bare
+ * decision number and a prefixed variant), mission/version build-labels, plan/mission/goal and fork
+ * labels, section cross-refs, pipeline `stage<n>` labels, leaked product-domain names, authoring-tool
+ * / process-narration references, and build-history migration phrases.
  *
  * TWO detector mechanisms live here:
- *   TOKENS        plain [name, RegExp] pairs — the vocabulary that is safe to spell out.
+ *   TOKENS        plain [name, RegExp] pairs — the vocabulary that is safe to encode.
  *   HASHED_TOKENS [name, sha256hex] pairs — see below.
  */
 
 // Each entry is a [name, RegExp] pair: the name labels the token family in the gate's output, the
-// RegExp is the detector. Only regex-shaping rationale is inline (no build-history narrative).
+// RegExp is the detector. Only regex-shaping rationale is inline (no build-history narrative). The
+// human-readable PHRASE detectors are assembled from fragments so the contiguous literal is absent
+// from this source, while the compiled pattern is exactly the phrase it always was.
 export const TOKENS = [
-  ['PY-D', /PY-D\d/],
+  ['prefixed-decision', new RegExp('PY' + '-D\\d')], // a decision number carried under a project prefix
   ['section-ref', /§\s?\d/],
   ['P3.5', /P3\.5/],
   ['spike', /\bSpike [A-Z]\b/],
   ['phase-P#', /\bP\d{1,2}\b(?!\.\d)/],
-  ['phase-word', /\bPhase[- ][A-Z]\b/], // both `Phase C` (space) and `Phase-C` (hyphen) delimiter forms
+  ['phase-word', /\bPhase[- ][A-Z]\b/], // both the space and hyphen delimiter forms of the phase-word label
   ['Slice#', /\bSlice\s?\d/i],
   // `stage#` catches BOTH the word-boundary form (`stage3`, `Stage 3`, `stage-3`) AND a camelCase
   // `...Stage<digit>` identifier (`fooStage9`) — the `[a-z]Stage\d` alternation adds the
   // lowercase→`Stage` boundary the leading `\b` form misses (a numbered pipeline var like
   // `unknownStage8` would otherwise slip through).
   ['stage#', /\bstage[- ]?\d|[a-z]Stage\d/i],
-  ['D-number', /(?<![\w-])D\d{1,3}\b/], // standalone decision number; excludes the PY-D<n> form (own token)
-  // Mission/version build-labels: the hyphen forms `DX-v<n>` / `DX-<n>` and the glued `DX<nn>` (≥2
-  // digits). Leading lookbehind guards a letter-prefixed collision (`IDX-…`); `DX` as a bare
-  // developer-experience word (no adjacent digit — `LOCAL-DX-…`) is NOT tokenized.
+  ['D-number', /(?<![\w-])D\d{1,3}\b/], // standalone decision number; excludes the prefixed form (own token)
+  // Mission/version build-labels: the hyphen forms and the glued `DX<nn>` (≥2 digits). The leading
+  // lookbehind guards a letter-prefixed collision (`IDX-…`); a bare developer-experience `DX` word
+  // with no adjacent digit is NOT tokenized.
   ['DX-label', /(?<![A-Za-z])DX(?:-v?\d|\d\d)/],
   ['wave#', /\bwave[ -]?\d/i],
   ['wave-code', /\bW\d(?:FI|CV|S\d)/],
   ['It.#', /\bIt\.\d|\bIteration\s?\d/],
   ['mission', /\bGOAL2\b|\bINTEL-1\b/],
-  ['goal-label', /\bGoal-\d\b/], // roadmap goal labels (`Goal-3`); `GOAL2` literal stays on `mission`
+  ['goal-label', /\bGoal-\d\b/], // roadmap goal labels; the glued mission literal stays on `mission`
   ['mission-label', /\bM\d-[A-Z]|\bKS-\d/],
   ['fork', /\bFork\s?#?\d|\bOpen Question\s?#?\d/i],
   ['plan-section', /\bS\d\.\d/],
@@ -53,29 +61,30 @@ export const TOKENS = [
   // Context-scoped to those exact keywords so it catches the dangling slice pointer WITHOUT flagging
   // bare `S\d` (status codes / identifiers).
   ['slice-abbrev', /\bS\d+ (?:law|brief|defect|finding|round|dim|slice|wave|F\d)\b|\bS\d+-F\d\b/],
-  // Leaked product-domain names — a shipped source file must be product-neutral. `memovo` is the
-  // publisher identity and is a public name, so it stays a plain literal. (A second product-domain
-  // name that was never public is detected via HASHED_TOKENS below, not here.)
-  ['product-memovo', /memovo/i],
+  // Leaked product-domain names — a shipped source file must be product-neutral. The publisher
+  // identity is a public name but is still assembled from fragments here so this registry never
+  // spells it out. (A second product-domain name that was never public is detected via HASHED_TOKENS
+  // below, not here.)
+  ['product-domain-name', new RegExp('me' + 'movo', 'i')],
   ['product-meeting', /\bmeeting\b/i],
   // Authoring-tool + process-narration references: an authoring-skill reference is a dangling ref in a
   // shipped file (its `.claude/**` home never ships), and process-narration identifiers must not
   // surface in the shipped example/package surface. Both are neutralized in the tree and held to ZERO.
   ['authoring-skill', /rayspec-author/i],
   ['dogfood', /dogfood/i],
-  // ── build-history migration PHRASES (multi-word, so legitimate live architectural vocabulary like a
-  // bare `donor`/`donates` inter-package relationship is NOT tripped — only the migration-log framing).
-  // Held to ZERO in NON-kill-set source; the frozen adapter carries a few of
-  // these in comments (allowlisted as a frozen residual in the gate script). ──
-  ['build-shadow-run', /\bshadow-run\b/i],
-  // `cutover stages` = the migration-pipeline framing (NOT bare `cutover`, which is legit business/
-  // incident vocabulary in fixture transcripts, test labels, and real deployment bug descriptions).
-  ['build-cutover', /\bcutover stages\b/i],
-  ['build-retired-pack', /\bretired product-pack\b/i],
-  ['build-donor', /\bdonor (?:pack|persist)\b/i], // migration framing; bare `donor` is legit + NOT tokenized
-  ['build-frozen-baseline', /\bfrozen baseline\b/i],
-  ['build-reference-impl', /\breference implementation\b/i],
-  ['build-prior-impl', /\bprior implementation\b/i],
+  // ── build-history migration terms. Most are multi-word phrases, so legitimate live architectural
+  // vocabulary is not tripped; the migration SOURCE word (below) is a bare single-word token because it
+  // is 0 across shipped source, so any future occurrence is archaeology. Each term is assembled from
+  // fragments so it is not spelled out contiguously in this registry. Held to ZERO across the tree. ──
+  ['build-parallel-run', new RegExp('\\bshadow' + '-run\\b', 'i')],
+  // the migration-pipeline framing (NOT the bare business/incident word, which is legit vocabulary in
+  // fixture transcripts, test labels, and real deployment bug descriptions).
+  ['build-cutover', new RegExp('\\bcutover ' + 'stages\\b', 'i')],
+  ['build-retired-pack', new RegExp('\\bretired ' + 'product-pack\\b', 'i')],
+  ['build-source-ref', new RegExp('\\bdo' + 'nor\\b', 'i')], // the migration SOURCE word — a bare single-word token; any occurrence in shipped source is archaeology
+  ['build-frozen-baseline', new RegExp('\\bfrozen ' + 'baseline\\b', 'i')],
+  ['build-reference-impl', new RegExp('\\breference ' + 'implementation\\b', 'i')],
+  ['build-prior-impl', new RegExp('\\bprior ' + 'implementation\\b', 'i')],
 ];
 
 /**
