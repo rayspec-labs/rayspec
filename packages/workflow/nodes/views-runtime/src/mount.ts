@@ -5,7 +5,7 @@
  * fragments a RaySpec deployment mounts — EXACTLY the `mountAudioCapability` pattern
  * (@rayspec/audio-runtime/rayspec/mount.ts): an `api[]` route set of `{ kind:'handler' }` actions
  * plus the resolved handler map the declared-routes engine dispatches. ADDITIVE composition only —
- * no kill-set file is touched; the engine's `registerDeclaredRoutes` puts every view route behind
+ * no frozen-surface file is touched; the engine's `registerDeclaredRoutes` puts every view route behind
  * the SAME ordered chain every route uses (`requireAuth → resolveTenant → requirePermission`), and
  * `invokeRouteHandler` runs the view inside `TenantDb.transaction()` with the tenant-bound,
  * name-keyed `HandlerDb` facade — so every view read carries the STRUCTURAL tenant predicate.

@@ -471,7 +471,7 @@ export interface RouteHandlerInit extends HandlerInit {
    * An ALLOWLISTED subset of the request's HTTP headers, LOWERCASE-keyed (DATA). This seam
    * exists for the declared `conditional_read` feature (an SDK-consumption capability — e.g. the
    * views runtime's `if-none-match` → 304) plus content-negotiation basics; it is NOT general header
-   * passthrough and NOT a donor-parity requirement. The engine forwards ONLY a closed allowlist
+   * passthrough and NOT a wire-parity requirement. The engine forwards ONLY a closed allowlist
    * (conditional-read headers + accept/accept-language/content-type — see the api interpreter's
    * `FORWARDED_REQUEST_HEADERS`); credentials (`authorization`/`cookie`/`proxy-authorization`/any
    * future scheme) can therefore never reach a handler. ABSENT when the api interpreter does not

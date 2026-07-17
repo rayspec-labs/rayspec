@@ -1,7 +1,7 @@
 // @rayspec/product-yaml — the Product-YAML deploy composition. `deploy` (the single
-// kill-set touch) calls `composeProductDeploy` and maps `ProductComposeError` onto its
+// frozen-surface touch) calls `composeProductDeploy` and maps `ProductComposeError` onto its
 // DeployError vocabulary; everything about WHAT is supported lives here, reviewable outside the
-// kill-set. Product-free: all product meaning comes from the validated ProductSpec.
+// frozen surface. Product-free: all product meaning comes from the validated ProductSpec.
 export {
   type CapabilityStoreComposition,
   composeCapabilityStores,

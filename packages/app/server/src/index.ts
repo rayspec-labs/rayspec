@@ -14,7 +14,7 @@
 
 // The UPDATE flow: re-export the deploy-migration seam types a wrapper needs to build the
 // `updateMigrations` input for `assembleServer` + assert `deploy()`'s block. These originate in
-// @rayspec/api-auth (deploy.ts, a kill-set file — consumed via its EXPORTS only, never edited); the
+// @rayspec/api-auth (deploy.ts, a frozen-surface file — consumed via its EXPORTS only, never edited); the
 // server already depends on api-auth, so re-exporting here spares the wrapper a direct api-auth dep.
 export { DeployError, type PlannedMigration } from '@rayspec/api-auth';
 // The UPDATE flow: re-export the report-only drift finding type so a wrapper/test can name

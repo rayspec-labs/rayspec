@@ -39,7 +39,7 @@ describe('reprocessFinalizedSession (the audio reprocess event seam)', () => {
     });
     expect(ingress.emits).toHaveLength(1);
     const { event, options } = ingress.emits[0]!;
-    // The forced key is the DISTINCT reprocess key — NOT the byte-frozen `session_id:sess-1:finalized`.
+    // The forced key is the DISTINCT reprocess key — NOT the byte-stable `session_id:sess-1:finalized`.
     expect(options?.forceKey).toBe('session_id:sess-1:reprocess:nonce-1');
     expect(options?.forceKey).not.toBe('session_id:sess-1:finalized');
     // The event is the SAME neutral finalized-session shape a live finalize emits — only session_id is

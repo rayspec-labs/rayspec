@@ -38,7 +38,7 @@ import { CONVERSATION_EVENT_PAYLOAD_KEYS } from './types.js';
  * dedup-scope label: TURN-scoped single-flight (a re-POST of one message converges on one durable
  * run; every new turn gets its own). The derived idempotency key uses the GENERIC format
  * `turn_ref:<conversation_id>:<message_id>` (payloadFieldIdempotencyKey — no legacy suffix; the
- * `:finalized` format is audio-only, byte-frozen live run identity).
+ * `:finalized` format is audio-only, byte-stable live run identity).
  */
 export interface ConversationCapabilityEventDescriptor extends TriggerEventDescriptor {
   /** How downstream consumption is deduped — turn-scoped single-flight for a re-POST. */

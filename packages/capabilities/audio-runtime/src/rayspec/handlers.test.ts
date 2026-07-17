@@ -1,6 +1,6 @@
 /**
  * Binding-level tests for the audio `rayspec/handlers` adapter — specifically the chunk-ingest
- * handler's BOUNDED body read. The donor pattern buffered the whole request via an unbounded
+ * handler's BOUNDED body read. The naive pattern buffered the whole request via an unbounded
  * `request.arrayBuffer()`; the hardened binding drains the raw body under the configured per-chunk cap
  * and returns a 413 the instant it is exceeded (before the bytes are stored).
  */

@@ -572,7 +572,7 @@ describe.skipIf(!hasDb)('declared stores + store steps e2e (the composed stack)'
     // an author-declared `unique: true` column is TENANT-SCOPED compound `(tenant_id, col)`, but a
     // durable `ON CONFLICT` target (the store's `key` — here `entry_ref`) MUST stay single-column, or a
     // compound index would 42P10 the upsert. The tenant-scoped composite KEY (a single-column key that
-    // is ALSO tenant-scoped) still needs kill-set StoreSpec vocabulary — a deferred capability.
+    // is ALSO tenant-scoped) still needs frozen-surface StoreSpec vocabulary — a deferred capability.
     // Until that lands, a foreign-tenant key collision is a REAL, expected state, and the
     // runtime's job is to surface it LOUDLY (asserted below), never as a silent success. A naive
     // compound-all (forgetting the conflict-key carve-out) would break this upsert 42P10 — the guard.

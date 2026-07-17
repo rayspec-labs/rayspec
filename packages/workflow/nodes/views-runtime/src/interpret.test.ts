@@ -335,7 +335,7 @@ describe('group modes', () => {
   });
 });
 
-describe('exclusion strictness (a malformed flag never hides a row — the donor `=== true` law)', () => {
+describe('exclusion strictness (a malformed flag never hides a row — the canonical `=== true` law)', () => {
   it('excludes ONLY strict-equal rows', async () => {
     const surface = new FakeReadSurface(STORES);
     surface.seed(TENANT, 'order_events', { order_id: 'o1', kind: 'a', hidden: true });
@@ -461,7 +461,7 @@ describe('identical sub-reads are MEMOIZED per interpretation pass (one select, 
         return db.select(store, filter, opts as never);
       },
     };
-    // The fixture's per-track pattern: THREE fields, one underlying row (donor: ONE select).
+    // The fixture's per-track pattern: THREE fields, one underlying row (the invariant: ONE select).
     const view = singleView({
       k1: { kind: 'lookup', source: LOOKUP_SOURCE, field: { column: 'kind' }, type: 'string' },
       k2: {
@@ -682,7 +682,7 @@ describe('param handling beyond the goldens', () => {
     expect((withNote.body as Record<string, unknown>).echo).toBe('hi');
   });
 
-  it('UNDECLARED query params are ignored (donor-compatible — request params are DATA)', async () => {
+  it('UNDECLARED query params are ignored (wire-compatible — request params are DATA)', async () => {
     const surface = new FakeReadSurface(STORES);
     surface.seed(TENANT, 'orders', { order_id: 'o1', state: 'open', qty: 1, rush: false });
     const view = singleView({

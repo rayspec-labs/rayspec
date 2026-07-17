@@ -14,7 +14,7 @@
  * DELIBERATELY carried no `outputType` — an outputType short-circuited its tool loop. In the YAML
  * world `transcribe` is its own workflow node, so this extract node receives the transcript as a typed
  * input and needs NO tools: a single-turn structured extraction. That lets the executor use NATIVE
- * strict structured output (`spec.outputSchema` + `requireNativeStructuredOutput`), the donor's
+ * strict structured output (`spec.outputSchema` + `requireNativeStructuredOutput`), the canonical
  * anti-hallucination discipline the pack could not use. The acceptance boundary (grounding.check +
  * validation.check) still runs downstream — this node only PRODUCES the candidate.
  *
@@ -66,7 +66,7 @@ export interface LiveExtractionInputContext {
 export interface LiveExtractionNodeConfig {
   /** The neutral backend instance (production: an OpenAIAdapter; the deployment constructs it). */
   readonly backend: Backend;
-  /** The extraction model (the donor: `gpt-5`). */
+  /** The extraction model (the canonical default: `gpt-5`). */
   readonly model: string;
   /** The ASSEMBLED instructions: the base prompt + the DECLARED extraction_constraints. */
   readonly instructions: string;
@@ -106,7 +106,7 @@ function lastArtifactOfKind(ctx: CapabilityInvocationContext, kind: string): unk
   return undefined;
 }
 
-/** Format the closed span set as the donor `[span_id] (track) text` lines the tuned prompt expects. */
+/** Format the closed span set as the canonical `[span_id] (track) text` lines the tuned prompt expects. */
 function formatTranscriptLines(spans: readonly unknown[]): string {
   const lines: string[] = [];
   for (const s of spans) {

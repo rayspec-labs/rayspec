@@ -28,7 +28,7 @@ import { RECORD_EVENT_ENVELOPE_KEYS } from './types.js';
  * `@rayspec/spec` product-events.ts). This extension only NARROWS the dedup-scope label:
  * record-scoped single-flight (a re-submit of one record converges on one durable run). The
  * derived idempotency key uses the GENERIC format `record_id:<id>` (payloadFieldIdempotencyKey
- * — no legacy `:finalized` suffix; that format is audio-only, byte-frozen live run identity).
+ * — no legacy `:finalized` suffix; that format is audio-only, byte-stable live run identity).
  */
 export interface RecordCapabilityEventDescriptor extends TriggerEventDescriptor {
   /** How downstream consumption is deduped — record-scoped single-flight for a re-submit. */

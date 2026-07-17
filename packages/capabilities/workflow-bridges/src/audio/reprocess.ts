@@ -3,7 +3,7 @@
  * finalized-session workflow as a FRESH durable run.
  *
  * WHY A DISTINCT KEY: a live finalize keys its durable run on `sessionScopedIdempotencyKey`
- * (`session_id:<id>:finalized`, byte-frozen — live run identity derives from it), so re-emitting the
+ * (`session_id:<id>:finalized`, byte-stable — live run identity derives from it), so re-emitting the
  * SAME finalized event DEDUPS to the original run. An operational reprocess (re-extract after a fix /
  * recover a stuck session) must instead drive a SEPARATE, fresh run over the session's CURRENT store
  * state — so it supplies a DISTINCT idempotency key via the dispatcher's `forceKey` seam, WITHOUT
@@ -20,7 +20,7 @@ import type { WorkflowDispatchEnqueued, WorkflowEventIngress } from '@rayspec/wo
 import { AUDIO_FINALIZED_SESSION_EVENT_TYPE } from './adapter.js';
 
 /**
- * The reprocess idempotency key — DISTINCT from the byte-frozen live finalize key
+ * The reprocess idempotency key — DISTINCT from the byte-stable live finalize key
  * (`session_id:<id>:finalized`) by construction, so a reprocess never dedups onto the original run.
  * The `nonce` makes each reprocess its own fresh run (distinct nonces → distinct runs).
  */

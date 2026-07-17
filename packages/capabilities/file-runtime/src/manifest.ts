@@ -26,7 +26,7 @@ import { FILE_EVENT_PAYLOAD_KEYS } from './types.js';
  * `@rayspec/spec` product-events.ts). This extension only NARROWS the dedup-scope label:
  * file-scoped single-flight (a re-submit of one file converges on one durable run). The derived
  * idempotency key uses the GENERIC format `file_id:<id>` (payloadFieldIdempotencyKey — no
- * legacy suffix; the `:finalized` format is audio-only, byte-frozen live run identity).
+ * legacy suffix; the `:finalized` format is audio-only, byte-stable live run identity).
  */
 export interface FileCapabilityEventDescriptor extends TriggerEventDescriptor {
   /** How downstream consumption is deduped — file-scoped single-flight for a re-submit. */

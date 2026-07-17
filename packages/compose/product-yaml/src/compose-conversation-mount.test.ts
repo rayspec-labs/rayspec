@@ -148,7 +148,7 @@ describe('composeProductDeploy — the conversation_input capability (conditiona
     expect(enqueuer.calls[0]?.workflow.id).toBe('log_turn');
     expect(enqueuer.calls[0]?.tenantId).toBe(TENANT);
     // ★ THE C10 KEY PIN: the descriptor-derived key is the generic `<field>:<value>` format over
-    // the PER-TURN `turn_ref` field — the ':finalized' suffix stays audio-only (its byte-frozen
+    // the PER-TURN `turn_ref` field — the ':finalized' suffix stays audio-only (its byte-stable
     // pin lives in compose.test.ts).
     expect(enqueuer.calls[0]?.idempotencyKey).toBe('turn_ref:c-1:m-1');
 

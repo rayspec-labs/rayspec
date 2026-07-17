@@ -251,7 +251,7 @@ export function lintProductViews(input: ViewLintInput): SpecError[] {
             } else if (contractIds.has(ref)) {
               // LEGACY carve-out (documented judgment call, TIGHTENED): a
               // DECLARATION-ONLY view (no `read`) may still ref a TOP-LEVEL CONTRACT ID — EXACTLY
-              // the class a frozen legacy donor fixture declares (byte-synced to the committed
+              // the class a frozen legacy fixture declares (byte-synced to the committed
               // fixture: its read-less artifact_query views ref top-level response contracts,
               // never capability contracts). Frozen artifacts are not rewritten. Such a view is
               // INERT: it can never mount (@rayspec/views-runtime requires `read`, where the
@@ -259,12 +259,12 @@ export function lintProductViews(input: ViewLintInput): SpecError[] {
               // passes silently.
             } else if (capabilityContractRefs.has(ref)) {
               // OUTSIDE the carve-out: a capability-contract ref on an artifact_query source has no
-              // legacy precedent (the donor never declares it) and no execution path — the view is
+              // legacy precedent (the legacy fixture never declares it) and no execution path — the view is
               // dead-on-arrival. Rejected loudly, never silently accepted.
               invalid(
                 `view '${view.id}' artifact_query source ref '${ref}' names a CAPABILITY contract — ` +
                   'outside the legacy carve-out (which admits top-level contract ids only, the ' +
-                  'frozen legacy donor class); this view is dead-on-arrival: declare an artifact ' +
+                  'frozen legacy class); this view is dead-on-arrival: declare an artifact ' +
                   'kind/collection, or use a capability source for a delegated view',
                 srcPath,
               );

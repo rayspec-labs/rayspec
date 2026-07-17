@@ -20,7 +20,7 @@
  *     is rejected 422 (`invalid_submit_body`) — the payload is server-derived only, so there is
  *     no spoof channel at all.
  *
- * EMIT-FAULT POSTURE (donor-faithful, the record decision tests): the FIRST-submit emit and the
+ * EMIT-FAULT POSTURE (wire-faithful, the record decision tests): the FIRST-submit emit and the
  * IDENTICAL-re-submit re-emit are DELIBERATELY NOT best-effort — they are the crash-recovery
  * mechanism, so a transient sink fault SURFACES (500) to keep the client retrying until the file
  * is enqueued; swallowing it would re-open the silent zero-run. What a SURFACED first-submit
@@ -171,7 +171,7 @@ export async function submitFile(
   // seal means the re-read row holds bytes this request NEVER verified; emitting them would
   // start a workflow on an unchecked payload. 409 instead, ZERO emit (the row is NOT rolled
   // back — the racer's bytes are legitimately stored; only THIS request's decision basis is
-  // stale). NO heal-emit on THIS 409 (donor-deliberate, the record re-read arm's rationale):
+  // stale). NO heal-emit on THIS 409 (deliberate by design, the record re-read arm's rationale):
   // the just-read row is still in flux — any later retry (submit OR divergent upload) lands on
   // the STABLE identical/divergent paths above, which emit/heal the stored event.
   if (row.state !== 'submitted' || row.sha256 !== found.sha256) {

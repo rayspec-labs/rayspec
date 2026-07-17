@@ -339,7 +339,7 @@ export function makeSttTranscribeSessionNode(cfg: SttSessionNodeConfig): Capabil
     // the CRITICAL transcription path (a remux failure there correctly fails STT: no audio ⇒ no
     // transcript), this one is FAIL-SOFT (a failure only defers playback). Sharing one remux artifact
     // would either expose the neutral STT adapter's internal remux bytes back through its port (a
-    // boundary violation, near the kill-set) or add cross-node mutable remux cache state that threatens
+    // boundary violation, near the frozen surface) or add cross-node mutable remux cache state that threatens
     // this durable node's re-run idempotency. The remux is a cheap container rewrite (`-c copy`, no
     // re-encode — seconds even for a 74-min recording) run off-request, so the duplicated work is a
     // bounded, correctness-neutral cost that is cheaper than the coupling a dedup would introduce.

@@ -91,7 +91,7 @@ export * as schema from './schema.js';
 // The CORE tenant-scoped table set (runs / journal_steps / conversation_items / run_events /
 // idempotency_keys). Additive named re-export (also reachable via `schema.CORE_TENANT_SCOPED_TABLES`)
 // so a platform consumer — e.g. a tenant data-erasure — can erase the core run-journal/transcript
-// tables through the SAME `forTenant` chokepoint without naming each table. NOT kill-set (schema.ts is
+// tables through the SAME `forTenant` chokepoint without naming each table. NOT a frozen-surface file (schema.ts is
 // unchanged; this just surfaces an already-exported const on the package barrel).
 export { CORE_TENANT_SCOPED_TABLES } from './schema.js';
 // The soft-delete table-identity registry: `buildProductTables` marks a `softDelete` store's runtime

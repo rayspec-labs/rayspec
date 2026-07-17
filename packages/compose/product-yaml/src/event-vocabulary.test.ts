@@ -144,7 +144,7 @@ describe('triggerRegistrationForWorkflow (C10: explicit descriptor-derived keys)
   it('derives the CLEAN GENERIC key for a NON-audio descriptor — not a hardwired session default, not the legacy suffix', () => {
     // DELIBERATE: a NEW event's key uses
     // the generic `<field>:<value>` format (payloadFieldIdempotencyKey) — the `:finalized` suffix
-    // is AUDIO-ONLY legacy (byte-frozen live run identity, pinned below + in compose.test.ts).
+    // is AUDIO-ONLY legacy (byte-stable live run identity, pinned below + in compose.test.ts).
     const registration = triggerRegistrationForWorkflow(
       workflowTriggeredBy(TICKET_DESCRIPTOR.contract),
       descriptorMap(TICKET_DESCRIPTOR),
@@ -172,7 +172,7 @@ describe('triggerRegistrationForWorkflow (C10: explicit descriptor-derived keys)
     );
   });
 
-  it('derives the byte-frozen audio key from the REAL mounted descriptor', () => {
+  it('derives the byte-stable audio key from the REAL mounted descriptor', () => {
     const registration = triggerRegistrationForWorkflow(
       workflowTriggeredBy(AUDIO_EVENT),
       mountedTriggerEventDescriptors(),

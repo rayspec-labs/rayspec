@@ -1,7 +1,7 @@
 /**
  * The fail-closed composition error. `deploy` maps it 1:1 onto its `DeployError` step
- * vocabulary, so the ONE kill-set file stays a thin mapping and every decision about WHAT is
- * unsupported lives here (reviewable outside the kill-set):
+ * vocabulary, so the ONE frozen-surface file stays a thin mapping and every decision about WHAT is
+ * unsupported lives here (reviewable outside the frozen surface):
  *
  *  - `unsupported_spec` — the document is VALID Product-YAML, but it declares a section/policy/step
  *    this composition has no runtime for (or a section whose required deployment wiring was not

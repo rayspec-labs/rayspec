@@ -136,7 +136,7 @@ export type ViewOrderBy = z.infer<typeof ViewOrderBy>;
 /**
  * Exclude rows where `column === equals` (e.g. the frozen `dismissed === true` skip). STRICT
  * equality on a literal — a non-matching / malformed column value is NOT excluded (the safe
- * read-route default: a read never hides rows on a bad flag — mirrors the donor's `=== true` test).
+ * read-route default: a read never hides rows on a bad flag — mirrors the canonical `=== true` test).
  */
 export const ViewExclude = z
   .object({ column: SafeIdentifier, equals: z.union([ViewScalar, z.null()]) })

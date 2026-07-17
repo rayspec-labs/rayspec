@@ -200,7 +200,7 @@ export async function ingestChunk(
       // concurrent finalize that seals the track between this re-read and the write drops the row from
       // the filter, so a completed track can never have its watermark pushed PAST its sealed total. Zero
       // rows updated == the seal won the race → treat this chunk as a post-seal late retry (no-op at the
-      // sealed watermark), matching the donor's sealed-track semantics.
+      // sealed watermark), matching the canonical sealed-track semantics.
       const updated = await tx.update(
         AUDIO_TRACKS_STORE,
         { session_id: sessionId, track, status: 'recording' },

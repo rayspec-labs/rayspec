@@ -11,7 +11,7 @@
  *                                            stubbed rollout (NO DB, NO network). Emits a JSON verdict.
  *
  * WHAT deploy IS. It is `deployments/acme-notes/serve.mts` as a first-class operator command: it wraps
- * `assembleServer` (NOT the kill-set `deploy()` — that stays inside the composition root) and injects
+ * `assembleServer` (NOT the frozen-surface `deploy()` — that stays inside the composition root) and injects
  * the deployer seams through the SAME shared `assembleOptsFromEnv` builder `rayspec-serve` uses — the
  * sanctioned `registerProductStores` registrar (the @rayspec/db/composition door — validates every
  * product table's tenant predicate before it joins the deny-by-default chokepoint Set) for any spec,
@@ -291,7 +291,7 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
 }
 
 /**
- * Boot + SERVE the deployment (long-running). Wraps `assembleServer` (NOT the kill-set `deploy()`),
+ * Boot + SERVE the deployment (long-running). Wraps `assembleServer` (NOT the frozen-surface `deploy()`),
  * building its deployer-seam opts from the SHARED `assembleOptsFromEnv` builder (the sanctioned
  * validating registrar as the product-table hook + an env-driven agent-backend factory when the spec is
  * a backend-profile doc WITH agents — so `rayspec deploy <backend-spec-with-agents>` boots those agents

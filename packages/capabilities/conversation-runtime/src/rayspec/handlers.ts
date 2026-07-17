@@ -231,7 +231,7 @@ function wantsEventStream(headers: RouteHandlerInit['headers']): boolean {
  *     `usage?`) — built from `ensureTurnReply`'s RETURN (lifecycle-independent: it does NOT depend on
  *     seeing a `run_completed` event), so it is the guaranteed delivery even when zero deltas flowed —
  *     OR a `conversation_reply_error` frame carrying the run id (the SSE 200 is already flushed; the
- *     status cannot change — the donor honesty note).
+ *     status cannot change — the canonical honesty note).
  * `signal.aborted` (client disconnect) short-circuits EMITS only; `ensureTurnReply` STILL runs to
  * completion (the reply persists server-side — the stream is a view).
  *
@@ -349,7 +349,7 @@ const STREAMED_EVENT_TYPES: ReadonlySet<string> = new Set(['text_delta']);
 /**
  * Map a reply-run NeutralEvent to a client-stream SSE frame, ALLOWLISTED: only a `text_delta`
  * event becomes a frame; everything else is OMITTED (durable in run_events, never on the client
- * stream). FAIL-CLOSED (the donor `toSseFrame` discipline): an event we cannot faithfully serialize —
+ * stream). FAIL-CLOSED (the canonical `toSseFrame` discipline): an event we cannot faithfully serialize —
  * or one lacking a string `type` — is OMITTED, never fabricated. Read STRUCTURALLY (no core-event
  * dependency) so the capability stays neutral; `data` is the whole (allowlisted) event so a client
  * reads its own `text`. The `id` = the run's DURABLE event `seq` — a cursor into the runs-events

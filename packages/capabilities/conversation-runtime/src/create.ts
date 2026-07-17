@@ -25,7 +25,7 @@
  *     (this request's title did not win). The guard MIRRORS the found-path (C10-1): only a
  *     request that ASSERTED a title can lose — a BARE create asserted nothing, so a titled
  *     racer's head simply stands and the bare create converges to the dedup outcome (never a
- *     spurious 409). KNOWN RACE-WINDOW CAVEAT (record-donor-shared): the
+ *     spurious 409). KNOWN RACE-WINDOW CAVEAT (record-capability-shared): the
  *     first-create upsert's DO-UPDATE arm can overwrite a racing first-create's `title`/`opened_at`
  *     — reachable ONLY inside the first-creation race window (a later create never reaches the
  *     upsert; it lands on the found-row paths above), and always LOUD for the overwritten request

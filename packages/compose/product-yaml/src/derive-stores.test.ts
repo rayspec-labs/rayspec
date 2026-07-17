@@ -1,6 +1,6 @@
 /**
  * `deriveProductStores` — proves the Tier-A store bindings derive from the acme-notes.product.yaml
- * declarations and match the ground-truth donor shapes (the e2e PRODUCT_STORES), so the env boot stays
+ * declarations and match the ground-truth store shapes (the e2e PRODUCT_STORES), so the env boot stays
  * product-free. Fail-the-fix: the derived stores are asserted column-for-column against the ground
  * truth; an ambiguous transcript sink is rejected.
  */
@@ -36,7 +36,7 @@ describe('deriveProductStores (acme-notes.product.yaml)', () => {
     ]);
   });
 
-  it('the derived store shapes MATCH the ground-truth donor stores (the e2e PRODUCT_STORES)', () => {
+  it('the derived store shapes MATCH the ground-truth stores (the e2e PRODUCT_STORES)', () => {
     const derived = deriveProductStores(acmeSpec(), AUDIO_STORES);
     const byName = new Map(derived.stores.map((s) => [s.name, s]));
 

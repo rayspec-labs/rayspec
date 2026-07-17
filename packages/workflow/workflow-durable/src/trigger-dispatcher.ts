@@ -44,7 +44,7 @@ import type { WorkflowInputEvent, WorkflowSpec } from '@rayspec/foundation';
  * seam: re-driving a session's declared finalized-session workflow through the NORMAL emit path would
  * dedup to the prior run (the default per-session key resolves to the SAME `durableWorkflowRunId`), so
  * a reprocess supplies a DISTINCT key (e.g. `session_id:<id>:reprocess:<nonce>`) to enqueue a FRESH
- * durable run over the CURRENT store state — WITHOUT changing the byte-frozen `sessionScopedIdempotencyKey`
+ * durable run over the CURRENT store state — WITHOUT changing the byte-stable `sessionScopedIdempotencyKey`
  * format the live audio finalize path depends on. An empty/whitespace `forceKey` FALLS BACK to the
  * per-trigger keyFn (fail-safe: never a silent shared collision key). `reason` is advisory operator
  * context the caller records alongside the reprocess (the dispatcher does not thread it into the frozen
@@ -165,7 +165,7 @@ export class WorkflowEventDispatcher implements WorkflowEventIngress {
  * FALLS BACK to the event id (still a stable per-delivery key) rather than colliding every event onto
  * one key — fail-safe, never a silent cross-session merge.
  *
- * ⚠ LEGACY KEY FORMAT (`<field>:<value>:finalized`) — AUDIO-ONLY, BYTE-FROZEN: live deployment
+ * ⚠ LEGACY KEY FORMAT (`<field>:<value>:finalized`) — AUDIO-ONLY, BYTE-STABLE: live deployment
  * durable run ids derive from this exact string (a format drift re-keys live runs → duplicate runs
  * on redelivery). NEW trigger events use `payloadFieldIdempotencyKey` below — this function
  * stays for the audio event and must never change.

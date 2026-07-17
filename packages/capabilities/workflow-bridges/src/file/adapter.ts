@@ -20,7 +20,7 @@
  *
  * `payload.file_id` is what the descriptor-derived `payloadFieldIdempotencyKey('file_id')` keys
  * the durable run on (`file_id:<id>` — the generic format; the `:finalized` suffix stays
- * audio-only, byte-frozen live run identity). Because `id` is ALSO file-scoped, the dispatcher's
+ * audio-only, byte-stable live run identity). Because `id` is ALSO file-scoped, the dispatcher's
  * missing-field fallback (`event:${id}`) stays per-file-stable too. So a client re-submit
  * (retry = redelivery) converges on ONE durable run (C10 single-flight).
  */

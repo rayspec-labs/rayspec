@@ -92,7 +92,7 @@ describe('resolveConversationConfig — the ref-delimiter law', () => {
     expect(DEFAULT_MAX_HISTORY_CHARS).toBe(64 * 1024);
   });
 
-  it('maxMessageBytes has a HARD CEILING — an override above the journal-friendliness class (the record 64 KiB whole-payload donor) is a construction error, never a silent widening', () => {
+  it('maxMessageBytes has a HARD CEILING — an override above the journal-friendliness class (the record 64 KiB whole-payload bound) is a construction error, never a silent widening', () => {
     // The ceiling IS the record whole-payload class bound (DEFAULT_MAX_RECORD_BYTES = 64 KiB).
     expect(MAX_MESSAGE_BYTES_CEILING).toBe(64 * 1024);
     // At the ceiling: accepted (a deployment may consciously widen up to the class bound) …

@@ -545,7 +545,7 @@ describe('composeProductDeploy — the trigger-event vocabulary', () => {
     expect(composed.triggerEvents).toEqual(['audio_input.finalized_session']);
   });
 
-  it('enqueues through the composed ingress with the EXACT byte-frozen audio key (live run identity)', async () => {
+  it('enqueues through the composed ingress with the EXACT byte-stable audio key (live run identity)', async () => {
     const enqueuer = new RecordingEnqueuer();
     const composed = composeProductDeploy(parseFixture(), rollout({ enqueuer }));
     const result = await composed.ingress.emit({
@@ -564,7 +564,7 @@ describe('composeProductDeploy — the trigger-event vocabulary', () => {
     expect(enqueuer.calls[0]?.workflow.id).toBe('process_recording');
     expect(enqueuer.calls[0]?.tenantId).toBe(TENANT);
     // ★ THE LIVE RE-KEY GUARD: the live deployment's durable run ids derive from THIS string. Any format
-    // drift re-keys live runs (a redelivered finalize would double-run). Byte-frozen: the composed
+    // drift re-keys live runs (a redelivered finalize would double-run). Byte-stable: the composed
     // trigger's EXPLICIT descriptor-derived key must be exactly `session_id:<id>:finalized`.
     expect(enqueuer.calls[0]?.idempotencyKey).toBe('session_id:sess-abc:finalized');
   });
