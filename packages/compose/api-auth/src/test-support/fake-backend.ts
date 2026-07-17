@@ -54,7 +54,7 @@ export class FakeRunBackend implements Backend {
     await Promise.allSettled([...this.inFlight]);
   }
   /**
-   * Optional error mode (B2): when set, the run RETURNS a RunResult with status:'error' carrying this
+   * Optional error mode: when set, the run RETURNS a RunResult with status:'error' carrying this
    * detail (a completed-but-errored run — distinct from a THROWN run). The run-core genericizes the
    * error on reconstruction, so a test can assert the detail does NOT leak through GET /runs/{id}.
    */
@@ -201,7 +201,7 @@ export class FakeRunBackend implements Backend {
       await ctx.dispatchTool(toolName, { q: spec.input }, 'taint-call-1');
     }
 
-    // B2: a completed-but-errored run — a CLEAN single-step error (NO tool call) so its reconstructed
+    // a completed-but-errored run — a CLEAN single-step error (NO tool call) so its reconstructed
     // usage/cost/stepCount are deterministic. RETURNS status:'error' with a real `error` detail;
     // run-core persists the header (status='error') and GET /runs/{id} GENERICIZES the error string so
     // the adapter-supplied detail does NOT leak. (Distinct from a THROWN run, which releases the

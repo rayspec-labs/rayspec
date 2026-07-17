@@ -910,7 +910,7 @@ describe('reserved names — EVERY name position × the WHOLE reserved set (code
             },
           },
         ],
-        // TH-2: the 7th name position — an ITEMS-shape field (checkItemShape). Previously untested,
+        // the 7th name position — an ITEMS-shape field (checkItemShape). Previously untested,
         // so a regression there would have passed the loop silently.
         [
           'item-shape field',

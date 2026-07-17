@@ -860,7 +860,7 @@ describe('GET /v1/runs/:id', () => {
     expect(result.stepCount).toBe(1);
   });
 
-  it('B2: an idempotent JSON replay body IS the same reconstruction GET /runs/{id} returns (self-consistent, no drift)', async () => {
+  it('an idempotent JSON replay body IS the same reconstruction GET /runs/{id} returns (self-consistent, no drift)', async () => {
     const { token } = await principal('replay-fidelity@example.com', 'ReplayFidelityOrg');
     const headers = {
       authorization: `Bearer ${token}`,

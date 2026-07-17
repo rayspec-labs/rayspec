@@ -1,5 +1,5 @@
 /**
- * Product-YAML JSON-Schema round-trip CONTRACT test (TH-3) — the dual of `export.test.ts` for the
+ * Product-YAML JSON-Schema round-trip CONTRACT test — the dual of `export.test.ts` for the
  * `exportProductJsonSchema()` artifact (the source `gate:spec-schema` keeps `product.schema.json` fresh
  * against). It compiles the REAL exported artifact through the SAME Ajv2020 the runtime uses and proves,
  * honestly, the SPLIT between the two enforcement layers:
@@ -37,7 +37,7 @@ function readObj(relFromRepoRoot: string): unknown {
 
 const MINIMAL = { version: '1.0', product: { id: 'p', name: 'P' } };
 
-describe('exportProductJsonSchema — Ajv2020 round-trip contract (TH-3)', () => {
+describe('exportProductJsonSchema — Ajv2020 round-trip contract', () => {
   const artifact = exportProductJsonSchema();
   const ajv = new Ajv2020Ctor({ allErrors: true, strict: false });
   const validate = ajv.compile(artifact);

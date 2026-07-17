@@ -155,7 +155,7 @@ function normSet(pairs: ErrPair[]): string[] {
 }
 
 /**
- * Assert the parse failed with the EXACT expected error set (length + code + PATH). This is the TH-2
+ * Assert the parse failed with the EXACT expected error set (length + code + PATH). This is the
  * strengthening over a loose `toContain`: a path-wrong regression, or an over-rejecting one that adds a
  * spurious error, now FAILS the case.
  */
@@ -707,7 +707,7 @@ workflows:
   });
 });
 
-describe('view streaming guardrail (TH-4 — real, tested, not decorative)', () => {
+describe('view streaming guardrail (real, tested, not decorative)', () => {
   it('rejects a `/playback` route path (belongs to Tier-B media serving)', () => {
     expectExact(
       BASE.replace('      path: /things/{id}/result', '      path: /things/{id}/playback'),
