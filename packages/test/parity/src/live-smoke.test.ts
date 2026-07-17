@@ -42,6 +42,13 @@ const codexHome = process.env.CODEX_HOME ?? join(process.env.HOME ?? '', '.codex
 
 const hasOpenAI = Boolean(openaiKey);
 const hasAnthropic = Boolean(oauthToken);
+// `hasCodex` is deliberately derived from the mere PRESENCE of the auth file, NOT from the resolved
+// auth form. This is the BROAD gate: any present `auth.json` makes the codex block RUN, and the block
+// then hard-fails if `resolveAuth()` does not return the subscription form (see the codex block below).
+// Deriving `hasCodex` from the resolved form instead would turn that hard-fail into a silent self-skip
+// (a non-subscription auth.json would set `hasCodex=false`, the block would never run, and the
+// zero-provider-coverage regression would go unreported) — so the presence check is what ENABLES the
+// downstream correctness enforcement.
 const hasCodex = existsSync(join(codexHome, 'auth.json'));
 
 // The backends this file can exercise live, each mapped to whether its credential is present. `pi`
