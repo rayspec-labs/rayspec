@@ -1,17 +1,25 @@
 /**
  * Deterministic acceptance — credential-INDEPENDENT.
  *
- * Proves the parts of A.1 that do not need a live Anthropic run:
+ * Proves the parts that do not need a live Anthropic run:
  *   - per-tenant CLAUDE_CONFIG_DIR isolation (no cross-contamination)
  *   - bundled-binary verification works
  *   - auth-mode self-check detects a stray ANTHROPIC_API_KEY
  *   - JSONL session re-derivation round-trips into neutral ConvItems
  *   - the FAITHFUL recursive tool-arg Zod projection validate-and-repair
  */
-import { mkdirSync, mkdtempSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
   AnthropicAdapter,
@@ -26,7 +34,7 @@ function tmpRoot() {
   return mkdtempSync(join(tmpdir(), 'rayspec-a1-'));
 }
 
-describe('A.1 per-tenant config-dir isolation', () => {
+describe('Per-tenant config-dir isolation', () => {
   it('creates distinct config dirs per tenant', () => {
     const adapter = new AnthropicAdapter({ configRoot: tmpRoot() });
     const a = adapter.configDirFor('alpha');
@@ -37,7 +45,7 @@ describe('A.1 per-tenant config-dir isolation', () => {
   });
 });
 
-describe('A.1 tenant config-dir hardening (credential isolation on disk)', () => {
+describe('tenant config-dir hardening (credential isolation on disk)', () => {
   it('creates the tenant dir private — mode 0700, no group/world access', () => {
     const adapter = new AnthropicAdapter({ configRoot: tmpRoot() });
     const dir = adapter.configDirFor('alpha');
@@ -72,7 +80,123 @@ describe('A.1 tenant config-dir hardening (credential isolation on disk)', () =>
   });
 });
 
-describe('A.1 bundled binary verification', () => {
+describe('config-dir hardening — atomic create, validated on the EEXIST branch', () => {
+  // A concurrently-planted (or pre-existing) entry surfaces as EEXIST from the non-recursive mkdir
+  // and is validated, never silently accepted. Capping the EEXIST-branch validation lets the bad
+  // entry through — the deterministic fail-the-fix (the pure race window is not unit-testable; see
+  // the report). chmod defeats umask so the mode is unambiguous regardless of the runner's umask.
+
+  it('rejects a pre-existing group/world-accessible tenant dir (mode-check on EEXIST)', () => {
+    const root = tmpRoot();
+    const bad = join(root, 'tenant-alpha');
+    mkdirSync(bad, { mode: 0o700 });
+    chmodSync(bad, 0o077);
+    const adapter = new AnthropicAdapter({ configRoot: root });
+    // Cap the EEXIST mode-check → this bad dir is returned instead of thrown → RED.
+    expect(() => adapter.configDirFor('alpha')).toThrow(/group|world|access/);
+  });
+
+  it('rejects a pre-existing regular file at the tenant path (not-a-directory on EEXIST)', () => {
+    const root = tmpRoot();
+    writeFileSync(join(root, 'tenant-alpha'), 'x', { mode: 0o600 });
+    const adapter = new AnthropicAdapter({ configRoot: root });
+    // Cap the isDirectory-check → a 0o600 file passes the mode-check + realpath → accepted → RED.
+    expect(() => adapter.configDirFor('alpha')).toThrow(/symlink|not a directory/);
+  });
+
+  it('rejects a pre-existing symlink at the tenant path (never follows it into place)', () => {
+    const root = tmpRoot();
+    // Symlink to a real dir DIRECTLY under root so realpath-containment passes — the EEXIST symlink
+    // check is then the sole guard.
+    mkdirSync(join(root, 'real'), { mode: 0o700 });
+    symlinkSync(join(root, 'real'), join(root, 'tenant-alpha'));
+    const adapter = new AnthropicAdapter({ configRoot: root });
+    expect(() => adapter.configDirFor('alpha')).toThrow(/symlink|not a directory/);
+  });
+
+  it('a fresh create is atomic and yields a private dir (no group/world bits)', () => {
+    const adapter = new AnthropicAdapter({ configRoot: tmpRoot() });
+    const dir = adapter.configDirFor('fresh');
+    expect(statSync(dir).isDirectory()).toBe(true);
+    expect(statSync(dir).mode & 0o077).toBe(0);
+  });
+});
+
+describe('config-dir hardening — config root mode asserted at boot', () => {
+  it('rejects a group/world-accessible config root at construction', () => {
+    const root = tmpRoot();
+    chmodSync(root, 0o750);
+    // Cap assertConfigRoot → construction succeeds → RED.
+    expect(() => new AnthropicAdapter({ configRoot: root })).toThrow(
+      /config root is group\/world-accessible/,
+    );
+  });
+
+  it('creates an absent config root private (0o700), giving the non-recursive create its parent', () => {
+    const root = join(tmpRoot(), 'nested', 'anthropic-root');
+    new AnthropicAdapter({ configRoot: root });
+    expect(statSync(root).isDirectory()).toBe(true);
+    expect(statSync(root).mode & 0o077).toBe(0);
+  });
+
+  it('rejects a symlinked config root', () => {
+    // A 0o700 symlink pointing at a real dir must be caught by the TYPE guard, not followed. The
+    // guard ensures existence first (a recursive mkdir no-ops on the symlink), then lstat (no-follow)
+    // sees the symlink. This message-specific assertion is the fail-the-fix: cap the type guard and
+    // the symlinked root falls through to the mode check, which throws the group/world message
+    // instead — so the assertion goes RED. (A symlink's own lstat mode is not portably controllable,
+    // so we assert on the message, not on reaching the mode/ownership guards.)
+    const base = tmpRoot();
+    const realDir = join(base, 'real');
+    const linkRoot = join(base, 'link-root');
+    mkdirSync(realDir, { mode: 0o700 });
+    symlinkSync(realDir, linkRoot);
+    expect(() => new AnthropicAdapter({ configRoot: linkRoot })).toThrow(
+      /is a symlink or not a directory/,
+    );
+  });
+
+  it('rejects a pre-existing group/world-accessible config root', () => {
+    // Exercises the UNCONDITIONAL re-validate: the root already exists (0o777) at construction, so
+    // the recursive mkdir no-ops and does NOT tighten its mode — the guard must still reject it.
+    // chmod defeats umask so the mode is unambiguous. Fail-the-fix: cap the mode check and this
+    // process-owned 0o777 dir passes the type + ownership guards and is accepted → RED.
+    const root = tmpRoot();
+    chmodSync(root, 0o777);
+    expect(() => new AnthropicAdapter({ configRoot: root })).toThrow(/group\/world-accessible/);
+  });
+
+  it('rejects a foreign-owned config root', () => {
+    // Ownership cannot be changed without privileges, so stub process.getuid to a uid that does NOT
+    // match the real (process-owned) 0o700 root — the deterministic proxy for a foreign owner.
+    // Fail-the-fix: cap the ownership check and this real 0o700 process-created dir is accepted → RED.
+    const root = tmpRoot();
+    const realUid = process.getuid?.() ?? 0;
+    const spy = vi.spyOn(process, 'getuid').mockReturnValue(realUid + 1);
+    try {
+      expect(() => new AnthropicAdapter({ configRoot: root })).toThrow(/not owned by this process/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('config-dir hardening — tenantId validated BEFORE any path op', () => {
+  // A hostile raw tenantId is rejected fail-closed before join/resolve — no directory is created.
+  // Cap the validator → the empty and bare-`..` ids reach mkdir and CREATE a directory (RED); the
+  // separator ids ('a/b', '../evil') are additionally caught by the pre-existing containment check.
+  for (const bad of ['../evil', 'a/b', '..', '']) {
+    it(`rejects tenantId ${JSON.stringify(bad)} and creates no directory`, () => {
+      const root = tmpRoot();
+      const adapter = new AnthropicAdapter({ configRoot: root });
+      const before = readdirSync(root);
+      expect(() => adapter.configDirFor(bad)).toThrow();
+      expect(readdirSync(root)).toEqual(before);
+    });
+  }
+});
+
+describe('bundled binary verification', () => {
   it('verifies the bundled claude binary runs', () => {
     const adapter = new AnthropicAdapter({ configRoot: tmpRoot() });
     const res = adapter.verifyBinary();
@@ -82,7 +206,7 @@ describe('A.1 bundled binary verification', () => {
   });
 });
 
-describe('A.1 auth-mode self-check (trustworthy)', () => {
+describe('auth-mode self-check (trustworthy)', () => {
   const savedKey = process.env.ANTHROPIC_API_KEY;
   const savedTok = process.env.CLAUDE_CODE_OAUTH_TOKEN;
   const restore = (name: string, val: string | undefined) => {
@@ -122,7 +246,7 @@ describe('A.1 auth-mode self-check (trustworthy)', () => {
   });
 });
 
-describe('auth_mode reconciliation (P1 Slice-4 mislabel fix) — fixtured, no live token', () => {
+describe('auth_mode reconciliation — fixtured, no live token', () => {
   // A live check (claude-agent-sdk 0.3.185) found a SUCCESSFUL
   // subscription run reports system/init apiKeySource='none' (NOT 'oauth'), so the prior logic
   // mislabeled it 'unauthenticated'. These drive the reconciliation from a FIXTURED apiKeySource
@@ -163,7 +287,7 @@ describe('auth_mode reconciliation (P1 Slice-4 mislabel fix) — fixtured, no li
   });
 });
 
-describe('A1 quarantine: deriveConversationFromObserved excludes non-MCP (built-in) tool blocks', () => {
+describe('Quarantine: deriveConversationFromObserved excludes non-MCP (built-in) tool blocks', () => {
   const spec = {
     name: 'weather-agent',
     instructions: 'You are concise.',
@@ -257,7 +381,7 @@ describe('A1 quarantine: deriveConversationFromObserved excludes non-MCP (built-
   });
 });
 
-describe('A.1 JSONL session re-derivation round-trip', () => {
+describe('JSONL session re-derivation round-trip', () => {
   it('re-derives a neutral transcript from a CLI-style JSONL session file', async () => {
     const adapter = new AnthropicAdapter({ configRoot: tmpRoot() });
     const configDir = adapter.configDirFor('gamma');
@@ -277,7 +401,7 @@ describe('A.1 JSONL session re-derivation round-trip', () => {
     ].join('\n');
     writeFileSync(join(projectDir, `${sessionId}.jsonl`), jsonl);
 
-    // Exercise the adapter's REAL re-derivation (the A.1 round-trip acceptance).
+    // Exercise the adapter's REAL re-derivation (the round-trip acceptance).
     // Re-derivation returns neutral ConvTurn[] (one text part per JSONL message).
     const turns = reDeriveJsonl(configDir, sessionId);
     expect(turns.map((t) => t.role)).toEqual(['user', 'assistant']);
@@ -299,7 +423,7 @@ describe('A.1 JSONL session re-derivation round-trip', () => {
  * instead of falling through to a late dispatchTool rejection (the MaxTurns churn). The over-rejection
  * guard: it must NOT reject args the neutral schema would accept (a SUBSET, never stricter).
  */
-describe('P5-STRICT-1 deep tool-arg Zod projection validate-and-repair (mirrors the SDK MCP validate)', () => {
+describe('Deep tool-arg Zod projection validate-and-repair (mirrors the SDK MCP validate)', () => {
   // A realistic structured tool arg: an array of objects with a nested required field + an
   // enum — the exact shape the OLD shallow projection (array→array(unknown)) could not validate.
   const params = {
@@ -337,7 +461,7 @@ describe('P5-STRICT-1 deep tool-arg Zod projection validate-and-repair (mirrors 
     expect(
       v.safeParse({
         title: 'Weekly sync',
-        action_items: [{ description: 'ship P5', owner: 'phil', due_raw: 'Friday' }],
+        action_items: [{ description: 'ship the release notes', owner: 'phil', due_raw: 'Friday' }],
         priority: 'high',
       }).success,
     ).toBe(true);

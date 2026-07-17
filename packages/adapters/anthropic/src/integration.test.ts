@@ -222,7 +222,7 @@ function mockQueryWithToolCall(toolCallId: string) {
 }
 
 /**
- * A1: a mock query() that yields a BUILT-IN tool block (ToolSearch — NOT one of our MCP tools)
+ * A mock query() that yields a BUILT-IN tool block (ToolSearch — NOT one of our MCP tools)
  * alongside the legit MCP get_weather call. Proves the re-derivation QUARANTINE excludes the built-in
  * tool_use + its raw tool_result from the neutral transcript, and that the built-in is never
  * journaled (only the dispatched MCP tool is). The built-in is given a DISTINCT tool_use id.
@@ -316,7 +316,7 @@ function mockQueryWithBuiltinAndMcpCall(builtinId: string, mcpId: string) {
   };
 }
 
-describe('Anthropic adapter: A1 built-in-tool restriction + quarantine (§10.A headline fix)', () => {
+describe('Anthropic adapter: built-in-tool restriction + quarantine (the untrusted-content boundary)', () => {
   it('passes tools:[] (built-ins disabled) + a canUseTool deny hook allowing only mcp__rayspec__*', async () => {
     const calls: unknown[] = [];
     const tool = recordingTool(calls);
@@ -400,7 +400,7 @@ describe('Anthropic adapter: A1 built-in-tool restriction + quarantine (§10.A h
   });
 });
 
-describe('Anthropic adapter: in-proc MCP tool bridge routes through ctx.dispatchTool (§10.A)', () => {
+describe('Anthropic adapter: in-proc MCP tool bridge routes through ctx.dispatchTool', () => {
   it('invokes the handler ONLY via the dispatcher, opaque-wraps, journals ONE tool step, correlates parts', async () => {
     const calls: unknown[] = [];
     const tool = recordingTool(calls);
@@ -434,7 +434,7 @@ describe('Anthropic adapter: in-proc MCP tool bridge routes through ctx.dispatch
       expect(callPart.toolCallId).toBe('toolu_REAL_123');
       expect(resultPart.toolCallId).toBe('toolu_REAL_123');
     }
-    // A2: EVERY tool_result in the transcript is the opaque dispatched kind:'tool_data' (no raw,
+    // EVERY tool_result in the transcript is the opaque dispatched kind:'tool_data' (no raw,
     // un-opaque-wrapped output ever lands in the SoT) AND EVERY tool_call is a sanctioned MCP tool.
     const allResults = parts.filter((p) => p.kind === 'tool_result');
     expect(allResults.length).toBeGreaterThanOrEqual(1);
@@ -472,7 +472,7 @@ describe('Anthropic adapter: in-proc MCP tool bridge routes through ctx.dispatch
   });
 });
 
-describe('Anthropic adapter: C1 — a legit tool whose sole property is named `args` is NOT unwrapped', () => {
+describe('Anthropic adapter: a legit tool whose sole property is named `args` is NOT unwrapped', () => {
   it('passes { args: ... } straight to the dispatcher (no single-args unwrap for a real projected shape)', async () => {
     // A tool whose object schema's ONLY property is literally named `args` (a real field, not the
     // fallback blob). The projection produces a REAL shape (type:object with properties), so the
@@ -591,7 +591,7 @@ describe('Anthropic adapter: C1 — a legit tool whose sole property is named `a
   });
 });
 
-describe('Anthropic adapter: C4 non-success result branch (subtype !== success)', () => {
+describe('Anthropic adapter: non-success result branch (subtype !== success)', () => {
   it('a result with subtype=error_max_turns yields status=error + error message + output:null', async () => {
     const journal = new FakeJournal();
     querySpy.mockImplementation(() => ({
@@ -631,10 +631,10 @@ describe('Anthropic adapter: C4 non-success result branch (subtype !== success)'
   });
 });
 
-describe('Anthropic adapter: N1 — no total_cost_usd => provider cost ABSENT (no fabricated $0, no false drift)', () => {
+describe('Anthropic adapter: no total_cost_usd => provider cost ABSENT (no fabricated $0, no false drift)', () => {
   it('a success result WITHOUT total_cost_usd records NO providerCostUsd on the final llm step', async () => {
     const journal = new FakeJournal();
-    // A success result that omits total_cost_usd (e.g. a partial/older SDK shape). N1: the adapter must
+    // A success result that omits total_cost_usd (e.g. a partial/older SDK shape). The adapter must
     // NOT fabricate providerCostUsd:0 — that would later trip a FALSE cost_drift vs the non-zero
     // computed cost. The step is left WITHOUT providerCostUsd (run-core journals provider_cost_usd=NULL).
     querySpy.mockImplementation(() => ({
@@ -751,7 +751,7 @@ describe('Anthropic adapter: native structured output via outputFormat (no promp
  * Case 2 (two DISTINCT message.id ⇒ two real calls) must still yield TWO `llm` steps — proves the
  * coalesce does NOT over-collapse genuinely separate calls.
  */
-describe('Anthropic adapter: P5-COST-1 — coalesce assistant stream frames into real model calls', () => {
+describe('Anthropic adapter: coalesce assistant stream frames into real model calls', () => {
   it('ONE real call emitted as TWO frames (same message.id, same usage) => EXACTLY ONE llm step (not two)', async () => {
     const journal = new FakeJournal();
     // A SINGLE real model call delivered as a thinking-block frame + a text-block frame. Both frames

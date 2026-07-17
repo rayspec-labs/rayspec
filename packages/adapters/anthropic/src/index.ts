@@ -43,14 +43,14 @@
  *   - Options.allowedTools?: string[]                                          (sdk.d.ts:1287)
  *       MCP tools are exposed to the model as `mcp__<serverName>__<toolName>`; we allowlist them.
  *       allowedTools is NOT a restrictor — sdk.d.ts:1282-1283: "To restrict which tools are
- *       available, use the `tools` option instead." (A1.)
+ *       available, use the `tools` option instead."
  *   - Options.tools?: string[] | {type:'preset';preset:'claude_code'}          (sdk.d.ts:1343-1346)
  *       THE built-in-tool restrictor: `[]` DISABLES ALL built-in tools (Bash/Read/Write/Edit/Grep/
  *       Glob/WebFetch/ToolSearch/…); a preset/omitted enables the full Claude Code preset. We pass
  *       `tools: []` so NO built-in tool can ever execute. VERIFIED LIVE (sdk 0.3.185,
  *       claude-haiku-4-5): with `tools:[]` the in-proc MCP tool mcp__rayspec__get_weather STILL
  *       fires through the bridge (MCP comes from mcpServers+allowedTools — orthogonal to the built-in
- *       preset) and ZERO built-in tool_use blocks appear. (A1 — the headline untrusted-content boundary fix.)
+ *       preset) and ZERO built-in tool_use blocks appear. (the headline untrusted-content boundary fix.)
  *   - Options.canUseTool?: CanUseTool                                          (sdk.d.ts:188,1292)
  *       Per-tool-call permission hook (toolName,input)=>{behavior:'allow'|'deny'}. DEFENSE-IN-DEPTH:
  *       we install a hook that ALLOWS only `mcp__<MCP_SERVER_NAME>__*` and DENIES everything else, so
@@ -68,7 +68,7 @@
  *   that CAN run is dispatched through ctx.dispatchTool and therefore opaque-wrapped + journaled
  *   exactly as OpenAI/Pi. As belt-and-suspenders the conversation re-derivation also QUARANTINES any
  *   tool_use/tool_result block whose name is not one of this run's MCP tools, so a stray built-in's
- *   raw output can never land in the neutral transcript even if one somehow fired (A1).
+ *   raw output can never land in the neutral transcript even if one somehow fired.
  *
  * No SDK type escapes this file — everything returned is a neutral RunResult.
  */
@@ -83,7 +83,7 @@ import {
   statSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createSdkMcpServer, query, tool } from '@anthropic-ai/claude-agent-sdk';
 import type {
   AgentSpec,
@@ -114,7 +114,7 @@ const MCP_SERVER_NAME = 'rayspec';
  */
 export const ANTHROPIC_SDK_VERSION = '0.3.185';
 
-/** Provenance tag recorded on every journal step (A6): SDK + adapter version. */
+/** Provenance tag recorded on every journal step: SDK + adapter version. */
 export const ANTHROPIC_PRODUCED_BY = `@anthropic-ai/claude-agent-sdk@${ANTHROPIC_SDK_VERSION}+adapter-anthropic`;
 
 export interface AnthropicAdapterOptions {
@@ -131,6 +131,28 @@ export interface AuthSelfCheck {
   oauthTokenPresent: boolean;
 }
 
+/**
+ * Reject a hostile raw tenant id BEFORE it reaches any path op (fail-closed, no silent path
+ * collapse): a path separator (`/` or `\`), a `..` traversal segment, a NUL, an absolute-path
+ * marker, or an empty id. With separators already rejected, the only remaining `..` traversal form
+ * is the bare `..`. The post-resolve + realpath containment checks in configDirFor stay as
+ * defense-in-depth (they are NOT removed).
+ */
+function assertSafeTenantId(tenantId: string): void {
+  if (
+    tenantId.length === 0 ||
+    tenantId.includes('\0') ||
+    tenantId.includes('/') ||
+    tenantId.includes('\\') ||
+    tenantId === '..' ||
+    isAbsolute(tenantId)
+  ) {
+    throw new Error(
+      `anthropic adapter: refusing an unsafe tenant id — a path separator, '..' traversal, absolute path, or empty id can never be contained under the configured root (tenant '${tenantId}').`,
+    );
+  }
+}
+
 export class AnthropicAdapter implements Backend {
   readonly id = 'anthropic' as const;
   private readonly configRoot: string;
@@ -139,10 +161,49 @@ export class AnthropicAdapter implements Backend {
   constructor(opts: AnthropicAdapterOptions) {
     this.configRoot = opts.configRoot;
     this.execPath = opts.pathToClaudeCodeExecutable;
+    this.assertConfigRoot();
+  }
+
+  /**
+   * Boot-time guard on the config ROOT itself. The per-tenant child dirs are already type-, mode-,
+   * and ownership-checked; this MIRRORS that guard for the root, whose weakness would undermine the
+   * whole isolation. Ensure the root exists at 0o700, then UNCONDITIONALLY re-validate it: reject a
+   * symlink or non-directory, a group/world-accessible mode, or a foreign-owned root. The create
+   * alone guarantees nothing — a recursive mkdir no-ops on an existing (possibly attacker-planted)
+   * path, so the checks always run against the real on-disk entry. This also gives configDirFor its
+   * precondition that the parent exists for the non-recursive per-tenant create.
+   */
+  private assertConfigRoot(): void {
+    // Ensure the root (and any missing parents) exist at 0o700.
+    mkdirSync(this.configRoot, { recursive: true, mode: 0o700 });
+    // Unconditionally re-validate: a pre-existing or concurrently-planted root is NOT skipped
+    // (recursive mkdir no-ops on an existing path, so the create alone guarantees nothing). lstat
+    // does not follow a final symlink, so a symlinked root is caught here rather than followed.
+    const st = lstatSync(this.configRoot);
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw new Error(
+        `anthropic adapter: config root is a symlink or not a directory (${this.configRoot}).`,
+      );
+    }
+    if (st.mode & 0o077) {
+      throw new Error(
+        `anthropic adapter: config root is group/world-accessible (${this.configRoot}).`,
+      );
+    }
+    // A root owned by another uid can be swapped out from under us after these checks; reject a
+    // foreign-owned root. POSIX only — process.getuid is undefined on Windows.
+    if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
+      throw new Error(
+        `anthropic adapter: config root is not owned by this process (${this.configRoot}).`,
+      );
+    }
   }
 
   /** Per-tenant config dir — created on demand, isolates credentials + JSONL transcripts. */
   configDirFor(tenantId: string): string {
+    // Validate the RAW tenantId BEFORE any path op (fail-closed, no silent path collapse). The
+    // post-resolve + realpath containment checks below stay as defense-in-depth.
+    assertSafeTenantId(tenantId);
     const dir = join(this.configRoot, `tenant-${tenantId}`);
     // Containment: the target must be a DIRECT child named tenant-<id>. A separator or traversal in
     // tenantId that would place the dir anywhere else is refused, never created.
@@ -151,20 +212,29 @@ export class AnthropicAdapter implements Backend {
         `anthropic adapter: refusing tenant config dir outside the configured root (tenant '${tenantId}').`,
       );
     }
-    const existing = lstatSync(dir, { throwIfNoEntry: false });
-    if (existing === undefined) {
-      // 0o700 so a tenant's credentials + on-disk JSONL transcripts are never group/world-readable.
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-    } else if (existing.isSymbolicLink() || !existing.isDirectory()) {
-      // Never follow a symlink (or a non-directory) into place — it could redirect a tenant's dir.
-      throw new Error(
-        `anthropic adapter: tenant config path is a symlink or not a directory (tenant '${tenantId}').`,
-      );
-    } else if (existing.mode & 0o077) {
-      // An existing dir reachable by group/world is not trustworthy for credential isolation.
-      throw new Error(
-        `anthropic adapter: tenant config dir is group/world-accessible (tenant '${tenantId}').`,
-      );
+    // ATOMIC create: a NON-recursive mkdir either creates the dir fresh (0o700) or throws EEXIST —
+    // no check-then-create race. A concurrently-planted entry surfaces as EEXIST and is validated on
+    // the branch below, never silently accepted (recursive:true would no-op on an existing path,
+    // skipping validation). 0o700 so a tenant's credentials + on-disk JSONL transcripts are never
+    // group/world-readable.
+    try {
+      mkdirSync(dir, { mode: 0o700 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err;
+      // The path already existed — validate the pre-existing entry.
+      const existing = lstatSync(dir);
+      if (existing.isSymbolicLink() || !existing.isDirectory()) {
+        // Never follow a symlink (or a non-directory) into place — it could redirect a tenant's dir.
+        throw new Error(
+          `anthropic adapter: tenant config path is a symlink or not a directory (tenant '${tenantId}').`,
+        );
+      }
+      if (existing.mode & 0o077) {
+        // An existing dir reachable by group/world is not trustworthy for credential isolation.
+        throw new Error(
+          `anthropic adapter: tenant config dir is group/world-accessible (tenant '${tenantId}').`,
+        );
+      }
     }
     // Realpath containment: after resolving every symlink, the real dir must still sit directly under
     // the real configured root (defeats a symlinked path component between the root and the dir).
@@ -243,7 +313,7 @@ export class AnthropicAdapter implements Backend {
     const preCheck = this.envAuthCheck();
     let authMode: AuthMode = ctx.authMode ?? preCheck.authMode;
 
-    // C2: run-core is the SINGLE per-run seq authority. Emit SEQ-LESS through ctx.onEvent;
+    // Run-core is the SINGLE per-run seq authority. Emit SEQ-LESS through ctx.onEvent;
     // run-core's wrapped sink stamps the one monotonic seq across the adapter's events AND
     // dispatchTool's tool events. No adapter-local makeEventIngest (deleted).
     const emit = (e: NeutralEventInput) => ctx.onEvent?.(e as NeutralEvent);
@@ -274,7 +344,7 @@ export class AnthropicAdapter implements Backend {
     // the gate (gate:adapter-handlers) verifies every tool path routes through dispatchTool.
     const { mcpServers, allowedTools, toolEvents } = this.buildToolBridge(spec, ctx, emit);
 
-    // A1: the SET of tool names that ARE sanctioned (the in-proc MCP tools, both the bare neutral
+    // The SET of tool names that ARE sanctioned (the in-proc MCP tools, both the bare neutral
     // name e.g. `get_weather` and the model-facing `mcp__rayspec__get_weather`). Used by (a) the
     // canUseTool deny hook to allow ONLY these and (b) the re-derivation quarantine to exclude any
     // block whose name is not one of them — so a stray built-in's raw output never enters the SoT.
@@ -294,13 +364,13 @@ export class AnthropicAdapter implements Backend {
     let apiKeySource = preCheck.apiKeySource;
     let status: 'completed' | 'error' = 'completed';
     let errorMessage: string | undefined;
-    // OBS-01: the neutral class of a failed run. The Anthropic child (Claude Agent SDK query())
+    // The neutral class of a failed run. The Anthropic child (Claude Agent SDK query())
     // has NO HTTP status object — a non-success `result` carries only a `subtype`, and a thrown error
     // is a stringified child error. So we classify the SUBTYPE explicitly (below) and run a THROWN
     // error through classifyUpstreamError (message heuristics for rate-limit/overloaded/timeout).
     // Default `internal` — never a mis-tag. NEUTRAL vocabulary: no SDK error shape leaks out.
     let errorClass: ErrorClass = 'internal';
-    // OBS-01: a Retry-After (seconds) the classifier captured from a THROWN child error (rate-limit/
+    // A Retry-After (seconds) the classifier captured from a THROWN child error (rate-limit/
     // 5xx), recorded into the failing journal step output so the sync endpoint can surface the header.
     let errorRetryAfter: number | undefined;
     // Per-REAL-MODEL-CALL usage — the REAL per-step ledger source.
@@ -320,7 +390,7 @@ export class AnthropicAdapter implements Backend {
     let lastAssistantMessageId: string | undefined;
     let aggUsage: Usage = emptyUsage();
     let cost = 0;
-    // N1: track whether the SDK ACTUALLY reported a provider cost. total_cost_usd may be
+    // Track whether the SDK ACTUALLY reported a provider cost. total_cost_usd may be
     // absent (e.g. an error/partial result); we must NOT fabricate a $0 provider cost (which would
     // surface a FALSE cost_drift against the non-zero computed cost). Stays undefined until present.
     let providerCost: number | undefined;
@@ -341,13 +411,13 @@ export class AnthropicAdapter implements Backend {
           // The in-proc MCP tool bridge + its allowlist (mcp__rayspec__<tool>).
           ...(mcpServers ? { mcpServers } : {}),
           ...(allowedTools.length > 0 ? { allowedTools } : {}),
-          // A1 (the headline untrusted-content boundary fix): DISABLE ALL built-in tools (Bash/Read/Write/Edit/Grep/Glob/
+          // The untrusted-content boundary: DISABLE ALL built-in tools (Bash/Read/Write/Edit/Grep/Glob/
           // WebFetch/ToolSearch/…). `tools: []` is the documented restrictor (sdk.d.ts:1343-1346);
           // allowedTools is NOT a restrictor. The in-proc MCP tools come from mcpServers+allowedTools
           // and stay callable (verified live) — so the ONLY callable tools are the dispatchTool-backed
           // MCP ones. NO built-in tool can run outside the untrusted-content boundary chokepoint.
           tools: [],
-          // A1 defense-in-depth: a per-call permission hook that ALLOWS only the sanctioned MCP tools
+          // Defense-in-depth: a per-call permission hook that ALLOWS only the sanctioned MCP tools
           // and DENIES everything else. Even if a built-in were ever reachable it cannot execute.
           canUseTool: makeMcpOnlyPermission(sanctionedToolNames),
           // Fully isolated per-tenant run.
@@ -424,7 +494,7 @@ export class AnthropicAdapter implements Backend {
           } else {
             status = 'error';
             errorMessage = `result subtype=${m.subtype}`;
-            // OBS-01: classify the SDK result error subtype into the neutral class. The CLI
+            // Classify the SDK result error subtype into the neutral class. The CLI
             // exposes these four error subtypes (sdk.d.ts:3839). `error_max_turns` is a loop/turn
             // exhaustion → the neutral `timeout` class (a deadline-style limit); the budget/retry/
             // generic execution subtypes have no upstream-network analogue → honestly `internal`
@@ -435,7 +505,7 @@ export class AnthropicAdapter implements Backend {
       }
     } catch (err) {
       status = 'error';
-      // OBS-01: a THROWN child error — classify (preserving the cause). The child may surface a
+      // A THROWN child error — classify (preserving the cause). The child may surface a
       // rate-limit / overloaded / timeout in its message; the heuristic catches those, else `internal`.
       const classified = classifyUpstreamError(err);
       errorMessage = classified.message;
@@ -482,7 +552,7 @@ export class AnthropicAdapter implements Backend {
         inputHash: hashJson({ input: spec.input, turn: i }),
         // Persist a NEUTRAL, SDK-free projection (final marker on the last). The opaque payload is
         // the replay cache source. The FINAL llm step carries finalText/output/sessionId/apiKeySource.
-        // OBS-01: on the FINAL step of an ERROR run, also record { error, errorClass } in the
+        // On the FINAL step of an ERROR run, also record { error, errorClass } in the
         // output jsonb so GET /v1/runs/{id} can DERIVE the classified error from the failing step.
         output: isFinal
           ? {
@@ -504,9 +574,9 @@ export class AnthropicAdapter implements Backend {
         // costUsd is RE-COMPUTED authoritatively in run-core from the registry; the SDK's
         // total_cost_usd is surfaced as the PROVIDER cost on the FINAL step for reconciliation.
         costUsd: isFinal ? cost : 0,
-        // PROVIDER cost (A3): Anthropic SDKResultSuccess.total_cost_usd (sdk.d.ts:3875) on
+        // PROVIDER cost: Anthropic SDKResultSuccess.total_cost_usd (sdk.d.ts:3875) on
         // the FINAL llm step only (it is the whole-run reported cost). Earlier turns report none.
-        // N1: mirror Pi's guard — surface providerCostUsd ONLY when total_cost_usd was
+        // Mirror Pi's guard — surface providerCostUsd ONLY when total_cost_usd was
         // actually present (!== undefined); never default to 0 (a fabricated $0 would trip a FALSE
         // cost_drift against the non-zero computed cost). Absent -> journal provider_cost_usd NULL.
         ...(isFinal && providerCost !== undefined ? { providerCostUsd: providerCost } : {}),
@@ -538,7 +608,7 @@ export class AnthropicAdapter implements Backend {
       output,
       // Key-presence: error ALWAYS present (the message on error, null otherwise).
       error: errorMessage ?? null,
-      // OBS-01: errorClass is always-present — the neutral class on error, null on success.
+      // errorClass is always-present — the neutral class on error, null on success.
       // Guard on `status` (not on the `errorClass` default) so a completed run is unambiguously null.
       errorClass: status === 'error' ? errorClass : null,
       conversation,
@@ -580,7 +650,7 @@ export class AnthropicAdapter implements Backend {
       // still runs inside ctx.dispatchTool against the neutral JSON-Schema; this shape only shapes the
       // model-facing call.
       //
-      // C1: track PER TOOL whether the projection FELL BACK to the single `{ args: z.unknown() }`
+      // Track PER TOOL whether the projection FELL BACK to the single `{ args: z.unknown() }`
       // shape (a non-object/unschemaable spec). The single-`args` UNWRAP must ONLY apply for that
       // fallback — otherwise a legit tool whose sole real property is literally named `args` would be
       // corrupted (its `{ args: ... }` object wrongly unwrapped). For a real projected shape we pass
@@ -598,7 +668,7 @@ export class AnthropicAdapter implements Backend {
           const toolCallId = extractMcpToolCallId(extra);
           // The model's actual arguments arrive as the shaped object; pass them straight to the
           // dispatcher (which re-validates against the neutral JSON-Schema inputSchema). Only unwrap a
-          // single-`args` blob when THIS tool's projection used the args-fallback shape (C1).
+          // single-`args` blob when THIS tool's projection used the args-fallback shape.
           const argsForDispatch = usedArgsFallback ? unwrapMcpArgs(rawArgs) : rawArgs;
           if (!ctx.dispatchTool) {
             // No dispatcher means no tools were wired — fail closed (never run anything inline).
@@ -699,7 +769,7 @@ export class AnthropicAdapter implements Backend {
       finalText,
       output,
       error: null,
-      // OBS-01: errorClass is always-present — null on the (replay) success path.
+      // errorClass is always-present — null on the (replay) success path.
       errorClass: null,
       conversation: rehydrated,
       // Usage/cost are DROPPED on replay (no new spend) — metered on the live run.
@@ -968,7 +1038,7 @@ export function jsonSchemaToZodType(node: unknown): z.ZodTypeAny {
  */
 export function jsonSchemaToZodShape(parameters: Record<string, unknown>): {
   shape: Record<string, z.ZodTypeAny>;
-  /** True iff the projection fell back to the single `{ args: z.unknown() }` shape (C1). */
+  /** True iff the projection fell back to the single `{ args: z.unknown() }` shape. */
   usedArgsFallback: boolean;
 } {
   const props = parameters?.properties;
@@ -994,7 +1064,7 @@ type McpPermissionResult =
   | { behavior: 'deny'; message: string };
 
 /**
- * Build the A1 defense-in-depth permission hook (canUseTool). It ALLOWS a tool call ONLY when the
+ * Build the defense-in-depth permission hook (canUseTool). It ALLOWS a tool call ONLY when the
  * tool name is one of this run's sanctioned in-proc MCP tools (`mcp__<server>__*` or its bare neutral
  * name); every other tool — including any built-in (Bash/Read/Write/Edit/ToolSearch/…) — is DENIED.
  * Combined with `tools: []` this guarantees the ONLY callable tools are the dispatchTool-backed MCP
@@ -1009,7 +1079,7 @@ function makeMcpOnlyPermission(
     }
     return {
       behavior: 'deny',
-      message: `tool '${toolName}' is not a sanctioned MCP tool (built-in tools are disabled — §10.A)`,
+      message: `tool '${toolName}' is not a sanctioned MCP tool (built-in tools are disabled)`,
     };
   };
 }
@@ -1107,7 +1177,7 @@ function countToolParts(conversation: ConvTurn[]): number {
  *  - user text block             -> user turn, text part
  * tool_call/tool_result correlate by the SDK's real tool_use id, so a call pairs with its result.
  *
- * A1 QUARANTINE (defense-in-depth): if `sanctioned` is provided, any tool_use/tool_result block whose
+ * QUARANTINE (defense-in-depth): if `sanctioned` is provided, any tool_use/tool_result block whose
  * tool name is NOT a sanctioned in-proc MCP tool is EXCLUDED from the neutral transcript (and its id
  * is tracked so the matching tool_result is dropped too). So even if a built-in ever fired, its raw,
  * un-opaque-wrapped, un-journaled output can never land in the RaySpec-owned transcript.
@@ -1150,7 +1220,7 @@ export function deriveConversationFromObserved(
       if (block.type === 'tool_use' && block.id && block.name) {
         const name = String(block.name);
         if (!isSanctionedTool(name, sanctioned)) {
-          // A1 quarantine: a non-MCP (built-in) tool_use — exclude it AND its eventual result.
+          // Quarantine: a non-MCP (built-in) tool_use — exclude it AND its eventual result.
           quarantinedIds.add(String(block.id));
           continue;
         }
@@ -1166,7 +1236,7 @@ export function deriveConversationFromObserved(
       }
       if (block.type === 'tool_result' && block.tool_use_id) {
         const id = String(block.tool_use_id);
-        // A1 quarantine: drop a result whose call was quarantined OR whose correlated tool is non-MCP.
+        // Quarantine: drop a result whose call was quarantined OR whose correlated tool is non-MCP.
         if (quarantinedIds.has(id) || !isSanctionedResult(turns, id, sanctioned)) continue;
         push('tool', [
           {
@@ -1188,7 +1258,7 @@ export function deriveConversationFromObserved(
 }
 
 /**
- * A1 quarantine predicate: is `name` a sanctioned in-proc MCP tool? When `sanctioned` is undefined
+ * Quarantine predicate: is `name` a sanctioned in-proc MCP tool? When `sanctioned` is undefined
  * (e.g. a fixtured re-derivation with no allowlist) quarantine is OFF (legacy behavior) — but the
  * run() path ALWAYS passes the set, so production re-derivation always quarantines.
  */
@@ -1198,7 +1268,7 @@ function isSanctionedTool(name: string, sanctioned?: Set<string>): boolean {
 }
 
 /**
- * A1 quarantine predicate for a tool_result: a result is sanctioned iff its correlated tool_call (by
+ * Quarantine predicate for a tool_result: a result is sanctioned iff its correlated tool_call (by
  * id) was a sanctioned tool. If no matching call is found (e.g. the call block was already
  * quarantined/absent), it is NOT sanctioned — drop it.
  */
@@ -1268,7 +1338,7 @@ function normalizeToolResultContent(content: unknown): unknown {
  * Exported so the round-trip acceptance can exercise the REAL code path. Returns NON-system turns
  * (the caller prepends the trusted system turn) — a stored 'system' line is dropped.
  *
- * A1 QUARANTINE: when `sanctioned` is provided, any tool_use/tool_result block whose tool name is not
+ * QUARANTINE: when `sanctioned` is provided, any tool_use/tool_result block whose tool name is not
  * a sanctioned in-proc MCP tool is EXCLUDED — a stray built-in's raw output never enters the SoT.
  */
 export function reDeriveJsonl(
@@ -1307,7 +1377,7 @@ export function reDeriveJsonl(
         } else if (block.type === 'tool_use' && block.id && block.name) {
           const name = String(block.name);
           if (!isSanctionedTool(name, sanctioned)) {
-            quarantinedIds.add(String(block.id)); // A1 quarantine: drop built-in tool_use + its result
+            quarantinedIds.add(String(block.id)); // Quarantine: drop built-in tool_use + its result
             continue;
           }
           parts.push({
@@ -1318,7 +1388,7 @@ export function reDeriveJsonl(
           });
         } else if (block.type === 'tool_result' && block.tool_use_id) {
           const id = String(block.tool_use_id);
-          // A1 quarantine: drop a result whose call was quarantined OR whose tool is non-MCP.
+          // Quarantine: drop a result whose call was quarantined OR whose tool is non-MCP.
           if (quarantinedIds.has(id) || !isSanctionedResult(turns, id, sanctioned)) continue;
           parts.push({
             kind: 'tool_result',
@@ -1418,7 +1488,7 @@ function prependTrustedSystem(spec: AgentSpec, rest: ConvTurn[]): ConvTurn[] {
 
 /**
  * Strip a leading coerced-system turn (a 'user' turn whose single text part is the instructions) so
- * the trusted system turn can be re-prepended on replay — mirrors the OpenAI adapter's C3 handling
+ * the trusted system turn can be re-prepended on replay — mirrors the OpenAI adapter's handling
  * (rehydrate.ts coerces a stored 'system' row to 'user').
  */
 function stripLeadingSystem(rehydrated: ConvTurn[]): ConvTurn[] {
