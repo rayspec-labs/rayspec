@@ -91,7 +91,7 @@ export type CapabilityTier = z.infer<typeof CapabilityTier>;
  * declares the capability is runtime-backed; `reserved`/`not_yet_runtime` declare a future
  * dependency. WIREDNESS is enforced at the deploy composition, not here — a MOUNT rejects any
  * capability that is not `available` + actually runtime-backed (fail-closed, section named), while
- * `doctor`/`plan` (validate-only) accept all three (the frozen donor stays valid).
+ * `doctor`/`plan` (validate-only) accept all three (the frozen legacy fixture stays valid).
  */
 export const CapabilityStatus = z.enum(['reserved', 'not_yet_runtime', 'available']);
 export type CapabilityStatus = z.infer<typeof CapabilityStatus>;
@@ -320,7 +320,7 @@ export type ExtractorSpec = z.infer<typeof ExtractorSpec>;
  * A declared product store: the MINIMAL typed data declaration the store_read/store_write step
  * runtime targets, and the backing for store-sourced views. DESIGN LAWS:
  *  - the columns are EXACTLY the backend `StoreColumn` vocabulary (imported from grammar.ts, which stays
- *    byte-frozen), so the DERIVED output (`deriveProductStores`) is a standard `StoreSpec` and the
+ *    byte-stable), so the DERIVED output (`deriveProductStores`) is a standard `StoreSpec` and the
  *    whole existing store machinery — `generateProductSql` (tenancy/GDPR injection), `diffProductStores`,
  *    drift/classify, the update seam, `eraseTenant` — consumes declared stores UNCHANGED;
  *  - authors declare BUSINESS columns only; the tenancy/GDPR columns (`id`/`tenant_id`/`created_at`/

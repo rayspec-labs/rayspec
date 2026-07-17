@@ -30,7 +30,7 @@ export const DEFAULT_MAX_MESSAGE_BYTES = 32 * 1024;
 /**
  * The HARD CEILING on `maxMessageBytes` overrides: the rationale above makes
  * journal-friendliness a CLASS bound, not a default — the record capability caps its WHOLE
- * canonical payload at 64 KiB for exactly that reason, so 64 KiB is the donor-consistent ceiling
+ * canonical payload at 64 KiB for exactly that reason, so 64 KiB is the established ceiling
  * for the one field that rides our payload. HONEST NUANCE: this ceiling caps the
  * `message` FIELD at the class bound — the event ENVELOPE (ids, turn_seq, timestamps) rides on
  * top, so a deliberate at-ceiling override writes journal payloads slightly ABOVE the cited 64 KiB

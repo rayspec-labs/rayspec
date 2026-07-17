@@ -28,7 +28,7 @@ import { readProductUpdateMigrations } from './product-boot.js';
  *   - NO spec (auth-only boot) → {} (no registrar, no agent factory).
  *   - ANY spec → the SANCTIONED validating product-table registrar (registerProductStores VALIDATES
  *     every table before it joins the deny-by-default chokepoint Set); harmless when the spec declares
- *     no stores. deploy.ts (the kill-set roll-out) is untouched — these are its existing opts.
+ *     no stores. deploy.ts (the frozen-surface roll-out) is untouched — these are its existing opts.
  *   - a BACKEND-profile spec WITH ≥1 declared agent → additionally an `agentBackendsFactory` built from
  *     env (agentBackendsFactoryFromEnv); a PRODUCT-profile or agent-free spec needs none (undefined),
  *     and the product deploy path builds its own backends.

@@ -365,7 +365,7 @@ describe('submitFile — the divergent-upload-racing-submit TOCTOU (arm 2: the r
     if (res.ok) throw new Error('unreachable');
     expect(res.status).toBe(409);
     expect(res.error).toBe('file_conflict');
-    // Liveness is NOT lost (the donor's no-heal-here rationale): any later submit retry lands on
+    // Liveness is NOT lost (the canonical no-heal-here rationale): any later submit retry lands on
     // the stable divergent/identical paths, which heal/emit the stored event.
     const retry = await submitFile(
       { tenantId: TENANT_A, db: makeFakeFileDb(table, TENANT_A), config: resolveFileConfig() },
@@ -380,7 +380,7 @@ describe('submitFile — the divergent-upload-racing-submit TOCTOU (arm 2: the r
   });
 });
 
-describe('submitFile — emit faults on the PRIMARY paths surface (the liveness decision, donor-faithful)', () => {
+describe('submitFile — emit faults on the PRIMARY paths surface (the liveness decision, wire-faithful)', () => {
   it('a transient sink fault on the FIRST submit PROPAGATES (the row stays sealed; the retry re-emits)', async () => {
     const table = new SharedFileTable();
     seedRow(table, { state: 'uploaded' });

@@ -35,7 +35,7 @@ export const DEFAULT_PROTOCOL_VERSION = 2;
 /**
  * The default per-chunk byte cap (8 MiB). A single ingest POST is drained under this bound and a
  * larger body is a 413 BEFORE it is buffered/stored — so an authenticated caller cannot buffer an
- * unbounded chunk into memory (the donor's unbounded `request.arrayBuffer()` DoS). Generous for a
+ * unbounded chunk into memory (a naive unbounded `request.arrayBuffer()` DoS). Generous for a
  * real audio chunk; a product may narrow it.
  */
 export const DEFAULT_MAX_CHUNK_BYTES = 8 * 1024 * 1024;

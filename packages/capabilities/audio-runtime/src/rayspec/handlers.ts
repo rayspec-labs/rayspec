@@ -75,7 +75,7 @@ function toHandlerReturn<T>(result: AudioCapabilityResult<T>): T | HttpResponse<
 export function makeChunkIngestHandler(config: AudioHandlersConfig): StreamRouteHandler {
   return async (init: StreamRouteHandlerInit): Promise<Response> => {
     const ctx = blobContext(init, config.resolved);
-    // BOUNDED body read: drain the raw request under the per-chunk cap instead of the donor's
+    // BOUNDED body read: drain the raw request under the per-chunk cap instead of the naive
     // unbounded `request.arrayBuffer()` — an over-cap chunk is a 413 BEFORE the bytes are buffered
     // into memory or stored (the shared file-runtime byte-bound pattern, generalized).
     const drained = await readBoundedBody(

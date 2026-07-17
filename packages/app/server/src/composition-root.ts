@@ -1129,7 +1129,7 @@ async function deployDeclaredSpec(
   // legitimate no-materialization re-deploy that still VALIDATEs the spec, chokepoint-VERIFIEs every
   // product table, loads handlers, registers triggers, and reports drift — but runs NO product DDL, so
   // it can never drop/recreate a populated store. The mount-vs-deploy decision lives HERE (the only
-  // real deployer), not in the kill-set deploy.ts. The query thunk is reused for `target.query` below.
+  // real deployer), not in the frozen-surface deploy.ts. The query thunk is reused for `target.query` below.
   const queryFn = async (sql: string, params: unknown[]): Promise<Record<string, unknown>[]> =>
     (await db.$client.unsafe(sql, params as never[])) as unknown as Record<string, unknown>[];
 
@@ -1186,7 +1186,7 @@ async function deployDeclaredSpec(
     // a legitimate no-materialization re-deploy that still VALIDATEs the spec, chokepoint-VERIFIEs every
     // product table, loads handlers, registers triggers, and reports drift — but runs NO product DDL, so
     // it can never drop/recreate a populated store. The mount-vs-deploy decision lives HERE (the only
-    // real deployer), not in the kill-set deploy.ts.
+    // real deployer), not in the frozen-surface deploy.ts.
     const preDrift = await detectDrift(specStores, 'public', queryFn);
     const schemaState = classifyProductSchema(specStores, preDrift);
     if (schemaState === 'drifted') {

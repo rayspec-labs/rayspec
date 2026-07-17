@@ -2,7 +2,7 @@
  * The capability mount helper (the audio `rayspec/mount.ts` pattern) — turn the capability into
  * the declarative fragments a RaySpec deployment mounts: the neutral `stores[]`, the ONE
  * authenticated POST submit route (behind the SAME auth/tenancy chain every route uses), and the
- * resolved handler map the engine dispatches. ADDITIVE composition only — no kill-set file is
+ * resolved handler map the engine dispatches. ADDITIVE composition only — no frozen-surface file is
  * touched; a deployment supplies a mount base path + the event sink and gets a fully-wired
  * submit-ingress capability.
  */

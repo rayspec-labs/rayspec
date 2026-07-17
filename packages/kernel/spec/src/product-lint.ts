@@ -1082,7 +1082,7 @@ export function lintProductSpec(spec: ProductSpec): SpecError[] {
           ),
         );
       } else {
-        // per-type `use` discipline (mirrors the donor fixture + the bridge)
+        // per-type `use` discipline (mirrors the reference fixture + the bridge)
         switch (step.type) {
           case 'capability':
             if (!capabilityIds.has(namespace)) {

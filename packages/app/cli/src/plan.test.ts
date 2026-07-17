@@ -197,7 +197,7 @@ describe('plan — gate blocks an unreviewed destructive migration', () => {
   it('a destructive migration is BLOCKED through runPlan and SHORT-CIRCUITS the shadow', async () => {
     // Drive the gate-BLOCKED branch through runPlan's OWN code path (not just the bare scanner) by
     // injecting a destructive DIFF, AND supply a shadow URL + a shadowApply SPY — proving the block
-    // returns BEFORE the shadow runs (shadowApplied:false, the spy never called).
+    // returns BEFORE the shadow migration runs (shadowApplied:false, the spy never called).
     let shadowCalls = 0;
     const r = await runPlan(['rayspec.yaml'], {
       shadowDatabaseUrl: 'postgres://u:p@shadow.host:5432/rayspec_shadow',
@@ -455,7 +455,7 @@ describe('plan — update-mode read-only guard: refuse a baseline-seeded shadow 
     expect(JSON.stringify(r)).not.toContain('postgres://');
   });
 
-  it('additive update + DIFFERENT shadow db name → the guard does NOT fire, the baseline shadow RUNS (the spy fires once)', async () => {
+  it('additive update + DIFFERENT shadow db name → the guard does NOT fire, the baseline shadow migration RUNS (the spy fires once)', async () => {
     // The non-vacuous companion: same host, a DIFFERENT db name, so the guard must NOT fire and the
     // baseline-seeded shadow DOES run — proving the spy-never-called assertion above actually bites.
     let baselineCalls = 0;

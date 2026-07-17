@@ -10,7 +10,7 @@
  * behavior), so a re-introduced local copy or a behavioral divergence fails CI.
  *
  * This is a PRODUCT-side module: it must never import a runtime package (the Tier-B runtimes import
- * @rayspec/spec, not the reverse), and it is NOT `grammar.ts` (kill-set, byte-frozen).
+ * @rayspec/spec, not the reverse), and it is NOT `grammar.ts` (a frozen surface).
  */
 
 /**
@@ -81,7 +81,7 @@ export interface TriggerEventDescriptor {
   /**
    * The payload field the durable run's single-flight idempotency key derives from (C10). MUST be one
    * of `payload_keys`. For the audio event this is `session_id`, and the derived key format
-   * `session_id:<id>:finalized` is byte-frozen (live run identity).
+   * `session_id:<id>:finalized` is byte-stable (live run identity).
    */
   readonly idempotency_key_field: string;
 }

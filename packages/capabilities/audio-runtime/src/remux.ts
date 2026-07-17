@@ -3,7 +3,7 @@
  * pack — the no-pack invariant is about imports). Stitches a track's per-chunk Ogg-Opus files into ONE
  * continuous, seekable Opus file the playback stream can serve.
  *
- * THE DE-RISKED PATH (donor law): the per-chunk Ogg-Opus files (each a SELF-CONTAINED stream,
+ * THE DE-RISKED PATH (the invariant): the per-chunk Ogg-Opus files (each a SELF-CONTAINED stream,
  * OpusHead per chunk — the Tauri-client / fresh-encoder-per-chunk shape) are concatenated with
  * ffmpeg's concat DEMUXER under `-c copy` (NO re-encode/decode; packet count preserved):
  *
@@ -22,7 +22,7 @@
  * ffprobe run via `node:child_process` — the sanctioned trusted-author runtime side-channel
  * (before the external-exposure hardening; the real confinement is the per-tenant sandbox isolate).
  *
- * ⚠ WHY THE REMUX ALONE CANNOT CATCH A SHORT *INPUT* (honest, donor-validated): a byte-truncated
+ * ⚠ WHY THE REMUX ALONE CANNOT CATCH A SHORT *INPUT* (honest, from first principles): a byte-truncated
  * Ogg-Opus chunk is still INTERNALLY VALID (Ogg is page-structured), so ffprobe reports the chunk's
  * own shorter duration with NO error and the concat faithfully copies those pages — the remux has no
  * independent notion of "how long the recording SHOULD be". The independent full-length expectation

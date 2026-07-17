@@ -113,7 +113,7 @@ ${MINIMAL_READ}
   });
 
   it('LEGACY: a DECLARATION-ONLY (no read) artifact_query view may still ref a contract — but it can never mount', () => {
-    // A frozen legacy donor (byte-synced to the committed product fixture)
+    // A frozen legacy fixture (byte-synced to the committed product fixture)
     // declares the conflated form; a declaration-only view keeps parsing (documented judgment call).
     // The separation is STRICT for every view that can EXECUTE (`read` present — the cases above).
     const res = parseProductSpec(
@@ -130,9 +130,9 @@ ${MINIMAL_READ}
     expect(res.ok).toBe(true);
   });
 
-  it('a DECLARATION-ONLY artifact_query ref naming a CAPABILITY contract is REJECTED (carve-out = contract ids ONLY, the frozen donor class)', () => {
+  it('a DECLARATION-ONLY artifact_query ref naming a CAPABILITY contract is REJECTED (carve-out = contract ids ONLY, the frozen legacy class)', () => {
     // Red-first: the legacy carve-out silently accepted ANY read-less artifact_query view naming a
-    // capability contract. The frozen legacy donor (the class the carve-out exists
+    // capability contract. The frozen legacy fixture (the class the carve-out exists
     // for) only ever refs TOP-LEVEL contract ids (top-level response contracts) —
     // everything outside that class is dead-on-arrival.
     const errs = errorsOf(

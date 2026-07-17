@@ -88,7 +88,7 @@ describe('finalizedSessionEventToWorkflowInput', () => {
     expect(descriptor?.payload_keys).toEqual(AUDIO_FINALIZED_SESSION_PAYLOAD_KEYS);
     const wf = finalizedSessionEventToWorkflowInput(finalizedEvent());
     expect(Object.keys(wf.payload).sort()).toEqual([...(descriptor?.payload_keys ?? [])].sort());
-    // The descriptor-declared key field derives the EXACT byte-frozen live key format.
+    // The descriptor-declared key field derives the EXACT byte-stable live key format.
     expect(descriptor?.idempotency_key_field).toBe('session_id');
     expect(sessionScopedIdempotencyKey(descriptor?.idempotency_key_field ?? '')(wf)).toBe(
       'session_id:sess-1:finalized',

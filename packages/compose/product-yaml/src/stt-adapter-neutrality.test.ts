@@ -19,7 +19,7 @@
  *         BOTH the provider adapter package AND the neutral port are scanned; anything else with
  *         network/key access fails closed (the neutral port must be entirely network- and key-free).
  *
- * The adapter source is byte-frozen, so a fail-the-fix that would need to MUTATE it is proven instead
+ * The adapter source is a frozen surface, so a fail-the-fix that would need to MUTATE it is proven instead
  * on a SYNTHETIC leaky sample (as the port-scan matcher self-test already is). Where a real assertion can go
  * red without mutating the frozen source (the extractor self-test; the real-access detection on the
  * frozen adapter), it does.
@@ -444,7 +444,7 @@ describe('STT provider-neutral public surface (structural allowlist)', () => {
   });
 
   it('the allowlist has teeth: a synthetic leaked provider-native field is caught by the exact-set diff', () => {
-    // Cannot mutate the byte-frozen adapter surface, so prove the diff on a SYNTHETIC leaky surface.
+    // Cannot mutate the frozen adapter surface, so prove the diff on a SYNTHETIC leaky surface.
     const leakySurface = [
       'export interface SttTranscript {',
       '  transcript_id: string;',

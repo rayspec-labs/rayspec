@@ -237,7 +237,7 @@ describe('assembleTurnInput — the trust-boundary delimiter jail (the two manda
     expect(assembled.input).toContain('\\u2028');
     expect(assembled.input).toContain('\\u2029');
     expect(assembled.input).toContain('\\u0085');
-    // The escaped forms parse back to the identical value (lossless — the donor law).
+    // The escaped forms parse back to the identical value (lossless — the invariant).
     const dataLine = assembled.input
       .split('\n')
       .find((l) => l.startsWith('{"') && l.includes('\\u2028'));

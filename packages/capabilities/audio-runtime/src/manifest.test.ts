@@ -24,7 +24,7 @@ describe('capability manifest', () => {
     // The compose-time scope check and the per-trigger single-flight key derivation consume
     // THESE fields (the shared TriggerEventDescriptor contract). The payload keys are coupled
     // fail-the-fix to the seam adapter's emitted payload in @rayspec/audio-workflow-bridge
-    // (adapter.test.ts); the key field feeds the byte-frozen live key `session_id:<id>:finalized`.
+    // (adapter.test.ts); the key field feeds the byte-stable live key `session_id:<id>:finalized`.
     const audio = AUDIO_CAPABILITY_MANIFEST.capabilities.find((c) => c.id === 'audio_input');
     const event = audio?.events.find((e) => e.id === 'session_finalized');
     expect(event?.payload_keys).toEqual(['session_id', 'tenant_id', 'tracks', 'source_capability']);

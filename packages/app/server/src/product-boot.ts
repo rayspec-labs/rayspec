@@ -24,7 +24,7 @@
  * now also points at the update seam).
  *
  * This lives in the composition root (server) — the DBOS wiring belongs here (server/src is where the
- * concrete engines are wired), NOT in the kill-set deploy.ts (the family dispatch already exists).
+ * concrete engines are wired), NOT in the frozen-surface deploy.ts (the family dispatch already exists).
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -712,7 +712,7 @@ export const WIRED_EXTRACTION_BACKENDS = ['openai', 'anthropic', 'pi', 'codex'] 
 /**
  * The boot-side backend FACTORY: map an extractor config's `backend` string to the right
  * in-process neutral adapter, demanding ONLY the env the CHOSEN backend needs (fail-closed, actionable).
- * The kill-set `packages/adapters/**` are consumed via their EXPORTED constructors ONLY (zero adapter
+ * The frozen-surface `packages/adapters/**` are consumed via their EXPORTED constructors ONLY (zero adapter
  * source edits). Per-backend env contract (doc-first verified against each adapter's source + the
  * neutral `CAPABILITIES` table):
  *  - openai    — OPENAI_API_KEY (the @openai/agents API-key path; no subscription).
@@ -729,7 +729,7 @@ export const WIRED_EXTRACTION_BACKENDS = ['openai', 'anthropic', 'pi', 'codex'] 
  * `process.env` to the child SDK, and the SDK's credential precedence is `ANTHROPIC_API_KEY >
  * CLAUDE_CODE_OAUTH_TOKEN`. So a deployment that INTENDS the $0 subscription (sets CLAUDE_CODE_OAUTH_TOKEN)
  * but ALSO carries a stray `ANTHROPIC_API_KEY` would SILENTLY bill the API — the subscription token is
- * shadowed. We CANNOT strip inside the kill-set adapter (`packages/adapters/**`), so we warn LOUD boot-side
+ * shadowed. We CANNOT strip inside the frozen-surface adapter (`packages/adapters/**`), so we warn LOUD boot-side
  * when BOTH are present. Returns the banner (NAMES only, never secret VALUES) or null. Does NOT hard-block:
  * a deployer may legitimately want the API-key path.
  */
@@ -1100,7 +1100,7 @@ export function resolveExtractorConfigPath(
 /**
  * Compose the extraction executor instructions: the base prompt (runtime-side config) + the
  * DECLARED `extraction_constraints` (the YAML's binding rules, appended verbatim). This is the
- * "donor prompt + declared contract" assembly the honesty ledger (1.1) requires.
+ * "base prompt + declared contract" assembly the honesty ledger (1.1) requires.
  */
 export function assembleExtractionInstructions(
   promptText: string,
@@ -2302,8 +2302,8 @@ export async function deployProductYamlSpec(
           // Thread the product-profile conflict-key carve-out (computed above from
           // `deriveConflictKeys`) onto the engine so a store-route 409 on a GLOBAL-unique key column
           // uses the generic message (no cross-tenant existence oracle), while a tenant-scoped author-
-          // `unique` column is still named. deploy() builds `engine` WITHOUT this (kill-set, byte-frozen);
-          // we add it HERE, in the deployer-owned buildApp seam, so the kill-set stays untouched.
+          // `unique` column is still named. deploy() builds `engine` WITHOUT this (a frozen surface);
+          // we add it HERE, in the deployer-owned buildApp seam, so the frozen surface stays untouched.
           conflictKeys,
           ...(blobFactory ? { blobFactory } : {}),
           ...(mediaTokenService ? { mediaTokenService } : {}),

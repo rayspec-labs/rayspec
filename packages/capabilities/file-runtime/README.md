@@ -8,7 +8,7 @@ instructions — the trust boundary); this package carries zero product vocabula
 
 A record×audio HYBRID by design: `@rayspec/record-runtime` donates the manifest/event/submit
 template (JSON side); `@rayspec/audio-runtime` donates the stream-route byte transport — but the
-upload core is **designed, not mirrored**: never the audio donor's unbounded `arrayBuffer()`.
+upload core is **designed, not mirrored**: never the audio path's unbounded `arrayBuffer()`.
 
 ## The byte bound
 

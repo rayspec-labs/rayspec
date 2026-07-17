@@ -29,7 +29,7 @@
  * HONEST LIMIT (read this before overselling it).
  *   This seals the SANCTIONED DOOR, not the Set. `registerScopedTables` stays reachable from
  *   `@rayspec/db/testing` (test/gate code only) and UNSEALED — a real Set seal would need a flag INSIDE
- *   the kill-set `tenant-db.ts`, which is out of scope here. The property this module actually ships is:
+ *   the frozen-surface `tenant-db.ts`, which is out of scope here. The property this module actually ships is:
  *   `@rayspec/db/testing` is banned across `packages/**\/src` (biome `noRestrictedImports`) AND the
  *   `@rayspec/db/composition` subpath is banned in the scoped roots (biome + the tenant-chokepoint gate),
  *   so SHIPPED code cannot register a product table post-boot at all — only this validated door can, and

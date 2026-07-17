@@ -13,7 +13,7 @@
  *  3. THE EVENT IS BUILT FROM THE STORED ROW ONLY (row-event.ts) — never from a request. The
  *     ledger is INSERT-only, so the insert's RETURNING row IS the authoritative stored row (no
  *     concurrent-mutation path exists on a persisted user turn; the explicit re-read the
- *     record/file donors need for their replace/seal arms has nothing to catch here — deliberate).
+ *     record/file capabilities need for their replace/seal arms has nothing to catch here — deliberate).
  *  4. DIFFERENT-TEXT-SAME-MESSAGE_ID IS LOUD, NEVER A SILENT DEDUP — a re-POST whose text differs
  *     from the stored turn is a 409 `conversation_message_conflict` with ZERO row change and ZERO
  *     emit OF THE REQUEST'S TEXT. The STORED authoritative event IS re-emitted on this path (the
@@ -38,7 +38,7 @@
  * a lost different-message race re-reads max and takes the next seq. Under the unit fakes the same
  * typed 409 returns and the fake's tx-poison model pins that the violation stayed savepoint-scoped.
  *
- * EMIT-FAULT POSTURE (donor-faithful): the FIRST-persist emit and the IDENTICAL-re-POST re-emit
+ * EMIT-FAULT POSTURE (wire-faithful): the FIRST-persist emit and the IDENTICAL-re-POST re-emit
  * are DELIBERATELY NOT best-effort — they are the crash-recovery mechanism, so a transient sink
  * fault SURFACES (500) to keep the client retrying until the turn is enqueued; swallowing it would
  * re-open the silent zero-run. ONLY the divergent-409 heal is best-effort (the 409 is a PERMANENT

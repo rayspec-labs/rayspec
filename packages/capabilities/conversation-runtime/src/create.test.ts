@@ -265,7 +265,7 @@ describe('createConversation — the concurrent-divergent-create TOCTOU (the aut
           raced = true;
           // Model the RACER's first-create upsert landing AFTER ours (a racer that read "no row"
           // BEFORE our upsert — un-stageable directly under single-threaded fakes) through the
-          // REAL fake upsert semantics: the DO-UPDATE overwrite is exactly the record-donor
+          // REAL fake upsert semantics: the DO-UPDATE overwrite is exactly the record-capability
           // race-window caveat create.ts documents.
           await makeFakeConversationDb(tables, TENANT_A).upsert(
             CONVERSATIONS_STORE,

@@ -1,7 +1,7 @@
 /**
  * `rayspec deploy` — the DB-free unit surface: `--dry-run` compose (happy + fail-closed paths), the
  * usage-error mapping, and the STRUCTURAL guards that keep the command on the sanctioned path (it must
- * never build product tables itself, and must never import the kill-set `deploy()`).
+ * never build product tables itself, and must never import the frozen-surface `deploy()`).
  *
  * The long-running serve path + the real store registration are proven on ground truth in
  * deploy.db.test.ts (it boots acme-notes through the real CLI and hits a declared route over HTTP).
@@ -96,7 +96,7 @@ describe('rayspec deploy --dry-run', () => {
 
 describe('rayspec deploy — structural guards (stays on the sanctioned path)', () => {
   const rawSrc = readFileSync(join(here, 'deploy.ts'), 'utf8');
-  // Strip comments so a prose mention of the kill-set `deploy()` is not a false positive on the
+  // Strip comments so a prose mention of the frozen-surface `deploy()` is not a false positive on the
   // call-site checks below (we assert the CODE never calls it, not that the file never names it).
   const code = rawSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
 
@@ -111,9 +111,9 @@ describe('rayspec deploy — structural guards (stays on the sanctioned path)', 
     expect(code).not.toMatch(/registerProductTables:\s*registerProductStores/);
   });
 
-  it('wraps assembleServer, NOT the kill-set deploy()', () => {
+  it('wraps assembleServer, NOT the frozen-surface deploy()', () => {
     expect(code).toMatch(/assembleServer/);
-    // deploy() (the kill-set roll-out) is only referenced via the DeployError TYPE it exports — never
+    // deploy() (the frozen-surface roll-out) is only referenced via the DeployError TYPE it exports — never
     // imported or called as a function in the CODE.
     expect(code).not.toMatch(/\bdeploy\s*\(/);
   });

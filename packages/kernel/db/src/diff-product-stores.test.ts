@@ -710,7 +710,7 @@ describe('business-key FK (referencesColumn) — compound DDL + byte-fidelity', 
 
   it('an ID-TARGET FK is emitted BYTE-IDENTICALLY to the historic single-column `_id_fk` form', () => {
     const sql = generateProductSql([PARENT, CHILD_ID]);
-    // The exact pre-business-key DDL — a regression guard on the byte-frozen id-target path.
+    // The exact pre-business-key DDL — a regression guard on the byte-stable id-target path.
     expect(sql).toContain(
       'ALTER TABLE "transcripts" ADD CONSTRAINT "transcripts_meeting_id_meetings_id_fk" ' +
         'FOREIGN KEY ("meeting_id") REFERENCES "public"."meetings"("id") ' +

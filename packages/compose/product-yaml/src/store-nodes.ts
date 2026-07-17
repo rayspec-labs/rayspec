@@ -209,7 +209,7 @@ export function makeStoreReadNode(cfg: StoreNodeConfig): CapabilityNodeHandler {
  *    verify-read on the key column: row present → completed `wrote: 0`; absent → the typed failure.
  * The failure message is CONTENT-FREE re values (store + key COLUMN, never the key VALUE — no new
  * cross-tenant oracle surface beyond failure visibility). The structural fix (a tenant-scoped
- * composite unique) needs kill-set StoreSpec vocabulary — a deferred capability.
+ * composite unique) needs frozen-surface StoreSpec vocabulary — a deferred capability.
  */
 export function makeStoreWriteNode(cfg: StoreNodeConfig): CapabilityNodeHandler {
   return async (ctx): Promise<CapabilityInvocationResult> => {

@@ -21,7 +21,7 @@
  *
  * `payload.record_id` is what the descriptor-derived `payloadFieldIdempotencyKey('record_id')`
  * keys the durable run on (`record_id:<id>` — the generic format; the `:finalized` suffix stays
- * audio-only, byte-frozen live run identity). Because `id` is ALSO record-scoped, the dispatcher's
+ * audio-only, byte-stable live run identity). Because `id` is ALSO record-scoped, the dispatcher's
  * missing-field fallback (`event:${id}`) stays per-record-stable too. So a client re-submit
  * (retry = redelivery) converges on ONE durable run (C10 single-flight).
  */

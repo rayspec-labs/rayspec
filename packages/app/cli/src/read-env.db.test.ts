@@ -113,7 +113,7 @@ describe.skipIf(!hasShadow)(
       process.chdir(dir);
 
       // Remove BOTH from the ambient env: the ONLY way plan can see the shadow URL is via the loader.
-      // (DATABASE_URL stays removed so the read-only guard has no real-DB target → the sibling shadow runs unimpeded.)
+      // (DATABASE_URL stays removed so the read-only guard has no real-DB target → the sibling shadow migration runs unimpeded.)
       const prevShadow = process.env.SHADOW_DATABASE_URL;
       const prevDb = process.env.DATABASE_URL;
       delete process.env.SHADOW_DATABASE_URL;

@@ -107,7 +107,7 @@ const TENANT_A = '00000000-0000-4000-8000-0000000000a1';
 const SESSION = 'e2e-sess-1';
 const MEDIA_SECRET = 'acme-e2e-media-secret-at-least-32-bytes';
 
-/** The deployment's Tier-A product stores (transcript sink + artifact collection — donor-shaped). */
+/** The deployment's Tier-A product stores (transcript sink + artifact collection — spec-shaped). */
 const PRODUCT_STORES: StoreSpec[] = [
   {
     name: 'track_transcripts',
@@ -530,7 +530,7 @@ describe.skipIf(!hasDb)('acme-notes fake-provider e2e through the REAL deploy pa
     expect(absentBody.word_count).toBe(0);
     expect(absentBody.words).toEqual([]);
 
-    // The donor 400 contract (an out-of-enum track).
+    // The specified 400 contract (an out-of-enum track).
     const bad = await get(`/sessions/${SESSION}/other/transcript`, tokenA);
     expect(bad.status).toBe(400);
   });
@@ -566,7 +566,7 @@ describe.skipIf(!hasDb)('acme-notes fake-provider e2e through the REAL deploy pa
     expect(body.queries).toEqual([]); // the empty-evidence query was DROPPED
     expect(body.labels).toEqual(expectedByKind('label'));
 
-    // The never-processed session: the zeroed shape (donor absent contract).
+    // The never-processed session: the zeroed shape (the specified absent contract).
     const absent = await get('/sessions/never-processed/notes', tokenA);
     expect(absent.status).toBe(200);
     expect(await absent.json()).toEqual({

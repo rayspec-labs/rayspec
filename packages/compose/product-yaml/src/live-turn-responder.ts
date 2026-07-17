@@ -8,7 +8,7 @@
  *
  * ── THE DETERMINISTIC REPLY RUN ID (C10 — the convergence anchor), ATTEMPT-SCOPED ──────
  * `replyAttemptRunId(turnRef, n)` derives a UUID-shaped id from the turn's TENANT-PREFIXED ledger
- * `turn_ref` plus the ATTEMPT ordinal (the `agentSubRunId` donor recipe; attempt 0 is byte-
+ * `turn_ref` plus the ATTEMPT ordinal (the `agentSubRunId` recipe; attempt 0 is byte-
  * compatible with the original `replyRunId(turnRef)`): every converging retry of one turn WALKS
  * the same deterministic id chain (tenant-disjoint by the embedded tenant), which is what makes
  * the ATTACH below possible.
@@ -66,14 +66,14 @@ export interface LiveTurnResponderConfig {
   readonly tdbFor: (tenantId: string) => TenantDb;
 }
 
-/** Shape a sha256 hex digest into the v5-shaped UUID (the `agentSubRunId` donor recipe). */
+/** Shape a sha256 hex digest into the v5-shaped UUID (the `agentSubRunId` recipe). */
 function uuidShaped(hex: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
 /**
  * A deterministic, UUID-shaped reply run id from the tenant-prefixed ledger turn_ref (the
- * `agentSubRunId` donor recipe — sha256, v5-shaped). Tenant-disjoint by the embedded tenant.
+ * `agentSubRunId` recipe — sha256, v5-shaped). Tenant-disjoint by the embedded tenant.
  * This is ATTEMPT 0 of the attempt-id chain (`replyAttemptRunId(turnRef, 0)`).
  */
 export function replyRunId(turnRef: string): string {

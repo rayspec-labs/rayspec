@@ -401,7 +401,7 @@ describe('submitTurn — the closed body shape (no spoof channel; the structural
     }
   });
 
-  it('DONOR-PARITY: the WHOLE turn body is byte-bounded (the record whole-payload discipline) — an oversize junk sibling with a SMALL text is the typed 413 BEFORE field validation, with ZERO side effects', async () => {
+  it('WHOLE-BODY-BOUND: the WHOLE turn body is byte-bounded (the record whole-payload discipline) — an oversize junk sibling with a SMALL text is the typed 413 BEFORE field validation, with ZERO side effects', async () => {
     const tables = new SharedConversationTables();
     seedConversation(tables);
     const s = sink();
@@ -422,7 +422,7 @@ describe('submitTurn — the closed body shape (no spoof channel; the structural
     expect(s.emitCount()).toBe(0); // zero emit
   });
 
-  it('DONOR-PARITY: the whole-body bound is EXACT against the real config — one measured byte over is the 413; below it the CLOSED SHAPE still owns rejection (422 unknown key)', async () => {
+  it('WHOLE-BODY-BOUND: the whole-body bound is EXACT against the real config — one measured byte over is the 413; below it the CLOSED SHAPE still owns rejection (422 unknown key)', async () => {
     const cfg = resolveConversationConfig();
     const s = sink();
     // The shallow measure: own key names + own string values, raw UTF-8 bytes.
@@ -712,7 +712,7 @@ describe('submitTurn — the C10 turn-seq races (deterministic TOCTOU interposer
   });
 });
 
-describe('submitTurn — emit faults on the PRIMARY paths surface (the liveness decision, donor-faithful)', () => {
+describe('submitTurn — emit faults on the PRIMARY paths surface (the liveness decision, wire-faithful)', () => {
   it('a transient sink fault on the FIRST turn PROPAGATES (the row stays persisted under the unit-fake posture; the retry re-emits — the dual posture)', async () => {
     const tables = new SharedConversationTables();
     seedConversation(tables);

@@ -1,6 +1,6 @@
 /**
  * The `file_input.upload` core operation — the BOUNDED single-shot raw-byte ingest. DESIGNED, not
- * mirrored: the audio donor's unbounded
+ * mirrored: the audio path's unbounded
  * `await request.arrayBuffer()` is exactly what this must never do — an authenticated caller must
  * not be able to buffer an unbounded body into memory.
  *

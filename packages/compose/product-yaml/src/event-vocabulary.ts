@@ -30,7 +30,7 @@ import { ProductComposeError } from './errors.js';
 /**
  * The canonical event ids whose derived idempotency key keeps the LEGACY `<field>:<value>:finalized`
  * format (`sessionScopedIdempotencyKey`). Exactly ONE entry, like the alias table — the audio
- * event's key feeds LIVE deployment run identity and is byte-frozen (a re-key duplicates live
+ * event's key feeds LIVE deployment run identity and is byte-stable (a re-key duplicates live
  * runs on redelivery). Every OTHER event derives the clean generic `<field>:<value>` format
  * (`payloadFieldIdempotencyKey`) — new events must NOT join this set.
  */

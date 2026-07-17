@@ -15,7 +15,7 @@
  *
  * This is the seam composition, promoted from the test recipes
  * (audio-workflow-seam.db.test.ts + views-seam.db.test.ts) into its production owner — invoked by
- * `deploy` (the single kill-set touch), which maps `ProductComposeError` onto `DeployError`.
+ * `deploy` (the single frozen-surface touch), which maps `ProductComposeError` onto `DeployError`.
  *
  * ── PARTIAL-UNLOCK HONESTY (fail-closed by construction) ────────────────────────────────────────
  * Everything the composition cannot SERVE rejects the deploy naming the section — never a silent
@@ -263,7 +263,7 @@ export interface ProductYamlRollout {
    * `agentIds` lists the extractors this executor serves — compose fail-closed-verifies it covers every
    * `spec.extractors`. Exactly one of `agents` / `liveAgent` must be supplied when `spec.extractors` is
    * non-empty. (`buildNodeForAgent` builds a per-agent node — not one shared node for all agents;
-   * deploy.ts (kill-set) imports `ProductYamlRollout` but does NOT destructure `liveAgent`, so this
+   * deploy.ts (frozen surface) imports `ProductYamlRollout` but does NOT destructure `liveAgent`, so this
    * per-agent shape keeps deploy.ts compiling byte-unchanged.)
    */
   readonly liveAgent?: {

@@ -13,7 +13,7 @@ of the `audio_input` + `media_playback` capability contracts.
   and the machine-readable `manifest`.
 - **RaySpec binding** (`@rayspec/audio-runtime/rayspec`): `mountAudioCapability(...)` returns the neutral
   `stores[]`, the `api[]` routes, and the resolved handler map to wire behind RaySpec's real auth/tenancy
-  chain (additive — touches no kill-set file). Handler factories bind the platform `RouteHandlerInit`/
+  chain (additive — touches no frozen-surface file). Handler factories bind the platform `RouteHandlerInit`/
   `StreamRouteHandlerInit` straight into the core ports.
 
 ## Behavior (declared 1.0 semantics)

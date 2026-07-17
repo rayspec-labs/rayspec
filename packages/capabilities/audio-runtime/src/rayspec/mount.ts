@@ -2,7 +2,7 @@
  * The capability mount helper — turn the capability into the declarative fragments a
  * RaySpec deployment mounts: the neutral `stores[]`, the `api[]` route set (behind the SAME auth/tenancy
  * chain every route uses), and the resolved handler map (id → route-kind handler) the engine dispatches.
- * ADDITIVE composition only — this touches no kill-set file; a product supplies a mount base path + the
+ * ADDITIVE composition only — this touches no frozen-surface file; a product supplies a mount base path + the
  * event sink and gets a fully-wired audio capability.
  */
 import type { RouteHandler } from '@rayspec/handler-sdk';

@@ -3,7 +3,7 @@
  * into the declarative fragments a RaySpec deployment mounts: the neutral `stores[]`, the TWO
  * authenticated routes (the PUT idempotent create + the POST turn submit, both plain
  * `{kind:'handler'}` JSON routes — behind the SAME auth/tenancy chain every route uses), and the
- * resolved handler map the engine dispatches. ADDITIVE composition only — no kill-set file is
+ * resolved handler map the engine dispatches. ADDITIVE composition only — no frozen-surface file is
  * touched; a deployment supplies a mount base path + the event sink and gets a fully-wired
  * conversational-ingress capability. (the fragments ship UNMOUNTED; the conditional compose
  * mount wires them in.)

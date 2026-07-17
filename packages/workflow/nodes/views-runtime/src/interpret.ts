@@ -10,22 +10,22 @@
  * REQUEST LAWS (the DECLARED read semantics — EXCEPT where marked ADDITIVE; the package README's
  * "Request laws" section is the prose companion):
  *  - PARAMS: every declared param is validated against its closed preset (+ optional enum). A
- *    missing-required / mis-shaped param → 400 `{ error: 'bad_request', detail }` (the donor's
+ *    missing-required / mis-shaped param → 400 `{ error: 'bad_request', detail }` (the canonical
  *    behavior; `detail` wording is product-neutral — the comparator treats detail as
- *    informational). Undeclared query params are IGNORED (donor-compatible; request params are DATA).
+ *    informational). Undeclared query params are IGNORED (wire-compatible; request params are DATA).
  *  - LEAF TYPES: a raw value matching the declared type passes through; anything else becomes the
- *    declared literal `default` (default `null`) — the donor's `typeof x === 'number' ? x : null`
+ *    declared literal `default` (default `null`) — the canonical `typeof x === 'number' ? x : null`
  *    family as stable, declared behavior.
  *  - PAGINATION (list): `limit` missing/non-integer/`< 1` → default_limit (never an empty page);
  *    `> max_limit` → max_limit; `offset` missing/non-integer/`< 0` → 0. `total` is the FULL
  *    (tenant-scoped, post-exclude) match count; `next_offset` = `offset+limit < total ? … : null`.
  *    READ SHAPE (TEN-1): the page is a BOUNDED server-side LIMIT/OFFSET select + a `count` for the
- *    total (wire-identical to the donor's full-read-and-slice math, without the unbounded
+ *    total (wire-identical to the canonical full-read-and-slice math, without the unbounded
  *    within-tenant read); falls back to the full read + in-interpreter slice when the facade offers
  *    no `count` or the view declares an in-memory `exclude`.
  *  - ABSENT (single): no row → the DECLARED `read.absent` DTO (200) or `409 { error: 'not_ready' }`
  *    per `absent_state` — never an improvised shape, never a 404 for a mid-processing read model.
- *  - CONDITIONAL READ (`conditional_read: etag`, GET) — ADDITIVE vs the frozen donor (the donor's
+ *  - CONDITIONAL READ (`conditional_read: etag`, GET) — ADDITIVE vs the frozen precedent (the earlier
  *    read routes served neither an ETag nor a 304): a strong ETag (sha-256 of the canonical DTO
  *    JSON) is set on the 200; a matching `If-None-Match` → bodyless 304 with the same ETag.
  *    `If-Range` is NOT a view behavior (byte-range serving is Tier-B media capability — the
@@ -56,7 +56,7 @@ import type { CompiledView, StoreIndex } from './compile.js';
 // param validation (the closed presets)
 // ---------------------------------------------------------------------------------------
 
-/** The frozen safe-id shape (the donor's id-param rule). */
+/** The frozen safe-id shape (the canonical id-param rule). */
 const SAFE_ID_RE = /^[A-Za-z0-9_.-]{1,128}$/;
 const INT_RE = /^\d+$/;
 const MAX_STRING_PARAM = 1024;
@@ -166,7 +166,7 @@ function getPath(value: unknown, path: readonly string[]): unknown {
 // pagination (the frozen clamp law)
 // ---------------------------------------------------------------------------------------
 
-/** The donor's clamp: undefined/''/non-integer/`< min` → def; `> max` → max. */
+/** The canonical clamp: undefined/''/non-integer/`< min` → def; `> max` → max. */
 function clampInt(raw: string | undefined, def: number, min: number, max: number): number {
   if (raw === undefined || raw === '') return def;
   const n = Number(raw);
@@ -189,7 +189,7 @@ interface RequestCtx {
    * DF-2: the per-REQUEST sub-read memo. Key = the full query signature (store + resolved match
    * values + exclude + order_by + limit); value = the post-exclude rows promise. Identical sub-reads
    * within ONE interpretation pass (e.g. three per-track lookups on the same (store, match)) share
-   * ONE select AND one row set — so they can never stitch fields from DIFFERENT rows, and the donor's
+   * ONE select AND one row set — so they can never stitch fields from DIFFERENT rows, and the canonical
    * one-select-per-track read cost is reproduced. Scoped to the request (created per handler call);
    * all reads run inside the request's one tenant transaction, so memoization cannot change results.
    */
@@ -269,7 +269,7 @@ function runSubRead(
   return pending;
 }
 
-/** In-memory exclusion (strict equality — a malformed flag never hides a row; the donor's `=== true`). */
+/** In-memory exclusion (strict equality — a malformed flag never hides a row; the canonical `=== true`). */
 function applyExclude(rows: StoreRow[], exclude: ViewSubRead['exclude'] | undefined): StoreRow[] {
   if (!exclude || exclude.length === 0) return rows;
   return rows.filter((row) => !exclude.some((ex) => row[ex.column] === ex.equals));
@@ -430,7 +430,7 @@ async function projectCollectTop(
 // the route handler builder
 // ---------------------------------------------------------------------------------------
 
-/** The donor's 400 body (product-neutral detail — the comparator compares on {status, error}). */
+/** The canonical 400 body (product-neutral detail — the comparator compares on {status, error}). */
 function badRequest(param: string) {
   return httpResponse({
     status: 400,
@@ -462,7 +462,7 @@ export function makeViewRouteHandler(compiled: CompiledView, stores: StoreIndex)
   const pagination = view.pagination;
 
   return async (init: RouteHandlerInit): Promise<unknown> => {
-    // ---- 1. validate declared params (400 on violation — the donor's behavior) -------------
+    // ---- 1. validate declared params (400 on violation — the canonical behavior) -------------
     const validated = validateParams(declaredParams, init.params);
     if (!validated.ok) return badRequest(validated.param);
     // The sub-read memo is REQUEST-SCOPED (DF-2): fresh per handler call, never shared across requests.
@@ -504,7 +504,7 @@ export function makeViewRouteHandler(compiled: CompiledView, stores: StoreIndex)
       // into memory (an in-memory `exclude` needs every row for the post-exclude total). The WIRE
       // output is identical to the full-read law (same DTO, same total/next_offset — the goldens pin
       // it); both statements run inside the request's ONE tenant transaction. Falls back to the
-      // donor-shaped full read + in-interpreter slice when `count` is unavailable (older facades) or
+      // spec-shaped full read + in-interpreter slice when `count` is unavailable (older facades) or
       // `exclude` is declared.
       const bounded =
         typeof ctx.db.count === 'function' &&
@@ -515,7 +515,7 @@ export function makeViewRouteHandler(compiled: CompiledView, stores: StoreIndex)
       let limit: number;
       let offset: number;
       // Pagination params are PAGINATION-OWNED (lint rejects a params collision), so they are read
-      // from the RAW request params — the clamp law IS their validation (donor-identical: a
+      // from the RAW request params — the clamp law IS their validation (wire-identical: a
       // malformed value clamps, it never 400s). Read as OWN properties (FCY-2).
       const rawLimit = pagination?.limit_param
         ? ownParam(init.params, pagination.limit_param)

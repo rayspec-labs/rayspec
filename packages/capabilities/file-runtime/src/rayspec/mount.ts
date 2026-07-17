@@ -4,7 +4,7 @@
  * authenticated routes (the raw-byte PUT upload as a `{kind:'stream', mode:'ingest'}` route + the
  * JSON POST submit as a `{kind:'handler'}` route — behind the SAME auth/tenancy chain every route
  * uses; the stream interpreter gates ingest on `store:write` exactly like the audio capability),
- * and the resolved handler map the engine dispatches. ADDITIVE composition only — no kill-set file
+ * and the resolved handler map the engine dispatches. ADDITIVE composition only — no frozen-surface file
  * is touched; a deployment supplies a mount base path + the event sink and gets a fully-wired
  * file-ingest capability.
  */

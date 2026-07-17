@@ -20,7 +20,7 @@ import type { TriggerEventDescriptor } from '@rayspec/spec';
  * scope contract — coupled fail-the-fix to the seam adapter's emitted payload by
  * `@rayspec/audio-workflow-bridge` adapter.test.ts), and `idempotency_key_field` (the payload field
  * the durable run's single-flight key derives from — `session_id`; the derived key format
- * `session_id:<id>:finalized` is byte-frozen live run identity). This extension only NARROWS the
+ * `session_id:<id>:finalized` is byte-stable live run identity). This extension only NARROWS the
  * dedup-scope label: session-scoped single-flight for a dual-track finalize.
  */
 export interface CapabilityEventDescriptor extends TriggerEventDescriptor {

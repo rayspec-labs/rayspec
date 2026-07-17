@@ -26,7 +26,7 @@ interface ConversationManifest {
 }
 
 const manifestJsonPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'manifest.json');
-// The neutral surface must name none of: the donor product vocabulary, the acceptance-product
+// The neutral surface must name none of: the source product vocabulary, the acceptance-product
 // vocabulary, or the conversational-product vocabulary (incl. the informal 'chat' token — this
 // capability is deliberately named CONVERSATION on its neutral surface). Collision-checked: none of
 // these appears on the capability's own neutral surface or manifest.

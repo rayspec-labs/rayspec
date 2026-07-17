@@ -261,7 +261,7 @@ export function makeRouteHandler(args: {
       // negotiation lives in the handler — e.g. the conversational turn route reads `init.headers.
       // accept`); an ABSENT `sse` (every existing httpResponse consumer) falls through to the
       // byte-identical JSON path below. The producer OWNS its terminal/error framing (an SSE 200 is
-      // already flushed — the status cannot change mid-stream; the donor honesty note); if it
+      // already flushed — the status cannot change mid-stream; the canonical honesty note); if it
       // throws unexpectedly the stream tears down and the (independently-persisted) operation still
       // converges on the client's idempotent retry.
       if (result.sse) {

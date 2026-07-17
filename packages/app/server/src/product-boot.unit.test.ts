@@ -46,13 +46,13 @@ function acmeSpec(): ProductSpec {
   return parsed.value;
 }
 
-describe('assembleExtractionInstructions (donor prompt + declared contract — ledger 1.1)', () => {
+describe('assembleExtractionInstructions (base prompt + declared contract — ledger 1.1)', () => {
   it('composes the base prompt AND every declared extraction_constraint', () => {
     const spec = acmeSpec();
     const constraints = spec.extractors[0]?.extraction_constraints ?? [];
     expect(constraints.length).toBeGreaterThan(0);
     const out = assembleExtractionInstructions('BASE-PROMPT', constraints);
-    expect(out).toContain('BASE-PROMPT'); // the donor prompt is present
+    expect(out).toContain('BASE-PROMPT'); // the base prompt is present
     for (const c of constraints) expect(out).toContain(`- ${c}`); // every declared constraint composed
   });
   it('returns the base prompt unchanged when there are no constraints', () => {
