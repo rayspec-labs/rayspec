@@ -71,6 +71,12 @@ assert_eq() {
 echo "== target server: $PGUSER@$PGHOST:$PGPORT (from SHADOW_DATABASE_URL); throwaway DB: $DRYRUN_DB =="
 psql -d postgres -c "DROP DATABASE IF EXISTS $DRYRUN_DB;" >/dev/null
 psql -d postgres -c "CREATE DATABASE $DRYRUN_DB OWNER $PGUSER;" >/dev/null
+# Harden the throwaway DB to match the platform's hardened DBs: revoke the default PUBLIC CONNECT so
+# only the owner may connect (the owner keeps CONNECT via ownership, so the dry-run below is unaffected).
+psql -d postgres -c "REVOKE CONNECT ON DATABASE $DRYRUN_DB FROM PUBLIC;" >/dev/null
+# Fail the run if PUBLIC still has CONNECT — makes the hardening self-checking (has_database_privilege
+# returns 't'/'f'; after the revoke it must be 'f').
+psql -d postgres -tAc "SELECT has_database_privilege('public','$DRYRUN_DB','CONNECT')" | grep -qx f || { echo "shadow-dryrun: PUBLIC still has CONNECT on $DRYRUN_DB" >&2; exit 1; }
 
 # NO pre-seed. 0000 is now self-bootstrapping (it CREATEs runs/journal_steps/
 # conversation_items in their authentic spike pre-state, then retrofits them), so the chain is
@@ -303,6 +309,11 @@ trap 'cleanup; cleanup_product' EXIT
 echo "== build the throwaway PRODUCT DB ($DRYRUN_PRODUCT_DB): orgs root + generated product migration =="
 psql -d postgres -c "DROP DATABASE IF EXISTS $DRYRUN_PRODUCT_DB;" >/dev/null
 psql -d postgres -c "CREATE DATABASE $DRYRUN_PRODUCT_DB OWNER $PGUSER;" >/dev/null
+# Harden the throwaway product DB to match the platform's hardened DBs: revoke the default PUBLIC
+# CONNECT so only the owner may connect (the owner keeps CONNECT via ownership; the dry-run is unaffected).
+psql -d postgres -c "REVOKE CONNECT ON DATABASE $DRYRUN_PRODUCT_DB FROM PUBLIC;" >/dev/null
+# Fail the run if PUBLIC still has CONNECT — makes the hardening self-checking (must be 'f' post-revoke).
+psql -d postgres -tAc "SELECT has_database_privilege('public','$DRYRUN_PRODUCT_DB','CONNECT')" | grep -qx f || { echo "shadow-dryrun: PUBLIC still has CONNECT on $DRYRUN_PRODUCT_DB" >&2; exit 1; }
 # The orgs cascade root (minimal — the generic product assertions need orgs.id only).
 psql -d "$DRYRUN_PRODUCT_DB" >/dev/null <<'SQL'
 CREATE TABLE orgs (
