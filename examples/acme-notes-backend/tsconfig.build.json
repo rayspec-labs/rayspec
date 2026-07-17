@@ -1,0 +1,15 @@
+{
+  "//": "Build config for the custom escape-hatch handlers. `rayspec` serve/deploy runs on a compiled JavaScript runtime, so a backend whose spec references custom `.ts` handlers must compile them to `.js` before deploy. This config transpiles handlers/*.ts to ESM `.js` under dist/ (see build.mjs). The handler modules import @rayspec/handler-sdk type-only, so `noCheck` (transpile-only) needs no dependency resolution and the type imports are erased.",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2022",
+    "verbatimModuleSyntax": true,
+    "removeComments": true,
+    "noCheck": true,
+    "types": [],
+    "rootDir": ".",
+    "outDir": "./dist"
+  },
+  "include": ["handlers/**/*.ts"]
+}

@@ -122,6 +122,13 @@ node packages/app/server/dist/serve.js
 See **[getting-started](./docs/getting-started.md)** for the full walkthrough,
 including provisioning the first tenant and making an authenticated request.
 
+The quickstart above deploys a **product-profile** document — pure declaration, no
+build step. A **backend-profile** document that ships custom `.ts` escape-hatch
+handlers must be compiled to `.js` first (the serve runtime imports compiled
+modules); `examples/acme-notes-backend` includes a `build.mjs` build step, described
+in
+[getting-started](./docs/getting-started.md#the-backend-profile-direct-agent-boot).
+
 ---
 
 ## Architecture at a glance

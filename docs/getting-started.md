@@ -444,18 +444,35 @@ a lead → poll loop end to end. (`examples/local-boot/` is now only a dev
 convenience — it provisions a throwaway dev database and drives the redeploy/update
 flow — **not** a requirement for running agents.)
 
-**Custom handlers ship compiled.** A backend-profile document may also point at
-custom escape-hatch handler modules. The production serve runtime imports
-**compiled** modules, so deploying a backend document that references `.ts`
+**Custom handlers compile before you deploy.** A backend-profile document may also
+point at custom escape-hatch handler modules. The production serve runtime imports
+each `handlers[].module` with a plain dynamic import on a JavaScript-only runtime —
+it ships no `.ts` loader — so deploying a backend document that references `.ts`
 handlers fails closed at roll-out:
 
 ```
 handler '…': failed to import module 'handlers/….ts': Unknown file extension ".ts"
 ```
 
-Compile such handlers to `.js`/`.mjs` before deploying — the deploy runtime ships
-no turnkey `.ts` loader. Use [`rayspec gen-handler`](./cli-reference.md#gen-handler)
-to scaffold a handler, and `doctor` to validate any spec before you deploy it.
+The fix is a build step: transpile the handlers to `.js` and deploy a spec that
+references the compiled modules. (The product profile above carries no code, so it
+needs no build — this applies only to a backend profile with custom handlers.) The
+`examples/acme-notes-backend` backend ships one:
+
+```bash
+# Transpile handlers/*.ts -> dist/handlers/*.js and write a deploy-ready dist/rayspec.yaml
+node examples/acme-notes-backend/build.mjs
+
+# Deploy the compiled artifact — its handlers now resolve to .js
+$RAYSPEC deploy examples/acme-notes-backend/dist/rayspec.yaml
+```
+
+`build.mjs` is a thin wrapper around `tsc` (see `tsconfig.build.json`) plus a copy
+that rewrites each `module: handlers/<name>.ts` reference to the compiled `.js`.
+Adapt it for your own backend, or run any equivalent transpile — the runtime only
+requires that every `handlers[].module` resolves to a compiled `.js`/`.mjs`. Use
+[`rayspec gen-handler`](./cli-reference.md#gen-handler) to scaffold a handler, and
+`doctor` to validate any spec before you deploy it.
 
 For the security boundaries that apply before you expose any of this beyond a
 trusted local machine, read

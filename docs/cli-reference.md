@@ -375,18 +375,22 @@ change is applied by the explicit `--apply-migration` flag below.
   message and exits `1`.
 - **Profiles — declaration vs. custom code.** `deploy` runs a **product-profile**
   document (like `examples/acme-notes/acme-notes.product.yaml`) directly — it is
-  pure declaration with no custom code. A **backend-profile** document may ship
-  custom escape-hatch handler modules; the serve runtime imports **compiled**
-  modules, so a backend document that references `.ts` handlers fails closed at
-  roll-out:
+  pure declaration with no custom code and no build step. A **backend-profile**
+  document may ship custom escape-hatch handler modules; the serve runtime imports
+  **compiled** modules, so a backend document that references `.ts` handlers fails
+  closed at roll-out:
 
   ```
   handler '…': failed to import module 'handlers/….ts': Unknown file extension ".ts"
   ```
 
-  Compile such handlers to `.js` before deploying — the deploy runtime ships no
-  turnkey `.ts` loader. ([`gen-handler`](#gen-handler) scaffolds a handler;
-  [`doctor`](#doctor) validates the spec.)
+  Compile such handlers to `.js` first and deploy the compiled artifact — the deploy
+  runtime ships no turnkey `.ts` loader. `examples/acme-notes-backend` ships a
+  build step (`build.mjs`) that transpiles its handlers and emits a deploy-ready
+  spec; see
+  [getting-started → the backend profile](./getting-started.md#the-backend-profile-direct-agent-boot).
+  ([`gen-handler`](#gen-handler) scaffolds a handler; [`doctor`](#doctor) validates
+  the spec.)
 - **Database state.** The serve path applies the committed **platform** migration
   chain to `DATABASE_URL` (idempotent — it bootstraps a clean database and no-ops on an
   up-to-date one), then materializes the declared stores on a clean database or mounts
