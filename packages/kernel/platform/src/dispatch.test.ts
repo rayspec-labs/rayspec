@@ -281,7 +281,7 @@ describe('dispatchTool success path', () => {
   });
 });
 
-describe('dispatchTool replay contract (locked Decision #3)', () => {
+describe('dispatchTool replay contract', () => {
   it('IDEMPOTENT replay returns the CACHED output (matched by args inputHash) WITHOUT re-running the handler', async () => {
     const journal = new FakeJournal();
     const handler = vi.fn(() => ({ fresh: true }));

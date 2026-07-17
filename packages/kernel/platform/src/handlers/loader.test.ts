@@ -72,7 +72,7 @@ describe('jailModulePath — path jail (fail-closed)', () => {
   });
 });
 
-describe('jailModulePath — SYMLINK re-check (defense-in-depth, review finding #4)', () => {
+describe('jailModulePath — SYMLINK re-check (defense-in-depth)', () => {
   let dir: string; // a real temp tree: <dir>/root/ (the jail) + <dir>/outside/secret.ts
   beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), 'rayspec-jail-'));

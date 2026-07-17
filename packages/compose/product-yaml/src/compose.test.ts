@@ -181,7 +181,7 @@ describe('composeProductDeploy — healthy composition', () => {
 
   it('narrows the audio capability tracks to the DECLARED attribution vocabulary', async () => {
     // The fixture declares grounding.attribution_policy.tracks { mic, system } — the composed audio
-    // capability must accept EXACTLY those lanes (the frozen pack's behavior), NOT the neutral
+    // capability must accept EXACTLY those lanes (the frozen legacy behavior), NOT the neutral
     // default id shape. Regression shape: with the default policy an accepted junk track becomes a
     // sealed track that poisons the session's single-flight durable run (stt fails terminally).
     const composed = composeProductDeploy(parseFixture(), rollout());

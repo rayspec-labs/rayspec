@@ -109,7 +109,7 @@ export interface RunOptions {
 }
 
 /**
- * The auth mode that draws a subscription (no per-token API billing) — Decision #7: a step run under
+ * The auth mode that draws a subscription (no per-token API billing): a step run under
  * it records billed_cost_usd = 0 (the attributed computed/provider cost is still recorded as a value
  * metric). Single source of truth so the journal sink + the rollup agree.
  */
@@ -124,7 +124,7 @@ export const SUBSCRIPTION_AUTH_MODE = 'subscription-oauth-official-harness';
  */
 export const CODEX_SUBSCRIPTION_AUTH_MODE = 'codex-subscription-oauth';
 
-/** True iff a run/step on this auth mode is NOT billed per-token (Decision #7 subscription path). */
+/** True iff a run/step on this auth mode is NOT billed per-token (the subscription path). */
 export function isSubscriptionBilling(authMode: AuthMode): boolean {
   return authMode === SUBSCRIPTION_AUTH_MODE || authMode === CODEX_SUBSCRIPTION_AUTH_MODE;
 }
@@ -144,7 +144,7 @@ export interface CostContext {
  * `record()` is the SINGLE place per-step cost is finalized (the journal is the source
  * of truth). It RE-COMPUTES the computed cost from the effective-dated pricing registry at the
  * run's instant (not the adapter's pre-computed number), reconciles it against the provider-reported
- * cost (drift flag), applies the Decision-#7 subscription billed=0 rule, and records the pricing
+ * cost (drift flag), applies the subscription billed=0 rule, and records the pricing
  * provenance (pricing_version: `<model>@<effectiveFrom>` or 'FALLBACK') + the SDK provenance
  * (produced_by) — so a stale/fabricated adapter cost can never become the ledger's authoritative cost,
  * and a fallback-priced step is DISTINGUISHABLE in the ledger (auditability is the point).
@@ -206,7 +206,7 @@ export function makeJournalSink(
       //     model (a tool step's all-zero usage costs ~0). We DERIVE it, never trust step.costUsd.
       //  2. RECONCILE against the provider-reported cost (Anthropic total_cost_usd, Pi usage.cost.total;
       //     null for OpenAI) → the cost_drift flag (never fabricate a provider cost).
-      //  3. BILLED cost (Decision #7): 0 for a subscription run, else the computed cost — the value
+      //  3. BILLED cost: 0 for a subscription run, else the computed cost — the value
       //     metric (computed/provider) is STILL recorded.
       const model = step.model ?? cost?.model ?? 'unknown-model';
       const at = cost?.at ?? new Date().toISOString();
@@ -415,7 +415,7 @@ export async function runAgent(
   // effects (e.g. setDefaultOpenAIKey); it is idempotent.
   const authMode = await backend.resolveAuth();
 
-  // Build the central tool dispatcher and wire it (+ the tools) onto the context (carry-in #5). The
+  // Build the central tool dispatcher and wire it (+ the tools) onto the context. The
   // OpenAI adapter marshals every SDK tool-call into ctx.dispatchTool — the ONLY
   // sanctioned tool path; it holds no handlers. Tool steps are attributed to the run's REAL
   // authMode resolved above. dispatchTool's events flow through the SAME wrapped (seq-stamping)
@@ -455,7 +455,7 @@ export async function runAgent(
     authMode,
     tools,
     dispatchTool,
-    // Replay reconstruction source (carry-in #6): on replay, the adapter rebuilds the neutral
+    // Replay reconstruction source: on replay, the adapter rebuilds the neutral
     // transcript from the ConversationStore via the trust-boundary read-path (tenant-scoped, per-part
     // re-validation) WITHOUT calling the model — never from the SDK RunState.
     rehydrate: () => rehydrateConversation(tdb, runId),
@@ -704,7 +704,7 @@ export interface CostRollup {
    * OpenAI-only scope) — a null roll-up faithfully means "no provider cost was ever reported", not 0.
    */
   providerCostUsd: number | null;
-  /** Sum of the BILLED cost (Decision #7: subscription steps contribute 0). */
+  /** Sum of the BILLED cost (subscription steps contribute 0). */
   billedCostUsd: number;
   /** True iff ANY step in scope drifted (computed vs provider beyond the threshold). */
   costDrift: boolean;

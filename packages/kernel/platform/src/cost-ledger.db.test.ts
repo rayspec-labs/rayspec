@@ -4,7 +4,7 @@
  * Proves run-core's journal sink finalizes cost AT record() time from the effective-dated registry
  * (the single source of truth): the COMPUTED cost is the registry value (not the adapter's
  * claimed number), the PROVIDER cost is reconciled (drift flag trips on a REAL divergence), the
- * Decision-#7 SUBSCRIPTION rule writes billed=0 with a non-zero attributed cost, provenance is
+ * SUBSCRIPTION rule writes billed=0 with a non-zero attributed cost, provenance is
  * recorded, and the run→tenant roll-ups aggregate the journal tenant-scoped.
  *
  * Uses a REAL Postgres-backed journal/db + a FAKE backend that reports a chosen auth mode + provider
@@ -207,7 +207,7 @@ describe('computed-vs-provider reconciliation + drift flag', () => {
   });
 });
 
-describe('subscription-run ledger semantics (Decision #7) — billed=0 + attributed cost', () => {
+describe('subscription-run ledger semantics — billed=0 + attributed cost', () => {
   it('a SUBSCRIPTION step records billed_cost_usd=0 but a NON-ZERO attributed (computed) cost', async () => {
     const tdb = forTenant(db, TENANT_A);
     const res = await runAgent(
@@ -222,7 +222,7 @@ describe('subscription-run ledger semantics (Decision #7) — billed=0 + attribu
       {},
     );
     const step = await stepRow(res.runId);
-    // Decision #7: billed is 0 on a subscription run (draws subscription limits, no per-token billing).
+    // Billed is 0 on a subscription run (draws subscription limits, no per-token billing).
     expect(Number(step?.billedCostUsd)).toBe(0);
     // ...but the ATTRIBUTED (computed) cost is non-zero — the value metric is still recorded.
     expect(Number(step?.costUsd)).toBeGreaterThan(0);

@@ -255,7 +255,7 @@ function selfTest() {
       src: "export const h = (init) => init.db.transaction(async (tx) => tx.insert('s', row));",
       expect: false,
     },
-    // FIX B (should-fix #3) — STRING-AWARE comment stripper, proven FAIL-THE-FIX. A STRING LITERAL
+    // FIX B — STRING-AWARE comment stripper, proven FAIL-THE-FIX. A STRING LITERAL
     // opens an UNMATCHED `/*`, a REAL `new Pool(` follows it, and a LATER string contains `*/`. The
     // NAIVE two-regex stripper's `/\*[\s\S]*?\*\//` matches from the IN-STRING `/*` to the IN-STRING
     // `*/` and SWALLOWS the `new Pool(` between them → the violation is HIDDEN (detector returns false).

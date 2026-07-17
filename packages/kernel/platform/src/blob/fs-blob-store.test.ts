@@ -286,7 +286,7 @@ describe('FsBlobStore — single-file format (closes the sidecar-collision + con
   });
 
   it('N concurrent same-key puts of identical bytes ALL resolve (no temp-name collision) + the blob round-trips', async () => {
-    // FAIL-THE-FIX for must-fix #1: the OLD temp name was `${absolute}.tmp-${pid}-${Date.now()}` —
+    // FAIL-THE-FIX: the OLD temp name was `${absolute}.tmp-${pid}-${Date.now()}` —
     // two puts in the same millisecond collided on ONE temp path → an EEXIST/torn rename. The new temp
     // name appends `randomUUID()` so each concurrent put renames its OWN unique temp (last wins).
     const N = 8;

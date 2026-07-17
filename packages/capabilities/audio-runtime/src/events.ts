@@ -18,7 +18,7 @@ import type { FinalizedSessionEvent } from './types.js';
 /**
  * The event sink the capability emits `session_finalized` through. Delivery MUST be idempotent by
  * `event.event_id`: finalize emits on BOTH the first-seal path AND the idempotent already-completed
- * path (mirroring the pack's exactly-once enqueue), so a re-finalize / a concurrent second-track finalize
+ * path (mirroring the established exactly-once enqueue), so a re-finalize / a concurrent second-track finalize
  * re-emits the SAME `event_id` — the sink must treat the second delivery as a no-op (one workflow).
  */
 export interface SessionFinalizedSink {

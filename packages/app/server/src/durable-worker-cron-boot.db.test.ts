@@ -108,7 +108,7 @@ triggers:
     action: { kind: agent, agent: digest }
 `;
 
-/** The SAME spec but WITHOUT the durable worker — the #4b fail-closed case. */
+/** The SAME spec but WITHOUT the durable worker — the without-durable-worker fail-closed case. */
 const CRON_NO_WORKER_YAML = CRON_SPEC_YAML.replace('deployment:\n  durableWorker: true\n', '');
 
 const CRON_TENANT = '00000000-0000-0000-0000-0000000000cc';
@@ -177,7 +177,7 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
    * The SAME registrar but with NO `agentBackendsFactory` — so `agentBackends` (composition-root.ts
    * `opts.agentBackendsFactory?.()`) stays undefined and the durable worker is NEVER constructed
    * (`durableExecutorInstance` stays undefined at ~:525), even though the spec passes lint. This is the
-   * fixture that REACHES the runtime #4b guard (~:656) in isolation — the lint rule does not fire,
+   * fixture that REACHES the runtime without-durable-worker guard (~:656) in isolation — the lint rule does not fire,
    * because the spec keeps `deployment.durableWorker:true` + the cron trigger.
    */
   function assembleOptsNoBackend(): Parameters<typeof assembleServer>[1] {
@@ -271,7 +271,7 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
   );
 
   maybe(
-    '#4b fail-closed: a cron spec WITHOUT a durable worker aborts the boot loudly',
+    'without-durable-worker fail-closed: a cron spec WITHOUT a durable worker aborts the boot loudly',
     async () => {
       process.env.RAYSPEC_SPEC_PATH = writeSpec(CRON_NO_WORKER_YAML, 'no-worker.yaml');
       process.env.RAYSPEC_CRON_TENANT_ID = CRON_TENANT;
@@ -284,17 +284,17 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
   );
 
   maybe(
-    '#4b fail-closed (runtime guard, isolated): a lint-PASSING cron spec with NO durable worker wired ' +
+    'without-durable-worker fail-closed (runtime guard, isolated): a lint-PASSING cron spec with NO durable worker wired ' +
       '(no backend factory) aborts with BootConfigError at the runtime guard',
     async () => {
       // The PRIOR test's spec is rejected by the LINT rule FIRST (cron-without-durableWorker), so the
-      // runtime #4b guard at composition-root.ts:~656 is never reached — that test cannot prove the
+      // runtime without-durable-worker guard at composition-root.ts:~656 is never reached — that test cannot prove the
       // runtime backstop. This one isolates the RUNTIME guard: the spec KEEPS deployment.durableWorker:
       // true + the cron trigger (so lint PASSES + deploy()'s validate does NOT reject), but the server
       // is assembled WITHOUT an agentBackendsFactory → `agentBackends` is undefined → the worker is
-      // never constructed (`durableExecutorInstance` stays undefined) → the boot reaches the #4b guard,
-      // which throws BootConfigError. The cron tenant is set so the failure is the #4b worker guard, not
-      // the (later) cron-tenant guard. The org table is not required: the #4b throw precedes any DB probe.
+      // never constructed (`durableExecutorInstance` stays undefined) → the boot reaches the without-durable-worker guard,
+      // which throws BootConfigError. The cron tenant is set so the failure is the without-durable-worker guard, not
+      // the (later) cron-tenant guard. The org table is not required: the without-durable-worker guard throw precedes any DB probe.
       process.env.RAYSPEC_SPEC_PATH = writeSpec(CRON_SPEC_YAML, 'runtime-no-worker.yaml');
       process.env.RAYSPEC_CRON_TENANT_ID = CRON_TENANT;
       const config = loadServerConfig();

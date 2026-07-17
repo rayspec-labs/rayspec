@@ -106,7 +106,7 @@ describe('exportJsonSchema — Ajv2020 round-trip contract', () => {
     expect(validate(bad)).toBe(false);
   });
 
-  // Fix #2: io:'input' — the exported artifact must accept what the PARSER accepts. With the
+  // io:'input' — the exported artifact must accept what the PARSER accepts. With the
   // default io:'output', z.toJSONSchema marks every .default()ed field required, so a
   // default-omitting minimal spec the parser ACCEPTS would be REJECTED by the artifact. These
   // cases lock io:'input' (a regression to io:'output' turns them red).

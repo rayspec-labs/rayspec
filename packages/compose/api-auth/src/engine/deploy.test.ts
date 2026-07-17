@@ -208,7 +208,7 @@ describe('deploy() — abort-on-fail control flow', () => {
   });
 
   it('MIGRATE: with [good, bad] migrations, the good one applies, the bad aborts at [migrate], roll-out never runs', async () => {
-    // Pins the documented per-migration-tx + Fork-#4 forward-fix contract: migrations apply
+    // Pins the documented per-migration-tx forward-fix contract: migrations apply
     // SEQUENTIALLY; a later one that throws aborts at [migrate] and the prior (good) one is NOT rolled
     // back (there are no down-migrations — recovery is a new forward migration). buildApp must never be
     // reached. The recordingTarget records each migration it applied (the override records the good one
