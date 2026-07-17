@@ -72,9 +72,11 @@ in the platform — everything comes from the spec you inject.
 
 ## Quickstart
 
-Prerequisites: Node `>=22`, pnpm `10.12.4`, and a Postgres you can reach. Run
-these from the repo root; `dist/index.js` is the `rayspec` CLI and
-`dist/serve.js` is the `rayspec-serve` boot bin.
+Prerequisites: Node `>=22`, pnpm `10.12.4`, and a Postgres you can reach
+(`pnpm db:up` brings up a local one and needs Docker with Compose v2). No pnpm on
+your PATH? Prefix each command with `npx -y pnpm@10.12.4`. Run these from the repo
+root; `dist/index.js` is the `rayspec` CLI and `dist/serve.js` is the
+`rayspec-serve` boot bin.
 
 ```bash
 git clone <this-repo> rayspec && cd rayspec
