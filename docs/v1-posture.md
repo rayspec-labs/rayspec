@@ -119,6 +119,34 @@ string (`''`) — is itself an **unquoted claim**: there is nothing to verify ag
 cited span, so it takes the same `on_unquoted_claim` consequence (a zero-length quote
 never silently skips the check).
 
+## What v1 does not do yet
+
+The surface above is what v1 *ships*; a few behaviours are deliberately staged for
+later, and a mounted document should not assume them. These are honest edges of the
+trusted, single-node posture — not defects — and they sit alongside the
+deployment-level cuts in the README's
+[Security posture](../README.md#security-posture) and the
+[separate hardening layer](../SECURITY.md#the-separate-hardening-layer-not-in-the-core)
+that the core deliberately leaves out.
+
+- **Request cancellation does not propagate into in-flight work.** Cancelling or
+  timing out a request ends the *request* — the caller is freed and a bounded
+  request returns a timeout — but the model/agent work it already started is not
+  cancelled and runs to completion. Propagating cancellation from a request into
+  the in-flight run it triggered is deferred; its proper home is an out-of-request
+  worker.
+- **Deletes are soft; the hard-delete purge is off by default.** A delete takes
+  effect immediately as a soft-delete: it stamps a tombstone, scrubs personal data,
+  and revokes the subject's credentials at once. The irreversible hard-delete
+  (purge) that later removes tombstoned rows is **operator-gated and off by
+  default** — a deployment enables it explicitly. Until it is enabled, eligible
+  tombstones are reported but retained rather than physically erased.
+- **Federation and residency columns are shape-only.** The data model carries
+  federation- and residency-ready columns from its first migration, but enforcing
+  them — cross-node federation and data-residency constraints — is deferred to the
+  external-exposure hardening layer. In the single-node posture those columns exist
+  without an enforcing policy behind them.
+
 ## The complete worked example
 
 [`examples/acme-notes/acme-notes.product.yaml`](../examples/acme-notes/acme-notes.product.yaml)

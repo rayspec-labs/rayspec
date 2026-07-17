@@ -69,6 +69,9 @@ distinct hardening layer:
 
 - per-tenant data encryption with wrapped data-encryption keys,
 - database row-level security as a second, in-database enforcement of tenancy,
+- cross-node federation and data-residency enforcement — the data model carries the
+  federation- and residency-ready columns from day one, but enforcing them belongs
+  to this layer,
 - per-tenant execution sandboxing,
 - cryptographic binding of tokens to their client, and
 - an out-of-band org-invite flow. In the core, adding a member by email returns a
