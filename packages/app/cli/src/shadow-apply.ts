@@ -184,6 +184,11 @@ export async function shadowApply(
     // safe here because the name is OURS (generated from pid+hex), never operator/spec input.
     await admin.unsafe(`CREATE DATABASE ${dbName}`);
     created = true;
+    // Harden the throwaway: a freshly-created database inherits CONNECT for PUBLIC by default. Revoke it
+    // so only the owner (this run) can connect — parity with a hardened cell DB. Same safe generated
+    // identifier as the CREATE. A throw here is caught by the outer catch as the connect/infra region
+    // (fail-closed → generic message, no host/credential leak), and the throwaway is still dropped.
+    await admin.unsafe(`REVOKE CONNECT ON DATABASE ${dbName} FROM PUBLIC`);
 
     // Connect to the THROWAWAY DB (never the real target) to seed + apply.
     const throwUrl = withDatabaseName(shadowDatabaseUrl, dbName);
@@ -292,6 +297,11 @@ export async function shadowApplyBaselineUpdate(
   try {
     await admin.unsafe(`CREATE DATABASE ${dbName}`);
     created = true;
+    // Harden the throwaway: a freshly-created database inherits CONNECT for PUBLIC by default. Revoke it
+    // so only the owner (this run) can connect — parity with a hardened cell DB. Same safe generated
+    // identifier as the CREATE. A throw here is caught by the outer catch as the connect/infra region
+    // (fail-closed → generic message, no host/credential leak), and the throwaway is still dropped.
+    await admin.unsafe(`REVOKE CONNECT ON DATABASE ${dbName} FROM PUBLIC`);
 
     const throwUrl = withDatabaseName(shadowDatabaseUrl, dbName);
     const work = postgres(throwUrl, { max: 1, onnotice: () => {} });

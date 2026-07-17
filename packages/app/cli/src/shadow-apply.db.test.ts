@@ -12,7 +12,7 @@
  */
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { shadowApply, withDatabaseName } from './shadow-apply.js';
+import { shadowApply, shadowApplyBaselineUpdate, withDatabaseName } from './shadow-apply.js';
 
 const hasDb = Boolean(process.env.DATABASE_URL || process.env.SHADOW_DATABASE_URL);
 const requireDb = process.env.CI === 'true' || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -101,5 +101,34 @@ describe.skipIf(!hasDb)('shadowApply — applies + cleans up', () => {
       // No throwaway DB was created (the admin connect failed before CREATE).
       expect(r.dbName).toBeUndefined();
     }
+  }, 60_000);
+});
+
+/**
+ * The throwaway DB must not inherit the default PUBLIC CONNECT privilege — only its owner (this run)
+ * should be able to connect. We prove it in-band: a probe that RAISES inside the apply transaction iff
+ * the PUBLIC role still has CONNECT on the current (throwaway) database. When CONNECT is revoked the
+ * probe passes and the apply is clean (ok:true); if it were still granted the probe would RAISE and the
+ * apply would fail (ok:false). The owner keeps CONNECT regardless, so `work` still applies normally.
+ */
+const PUBLIC_CONNECT_PROBE = `
+DO $$ BEGIN
+  IF has_database_privilege('public', current_database(), 'CONNECT')
+  THEN RAISE EXCEPTION 'PUBLIC still has CONNECT on the shadow throwaway';
+  END IF;
+END $$;`;
+
+describe.skipIf(!hasDb)('shadow throwaway — PUBLIC cannot connect', () => {
+  it('shadowApply revokes PUBLIC CONNECT on the throwaway → the probe passes (ok:true)', async () => {
+    const r = await shadowApply(shadowUrl(), PUBLIC_CONNECT_PROBE);
+    expect(r.ok).toBe(true);
+  }, 60_000);
+
+  it('shadowApplyBaselineUpdate revokes PUBLIC CONNECT on the throwaway → the probe passes (ok:true)', async () => {
+    // The probe runs as the baseline SQL inside the apply transaction; an empty new-spec store list
+    // makes the post-apply drift oracle vacuously clean, isolating the CONNECT-privilege assertion.
+    const r = await shadowApplyBaselineUpdate(shadowUrl(), PUBLIC_CONNECT_PROBE, '', []);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.drift).toEqual([]);
   }, 60_000);
 });
