@@ -349,7 +349,7 @@ export async function uploadFile(
 
   // NEW file: blob put FIRST (idempotent by content key — a crash before the row write leaves an
   // orphaned blob, never a dangling row), then the ATOMIC upsert on the tenant-prefixed unique
-  // ref (db.upsert ONLY — never insert-and-recover; the C10 25P02 law). A concurrent first-upload
+  // ref (db.upsert ONLY — never insert-and-recover; the single-flight 25P02 law). A concurrent first-upload
   // converges here (last write wins pre-seal, and every row always names ITS OWN bytes — the
   // content-key consistency law).
   await ctx.blob.put(blobKey, bytes, { contentType: mediaType });

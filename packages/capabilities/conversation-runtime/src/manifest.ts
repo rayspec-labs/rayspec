@@ -18,7 +18,7 @@
  * cap, and riding the payload is what lets a declared async workflow consume it through the
  * existing `input_context.payload_fields` path.
  *
- * ── THE PER-TURN IDEMPOTENCY LAW (C10 — pinned by manifest.test.ts + the bridge tests) ─────────
+ * ── THE PER-TURN IDEMPOTENCY LAW (single-flight — pinned by manifest.test.ts + the bridge tests) ─────────
  * `idempotency_key_field` is the composed per-TURN `turn_ref` (`<conversation_id>:<message_id>`,
  * the `artifact_ref` single-field idiom) — NEVER `conversation_id`: a conversation-scoped key
  * would dedupe EVERY later turn of a conversation into its FIRST durable run (silent turn loss).

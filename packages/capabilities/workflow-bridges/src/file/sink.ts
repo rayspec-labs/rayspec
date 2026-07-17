@@ -16,7 +16,7 @@
  * STORED event, re-emitted so a sealed-but-never-enqueued file is recovered by
  * any retry), and the dispatcher's per-file enqueue idempotency key (the descriptor-derived
  * `payloadFieldIdempotencyKey('file_id')` → the tenant-namespaced `durableWorkflowRunId`) is what
- * dedups the re-emissions to ONE durable run (C10). So delivery is idempotent by design
+ * dedups the re-emissions to ONE durable run (single-flight). So delivery is idempotent by design
  * end-to-end.
  */
 import {

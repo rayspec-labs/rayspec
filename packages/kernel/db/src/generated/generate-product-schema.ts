@@ -295,7 +295,7 @@ function emitStore(store: StoreSpec, conflictKeys?: ReadonlySet<string>): string
  *   - a banner comment (DO NOT EDIT — generated)
  *   - the pg-core import (only the needed builders) + `orgs` from the core schema
  *   - one `pgTable(...)` const per store (injected columns + business columns + FKs)
- *   - the `PRODUCT_TENANT_SCOPED_TABLES` tuple (`[...] as const`) — the type-enforced seam A1
+ *   - the `PRODUCT_TENANT_SCOPED_TABLES` tuple (`[...] as const`) — the type-enforced tuple seam
  *
  * `stores` is taken in DECLARED order; a store referenced by an FK MUST be declared before /
  * anywhere in the list (Drizzle `.references(() => parent.id)` is a thunk, so forward refs within

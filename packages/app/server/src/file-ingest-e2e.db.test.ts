@@ -10,11 +10,11 @@
  *       demands the BLOB root ONLY — no file download in v1, so no media key) → both routes mount
  *       with their DECLARED action tuples (stream:ingest upload + handler submit);
  *   (b) upload → submit → the REAL DBOS workflow runs off-request → EXACTLY ONE `workflow_runs`
- *       row whose PK equals the INDEPENDENTLY-RECOMPUTED deterministic id over the C10 key
+ *       row whose PK equals the INDEPENDENTLY-RECOMPUTED deterministic id over the single-flight key
  *       `file_id:<id>` (pinning the whole enqueue-key derivation, not just a row count) → the
  *       declared store row carries the server-derived byte metadata → the bytes are ON DISK under
  *       the tenant-jailed content-addressed key;
- *   (c) byte-identical re-upload + re-submit → deduped, STILL one run (C10 single-flight);
+ *   (c) byte-identical re-upload + re-submit → deduped, STILL one run (single-flight);
  *   (d) divergent post-seal upload → 409 `file_conflict`, sealed bytes untouched, still one run
  *       (the heal re-emit dedups downstream);
  *   (e) oversize Content-Length → 413 BEFORE any byte is read: ZERO blob bytes, ZERO pointer row,
@@ -410,7 +410,7 @@ describe.skipIf(!baseUrl)('file-ingest — real boot + real DBOS + HTTP', () => 
 
       const runs = await waitForCompletedRuns(1);
       expect(runs).toHaveLength(1);
-      // ★ THE C10 KEY PIN through the WHOLE composed stack: the durable run's PK must equal the
+      // ★ THE single-flight KEY PIN through the WHOLE composed stack: the durable run's PK must equal the
       // independently-recomputed deterministic id over the GENERIC `file_id:<id>` key (a key-format
       // drift — e.g. the audio ':finalized' suffix leaking in — re-keys durable runs → RED here).
       expect(runs[0]?.workflow_run_id).toBe(
@@ -453,7 +453,7 @@ describe.skipIf(!baseUrl)('file-ingest — real boot + real DBOS + HTTP', () => 
   );
 
   maybe(
-    '(c) byte-identical re-upload + re-submit → deduped, STILL one run (C10)',
+    '(c) byte-identical re-upload + re-submit → deduped, STILL one run (single-flight)',
     async () => {
       e2eTestsRan += 1;
       const up = await upload(FILE_ID, BODY, { token: tokenA });

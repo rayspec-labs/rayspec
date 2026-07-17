@@ -11,7 +11,7 @@
  * SERVER-DERIVED tenant id (keys.ts). That makes both stores PER-TENANT-KEYED BY CONSTRUCTION —
  * not the declared-store deployment-global-key caveat class.
  *
- * ── THE LEDGER'S TWO UNIQUES (the C10 turn state machine's authorities) ───────────────────────
+ * ── THE LEDGER'S TWO UNIQUES (the single-flight turn state machine's authorities) ───────────────────────
  * `turn_ref`  (`${tenantId}:${conversationId}:${messageId}`) — the DEDUP authority: a re-POST of
  *             one message converges on one row/one event/one durable run.
  * `seq_ref`   (`${tenantId}:${conversationId}:${turnSeq}`)   — the ORDERING authority: two turns

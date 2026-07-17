@@ -7,7 +7,7 @@
  *  2. IDEMPOTENT RE-SUBMIT THAT RE-EMITS — submit persists the capability-owned row first (upsert
  *     on the tenant-prefixed `record_ref`), then EMITS on BOTH the first-persist path AND the
  *     identical-re-submit path (client retry = redelivery; a crash between persist and emit is
- *     recovered by the retry). The sink/dispatcher dedups downstream (C10 single-flight) — ONE
+ *     recovered by the retry). The sink/dispatcher dedups downstream (single-flight) — ONE
  *     durable run per record.
  *  3. PER-TENANT CAPABILITY-STORE KEYING — the `record_ref` unique embeds the server-derived
  *     tenant (stores.ts/keys.ts; the audio `session_ref` pattern — NOT the global-key caveat).
@@ -25,7 +25,7 @@
  * while the stored record silently never runs. So the divergent-409 path RE-EMITS the STORED
  * authoritative event before returning 409: the emit is idempotent end-to-end (the record-scoped
  * `event_id` → the dispatcher's `record_id:<id>` key → the tenant-namespaced durableWorkflowRunId
- * — an already-enqueued record dedups to the SAME run, C10), so the heal can never double-run,
+ * — an already-enqueued record dedups to the SAME run, single-flight), so the heal can never double-run,
  * and "a crash between persist and emit is recovered by the retry" holds for ANY retry payload.
  *
  * TRUST BOUNDARY: the body is UNTRUSTED CALLER DATA — validated for SHAPE (object, nesting depth, size,
@@ -367,7 +367,7 @@ export async function submitRecord(
   const event = submittedEvent(ctx.tenantId, recordId, row.payload as Record<string, unknown>);
   // Emit on EVERY successful submit (first + identical re-submit): the re-emission is the
   // redelivery a crash-between-persist-and-emit needs; the sink/dispatcher dedups by the
-  // record-scoped key (C10). A RecordEventRejectedError from the sink propagates (fail-closed law
+  // record-scoped key (single-flight). A RecordEventRejectedError from the sink propagates (fail-closed law
   // — nothing enqueued; the binding maps it to a clean 403).
   await sink.emit(event);
 

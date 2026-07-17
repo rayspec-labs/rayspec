@@ -55,7 +55,7 @@ export class OrgStore {
    * ATOMIC single-flight — one `INSERT … ON CONFLICT (user_id, org_id) DO UPDATE` statement, NOT a
    * read-then-insert: two CONCURRENT fresh adds would both read "no row" and both INSERT, the second
    * violating the non-partial UNIQUE(user_id, org_id) → 23505 → HTTP 500, breaking the promised
-   * idempotency. The upsert makes the DB's own row-level atomicity the single-flight point (the C10
+   * idempotency. The upsert makes the DB's own row-level atomicity the single-flight point (the
    * lesson — the platform's atomicity, not a TOCTOU read-then-insert). The role CASE preserves the
    * semantics EXACTLY: a fresh row and a reactivated TOMBSTONE become `member`, while an already-
    * ACTIVE row keeps its stored role (`deleted_at IS NULL` ⇒ an owner/admin re-add is never demoted).

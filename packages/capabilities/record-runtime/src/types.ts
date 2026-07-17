@@ -36,7 +36,7 @@ export interface RecordSubmission {
  * The `record_input.record_submitted` event — the workflow trigger shape. The `event_id` is the
  * RECORD-scoped idempotency key (= `${tenant_id}:${record_id}`, mirroring the audio capability's
  * session-scoped `finalizedEventId`), so a re-submit of the same record converges on ONE workflow
- * (C10 single-flight downstream). `record` carries the AUTHORITATIVE stored payload (re-read from
+ * (single-flight downstream). `record` carries the AUTHORITATIVE stored payload (re-read from
  * the capability-owned row after persist — never the raw request body), so a deduped redelivery
  * is byte-consistent with the first delivery.
  */
@@ -64,7 +64,7 @@ export interface RecordSubmitResult {
   readonly event_id: string;
   /**
    * True when this submit was an IDENTICAL re-submit of an already-stored record (the event was
-   * re-emitted for redelivery and dedups downstream — client retry = redelivery, C10).
+   * re-emitted for redelivery and dedups downstream — client retry = redelivery, single-flight).
    */
   readonly deduped: boolean;
 }

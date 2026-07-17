@@ -7,12 +7,12 @@ donates the manifest/handler/mount template.
 What it does (product-neutral, zero product vocabulary):
 
 - **Idempotent conversation create** — `PUT {base}/{conversation_id}` (client-chosen id; a
-  re-create of the same id is the same ack, C10; a divergent `title` assertion is a loud 409).
+  re-create of the same id is the same ack, single-flight; a divergent `title` assertion is a loud 409).
 - **Bounded turn submit** — `POST {base}/{conversation_id}/turns` with the closed body
   `{ message_id, text }`: validate → bounds (32 KiB UTF-8 default) → persist the user turn in the
   capability-owned ledger → emit the `conversation_input.turn_submitted` trigger event a declared
   Product-YAML workflow runs on.
-- **The C10 turn state machine** — per-TURN idempotency (`turn_ref` =
+- **The single-flight turn state machine** — per-TURN idempotency (`turn_ref` =
   `<conversation_id>:<message_id>`, never `conversation_id`: that would silently collapse every
   later turn into the first run); a re-POST of one message converges on ONE durable run; two turns
   racing one conversation resolve LOUD (typed 409 `conversation_turn_conflict` on the ledger's
@@ -46,7 +46,7 @@ read, that turn surfaces the loud 409 `conversation_turn_conflict` (so the 409 i
 user-vs-user only) and its same-`message_id` retry converges;
 on reply-persist retry exhaustion (bounded, 3 fresh-tx attempts) the typed 503 carries the
 deterministic reply run id and a same-`message_id` re-POST converges on one reply without a second
-model call (C10 — the reply row and the deterministic run id are the convergence authorities).
+model call (single-flight — the reply row and the deterministic run id are the convergence authorities).
 
 The event seam (`TurnSubmittedSink`) is bridged to the durable workflow runtime by
 `@rayspec/conversation-workflow-bridge`. The assistant reply row emits NO event — only user turns

@@ -476,7 +476,7 @@ export interface CollectionPersistOutcome {
  * lifecycle: `preserve_human_edits` (pre-read + skip — the human edit wins, never overwritten or
  * re-stamped) and `reconcile_stale_rows` (delete this scope's non-human-edited rows of reconciling
  * kinds whose `artifact_ref` a re-extract no longer produces). Upsert is the atomic
- * `INSERT … ON CONFLICT (artifact_ref) DO UPDATE` (the C1 idiom) keyed by the tenant-namespaced ref.
+ * `INSERT … ON CONFLICT (artifact_ref) DO UPDATE` (the atomic-upsert idiom) keyed by the tenant-namespaced ref.
  *
  * `reconcile` is the DECLARED reconcile scope (`declaredReconcileScope`) — derived from the product
  * spec's reconcile-enabled kinds + their bound stores, NEVER from `planned`: a re-extract

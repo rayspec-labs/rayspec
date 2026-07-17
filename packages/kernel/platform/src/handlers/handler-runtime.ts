@@ -61,7 +61,7 @@ import type {
  * interpreters (stream-routes.ts ingest/playback) IGNORE it — a stream handler always runs inside
  * the engine's tenant transaction via `invokeStreamRouteHandler`. ABSENT (every loader-resolved
  * handler + every existing capability entry) = today's behavior byte-identical: the engine opens
- * ONE `TenantDb.transaction` around the handler (A3). `'handler-managed'` = the engine opens NO
+ * ONE `TenantDb.transaction` around the handler. `'handler-managed'` = the engine opens NO
  * transaction — the handler manages its own short transactions via `init.db.transaction(...)`
  * (the conversational turn route needs this to commit its intake BEFORE an in-request model run
  * and to hold no tx across it). This is a CODE-LEVEL entry field (set by a capability mount),

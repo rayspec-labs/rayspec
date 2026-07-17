@@ -82,7 +82,7 @@ function toFiniteNonNegative(v: unknown): number | undefined {
  * `status` (openai APIError), `statusCode` (node-fetch-style), `response.status`, and one level of
  * `cause` / `error` nesting (an agents-SDK error often wraps the underlying API error).
  *
- * CLS-4: an ERROR-range status (>=400) anywhere in the shallow walk WINS over a benign non-error status
+ * STATUS PREFERENCE: an ERROR-range status (>=400) anywhere in the shallow walk WINS over a benign non-error status
  * (e.g. a `response.status:200` on the wrapper shadowing a real `cause.status:500`). We collect the
  * candidates and prefer the first error-range one; only if none is in the error range do we fall back to
  * the first non-error status found. Returns undefined if no finite HTTP status is present at all.
@@ -112,7 +112,7 @@ function collectStatuses(err: unknown, depth: number, out: number[]): void {
 }
 
 /**
- * Parse a `Retry-After` HEADER value to seconds. CLS-5: a `Retry-After` is EITHER a delta-seconds
+ * Parse a `Retry-After` HEADER value to seconds. A `Retry-After` is EITHER a delta-seconds
  * integer OR an HTTP-date (RFC 7231) — and `Number.parseInt` would misparse a number-leading date
  * (e.g. "21 Oct 2015") to a wrong seconds value. So we accept the header ONLY when it is a PURE
  * integer (optionally surrounded by whitespace); an HTTP-date (which we do NOT parse) yields undefined.
@@ -187,7 +187,7 @@ function errorName(err: unknown): string {
  *     refusal noun in a field label ("refusal: none").
  *  4. Default: `internal` (genuinely unclassifiable — fail-closed, never a mis-tag).
  *
- * CLS-3: the whole body is throw-guarded — a hostile getter (e.g. a `message`/`headers` accessor that
+ * THROW-SAFETY: the whole body is throw-guarded — a hostile getter (e.g. a `message`/`headers` accessor that
  * throws) can never blow up the classifier; it falls back to `{ internal, <safe String(err)> }`.
  */
 export function classifyUpstreamError(err: unknown): ClassifiedError {
@@ -223,9 +223,9 @@ function classifyUpstreamErrorUnsafe(err: unknown): ClassifiedError {
   if (/InternalServer/i.test(name)) return withRetry('upstream_5xx');
 
   // (3) Conservative MESSAGE heuristics (the Anthropic child / stringified errors have no status).
-  // CLS-1/CLS-2: every branch requires a CONTEXT phrase, not a bare number or a field-label noun.
+  // Every branch requires a CONTEXT phrase, not a bare number or a field-label noun.
   const m = message.toLowerCase();
-  // RATE LIMIT: an explicit rate-limit / throttle / quota CONTEXT phrase. CLS-1: NOT a bare "429" (it
+  // RATE LIMIT: an explicit rate-limit / throttle / quota CONTEXT phrase. NOT a bare "429" (it
   // could be any id/count) — "429" only counts when it sits ADJACENT to rate-limit/throttle wording,
   // OR when it is an UNAMBIGUOUS STATUS indicator: a status code at the START of the
   // message or the literal `"429 status code"` form. The openai SDK stringifies a thrown APIError that
@@ -244,7 +244,7 @@ function classifyUpstreamErrorUnsafe(err: unknown): ClassifiedError {
   ) {
     return withRetry('rate_limited');
   }
-  // UPSTREAM 5xx: a server-error CONTEXT word — NOT a bare 3-digit number (CLS-1: "530 output tokens"
+  // UPSTREAM 5xx: a server-error CONTEXT word — NOT a bare 3-digit number ("530 output tokens"
   // is a token count, not a 530 status; "took 502 ms" is a duration, not a 502) — OR an UNAMBIGUOUS
   // STATUS indicator: a 5xx code at the START of the message ("500 The server had an
   // error…") or the literal `"<5xx> status code"` form ("503 status code (no body)"). These are the
@@ -264,7 +264,7 @@ function classifyUpstreamErrorUnsafe(err: unknown): ClassifiedError {
     return { errorClass: 'timeout', message };
   }
   // REFUSAL (matched LAST, narrowly): a DECLINE context — the model "refused …", "declined to …", or
-  // an explicit refusal stop-reason. CLS-2: NOT the bare NOUN `refusal` in a benign field LABEL
+  // an explicit refusal stop-reason. NOT the bare NOUN `refusal` in a benign field LABEL
   // ("safety refusal: none" / "refusal: passed/false"), and NOT a generic "declined for X" (only
   // "declined TO …"), so an ordinary error string is never mis-tagged a refusal.
   // The `\s*(?:[:=]\s*)?` separator is the exact-same-language, backtracking-free form of `\s*[:=]?\s*`:
@@ -282,7 +282,7 @@ function classifyUpstreamErrorUnsafe(err: unknown): ClassifiedError {
   return { errorClass: 'internal', message };
 }
 
-/** A String(err) that itself never throws (a hostile toString is swallowed) — for the CLS-3 fallback. */
+/** A String(err) that itself never throws (a hostile toString is swallowed) — for the throw-safe fallback. */
 function safeStringify(err: unknown): string {
   try {
     return String(err);

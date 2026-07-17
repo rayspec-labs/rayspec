@@ -188,7 +188,7 @@ extensions:
       const config = loadServerConfig();
       server = await assembleServer(config, {
         registerProductTables: (tables) => {
-          // The A1 LOCAL stand-in: register THESE exact (pack-contributed) product-table instances.
+          // The LOCAL table-registration stand-in: register THESE exact (pack-contributed) product-table instances.
           registerScopedTables([...tables.values()]);
         },
       });

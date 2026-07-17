@@ -58,7 +58,7 @@ export type TurnRole = 'user' | 'assistant';
  * The `conversation_input.turn_submitted` event — the workflow trigger shape. The `event_id` is
  * the TURN-scoped idempotency key (= `${tenant_id}:${conversation_id}:${message_id}`, the
  * record/file `submittedEventId` mirror), so a re-POST of the same message converges on ONE
- * workflow (C10 single-flight downstream) while every NEW turn gets its OWN run. Every field is
+ * workflow (single-flight downstream) while every NEW turn gets its OWN run. Every field is
  * read from the AUTHORITATIVE stored ledger row (never a raw request), so a deduped redelivery is
  * byte-consistent with the first delivery.
  */
@@ -102,7 +102,7 @@ export interface ConversationCreateResult {
    * (never fabricated; only `open` is ever written).
    */
   readonly state: ConversationState;
-  /** True when this create was an idempotent re-create of an existing conversation (C10). */
+  /** True when this create was an idempotent re-create of an existing conversation (single-flight). */
   readonly deduped: boolean;
 }
 
@@ -120,7 +120,7 @@ export interface TurnSubmitResult {
   /**
    * True when this submit was an IDENTICAL re-POST of an already-persisted message (the STORED
    * authoritative event was re-emitted for redelivery and dedups downstream — client retry =
-   * redelivery, C10).
+   * redelivery, single-flight).
    */
   readonly deduped: boolean;
 }
@@ -144,7 +144,7 @@ export interface TurnReplyBlock {
   readonly message: string;
   /** The reply row's own 1-based ledger sequence. */
   readonly turn_seq: number;
-  /** The reply run's id (deterministic from the user turn's `turn_ref` — C10 convergence). */
+  /** The reply run's id (deterministic from the user turn's `turn_ref` — single-flight convergence). */
   readonly run_id: string;
   readonly usage?: {
     readonly inputTokens: number;

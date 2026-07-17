@@ -146,7 +146,7 @@ describe('submitFile — seal + emit (the durability recipe)', () => {
     expect(typeof s.deliveredFor(`${TENANT_A}:f-1`)?.occurred_at).toBe('string');
   });
 
-  it('an IDENTICAL re-submit RE-EMITS the deduped event (redelivery) — one delivered event (C10)', async () => {
+  it('an IDENTICAL re-submit RE-EMITS the deduped event (redelivery) — one delivered event (single-flight)', async () => {
     const table = new SharedFileTable();
     seedRow(table, { state: 'uploaded' });
     const s = sink();
@@ -159,7 +159,7 @@ describe('submitFile — seal + emit (the durability recipe)', () => {
     expect(second.value.deduped).toBe(true);
     expect(second.value.event_id).toBe(`${TENANT_A}:f-1`);
     expect(s.emitCount()).toBe(2); // the re-submit RE-EMITTED …
-    expect(s.deliveredCount()).toBe(1); // … and the sink deduped to ONE delivery (C10)
+    expect(s.deliveredCount()).toBe(1); // … and the sink deduped to ONE delivery (single-flight)
     expect(table.rows).toHaveLength(1);
   });
 

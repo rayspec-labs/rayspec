@@ -2,7 +2,7 @@
  * DURABLE-WORKER boot test — the composition-root worker wiring had ZERO
  * coverage. This boots the REAL composition root (`assembleServer`) against a throwaway DATABASE with
  * a `deployment.durableWorker:true` spec + a deterministic FakeBackend (injected via
- * `agentBackendsFactory`) + the A1 `registerProductTables` hook, then asserts END-TO-END on ground
+ * `agentBackendsFactory`) + the `registerProductTables` table-registration hook, then asserts END-TO-END on ground
  * truth (fail-the-fix, not pass-the-shape):
  *
  *   1. an `async:true` POST → 202 `{ runId, status:'enqueued', events }` OFF-REQUEST (the request
@@ -189,13 +189,13 @@ describe('durable-worker boot — real composition root wires + runs an async of
     // Sanity: the derived system DB url matches what we will drop on teardown (fix B/F wiring).
     expect(deriveDbosSystemUrl(appDbUrl)).toBe(withDbName(baseUrl, dbosSysDb));
 
-    // The A1 product-table registrar (the LOCAL stand-in for a committed product-schema tuple) + the
+    // The product-table registrar (the LOCAL stand-in for a committed product-schema tuple) + the
     // FakeBackend wired as the `openai` adapter the declared `echo` agent resolves to.
     server = await assembleServer(config, {
       agentBackendsFactory: (): ReadonlyMap<BackendId, Backend> =>
         new Map<BackendId, Backend>([['openai', new FakeBackend()]]),
       registerProductTables: (tables) => {
-        // Register THOSE exact product-table instances (deploy() verifies the same objects — A1).
+        // Register THOSE exact product-table instances (deploy() verifies the same objects).
         registerScopedTables([...tables.values()]);
       },
     });

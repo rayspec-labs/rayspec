@@ -27,7 +27,7 @@
  *
  * DB ISOLATION: a whole throwaway DATABASE (not a schema) — the platform migration chain materializes
  * orgs + the platform tables; the generated product SQL materializes the two product stores. The
- * product tables are registered in the chokepoint via the @rayspec/db/testing seam (the LOCAL A1
+ * product tables are registered in the chokepoint via the @rayspec/db/testing seam (the LOCAL table-registration
  * stand-in) so `forTenant().delete/select/insert` reach them.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -129,7 +129,7 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
       await tx.unsafe(ddl);
     });
 
-    // LOCAL A1 stand-in: register THESE exact product-table instances in the chokepoint Set.
+    // LOCAL table-registration stand-in: register THESE exact product-table instances in the chokepoint Set.
     unregister = registerScopedTables([...productTables.values()]);
 
     // The two tenants (orgs rows — the tenant_id FK target + the existence probe).

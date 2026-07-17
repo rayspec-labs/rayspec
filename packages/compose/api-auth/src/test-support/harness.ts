@@ -282,7 +282,7 @@ export async function createHarness(
     playbackMaxStreamsPerUser?: number;
     /**
      * Override the isolated schema name (default `rayspec_test_apiauth`). A second concurrent
-     * harness (e.g. the A3 GUC test, which needs its OWN schema so it does not collide with the main
+     * harness (e.g. the GUC test, which needs its OWN schema so it does not collide with the main
      * declared-routes suite) passes a distinct name.
      */
     schema?: string;
@@ -299,7 +299,7 @@ export async function createHarness(
      */
     bodyRefreshEnabled?: boolean;
     /**
-     * Wrap the raw Db BEFORE it is injected into `createAuthApp` (test-only seam, A3). The A3 GUC
+     * Wrap the raw Db BEFORE it is injected into `createAuthApp` (test-only seam). The GUC
      * test passes a wrapper whose `transaction` reads `current_setting('app.current_tenant')` INSIDE
      * the handler's real transaction — proving the GUC is populated (not a proxy). The schema DDL is
      * applied on the UNWRAPPED handle; only the app's deps.db is wrapped.
@@ -423,7 +423,7 @@ export async function createHarness(
   }
 
   const deps: AppDeps = {
-    // A3: the declared-route engine reads deps.db; wrap it (test-only) to capture the in-handler
+    // GUC seam: the declared-route engine reads deps.db; wrap it (test-only) to capture the in-handler
     // transaction GUC. The stores hold the UNWRAPPED handle (they ran the DDL on it) — only the
     // engine/run path sees the wrapper.
     db: opts.wrapDb ? opts.wrapDb(db) : db,
@@ -495,7 +495,7 @@ export interface DeployHarness {
    */
   buildApp: (engine: DeclarativeEngine) => ReturnType<typeof createAuthApp>;
   /**
-   * The CANONICAL product tables the harness built + REGISTERED (the committed A1 tuple sim). The
+   * The CANONICAL product tables the harness built + REGISTERED (the committed product-table tuple sim). The
    * acceptance test passes THESE as `deploy()`'s `rollout.productTables` so the verify-not-register
    * probe sees the SAME registered instances (the Set is keyed by object identity).
    */
@@ -511,11 +511,11 @@ export interface DeployHarness {
  * UNLIKE `createHarness`, this does NOT pre-apply the product DDL — `deploy()` applies it via the
  * `applyMigration` seam (so the MIGRATE step is exercised for real). It DOES pre-register the
  * throwaway product tables in the deny-by-default Set (the test seam — `registerScopedTables`,
- * carved out of both gates), simulating the COMMITTED A1 tuple a real deployment ships; deploy()'s
+ * carved out of both gates), simulating the COMMITTED product-table tuple a real deployment ships; deploy()'s
  * verify-not-register step then passes (and a NON-registered store would abort the deploy — the
  * acceptance suite proves both directions).
  *
- * @param opts.stores            the declared stores whose tables are pre-registered (the A1 tuple sim).
+ * @param opts.stores            the declared stores whose tables are pre-registered (the product-table tuple sim).
  * @param opts.schema            the isolated schema name (default `rayspec_test_deploy`).
  * @param opts.wrapDb            optional raw-Db wrapper (the route-handler GUC capture test).
  */
@@ -534,7 +534,7 @@ export async function createDeployHarness(opts: {
   await db.$client.unsafe(buildFullSchemaSql(SCHEMA));
 
   // Pre-register the throwaway product tables in the REAL deny-by-default Set — this SIMULATES the
-  // committed A1 tuple a real deployment ships (the platform main line is product-empty). deploy()
+  // committed product-table tuple a real deployment ships (the platform main line is product-empty). deploy()
   // verifies-not-registers; the test owns registration via the carved-out test seam.
   const productTables = buildProductTables([...opts.stores], opts.conflictKeys);
   const unregister = registerScopedTables([...productTables.values()]);
@@ -596,7 +596,7 @@ export async function createDeployHarness(opts: {
       // Probe the REAL TenantDb chokepoint: `.select(table)` runs `assertScoped`, which THROWS
       // deny-by-default if the table is not in TENANT_SCOPED_TABLES. We do not execute the query —
       // building the select is enough to trip the runtime admission check. storeName aids the deploy
-      // message. The `select` signature is typed to the COMMITTED literal tuple (the A1 compile-time
+      // message. The `select` signature is typed to the COMMITTED literal tuple (the compile-time
       // guard); a runtime-built product table is not a member of that type, so we cast to the
       // parameter type — the RUNTIME `assertScoped` is exactly what this probe is meant to exercise.
       void storeName;

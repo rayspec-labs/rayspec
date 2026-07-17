@@ -188,7 +188,7 @@ export interface JournalSink {
    */
   lookup(idempotencyKey: string): Promise<{ output: unknown } | null>;
   /**
-   * Look up a cached idempotent TOOL step by its args `inputHash` (review fix A1): a tool step's
+   * Look up a cached idempotent TOOL step by its args `inputHash`: a tool step's
    * `idempotencyKey` column now carries the REAL per-call callId (unique per call), so the
    * idempotent-replay CACHE — which is keyed by args, not by call — must match on `inputHash`
    * instead. Returns the cached opaque tool output, or null to re-run live. Optional: a sink that

@@ -442,7 +442,7 @@ export const runs = pgTable(
  * `(tenant, workflow_id, idempotency_key)` (see workflow-durable's `durableWorkflowRunId`) so two
  * tenants that declare the SAME `(workflow_id, idempotency_key)` can NEVER collide on one run row
  * (the durable-run single-flight lesson applied by construction). The `UNIQUE(tenant_id, workflow_id, idempotency_key)`
- * index is the SINGLE-FLIGHT natural key (C10): concurrent/redelivered starts for the same
+ * index is the SINGLE-FLIGHT natural key: concurrent/redelivered starts for the same
  * `(tenant, workflow, idempotency)` collide on it → exactly one run header. `resumable` marks a
  * paused/quarantined run a later worker can resume from the persisted node states. `input_event` is
  * the full neutral trigger event (DATA); `error` is the first workflow-level error state.
@@ -476,7 +476,7 @@ export const workflowRuns = pgTable(
   },
   (t) => [
     index('workflow_runs_tenant_idx').on(t.tenantId),
-    // The single-flight natural key (C10): exactly one run per (tenant, workflow, idempotency-key).
+    // The single-flight natural key: exactly one run per (tenant, workflow, idempotency-key).
     uniqueIndex('workflow_runs_tenant_wf_idem_idx').on(t.tenantId, t.workflowId, t.idempotencyKey),
   ],
 );
@@ -538,7 +538,7 @@ export const workflowNodeStates = pgTable(
  * `@rayspec/grounding-runtime` `ArtifactStore` interface with a TenantDb implementation so an
  * artifact never leaves its tenant. The `artifact_id` is the content-addressed handle id
  * (`artifact:<namespace>:<scope>:<kind>:<hash>`); `UNIQUE(tenant_id, artifact_id)` makes a persist
- * IDEMPOTENT (a re-persist of identical content is a get-or-create no-op — the C10 SAVEPOINT-scoped
+ * IDEMPOTENT (a re-persist of identical content is a get-or-create no-op — the single-flight SAVEPOINT-scoped
  * get-or-create is recoverable). `content` is the artifact body (DATA); `metadata` its envelope meta.
  */
 export const workflowArtifacts = pgTable(

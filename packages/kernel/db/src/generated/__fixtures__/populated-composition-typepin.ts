@@ -1,13 +1,13 @@
 /**
- * COMPILE-TIME pin for a POPULATED deployment's A1 composition.
+ * COMPILE-TIME pin for a POPULATED deployment's product-table composition.
  *
  * The platform main line ships a PRODUCT-EMPTY tuple, so the populated-deployment compile path was
- * never typechecked (the original ZPC-1 bug — an unconditional empty-baseline assertion — would have
+ * never typechecked (the original empty-baseline bug — an unconditional empty-baseline assertion — would have
  * broken a real deployment, and nothing caught it). This module composes the POPULATED fixture
  * tuple against the REAL core tuple EXACTLY as schema.ts does, and asserts the populated deployment
  * typechecks: every product table is a member of the composed union, and the composed element type
  * is the precise core ⊕ product union (no widening). If a future change broke the populated
- * composition (as ZPC-1 did), `tsc -b` would fail HERE.
+ * composition (as the empty-baseline bug did), `tsc -b` would fail HERE.
  *
  * It is a fixture (under `__fixtures__/`, compiled by tsc -b but not used at runtime).
  */

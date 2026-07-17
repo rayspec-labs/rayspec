@@ -12,11 +12,11 @@
  * scheduled-workflows, AND this workflow-run workflow.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * SINGLE-FLIGHT + DURABILITY (C10 + honest resume).
+ * SINGLE-FLIGHT + DURABILITY (with honest resume).
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * The DBOS `workflowID` IS the tenant-namespaced `durableWorkflowRunId(tenant, workflowId,
  * idempotencyKey)`, so DBOS's own workflow-id idempotency law dedups a redelivered / concurrent
- * enqueue to exactly one workflow (C10). On a crash mid-run, DBOS re-invokes the workflow → the ONE
+ * enqueue to exactly one workflow (single-flight). On a crash mid-run, DBOS re-invokes the workflow → the ONE
  * step re-runs `engine.execute()`, which JOURNAL-RESUMES at the first non-completed node (a completed
  * node is never re-run). This is the honest durability contract documented on the engine (a node
  * interrupted mid-execution is re-run — node handlers self-guard: capability idempotency keys,
@@ -200,7 +200,7 @@ export class DbosWorkflowExecutor implements WorkflowEnqueuer {
   /**
    * Enqueue (or dedup) a durable workflow run — the `WorkflowEnqueuer` seam the trigger dispatcher
    * calls. The DBOS workflowID is the tenant-namespaced `durableWorkflowRunId`, so a redelivery /
-   * concurrent enqueue of the same `(tenant, workflow, idempotency)` dedups to one workflow (C10).
+   * concurrent enqueue of the same `(tenant, workflow, idempotency)` dedups to one workflow (single-flight).
    */
   async enqueueWorkflowRun(input: {
     tenantId: string;

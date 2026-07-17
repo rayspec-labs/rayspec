@@ -3,7 +3,7 @@
  * A neutral single-repo Product-YAML VPS boot entrypoint (the deploy-entrypoint gate's subject).
  *
  * The generic `rayspec-serve` bin boots auth-only / classic specs; a Product-YAML boot additionally
- * needs the LOCAL A1 stand-in (`registerProductTables`) so `deploy()`'s identity-keyed chokepoint
+ * needs the LOCAL table-registration stand-in (`registerProductTables`) so `deploy()`'s identity-keyed chokepoint
  * verify sees the exact product-table instances (a real deployment commits a `product-schema.ts`; the
  * LOCAL/single-node posture registers them at boot). The
  * LIVE extraction, the STT provider, and the store bindings are all read from ENV by the composition

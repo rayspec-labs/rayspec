@@ -36,7 +36,7 @@ export type FileState = 'uploaded' | 'submitted';
 /**
  * The `file_input.file_submitted` event — the workflow trigger shape. The `event_id` is the
  * FILE-scoped idempotency key (= `${tenant_id}:${file_id}`, the record `submittedEventId` mirror),
- * so a re-submit of the same file converges on ONE workflow (C10 single-flight downstream). Every
+ * so a re-submit of the same file converges on ONE workflow (single-flight downstream). Every
  * field is read from the AUTHORITATIVE stored pointer row (never a raw request), so a deduped
  * redelivery is byte-consistent with the first delivery. Bytes are NOT here — `blob_key` is the
  * tenant-relative key a tenant-bound reader resolves (the parse node's input).
@@ -87,7 +87,7 @@ export interface FileSubmitResult {
   readonly event_id: string;
   /**
    * True when this submit was a re-submit of an already-sealed file (the STORED authoritative
-   * event was re-emitted for redelivery and dedups downstream — client retry = redelivery, C10).
+   * event was re-emitted for redelivery and dedups downstream — client retry = redelivery, single-flight).
    */
   readonly deduped: boolean;
 }

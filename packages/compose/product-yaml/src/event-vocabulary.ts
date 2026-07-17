@@ -8,7 +8,7 @@
  *      triggering workflow's event `payload_keys` (was: the global audio constant). NEVER a union
  *      across events: a union would re-admit a scope the actual triggering event cannot satisfy —
  *      exactly the runtime 'persist_scope_missing' hole this closed;
- *   3. the per-trigger idempotency-key derivation (C10) — every trigger registration passes an
+ *   3. the per-trigger idempotency-key derivation (single-flight) — every trigger registration passes an
  *      EXPLICIT `idempotencyKeyForEvent` from the descriptor's declared key field (was: the
  *      dispatcher's implicit default, a silent single-flight weakening for any future non-audio
  *      event). For the audio event the derived key stays byte-identical:
@@ -73,7 +73,7 @@ export function mountedTriggerEventDescriptors(
           `capability '${capability.id}' event '${descriptor.id}' declares idempotency key field ` +
             `'${descriptor.idempotency_key_field}', which is not among its payload keys ` +
             `(${descriptor.payload_keys.join(', ')}) — the single-flight key would ALWAYS fall back ` +
-            'to per-delivery event ids (a silent C10 weakening); rejected at compose.',
+            'to per-delivery event ids (a silent single-flight weakening); rejected at compose.',
         );
       }
       if (byCanonicalId.has(descriptor.contract)) {
@@ -91,7 +91,7 @@ export function mountedTriggerEventDescriptors(
 
 /**
  * Build ONE dispatcher trigger registration for a compiled workflow: the workflow + the EXPLICIT
- * per-event idempotency-key derivation from its trigger event's descriptor (C10 by construction —
+ * per-event idempotency-key derivation from its trigger event's descriptor (single-flight by construction —
  * compose never relies on the dispatcher's implicit default, so a future event without a declared
  * key contract cannot silently weaken the single-flight). Fail-closed: a compiled workflow whose
  * trigger event has no mounted descriptor is rejected here (defense-in-depth — the bridge already
@@ -107,7 +107,7 @@ export function triggerRegistrationForWorkflow(
       'unsupported_spec',
       `workflow '${workflow.id}' triggers on event '${workflow.trigger.event}', which no mounted ` +
         'capability declares a descriptor for — a trigger without a declared idempotency contract ' +
-        'would silently fall back to per-delivery keys (a C10 single-flight weakening); rejected at ' +
+        'would silently fall back to per-delivery keys (a single-flight weakening); rejected at ' +
         'compose.',
     );
   }

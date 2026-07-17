@@ -6,7 +6,7 @@
  * loader resolved it (path-jailed, fail-closed at boot); this interpreter builds the Hono handler
  * that runs it per request:
  *   - on the SAME ordered auth/tenant middleware chain as every route (server-derived tenant);
- *   - INSIDE `forTenant(db, tenantId).transaction(...)` (the GUC seam — A2/A3), so every DB touch the
+ *   - INSIDE `forTenant(db, tenantId).transaction(...)` (the GUC seam), so every DB touch the
  *     handler makes is in ONE tenant-scoped transaction (route handlers, unlike tool handlers, DO get
  *     an outer transaction);
  * through the platform's single `HandlerRuntime` indirection (external-exposure hardening isolate seam).

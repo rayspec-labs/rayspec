@@ -73,7 +73,7 @@ describe('CONVERSATION_CAPABILITY_MANIFEST', () => {
     expect(event?.idempotency).toBe('turn_scoped');
   });
 
-  it('THE TURN-LOSS PIN (C10): the idempotency key field is NEVER conversation_id — a conversation-scoped key would dedupe every later turn into the FIRST durable run (silent turn loss)', () => {
+  it('THE TURN-LOSS PIN (single-flight): the idempotency key field is NEVER conversation_id — a conversation-scoped key would dedupe every later turn into the FIRST durable run (silent turn loss)', () => {
     const event = CONVERSATION_CAPABILITY_MANIFEST.capabilities[0]?.events[0];
     expect(event?.idempotency_key_field).not.toBe('conversation_id');
     // The chosen field composes the conversation AND the per-turn message identity.

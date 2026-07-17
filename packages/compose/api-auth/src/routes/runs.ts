@@ -285,7 +285,7 @@ export async function executeAgentRun(
   const timeoutMs = deps.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
   // build the run's tools. A DECLARED agent (engine-built registry entry) sets
   // `toolFactory` — its tools are per-RUN, TENANT-bound (each escape-hatch handler gets a HandlerInit
-  // whose HandlerDb closes over THIS tenant's TenantDb — A2). A static-tools entry sets `tools`.
+  // whose HandlerDb closes over THIS tenant's TenantDb). A static-tools entry sets `tools`.
   // Prefer the tenant-bound factory when present; else the static list. Built from the SAME `tdb`
   // (forTenant) the idempotency reservation already uses, so no extra tenant resolution.
   const runTools = entry.toolFactory ? entry.toolFactory(tdb) : entry.tools;
@@ -933,7 +933,7 @@ function replayEventsAsSse(c: Context, tdb: TenantDb, runId: string, afterSeq: n
       .orderBy(asc(schema.runEvents.seq));
     for (const row of rows as Array<{ seq: string; type: string; data: unknown }>) {
       if (stream.aborted) break;
-      // C1 (re-validate-on-read): a stored jsonb `data` is attacker-/corruption-reachable, so
+      // Re-validate-on-read: a stored jsonb `data` is attacker-/corruption-reachable, so
       // exactly like rehydrateConversation re-validates conversation_items.payload — we re-parse it as
       // a neutral NeutralEvent and DROP (omit) any row whose data does not match the neutral shape
       // (fail-closed: never serve an unvalidated stored frame). The validated value (not the raw row)

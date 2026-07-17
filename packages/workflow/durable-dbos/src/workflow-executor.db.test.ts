@@ -6,7 +6,7 @@
  * workflow spine on GROUND TRUTH:
  *  1. `enqueueWorkflowRun` → `runWorkflowJob` runs `engine.execute` OFF-REQUEST → workflow_runs +
  *     workflow_node_states + workflow_artifacts persist; status maps enqueued → succeeded.
- *  2. SINGLE-FLIGHT (C10): enqueueing the SAME (tenant, workflow, idempotency) twice — the DBOS
+ *  2. SINGLE-FLIGHT: enqueueing the SAME (tenant, workflow, idempotency) twice — the DBOS
  *     workflowID is the tenant-namespaced durableWorkflowRunId — runs the engine (and its nodes)
  *     EXACTLY once (a node counter proves it), and the second enqueue reports deduped.
  *

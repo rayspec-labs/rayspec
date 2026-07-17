@@ -67,7 +67,7 @@ describe('submittedFileEventToWorkflowInput', () => {
     // key set EQUALS the descriptor's — no extra channel can ride along, none can go missing.
     const input = submittedFileEventToWorkflowInput(event());
     expect(Object.keys(input.payload).sort()).toEqual([...FILE_SUBMITTED_PAYLOAD_KEYS].sort());
-    // … and the descriptor's idempotency key field is among them (C10 never falls back).
+    // … and the descriptor's idempotency key field is among them (single-flight never falls back).
     expect(FILE_SUBMITTED_PAYLOAD_KEYS).toContain(descriptor?.idempotency_key_field ?? '');
   });
 });

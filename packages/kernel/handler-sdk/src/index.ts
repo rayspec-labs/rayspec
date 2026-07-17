@@ -85,7 +85,7 @@ export type StoreRow = Record<string, unknown>;
 export type StoreFilter = Record<string, unknown>;
 
 /**
- * Read-shaping options for `select` (C11 — list/aggregation handlers stop hand-rolling N+1 + in-memory
+ * Read-shaping options for `select` (list/aggregation handlers stop hand-rolling N+1 + in-memory
  * sort/slice). ALL fields are PLAIN SERIALIZABLE values (column NAMES + numbers + an `'asc'|'desc'`
  * literal) — NO closures, NO live query builder — so a `select(store, filter, opts)` call stays the
  * SAME marshallable request the external-exposure isolate can ship across a boundary unchanged (the isolate-safe
@@ -107,7 +107,7 @@ export interface SelectOptions {
 
 /**
  * The tenant-bound DB capability a tool/route/trigger handler receives via `HandlerInit.db`
- * (corrects A2: the handler does NOT receive a raw `TenantDb`; the engine builds this name-keyed
+ * (the handler does NOT receive a raw `TenantDb`; the engine builds this name-keyed
  * facade over `forTenant(db, tenantId)` + the deployment's declared product tables and injects it).
  *
  * Every method:
@@ -117,24 +117,24 @@ export interface SelectOptions {
  *  - fail-closes on an UNDECLARED store name (a handler can only reach stores the spec declared);
  *  - exchanges only plain serializable rows / filters (the isolate-ready shape).
  *
- * TRANSACTION BOUNDARY (corrects A2 — the asymmetry is intentional, stated here AND in code):
+ * TRANSACTION BOUNDARY (the asymmetry is intentional, stated here AND in code):
  *  - a TOOL handler gets NO implicit outer transaction (an agent fires several tools in parallel
  *    under the dispatch Semaphore; wrapping the loop would hold a DB tx open across model latency).
  *    A tool needing atomicity opens one EXPLICITLY via `db.transaction(...)`.
  *  - a ROUTE/TRIGGER handler runs INSIDE a `TenantDb.transaction()` the engine already opened (the
- *    `app.current_tenant` GUC seam, A3); `db.transaction(...)` there nests onto the same tenant.
+ *    `app.current_tenant` GUC seam); `db.transaction(...)` there nests onto the same tenant.
  */
 export interface HandlerDb {
   /**
    * List/select rows from a declared store matching `filter` (tenant-scoped; `{}`/omitted = all).
    *
-   * FILTER (C11): an equality map; a value that is an ARRAY becomes a batched set-membership filter
+   * FILTER: an equality map; a value that is an ARRAY becomes a batched set-membership filter
    * (`IN (…)`) on a NON-jsonb column — so a list handler reads N rows in ONE query instead of N
    * round-trips. (On a `jsonb` column an array value is the VALUE ITSELF → matched by equality, never
    * `IN`.) Each array element still passes the same data-value guard a scalar does (an injection vector
    * is rejected fail-closed).
    *
-   * OPTS (C11): optional `orderBy`/`limit`/`offset` (see `SelectOptions`) for server-side ordering +
+   * OPTS: optional `orderBy`/`limit`/`offset` (see `SelectOptions`) for server-side ordering +
    * paging. The tenant predicate is structural BENEATH this; opts can never widen it.
    */
   select(store: string, filter?: StoreFilter, opts?: SelectOptions): Promise<StoreRow[]>;
@@ -155,7 +155,7 @@ export interface HandlerDb {
   /** Insert one row into a declared store (tenant_id auto-stamped); returns the inserted row. */
   insert(store: string, values: StoreRow): Promise<StoreRow>;
   /**
-   * ATOMIC upsert (C11/C1) — one `INSERT … ON CONFLICT (conflictColumns) DO UPDATE` that replaces the
+   * ATOMIC upsert — one `INSERT … ON CONFLICT (conflictColumns) DO UPDATE` that replaces the
    * race-prone hand-rolled select-else-insert-else-catch-23505 idiom with a SINGLE statement. Inserts
    * `values` (tenant_id auto-stamped); on a unique-constraint conflict over `conflictColumns` it UPDATES
    * the conflicting row with `values` (minus the conflict columns) INSTEAD of erroring.
@@ -238,7 +238,7 @@ export interface HandlerInit {
  * a tool author writes against is explicit and so a future tool-only capability can be added here
  * WITHOUT widening route/trigger inits.
  *
- * NO implicit outer transaction (A2): a tool that needs atomicity calls `init.db.transaction(...)`.
+ * NO implicit outer transaction: a tool that needs atomicity calls `init.db.transaction(...)`.
  *
  * A tool init carries the tenant-bound `init.blob` (inherited from `HandlerInit`)
  * when the deployment wired a blob backend, exactly like a ROUTE/STREAM init. The resolver
@@ -250,7 +250,7 @@ export interface HandlerInit {
  * the previously-documented gap where a tool init was ONLY `{ tenantId, db }`.)
  *
  * (No `toolCallId` is surfaced: the central `dispatchTool` chokepoint owns the real per-call id as
- * its journal/uniqueness key and — by design, A2 — calls the wrapped handler with only `(args)`, so
+ * its journal/uniqueness key and — by design — calls the wrapped handler with only `(args)`, so
  * the resolver cannot thread the real id through without changing the UNCHANGED chokepoint. A tool
  * handler needs the args + the tenant-bound db (+ the optional tenant-bound blob), not the dispatch
  * correlation id; we do not fabricate one.)
@@ -452,7 +452,7 @@ export function isHttpResponse(value: unknown): value is HttpResponse {
   );
 }
 
-/** What a ROUTE handler receives. Runs INSIDE the engine's `TenantDb.transaction()` (A3). */
+/** What a ROUTE handler receives. Runs INSIDE the engine's `TenantDb.transaction()` (the tenant-GUC seam). */
 export interface RouteHandlerInit extends HandlerInit {
   /**
    * Path/query params bound by the route (e.g. `{id}` → `params.id`). All values are DATA (server-
@@ -507,7 +507,7 @@ export interface RouteHandlerInit extends HandlerInit {
   readonly mintPlayToken?: (args: { resource: string; ttlSeconds: number }) => Promise<string>;
 }
 
-/** What a TRIGGER handler receives. Runs INSIDE the engine's `TenantDb.transaction()` (A3). */
+/** What a TRIGGER handler receives. Runs INSIDE the engine's `TenantDb.transaction()` (the tenant-GUC seam). */
 export interface TriggerHandlerInit extends HandlerInit {
   /** The declared trigger's name (DATA — for logging/branching). */
   readonly triggerName: string;

@@ -259,7 +259,7 @@ describe('mountConversationCapability — the bound handlers (create → turn �
       reply: { message: string; run_id: string; usage?: unknown };
     };
     expect(again.deduped).toBe(true);
-    // C10: the SAME persisted reply, ZERO additional responder/model invocations.
+    // single-flight: the SAME persisted reply, ZERO additional responder/model invocations.
     expect(again.reply.message).toBe(first.reply.message);
     expect(again.reply.run_id).toBe(first.reply.run_id);
     expect(again.reply.usage).toBeUndefined(); // ledger-served — no fresh usage (honest).
@@ -430,7 +430,7 @@ describe('mountConversationCapability — the SSE streaming egress (content-nego
     expect(body.text).toContain('ping-zzz');
   });
 
-  it('TERMINAL ⟷ RE-POST consistency: the stream terminal frame equals the C10 re-POST JSON reply (run_id, text, turn_seq)', async () => {
+  it('TERMINAL ⟷ RE-POST consistency: the stream terminal frame equals the single-flight re-POST JSON reply (run_id, text, turn_seq)', async () => {
     const h = harness(createInMemoryTurnSubmittedSink());
     await driveCreate(h, 'c-1');
 
@@ -440,7 +440,7 @@ describe('mountConversationCapability — the SSE streaming egress (content-nego
     );
     const streamed = JSON.parse(frames.at(-1)?.data ?? '{}');
 
-    // Re-POST the SAME message_id as JSON (the C10 reconnect path) — the persisted reply, verbatim.
+    // Re-POST the SAME message_id as JSON (the single-flight reconnect path) — the persisted reply, verbatim.
     const reposted = (await driveTurn(h, 'c-1', { message_id: 'm-1', text: 'hi' })) as {
       reply: { run_id: string; message: string; turn_seq: number };
     };
@@ -715,7 +715,7 @@ describe('mountConversationCapability — the SSE streaming egress (content-nego
     };
     expect(jsonFresh.reply.usage).toEqual(streamedTerminal.usage);
 
-    // (b) a LEDGER-SERVED reply (C10 re-POST) reports NO usage — consistently in BOTH the JSON reply
+    // (b) a LEDGER-SERVED reply (single-flight re-POST) reports NO usage — consistently in BOTH the JSON reply
     // AND the terminal frame (a known residual: the run header stores no token counts to re-derive).
     const jsonRepost = (await driveTurn(h, 'c-1', { message_id: 'm-1', text: 'hi' })) as {
       reply: { usage?: unknown };

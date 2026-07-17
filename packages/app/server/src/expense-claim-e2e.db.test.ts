@@ -11,10 +11,10 @@
  * Arms:
  *   1. env boot → Product-YAML dispatch (deployMode 'materialized'; NO audio/stt env demanded);
  *   2. seed the policy catalog → POST /records/{id}/submit → the REAL DbosWorkflowExecutor runs
- *      store_read → agent → validation → store_write OFF-REQUEST → EXACTLY ONE workflow_runs row (C10)
+ *      store_read → agent → validation → store_write OFF-REQUEST → EXACTLY ONE workflow_runs row (single-flight)
  *      → the coded_claims row carries the coded jsonb + the catalog snapshot (read feeds write);
  *   3. the DECLARED views serve the coded claim (detail + paged list) over HTTP;
- *   4. re-submit the SAME claim id → deduped:true → STILL one run + one row (C10 single-flight);
+ *   4. re-submit the SAME claim id → deduped:true → STILL one run + one row (single-flight);
  *   5. a foreign-tenant submit → 403 record_event_rejected (cross-tenant fail-closed, zero enqueue);
  *   6. an unauthenticated submit → 401;
  *   7. the boot-scope gate is WIRED: an out-of-scope (multi-scope) doc fails the boot fail-closed.
@@ -277,7 +277,7 @@ describe.skipIf(!baseUrl)('Expense-Claim acceptance — real boot + real DBOS + 
       expect(body.deduped).toBe(false);
 
       const runs = await waitForOneCompletedRun();
-      expect(runs).toHaveLength(1); // C10 single-flight
+      expect(runs).toHaveLength(1); // single-flight
       expect(runs[0]?.tenant_id).toBe(TENANT);
 
       // 3. MATERIALIZED ground truth: one coded row with the coded jsonb + the catalog snapshot.
@@ -312,7 +312,7 @@ describe.skipIf(!baseUrl)('Expense-Claim acceptance — real boot + real DBOS + 
       expect(listBody.claims).toHaveLength(1);
       expect(listBody.claims[0]).toMatchObject({ claim_ref: RECORD, amount_cents: 4200 });
 
-      // 5. Re-submit the SAME claim (reordered body) → deduped → STILL one run + one row (C10).
+      // 5. Re-submit the SAME claim (reordered body) → deduped → STILL one run + one row (single-flight).
       const again = await submit(
         RECORD,
         {
@@ -324,7 +324,7 @@ describe.skipIf(!baseUrl)('Expense-Claim acceptance — real boot + real DBOS + 
       );
       expect(again.status).toBe(200);
       expect((await again.json()).deduped).toBe(true);
-      // C10 single-flight: a re-submit must enqueue NO second durable run. A FIXED sleep-then-read
+      // single-flight: a re-submit must enqueue NO second durable run. A FIXED sleep-then-read
       // samples ONCE and can MISS a genuine 2nd run whose `ensureRun` header lands just after the sleep
       // (a slow-box timing false-green — e.g. a regression that made the durable workflowRunId
       // non-deterministic). Instead POLL-until-quiescent: over a multi-second window, on EVERY tick the

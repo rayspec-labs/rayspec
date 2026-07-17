@@ -6,7 +6,7 @@
  * instructions/model/backend come from the deployment's `<agent_id>.responder.json` (boot-side,
  * the extractor.json precedent) — no product or model name lives here.
  *
- * ── THE DETERMINISTIC REPLY RUN ID (C10 — the convergence anchor), ATTEMPT-SCOPED ──────
+ * ── THE DETERMINISTIC REPLY RUN ID (single-flight — the convergence anchor), ATTEMPT-SCOPED ──────
  * `replyAttemptRunId(turnRef, n)` derives a UUID-shaped id from the turn's TENANT-PREFIXED ledger
  * `turn_ref` plus the ATTEMPT ordinal (the `agentSubRunId` recipe; attempt 0 is byte-
  * compatible with the original `replyRunId(turnRef)`): every converging retry of one turn WALKS

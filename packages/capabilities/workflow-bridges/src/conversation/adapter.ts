@@ -24,7 +24,7 @@
  * dedupe EVERY later turn of a conversation into its FIRST durable run — silent turn loss (pinned
  * fail-the-fix by adapter.test.ts). Because `id` is ALSO turn-scoped, the dispatcher's
  * missing-field fallback (`event:${id}`) stays per-turn-stable too. So a client re-POST (retry =
- * redelivery) converges on ONE durable run per turn (C10 single-flight).
+ * redelivery) converges on ONE durable run per turn (single-flight).
  */
 import type { SubmittedTurnEvent } from '@rayspec/conversation-runtime';
 import { CONVERSATION_EVENT_PAYLOAD_KEYS } from '@rayspec/conversation-runtime';

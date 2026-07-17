@@ -6,7 +6,7 @@
  * `record_submitted` event through an injected `RecordSubmittedSink`. The Tier A workflow runtime
  * subscribes to that event and enforces record-scoped single-flight by the event's `event_id`
  * (= `${tenantId}:${recordId}`) / the descriptor-derived idempotency key, so a client re-submit
- * (retry = redelivery) converges on EXACTLY one workflow run (C10).
+ * (retry = redelivery) converges on EXACTLY one workflow run (single-flight).
  */
 import type { SubmittedRecordEvent } from './types.js';
 

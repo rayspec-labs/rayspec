@@ -29,7 +29,7 @@ export class TenantDbWorkflowJournalStore implements WorkflowJournalStore {
   async ensureRun(
     header: WorkflowRunHeaderInput,
   ): Promise<{ run: DurableWorkflowRun; created: boolean }> {
-    // Single-flight (C10): the deterministic tenant-namespaced workflowRunId is the PK, so a concurrent
+    // Single-flight: the deterministic tenant-namespaced workflowRunId is the PK, so a concurrent
     // / redelivered start of the same (tenant, workflow, idempotency) collides on it. INSERT .. ON
     // CONFLICT DO NOTHING RETURNING — the FIRST caller creates it (created:true); a loser gets [] and
     // reads the existing header (created:false). No in-tx 23505 recovery (single-flight is the fix).

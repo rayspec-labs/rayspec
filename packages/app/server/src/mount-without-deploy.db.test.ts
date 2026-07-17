@@ -171,7 +171,7 @@ describe('mount-without-deploy — reboot preserves materialized product stores'
   }, 60_000);
 
   // Boot the real composition root against the throwaway DB with the given spec path. Registers the
-  // built product tables through the A1 chokepoint hook (deploy() verifies the SAME instances).
+  // built product tables through the table-registration chokepoint hook (deploy() verifies the SAME instances).
   async function boot(whichSpecPath: string): Promise<BootedServer> {
     process.env.RAYSPEC_SPEC_PATH = whichSpecPath;
     const config = loadServerConfig();

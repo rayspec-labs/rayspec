@@ -106,7 +106,7 @@ describe('static frontend serving — composition root mounts declared frontend[
     if (baseUrl) {
       const config = loadServerConfig();
       server = await assembleServer(config, {
-        // The A1 LOCAL stand-in: register THESE exact product-table instances (deploy() verifies the
+        // The LOCAL table-registration stand-in: register THESE exact product-table instances (deploy() verifies the
         // same objects). notes-ui has no handlers/agents/stream — a plain store+api+frontend boot.
         registerProductTables: (tables) => {
           registerScopedTables([...tables.values()]);

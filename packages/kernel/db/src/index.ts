@@ -47,7 +47,7 @@ export {
 // deploy tooling. The platform main line ships these + a PRODUCT-EMPTY generated baseline; a
 // deployment / the throwaway runs the generator over its own spec. The GATE-ONLY product-tenancy
 // machinery (`assertProductTenancy`, `withScopedTables`) is DELIBERATELY off this surface — it lives
-// on `@rayspec/db/testing` (ZPC-3), blocked in shipped `packages/**\/src` by the same Biome
+// on `@rayspec/db/testing` (the testing-only seam), blocked in shipped `packages/**\/src` by the same Biome
 // `noRestrictedImports` ban as the raw factories, so a request-path caller cannot reach the
 // deny-by-default Set mutator.
 export { buildProductTables } from './generated/build-product-tables.js';

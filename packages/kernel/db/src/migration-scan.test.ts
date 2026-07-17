@@ -189,7 +189,7 @@ describe('high-blast detectors an earlier scan missed', () => {
   });
 });
 
-describe('C5: EVERY committed migration passes the scan with its reviewed allowlist (per-migration)', () => {
+describe('EVERY committed migration passes the scan with its reviewed allowlist (per-migration)', () => {
   // The gate CLI already scans all migrations; this gives each one PER-MIGRATION unit coverage so a
   // future migration that is destructive without a reviewed allowlist entry fails HERE too (and a
   // currently-clean one — e.g. 0004_run_events — has an explicit clean-status assertion).

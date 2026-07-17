@@ -1,7 +1,7 @@
 /**
- * COMPILE-TIME pin for the A1 tuple composition — the load-bearing
+ * COMPILE-TIME pin for the product-table tuple composition — the load-bearing
  * deny-by-default TYPE invariant. This module is COMPILED by `tsc -b` (NOT a `.test.ts`, which tsc
- * excludes), so the assertions below FAIL `pnpm typecheck` on a regression — A1 is build-blocking.
+ * excludes), so the assertions below FAIL `pnpm typecheck` on a regression — this tuple pin is build-blocking.
  *
  * It proves, against the REAL `schema.ts` composition + a synthetic populated tuple:
  *   1. NO WIDENING — the composed element type is the precise UNION of the member table literal
@@ -12,12 +12,12 @@
  *      composed union (a table absent from the tuple is unreachable through the chokepoint).
  *   4. EMPTY-BASELINE — ONLY when the real product tuple is empty (the platform main line), the
  *      platform union equals the CORE union. This is GUARDED on the actual product-tuple length so a
- *      POPULATED deployment (product tuple non-empty) still typechecks (ZPC-1).
+ *      POPULATED deployment (product tuple non-empty) still typechecks (the populated-deployment type-pin).
  *
  * A POPULATED deployment compile path is additionally typechecked by `__fixtures__/populated-
- * product-schema.ts` (ZPC-2) — a real populated module composed against schema.ts.
+ * product-schema.ts` (the populated-schema fixture pin) — a real populated module composed against schema.ts.
  *
- * The RUNTIME half of A1 (an unregistered table throws at access) is proven by
+ * The RUNTIME half of the tuple invariant (an unregistered table throws at access) is proven by
  * product-pipeline.test.ts + the api-auth cross-tenant gate.
  */
 import { pgTable, uuid } from 'drizzle-orm/pg-core';
@@ -64,7 +64,7 @@ type _UnregisteredIsNotMember = Assert<
 
 // (4) EMPTY-BASELINE — guarded on the REAL product tuple length. Only assert union-equality when the
 // product tuple is empty (the platform main line); a POPULATED deployment skips this (it would not
-// hold, by design) and still typechecks (ZPC-1).
+// hold, by design) and still typechecks (the populated-deployment type-pin).
 type ProductIsEmpty = (typeof PRODUCT_TENANT_SCOPED_TABLES)['length'] extends 0 ? true : false;
 type _EmptyBaselineUnchangedIfEmpty = Assert<
   ProductIsEmpty extends true ? Equals<PlatformMember, CoreMember> : true

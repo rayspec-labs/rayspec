@@ -71,7 +71,7 @@ describe('submittedRecordEventToWorkflowInput', () => {
     for (const key of RECORD_SUBMITTED_ENVELOPE_KEYS) {
       expect(Object.keys(input.payload)).toContain(key);
     }
-    // … and the descriptor's idempotency key field is among them (C10 never falls back).
+    // … and the descriptor's idempotency key field is among them (single-flight never falls back).
     expect(RECORD_SUBMITTED_ENVELOPE_KEYS).toContain(descriptor?.idempotency_key_field ?? '');
   });
 });

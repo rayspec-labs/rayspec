@@ -28,7 +28,7 @@
  *   leg is tx-free (run-core's streaming-persist law) and the reply persists in its own short tx.
  *   A reply-leg error NEVER unwinds the committed intake — it maps to the reply-leg error body
  *   CARRYING the intake facts + the deterministic run id, so the client knows the turn was
- *   accepted and retries the SAME message_id to converge (C10 — no second model call).
+ *   accepted and retries the SAME message_id to converge (single-flight — no second model call).
  *
  * The create handler is UNCHANGED (engine-tx posture — it runs no model).
  */
@@ -121,7 +121,7 @@ type IntakeOutcome =
  *     client stream), then emits ONE terminal `conversation_reply` (the guaranteed complete reply —
  *     load-bearing for a zero-delta backend) or `conversation_reply_error` frame. The reply PERSISTS
  *     server-side regardless of the client connection; a disconnected client reconnects by re-POSTing
- *     the SAME message_id (the C10 dedup path — reply.ts) and gets the identical persisted reply (the
+ *     the SAME message_id (the single-flight dedup path — reply.ts) and gets the identical persisted reply (the
  *     terminal frame and the re-POST JSON carry the SAME `{run_id,text,turn_seq}`).
  *   - any other / absent / MALFORMED Accept → the JSON path, BYTE-IDENTICAL (never a 500).
  */
@@ -272,7 +272,7 @@ function makeTurnReplyProducer(
       // An UNEXPECTED fault (the model leg or the persist threw outright). The SSE 200 headers
       // are already flushed, so this can never become a JSON 500 — emit the typed error frame the
       // asymmetry would otherwise hide, then close cleanly. The intake is DURABLE (leg 1 committed);
-      // the client re-POSTs the SAME message_id to converge (C10). Best-effort errorClass/run_id.
+      // the client re-POSTs the SAME message_id to converge (single-flight). Best-effort errorClass/run_id.
       if (signal.aborted) return; // client already gone — nothing to deliver.
       await emit({
         event: REPLY_ERROR_FRAME_EVENT,

@@ -104,7 +104,7 @@ try {
   await admin.end();
 }
 
-// 4. Boot the composed stack with the LOCAL A1 stand-in (+ the conversation/agent executor modes).
+// 4. Boot the composed stack with the LOCAL table-registration stand-in (+ the conversation/agent executor modes).
 process.env.DATABASE_URL = DATABASE_URL;
 process.env.PORT = PORT;
 process.env.RAYSPEC_PRODUCT_TENANT_ID = TENANT;

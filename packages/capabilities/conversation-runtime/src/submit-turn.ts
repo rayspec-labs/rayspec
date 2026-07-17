@@ -4,7 +4,7 @@
  *
  *  1. DETERMINISTIC TENANT-SCOPED EVENT ID — `submittedTurnEventId(tenantId, conversationId,
  *     messageId)` (the record/file mirror): TURN-scoped, so every new turn gets its OWN durable
- *     run while a re-POST of one message converges on one (C10; keying on the conversation would
+ *     run while a re-POST of one message converges on one (single-flight; keying on the conversation would
  *     silently dedupe every later turn into the first run — the pinned turn-loss hazard).
  *  2. IDEMPOTENT RE-POST THAT RE-EMITS — an identical re-POST of a persisted message returns
  *     `deduped: true` AND re-emits the STORED authoritative event (client retry = redelivery; a
@@ -197,7 +197,7 @@ export async function submitTurn(
   const found = existing[0];
   if (found !== undefined) {
     if (String(found.message) !== text) {
-      // THE STORED-EVENT HEAL — BEST-EFFORT BY DESIGN (C10-2; the record heal posture): the
+      // THE STORED-EVENT HEAL — BEST-EFFORT BY DESIGN (the record heal posture): the
       // stored turn may be persisted-but-never-enqueued, so re-emit its STORED event before the
       // permanent 409. The catch below swallows EVERY throw except the fail-closed rejection
       // family — deliberately: the 409 is a PERMANENT client condition (divergent text under a
@@ -243,7 +243,7 @@ export async function submitTurn(
   const tailSeq = Number(tail[0]?.turn_seq);
   const nextSeq = (Number.isFinite(tailSeq) ? tailSeq : 0) + 1;
 
-  // THE SAVEPOINT-SCOPED INSERT (the module header's C10 law, the concurrent-turn conflict fix): `db.transaction`
+  // THE SAVEPOINT-SCOPED INSERT (the module header's single-flight law, the concurrent-turn conflict fix): `db.transaction`
   // NESTED inside the engine's route transaction is a SAVEPOINT, so a lost-race unique violation
   // aborts ONLY this scope — the route tx stays clean and the typed 409 below actually reaches
   // the client (an unscoped 23505 poisons the route tx: the driver rejects the outer transaction
@@ -267,7 +267,7 @@ export async function submitTurn(
     );
   } catch (e) {
     if (isUniqueViolation(e)) {
-      // THE LOST RACE (the module header's C10 law): a concurrent turn won `seq_ref` (a different
+      // THE LOST RACE (the module header's single-flight law): a concurrent turn won `seq_ref` (a different
       // message took this seq) or `turn_ref` (the same message double-fired and its winner
       // persisted after our dedup read). LOUD typed 409 — ZERO emit (nothing was persisted for
       // THIS request; the winner emits its own stored event on its own path), ZERO further DB

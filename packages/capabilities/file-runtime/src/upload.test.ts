@@ -725,7 +725,7 @@ describe('uploadFile — the upload-racing-submit TOCTOU (arm 1: the state-guard
     expect(uploadSink.deliveredFor(`${TENANT_A}:f-1`)).toMatchObject({
       sha256: sha256Hex(sealedBytes), // … carrying the SEALED bytes, never the request's shaX
     });
-    // The racer's own emit went to ITS sink (one delivery — C10 single-flight downstream).
+    // The racer's own emit went to ITS sink (one delivery — single-flight downstream).
     expect(racerSink.deliveredCount()).toBe(1);
     // The shaX bytes MAY exist as an orphan under their own content key (the stated no-GC cut) —
     // content-addressed keys keep the sealed row's blob_key pointing at the sealed bytes.

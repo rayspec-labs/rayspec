@@ -1,6 +1,6 @@
 /**
  * The reply leg (reply.ts), fail-the-fix over the constraint-enforcing fake db:
- *  - C10 DEDUP: an existing reply row short-circuits BEFORE the responder (the fake counts
+ *  - single-flight DEDUP: an existing reply row short-circuits BEFORE the responder (the fake counts
  *    invocations — zero model work on the dedup arm);
  *  - the reply ROW: own next seq, derived `reply~` message id + turn_ref, role/state/run_id set,
  *    NO event emitted (the ledger's assistant row triggers nothing);
@@ -183,7 +183,7 @@ describe('ensureTurnReply — the fresh path', () => {
   });
 });
 
-describe('ensureTurnReply — C10 convergence', () => {
+describe('ensureTurnReply — single-flight convergence', () => {
   it('DEDUP: an existing reply row returns VERBATIM with ZERO responder calls', async () => {
     const tables = new SharedConversationTables();
     const db = makeFakeConversationDb(tables, TENANT);

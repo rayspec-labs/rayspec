@@ -3,7 +3,7 @@
  *  - the payload keys equal the MANIFEST descriptor's payload_keys (the contract) AND are
  *    exactly what the adapter emits — nothing more (no client channel), nothing less;
  *  - every field is the SERVER-DERIVED value from the capability event (stored-row provenance);
- *  - THE C10 TURN-LOSS PIN: the idempotency field is PER-TURN — two turns of ONE conversation
+ *  - THE single-flight TURN-LOSS PIN: the idempotency field is PER-TURN — two turns of ONE conversation
  *    derive DISTINCT single-flight keys (a conversation-keyed field would collapse every later
  *    turn into the first durable run: silent turn loss);
  *  - the event type is the DEFAULT join with NO alias-table entry.
@@ -64,13 +64,13 @@ describe('submittedTurnEventToWorkflowInput', () => {
     // key set EQUALS the descriptor's — no extra channel can ride along, none can go missing.
     const input = submittedTurnEventToWorkflowInput(event());
     expect(Object.keys(input.payload).sort()).toEqual([...TURN_SUBMITTED_PAYLOAD_KEYS].sort());
-    // … and the descriptor's idempotency key field is among them (C10 never falls back).
+    // … and the descriptor's idempotency key field is among them (single-flight never falls back).
     expect(TURN_SUBMITTED_PAYLOAD_KEYS).toContain(descriptor?.idempotency_key_field ?? '');
     // The scope key (persisted artifacts scope on `conversation`) is a payload key.
     expect(TURN_SUBMITTED_PAYLOAD_KEYS).toContain('conversation_id');
   });
 
-  it('THE C10 TURN-LOSS PIN: two turns of ONE conversation derive DISTINCT dispatcher idempotency keys through the REAL derivation (conversation-keying would collapse them into one run)', () => {
+  it('THE single-flight TURN-LOSS PIN: two turns of ONE conversation derive DISTINCT dispatcher idempotency keys through the REAL derivation (conversation-keying would collapse them into one run)', () => {
     const descriptor = CONVERSATION_CAPABILITY_MANIFEST.capabilities[0]?.events[0];
     const keyFn = payloadFieldIdempotencyKey(descriptor?.idempotency_key_field ?? '');
     const turn1 = submittedTurnEventToWorkflowInput(

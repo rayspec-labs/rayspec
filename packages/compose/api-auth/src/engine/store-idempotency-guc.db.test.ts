@@ -10,7 +10,7 @@
  * a bare `.select()` leaves ALL other tests green (no RLS is mounted today, so the GUC has no observable
  * effect), which is exactly the blind spot this suite closes.
  *
- * The proof uses the A3 `wrapDb` GUC-capture seam (test-support/harness.ts): the wrapper observes
+ * The proof uses the `wrapDb` GUC-capture seam (test-support/harness.ts): the wrapper observes
  * `current_setting('app.current_tenant')` INSIDE every transaction that runs through `deps.db`. We RESET
  * the captured value to a sentinel right BEFORE the idempotent RETRY, so the ONLY transaction that can
  * repopulate it on that request is the replay-read (the retry's create tx THROWS before the wrapper's
@@ -132,7 +132,7 @@ describeDb('the replay-read runs in a tenant tx that sets the GUC', () => {
     testsRan += 1;
     const a = await principal('guc-a@example.com', 'GucOrgA');
 
-    // (1) First create with Idempotency-Key K → 201. Its create tx sets the GUC (A3) — proven by the
+    // (1) First create with Idempotency-Key K → 201. Its create tx sets the GUC — proven by the
     // capture reflecting the row's tenant. Read the tenant off the response (serializeRow exposes it).
     const first = await post(a.token, { content: 'hello' }, 'K-GUC-1');
     expect(first.status).toBe(201);
@@ -140,7 +140,7 @@ describeDb('the replay-read runs in a tenant tx that sets the GUC', () => {
     const firstId = firstBody.id as string;
     const tenantId = firstBody.tenant_id as string;
     expect(typeof tenantId).toBe('string');
-    // The create tx ran with the GUC populated to the request tenant (baseline A3 invariant).
+    // The create tx ran with the GUC populated to the request tenant (the baseline GUC invariant).
     expect(capturedGuc.value).toBe(tenantId);
 
     // (2) RESET the sentinel: only a transaction on the RETRY may repopulate it now. The retry's create

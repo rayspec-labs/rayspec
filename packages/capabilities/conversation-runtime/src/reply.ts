@@ -13,12 +13,12 @@
  * turn_ref    = the reply's DEDUP/single-flight authority (the ledger's global unique) — exactly
  *               one reply row can ever exist per user turn.
  * turn_seq    = the reply row's OWN next sequence (the read-max+1 law).
- * run_id      = the deterministic reply run id (from the responder — C10 convergence).
+ * run_id      = the deterministic reply run id (from the responder — single-flight convergence).
  * state       = 'replied' (terminal; persisted only after a COMPLETED run).
  * The reply row EMITS NO EVENT (only user turns trigger workflows — row-event.ts fail-closes on a
  * non-user row; the sink is never called here).
  *
- * ── CONVERGENCE (C10 — the no-second-model-call law) ────────────────────────────────────────────
+ * ── CONVERGENCE (single-flight — the no-second-model-call law) ────────────────────────────────────────────
  * 1. Reply row exists → return it VERBATIM (zero responder/model calls — the dedup arm).
  * 2. No reply row → assemble the bounded window and call `respond` (the LIVE responder first
  *    ATTACHES to a completed run under the deterministic run id — a crash between model-success
@@ -37,7 +37,7 @@
  * retries here. The converse race exists too (stated honestly): when the REPLY persist
  * wins a sequence a concurrent user turn had read, THAT turn's intake loses its `seq_ref` insert
  * and surfaces the loud 409 `conversation_turn_conflict` — so the 409 is NOT user-vs-user
- * only; the client's same-message_id retry still converges (C10). On reply-retry exhaustion the
+ * only; the client's same-message_id retry still converges (single-flight). On reply-retry exhaustion the
  * typed 503 carries the run id — the model output is durable under it and the client's
  * idempotent re-POST converges via arm 2 (no second model call).
  *
@@ -177,7 +177,7 @@ export async function ensureTurnReply(
   const assembled = assembleTurnInput({ history, chars, ...(context ? { context } : {}) });
 
   // 3. The model leg — NO transaction held (the intake-ordering law). The live responder attaches
-  //    to a completed deterministic run before ever re-invoking the model (C10).
+  //    to a completed deterministic run before ever re-invoking the model (single-flight).
   const userTurnRef = turnRef(ctx.tenantId, conversationId, intake.message_id);
   const outcome = await responder.respond({
     input: assembled.input,

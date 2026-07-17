@@ -10,7 +10,7 @@
  *    re-read from the validated `ProductSpec` by (workflow id, step id) — exactly how the grounding/
  *    validation/persist nodes read their policy from the spec. A step the spec does not declare is a
  *    TYPED failure (`store_step_undeclared`), never a guess.
- *  - **store.write is `db.upsert` EXCLUSIVE, on the STORE-DECLARED conflict key** (the C10 25P02
+ *  - **store.write is `db.upsert` EXCLUSIVE, on the STORE-DECLARED conflict key** (the single-flight 25P02
  *    lesson: an in-tx unique-violation on a non-upsert path poisons the WHOLE run transaction — an
  *    insert-and-recover can never be saved in-tx). The durable engine's at-least-once law re-executes
  *    a mid-crash node; the upsert makes the re-execution converge on ONE row per key value.
@@ -193,7 +193,7 @@ export function makeStoreReadNode(cfg: StoreNodeConfig): CapabilityNodeHandler {
  * whitelist on the resolved values (the same server-side whitelist the HTTP route applies — so an
  * out-of-whitelist value, including an agent's classification output, is rejected before the write),
  * then **upsert EXCLUSIVELY on the store's declared conflict key** (see the module header — the
- * C10/at-least-once law).
+ * single-flight/at-least-once law).
  *
  * THE `undefined`-RESULT LAW (the cross-tenant write-blindness fix — loud, never silent). The facade's
  * return contract (store-facade.ts) makes `undefined` mean, per arm:
@@ -256,7 +256,7 @@ export function makeStoreWriteNode(cfg: StoreNodeConfig): CapabilityNodeHandler 
 
     let row: StoreRow | undefined;
     try {
-      // db.upsert ONLY — never insert-and-recover (C10: an in-tx 23505 → 25P02 poisons the whole
+      // db.upsert ONLY — never insert-and-recover (single-flight: an in-tx 23505 → 25P02 poisons the whole
       // run transaction; the upsert's ON CONFLICT converges re-executions on ONE row per key).
       row = await cfg.db.upsert(store.name, [...store.key], values);
     } catch (e) {

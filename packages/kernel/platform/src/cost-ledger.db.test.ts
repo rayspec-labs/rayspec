@@ -124,14 +124,14 @@ describe('per-step cost is RE-COMPUTED from the registry at record() time', () =
     expect(Number(step?.costUsd)).toBeCloseTo(expected, 12);
     // The adapter LIED with 999 — it must NOT be in the ledger.
     expect(Number(step?.costUsd)).not.toBe(999);
-    // Provenance: produced_by is the SDK+adapter tag (A6); pricing_version is the pricing entry (A1).
+    // Provenance: produced_by is the SDK+adapter tag; pricing_version is the pricing entry.
     expect(step?.producedBy).toBe('test-cost-backend@1.0.0');
     // pricing_version records WHICH effective-dated entry computed the cost (`<model>@<effectiveFrom>`).
     expect(step?.pricingVersion).toBe('gpt-4.1-mini@2025-04-14');
   });
 });
 
-describe('A6/A1: pricing-version provenance is PERSISTED + a FALLBACK step is distinguishable', () => {
+describe('pricing-version provenance is PERSISTED + a FALLBACK step is distinguishable', () => {
   it('a KNOWN-model step records pricing_version=`<model>@<effectiveFrom>`', async () => {
     const tdb = forTenant(db, TENANT_A);
     const res = await runAgent(
@@ -163,7 +163,7 @@ describe('A6/A1: pricing-version provenance is PERSISTED + a FALLBACK step is di
   });
 });
 
-describe('A3: computed-vs-provider reconciliation + drift flag', () => {
+describe('computed-vs-provider reconciliation + drift flag', () => {
   it('provider cost CLOSE to computed → recorded, NO drift', async () => {
     const tdb = forTenant(db, TENANT_A);
     // computed = 0.0012; provider 0.00121 is within 5%.
@@ -207,7 +207,7 @@ describe('A3: computed-vs-provider reconciliation + drift flag', () => {
   });
 });
 
-describe('A5: subscription-run ledger semantics (Decision #7) — billed=0 + attributed cost', () => {
+describe('subscription-run ledger semantics (Decision #7) — billed=0 + attributed cost', () => {
   it('a SUBSCRIPTION step records billed_cost_usd=0 but a NON-ZERO attributed (computed) cost', async () => {
     const tdb = forTenant(db, TENANT_A);
     const res = await runAgent(
@@ -269,7 +269,7 @@ describe('A5: subscription-run ledger semantics (Decision #7) — billed=0 + att
   });
 });
 
-describe('A4: run→tenant cost roll-up (tenant-scoped via TenantDb)', () => {
+describe('run→tenant cost roll-up (tenant-scoped via TenantDb)', () => {
   it('the run header cost is the journal roll-up; rollupRunCost matches', async () => {
     const tdb = forTenant(db, TENANT_A);
     const res = await runAgent(

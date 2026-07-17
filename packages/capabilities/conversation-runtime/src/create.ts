@@ -18,11 +18,11 @@
  *     v1 (no route can change a stored title; a rename surface is a later slice/consumer
  *     decision, not an accidental omission).
  *  3. FIRST PERSIST = ATOMIC upsert on the tenant-prefixed unique `conversation_ref` (db.upsert
- *     ONLY — never insert-and-recover; the C10 25P02 law). Two concurrent identical first-creates
+ *     ONLY — never insert-and-recover; the single-flight 25P02 law). Two concurrent identical first-creates
  *     converge on one row/one ack.
  *  4. AUTHORITATIVE RE-READ (the record re-read posture): a concurrent DIVERGENT racer that overwrote
  *     the head between our upsert and the re-read surfaces as a title mismatch → the loud 409
- *     (this request's title did not win). The guard MIRRORS the found-path (C10-1): only a
+ *     (this request's title did not win). The guard MIRRORS the found-path: only a
  *     request that ASSERTED a title can lose — a BARE create asserted nothing, so a titled
  *     racer's head simply stands and the bare create converges to the dedup outcome (never a
  *     spurious 409). KNOWN RACE-WINDOW CAVEAT (record-capability-shared): the
@@ -124,7 +124,7 @@ export async function createConversation(
   }
 
   // FIRST PERSIST (requirement 3): ATOMIC upsert on the tenant-prefixed unique ref — concurrent
-  // identical first-creates converge; the C10 25P02 law forbids insert-and-recover.
+  // identical first-creates converge; the single-flight 25P02 law forbids insert-and-recover.
   const written = {
     conversation_id: conversationId,
     conversation_ref: ref,
@@ -144,7 +144,7 @@ export async function createConversation(
     throw new Error('conversation-runtime create: head row vanished mid-create (fail-closed).');
   }
   const storedTitle = row.title === null || row.title === undefined ? null : String(row.title);
-  // C10-1: MIRROR the found-path guard — absent = NO assertion, so the conflict fires only when
+  // MIRROR the found-path guard — absent = NO assertion, so the conflict fires only when
   // THIS request asserted a title the authoritative head diverges from. (The old
   // `storedTitle !== (title ?? null)` shape 409'd a BARE create that lost the first-create race
   // to a TITLED racer — contradicting the module contract's "a bare retry is always safe".)

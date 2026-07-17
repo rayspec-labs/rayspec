@@ -1,7 +1,7 @@
 // FIXTURE: a POPULATED generated product module, compiled by tsc -b so the
 // populated-deployment compile path is actually typechecked (the platform baseline is product-empty).
 // Mirrors examples/acme-notes-backend/generated/product-schema.ts with the import path adjusted for
-// this fixtures dir. NOT used at runtime; its ONLY job is to make the populated A1 composition typecheck.
+// this fixtures dir. NOT used at runtime; its ONLY job is to make the populated product-table composition typecheck.
 
 /**
  * GENERATED product schema — DO NOT EDIT BY HAND.
