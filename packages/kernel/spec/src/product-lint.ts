@@ -1216,7 +1216,7 @@ export function lintProductSpec(spec: ProductSpec): SpecError[] {
     // closed enum → a bad-enum `schema_violation`); this additionally rejects a route PATH that names
     // binary/range media streaming (`/playback`, `/stream`, `/streaming`). Word-boundary-anchored so a
     // playback-TOKEN read view (e.g. `/…/play-token`) is allowed — the token view returns a read model,
-    // not a stream. Tested per-marker (GR/TH-4: no untested substring theater).
+    // not a stream. Tested per marker — no decorative/untested substring check.
     if (STREAMING_ROUTE_MARKER.test(view.route.path)) {
       errors.push(
         specError(

@@ -113,8 +113,8 @@ function collectParams(c: Context<AppEnv>): Record<string, string> {
 }
 
 /**
- * the request headers a `{handler}` route FORWARDS into `init.headers` — a CLOSED ALLOWLIST
- * (TH-1). This seam exists for the declared `conditional_read` feature (an SDK-consumption
+ * the request headers a `{handler}` route FORWARDS into `init.headers` — a CLOSED ALLOWLIST.
+ * This seam exists for the declared `conditional_read` feature (an SDK-consumption
  * capability of the views runtime: If-None-Match → 304) plus content-negotiation basics — NOT for
  * general header passthrough. Forwarding an allowlist instead of stripping a denylist means a
  * credential header (`authorization`, `cookie`, `proxy-authorization`, or any FUTURE credential
