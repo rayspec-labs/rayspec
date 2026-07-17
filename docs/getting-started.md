@@ -21,12 +21,19 @@ real authenticated request. You will:
 ## Prerequisites
 
 - **Node** `>=22`
-- **pnpm** `10.12.4`. The simplest way to get exactly this version is Corepack (bundled
-  with Node): `corepack prepare pnpm@10.12.4 --activate`. If your environment has no
-  Corepack, prefix the commands below with a one-off pin instead, e.g.
-  `npx -y pnpm@10.12.4 install`.
-- **Postgres** you can reach. The repo ships a local one via Docker Compose
-  (`pnpm db:up`, listening on port `5433`); or point at your own.
+- **pnpm** `10.12.4`. The most robust way to run exactly this version is a one-off
+  pin — prefix the commands below with `npx -y pnpm@10.12.4`, e.g.
+  `npx -y pnpm@10.12.4 install`. It needs no global install and works even where
+  Corepack is unavailable. To activate pnpm globally instead, use Corepack (bundled
+  with Node): `corepack enable && corepack prepare pnpm@10.12.4 --activate` — the
+  `corepack enable` step is required first (without it a fresh environment reports
+  `pnpm: command not found`), and on some Node builds Corepack fails with
+  `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`; if you hit either, use the
+  `npx -y pnpm@10.12.4` pin.
+- **Postgres** you can reach. The repo ships a local one via Docker Compose, which
+  needs **Docker with Compose v2** (the `docker compose` subcommand — a bare
+  `docker.io` package ships no Compose plugin). Bring it up with `pnpm db:up`
+  (listening on port `5433`); or point at your own Postgres and skip Docker.
 
 > **Don't work from a cloud-synced folder.** Clone and build outside iCloud Drive,
 > Dropbox, OneDrive, or any folder a sync client watches. Those clients churn
