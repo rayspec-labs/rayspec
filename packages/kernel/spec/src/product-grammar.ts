@@ -633,7 +633,6 @@ export type ProductViewSpec = z.infer<typeof ProductViewSpec>;
 export const ProviderOverride = z
   .object({
     default_model: z.string().min(1).optional(),
-    default_provider: z.string().min(1).optional(),
   })
   .strict();
 export type ProviderOverride = z.infer<typeof ProviderOverride>;

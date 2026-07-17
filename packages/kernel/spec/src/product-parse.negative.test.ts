@@ -287,6 +287,20 @@ describe('unknown_field (strict, fail-closed)', () => {
       [['unknown_field', 'views[0].paginationn']],
     );
   });
+
+  it('rejects a provider override that sets a default provider (only default_model is bindable)', () => {
+    expectExact(
+      `${BASE}\ndeployment_overrides:\n  providers:\n    deepgram:\n      default_provider: some_provider\n`,
+      [['unknown_field', 'deployment_overrides.providers.deepgram.default_provider']],
+    );
+  });
+
+  it('a provider override binding a default model still parses (the surviving sibling)', () => {
+    const res = parseProductSpec(
+      `${BASE}\ndeployment_overrides:\n  providers:\n    deepgram:\n      default_model: nova-2\n`,
+    );
+    expect(res.ok).toBe(true);
+  });
 });
 
 describe('schema_violation (shape)', () => {
