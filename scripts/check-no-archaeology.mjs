@@ -30,9 +30,9 @@
  *      accepted cost.
  *
  * SCOPE BOUNDARY (families deliberately NOT tokenized — a documented decision, NOT a silent miss):
- *   (a) the `C<n>` invariant-name shorthand (`C10`/`C11`) — a load-bearing shorthand used across the
- *       codebase; a broad `C\d` token is noise-prone (it collides with `C1` constants / hex /
- *       identifiers), so these are not tokenized here.
+ *   (a) an invariant-name letter+number shorthand — a load-bearing shorthand used across the
+ *       codebase; a broad single-letter+digit token is noise-prone (it collides with real short-code
+ *       constants / hex / identifiers), so these are not tokenized here.
  *   (b) ambiguous single-letter+digit codes (`E1`/`F1`) — they collide with legit LOCAL test-arm
  *       labels (arm F1/F2, INJ-F1, TF-F1), score/hex forms, and the "Tier-1" test-tier term. Only the
  *       EXPLICIT slice+finding forms `S<n> F<n>` / `S<n>-F<n>` are tokenized (slice-abbrev).
