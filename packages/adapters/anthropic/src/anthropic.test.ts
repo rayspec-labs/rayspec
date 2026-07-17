@@ -1,7 +1,7 @@
 /**
  * Deterministic acceptance — credential-INDEPENDENT.
  *
- * Proves the parts of A.1 that do not need a live Anthropic run:
+ * Proves the parts that do not need a live Anthropic run:
  *   - per-tenant CLAUDE_CONFIG_DIR isolation (no cross-contamination)
  *   - bundled-binary verification works
  *   - auth-mode self-check detects a stray ANTHROPIC_API_KEY
@@ -360,7 +360,7 @@ describe('JSONL session re-derivation round-trip', () => {
     ].join('\n');
     writeFileSync(join(projectDir, `${sessionId}.jsonl`), jsonl);
 
-    // Exercise the adapter's REAL re-derivation (the A.1 round-trip acceptance).
+    // Exercise the adapter's REAL re-derivation (the round-trip acceptance).
     // Re-derivation returns neutral ConvTurn[] (one text part per JSONL message).
     const turns = reDeriveJsonl(configDir, sessionId);
     expect(turns.map((t) => t.role)).toEqual(['user', 'assistant']);
