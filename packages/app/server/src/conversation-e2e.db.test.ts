@@ -20,7 +20,7 @@
  *   (b2) THE TURN-LOSS PIN at the system level: a SECOND turn of the SAME conversation gets its
  *        OWN durable run (turn_seq 2; key `turn_ref:<conv>:<msg2>`) — a conversation-scoped key
  *        would dedupe it into run 1 (silent turn loss);
- *   (c)  identical re-POST of a persisted message → `deduped: true`, STILL the same runs (single-flight
+ *   (c)  identical re-POST of a persisted message → `deduped: true`, STILL the same runs (
  *        single-flight through the whole composed stack);
  *   (d)  divergent-text re-POST of a stored message_id → 409 `conversation_message_conflict`,
  *        the stored turn unchanged, still the same runs (the heal re-emit dedups);
