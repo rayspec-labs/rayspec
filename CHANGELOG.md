@@ -5,6 +5,44 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-07-17
+
+### Security
+
+- **The per-tenant Anthropic credential directory is hardened further.** The
+  directory is now created in a single atomic step (create-or-validate, with no
+  check-then-create window), the credential root's ownership and permissions are
+  asserted at startup, and the tenant identifier is validated — an empty, absolute,
+  separator-, traversal-, or NUL-bearing value is rejected — before it is ever used
+  to build a path. This builds on the mode-`0700` and containment checks from the
+  previous release.
+- **All static-analysis findings are resolved.** The code-, path-, and label-parsing
+  and file-I/O findings surfaced by static analysis are fixed, or dismissed with a
+  documented rationale, leaving zero open alerts.
+- **CI supply-chain integrity is tightened further.** Container images used in CI
+  are pinned by content digest, and repository secret-scanning with push-protection
+  is enabled.
+
+### Changed
+
+- **Clearer startup and developer diagnostics.** Boot now emits a progress line
+  before the ready banner and fails with an explicit timeout message if it stalls; a
+  failed development-database connection reports its underlying cause; and a second
+  local instance can run alongside the first through container, volume, and port
+  overrides. The getting-started guide is polished to match.
+- **Source comments and test descriptions are rewritten in self-carrying product
+  language**, and the repository check that keeps the shipped source product-neutral
+  is stricter. These are non-functional text and tooling changes; runtime behaviour
+  is unchanged.
+
+### Documentation
+
+- **The v1 posture now states its honest edges.** A new "what v1 does not do yet"
+  section documents that request cancellation is bounded to the request rather than
+  propagated into in-flight work, that the hard-delete purge is operator-gated and
+  off by default, and that the federation and residency columns are shape-only with
+  enforcement deferred to the separate hardening layer.
+
 ## [1.4.0] - 2026-07-16
 
 ### Security
