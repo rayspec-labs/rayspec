@@ -2,7 +2,7 @@
 /**
  * Deploy-entrypoint import-resolvability gate.
  *
- * WHY THIS EXISTS (a REAL crash-loop class caught at a VPS cutover)
+ * WHY THIS EXISTS (a REAL crash-loop class caught in production)
  *   The single-repo VPS image boots via `CMD ["pnpm","exec","tsx","deployments/acme-notes/serve.mts"]`.
  *   `deployments/acme-notes/serve.mts` lives OUTSIDE any workspace package (the `deployments/` tree has NO
  *   package.json + is not a pnpm-workspace member), so Node resolves its BARE (non-relative) imports from
