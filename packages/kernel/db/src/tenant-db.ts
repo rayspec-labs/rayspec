@@ -226,7 +226,7 @@ export class TenantDb {
   }
 
   /**
-   * Cross-tenant run-header ownership probe (CRITICAL #1, encapsulated).
+   * Cross-tenant run-header ownership probe (encapsulated).
    *
    * Returns the OWNERSHIP verdict for a runId against THIS tenant. This is intentionally a
    * cross-tenant read (it must see whether the PK belongs to ANOTHER tenant to detect a

@@ -19,7 +19,7 @@ import { toOutputType } from './index.js';
 
 describe('OpenAI adapter wire mapping', () => {
   it('maps a neutral outputSchema -> JsonSchemaDefinition shape via the REAL projection (json_schema, strict)', () => {
-    // C5 (de-tautologized): drive the REAL projection the adapter applies in run() (toOutputType),
+    // De-tautologized: drive the REAL projection the adapter applies in run() (toOutputType),
     // NOT a hand-built literal compared to itself. Flipping strict:true->false in index.ts breaks
     // this assertion.
     const neutral = { name: 'meeting_extraction', schema: { type: 'object', properties: {} } };

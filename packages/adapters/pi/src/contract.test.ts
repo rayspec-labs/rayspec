@@ -573,7 +573,7 @@ describe('piToolParameters validate-and-repair (mirrors pi-agent-core validateTo
     return Compile(piToolParameters({ name: 't', description: 'd', parameters: params }));
   }
 
-  it('it is NOT the old empty accept-all Type.Object — the neutral JSON-Schema is carried verbatim (EXCEPT unenforced `format` is stripped — FIX 1)', () => {
+  it('it is NOT the old empty accept-all Type.Object — the neutral JSON-Schema is carried verbatim (EXCEPT unenforced `format` is stripped)', () => {
     const ts = piToolParameters({ name: 't', description: 'd', parameters: params });
     // `params` carries no `format`, so the projection is byte-verbatim here (the structural keywords —
     // type/properties/required/items/enum/additionalProperties — are all retained).
@@ -589,7 +589,7 @@ describe('piToolParameters validate-and-repair (mirrors pi-agent-core validateTo
   // relocating the very MaxTurns churn this fixes. The fix RECURSIVELY STRIPS `format` so Compile/Check
   // accepts whatever dispatchTool's ajv accepts. Doc-first probe (typebox@1.1.38 Compile.Check vs the
   // exact dispatch.ts ajv config): `format` is the ONLY divergence in the tool-parameter vocabulary.
-  describe('FIX 1 — `format` stripped so Pi-Check is a SUBSET of dispatchTool ajv (never stricter)', () => {
+  describe('`format` stripped so Pi-Check is a SUBSET of dispatchTool ajv (never stricter)', () => {
     const formatParams = {
       type: 'object',
       properties: {

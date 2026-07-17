@@ -505,7 +505,7 @@ describe('Deep tool-arg Zod projection validate-and-repair (mirrors the SDK MCP 
   // `integer → z.number().refine(Number.isInteger)`. Doc-first probe: refine(Number.isInteger) matches
   // ajv's `{type:'integer'}` accept/reject on every probed value (2^53 → accept, 1e21 → accept,
   // 3.5 → reject, 3 → accept). (2^53 = 9007199254740992 is an EXACT float — no precision loss.)
-  describe('FIX 2 — `integer` accepts large ints (>safe-int) like dispatchTool ajv (never .int()-clamped)', () => {
+  describe('`integer` accepts large ints (>safe-int) like dispatchTool ajv (never .int()-clamped)', () => {
     const v = jsonSchemaToZodType({ type: 'integer' });
 
     it('ACCEPTS 9007199254740992 (2^53, above the safe-int range) — RED on the base (.int() clamps), GREEN after refine', () => {
