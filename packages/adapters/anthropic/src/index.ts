@@ -165,20 +165,36 @@ export class AnthropicAdapter implements Backend {
   }
 
   /**
-   * Boot-time guard on the config ROOT itself: the per-tenant child dirs are 0o700-guarded, but a
-   * group/world-accessible ROOT would undermine the whole isolation. Assert an existing root has no
-   * group/other bits (fail-closed), or create it 0o700 when absent (idempotent) — which also gives
-   * configDirFor its precondition that the parent exists for the non-recursive per-tenant create.
+   * Boot-time guard on the config ROOT itself. The per-tenant child dirs are already type-, mode-,
+   * and ownership-checked; this MIRRORS that guard for the root, whose weakness would undermine the
+   * whole isolation. Ensure the root exists at 0o700, then UNCONDITIONALLY re-validate it: reject a
+   * symlink or non-directory, a group/world-accessible mode, or a foreign-owned root. The create
+   * alone guarantees nothing — a recursive mkdir no-ops on an existing (possibly attacker-planted)
+   * path, so the checks always run against the real on-disk entry. This also gives configDirFor its
+   * precondition that the parent exists for the non-recursive per-tenant create.
    */
   private assertConfigRoot(): void {
-    const existing = lstatSync(this.configRoot, { throwIfNoEntry: false });
-    if (existing === undefined) {
-      mkdirSync(this.configRoot, { recursive: true, mode: 0o700 });
-      return;
+    // Ensure the root (and any missing parents) exist at 0o700.
+    mkdirSync(this.configRoot, { recursive: true, mode: 0o700 });
+    // Unconditionally re-validate: a pre-existing or concurrently-planted root is NOT skipped
+    // (recursive mkdir no-ops on an existing path, so the create alone guarantees nothing). lstat
+    // does not follow a final symlink, so a symlinked root is caught here rather than followed.
+    const st = lstatSync(this.configRoot);
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw new Error(
+        `anthropic adapter: config root is a symlink or not a directory (${this.configRoot}).`,
+      );
     }
-    if (existing.mode & 0o077) {
+    if (st.mode & 0o077) {
       throw new Error(
         `anthropic adapter: config root is group/world-accessible (${this.configRoot}).`,
+      );
+    }
+    // A root owned by another uid can be swapped out from under us after these checks; reject a
+    // foreign-owned root. POSIX only — process.getuid is undefined on Windows.
+    if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
+      throw new Error(
+        `anthropic adapter: config root is not owned by this process (${this.configRoot}).`,
       );
     }
   }

@@ -19,7 +19,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
   AnthropicAdapter,
@@ -137,6 +137,47 @@ describe('config-dir hardening — config root mode asserted at boot (1b)', () =
     new AnthropicAdapter({ configRoot: root });
     expect(statSync(root).isDirectory()).toBe(true);
     expect(statSync(root).mode & 0o077).toBe(0);
+  });
+
+  it('rejects a symlinked config root', () => {
+    // A 0o700 symlink pointing at a real dir must be caught by the TYPE guard, not followed. The
+    // guard ensures existence first (a recursive mkdir no-ops on the symlink), then lstat (no-follow)
+    // sees the symlink. This message-specific assertion is the fail-the-fix: cap the type guard and
+    // the symlinked root falls through to the mode check, which throws the group/world message
+    // instead — so the assertion goes RED. (A symlink's own lstat mode is not portably controllable,
+    // so we assert on the message, not on reaching the mode/ownership guards.)
+    const base = tmpRoot();
+    const realDir = join(base, 'real');
+    const linkRoot = join(base, 'link-root');
+    mkdirSync(realDir, { mode: 0o700 });
+    symlinkSync(realDir, linkRoot);
+    expect(() => new AnthropicAdapter({ configRoot: linkRoot })).toThrow(
+      /is a symlink or not a directory/,
+    );
+  });
+
+  it('rejects a pre-existing group/world-accessible config root', () => {
+    // Exercises the UNCONDITIONAL re-validate: the root already exists (0o777) at construction, so
+    // the recursive mkdir no-ops and does NOT tighten its mode — the guard must still reject it.
+    // chmod defeats umask so the mode is unambiguous. Fail-the-fix: cap the mode check and this
+    // process-owned 0o777 dir passes the type + ownership guards and is accepted → RED.
+    const root = tmpRoot();
+    chmodSync(root, 0o777);
+    expect(() => new AnthropicAdapter({ configRoot: root })).toThrow(/group\/world-accessible/);
+  });
+
+  it('rejects a foreign-owned config root', () => {
+    // Ownership cannot be changed without privileges, so stub process.getuid to a uid that does NOT
+    // match the real (process-owned) 0o700 root — the deterministic proxy for a foreign owner.
+    // Fail-the-fix: cap the ownership check and this real 0o700 process-created dir is accepted → RED.
+    const root = tmpRoot();
+    const realUid = process.getuid?.() ?? 0;
+    const spy = vi.spyOn(process, 'getuid').mockReturnValue(realUid + 1);
+    try {
+      expect(() => new AnthropicAdapter({ configRoot: root })).toThrow(/not owned by this process/);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
