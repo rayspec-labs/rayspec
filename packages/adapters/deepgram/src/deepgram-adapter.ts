@@ -78,7 +78,7 @@ export class DeepgramSttAdapter implements SttAdapter {
   /**
    * Transcribe one finalized track via a single `POST /v1/listen`.
    *
-   * IDEMPOTENCY (F1, accepted-but-not-deduped deferral): `request.idempotency_key` is accepted for
+   * IDEMPOTENCY (accepted-but-not-deduped deferral): `request.idempotency_key` is accepted for
    * forward-compatibility but this adapter does NOT dedupe on it — every call issues a fresh billed
    * Deepgram request, so two identical calls today = two billed requests. Single-flight/dedup is the
    * Tier-A workflow-runtime's job (its `enqueueAgentRun` idempotency-key), NOT the provider adapter's.
@@ -207,7 +207,7 @@ export class DeepgramSttAdapter implements SttAdapter {
   /**
    * Fan out to one `transcribeTrack` per finalized track (session model/language policy applied to
    * each). The session `idempotency_key` is forwarded but, as on `transcribeTrack`, is NOT deduped
-   * here — dedup/single-flight belongs to the Tier-A workflow-runtime, not this adapter (F1).
+   * here — dedup/single-flight belongs to the Tier-A workflow-runtime, not this adapter.
    */
   async transcribeSession(request: SttTranscribeSessionRequest): Promise<SttTranscriptionResult[]> {
     const results: SttTranscriptionResult[] = [];
@@ -277,9 +277,9 @@ export class DeepgramSttAdapter implements SttAdapter {
     });
     const hint = languagePolicy?.language_hint?.trim();
     if (hint) {
-      // WF-3: `language=<hint>` is a NEW param the proven prior path never sent — that path
-      // always sent `detect_language=true`. A shadow-run against the frozen baseline
-      // must therefore run WITHOUT a language_hint, so the request reproduces the prior path byte-for-byte.
+      // When a language_hint is set, pin Deepgram to that language with `language=<hint>` — it is
+      // mutually exclusive with auto-detection, so this path never also sends `detect_language=true`
+      // (the default `else` path below sends `detect_language=true` when no hint is given).
       params.set('language', hint);
     } else if (languagePolicy?.detect_language !== false) {
       // Default: detect the dominant language when no explicit hint is given.

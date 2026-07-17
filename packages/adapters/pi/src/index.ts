@@ -12,7 +12,7 @@
  *   - AuthStorage.inMemory(); authStorage.setRuntimeApiKey('openai', key) (core/auth-storage.d.ts:59,64)
  *       inMemory() uses an InMemoryAuthStorageBackend (no auth.json reads/writes). create() defaults
  *       to a FileAuthStorageBackend that reads+writes ~/.pi/agent/auth.json via a reload lock — which
- *       is why this adapter uses inMemory() for a truly isolated, side-effect-free run (B3).
+ *       is why this adapter uses inMemory() for a truly isolated, side-effect-free run.
  *       setRuntimeApiKey is a runtime override (priority 1 in getApiKey), so the OpenAI key resolves
  *       with NO disk credential — verified live.
  *   - ModelRegistry.inMemory(authStorage); SessionManager.inMemory()
@@ -303,7 +303,7 @@ export class PiAdapter implements Backend {
     const resolved = await this.resolveAuth();
     const authMode: AuthMode = ctx.authMode ?? resolved;
 
-    // C2: run-core is the SINGLE per-run seq authority. Emit SEQ-LESS through ctx.onEvent
+    // run-core is the SINGLE per-run seq authority. Emit SEQ-LESS through ctx.onEvent
     // (its wrapper stamps the one monotonic seq across adapter + dispatchTool events). No adapter-local
     // makeEventIngest (deleted). Pi events carry no SDK correlation id — the platform seq gives them
     // the same total order (the asymmetry lives here, not in a weakened neutral type).
@@ -319,7 +319,7 @@ export class PiAdapter implements Backend {
     }
 
     // ---- isolated, in-memory auth + model registry (no ~/.pi reads/writes) ----------------------
-    // B3: AuthStorage.inMemory() uses an InMemoryAuthStorageBackend — NO auth.json file I/O.
+    // AuthStorage.inMemory() uses an InMemoryAuthStorageBackend — NO auth.json file I/O.
     // (AuthStorage.create() would back onto ~/.pi/agent/auth.json via a reload lock, contradicting the
     // "isolated, in-memory" intent.) The OpenAI key is a runtime override (priority 1 in getApiKey),
     // so it resolves with no on-disk credential.
@@ -337,7 +337,7 @@ export class PiAdapter implements Backend {
     }
     if (!model) {
       const message = `PiAdapter: unknown OpenAI model '${spec.model}'`;
-      // OBS-01: this is an ADAPTER-INTERNAL validation error — the model is rejected before any
+      // This is an ADAPTER-INTERNAL validation error — the model is rejected before any
       // HTTP call, so there is no upstream status to classify; it is honestly `internal` (NOT an
       // upstream 4xx — we never fabricate an upstream class for a local rejection).
       const errorClass: ErrorClass = 'internal';
@@ -443,7 +443,7 @@ export class PiAdapter implements Backend {
     // event-pipeline.ts: maxQueue + FIFO waiter, persist-before-flush) — this awaited forwardTail
     // feeds it in order, so the platform bound applies to Pi's stream too. (DRIFT-4)
     //
-    // ADAPT-1 (OBS-01): pi-agent-core's StreamFn contract (pi-agent-core types.d.ts:7-10) says a
+    // pi-agent-core's StreamFn contract (pi-agent-core types.d.ts:7-10) says a
     // request/model/runtime failure MUST NOT throw — it is encoded in the stream + a terminal
     // AssistantMessage with stopReason "error"/"aborted" + errorMessage; and pi RETRIES retryable
     // upstream errors internally (agent-session.d.ts:488) surfacing a terminal failure via an
@@ -469,16 +469,16 @@ export class PiAdapter implements Backend {
     const startedAt = Date.now();
     let status: 'completed' | 'error' = 'completed';
     let errorMessage: string | undefined;
-    // OBS-01: the neutral class of a model-call failure (Pi wraps OpenAI under the hood, so an
+    // The neutral class of a model-call failure (Pi wraps OpenAI under the hood, so an
     // HTTP error surfaces the same status-bearing shape classifyUpstreamError understands). Set in the
     // prompt() catch; threaded onto the error RunResult + journal step. Default `internal`.
     let errorClass: ErrorClass = 'internal';
-    // OBS-01: a Retry-After (seconds) the classifier captured (rate-limit/5xx), recorded into the
+    // A Retry-After (seconds) the classifier captured (rate-limit/5xx), recorded into the
     // failing journal step's output so the sync endpoint can surface the header. Undefined otherwise.
     let errorRetryAfter: number | undefined;
     let messages: PiMessage[] = [];
     let latencyMs = 0;
-    // C2: own the session in a try/finally so a THROWING onEvent (during prompt OR the tail
+    // Own the session in a try/finally so a THROWING onEvent (during prompt OR the tail
     // drain) NEVER leaks the Pi session — the teardown (unsubscribe/abort/dispose) always runs,
     // mirroring the Anthropic adapter's finally-abort.
     try {
@@ -498,14 +498,14 @@ export class PiAdapter implements Backend {
       // Harvest the REAL message history (text + correlated tool_call/tool_result) before teardown.
       messages = (session.messages ?? []) as unknown as PiMessage[];
 
-      // ADAPT-1 (OBS-01): if prompt() RESOLVED but the run actually FAILED upstream (the
+      // If prompt() RESOLVED but the run actually FAILED upstream (the
       // retries-then-fails-without-throwing path), promote it to status='error'. Inspect the terminal
       // session state for an upstream-error indicator: (1) an `auto_retry_end success:false` event
       // captured during the run, OR (2) a terminal AssistantMessage whose stopReason is "error"/
       // "aborted" carrying an errorMessage (the StreamFn-encoded failure, pi-agent-core types.d.ts:7-10).
       // We do this ONLY when status is still 'completed' (the prompt() catch already owns the throw
       // path) so we never double-handle. classifyUpstreamError runs on the REAL upstream message (a
-      // rate-limit/5xx string classifies correctly via the message heuristics once CLS-1/CLS-2 tighten).
+      // rate-limit/5xx string classifies correctly via the message heuristics).
       if (status === 'completed') {
         const upstreamError = retryFinalError ?? terminalAssistantError(messages);
         if (upstreamError !== undefined) {
@@ -606,7 +606,7 @@ export class PiAdapter implements Backend {
       output,
       // Key-presence: error ALWAYS present (null on success).
       error: null,
-      // OBS-01: errorClass is always-present — null on the success path.
+      // errorClass is always-present — null on the success path.
       errorClass: null,
       conversation,
       usage,
@@ -619,7 +619,7 @@ export class PiAdapter implements Backend {
   /**
    * Forward a Pi SDK event to the neutral event stream (SEQ-LESS — run-core stamps the seq).
    *
-   * B2: ONLY `text_delta` is relayed here. The tool-event LIFECYCLE (tool_called /
+   * ONLY `text_delta` is relayed here. The tool-event LIFECYCLE (tool_called /
    * tool_result / tool_error) is owned EXCLUSIVELY by ctx.dispatchTool — it emits exactly one
    * tool_called + one tool_result/tool_error per dispatched call. Pi ALSO fires
    * tool_execution_start/end for the same call, so relaying them here produced DUPLICATE and
@@ -695,7 +695,7 @@ export class PiAdapter implements Backend {
       finalText,
       output,
       error: null,
-      // OBS-01: errorClass is always-present — null on the (replay) success path.
+      // errorClass is always-present — null on the (replay) success path.
       errorClass: null,
       conversation: rehydrated,
       // Usage/cost DROPPED on replay (no new spend) — metered on the live run.
@@ -738,7 +738,7 @@ interface PiMessage {
   toolCallId?: string;
   toolName?: string;
   isError?: boolean;
-  // AssistantMessage terminal-state fields (pi-ai types.d.ts:221-222) — ADAPT-1: a failed turn is
+  // AssistantMessage terminal-state fields (pi-ai types.d.ts:221-222) — a failed turn is
   // encoded as stopReason "error"/"aborted" + errorMessage (the StreamFn no-throw failure contract).
   stopReason?: string;
   errorMessage?: string;
@@ -771,7 +771,7 @@ function neutralUsageFromPi(u: PiUsage | undefined): Usage {
 }
 
 /**
- * ADAPT-1 (OBS-01): detect a terminal UPSTREAM failure encoded in the message history when
+ * Detect a terminal UPSTREAM failure encoded in the message history when
  * prompt() RESOLVED without throwing. pi-agent-core's StreamFn contract (pi-agent-core types.d.ts:7-10)
  * encodes a request/model/runtime failure as the FINAL AssistantMessage with stopReason "error"/
  * "aborted" + an errorMessage (NOT a throw). Returns that errorMessage (the real upstream cause) when
@@ -981,7 +981,7 @@ function errorResult(
     // Key-presence: output + error ALWAYS present.
     output: null,
     error,
-    // OBS-01: the neutral error class on the error path (always-present).
+    // The neutral error class on the error path (always-present).
     errorClass,
     conversation: [],
     usage: emptyUsage(),

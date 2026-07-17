@@ -1,12 +1,12 @@
 /**
  * The RaySpec config grammar — `RaySpec` and its six sections.
  *
- * A deployed backend is ONE validated `RaySpec` (concept §9: stores · api · agents ·
- * tooling · triggers · handlers). This module defines ONLY the Zod grammar (shape). The
+ * A deployed backend is ONE validated `RaySpec` — stores · api · agents ·
+ * tooling · triggers · handlers. This module defines ONLY the Zod grammar (shape). The
  * two-phase parser (`parse.ts`), the semantic linter (`lint.ts`), and the JSON-Schema exporter
  * (`export.ts`) build on top of it.
  *
- * FAIL-CLOSED BY CONSTRUCTION (concept §9): every GRAMMAR object level is `.strict()`, so an
+ * FAIL-CLOSED BY CONSTRUCTION: every GRAMMAR object level is `.strict()`, so an
  * unknown key is rejected — there is no silent passthrough of a typo'd or unrecognized field.
  * Verified (zod 4.4.3, doc-first probe): `.omit().extend().strict()` composes so the wrap layer
  * stays strict AND the exported JSON-Schema carries `additionalProperties:false` at every STRICT
@@ -55,7 +55,7 @@ export const Metadata = z
 export type Metadata = z.infer<typeof Metadata>;
 
 // ---------------------------------------------------------------------------------------
-// deployment — independent grammar (deployment PROPERTY, not a backend capability — C3)
+// deployment — independent grammar (deployment PROPERTY, not a backend capability)
 // ---------------------------------------------------------------------------------------
 
 /**
@@ -439,7 +439,7 @@ export type TriggerSpec = z.infer<typeof TriggerSpec>;
 // ---------------------------------------------------------------------------------------
 
 /**
- * An EXACT semantic version pin (CLAUDE.md §3 "zero caret/tilde"). An extension
+ * An EXACT semantic version pin ("zero caret/tilde"). An extension
  * pack is product code authored + versioned in its OWN repo and named by reference here, so its
  * version MUST be pinned exactly — any range/wildcard/floating/partial form would let the resolved
  * pack drift silently between deploys, defeating the reviewed-deploy discipline.

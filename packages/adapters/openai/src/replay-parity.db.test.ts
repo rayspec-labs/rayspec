@@ -1,5 +1,5 @@
 /**
- * C3 — DB-backed replay transcript PARITY.
+ * DB-backed replay transcript PARITY.
  *
  * Exercises the REAL path end-to-end (NOT a stubbed rehydrate, which masked the bug): a live
  * `runAgent` persists the re-derived conversation via run-core, then a replay of the SAME runId
@@ -106,7 +106,7 @@ function fakeRunImpl() {
   };
 }
 
-describe('C3: DB-backed replay transcript parity (real rehydrateConversation)', () => {
+describe('DB-backed replay transcript parity (real rehydrateConversation)', () => {
   it('replay.conversation matches live (first turn role=system from trusted instructions)', async () => {
     runSpy.mockImplementation(fakeRunImpl());
     const tdb = forTenant(db, TENANT_A);
@@ -149,7 +149,7 @@ describe('C3: DB-backed replay transcript parity (real rehydrateConversation)', 
   });
 });
 
-describe('C2: run-core is the single seq authority — one-tool run has contiguous monotonic seq', () => {
+describe('run-core is the single seq authority — one-tool run has contiguous monotonic seq', () => {
   it('run_started/tool_called/tool_result/run_completed carry strictly monotonic, contiguous seq', async () => {
     runSpy.mockImplementation(fakeRunImpl());
     const tdb = forTenant(db, TENANT_A);

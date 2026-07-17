@@ -26,7 +26,7 @@ function unavailableBoundaryResult(): SttTranscriptionResult {
     error: {
       code: 'provider_unavailable',
       message:
-        'Deepgram is documented as the first real STT adapter boundary, but Stage 5 does not call live providers.',
+        'Deepgram is documented as the first real STT adapter boundary, but this adapter build does not call live providers.',
       retryable: false,
     },
   };

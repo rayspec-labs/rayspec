@@ -152,7 +152,7 @@ const CODEX_SCRATCH_CWD = join(tmpdir(), 'rayspec-codex-scratch');
  */
 export const CODEX_SDK_VERSION = '0.142.2';
 
-/** Provenance tag recorded on every journal step (deliverable A6): SDK + adapter version. */
+/** Provenance tag recorded on every journal step: SDK + adapter version. */
 export const CODEX_PRODUCED_BY = `@openai/codex-sdk@${CODEX_SDK_VERSION}+adapter-codex`;
 
 /** The neutral auth mode for a Codex run on the ChatGPT OAuth subscription. */
@@ -275,7 +275,7 @@ export class CodexAdapter implements Backend {
     const preCheck = this.authSelfCheck();
     const authMode: AuthMode = ctx.authMode ?? preCheck.authMode;
 
-    // C2: run-core is the SINGLE per-run seq authority. Emit SEQ-LESS through ctx.onEvent; run-core's
+    // run-core is the SINGLE per-run seq authority. Emit SEQ-LESS through ctx.onEvent; run-core's
     // wrapped sink stamps the one monotonic seq across the adapter's events AND dispatchTool's events.
     const emit = (e: NeutralEventInput) => ctx.onEvent?.(e as NeutralEvent);
     await emit({ type: 'run_started', runId: ctx.runId });
@@ -307,7 +307,7 @@ export class CodexAdapter implements Backend {
     const reasoningTexts: string[] = [];
     let status: 'completed' | 'error' = 'completed';
     let errorMessage: string | undefined;
-    // OBS-01: the neutral class of a failed run. A codex turn.failed/error carries only a
+    // The neutral class of a failed run. A codex turn.failed/error carries only a
     // `message` string (no HTTP status object), so we run it through classifyUpstreamError (message
     // heuristics for rate-limit/5xx/timeout); default `internal` — never a mis-tag.
     let errorClass: ErrorClass = 'internal';
@@ -492,7 +492,7 @@ export class CodexAdapter implements Backend {
       output: status === 'error' ? null : output,
       // Key-presence: error ALWAYS present (the message on error, null otherwise).
       error: errorMessage ?? null,
-      // OBS-01: errorClass is always-present — the neutral class on error, null on success.
+      // errorClass is always-present — the neutral class on error, null on success.
       errorClass: status === 'error' ? errorClass : null,
       conversation,
       usage,

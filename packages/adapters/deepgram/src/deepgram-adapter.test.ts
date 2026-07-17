@@ -47,7 +47,7 @@ function trackRequest(overrides: Record<string, unknown> = {}) {
 }
 
 describe('DeepgramSttAdapter — happy path', () => {
-  it('POSTs the donor-faithful /v1/listen request and returns a completed neutral transcript', async () => {
+  it('POSTs the wire-faithful /v1/listen request and returns a completed neutral transcript', async () => {
     const { fetchImpl, calls } = fetchReturning(loadFixtureText('normal-paragraphs.json'));
     const adapter = new DeepgramSttAdapter({
       resolver: resolverFor(),
@@ -81,7 +81,7 @@ describe('DeepgramSttAdapter — happy path', () => {
     expect(call.init?.method).toBe('POST');
   });
 
-  it('pins the WHOLE Deepgram request URL — host + exact param set, no extras (TH-2)', async () => {
+  it('pins the WHOLE Deepgram request URL — host + exact param set, no extras', async () => {
     const { fetchImpl, calls } = fetchReturning(loadFixtureText('normal-paragraphs.json'));
     const adapter = new DeepgramSttAdapter({
       resolver: resolverFor(),
@@ -193,7 +193,7 @@ describe('DeepgramSttAdapter — fail-closed options (no network call)', () => {
 });
 
 describe('DeepgramSttAdapter — media + credential fail-closed', () => {
-  it('transcribes a FRESH track with NO media_artifact_ref — the resolver is the media authority (PY-D9b regression pin)', async () => {
+  it('transcribes a FRESH track with NO media_artifact_ref — the resolver is the media authority (regression pin)', async () => {
     // The real resolvers key on `(session_id, track)` and ignore `media_artifact_ref` (the production
     // BlobRemux resolver reads uploaded chunks; the Static resolver maps the pair). The STT node never
     // sets `media_artifact_ref`, so a blanket adapter precondition on it failed EVERY fresh recording
@@ -314,7 +314,7 @@ describe('DeepgramSttAdapter — HTTP + transport error mapping (content-free)',
     expect(result.error.code).toBe('malformed_provider_output');
   });
 
-  // FCO-4: a structurally-invalid 200 body must FAIL CLOSED, never a silent empty "completed".
+  // A structurally-invalid 200 body must FAIL CLOSED, never a silent empty "completed".
   const structurallyInvalid200Bodies: Array<{ label: string; body: string }> = [
     { label: 'a JSON array', body: '[]' },
     { label: 'a JSON array of objects', body: '[{"results":{}}]' },
@@ -357,7 +357,7 @@ describe('DeepgramSttAdapter — HTTP + transport error mapping (content-free)',
 });
 
 describe('DeepgramSttAdapter — secret hygiene', () => {
-  it('never surfaces the API key in a SUCCESSFUL completed transcript artifact (TH-3)', async () => {
+  it('never surfaces the API key in a SUCCESSFUL completed transcript artifact', async () => {
     // A deterministic CI-run guard: the key is used to authorize the call but must never end up
     // serialized into the neutral artifact a consumer persists/logs. Serialize the WHOLE result.
     const { fetchImpl } = fetchReturning(loadFixtureText('normal-paragraphs.json'));
@@ -473,7 +473,7 @@ describe('DeepgramSttAdapter — session fan-out', () => {
     expect(results.map((result) => result.status)).toEqual(['completed', 'completed']);
   });
 
-  // TH-1: assert the WHOLE invariant — the session-level model + language policy must reach EVERY
+  // Assert the WHOLE invariant — the session-level model + language policy must reach EVERY
   // per-track Deepgram request, not just that the fan-out completes. Removing the policy spread in
   // transcribeSession makes this test red (each track would fall back to the default model + detect).
   it('propagates the session model + language policy to every per-track request', async () => {

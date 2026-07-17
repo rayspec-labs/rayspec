@@ -104,7 +104,7 @@ export interface SdkJsonSchemaOutputType {
 /**
  * Project a neutral OutputSchemaSpec to the SDK's `outputType` JsonSchemaDefinition (the wire
  * shape @openai/agents 0.11.8 accepts: { type:'json_schema', name, strict, schema }). Exported so
- * the wire-mapping test asserts the REAL projection (C5 de-tautologization) — flipping `strict`
+ * the wire-mapping test asserts the REAL projection — flipping `strict`
  * here MUST break that test. `strict: true` requests SDK-enforced strict structured output.
  */
 export function toOutputType(outputSchema: {
@@ -141,7 +141,7 @@ export class OpenAIAdapter implements Backend {
     const resolved = await this.resolveAuth();
     const authMode: AuthMode = ctx.authMode ?? resolved;
 
-    // C2: run-core is the SINGLE per-run seq authority. This adapter emits SEQ-LESS events; the
+    // run-core is the SINGLE per-run seq authority. This adapter emits SEQ-LESS events; the
     // wrapped ctx.onEvent (set by run-core) stamps the one monotonic seq across the adapter's events
     // AND dispatchTool's tool events. We pass the seq-less input through ctx.onEvent (its wrapper
     // overwrites seq), so there is no second seq counter here.
@@ -153,7 +153,7 @@ export class OpenAIAdapter implements Backend {
 
     // ---- map neutral outputSchema -> SDK JsonSchemaDefinition ------------------
     // Projection extracted to `toOutputType` so the wire-mapping test asserts the REAL projection
-    // (C5: no literal-vs-literal); flipping strict here breaks that test.
+    // (no literal-vs-literal); flipping strict here breaks that test.
     const outputType = spec.outputSchema ? (toOutputType(spec.outputSchema) as never) : undefined;
 
     const agent = new Agent({
@@ -188,7 +188,7 @@ export class OpenAIAdapter implements Backend {
       result = await runNonStream(agent, spec.input, spec.maxTurns);
     } catch (err) {
       // ---- ERROR-PATH RunResult — identical shape, error set ----
-      // OBS-01: classify the upstream cause into the neutral ErrorClass (preserving the real
+      // Classify the upstream cause into the neutral ErrorClass (preserving the real
       // cause message) — a 429 vs a 5xx vs a model refusal becomes distinguishable, without leaking a
       // backend-specific error shape into the neutral RunResult. The classified { error, errorClass }
       // is written into the failing journal step's output jsonb AND onto the RunResult; a captured
@@ -224,7 +224,7 @@ export class OpenAIAdapter implements Backend {
         // Key-presence: output + error ALWAYS present.
         output: null,
         error: errorMessage,
-        // OBS-01: the neutral error class on the error path (null on success — see below).
+        // The neutral error class on the error path (null on success — see below).
         errorClass,
         conversation: [],
         usage: emptyUsage(),
@@ -326,7 +326,7 @@ export class OpenAIAdapter implements Backend {
       output,
       // Key-presence: error is ALWAYS present (null on success).
       error: null,
-      // OBS-01: errorClass is always-present too — null on the success path.
+      // errorClass is always-present too — null on the success path.
       errorClass: null,
       conversation,
       usage,
@@ -351,7 +351,7 @@ export class OpenAIAdapter implements Backend {
       // details.toolCall.callId is the SDK's REAL tool-call id; details.signal is the SDK abort.
       execute: async (args: unknown, _context?: unknown, details?: ToolCallDetailsLike) => {
         // The SDK's REAL per-call tool-call id — threaded into dispatchTool as the per-call journal
-        // uniqueness + correlation id (A1). Two identical-args calls in one run carry DISTINCT
+        // uniqueness + correlation id. Two identical-args calls in one run carry DISTINCT
         // callIds, so they journal DISTINCT rows and both fire (no unique_violation crash).
         const callId = details?.toolCall?.callId;
         if (!ctx.dispatchTool) {
@@ -410,7 +410,7 @@ export class OpenAIAdapter implements Backend {
     // The transcript comes from the untrusted-content read-path (tenant-scoped + per-part re-validation), not
     // the SDK RunState. Tool steps were journaled live; rehydrated tool parts reflect them.
     //
-    // C3 (replay transcript parity): the stored 'system' row was coerced to 'user' on read
+    // Replay transcript parity: the stored 'system' row was coerced to 'user' on read
     // (rehydrate.ts coerceRole — defense-in-depth so a poisoned stored system row can't re-enter as
     // an instruction). On REPLAY we re-prepend the TRUSTED system turn from spec.instructions
     // (never the stored/coerced row) and strip the leading coerced-system turn, so the replay
@@ -421,7 +421,7 @@ export class OpenAIAdapter implements Backend {
     const conversation = ctx.rehydrate ? reattachTrustedSystemTurn(spec, rehydrated) : rehydrated;
     const toolStepCount = countToolSteps(conversation);
 
-    // C2: emit the terminal event SEQ-LESS through the wrapped sink (run-core stamps the seq); no
+    // Emit the terminal event SEQ-LESS through the wrapped sink (run-core stamps the seq); no
     // adapter-local seq counter.
     await ctx.onEvent?.({
       type: 'run_completed',
@@ -438,7 +438,7 @@ export class OpenAIAdapter implements Backend {
       finalText,
       output,
       error: null,
-      // OBS-01: errorClass is always-present — null on the (replay) success path.
+      // errorClass is always-present — null on the (replay) success path.
       errorClass: null,
       conversation,
       // Usage is DROPPED on replay (no new spend) — it is NOT reconstructed here. The journal
@@ -630,7 +630,7 @@ export function deriveConversation(
 }
 
 /**
- * C3 (replay transcript parity): rebuild the replay conversation so its FIRST turn is the TRUSTED
+ * Replay transcript parity: rebuild the replay conversation so its FIRST turn is the TRUSTED
  * system turn (role='system', spec.instructions) — IDENTICAL to the live path's leading turn.
  *
  * On the live run, deriveConversation prepends a 'system' turn from spec.instructions; it is

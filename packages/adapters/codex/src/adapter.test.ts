@@ -343,7 +343,7 @@ describe('buildCuratedCodexEnv — the structural mis-billing guard', () => {
 // ===============================================================================================
 // Sandbox CONFINEMENT options + native structured output + RunResult shape (no tools)
 // ===============================================================================================
-describe('run — §10.A confinement + native structured output + RunResult shape', () => {
+describe('run — sandbox confinement + native structured output + RunResult shape', () => {
   it('passes the read-only / no-network / no-web-search / never-approve / empty-cwd confinement to startThread', async () => {
     codexBehavior = async function* () {
       yield { type: 'turn.started' };

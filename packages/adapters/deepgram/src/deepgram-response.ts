@@ -8,10 +8,9 @@ import {
 /**
  * Pure Deepgram pre-recorded (`/v1/listen`) response -> provider-neutral transcript mapping. This
  * module is the ONLY place that understands Deepgram's native wire shape; it makes NO network call
- * and reads NO credentials (the live call lives in `deepgram-adapter.ts`). It is wire-faithful to a
- * proven production STT response-mapping implementation so a later shadow-run against the frozen
- * baseline can reproduce it, then hands the mapped text/segments/words to the shared
- * `normalizeTranscriptArtifact` for stable neutral ids.
+ * and reads NO credentials (the live call lives in `deepgram-adapter.ts`). It maps Deepgram's native
+ * wire shape deterministically into the provider-neutral transcript, then hands the mapped
+ * text/segments/words to the shared `normalizeTranscriptArtifact` for stable neutral ids.
  *
  * Response schema verified against the current Deepgram docs (2026-07, `developers.deepgram.com`):
  *   metadata.request_id / metadata.duration
@@ -96,8 +95,8 @@ interface NeutralSegment {
  * This is a DIRECT consequence of the neutral "absent confidence → null, never a fabricated 0" choice
  * (`optionalConfidence`); making it match the naive form would reintroduce the fabricated 0 the neutral
  * contract deliberately rejects and would make a segment's confidence contradict its words'. On REAL
- * Deepgram data per-word confidence is always present, so this run.length-vs-present divergence CANNOT
- * surface — a shadow-run against real audio reproduces the reference output byte-for-byte.
+ * Deepgram data per-word confidence is always present, so this present-count-vs-`run.length` divergence
+ * CANNOT surface — mapping real audio produces a stable, deterministic result.
  */
 function meanConfidence(run: Array<Record<string, unknown>>): number | null {
   const values = run
@@ -167,7 +166,7 @@ function segmentFromRun(run: Array<Record<string, unknown>>): NeutralSegment {
  * Map a Deepgram response object to the shared normalizer input. Fails closed (throws
  * `DeepgramMappingError`, which the adapter maps to `malformed_provider_output`) when the payload is
  * not a structurally-valid Deepgram success — i.e. not a JSON object, a JSON array, or an object that
- * lacks a `results.channels` array (e.g. an error body or a truncated response). This is the FCO-4
+ * lacks a `results.channels` array (e.g. an error body or a truncated response). This is the
  * fail-closed guard: a 200 with a non-transcript body must NEVER map to a silent empty "completed".
  *
  * A GENUINE silent recording is distinct: Deepgram still returns `results.channels` with an empty
@@ -184,7 +183,7 @@ export function mapDeepgramResponseToNeutralInput(
 
   const results = asRecord(payload.results);
   if (!Array.isArray(results.channels)) {
-    // Structural fail-closed (FCO-4): a valid `/v1/listen` success always carries a
+    // Structural fail-closed: a valid `/v1/listen` success always carries a
     // `results.channels` array (even for silence). Its absence means an error/malformed body.
     throw new DeepgramMappingError('deepgram response is missing results.channels');
   }

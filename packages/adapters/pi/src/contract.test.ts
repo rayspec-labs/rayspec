@@ -32,7 +32,7 @@ vi.mock('@earendil-works/pi-ai', () => ({
 }));
 
 vi.mock('@earendil-works/pi-coding-agent', () => ({
-  // B3: the adapter uses AuthStorage.inMemory() (no ~/.pi file I/O), not .create().
+  // The adapter uses AuthStorage.inMemory() (no ~/.pi file I/O), not .create().
   AuthStorage: { inMemory: () => ({ setRuntimeApiKey }) },
   ModelRegistry: { inMemory: () => ({}) },
   SessionManager: { inMemory: () => ({}) },
@@ -228,7 +228,7 @@ describe('Pi adapter replay contract', () => {
   });
 });
 
-describe('Pi adapter real conversation re-derivation (Slice 2)', () => {
+describe('Pi adapter real conversation re-derivation', () => {
   it('derives correlated tool_call/tool_result parts by Pi real toolCallId + system from trusted instructions', async () => {
     // A multi-turn message history: assistant tool_call -> toolResult -> assistant final text.
     const messages = [
@@ -282,7 +282,7 @@ describe('Pi adapter real conversation re-derivation (Slice 2)', () => {
   });
 });
 
-describe('ADAPT-1 (OBS-01, D35): a terminal upstream failure that prompt() did NOT throw → status=error', () => {
+describe('a terminal upstream failure that prompt() did NOT throw → status=error', () => {
   // EMPIRICAL DETERMINATION (doc-first, pi-agent-core@0.79.9): pi's StreamFn contract
   // (pi-agent-core types.d.ts:7-10) is "Must not throw or return a rejected promise for request/model/
   // runtime failures … Failures must be encoded in the returned stream … and a final AssistantMessage
@@ -379,7 +379,7 @@ describe('ADAPT-1 (OBS-01, D35): a terminal upstream failure that prompt() did N
   });
 });
 
-describe('Pi adapter tool dispatch through ctx.dispatchTool (§10.A chokepoint)', () => {
+describe('Pi adapter tool dispatch through ctx.dispatchTool (untrusted-content chokepoint)', () => {
   it('routes the host-tool execution through the dispatcher (handler invoked once, opaque-wrapped, one tool step)', async () => {
     const calls: unknown[] = [];
     const tool: NeutralTool = {
@@ -442,7 +442,7 @@ describe('Pi adapter tool dispatch through ctx.dispatchTool (§10.A chokepoint)'
     expect(toolSteps[0]?.idempotencyKey).toBe('pi_call_X');
   });
 
-  it('B2: does NOT double-emit tool events — Pi tool_execution_start/end are dropped; dispatchTool is the single authority', async () => {
+  it('does NOT double-emit tool events — Pi tool_execution_start/end are dropped; dispatchTool is the single authority', async () => {
     const tool: NeutralTool = {
       spec: {
         name: 'get_weather',
@@ -460,7 +460,7 @@ describe('Pi adapter tool dispatch through ctx.dispatchTool (§10.A chokepoint)'
 
     // The fake session both (a) drives the dispatchTool path via the customTool execute AND (b) fires
     // Pi's OWN tool_execution_start/end + a text_delta into the subscriber — exactly the real
-    // double-source. After B2 the adapter relays ONLY text_delta; the tool lifecycle comes solely
+    // double-source. After that the adapter relays ONLY text_delta; the tool lifecycle comes solely
     // from dispatchTool (one tool_called + one tool_result).
     let listener: ((e: unknown) => void) | undefined;
     let registeredTools: Array<{ name: string; execute: (...a: unknown[]) => Promise<unknown> }> =
@@ -527,7 +527,7 @@ describe('Pi adapter tool dispatch through ctx.dispatchTool (§10.A chokepoint)'
     expect(events.filter((e) => e.type === 'tool_result')).toHaveLength(1);
     // No contradicting/extra tool_error.
     expect(events.filter((e) => e.type === 'tool_error')).toHaveLength(0);
-    // The text_delta IS still relayed by forwardEvent (B2 keeps text_delta).
+    // The text_delta IS still relayed by forwardEvent (the adapter keeps text_delta).
     expect(events.some((e) => e.type === 'text_delta')).toBe(true);
   });
 });
@@ -544,7 +544,7 @@ describe('Pi adapter tool dispatch through ctx.dispatchTool (§10.A chokepoint)'
  * malformed (incl. NESTED) arg and ACCEPTS a valid one. Over-rejection guard: it is a SUBSET of the
  * neutral contract — it only rejects what dispatchTool's ajv would also reject.
  */
-describe('P5-STRICT-1 piToolParameters validate-and-repair (mirrors pi-agent-core validateToolArguments)', () => {
+describe('piToolParameters validate-and-repair (mirrors pi-agent-core validateToolArguments)', () => {
   const params = {
     type: 'object',
     properties: {
@@ -879,7 +879,7 @@ describe('P5-STRICT-1 piToolParameters validate-and-repair (mirrors pi-agent-cor
     expect(
       compiled().Check({
         title: 'Weekly sync',
-        action_items: [{ description: 'ship P5', owner: 'phil', due_raw: 'Friday' }],
+        action_items: [{ description: 'ship the release notes', owner: 'phil', due_raw: 'Friday' }],
         priority: 'high',
       }),
     ).toBe(true);

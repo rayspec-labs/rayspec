@@ -113,10 +113,10 @@ describe('mapDeepgramResponse — honest degradation on missing fields', () => {
   });
 });
 
-describe('mapDeepgramResponse — mixed present/absent word confidence (WF-1 flagged divergence)', () => {
+describe('mapDeepgramResponse — mixed present/absent word confidence (flagged divergence)', () => {
   const transcript = mapDeepgramResponse(loadFixture('mixed-confidence-words.json'), ctx);
 
-  it('averages ONLY the present word confidences (present-count denominator), not the donor run.length', () => {
+  it('averages ONLY the present word confidences (present-count denominator), not a naive run.length', () => {
     // Run = [0.9, absent, 0.6]. Neutral present-only mean = (0.9 + 0.6) / 2 = 0.75.
     // A naive mapping (`run.length` denominator + 0-coercion) would produce (0.9 + 0 + 0.6) / 3 = 0.5.
     // This divergence is DELIBERATE (honest null/absent-confidence contract) and CANNOT surface on
@@ -134,7 +134,7 @@ describe('mapDeepgramResponse — mixed present/absent word confidence (WF-1 fla
 describe('mapDeepgramResponse — multichannel', () => {
   const transcript = mapDeepgramResponse(loadFixture('multichannel.json'), ctx);
 
-  it('maps only channels[0] (donor behavior) and ignores the second channel', () => {
+  it('maps only channels[0] and ignores the second channel', () => {
     expect(transcript.full_text).toBe('first channel only');
     expect(transcript.language).toBe('en');
     expect(transcript.words.map((word) => word.text)).toEqual(['first', 'channel', 'only']);
@@ -142,7 +142,7 @@ describe('mapDeepgramResponse — multichannel', () => {
   });
 });
 
-describe('mapDeepgramResponse — malformed input (fail-closed, FCO-4)', () => {
+describe('mapDeepgramResponse — malformed input (fail-closed)', () => {
   it('throws DeepgramMappingError for a non-object payload', () => {
     expect(() => mapDeepgramResponse(null, ctx)).toThrow(DeepgramMappingError);
     expect(() => mapDeepgramResponse(undefined, ctx)).toThrow(DeepgramMappingError);
@@ -152,7 +152,7 @@ describe('mapDeepgramResponse — malformed input (fail-closed, FCO-4)', () => {
 
   it('throws DeepgramMappingError for a JSON array body (not a channels-bearing object)', () => {
     // A 200 whose body is a JSON array is structurally NOT a Deepgram transcript — it must fail
-    // closed, never a silent empty "success" (FCO-4). Arrays are typeof "object", so the old
+    // closed, never a silent empty "success". Arrays are typeof "object", so the old
     // isRecord-only guard let them through to an empty completed transcript.
     expect(() => mapDeepgramResponse([], ctx)).toThrow(DeepgramMappingError);
     expect(() => mapDeepgramResponse([{ results: {} }], ctx)).toThrow(DeepgramMappingError);
