@@ -207,7 +207,7 @@ describe('computed-vs-provider reconciliation + drift flag', () => {
   });
 });
 
-describe('subscription-run ledger semantics (Decision #7) — billed=0 + attributed cost', () => {
+describe('subscription-run ledger semantics — billed=0 + attributed cost', () => {
   it('a SUBSCRIPTION step records billed_cost_usd=0 but a NON-ZERO attributed (computed) cost', async () => {
     const tdb = forTenant(db, TENANT_A);
     const res = await runAgent(
@@ -222,7 +222,7 @@ describe('subscription-run ledger semantics (Decision #7) — billed=0 + attribu
       {},
     );
     const step = await stepRow(res.runId);
-    // Decision #7: billed is 0 on a subscription run (draws subscription limits, no per-token billing).
+    // Billed is 0 on a subscription run (draws subscription limits, no per-token billing).
     expect(Number(step?.billedCostUsd)).toBe(0);
     // ...but the ATTRIBUTED (computed) cost is non-zero — the value metric is still recorded.
     expect(Number(step?.costUsd)).toBeGreaterThan(0);

@@ -16,7 +16,7 @@ import { cronRunId, FIRING_INSTANT_GRANULARITY_MS, firingInstantIso, firingKey }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-describe('cron firing-key derivation — truncation + determinism (fix #5)', () => {
+describe('cron firing-key derivation — truncation + determinism', () => {
   it('truncates the firing instant DOWN to whole seconds (the firing granularity)', () => {
     expect(FIRING_INSTANT_GRANULARITY_MS).toBe(1000);
     // 02:00:00.0xx all floor to 02:00:00.000Z.

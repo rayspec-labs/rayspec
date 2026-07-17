@@ -3,7 +3,7 @@
  *
  * Drives a backend through a REPLAY that hits a NON-IDEMPOTENT (side-effecting) tool — END TO END
  * through run-core + ctx.dispatchTool against a REAL Postgres journal — and asserts the fail-closed
- * contract (locked Decision #3) holds at the END-TO-END level, not just the dispatchTool unit test:
+ * contract holds at the END-TO-END level, not just the dispatchTool unit test:
  *   - on the LIVE run the side-effecting tool fires exactly ONCE (the real effect happens once);
  *   - on the REPLAY of that run, dispatchTool surfaces a `tool_error` — it NEVER re-fires the handler
  *     AND NEVER returns a cached output as if re-run (no fabricated success);
@@ -164,7 +164,7 @@ afterAll(async () => {
   await db.$client.end();
 });
 
-describe('E2E #10: non-idempotent tool through dispatchTool — fail-closed on REPLAY (Decision #3)', () => {
+describe('non-idempotent tool through dispatchTool — fail-closed on REPLAY', () => {
   it('LIVE: the side-effecting tool fires EXACTLY ONCE and returns opaque tool_data', async () => {
     const tdb = forTenant(db, TENANT_A);
     const backend = new ToolMarshallingBackend();
@@ -194,7 +194,7 @@ describe('E2E #10: non-idempotent tool through dispatchTool — fail-closed on R
     // The handler did NOT re-fire on replay (the irreversible effect is not repeated).
     expect(sideEffectFires).toBe(1);
     // The dispatched result on replay is a fail-closed tool_error (NOT a cached success masquerading
-    // as a fresh run) — Decision #3 reached END-TO-END through the adapter→run-core→dispatchTool chain.
+    // as a fresh run) — the fail-closed replay contract reached END-TO-END through the adapter→run-core→dispatchTool chain.
     expect(replayBackend.lastDispatch?.kind).toBe('tool_error');
     if (replayBackend.lastDispatch?.kind === 'tool_error') {
       expect(replayBackend.lastDispatch.message).toMatch(/non-idempotent|cannot be replayed/i);

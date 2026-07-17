@@ -3,19 +3,19 @@
  *
  * The deterministic `makeDeclaredAgentNode` (nodes.ts) runs a fake registry executor; THIS node runs
  * the declared agent through the platform's REAL `runAgent` path, so a real extraction call journals
- * per-step usage/cost under the run's tenant (the pack's metering posture), and emits the
+ * per-step usage/cost under the run's tenant (the platform's standard metering posture), and emits the
  * candidate under the DECLARED `required_output_shape.schema_ref` envelope BYTE-IDENTICAL to
  * `createAgentRuntimeHandler`, so the existing grounding/validation/persist nodes consume it unchanged.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * WHY NATIVE STRUCTURED OUTPUT (a workflow-decomposition win the pack could not take).
+ * WHY NATIVE STRUCTURED OUTPUT (a workflow-decomposition win a tool-driven design cannot take).
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * The pack's agent was TOOL-DRIVEN (it called `transcribe_session` then `persist_intelligence`) and
+ * An earlier design was TOOL-DRIVEN (a transcribe step then a persist step) and
  * DELIBERATELY carried no `outputType` — an outputType short-circuited its tool loop. In the YAML
  * world `transcribe` is its own workflow node, so this extract node receives the transcript as a typed
  * input and needs NO tools: a single-turn structured extraction. That lets the executor use NATIVE
  * strict structured output (`spec.outputSchema` + `requireNativeStructuredOutput`), the canonical
- * anti-hallucination discipline the pack could not use. The acceptance boundary (grounding.check +
+ * anti-hallucination discipline a tool-driven design could not use. The acceptance boundary (grounding.check +
  * validation.check) still runs downstream — this node only PRODUCES the candidate.
  *
  * ── CRASH-RESUME SAFETY (mirrors workflow-durable/nodes/agent-node.ts) ──────────────────────────

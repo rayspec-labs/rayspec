@@ -172,7 +172,7 @@ const RAW_DB_QUERY_RE = /\.db\s*\.\s*(select|insert|update|delete|transaction|ex
 // Alias-introduction forms recognised (the RHS is a raw `.db` member of this/deps/opts/an arg):
 //   const h = this.db;        const h = deps.db;        const h = opts.db;
 //   const { db } = this;      const { db } = deps;      const { db: h } = deps;
-// The RHS char class includes `#` (re-review #3) so a PRIVATE-FIELD handle (`const h = this.#deps.db`)
+// The RHS char class includes `#` so a PRIVATE-FIELD handle (`const h = this.#deps.db`)
 // is recognised — `#` is otherwise outside `\w`, so the old char class stopped at `this.` and missed it.
 const DB_ALIAS_ASSIGN_RE = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$.#]*\.db\b/g;
 const DB_ALIAS_DESTRUCTURE_RE =

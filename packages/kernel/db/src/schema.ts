@@ -284,7 +284,7 @@ export const journalSteps = pgTable(
      * Cost reconciliation + provenance.
      * provider_cost_usd: the SDK-reported cost (Anthropic total_cost_usd, Pi usage.cost.total); NULL
      * for OpenAI (no provider cost) — never fabricated. cost_drift: set when |computed - provider|
-     * exceeds the documented threshold. billed_cost_usd: 0 for a subscription run (Decision #7),
+     * exceeds the documented threshold. billed_cost_usd: 0 for a subscription run,
      * else the computed cost. produced_by: the SDK+adapter version that wrote the step.
      * pricing_version: the effective-dated pricing entry that COMPUTED this step's cost
      * (`<model>@<effectiveFrom>`, or 'FALLBACK' when the model/date had no registry entry) — so a
@@ -412,7 +412,7 @@ export const runs = pgTable(
     /**
      * Run-level roll-up of the per-step cost reconciliation.
      * provider_cost_usd: sum of the steps' provider cost (NULL when NO step reported one — OpenAI).
-     * billed_cost_usd: sum of billed cost (0 for a subscription run — Decision #7). cost_drift: true
+     * billed_cost_usd: sum of billed cost (0 for a subscription run). cost_drift: true
      * iff ANY step drifted.
      */
     providerCostUsd: numeric('provider_cost_usd'),

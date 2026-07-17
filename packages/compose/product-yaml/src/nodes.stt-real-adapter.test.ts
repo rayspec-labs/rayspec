@@ -8,7 +8,7 @@
  * and ignores `media_artifact_ref` entirely. A blanket precondition in the real adapter that
  * hard-required `media_artifact_ref` therefore failed EVERY fresh recording with
  * `stt_not_ready: "transcription failed: No finalized media artifact reference to transcribe."`
- * BEFORE the resolver/provider was reached — the exact VPS-cutover prod bug. The fake STT
+ * BEFORE the resolver/provider was reached — the exact production STT-resolver bug. The fake STT
  * adapter keys on `(session_id, track)` and never checks the ref, so the fake-only boot-e2e was blind
  * to this node↔real-adapter contract mismatch.
  *

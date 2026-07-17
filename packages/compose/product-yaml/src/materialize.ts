@@ -40,7 +40,7 @@
  *   `<scope>_id` (the scope column, from `artifacts[].scope`) · `artifact_kind` · `payload` (jsonb:
  *   the member payload + an `evidence_span_ids` duplicate of the pruned evidence) · `human_edited` ·
  *   `dismissed` · `artifact_ref` (the tenant-namespaced upsert key
- *   `${tenantId}:${scopeId}:${kind}:${seq}`, per-kind sequence — the pack's reconciliation key).
+ *   `${tenantId}:${scopeId}:${kind}:${seq}`, per-kind sequence — the established reconciliation key).
  * Lifecycle, executed as declared: `preserve_human_edits` → a human-edited row is never overwritten
  * (pre-read + skip); `reconcile_stale_rows` → non-human-edited rows of a re-extract that no longer
  * produces them are deleted, over the DECLARED reconcile scope (`declaredReconcileScope` — the
@@ -407,7 +407,7 @@ export function declaredReconcileScope(
 
 /**
  * Build the collection rows for the derived members (per-kind `:0,:1,…` sequence, declaration order —
- * stable across a re-extract, the pack's reconciliation law). `collectionStores` maps a declared
+ * stable across a re-extract, the prior reconciliation rule). `collectionStores` maps a declared
  * `artifacts[].collection` to its bound store name (compose validates the binding + columns).
  */
 export function buildCollectionRows(

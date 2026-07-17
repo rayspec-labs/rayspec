@@ -52,7 +52,7 @@ const MEDIA_AUDIENCE = 'rayspec-media-playback';
 export interface MediaTokenClaims {
   /** The token's asserted tenant (org) id. DATA — the handler RE-VALIDATES resource ownership in the DB. */
   readonly tenantId: string;
-  /** The OPAQUE resource reference the bearer may read (the pack's blob key). Never parsed by core. */
+  /** The OPAQUE resource reference the bearer may read (the opaque blob key). Never parsed by core. */
   readonly resource: string;
   /** The token id (audit + the optional revocation denylist key). */
   readonly jti: string;

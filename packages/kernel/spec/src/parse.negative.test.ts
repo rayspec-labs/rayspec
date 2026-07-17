@@ -290,7 +290,7 @@ describe('negative — invalid_embedded_schema', () => {
     expectRejection(yaml, 'invalid_embedded_schema');
   });
 
-  it('rejects an agent whose outputSchema.schema JSON-Schema is malformed (fix #3)', () => {
+  it('rejects an agent whose outputSchema.schema JSON-Schema is malformed', () => {
     const yaml = `
 version: '1.0'
 metadata:
@@ -310,7 +310,7 @@ agents:
   });
 });
 
-describe('negative — agent outputSchema is fail-closed (fix #1, core OutputSchemaSpec .strict())', () => {
+describe('negative — agent outputSchema is fail-closed (core OutputSchemaSpec .strict())', () => {
   it('rejects a typo/extra sibling key inside agents[].outputSchema', () => {
     // `schemaa` (typo of schema) is a stray sibling — strict OutputSchemaSpec must reject it,
     // not silently drop it. Without core .strict() this would parse ok (the headline finding).
@@ -334,7 +334,7 @@ agents:
   });
 });
 
-describe('negative — tool parameters must be an object schema (fix #7)', () => {
+describe('negative — tool parameters must be an object schema', () => {
   it('rejects a tool whose parameters is a (compilable) non-object schema', () => {
     // type:'string' compiles fine as JSON-Schema but is invalid as model-facing tool args.
     const yaml = BASE.replace(
@@ -345,7 +345,7 @@ describe('negative — tool parameters must be an object schema (fix #7)', () =>
   });
 });
 
-describe('negative — duplicate tool NAME (fix #5; dispatchTool keys on name)', () => {
+describe('negative — duplicate tool NAME (dispatchTool keys on name)', () => {
   it('rejects two tools with distinct ids but the SAME name', () => {
     const yaml = BASE.replace(
       'tooling:\n  - id: echo',
@@ -355,7 +355,7 @@ describe('negative — duplicate tool NAME (fix #5; dispatchTool keys on name)',
   });
 });
 
-describe('negative — duplicate api route (fix #4)', () => {
+describe('negative — duplicate api route', () => {
   it('rejects two routes with the same method + path', () => {
     const yaml = BASE.replace(
       "api:\n  - { method: GET, path: '/widgets', action: { kind: store, store: widgets, op: list } }",
@@ -365,7 +365,7 @@ describe('negative — duplicate api route (fix #4)', () => {
   });
 });
 
-describe('negative — duplicate column name within a store (fix #6)', () => {
+describe('negative — duplicate column name within a store', () => {
   it('rejects two columns with the same name', () => {
     const yaml = BASE.replace(
       '    columns:\n      - { name: label, type: text }',
@@ -375,7 +375,7 @@ describe('negative — duplicate column name within a store (fix #6)', () => {
   });
 });
 
-describe('negative — reserved column name (fix #9)', () => {
+describe('negative — reserved column name', () => {
   it('rejects a business column named tenant_id (an injected tenancy column)', () => {
     const yaml = BASE.replace(
       '      - { name: label, type: text }',
@@ -424,7 +424,7 @@ describe('negative — reserved list-query control keyword as a column name', ()
   });
 });
 
-describe('negative — FK onDelete set null on a NOT NULL column (fix #8)', () => {
+describe('negative — FK onDelete set null on a NOT NULL column', () => {
   it('rejects set-null on a non-nullable FK column', () => {
     const yaml = `
 version: '1.0'
@@ -586,7 +586,7 @@ stores:
   });
 });
 
-describe('negative — unquoted numeric version (fix #10; helpful diagnostic, no coercion)', () => {
+describe('negative — unquoted numeric version (helpful diagnostic, no coercion)', () => {
   it('rejects YAML `version: 1.0` (the number) with a quote-it hint, NOT a coercion', () => {
     const yaml = 'version: 1.0\nmetadata:\n  name: numericversion\n';
     const res = parseSpec(yaml);
@@ -600,8 +600,8 @@ describe('negative — unquoted numeric version (fix #10; helpful diagnostic, no
   });
 });
 
-// ---- fix #12: untested correct branches (each a regression tripwire) ------------------------
-describe('negative — previously-untested lint branches (fix #12)', () => {
+// ---- untested correct branches (each a regression tripwire) ------------------------
+describe('negative — previously-untested lint branches', () => {
   it('FK references a declared store but an UNDECLARED column → dangling_ref', () => {
     const yaml = `
 version: '1.0'

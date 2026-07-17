@@ -389,7 +389,7 @@ describe.skipIf(!hasDb)(
       expect(otherRows).toHaveLength(0);
     });
 
-    it('fix #5 (same-bucket cross-dedup): two fires a few ms apart in the SAME second cross-dedup → ONE row, ONE handler run', async () => {
+    it('same-bucket cross-dedup: two fires a few ms apart in the SAME second cross-dedup → ONE row, ONE handler run', async () => {
       // The scheduler's second-aligned tick and a `fireNow` a few ms later are the SAME logical instant
       // (truncated to whole seconds). They MUST produce the same firing key and dedup — a sub-second
       // difference must NOT slip a second dispatch through.

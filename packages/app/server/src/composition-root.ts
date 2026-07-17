@@ -1522,7 +1522,7 @@ async function deployDeclaredSpec(
   let fireCronNow: BootedServer['fireCronNow'];
   const cronTriggers = result.triggers.list().filter((t) => t.kind === 'cron');
   if (cronTriggers.length > 0) {
-    // (Fix #4b — fail-closed, defense-in-depth with the lint rule) A cron is fired ONLY by the durable
+    // (Fail-closed, defense-in-depth with the lint rule.) A cron is fired ONLY by the durable
     // off-request worker. If the spec declares cron triggers but no durable worker is wired (the spec
     // omitted deployment.durableWorker, or no agent backends were supplied), the cron would be SILENTLY
     // never scheduled (it just never fires). Refuse to boot — a half-deployed cron is never silently OK.
@@ -1547,7 +1547,7 @@ async function deployDeclaredSpec(
           'RAYSPEC_CRON_TENANT_ID to the org id the cron should fire under. Fail-closed.',
       );
     }
-    // Validate the cron tenant at BOOT (fix #3), not lazily at fire time (2am). `forTenant` throws the
+    // Validate the cron tenant at BOOT, not lazily at fire time (2am). `forTenant` throws the
     // fail-closed "tenantId must be a UUID" for a malformed id; the existence probe below catches a
     // well-formed-but-nonexistent org so a bogus tenant fails loud at boot, not via the FK at fire time.
     await assertCronTenantBootable(db, config.cronTenantId);
