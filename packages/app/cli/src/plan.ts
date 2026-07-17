@@ -153,10 +153,8 @@ export interface PlanResult {
    */
   readonly proposedAllowlist?: AllowlistEntry[];
   /**
-   * Honest diff caveats (renames, no-default NN, USING casts, drop ordering) in UPDATE mode; ALSO
-   * carries a single projection-only note when a product doc validated but its derived-store projection
-   * was unavailable (no `--against`). Present when non-empty on either path; absent on the backend
-   * first-materialization path (byte-stable).
+   * Honest diff caveats (renames, no-default NN, USING casts, drop ordering) in UPDATE mode. Present
+   * when non-empty; absent on the backend first-materialization path (byte-stable).
    */
   readonly notes?: string[];
   /** Section counts — present for a product-profile doc. */
@@ -585,7 +583,6 @@ async function planProduct(
   const product = projectProduct(parsed.value);
 
   const derivedNew = await deriveStoresForCli(parsed.value);
-  let projectionNote: string | undefined;
   let newStores: StoreSpec[] = [];
   // The per-store conflict-key carve-out for the derived product stores — kept SEPARATE for the
   // OLD and NEW sides (a surviving store's conflict keys CAN change across an update, e.g. a column
@@ -597,8 +594,21 @@ async function planProduct(
     newStores = derivedNew.stores;
     newConflictKeys = derivedNew.conflictKeys;
   } else if (oldText === undefined) {
-    // Projection-only: the doc VALIDATED — surface the derivation gap as a note, project no stores.
-    projectionNote = `derived-store projection unavailable: ${derivedNew.error}`;
+    // Projection-only: the doc VALIDATED but its stores are structurally underivable — and
+    // `deriveProductStores` is EXACTLY the boot path, so this doc plans "ok" then crashes at boot.
+    // A boot-fatal gap is a NON-OK plan verdict, not a note (mirrors the update-mode branch below).
+    return {
+      ok: false,
+      phase: 'validate',
+      ...emptyProjection(),
+      product,
+      errors: [
+        {
+          code: 'schema_violation',
+          message: `cannot derive stores for the product spec: ${derivedNew.error}`,
+        },
+      ],
+    };
   } else {
     // Update mode CANNOT diff without the new stores — fatal.
     return {
@@ -659,10 +669,6 @@ async function planProduct(
     firstMaterializeSql: () =>
       newStores.length > 0 ? generateProductSql(newStores, newConflictKeys) : '',
   });
-  // Weave a projection-only derivation note (never in update mode, where a gap is fatal above).
-  if (projectionNote !== undefined) {
-    return { ...result, notes: [...(result.notes ?? []), projectionNote] };
-  }
   return result;
 }
 
