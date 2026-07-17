@@ -844,6 +844,71 @@ stores:
     const catKeys = (seenNewKeys as Map<string, ReadonlySet<string>>).get('catalog');
     expect(catKeys ? [...catKeys] : []).toEqual(['serial_no']);
   });
+
+  // A doc whose stores are structurally underivable is BOOT-FATAL — `deriveProductStores` is exactly
+  // what boot runs — so `plan` must FAIL it, not project no stores and report ok. (A persisting
+  // artifact with no collection has no derivable store; boot throws on it.)
+  it('a doc that validates but whose stores are underivable FAILS the plan (not a silent ok)', async () => {
+    writeFileSync(
+      join(dir, 'boot-fatal.yaml'),
+      `version: "1.0"
+product:
+  id: acme_notes
+  name: Acme Notes
+artifacts:
+  - kind: summary
+    label: Summary
+    contract: acme.summary
+    scope: ticket
+contracts:
+  acme.summary:
+    type: object
+    additional_properties: false
+    properties:
+      text: { type: string }
+    required: [text]
+`,
+      'utf8',
+    );
+    const r = await runPlan(['boot-fatal.yaml'], { shadowDatabaseUrl: undefined });
+    expect(r.ok).toBe(false);
+    expect(r.phase).toBe('validate');
+    expect(r.errors.map((e) => e.code)).toContain('schema_violation');
+    expect(r.errors[0]?.message).toContain('cannot derive stores for the product spec');
+    // A boot-fatal doc materializes nothing.
+    expect(r.stores).toEqual([]);
+    expect(r.migrationSql).toBe('');
+  });
+
+  // Control: the SAME doc with a derivable store (a collection) plans ok — the failure above is the
+  // underivable store, not the shape of the doc.
+  it('the same doc WITH a derivable store (a collection) plans ok', async () => {
+    writeFileSync(
+      join(dir, 'boot-ok.yaml'),
+      `version: "1.0"
+product:
+  id: acme_notes
+  name: Acme Notes
+artifacts:
+  - kind: summary
+    label: Summary
+    contract: acme.summary
+    scope: ticket
+    collection: notes
+contracts:
+  acme.summary:
+    type: object
+    additional_properties: false
+    properties:
+      text: { type: string }
+    required: [text]
+`,
+      'utf8',
+    );
+    const r = await runPlan(['boot-ok.yaml'], { shadowDatabaseUrl: undefined });
+    expect(r.ok).toBe(true);
+    expect(r.stores.map((s) => s.name)).toEqual(['notes']);
+  });
 });
 
 describe('plan — no --against byte-stability golden (0.1 first materialization)', () => {
