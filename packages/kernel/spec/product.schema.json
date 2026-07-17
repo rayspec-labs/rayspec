@@ -1236,10 +1236,6 @@
               "default_model": {
                 "type": "string",
                 "minLength": 1
-              },
-              "default_provider": {
-                "type": "string",
-                "minLength": 1
               }
             },
             "additionalProperties": false
