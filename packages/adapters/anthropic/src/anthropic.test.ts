@@ -80,7 +80,7 @@ describe('tenant config-dir hardening (credential isolation on disk)', () => {
   });
 });
 
-describe('config-dir hardening — atomic create, validated on the EEXIST branch (1a)', () => {
+describe('config-dir hardening — atomic create, validated on the EEXIST branch', () => {
   // A concurrently-planted (or pre-existing) entry surfaces as EEXIST from the non-recursive mkdir
   // and is validated, never silently accepted. Capping the EEXIST-branch validation lets the bad
   // entry through — the deterministic fail-the-fix (the pure race window is not unit-testable; see
@@ -122,7 +122,7 @@ describe('config-dir hardening — atomic create, validated on the EEXIST branch
   });
 });
 
-describe('config-dir hardening — config root mode asserted at boot (1b)', () => {
+describe('config-dir hardening — config root mode asserted at boot', () => {
   it('rejects a group/world-accessible config root at construction', () => {
     const root = tmpRoot();
     chmodSync(root, 0o750);
@@ -181,7 +181,7 @@ describe('config-dir hardening — config root mode asserted at boot (1b)', () =
   });
 });
 
-describe('config-dir hardening — tenantId validated BEFORE any path op (1c)', () => {
+describe('config-dir hardening — tenantId validated BEFORE any path op', () => {
   // A hostile raw tenantId is rejected fail-closed before join/resolve — no directory is created.
   // Cap the validator → the empty and bare-`..` ids reach mkdir and CREATE a directory (RED); the
   // separator ids ('a/b', '../evil') are additionally caught by the pre-existing containment check.
@@ -461,7 +461,7 @@ describe('Deep tool-arg Zod projection validate-and-repair (mirrors the SDK MCP 
     expect(
       v.safeParse({
         title: 'Weekly sync',
-        action_items: [{ description: 'ship P5', owner: 'phil', due_raw: 'Friday' }],
+        action_items: [{ description: 'ship the release notes', owner: 'phil', due_raw: 'Friday' }],
         priority: 'high',
       }).success,
     ).toBe(true);
