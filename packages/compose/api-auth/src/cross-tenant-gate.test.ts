@@ -310,7 +310,7 @@ describe('replay rejection (in the full-surface gate)', () => {
 });
 
 /**
- * OIDC token/grant/client STORE isolation gate (Exit-gate item 3 / — the predicate-exempt
+ * OIDC token/grant/client STORE isolation gate (the predicate-exempt
  * surface the prior gate never exercised).
  *
  * The node-oidc-provider model store (oidc_models) is GLOBAL / predicate-exempt by design: the
@@ -332,7 +332,7 @@ describe('replay rejection (in the full-surface gate)', () => {
  * /v1 is DEFERRED in (the live M2M path is the api-key m2m_client). This gate proves STORE-ROW
  * protocol isolation between clients, not org-claim stamping (which does not ship).
  */
-describe('OIDC store cross-tenant/client isolation (Exit-gate item 3)', () => {
+describe('OIDC store cross-tenant/client isolation', () => {
   const SCHEMA = 'rayspec_test_oidc_gate';
   const REDIRECT = 'http://127.0.0.1:9999/cb';
   const CLIENT_A = { client_id: 'gate-client-a', client_secret: 'gate-secret-a', orgId: 'org-a' };
@@ -646,7 +646,7 @@ describe('OIDC store cross-tenant/client isolation (Exit-gate item 3)', () => {
 });
 
 /**
- * GENERATED PRODUCT-TABLE tenancy gate (Exit-gate item 3) — CI-BLOCKING.
+ * GENERATED PRODUCT-TABLE tenancy gate — CI-BLOCKING.
  *
  * Structural tenancy must hold for MATERIALIZED PRODUCT tables, not just the core run-journal
  * tables. The platform main line is PRODUCT-EMPTY, so this gate is PARAMETERIZED over a generated
@@ -660,7 +660,7 @@ describe('OIDC store cross-tenant/client isolation (Exit-gate item 3)', () => {
  * generated SQL column-for-column (the @rayspec/db product-pipeline test), so this proof holds for
  * the committed generated source. Does NOT weaken the existing cross-tenant gate above.
  */
-describe('generated product-table tenancy gate (Exit-gate item 3, CI-BLOCKING)', () => {
+describe('generated product-table tenancy gate (CI-BLOCKING)', () => {
   const SCHEMA = 'rayspec_test_product_tenancy_gate';
   const TENANT_A = '00000000-0000-0000-0000-0000000000c1';
   const TENANT_B = '00000000-0000-0000-0000-0000000000c2';

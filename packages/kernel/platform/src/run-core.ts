@@ -144,7 +144,7 @@ export interface CostContext {
  * `record()` is the SINGLE place per-step cost is finalized (the journal is the source
  * of truth). It RE-COMPUTES the computed cost from the effective-dated pricing registry at the
  * run's instant (not the adapter's pre-computed number), reconciles it against the provider-reported
- * cost (drift flag), applies the Decision-#7 subscription billed=0 rule, and records the pricing
+ * cost (drift flag), applies the subscription billed=0 rule, and records the pricing
  * provenance (pricing_version: `<model>@<effectiveFrom>` or 'FALLBACK') + the SDK provenance
  * (produced_by) — so a stale/fabricated adapter cost can never become the ledger's authoritative cost,
  * and a fallback-priced step is DISTINGUISHABLE in the ledger (auditability is the point).
@@ -415,7 +415,7 @@ export async function runAgent(
   // effects (e.g. setDefaultOpenAIKey); it is idempotent.
   const authMode = await backend.resolveAuth();
 
-  // Build the central tool dispatcher and wire it (+ the tools) onto the context (carry-in #5). The
+  // Build the central tool dispatcher and wire it (+ the tools) onto the context. The
   // OpenAI adapter marshals every SDK tool-call into ctx.dispatchTool — the ONLY
   // sanctioned tool path; it holds no handlers. Tool steps are attributed to the run's REAL
   // authMode resolved above. dispatchTool's events flow through the SAME wrapped (seq-stamping)
@@ -455,7 +455,7 @@ export async function runAgent(
     authMode,
     tools,
     dispatchTool,
-    // Replay reconstruction source (carry-in #6): on replay, the adapter rebuilds the neutral
+    // Replay reconstruction source: on replay, the adapter rebuilds the neutral
     // transcript from the ConversationStore via the trust-boundary read-path (tenant-scoped, per-part
     // re-validation) WITHOUT calling the model — never from the SDK RunState.
     rehydrate: () => rehydrateConversation(tdb, runId),

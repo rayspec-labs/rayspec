@@ -310,7 +310,7 @@ describe.skipIf(!hasDb)(
       expect(scheduler.cronTriggerNames).not.toContain('inbound-hook');
     });
 
-    it('HEADLINE (exit-gate #2): a SECOND fire of the same (trigger, instant) dispatches ZERO additional — exactly ONE reserve row + ONE handler run', async () => {
+    it('HEADLINE: a SECOND fire of the same (trigger, instant) dispatches ZERO additional — exactly ONE reserve row + ONE handler run', async () => {
       const instant = new Date('2026-06-24T02:00:00.000Z');
       const key = firingKey('nightly-digest', instant);
 

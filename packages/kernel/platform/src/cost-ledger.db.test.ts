@@ -4,7 +4,7 @@
  * Proves run-core's journal sink finalizes cost AT record() time from the effective-dated registry
  * (the single source of truth): the COMPUTED cost is the registry value (not the adapter's
  * claimed number), the PROVIDER cost is reconciled (drift flag trips on a REAL divergence), the
- * Decision-#7 SUBSCRIPTION rule writes billed=0 with a non-zero attributed cost, provenance is
+ * SUBSCRIPTION rule writes billed=0 with a non-zero attributed cost, provenance is
  * recorded, and the run→tenant roll-ups aggregate the journal tenant-scoped.
  *
  * Uses a REAL Postgres-backed journal/db + a FAKE backend that reports a chosen auth mode + provider
