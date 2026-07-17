@@ -90,6 +90,15 @@ export function closedReferenceGroundingChecker(input: GroundingCheckInput): Gro
   // spans — concatenation would admit a contiguous run that was never spoken in one span). No cited
   // span supports it ⇒ the claim is unsupported (a real span id with fabricated wording). Fail-closed:
   // an empty span-text map (missing/malformed carrier) yields no support, so the claim is UNSUPPORTED.
+  //
+  // The empty-string skip (`length > 0`) is DELIBERATE, and is NOT a bypass: an ABSENT quote is not the
+  // same as a FABRICATED one, so a checker with no quote to verify emits no unsupported finding. An
+  // EMPTY/blank quote never reaches this branch as a silent pass in the product pipeline — the
+  // materializer (`applyGroundingPolicy`) classifies an absent/empty/blank/whitespace-only quote_field
+  // value as a `missingQuote` and applies the declared `on_unquoted_claim` consequence (prune/drop/fail/
+  // ignore) directly, and it passes a quote to this checker ONLY when it is a non-blank string. So the
+  // enforcement of empty quotes lives THERE; this guard is the matching defense-in-depth for a direct
+  // caller.
   if (typeof input.quote === 'string' && input.quote.length > 0) {
     const quote = input.quote;
     const texts = spanTextMap(input.source_artifact.content);

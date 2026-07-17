@@ -21,8 +21,10 @@ useDefault = true
 [allowlist]
 description = "Documented dev/test placeholders that are not real secrets."
 paths = [
-  # The .env.example TEMPLATE file is placeholders end to end — the whole file is a non-secret.
-  '''\.env\.example$''',
+  # The ROOT .env.example template is placeholders end to end — the whole file is a non-secret.
+  # Anchored to the repo root (`^…$`) so it waves ONLY the root template, never any other file that
+  # merely ends in `.env.example` in some nested directory (which would silently skip that file).
+  '''^\.env\.example$''',
 ]
 regexes = [
   # The CI dev pepper (an explicit non-secret placeholder wired into ci.yml). Anchored: exact value only.

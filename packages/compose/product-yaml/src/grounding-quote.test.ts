@@ -194,6 +194,40 @@ describe('opt-in quote-text grounding over the REAL acme-notes product', () => {
     expect(result.error?.code).toBe('grounding_span_text_missing');
   });
 
+  it('CANNOT be gamed with an EMPTY quote: an excerpt whose quote is "" is treated as unquoted and DROPPED', () => {
+    // The concern: a member could try to satisfy a declared quote_field by emitting an EMPTY string,
+    // hoping to skip the token-run-subset check. Under acme-notes (on_unquoted_claim: prune, excerpt
+    // required), an empty/blank quote is classified as a missing quote → its evidence is pruned to empty
+    // → the evidence-required member is dropped. The cited span id is a REAL closed-set id, so the drop
+    // is caused by the empty quote, not by a bad citation. Fail-the-fix: reverting the materializer's
+    // blank-quote handling (accepting "" as a present quote) lets this excerpt persist → the row count
+    // below flips from 0 to 1.
+    const spec = acmeSpec();
+    const emptyQuoteCandidate: Record<string, unknown> = {
+      headline: 'Weekly review',
+      detail: 'A neutral note set with one empty-quote excerpt.',
+      output_language: 'en',
+      items: [],
+      pointers: [],
+      queries: [],
+      labels: [],
+      excerpts: [{ text: 'an empty-quote excerpt', quote: '', evidence: ['sp-1'] }],
+      mentions: [],
+    };
+    const app = applyGroundingPolicy(spec, emptyQuoteCandidate, 'acme.notes', closedMap());
+    expect(app.unsupportedClaims).toBe(1); // the empty quote is counted as an unquoted claim
+    expect(app.droppedMembers).toBe(1); // pruned to empty evidence → dropped (required kind)
+
+    const rows = buildCollectionRows(app.kinds, {
+      tenantId: 'tenant-a',
+      scopeColumn: 'session_id',
+      scopeId: FIXTURE.session_id,
+      collectionStores: new Map([['note_artifacts', { store: 'note_artifacts' }]]),
+    });
+    // The empty-quote excerpt never reaches a persisted row — it cannot be gamed via "".
+    expect(rows.filter((r) => r.kind === 'excerpt')).toHaveLength(0);
+  });
+
   it('DEFAULT-OFF control: with quote_field STRIPPED, the SAME fabricated excerpt survives (the declaration arms the check)', () => {
     const spec = acmeSpec();
     // Remove the excerpt kind's quote_field — the product no longer opts in.

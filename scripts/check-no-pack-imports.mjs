@@ -23,11 +23,11 @@
  *      never match). Line comments and inline block comments are stripped per-line before matching, so
  *      a seam path mentioned only in a comment never trips the gate.
  *
- *      KNOWN LIMITATION (unexploitable today): a tsconfig `paths` ALIAS that resolves into
- *      `products/`/`sdks/` and is imported by its alias name (no literal `products/`/`sdks/` substring
- *      in the specifier) would evade this literal-substring scan. No such alias exists (products/ has no
- *      importable module; sdks/ is Rust), so it is not a live gap — flagged here so it isn't
- *      rediscovered as a surprise later.
+ *      (Historically a KNOWN LIMITATION: a tsconfig `paths` ALIAS resolving into `products/`/`sdks/`
+ *      and imported by its alias NAME — no literal `products/`/`sdks/` substring in the specifier —
+ *      would evade this literal-substring scan. Clause (d) below now CLOSES that gap by scanning the
+ *      tsconfig alias targets/baseUrl for the seam, so an alias can never smuggle the dependency past
+ *      clause (a). No such alias exists today; clause (d) is defense-in-depth.)
  *
  *  (b) NO file in the deploy kit's BUILD CONTEXT (`deployments/** ` minus `*.md`) references a legacy
  *      extension-pack path (`PACK_RE`) — the deploy image must build from THIS repo alone, never from a
@@ -39,6 +39,12 @@
  *      `products/` or `sdks/` via a `file:`/`link:`/`workspace:`/relative-path spec — such a dep evades
  *      the static-import scan (there is no `import` line) yet is a real build-time dependency the
  *      Docker `--frozen-lockfile` would only catch much later.
+ *
+ *  (d) NO platform tsconfig (root, packages/**, examples/**) declares a `compilerOptions.paths` alias
+ *      whose target — or a `compilerOptions.baseUrl` — carries a `products/`/`sdks/` seam substring.
+ *      This closes the alias-evasion gap noted under clause (a): an alias whose NAME hides the seam
+ *      still resolves through a tsconfig `paths` target (or a seam baseUrl) that names the seam path, so
+ *      scanning the targets/baseUrl catches what the specifier scan cannot.
  *
  *   node scripts/check-no-pack-imports.mjs   # CHECK (exit 1 on any violation)
  *
@@ -212,6 +218,57 @@ for (const file of pkgJsonFiles) {
   }
 }
 
+// ── (d) NO platform tsconfig alias (paths target / baseUrl) resolves into products/sdks ───────────
+// A tsconfig `compilerOptions.paths` alias whose TARGET names a seam path — or a seam `baseUrl` — is a
+// build-time dependency that an alias-NAME import hides from clause (a)'s specifier scan. Scan the
+// platform tsconfig files' alias targets + baseUrl for a seam substring. Covers repo root + packages/**
+// + examples/** (the same platform scope as clauses (a)/(c); products/sdks/deployments are
+// consumer-owned). A malformed tsconfig is skipped (tsc surfaces that elsewhere), matching clause (c).
+const tsconfigFiles = [];
+{
+  const isTsconfig = (name) => /^tsconfig.*\.json$/.test(name);
+  try {
+    for (const e of readdirSync(repoRoot, { withFileTypes: true })) {
+      if (e.isFile() && isTsconfig(e.name)) tsconfigFiles.push(join(repoRoot, e.name));
+    }
+  } catch {
+    // no readable repo root — clause (a)'s fail-closed guard already covers that case
+  }
+  for (const base of ['packages', 'examples']) {
+    for (const file of walk(join(repoRoot, base))) {
+      if (isTsconfig(basename(file))) tsconfigFiles.push(file);
+    }
+  }
+}
+for (const file of tsconfigFiles) {
+  let ts;
+  try {
+    ts = JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    continue; // a malformed tsconfig is not this gate's job
+  }
+  const co = ts === null || typeof ts !== 'object' ? undefined : ts.compilerOptions;
+  if (co === null || typeof co !== 'object' || Array.isArray(co)) continue;
+  if (typeof co.baseUrl === 'string' && SEAM_RE.test(co.baseUrl)) {
+    violations.push(
+      `  [tsconfig-baseurl-seam] ${relative(repoRoot, file)}  "baseUrl": "${co.baseUrl.slice(0, 100)}"`,
+    );
+  }
+  const paths = co.paths;
+  if (paths !== null && typeof paths === 'object' && !Array.isArray(paths)) {
+    for (const [alias, targets] of Object.entries(paths)) {
+      const list = Array.isArray(targets) ? targets : [targets];
+      for (const target of list) {
+        if (typeof target === 'string' && SEAM_RE.test(target)) {
+          violations.push(
+            `  [tsconfig-path-seam] ${relative(repoRoot, file)}  "${alias}": "${target.slice(0, 100)}"`,
+          );
+        }
+      }
+    }
+  }
+}
+
 // ── fail-closed: a scan that read NOTHING must never certify the seam as clean ────────────────────
 // The gate's PRIMARY job is clause (a): the static products/sdks seam-import scan over
 // packages/scripts/examples (it increments platformScanned). The open-core platform ALWAYS has code
@@ -245,5 +302,6 @@ if (violations.length > 0) {
 console.log(
   `no-pack gate PASSED: no static products/sdks seam imports in packages/scripts/examples; ` +
     `deploy kit build-context clean of legacy extension-pack paths (${deployKitScanned} file(s) scanned); ` +
-    `no products/sdks seam dependency in ${pkgJsonFiles.length} package.json file(s).`,
+    `no products/sdks seam dependency in ${pkgJsonFiles.length} package.json file(s); ` +
+    `no products/sdks tsconfig alias/baseUrl in ${tsconfigFiles.length} tsconfig file(s).`,
 );
