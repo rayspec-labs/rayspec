@@ -23,7 +23,7 @@
  *                                           conversation id yields — tenant-scoped reads).
  *  - `conversation_turn_conflict`     409 — a LOST unique race on the turn ledger (two turns raced
  *                                           one conversation): retry with the SAME message_id — the
- *                                           retry converges on the dedup path (C10).
+ *                                           retry converges on the dedup path (single-flight).
  *  - `conversation_message_conflict`  409 — a re-POST of one message_id with DIFFERENT text (the
  *                                           stored turn is authoritative; submit new text under a
  *                                           new message_id) — permanent, never a silent dedup.
@@ -31,7 +31,7 @@
  * The reply-leg codes (the intake is COMMITTED on both — the body carries the intake facts):
  *  - `conversation_reply_failed`           502 — the reply model run failed (transient upstream
  *                                                classes included); retry with the SAME message_id
- *                                                to converge on one reply (C10).
+ *                                                to converge on one reply (single-flight).
  *  - `conversation_reply_persist_conflict` 503 — the reply lost every bounded sequence-race retry
  *                                                against concurrent turns; the run output is
  *                                                durable under the carried run id — a same-

@@ -2,7 +2,7 @@
  * RUNTIME product-table builder — the executable twin of the source generator.
  *
  * `generate-product-schema.ts` emits Drizzle-TS SOURCE (committed, codegen-into-committed-source —
- * correction A1). This module builds the EQUIVALENT runtime `PgTable` objects from the same
+ * the table-registration contract). This module builds the EQUIVALENT runtime `PgTable` objects from the same
  * `StoreSpec[]`, using the SAME injected-column pattern + the SAME ColumnType→builder mapping, so a
  * test / a generalized gate can exercise generated product tables through the real TenantDb
  * chokepoint WITHOUT importing a committed `generated/product-schema.ts` (whose `../schema.js`

@@ -145,7 +145,7 @@ export interface DeclaredRoutesConfig {
   /**
    * the BOOT-LOADED escape-hatch handlers (id → resolved fn + kind). A
    * `{handler}` route resolves its declared handler here + invokes it through the platform's
-   * `invokeRouteHandler` (inside a `TenantDb.transaction()` — A2/A3). Absent ⇒ a `{handler}` route
+   * `invokeRouteHandler` (inside a `TenantDb.transaction()`). Absent ⇒ a `{handler}` route
    * fails closed at BOOT (no loader supplied), never a runtime 501-that-should-have-worked.
    */
   handlers?: ReadonlyMap<string, ResolvedHandler>;
@@ -264,7 +264,7 @@ export function registerDeclaredRoutes(
       // (see `bindRouteParams` for the documented contract). `body.input` still flows in as before; a
       // route with NO path params behaves EXACTLY as today (the binding is additive).
       //
-      // NOTE (A3 / external-exposure hardening deferral): A3's GUC-populating `TenantDb.transaction` covers declared
+      // NOTE (external-exposure hardening deferral): the GUC-populating `TenantDb.transaction` covers declared
       // `{store}` route DB access (store-routes.ts) and route-handler DB access; the agent-run path is
       // DELIBERATELY NOT wrapped in a TenantDb.transaction here — that would hold a DB connection
       // across the entire model run and break run-core's streaming persist-before-flush. The agent
@@ -284,7 +284,7 @@ export function registerDeclaredRoutes(
 
     if (action.kind === 'handler') {
       // a declared ROUTE handler, WIRED. The handler runs INSIDE a
-      // `TenantDb.transaction()` (the GUC seam — A2/A3) via the platform's `invokeRouteHandler`,
+      // `TenantDb.transaction()` (the GUC seam) via the platform's `invokeRouteHandler`,
       // through the single `HandlerRuntime` indirection. The handler is the escape-hatch fn the
       // loader resolved (path-jailed, fail-closed at boot).
       //

@@ -232,7 +232,7 @@ describe('stream blob-backend boot guard — composition root fail-closed + real
 
       server = await assembleServer(config, {
         registerProductTables: (tables) => {
-          // The A1 LOCAL stand-in: register THESE exact product-table instances (deploy() verifies the
+          // The LOCAL table-registration stand-in: register THESE exact product-table instances (deploy() verifies the
           // same objects). buildProductTables here is only to assert the spec materialized one table.
           registerScopedTables([...tables.values()]);
         },

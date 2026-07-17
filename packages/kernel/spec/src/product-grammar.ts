@@ -327,7 +327,7 @@ export type ExtractorSpec = z.infer<typeof ExtractorSpec>;
  *    `deleted_at`/`retention_days`/`region`) are INJECTED downstream exactly like collection stores get
  *    them (declaring one is rejected by lint, `reserved_column_name`);
  *  - `key` is the REQUIRED conflict/idempotency identity: the durable engine's at-least-once law
- *    re-executes a mid-crash node, so EVERY store_write is an UPSERT on this declared key (C10 — never
+ *    re-executes a mid-crash node, so EVERY store_write is an UPSERT on this declared key (single-flight — never
  *    insert-and-recover; an in-tx unique-violation would poison the whole run transaction). It lives on
  *    the STORE (not the write step) because row identity is a property of the DATA — two write paths to
  *    one store must agree on one identity — and because the derivation must materialize the backing

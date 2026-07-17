@@ -16,7 +16,7 @@
  * The sink does NOT single-flight itself: the capability re-emits the SAME session-scoped event on every
  * seal path (first-track / second-track / re-finalize), and the dispatcher's per-session enqueue
  * idempotency key (`sessionScopedIdempotencyKey`, → the tenant-namespaced `durableWorkflowRunId`) is what
- * dedups the re-emissions to ONE durable run (C10). So delivery is idempotent by design end-to-end.
+ * dedups the re-emissions to ONE durable run (single-flight). So delivery is idempotent by design end-to-end.
  */
 import {
   type FinalizedSessionEvent,

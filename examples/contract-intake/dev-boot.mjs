@@ -102,7 +102,7 @@ try {
   await admin.end();
 }
 
-// 4. Boot the composed stack with the LOCAL A1 stand-in (+ the file/agent env this doc demands).
+// 4. Boot the composed stack with the LOCAL table-registration stand-in (+ the file/agent env this doc demands).
 mkdirSync(BLOB_ROOT, { recursive: true });
 process.env.DATABASE_URL = DATABASE_URL;
 process.env.PORT = PORT;

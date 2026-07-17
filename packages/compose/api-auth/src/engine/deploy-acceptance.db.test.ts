@@ -9,7 +9,7 @@
  * registered, the tool it dispatched, the handler it ran in a tenant tx) and reads GROUND TRUTH.
  *
  * The platform stays PRODUCT-FREE: the `notebooks`/`entries` stores, routes, agent, tool, handlers
- * come from the throwaway YAML. The committed A1 tuple a real deployment ships is SIMULATED by the
+ * come from the throwaway YAML. The committed product-table tuple a real deployment ships is SIMULATED by the
  * deploy harness pre-registering the throwaway tables via the test seam (deploy() verifies-not-
  * registers; the NON-registered-store abort is proven in two places: the real chokepoint's deny-by-
  * default rejection in `packages/db/src/tenant-db.test.ts` (the `/not registered/` toThrow), and

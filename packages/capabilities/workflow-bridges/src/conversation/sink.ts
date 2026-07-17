@@ -16,7 +16,7 @@
  * STORED event, re-emitted so a persisted-but-never-enqueued turn is recovered by any
  * retry), and the dispatcher's per-turn enqueue idempotency key (the descriptor-derived
  * `payloadFieldIdempotencyKey('turn_ref')` → the tenant-namespaced `durableWorkflowRunId`) is what
- * dedups the re-emissions to ONE durable run per turn (C10). So delivery is idempotent by design
+ * dedups the re-emissions to ONE durable run per turn (single-flight). So delivery is idempotent by design
  * end-to-end — and PER-TURN, so a conversation's turns each get their own run.
  */
 import {

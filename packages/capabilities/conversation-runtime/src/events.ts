@@ -7,7 +7,7 @@
  * subscribes to that event and enforces TURN-scoped single-flight by the event's `event_id`
  * (= `${tenantId}:${conversationId}:${messageId}`) / the descriptor-derived idempotency key
  * (`turn_ref:<conversation_id>:<message_id>`), so a client re-POST (retry = redelivery) converges
- * on EXACTLY one workflow run per turn (C10) — while every NEW turn gets its OWN run (the key is
+ * on EXACTLY one workflow run per turn (single-flight) — while every NEW turn gets its OWN run (the key is
  * per-TURN, never per-conversation).
  */
 import type { SubmittedTurnEvent } from './types.js';

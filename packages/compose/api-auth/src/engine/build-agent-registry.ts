@@ -12,7 +12,7 @@
  *   - the per-run, tenant-bound `toolFactory` is built from the agent's declared `tools[]` via
  * `@rayspec/platform`'s `buildToolFactory`: each declared tool resolves to a
  *     `NeutralTool` whose handler routes through the UNCHANGED `dispatchTool` chokepoint, with the
- *     escape-hatch fn wrapped so it gets a tenant-bound `HandlerInit` (A2).
+ *     escape-hatch fn wrapped so it gets a tenant-bound `HandlerInit`.
  *
  * `validateSpec` runs again at run time inside run-core/executeAgentRun (defense in depth) — this
  * builder additionally fail-closes at BOOT on a missing backend / unresolved tool/handler, so a

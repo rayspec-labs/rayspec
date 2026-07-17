@@ -79,7 +79,7 @@ export interface TriggerEventDescriptor {
    */
   readonly payload_keys: readonly string[];
   /**
-   * The payload field the durable run's single-flight idempotency key derives from (C10). MUST be one
+   * The payload field the durable run's single-flight idempotency key derives from. MUST be one
    * of `payload_keys`. For the audio event this is `session_id`, and the derived key format
    * `session_id:<id>:finalized` is byte-stable (live run identity).
    */

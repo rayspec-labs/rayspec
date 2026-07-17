@@ -317,7 +317,7 @@ describe.skipIf(!hasDb)(
       // First fire WINS the reserve → dispatches the handler exactly once.
       const first = await scheduler.fireNow('nightly-digest', instant);
       expect(first).toBe(true);
-      expect(capturedGuc.value).toBe(TENANT); // the handler ran inside the GUC-populated tenant tx (A3)
+      expect(capturedGuc.value).toBe(TENANT); // the handler ran inside the GUC-populated tenant tx
       expect(await countFireMarkers(TENANT, key)).toBe(1);
       expect(await countCronMarks(TENANT)).toBe(1); // exactly one handler invocation wrote one row
 

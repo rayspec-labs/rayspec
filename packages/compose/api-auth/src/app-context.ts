@@ -61,7 +61,7 @@ export interface AgentRegistryEntry {
    * build this agent's tenant-bound `NeutralTool[]` for ONE run from the run's
    * `TenantDb`. Each tool's handler is the escape-hatch function the loader resolved, wrapped so
    * dispatchTool's UNCHANGED `(args, signal)` call routes through the single `HandlerRuntime`
-   * indirection with an engine-built `ToolHandlerInit` (the tenant-bound `HandlerDb` — corrects A2).
+   * indirection with an engine-built `ToolHandlerInit` (the tenant-bound `HandlerDb`).
    * The run surface calls this with `forTenant(db, tenantId)` to produce the run's tools. Optional
    * (a no-tool agent / a static-tools entry omits it).
    */

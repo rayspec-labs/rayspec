@@ -4,7 +4,7 @@
  *
  *   • the MOUNTED descriptor registry is exactly the audio vocabulary (the inventory source);
  *   • the per-trigger idempotency key derivation FOLLOWS THE DESCRIPTOR's declared key field (not a
- *     hardwired session default) and is fail-closed on a missing descriptor (the C10 contract);
+ *     hardwired session default) and is fail-closed on a missing descriptor (the single-flight contract);
  *   • the persist-scope check is PER-EVENT, never a union across events — the two-descriptor
  *     union case is the fail-the-fix arm (a union-based implementation FAILS this suite).
  *
@@ -109,7 +109,7 @@ describe('mountedTriggerEventDescriptors — the fail-closed coherence guards', 
     );
   });
 
-  it('REJECTS an idempotency_key_field outside payload_keys (guard: C10 silent-weakening)', () => {
+  it('REJECTS an idempotency_key_field outside payload_keys (guard: single-flight silent-weakening)', () => {
     const thrown = throwsFrom([
       {
         id: 'ticket_input',
@@ -140,7 +140,7 @@ describe('mountedTriggerEventDescriptors — the fail-closed coherence guards', 
   });
 });
 
-describe('triggerRegistrationForWorkflow (C10: explicit descriptor-derived keys)', () => {
+describe('triggerRegistrationForWorkflow (single-flight: explicit descriptor-derived keys)', () => {
   it('derives the CLEAN GENERIC key for a NON-audio descriptor — not a hardwired session default, not the legacy suffix', () => {
     // DELIBERATE: a NEW event's key uses
     // the generic `<field>:<value>` format (payloadFieldIdempotencyKey) — the `:finalized` suffix

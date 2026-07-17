@@ -173,7 +173,7 @@ describe('classifyUpstreamError — fail-closed default + cause preservation', (
   });
 });
 
-describe('classifyUpstreamError — CLS-1: numeric over-breadth (a bare 3-digit number is NOT a status)', () => {
+describe('classifyUpstreamError — numeric over-breadth (a bare 3-digit number is NOT a status)', () => {
   it('a token count "530 output tokens" → internal (NOT upstream_5xx)', () => {
     // FAIL-THE-FIX: the old `/\b5\d\d\b/` matched any 500–599 number → mis-tagged upstream_5xx.
     expect(
@@ -216,7 +216,7 @@ describe('classifyUpstreamError — CLS-1: numeric over-breadth (a bare 3-digit 
   });
 
   it('the STRUCTURAL status path is UNCHANGED — a real APIError.status still classifies', () => {
-    // CLS-1 only tightens the message-heuristic path; a structural status remains authoritative.
+    // The numeric-over-breadth tightening only affects the message-heuristic path; a structural status remains authoritative.
     expect(classifyUpstreamError(fakeApiError(503, 'boom')).errorClass).toBe('upstream_5xx');
     expect(classifyUpstreamError(fakeApiError(429, 'boom')).errorClass).toBe('rate_limited');
     expect(classifyUpstreamError(fakeApiError(400, 'boom')).errorClass).toBe('upstream_4xx');
@@ -230,7 +230,7 @@ describe('classifyUpstreamError — an UNAMBIGUOUS status indicator (leading / "
   // core/error.js) are `"<status> <body>"` and `"<status> status code (no body)"`. This re-catches
   // these unambiguous status indicators WITHOUT re-introducing the over-broad bare-number match.
   it('the literal openai 500 body "500 The server had an error…" → upstream_5xx', () => {
-    // FAIL-THE-FIX: after the CLS-1 context-word tightening this under-classified to internal → an HTTP-1
+    // FAIL-THE-FIX: after the context-word tightening this under-classified to internal → an HTTP-1
     // transient 5xx was treated as non-transient (reservation kept, mapped 200 not 502).
     expect(
       classifyUpstreamError(
@@ -258,7 +258,7 @@ describe('classifyUpstreamError — an UNAMBIGUOUS status indicator (leading / "
     );
   });
 
-  it('KEEP-GREEN: a mid-sentence number is STILL internal (the CLS-1 guards hold)', () => {
+  it('KEEP-GREEN: a mid-sentence number is STILL internal (the numeric-over-breadth guards hold)', () => {
     // The status indicator is leading-or-"status code" ONLY — a mid-sentence 5xx/429 stays internal.
     expect(
       classifyUpstreamError(new Error('The model produced 530 output tokens')).errorClass,
@@ -272,7 +272,7 @@ describe('classifyUpstreamError — an UNAMBIGUOUS status indicator (leading / "
   });
 });
 
-describe('classifyUpstreamError — CLS-2: refusal over-match (a benign field label is NOT a refusal)', () => {
+describe('classifyUpstreamError — refusal over-match (a benign field label is NOT a refusal)', () => {
   it('"safety refusal: none" → internal (NOT model_refusal)', () => {
     // FAIL-THE-FIX: the old `/\brefus(?:e|ed|al)\b/` matched the bare noun in a passed field label.
     expect(classifyUpstreamError(new Error('safety refusal: none')).errorClass).toBe('internal');
@@ -306,7 +306,7 @@ describe('classifyUpstreamError — CLS-2: refusal over-match (a benign field la
   });
 });
 
-describe('classifyUpstreamError — CLS-2 refusal separators are bounded (no polynomial scan)', () => {
+describe('classifyUpstreamError — refusal separators are bounded (no polynomial scan)', () => {
   // The refusal branches now use the backtracking-free `\s*(?:[:=]\s*)?` separator (same language as the
   // old `\s*[:=]?\s*`, but without the two adjacent whitespace stars that made it polynomial-ReDoS).
   // These lock that every legitimate separator shape classifies EXACTLY as before.
@@ -348,8 +348,8 @@ describe('classifyUpstreamError — CLS-2 refusal separators are bounded (no pol
   });
 });
 
-describe('classifyUpstreamError — CLS-3/CLS-4/CLS-5: throw-safety, status preference, header parse', () => {
-  it('CLS-3: a hostile error with a throwing getter never crashes the classifier → internal', () => {
+describe('classifyUpstreamError — throw-safety, status preference, header parse', () => {
+  it('a hostile error with a throwing getter never crashes the classifier → internal', () => {
     const hostile = {
       get message(): string {
         throw new Error('boom in getter');
@@ -361,7 +361,7 @@ describe('classifyUpstreamError — CLS-3/CLS-4/CLS-5: throw-safety, status pref
     expect(typeof c.message).toBe('string');
   });
 
-  it('CLS-4: an error-range nested cause.status wins over a benign shallow response.status:200', () => {
+  it('an error-range nested cause.status wins over a benign shallow response.status:200', () => {
     // FAIL-THE-FIX: shallowest-wins would have returned 200 (no classification) and fallen through to
     // internal; the error-range preference surfaces the real 500.
     const err = {
@@ -371,7 +371,7 @@ describe('classifyUpstreamError — CLS-3/CLS-4/CLS-5: throw-safety, status pref
     expect(classifyUpstreamError(err).errorClass).toBe('upstream_5xx');
   });
 
-  it('CLS-5: a number-leading HTTP-date Retry-After is NOT misparsed to a wrong seconds value', () => {
+  it('a number-leading HTTP-date Retry-After is NOT misparsed to a wrong seconds value', () => {
     // A 429 whose Retry-After header is an HTTP-date (RFC 7231) — must NOT parse "21" out of it.
     const err = fakeApiError(429, 'rate limited', 'Wed, 21 Oct 2015 07:28:00 GMT');
     const c = classifyUpstreamError(err);
@@ -379,7 +379,7 @@ describe('classifyUpstreamError — CLS-3/CLS-4/CLS-5: throw-safety, status pref
     expect(c.retryAfter).toBeUndefined(); // an HTTP-date is not a delta-seconds integer → undefined
   });
 
-  it('CLS-5: a pure-integer Retry-After header is still captured (no regression)', () => {
+  it('a pure-integer Retry-After header is still captured (no regression)', () => {
     const c = classifyUpstreamError(fakeApiError(429, 'rate limited', '  45  '));
     expect(c.retryAfter).toBe(45);
   });

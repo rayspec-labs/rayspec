@@ -8,7 +8,7 @@
  *      Request + the tenant-bound blob — a route that silently regressed to `{kind:'handler'}`
  *      would still "exist" by path but buffer/parse JSON — + the handler map + the DEFAULT-join
  *      trigger vocabulary.
- *   2. THE C10 KEY PIN: the composed ingress derives the CLEAN GENERIC `file_id:<id>` idempotency
+ *   2. THE single-flight KEY PIN: the composed ingress derives the CLEAN GENERIC `file_id:<id>` idempotency
  *      key (the record law — the ':finalized' suffix stays audio-only, byte-stable).
  *   3. THE CONDITIONAL (fail-the-fix): a doc NOT declaring file_input mounts ZERO file surface —
  *      no store, no routes, no handlers, no trigger event (both the record-only and the audio doc).
@@ -108,7 +108,7 @@ describe('composeProductDeploy — the file_input capability (conditional mount 
     expect(result.enqueued).toHaveLength(1);
     expect(enqueuer.calls[0]?.workflow.id).toBe('log_file');
     expect(enqueuer.calls[0]?.tenantId).toBe(TENANT);
-    // ★ THE C10 KEY PIN: the file event derives the generic `<field>:<value>` format — the legacy
+    // ★ THE single-flight KEY PIN: the file event derives the generic `<field>:<value>` format — the legacy
     // ':finalized' suffix is audio-only (its own byte-stable pin lives in compose.test.ts).
     expect(enqueuer.calls[0]?.idempotencyKey).toBe('file_id:doc-1');
   });

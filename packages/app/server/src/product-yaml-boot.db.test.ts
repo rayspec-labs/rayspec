@@ -8,7 +8,7 @@
  * HTTP and asserts on ground truth (fail-the-fix):
  *   1. the boot dispatched to the Product-YAML path (deployMode 'materialized'; derived stores exist);
  *   2. upload → dual-track finalize → the REAL `DbosWorkflowExecutor` runs the workflow OFF-REQUEST →
- *      the workflow_runs journal completes, EXACTLY ONE run for the deployment tenant (C10);
+ *      the workflow_runs journal completes, EXACTLY ONE run for the deployment tenant (single-flight);
  *   3. the DECLARED views serve the transcript + the GROUNDED notes (prune/drop visible).
  *
  * (The grounded-through-DBOS artifacts + the real gpt-5 leg + real playback bytes are additionally
@@ -280,7 +280,7 @@ describe.skipIf(!baseUrl)(
             throw new Error(`workflow did not complete: ${JSON.stringify(runs)}`);
           await new Promise((r) => setTimeout(r, 250));
         }
-        expect(runs).toHaveLength(1); // EXACTLY ONE run (C10 single-flight across dual-track finalize)
+        expect(runs).toHaveLength(1); // EXACTLY ONE run (single-flight across dual-track finalize)
         expect(runs[0]?.tenant_id).toBe(TENANT);
 
         // The transcript view serves the REAL persisted transcript.

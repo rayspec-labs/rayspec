@@ -69,7 +69,7 @@ export interface RunOptions {
    */
   tools?: NeutralTool[];
   /**
-   * Demand NATIVE structured output (C1, fail-closed): when true, a spec with an outputSchema is
+   * Demand NATIVE structured output (fail-closed): when true, a spec with an outputSchema is
    * rejected up front (before any model call) on a backend that lacks native structured output
    * (pi emulates, so it is rejected; openai/anthropic accept). Threaded into assertSpecValid.
    */
@@ -178,7 +178,7 @@ export function makeJournalSink(
       return ok ? { output: ok.output ?? null } : null;
     },
     /**
-     * Idempotent-tool replay cache (A1): a tool step's idempotency_key column holds the per-call
+     * Idempotent-tool replay cache: a tool step's idempotency_key column holds the per-call
      * callId (unique per call), so the args-keyed replay cache matches on input_hash instead. Match
      * the LATEST OK `tool` step with this args hash in the run (newest wins on a same-args repeat).
      */
@@ -347,7 +347,7 @@ export async function runAgent(
     }
   }
 
-  // C1 (fail-closed capability gate): reject a spec that needs a capability this backend lacks,
+  // Fail-closed capability gate: reject a spec that needs a capability this backend lacks,
   // BEFORE any model call. validateSpec/assertSpecValid had been defined but never called; this is
   // where the gate actually runs. requireNativeStructuredOutput threads through so a caller can
   // DEMAND native structured output (pi rejected, openai/anthropic accepted).
@@ -364,7 +364,7 @@ export async function runAgent(
   const runAt = new Date().toISOString();
   const journal = makeJournalSink(tdb, runId, backend.id, replay, { model: spec.model, at: runAt });
 
-  // C2 — THE SINGLE PER-RUN SEQ AUTHORITY. One monotonic counter for the whole run: every event
+  // THE SINGLE PER-RUN SEQ AUTHORITY. One monotonic counter for the whole run: every event
   // that passes through ctx.onEvent (from the adapter AND from dispatchTool) is re-stamped with a
   // contiguous seq (0,1,2,...) by THIS one wrapper, so the run's event stream is one coherent
   // ordering. The wrapper accepts a seq-less event input (the converted OpenAI adapter + the
@@ -378,7 +378,7 @@ export async function runAgent(
   // the run_events `seq` column + the SSE `id:` — so an SSE reconnect resumes from Last-Event-ID via
   // a `seq > lastEventId` read of run_events. The pipeline ALWAYS persists (even with no live sink),
   // making GET /runs/{id}/events a real durable read path regardless of whether anyone streamed live.
-  // (This finalizes C2: dispatchTool + the adapters all flow through this one pipeline.)
+  // (This finalizes the single per-run seq authority: dispatchTool + the adapters all flow through this one pipeline.)
   let seqCounter = 0;
   const stampSeq = (event: NeutralEventInput | NeutralEvent): NeutralEvent =>
     ({ ...event, seq: seqCounter++ }) as NeutralEvent;
@@ -419,7 +419,7 @@ export async function runAgent(
   // OpenAI adapter marshals every SDK tool-call into ctx.dispatchTool — the ONLY
   // sanctioned tool path; it holds no handlers. Tool steps are attributed to the run's REAL
   // authMode resolved above. dispatchTool's events flow through the SAME wrapped (seq-stamping)
-  // sink as the adapter's, so tool events share the run's single seq order (C2).
+  // sink as the adapter's, so tool events share the run's single seq order.
   const tools = opts.tools ?? [];
   const dispatchTool =
     tools.length > 0
@@ -446,7 +446,7 @@ export async function runAgent(
   const ctx: RunContext = {
     runId,
     tenantId: tdb.tenantId,
-    // The adapter emits through this wrapped sink; run-core stamps the single monotonic seq (C2) and
+    // The adapter emits through this wrapped sink; run-core stamps the single monotonic seq and
     // routes through the persist-before-flush pipeline. Always present so run_events is
     // durably populated even when no live SSE client is attached.
     onEvent: wrappedOnEvent as EventSink,
@@ -766,7 +766,7 @@ export async function rollupRunCost(tdb: TenantDb, runId: string): Promise<CostR
 }
 
 /**
- * Roll up a WHOLE tenant's cost across all its journal steps (deliverable A4 — per-tenant cost).
+ * Roll up a WHOLE tenant's cost across all its journal steps (per-tenant cost roll-up).
  * Tenant-scoped via TenantDb (the predicate is auto-injected), so a caller can NEVER read another
  * tenant's cost. Returns the computed + provider + billed totals + a drift flag. This is the value-
  * metric surface (computed/attributed) AND the billing surface (billed) over the journal.

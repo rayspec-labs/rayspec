@@ -1,6 +1,6 @@
 /**
  * The Tier-A store.read / store.write nodes — unit proofs over a spying
- * HandlerDb fake. The C10/at-least-once LAW is pinned fail-the-fix: store.write goes through
+ * HandlerDb fake. The single-flight/at-least-once LAW is pinned fail-the-fix: store.write goes through
  * `db.upsert` EXCLUSIVELY with the STORE-DECLARED conflict key — the fake exposes an `insert` spy
  * that must NEVER fire (an insert-and-recover rewrite trips this test before it can poison a run
  * transaction with an in-tx 23505 → 25P02).
@@ -38,7 +38,7 @@ class SpyDb implements HandlerDb {
     throw new Error('unexpected count');
   }
   async insert(_store: string, values: StoreRow): Promise<StoreRow> {
-    // THE LAW: a store.write node must never reach insert (upsert-exclusive — C10/25P02).
+    // THE LAW: a store.write node must never reach insert (upsert-exclusive — single-flight/25P02).
     this.inserts.push(values);
     throw new Error('unexpected insert — store.write must be upsert-EXCLUSIVE');
   }
@@ -194,7 +194,7 @@ describe('store.read node', () => {
   });
 });
 
-describe('store.write node (upsert-EXCLUSIVE — the C10/at-least-once law)', () => {
+describe('store.write node (upsert-EXCLUSIVE — the single-flight/at-least-once law)', () => {
   const catalogArtifact: ArtifactRef = {
     id: 'catalog:fieldlog.catalog_rows',
     kind: 'fieldlog.catalog_rows',

@@ -11,9 +11,9 @@
  *
  * Arm: boot (deployMode 'materialized', no extraction/audio env) → POST /records/{id}/submit → the REAL
  * DBOS workflow runs store_read(filter product_area) → store_write OFF-REQUEST → EXACTLY ONE
- * workflow_runs row (C10) → the triaged_tickets row carries the submitted fields + status + the FILTERED
+ * workflow_runs row (single-flight) → the triaged_tickets row carries the submitted fields + status + the FILTERED
  * routing snapshot (one row — proving the store_read filter) → the DECLARED views serve it over HTTP →
- * a byte-identical re-submit → deduped (still one run/row, C10 single-flight) → an unauth submit → 401.
+ * a byte-identical re-submit → deduped (still one run/row, single-flight) → an unauth submit → 401.
  *
  * Skips without DATABASE_URL; a real DBOS launch needs a separate `<appdb>_dbos_sys` (auto-created).
  */
@@ -219,7 +219,7 @@ describe.skipIf(!baseUrl)('support-ticket-triage e2e — real boot + real DBOS +
   const maybe = baseUrl ? it : it.skip;
 
   maybe(
-    'boot → submit → store_read(filtered)→store_write → views → C10 → 401',
+    'boot → submit → store_read(filtered)→store_write → views → single-flight → 401',
     async () => {
       e2eTestsRan += 1;
       // The boot dispatched to the Product-YAML path and MATERIALIZED with NO extraction/audio env.
@@ -249,7 +249,7 @@ describe.skipIf(!baseUrl)('support-ticket-triage e2e — real boot + real DBOS +
       expect(body.deduped).toBe(false);
 
       const runs = await waitForOneCompletedRun();
-      expect(runs).toHaveLength(1); // C10 single-flight
+      expect(runs).toHaveLength(1); // single-flight
 
       // MATERIALIZED ground truth: one triaged row with the submitted fields + status + the FILTERED
       // routing snapshot (ONLY the billing row — proving the store_read `filter: product_area` worked).
@@ -295,7 +295,7 @@ describe.skipIf(!baseUrl)('support-ticket-triage e2e — real boot + real DBOS +
       });
 
       // Re-submit the SAME ticket with an IDENTICAL payload (reordered) → deduped → STILL one run + one
-      // row (C10 single-flight). NOTE: the payload MUST be byte-identical after canonicalization — a
+      // row (single-flight). NOTE: the payload MUST be byte-identical after canonicalization — a
       // DIVERGENT re-submit (a dropped/changed field) is correctly rejected 409 by the sha256 guard.
       const again = await submit(
         RECORD,

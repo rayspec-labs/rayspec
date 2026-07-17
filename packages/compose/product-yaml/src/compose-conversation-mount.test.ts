@@ -5,7 +5,7 @@
  *   1. WHEN DECLARED: BOTH capability-owned stores + BOTH routes — asserted as WHOLE TUPLES
  *      (method/path/action.kind/action.handler; both are plain `{kind:'handler'}` JSON routes — no
  *      byte streams in this capability) — + the handler map + the DEFAULT-join trigger vocabulary.
- *   2. THE C10 KEY PIN: the composed ingress derives the CLEAN GENERIC
+ *   2. THE single-flight KEY PIN: the composed ingress derives the CLEAN GENERIC
  *      `turn_ref:<conversation_id>:<message_id>` idempotency key — PER-TURN (the descriptor's
  *      `idempotency_key_field: 'turn_ref'`; keying on `conversation_id` would dedupe every later
  *      turn of a conversation into its FIRST durable run — silent turn loss), and NEVER the
@@ -147,7 +147,7 @@ describe('composeProductDeploy — the conversation_input capability (conditiona
     expect(first.enqueued).toHaveLength(1);
     expect(enqueuer.calls[0]?.workflow.id).toBe('log_turn');
     expect(enqueuer.calls[0]?.tenantId).toBe(TENANT);
-    // ★ THE C10 KEY PIN: the descriptor-derived key is the generic `<field>:<value>` format over
+    // ★ THE single-flight KEY PIN: the descriptor-derived key is the generic `<field>:<value>` format over
     // the PER-TURN `turn_ref` field — the ':finalized' suffix stays audio-only (its byte-stable
     // pin lives in compose.test.ts).
     expect(enqueuer.calls[0]?.idempotencyKey).toBe('turn_ref:c-1:m-1');

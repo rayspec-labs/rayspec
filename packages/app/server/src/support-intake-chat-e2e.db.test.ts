@@ -4,7 +4,7 @@
  * `RAYSPEC_SPEC_PATH`) on a throwaway DATABASE + a real DBOS launch, and is driven end-to-end over
  * REAL HTTP against MATERIALIZED ground truth (fail-the-fix). It composes
  * the WHOLE conversational chain in ONE doc:
- *   conversation identity + a per-turn ledger + `turn_submitted` (per-TURN C10 key) · the
+ *   conversation identity + a per-turn ledger + `turn_submitted` (per-TURN single-flight key) · the
  *   conditional conversation mount + the responder demand (no blob/media/STT env) · the in-request
  *   multi-turn responder (bounded history window + a bounded store-context read of the seeded catalog)
  *   · content-negotiated SSE egress + the async-follow-up seam · (this doc) the async workflow:
@@ -39,7 +39,7 @@
  *   (c) SSE transport: a turn via Accept: text/event-stream → the intake + per-backend delta frames +
  *       a terminal conversation_reply; the reply persists AND the async workflow ALSO fires
  *       (representation-independence — a streamed turn extracts a ticket too);
- *   (d) C10 turn dedup: an identical re-POST → deduped, the PERSISTED reply row-served with ZERO new
+ *   (d) single-flight turn dedup: an identical re-POST → deduped, the PERSISTED reply row-served with ZERO new
  *       model calls, and NO second workflow run / NO double UPSERT;
  *   (e) concurrent-turn conflict (the exactly-one-winner rule): two DIFFERENT turns racing one conversation → EXACTLY
  *       ONE 200 winner and the other EITHER a serialized 200 OR the loud typed 409
@@ -702,7 +702,7 @@ describe.skipIf(!baseUrl)('Support-Intake-Chat acceptance — real boot + real D
   );
 
   maybe(
-    '(d) C10 turn dedup: an identical re-POST → deduped, the PERSISTED reply row-served with ZERO new model calls / NO second run / NO double UPSERT',
+    '(d) single-flight turn dedup: an identical re-POST → deduped, the PERSISTED reply row-served with ZERO new model calls / NO second run / NO double UPSERT',
     async () => {
       e2eTestsRan += 1;
       const callsBefore = replyBackend.runCalls;
@@ -818,7 +818,7 @@ describe.skipIf(!baseUrl)('Support-Intake-Chat acceptance — real boot + real D
         false,
       );
       // (2) No new run overall, and specifically NO durable extract_ticket run keyed on either
-      // rejected turn (the per-turn C10 key a successful extraction WOULD have used).
+      // rejected turn (the per-turn single-flight key a successful extraction WOULD have used).
       await expectRunsQuiesced(5);
       const runs = await workflowRuns();
       expect(runs.some((r) => r.workflow_run_id === ticketRunId(CONV_BOUNDS, 'msg-big'))).toBe(

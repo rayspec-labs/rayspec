@@ -16,7 +16,7 @@
  * (the STORED event, re-emitted so a persisted-but-never-enqueued record is
  * recovered by any retry), and the dispatcher's per-record enqueue idempotency key (the
  * descriptor-derived `payloadFieldIdempotencyKey('record_id')` → the tenant-namespaced
- * `durableWorkflowRunId`) is what dedups the re-emissions to ONE durable run (C10). So delivery
+ * `durableWorkflowRunId`) is what dedups the re-emissions to ONE durable run (single-flight). So delivery
  * is idempotent by design end-to-end.
  */
 import {

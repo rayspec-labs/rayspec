@@ -6,7 +6,7 @@
  * `file_submitted` event through an injected `FileSubmittedSink`. The Tier A workflow runtime
  * subscribes to that event and enforces file-scoped single-flight by the event's `event_id`
  * (= `${tenantId}:${fileId}`) / the descriptor-derived idempotency key (`file_id:<id>`), so a
- * client re-submit (retry = redelivery) converges on EXACTLY one workflow run (C10).
+ * client re-submit (retry = redelivery) converges on EXACTLY one workflow run (single-flight).
  */
 import type { SubmittedFileEvent } from './types.js';
 

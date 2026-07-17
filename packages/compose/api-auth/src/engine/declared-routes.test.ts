@@ -13,7 +13,7 @@
  * the `{agent}` route reuses the run surface (a journaled run, RunResult shape);
  * `async:true` is FAIL-CLOSED-REJECTED (501);
  * the `{handler}` seam is a clean 501 (scope), not a silent 500;
- *  - A3 (headline): `current_setting('app.current_tenant')` equals the request tenant INSIDE the
+ *  - Headline: `current_setting('app.current_tenant')` equals the request tenant INSIDE the
  *    route-handler's OWN transaction — read back via the real tx (no proxy/blind assertion).
  */
 
@@ -909,7 +909,7 @@ describeDb('declared route authz + unknown route', () => {
 });
 
 /**
- * A3 (THE headline correctness item, correction A3): is the FIRST production consumer of
+ * THE headline correctness item: is the FIRST production consumer of
  * `TenantDb.transaction()` / the `app.current_tenant` GUC seam. This test asserts the GUC is REALLY
  * populated INSIDE the declared store-route handler's OWN transaction, reading it back via that exact
  * transaction handle — NOT a proxy/blind assertion.
@@ -922,7 +922,7 @@ describeDb('declared route authz + unknown route', () => {
  * of the handler's ACTUAL transaction, set by the handler's ACTUAL run. We assert it equals the
  * request's server-derived tenant — proving the RLS-ready seam (external-exposure hardening) is live for product data.
  */
-describeDb('A3 — app.current_tenant GUC is populated INSIDE the store-handler transaction', () => {
+describeDb('app.current_tenant GUC is populated INSIDE the store-handler transaction', () => {
   let ah: Harness;
   // Captured per request: the GUC value read INSIDE the handler's real transaction.
   const captured: { guc: string | null } = { guc: null };
@@ -994,7 +994,7 @@ describeDb('A3 — app.current_tenant GUC is populated INSIDE the store-handler 
     });
     expect(created.status).toBe(201);
 
-    // THE A3 assertion: the GUC read INSIDE the handler's own transaction equals the request tenant.
+    // THE GUC assertion: the GUC read INSIDE the handler's own transaction equals the request tenant.
     expect(captured.guc).toBe(orgId);
     // And it is a real uuid (the server-derived tenant), not empty/null.
     expect(captured.guc).toMatch(/^[0-9a-f-]{36}$/);

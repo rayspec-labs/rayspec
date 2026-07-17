@@ -84,7 +84,7 @@ class FakeBackend implements Backend {
 }
 
 /**
- * A fake 'pi' backend for the C1 capability-gate test. Its run() asserts it is NEVER reached when
+ * A fake 'pi' backend for the capability-gate test. Its run() asserts it is NEVER reached when
  * the spec is rejected up front (it bumps a counter the test checks stays 0).
  */
 class FakePiBackend implements Backend {
@@ -207,7 +207,7 @@ describe('run-core live run', () => {
   });
 });
 
-describe('run-core capability gate (C1, fail-closed)', () => {
+describe('run-core capability gate (fail-closed)', () => {
   it('rejects an outputSchema spec on pi when requireNativeStructuredOutput=true BEFORE backend.run', async () => {
     const backend = new FakePiBackend();
     await expect(
@@ -268,7 +268,7 @@ class EmittingBackend implements Backend {
       runId: ctx.runId,
       toolCallId: 'tc-1',
       name: 'lookup',
-      // C2: match what the REAL dispatchTool emits — the tool_result `result` is the UNWRAPPED handler
+      // match what the REAL dispatchTool emits — the tool_result `result` is the UNWRAPPED handler
       // output (dispatch.ts emitResult emits `result: result.data`), NOT the { kind:'tool_data', ... }
       // opaque wrapper. (The wrapper is what dispatchTool RETURNS to the adapter + journals; the EVENT
       // carries the bare data.) The previous test asserted the wrapper shape the event never has.
@@ -333,7 +333,7 @@ describe('run-core run_events persistence', () => {
     // The persisted `data` is the full neutral NeutralEvent (the SSE replay source).
     const toolResult = events.find((e) => e.type === 'tool_result');
     expect((toolResult?.data as { toolCallId?: string })?.toolCallId).toBe('tc-1');
-    // C2: the tool_result EVENT's `result` is the UNWRAPPED dispatched data — exactly what the REAL
+    // the tool_result EVENT's `result` is the UNWRAPPED dispatched data — exactly what the REAL
     // dispatchTool emits (dispatch.ts emitResult: `result: result.data`). The previous test asserted
     // `result.kind === 'tool_data'` (the opaque WRAPPER), a shape the event never carries — a blind
     // assertion that did not match production. Assert the real bare data AND that it is NOT the wrapper.

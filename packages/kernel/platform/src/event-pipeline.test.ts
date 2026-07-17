@@ -217,14 +217,14 @@ describe('EventPipeline overflow policy (back-pressure)', () => {
     expect(p.coalescedCount).toBe(0);
   });
 
-  // A1 (must-fix) regression: ≥2 CONCURRENT producers blocked on a full non-droppable queue. With a
+  // Blocked-producer (must-fix) regression: ≥2 CONCURRENT producers blocked on a full non-droppable queue. With a
   // single waiter slot, the second producer's resolver OVERWRITES the first's — the first is orphaned
   // forever, its emit() never resolves, drain() never completes, and the structural frame it carried is
   // NEVER persisted. This is the real deadlock (parallel OpenAI tool calls fire pipeline.emit of
   // non-droppable tool_called frames via Promise.all). A FIFO waiter queue must wake EXACTLY ONE waiter
   // per freed slot, in order, so BOTH resolve and BOTH frames persist. This test FAILS (times out, one
   // frame missing) against the single-slot waiter and PASSES after the FIFO fix.
-  it('A1: two CONCURRENT producers on a full non-droppable queue both resolve + both frames persist (no deadlock)', async () => {
+  it('two CONCURRENT producers on a full non-droppable queue both resolve + both frames persist (no deadlock)', async () => {
     const persisted: NeutralEvent[] = [];
     const gate = makeGate();
     let firstLive = true;
@@ -269,10 +269,10 @@ describe('EventPipeline overflow policy (back-pressure)', () => {
     expect(p.coalescedCount).toBe(0);
   });
 
-  // A1 corollary: a persist FAILURE while producers are blocked must reject ALL waiters (fail-closed),
+  // Blocked-producer corollary: a persist FAILURE while producers are blocked must reject ALL waiters (fail-closed),
   // never leave one orphaned waiting on a worker that has stopped. With a single waiter slot a second
   // blocked producer is silently lost on failure too.
-  it('A1: a persist failure rejects ALL blocked producers (no orphaned waiter)', async () => {
+  it('a persist failure rejects ALL blocked producers (no orphaned waiter)', async () => {
     const gate = makeGate();
     let firstLive = true;
     const p = new EventPipeline({

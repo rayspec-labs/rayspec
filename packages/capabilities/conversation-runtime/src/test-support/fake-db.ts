@@ -15,7 +15,7 @@
  *    row writes nothing and returns `undefined`); tenant_id is auto-stamped on insert; a conflict
  *    on a NON-target unique throws the same sanitized error insert does.
  *  - select/update/delete are tenant-scoped structurally (every op filters by the bound tenant);
- *    select honors the C11 `orderBy`/`limit` options (submit-turn's tail read depends on them).
+ *    select honors the read-shaping `orderBy`/`limit` options (submit-turn's tail read depends on them).
  *  - THE TX-POISON LAW (probe-verified against the REAL stack, drizzle +
  *    postgres.js): a route handler runs INSIDE the engine's tenant transaction, and a unique
  *    violation raised there UNSCOPED poisons that tx — postgres.js REMEMBERS the error and rejects
@@ -143,7 +143,7 @@ export function makeFakeConversationDb(
           return 0;
         });
       }
-      // C11 paging exactly like the real facade (store-facade.ts): OFFSET first, then LIMIT
+      // Read-shaping paging exactly like the real facade (store-facade.ts): OFFSET first, then LIMIT
       // (drizzle emits both; the history-window read depends on offset paging).
       if (opts?.offset !== undefined) rows = rows.slice(opts.offset);
       if (opts?.limit !== undefined) rows = rows.slice(0, opts.limit);

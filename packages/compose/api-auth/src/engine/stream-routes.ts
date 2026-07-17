@@ -8,7 +8,7 @@
  * + blob surface a stream handler can touch is the INJECTED, tenant-bound capability set (never a raw
  * pool/db/blob backend):
  *   - on the SAME ordered auth/tenant middleware chain as every route (server-derived tenant);
- *   - INSIDE `forTenant(db, tenantId).transaction(...)` (the GUC seam — A3) via the platform's
+ *   - INSIDE `forTenant(db, tenantId).transaction(...)` (the GUC seam) via the platform's
  *     `invokeStreamRouteHandler`, so every `init.db` write (the pointer row) is in ONE tenant-scoped,
  *     atomic transaction;
  *   - with `init.blob` a `BlobStore` tenant-bound BY CONSTRUCTION (the blob does NOT traverse the SQL

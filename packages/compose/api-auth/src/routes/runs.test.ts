@@ -573,7 +573,7 @@ describe('POST /v1/agents/:id/runs run-level idempotency', () => {
     expect(rows.length).toBe(1);
   });
 
-  it('C3: the agent_run idempotency snapshot is EXACTLY { runId } — no finalText/output/secret', async () => {
+  it('the agent_run idempotency snapshot is EXACTLY { runId } — no finalText/output/secret', async () => {
     const { token } = await principal('idem-snap@example.com', 'IdemSnapOrg');
     const created = await (
       await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
@@ -710,7 +710,7 @@ describe('POST /v1/agents/:id/runs (SSE)', () => {
     expect(headerResumed.map((f) => f.id)).toEqual(resumed.map((f) => f.id));
   });
 
-  it('C1: a POISONED run_events.data row (not a neutral event) is DROPPED on read (re-validate-on-read)', async () => {
+  it('a POISONED run_events.data row (not a neutral event) is DROPPED on read (re-validate-on-read)', async () => {
     const { token } = await principal('poison@example.com', 'PoisonOrg');
     const result = await (
       await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
@@ -755,7 +755,7 @@ describe('POST /v1/agents/:id/runs (SSE)', () => {
     expect(after).toEqual(cleanSeqs);
   });
 
-  it('C4: a backend that THROWS mid-run ends the SSE with an event:error frame; run_events keeps what was persisted', async () => {
+  it('a backend that THROWS mid-run ends the SSE with an event:error frame; run_events keeps what was persisted', async () => {
     const { token } = await principal('sse-err@example.com', 'SseErrOrg');
     // Make the SHARED backend throw mid-run via its gate (after run_started has emitted + persisted).
     backend.gate = () => Promise.reject(new Error('mid-run-explosion'));

@@ -145,7 +145,7 @@ describe('submitTurn — persist + emit (the durability recipe)', () => {
     expect(typeof s.deliveredFor(`${TENANT_A}:c-1:m-1`)?.occurred_at).toBe('string');
   });
 
-  it('a SECOND turn gets the next seq and a DISTINCT idempotency identity (per-TURN, never per-conversation — the C10 turn-loss pin)', async () => {
+  it('a SECOND turn gets the next seq and a DISTINCT idempotency identity (per-TURN, never per-conversation — the single-flight turn-loss pin)', async () => {
     const tables = new SharedConversationTables();
     seedConversation(tables);
     const s = sink();
@@ -174,7 +174,7 @@ describe('submitTurn — persist + emit (the durability recipe)', () => {
     expect(new Set(delivered.map((e) => e.conversation_id))).toEqual(new Set(['c-1']));
   });
 
-  it('an IDENTICAL re-POST RE-EMITS the deduped event (redelivery) — one delivered event, one row (C10)', async () => {
+  it('an IDENTICAL re-POST RE-EMITS the deduped event (redelivery) — one delivered event, one row (single-flight)', async () => {
     const tables = new SharedConversationTables();
     seedConversation(tables);
     const s = sink();
@@ -202,7 +202,7 @@ describe('submitTurn — persist + emit (the durability recipe)', () => {
       deduped: true,
     });
     expect(s.emitCount()).toBe(2); // the re-POST RE-EMITTED …
-    expect(s.deliveredCount()).toBe(1); // … and the sink deduped to ONE delivery (C10)
+    expect(s.deliveredCount()).toBe(1); // … and the sink deduped to ONE delivery (single-flight)
     expect(tables.turns).toHaveLength(1);
   });
 
@@ -547,7 +547,7 @@ describe('submitTurn — the divergence contract (409 conversation_message_confl
   });
 });
 
-describe('submitTurn — the C10 turn-seq races (deterministic TOCTOU interposers)', () => {
+describe('submitTurn — the single-flight turn-seq races (deterministic TOCTOU interposers)', () => {
   it('ARM A — two DIFFERENT turns race one conversation: the loser gets the TYPED 409 conversation_turn_conflict with ZERO emit (never a silent overwrite), and its retry takes the next seq', async () => {
     const tables = new SharedConversationTables();
     seedConversation(tables);
@@ -602,7 +602,7 @@ describe('submitTurn — the C10 turn-seq races (deterministic TOCTOU interposer
     expect(s.deliveredCount()).toBe(2);
   });
 
-  it('ARM B — the SAME message double-fires: the loser gets the typed 409 (zero second delivery), and its retry converges on the dedup path — ONE durable run (C10)', async () => {
+  it('ARM B — the SAME message double-fires: the loser gets the typed 409 (zero second delivery), and its retry converges on the dedup path — ONE durable run (single-flight)', async () => {
     const tables = new SharedConversationTables();
     seedConversation(tables);
     const s = sink();

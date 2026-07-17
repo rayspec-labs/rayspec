@@ -17,7 +17,7 @@ import { type DispatchDeps, makeDispatchTool, Semaphore } from './dispatch.js';
 
 /**
  * A fake JournalSink that mirrors the REAL Postgres sink's behavior so a blind array-push fake
- * cannot mask the A1 crash:
+ * cannot mask the same-args double-fire crash:
  *  - record() ENFORCES the UNIQUE (tenantId, runId, idempotencyKey) constraint (throws a
  *    unique_violation on a duplicate idempotencyKey, exactly like journal_idem_idx + a plain
  *    insert). This is what would crash a same-args double-fire under the OLD (args-hash) key.
@@ -201,7 +201,7 @@ describe('dispatchTool success path', () => {
     expect(res.kind).toBe('tool_data');
     if (res.kind === 'tool_data') {
       expect(res.name).toBe('echo');
-      // A1/#10: the result carries the REAL SDK callId (not the args-hash) so the journal step and
+      // The result carries the REAL SDK callId (not the args-hash) so the journal step and
       // the transcript tool_call/tool_result parts join on the same id.
       expect(res.toolCallId).toBe('call_REAL_123');
       expect(res.data).toEqual({ echoed: { a: 1 } });
@@ -216,8 +216,8 @@ describe('dispatchTool success path', () => {
     expect((journal.records[0]?.output as { kind?: string })?.kind).toBe('tool_data');
   });
 
-  it('A1: TWO byte-identical-args calls in ONE run BOTH fire + record TWO distinct journal rows (no unique_violation)', async () => {
-    // The exact crash A1 fixes: under the old args-hash journal key, a same-args 2nd call hit the
+  it('TWO byte-identical-args calls in ONE run BOTH fire + record TWO distinct journal rows (no unique_violation)', async () => {
+    // The exact crash the real-callId journal key fixes: under the old args-hash journal key, a same-args 2nd call hit the
     // UNIQUE index AFTER the side effect ran -> the run crashed. With the REAL callId as the key,
     // two identical-args calls get DISTINCT rows and BOTH fire. The FakeJournal here ENFORCES the
     // unique constraint, so a regression would throw (the array-push fake masked this).
@@ -248,7 +248,7 @@ describe('dispatchTool success path', () => {
     expect(journal.records[0]?.inputHash).toBe(journal.records[1]?.inputHash);
   });
 
-  it('A1: an absent callId still records distinct rows (uuid fallback never collides)', async () => {
+  it('an absent callId still records distinct rows (uuid fallback never collides)', async () => {
     const journal = new FakeJournal();
     const dispatch = makeDispatchTool(deps({ journal, tools: [echoTool({ idempotent: false })] }));
     await dispatch('echo', { a: 1 }); // no callId -> uuid fallback

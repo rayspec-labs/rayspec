@@ -5,7 +5,7 @@
  * through the REAL server entrypoint (`assembleServer` from `RAYSPEC_SPEC_PATH`) on a throwaway
  * DATABASE + a real DBOS launch, and is driven end-to-end over REAL HTTP against MATERIALIZED ground
  * truth (fail-the-fix). Same file-ingest chain as the acceptance, second independent product:
- *   bounded upload/submit + `file_submitted` (file-scoped C10 key) · conditional file mount +
+ *   bounded upload/submit + `file_submitted` (file-scoped single-flight key) · conditional file mount +
  *   blob-env demand · `file_input.parse_text` (text + PDF text-layer) · the generic extraction
  *   branch's product shape (DETERMINISTIC executor in CI — the live proof is the sibling smoke) ·
  *   plus store_read (the contract-type→retention catalog) feeding BOTH the agent and the persisted
@@ -21,7 +21,7 @@
  *       RAYSPEC_EXTRACTION_MODE demanded (one agent); declared route tuples mount;
  *   (b) upload a TEXT contract (the committed NDA) → submit → the REAL DBOS workflow runs parse_text →
  *       read_catalog → agent → validation.check → store_write OFF-REQUEST → EXACTLY ONE
- *       `workflow_runs` row whose PK equals the INDEPENDENTLY-RECOMPUTED id over the C10 key
+ *       `workflow_runs` row whose PK equals the INDEPENDENTLY-RECOMPUTED id over the single-flight key
  *       `file_id:<id>` → the coded_contracts row carries fields DERIVED FROM THE DOCUMENT TEXT +
  *       the catalog-matched retention policy + the catalog snapshot (read feeds write) → the bytes
  *       sit under the tenant-jailed content-addressed key;
@@ -30,7 +30,7 @@
  *       exact buildPdf call is documented in examples/contract-intake/fixtures/README.md) parses
  *       + codes end-to-end on the REAL pinned parser — a DIFFERENT contract_type, so its retention
  *       policy comes from a DIFFERENT catalog row (the match is provably not canned);
- *   (d) byte-identical re-upload + re-submit → deduped, run count UNCHANGED (C10 single-flight);
+ *   (d) byte-identical re-upload + re-submit → deduped, run count UNCHANGED (single-flight);
  *   (e) divergent post-seal upload → 409 `file_conflict`, sealed bytes untouched, runs unchanged;
  *   (f) oversize Content-Length → 413 BEFORE any byte: ZERO blob, ZERO pointer row, ZERO new runs;
  *   (g) disallowed mime → 415, zero side effects;
@@ -449,7 +449,7 @@ describe.skipIf(!baseUrl)('Contract-Intake e2e — real boot + real DBOS + HTTP'
   );
 
   maybe(
-    '(b) TEXT contract: upload → submit → ONE run (C10) → parse→catalog→agent→validate→store',
+    '(b) TEXT contract: upload → submit → ONE run (single-flight) → parse→catalog→agent→validate→store',
     async () => {
       e2eTestsRan += 1;
       const up = await upload(TXT_FILE_ID, TXT_BODY, {
@@ -470,7 +470,7 @@ describe.skipIf(!baseUrl)('Contract-Intake e2e — real boot + real DBOS + HTTP'
       expect(sub.status).toBe(200);
       expect(((await sub.json()) as Record<string, unknown>).deduped).toBe(false);
 
-      // ★ THE C10 KEY PIN through the WHOLE composed stack: the durable run's PK must equal the
+      // ★ THE single-flight KEY PIN through the WHOLE composed stack: the durable run's PK must equal the
       // independently-recomputed deterministic id over the file-scoped key `file_id:<id>`.
       const runId = expectedRunId(TENANT, 'code_contract', `file_id:${TXT_FILE_ID}`);
       const run = await waitForRun(runId);
@@ -602,7 +602,7 @@ describe.skipIf(!baseUrl)('Contract-Intake e2e — real boot + real DBOS + HTTP'
   );
 
   maybe(
-    '(d) byte-identical re-upload + re-submit → deduped, run count UNCHANGED (C10)',
+    '(d) byte-identical re-upload + re-submit → deduped, run count UNCHANGED (single-flight)',
     async () => {
       e2eTestsRan += 1;
       const up = await upload(TXT_FILE_ID, TXT_BODY, { token: tokenA });

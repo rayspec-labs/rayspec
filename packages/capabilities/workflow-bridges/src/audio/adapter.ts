@@ -16,7 +16,7 @@
  * `payload.session_id` is what `sessionScopedIdempotencyKey('session_id')` keys the durable run on, so
  * the mapping MUST carry it — and because `id` is ALSO session-scoped, the dispatcher's missing-field
  * fallback (`event:${id}`) stays per-session-stable too. So a dual-track finalize (both tracks re-emit
- * the same session-scoped event) and a re-finalize converge on ONE durable run (C10 single-flight).
+ * the same session-scoped event) and a re-finalize converge on ONE durable run (single-flight).
  */
 import type { FinalizedSessionEvent } from '@rayspec/audio-runtime';
 import type { WorkflowInputEvent } from '@rayspec/foundation';

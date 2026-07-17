@@ -7,7 +7,7 @@
  * historical run is always costed with the price that was in force WHEN IT RAN — a re-cost of an old
  * journal step never silently picks up a newer price. Every lookup returns the EXACT entry it used
  * plus a `pricingVersion` PROVENANCE tag (`<model>@<effectiveFrom>` or the fallback sentinel) so the
- * journal can record WHICH pricing computed a step (deliverable A1/A6).
+ * journal can record WHICH pricing computed a step (pricing-version + SDK/adapter provenance).
  *
  * Purity + determinism: no I/O, no clock read inside the math (the caller supplies `at`); the same
  * (model, at, tokens) always yields the same cost. Zod-typed so the registry shape is validated.
@@ -65,7 +65,7 @@ export interface ModelPrice {
  *
  * NOTE: prices are approximate public list rates kept for cost ATTRIBUTION (a value metric), not an
  * authoritative invoice — the provider-reported cost (Anthropic `total_cost_usd`, Pi `usage.cost.total`)
- * is reconciled against this in the journal (deliverable A3), and a drift beyond the documented
+ * is reconciled against this in the journal (computed-vs-provider reconciliation), and a drift beyond the documented
  * threshold is flagged rather than hidden.
  */
 export const PRICING: PricingRegistry = {
@@ -257,7 +257,7 @@ export interface CostReconciliation {
 }
 
 /**
- * Reconcile a COMPUTED cost against the PROVIDER-reported cost (deliverable A3). Sets the drift flag
+ * Reconcile a COMPUTED cost against the PROVIDER-reported cost. Sets the drift flag
  * when the relative difference exceeds `threshold` (default 5%). When the provider reports NO cost
  * (OpenAI — has no provider cost field), there is nothing to reconcile: `providerCostUsd` stays null
  * and `costDrift` is false (we never fabricate a provider cost). A non-zero computed vs a zero

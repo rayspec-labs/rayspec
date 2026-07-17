@@ -360,11 +360,11 @@ export type AgentBackendsFactory = (
 ) => ReadonlyMap<BackendId, Backend>;
 
 /**
- * The LOCAL A1 table-registration hook (the deny-by-default chokepoint Set is keyed by object
+ * The LOCAL table-registration hook (the deny-by-default chokepoint Set is keyed by object
  * IDENTITY). The composition root builds the product tables ONCE and hands those EXACT instances to
  * this hook BEFORE deploy()'s verify-not-register step, so the verify probe sees the same registered
  * objects. A REAL production deployment ships a COMMITTED `generated/product-schema.ts` that composes
- * these tables into `TENANT_SCOPED_TABLES` (so they are registered as committed source — A1) and
+ * these tables into `TENANT_SCOPED_TABLES` (so they are registered as committed source) and
  * needs NO hook; this hook is the LOCAL stand-in for that committed tuple, supplied by the dev
  * wrapper via the `@rayspec/db/testing` `registerScopedTables` seam (which the product-free
  * platform must not import). A spec deploy WITHOUT this hook will abort at deploy()'s verify step
@@ -683,7 +683,7 @@ export async function assembleServer(
   config: ServerConfig,
   opts: {
     agentBackendsFactory?: AgentBackendsFactory;
-    /** LOCAL A1 stand-in — register the built product tables (the dev wrapper supplies this). */
+    /** LOCAL table-registration stand-in — register the built product tables (the dev wrapper supplies this). */
     registerProductTables?: ProductTableRegistrar;
     /**
      * The deterministic Product-YAML extraction executor for
@@ -1034,7 +1034,7 @@ export function assertSpecFamilyMountable(specSource: string, specPath: string):
  * wrapper's pattern but lives in the composition root so a real deployer can drive a declarative
  * deploy from env alone. The deployer supplies the agent backends (the platform ships none).
  *
- * NOTE on the A1 tuple: a REAL production deployment commits a generated `product-schema.ts` that
+ * NOTE on the product-table tuple: a REAL production deployment commits a generated `product-schema.ts` that
  * composes the product tables into `TENANT_SCOPED_TABLES`, and deploy() VERIFIES-not-registers. This
  * LOCAL boot does not yet have a committed product-schema for an arbitrary injected spec, so the
  * caller (the dev wrapper) supplies a `registerProductTables` hook — we build the tables ONCE and
@@ -1112,7 +1112,7 @@ async function deployDeclaredSpec(
 
   const specStores = [...effectiveSpec.stores];
   const productTables = buildProductTables(specStores);
-  // LOCAL A1 stand-in: register THESE exact table instances before deploy()'s identity-keyed verify.
+  // LOCAL table-registration stand-in: register THESE exact table instances before deploy()'s identity-keyed verify.
   opts.registerProductTables?.(productTables);
 
   // ── mount-without-deploy — classify the LIVE product schema → MATERIALIZE vs MOUNT ───────

@@ -60,7 +60,7 @@ describe('invokeRouteHandler — the UNFLAGGED DEFAULT posture (exactly one engi
     );
     expect(result).toEqual({ ok: true });
     expect(txCalls()).toBe(1);
-    // The init was built from the TRANSACTIONAL handle (the A3 GUC seam) — not the base handle.
+    // The init was built from the TRANSACTIONAL handle (the GUC seam) — not the base handle.
     expect(seen?.tenantId).toBe('TX:t-default');
     expect(seen?.params).toEqual({ p: '1' });
   });

@@ -1,5 +1,5 @@
 /**
- * RUNTIME pin for the A1 tuple composition.
+ * RUNTIME pin for the product-table tuple composition.
  *
  * The COMPILE-TIME half (a product table's literal type is a member of the composed union; the
  * empty baseline leaves the union == the core union) lives in `tuple-composition-typepin.ts`, which
@@ -12,7 +12,7 @@ import { POPULATED_COMPOSITION_TYPEPINS } from './__fixtures__/populated-composi
 import { PRODUCT_TENANT_SCOPED_TABLES } from './product-schema.js';
 import { TUPLE_COMPOSITION_TYPEPINS } from './tuple-composition-typepin.js';
 
-describe('A1 tuple composition (runtime shape)', () => {
+describe('product-table tuple composition (runtime shape)', () => {
   it('the platform baseline ships ZERO product tables', () => {
     expect(PRODUCT_TENANT_SCOPED_TABLES.length).toBe(0);
   });
@@ -24,14 +24,14 @@ describe('A1 tuple composition (runtime shape)', () => {
     expect(TENANT_SCOPED_TABLES.length).toBe(CORE_TENANT_SCOPED_TABLES.length);
   });
 
-  it('the compile-time A1 type-pins are present (a tsc failure would block the build)', () => {
+  it('the compile-time tuple type-pins are present (a tsc failure would block the build)', () => {
     // 5 pins: no-widening, product-member, core-member, deny-by-default-negative, empty-baseline.
     expect(TUPLE_COMPOSITION_TYPEPINS).toEqual([true, true, true, true, true]);
   });
 
-  it('the POPULATED-deployment composition typechecks (ZPC-1/ZPC-2 — a real deployment compiles)', () => {
+  it('the POPULATED-deployment composition typechecks (a real deployment compiles)', () => {
     // The fixture composes a POPULATED product tuple against the real core tuple; that this module
-    // imports + compiles is the proof a populated deployment typechecks (the original ZPC-1 bug
+    // imports + compiles is the proof a populated deployment typechecks (the original empty-baseline bug
     // would have failed tsc here). 3 pins: notebooks-member, entries-member, no-widening.
     expect(POPULATED_COMPOSITION_TYPEPINS).toEqual([true, true, true]);
   });

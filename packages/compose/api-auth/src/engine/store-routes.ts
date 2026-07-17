@@ -3,7 +3,7 @@
  *
  * CRUD over a materialized product store via the `TenantDb` chokepoint, INSIDE a
  * `forTenant(db, tenantId).transaction(...)` — is the FIRST production consumer of the
- * `app.current_tenant` GUC seam (correction A3). Every DB touch runs in that transaction, so a
+ * `app.current_tenant` GUC seam. Every DB touch runs in that transaction, so a
  * external-exposure hardening RLS policy binds to an already-populated GUC with zero call-site churn.
  *
  * Tenant safety: the tenant predicate is STRUCTURAL — TenantDb auto-injects
@@ -270,7 +270,7 @@ export function makeStoreHandler(args: {
     // resolveTenant + requirePermission already established a tenant; defensive 404 if not.
     if (!tenantId) throw new ApiError('NOT_FOUND', 'Not found.');
     const tdb = forTenant(deps.db, tenantId);
-    // Every store action runs inside the GUC transaction (A3) — read it back in a test to prove it.
+    // Every store action runs inside the GUC transaction — read it back in a test to prove it.
     // A store.create idempotency-index collision throws IdempotencyReplayNeeded from INSIDE the tx
     // (a poisoned tx cannot read the prior row); we catch it OUTSIDE and REPLAY the prior row in a
     // fresh tenant-scoped read (200 + Idempotency-Replay: true, no duplicate, no 409).

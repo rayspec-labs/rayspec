@@ -21,7 +21,7 @@ export interface TurnReplyUsage {
 
 /**
  * The outcome of one responder invocation. `runId` is ALWAYS present — it is derived
- * DETERMINISTICALLY from the turn's ledger `turn_ref` (C10: a converging retry lands on the SAME
+ * DETERMINISTICALLY from the turn's ledger `turn_ref` (single-flight: a converging retry lands on the SAME
  * run), so even an error outcome names the run a client/operator can inspect.
  */
 export type TurnReplyOutcome =
@@ -73,7 +73,7 @@ export interface ResponderHistoryWindow {
  * capability owns assembly — assemble.ts) plus the turn's tenant-prefixed ledger `turn_ref` (the
  * deterministic run-id source) and returns the reply outcome. It must be SAFE TO CALL AGAIN for
  * the same `turnRef` (the live impl ATTACHES to a completed run instead of re-invoking the model —
- * the crash-window convergence path; C10).
+ * the crash-window convergence path; single-flight).
  *
  * `onEvent` (the streaming seam, unused in the non-streaming path): an optional live event sink the implementation forwards
  * into the run (the live impl threads it as `runAgent`'s `opts.onEvent`). Typed neutrally here

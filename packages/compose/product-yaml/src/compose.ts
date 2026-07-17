@@ -354,7 +354,7 @@ export interface ProductYamlRollout {
 export interface NodeRegistryBindings {
   /** The tenant-bound chokepoint handle for THIS run's tenant. */
   readonly tdb: TenantDb;
-  /** Store name → runtime PgTable (the deployment's committed A1 instances — deploy verified them). */
+  /** Store name → runtime PgTable (the deployment's committed product-table instances — deploy verified them). */
   readonly productTables: ReadonlyMap<string, PgTable>;
   /** The run's tenant id (artifact_ref/track_ref namespacing). */
   readonly tenantId: string;
@@ -780,7 +780,7 @@ export function composeProductDeploy(
   const dispatcher = new WorkflowEventDispatcher({
     tenantId: rollout.tenantId,
     enqueuer: rollout.enqueuer,
-    // EVERY registration carries an EXPLICIT descriptor-derived idempotencyKeyForEvent (C10 by
+    // EVERY registration carries an EXPLICIT descriptor-derived idempotencyKeyForEvent (single-flight by
     // construction — never the dispatcher's implicit default). Audio stays byte-identical:
     // `session_id:<id>:finalized` (test-pinned; live run identity).
     triggers: [...workflows.values()].map((workflow) =>
@@ -820,7 +820,7 @@ export function composeProductDeploy(
   }
 
   // ── 5b. the record (submit-ingress) capability mount — CONDITIONAL on declaration ────────────
-  // The sink is the SAME tenant-bound dispatcher the audio sink feeds (one ingress, one C10
+  // The sink is the SAME tenant-bound dispatcher the audio sink feeds (one ingress, one single-flight
   // authority), behind the record bridge's fail-closed cross-tenant assertion. A doc that does not
   // declare `record_input` mounts NOTHING record-shaped (no store, no route, no handler, no
   // trigger vocabulary — the conditional-mount law this establishes; audio follows the same law).
@@ -868,7 +868,7 @@ export function composeProductDeploy(
 
   // ── 5c. the file (byte-ingest) capability mount — CONDITIONAL on declaration ────────
   // The SAME conditional-mount law as record (5b): the sink is the SAME tenant-bound dispatcher
-  // (one ingress, one C10 authority), behind the file bridge's fail-closed cross-tenant assertion.
+  // (one ingress, one single-flight authority), behind the file bridge's fail-closed cross-tenant assertion.
   // A doc that does not declare `file_input` mounts NOTHING file-shaped (no store, no routes, no
   // handlers, no trigger vocabulary). `rollout.file` is the deployment-side OPTIONS block for the
   // mount (base path + the config-override seam: byte cap / content-type allowlist); supplied
@@ -886,7 +886,7 @@ export function composeProductDeploy(
 
   // ── 5d. the conversation (conversational-ingress) capability mount — CONDITIONAL ────────
   // The SAME conditional-mount law as record/file (5b/5c): the sink is the SAME tenant-bound
-  // dispatcher (one ingress, one C10 authority), behind the conversation bridge's fail-closed
+  // dispatcher (one ingress, one single-flight authority), behind the conversation bridge's fail-closed
   // cross-tenant assertion. The per-TURN enqueue idempotency key derives EXPLICITLY from the
   // manifest descriptor via `triggerRegistrationForWorkflow` above (`turn_ref` →
   // `payloadFieldIdempotencyKey` — the generic format; never the dispatcher default, never
@@ -1340,7 +1340,7 @@ export function composeProductDeploy(
     registry.register('artifact.read', createArtifactReadHandler({ store: artifactStore }));
     // The declared-store step runtime — two tenant-bound nodes over the SAME makeHandlerDb
     // facade (fail-closed on undeclared stores/columns; store.write = db.upsert EXCLUSIVELY on the
-    // store's declared conflict key — the C10/at-least-once law; see store-nodes.ts).
+    // store's declared conflict key — the single-flight/at-least-once law; see store-nodes.ts).
     registry.register('store.read', makeStoreReadNode({ spec, db }));
     registry.register('store.write', makeStoreWriteNode({ spec, db }));
     // The durable blob→text parse node, per-run TENANT-BOUND through the deployment's

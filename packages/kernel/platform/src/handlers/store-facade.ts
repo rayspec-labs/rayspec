@@ -29,12 +29,12 @@
  * the SAME `snakeToCamel` rule the table builder + the api store interpreter use, so a handler's
  * `{ note_id }` filter lands on the `noteId` column and a returned row is keyed by snake_case.
  *
- * TRANSACTION BOUNDARY (A2 — the asymmetry, stated here AND enforced by who calls `transaction`):
+ * TRANSACTION BOUNDARY (the asymmetry, stated here AND enforced by who calls `transaction`):
  *  - a TOOL handler gets NO implicit outer transaction (the resolver builds its facade over a plain
  *    `TenantDb`; an agent fires several tools in parallel under the dispatch Semaphore, so wrapping
  *    would hold a DB tx across model latency). A tool that needs atomicity calls `db.transaction(...)`.
  *  - a ROUTE/TRIGGER handler's facade is built over a `TenantDb` ALREADY inside `.transaction()` (the
- *    GUC seam, A3); `db.transaction(...)` there nests onto the same tenant-scoped tx.
+ *    GUC seam); `db.transaction(...)` there nests onto the same tenant-scoped tx.
  */
 import {
   enumWhitelistFor,
@@ -225,7 +225,7 @@ function filterPredicate(table: PgTable, filter: StoreFilter | undefined): SQL |
   if (entries.length === 0) return undefined;
   const preds = entries.map(([name, value]) => {
     const col = resolveColumn(table, name);
-    // C11: an ARRAY value on a NON-jsonb column → batched set-membership (inArray); each element is
+    // Read-shaping: an ARRAY value on a NON-jsonb column → batched set-membership (inArray); each element is
     // still SF-1-guarded. A jsonb column keeps eq (the array IS the value — do not break jsonb equality).
     if (Array.isArray(value) && !isJsonbColumn(col)) {
       for (const element of value) assertValidValue(col, 'filter', name, element);
@@ -486,7 +486,7 @@ function stampCreatedBy(
  * Build the `HandlerDb` facade over a `TenantDb` + the declared product tables. The TenantDb is the
  * REAL chokepoint (its predicate is structural); this facade only translates name-keyed,
  * serializable-shaped calls into TenantDb calls + maps rows back. Used for tool handlers (plain
- * TenantDb — no outer tx) AND, inside `.transaction()`, for route/trigger handlers (A2 asymmetry).
+ * TenantDb — no outer tx) AND, inside `.transaction()`, for route/trigger handlers (the tx-boundary asymmetry).
  *
  * `createdByActor` is the OPTIONAL server-derived caller identity (`user:<userId>` / `key:<apiKeyId>`)
  * of the request whose route handler owns this facade. When present, insert/upsert stamp it onto the
@@ -513,7 +513,7 @@ export function makeHandlerDb(
         .where(pred)
         .$dynamic();
       if (opts?.orderBy && opts.orderBy.length > 0) {
-        // C11: server-side ORDER BY — each column resolved fail-closed (an unknown column throws).
+        // Read-shaping: server-side ORDER BY — each column resolved fail-closed (an unknown column throws).
         const order = opts.orderBy.map(({ column, dir }) => {
           const col = resolveColumn(table, column);
           return dir === 'desc' ? desc(col) : asc(col);

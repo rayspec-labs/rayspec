@@ -75,7 +75,7 @@ export class EventPipeline {
   private inFlight: NeutralEvent | null = null;
   private draining = false;
   /**
-   * FIFO queue of producers blocked on a full non-droppable queue (A1 fix). Each blocked producer
+   * FIFO queue of producers blocked on a full non-droppable queue (the FIFO-fairness fix). Each blocked producer
    * pushes its `{ resolve, reject }`; the worker wakes EXACTLY ONE (the oldest) per freed slot, in
    * order. A SINGLE slot was the deadlock: a second concurrent producer overwrote the first's
    * resolver, orphaning it forever (its emit() never resolved → drain() hung → its structural frame
@@ -113,7 +113,7 @@ export class EventPipeline {
         break;
       }
       // The queue is full of NON-droppable frames — block until the worker drains one (back-pressure).
-      // Push a FIFO waiter (A1): the worker wakes EXACTLY ONE waiter (the oldest) per freed slot, so a
+      // Push a FIFO waiter: the worker wakes EXACTLY ONE waiter (the oldest) per freed slot, so a
       // second concurrent producer can no longer overwrite/orphan the first's resolver. A persist
       // failure rejects this waiter (fail-closed) rather than leaving it hung.
       await new Promise<void>((resolve, reject) => {
@@ -137,7 +137,7 @@ export class EventPipeline {
    * Wake EXACTLY ONE producer (the oldest, FIFO) blocked on a full non-droppable queue — called once
    * per freed slot. Waking exactly one per slot preserves the back-pressure bound (a freed slot admits
    * exactly one waiting frame) AND admission order (the oldest waiter resumes first, so its frame is
-   * pushed/persisted ahead of newer waiters'). A1: never overwrites/orphans a concurrent waiter.
+   * pushed/persisted ahead of newer waiters'). Never overwrites/orphans a concurrent waiter.
    */
   private wakeOneWaiter(): void {
     const w = this.spaceWaiters.shift();
@@ -171,7 +171,7 @@ export class EventPipeline {
     } catch (err) {
       this.failure = err;
       // Leave `inFlight` set (its persist/flush did not complete); reject EVERY producer waiting on
-      // space so none is left hung on a worker that has stopped (fail-closed, no orphan — A1).
+      // space so none is left hung on a worker that has stopped (fail-closed, no orphan).
       this.rejectAllWaiters(err);
     } finally {
       this.draining = false;

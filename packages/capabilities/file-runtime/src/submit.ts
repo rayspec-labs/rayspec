@@ -6,7 +6,7 @@
  *     (= `${tenantId}:${fileId}`, the record/audio mirror).
  *  2. IDEMPOTENT RE-SUBMIT THAT RE-EMITS — a re-submit of a sealed file returns `deduped: true`
  *     AND re-emits the STORED authoritative event (client retry = redelivery; a crash between
- *     seal and emit is recovered by the retry). The sink/dispatcher dedups downstream (C10
+ *     seal and emit is recovered by the retry). The sink/dispatcher dedups downstream (single-flight
  *     single-flight via `file_id:<id>`) — ONE durable run per file.
  *  3. THE EVENT IS BUILT FROM THE STORED ROW ONLY (row-event.ts) — never from a request; a
  *     deduped redelivery is byte-consistent with the first delivery. Bytes are NEVER in the
@@ -185,7 +185,7 @@ export async function submitFile(
   }
 
   // Emit on EVERY successful submit (first + re-submit): the re-emission is the redelivery a
-  // crash-between-seal-and-emit needs; the sink/dispatcher dedups by the file-scoped key (C10).
+  // crash-between-seal-and-emit needs; the sink/dispatcher dedups by the file-scoped key (single-flight).
   // NOT best-effort (the module-header decision): a transient fault SURFACES so the client keeps
   // retrying until the file is enqueued. A FileEventRejectedError propagates (fail-closed law —
   // nothing enqueued; the binding maps it to a clean 403).

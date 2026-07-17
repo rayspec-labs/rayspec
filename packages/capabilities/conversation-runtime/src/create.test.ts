@@ -1,6 +1,6 @@
 /**
  * The create core — the idempotent client-keyed conversation create: closed `{ title? }` body (no
- * spoof channel), C10 re-create dedup (same ack, zero duplicate row), the optional-title-assertion
+ * spoof channel), single-flight re-create dedup (same ack, zero duplicate row), the optional-title-assertion
  * divergence 409 (loud, stored authoritative), the display-field shape bound, tenant
  * isolation by construction (tenant-prefixed unique over ONE shared global-unique table), and the
  * concurrent-divergent-create TOCTOU (the authoritative re-read resolves LOUD).
@@ -23,7 +23,7 @@ function ctx(tables: SharedConversationTables, tenantId = TENANT_A): Conversatio
   };
 }
 
-describe('createConversation — the idempotent create (C10)', () => {
+describe('createConversation — the idempotent create (single-flight)', () => {
   it('the FIRST create persists the head row: state open, owner NULL (the v1 seam), title stored', async () => {
     const tables = new SharedConversationTables();
     const res = await createConversation(ctx(tables), { conversation_id: 'c-1' }, { title: 'Q3' });
@@ -296,7 +296,7 @@ describe('createConversation — the concurrent-divergent-create TOCTOU (the aut
     expect(tables.conversations[0]).toMatchObject({ title: 'RACER WINS' });
   });
 
-  it('C10-1: a BARE create racing a TITLED first-create CONVERGES to the dedup outcome — never a spurious 409 (absent title = NO assertion, the found-path mirror)', async () => {
+  it('a BARE create racing a TITLED first-create CONVERGES to the dedup outcome — never a spurious 409 (absent title = NO assertion, the found-path mirror)', async () => {
     const tables = new SharedConversationTables();
     // The same staged interleaving as the divergent arm above — but OUR request is BARE. The
     // module contract ("absent = no assertion; a bare retry is always safe", and the found-path's

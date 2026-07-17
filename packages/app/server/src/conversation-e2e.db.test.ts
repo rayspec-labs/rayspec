@@ -13,14 +13,14 @@
  *        DECLARED handler tuples; nothing audio/record/file-shaped mounts;
  *   (b)  PUT create → POST turn → the REAL DBOS workflow runs off-request → EXACTLY ONE
  *        `workflow_runs` row whose PK equals the INDEPENDENTLY-RECOMPUTED deterministic id over
- *        the PER-TURN C10 key `turn_ref:<conversation_id>:<message_id>` (pinning the whole
+ *        the PER-TURN single-flight key `turn_ref:<conversation_id>:<message_id>` (pinning the whole
  *        enqueue-key derivation, not just a row count) → the capability's OWN turn-ledger row
  *        carries the tenant-prefixed authorities (turn_ref / seq_ref) → the declared store row
  *        carries the payload-sourced fields incl. the NUMERIC turn_seq and the message TEXT;
  *   (b2) THE TURN-LOSS PIN at the system level: a SECOND turn of the SAME conversation gets its
  *        OWN durable run (turn_seq 2; key `turn_ref:<conv>:<msg2>`) — a conversation-scoped key
  *        would dedupe it into run 1 (silent turn loss);
- *   (c)  identical re-POST of a persisted message → `deduped: true`, STILL the same runs (C10
+ *   (c)  identical re-POST of a persisted message → `deduped: true`, STILL the same runs (single-flight
  *        single-flight through the whole composed stack);
  *   (d)  divergent-text re-POST of a stored message_id → 409 `conversation_message_conflict`,
  *        the stored turn unchanged, still the same runs (the heal re-emit dedups);
@@ -37,7 +37,7 @@
  *        response is the winner (200, deduped false); the other is EITHER the converged
  *        redelivery (200, deduped true) OR the loud lost-race 409 `conversation_turn_conflict` —
  *        never a 5xx. Ground truth: EXACTLY ONE durable run / ledger row / declared row for the
- *        doubled message (C10 single-flight under real concurrency, end-state only — no timing);
+ *        doubled message (single-flight under real concurrency, end-state only — no timing);
  *   (i)  erasure: assert-before-erase, then the boot's `eraseTenantNow`
  *        control seam REALLY deletes tenant A's BOTH capability-owned stores + the declared store
  *        rows (`blobs: 'no-backend'` — this capability moves no bytes), TENANT-SCOPED: B's head +
@@ -53,7 +53,7 @@
  *   (b2) THE TURN-2-SAW-TURN-1 LAW through real HTTP: the deterministic backend derives its reply
  *        from the RECEIVED input string — the turn-2 reply must attest BOTH turn texts (a
  *        garbled/missing history assembly is RED here);
- *   (c)  C10 at the reply level: the identical re-POST returns the PERSISTED reply with ZERO new
+ *   (c)  single-flight at the reply level: the identical re-POST returns the PERSISTED reply with ZERO new
  *        model invocations (the backend counts run() calls);
  *   (g)  ZERO model work on the cross-tenant 403 (the invocation count is unchanged);
  *   (h)  the concurrent double-fire converges on EXACTLY ONE reply row (the honest at-least-once
@@ -115,7 +115,7 @@ function expectedRunId(tenantId: string, workflowId: string, idempotencyKey: str
 
 /**
  * The INDEPENDENT oracle for the REPLY run id (product-yaml `replyRunId`, recomputed on purpose
- * — a derivation drift would break the C10 attach convergence on redelivery, RED here): v5-shaped
+ * — a derivation drift would break the single-flight attach convergence on redelivery, RED here): v5-shaped
  * UUID over sha256(`conversation-reply:${ledger turn_ref}`). This is ATTEMPT 0 of the terminal-failure retry chain.
  */
 function expectedReplyRunId(tenantId: string, conversationId: string, messageId: string): string {
@@ -548,7 +548,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
       const turn = await submitTurn(CONV_ID, tokenA, { message_id: MSG_1, text: TEXT_1 });
       expect(turn.status).toBe(200);
       // the response = the intake facts (a SUPERSET — arm-compat) + the REAL reply
-      // produced in the same request. The reply run id is INDEPENDENTLY recomputed (C10 anchor).
+      // produced in the same request. The reply run id is INDEPENDENTLY recomputed (single-flight anchor).
       expect(await turn.json()).toEqual({
         conversation_id: CONV_ID,
         message_id: MSG_1,
@@ -566,7 +566,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
 
       const runs = await waitForCompletedRuns(1);
       expect(runs).toHaveLength(1);
-      // ★ THE C10 KEY PIN through the WHOLE composed stack: the durable run's PK must equal the
+      // ★ THE single-flight KEY PIN through the WHOLE composed stack: the durable run's PK must equal the
       // independently-recomputed deterministic id over the PER-TURN generic key
       // `turn_ref:<conversation_id>:<message_id>` (a key-format drift — the audio ':finalized'
       // suffix leaking in, or a conversation-scoped key — re-keys durable runs → RED here).
@@ -661,7 +661,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
   );
 
   maybe(
-    '(c) identical re-POST → deduped, the PERSISTED reply returned, ZERO new model calls, STILL the same two runs (C10)',
+    '(c) identical re-POST → deduped, the PERSISTED reply returned, ZERO new model calls, STILL the same two runs (single-flight)',
     async () => {
       e2eTestsRan += 1;
       const callsBefore = replyBackend.runCalls;
@@ -675,7 +675,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
         turn_seq: 1,
         deduped: true,
       });
-      // ★ C10 AT THE REPLY LEVEL: the SAME persisted reply (row-served: same run id + text + seq,
+      // ★ single-flight AT THE REPLY LEVEL: the SAME persisted reply (row-served: same run id + text + seq,
       // honestly NO usage) and ZERO additional model invocations through the whole real stack.
       expect(body.reply).toEqual({
         message: 'DET-REPLY agent=support_responder model=det-fixture-model saw1=true saw2=false',
@@ -683,7 +683,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
         run_id: expectedReplyRunId(TENANT, CONV_ID, MSG_1),
       });
       expect(replyBackend.runCalls).toBe(callsBefore);
-      // The idempotent create is deduped too (the head-row half of C10).
+      // The idempotent create is deduped too (the head-row half of single-flight).
       const recreate = await createConversation(CONV_ID, tokenA);
       expect(recreate.status).toBe(200);
       expect(((await recreate.json()) as Record<string, unknown>).deduped).toBe(true);
@@ -811,7 +811,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
       e2eTestsRan += 1;
       // TWO SIMULTANEOUS POSTs of the SAME turn (same message_id, same text): both requests race
       // the dedup read and the ledger's unique authorities inside the engine's real tenant
-      // transactions (the C10 single-flight law driven concurrently, not sequentially).
+      // transactions (the single-flight law driven concurrently, not sequentially).
       const responses = await Promise.all([
         submitTurn(CONV_ID, tokenA, { message_id: MSG_3, text: TEXT_3 }),
         submitTurn(CONV_ID, tokenA, { message_id: MSG_3, text: TEXT_3 }),
@@ -1057,7 +1057,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
         expect(replyRow).toMatchObject({ role: 'assistant', state: 'replied', turn_seq: 2 });
 
         // STREAMING × ASYNC representation-independence: the streamed turn ALSO emitted turn_submitted
-        // and enqueued the durable workflow → the declared turn_log row + the C10-keyed workflow_run.
+        // and enqueued the durable workflow → the declared turn_log row + the single-flight-keyed workflow_run.
         const logRow = await waitForTurnLog(MSG_SSE);
         expect(logRow).toMatchObject({
           conversation_id: CONV_SSE,
@@ -1068,7 +1068,7 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
         const wfPk = expectedRunId(TENANT, 'log_turn', `turn_ref:${CONV_SSE}:${MSG_SSE}`);
         expect((await workflowRuns()).map((r) => r.workflow_run_id)).toContain(wfPk);
 
-        // TERMINAL ⟷ RE-POST consistency: a C10 JSON re-POST of the SAME message
+        // TERMINAL ⟷ RE-POST consistency: a single-flight JSON re-POST of the SAME message
         // returns the persisted reply, byte-equal to the stream's terminal {run_id, text, turn_seq}.
         const repost = await submitTurn(CONV_SSE, tokenA, {
           message_id: MSG_SSE,

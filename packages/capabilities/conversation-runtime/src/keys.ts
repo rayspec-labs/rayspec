@@ -23,7 +23,7 @@ export function conversationRef(tenantId: string, conversationId: string): strin
 }
 
 /**
- * The tenant-namespaced unique key of one turn BY MESSAGE ID — the ledger's C10 dedup authority
+ * The tenant-namespaced unique key of one turn BY MESSAGE ID — the ledger's single-flight dedup authority
  * (a re-POST of one message_id converges here): `${tenantId}:${conversationId}:${messageId}`.
  */
 export function turnRef(tenantId: string, conversationId: string, messageId: string): string {

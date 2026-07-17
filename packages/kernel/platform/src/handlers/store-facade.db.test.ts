@@ -59,7 +59,7 @@ const meetingsStore: StoreSpec = {
     // A nullable jsonb business column — exercises the SF1-JSONB-REGRESSION fix (object/array allowed).
     { name: 'metadata', type: 'jsonb', nullable: true, unique: false },
     // A nullable business column carrying a GLOBAL (non-tenant-scoped) UNIQUE in the DDL below — the
-    // worst-case upsert conflict target (the cross-tenant-write attack surface C1's setWhere guards).
+    // worst-case upsert conflict target (the cross-tenant-write attack surface the upsert's setWhere guards).
     { name: 'business_key', type: 'text', nullable: true, unique: false },
   ],
   foreignKeys: [],
@@ -191,7 +191,7 @@ function buildFacadeSchemaSql(): string {
         business_key text,
         ${after},
         -- GLOBAL (NOT tenant-scoped) unique — the worst case for an upsert conflict target: two tenants
-        -- can collide on the SAME business_key, so C1's tenant-scoped DO-UPDATE setWhere is what stops a
+        -- can collide on the SAME business_key, so the upsert's tenant-scoped DO-UPDATE setWhere is what stops a
         -- cross-tenant overwrite. (Multiple NULL business_keys are allowed — Postgres NULLs are distinct.)
         CONSTRAINT meetings_business_key_global_unique UNIQUE (business_key)
       );
@@ -748,7 +748,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     expect(underA[0]?.tenantId).toBe(TENANT_A);
   });
 
-  it('transaction() runs the body in a tenant tx that COMMITS its writes (the GUC seam, A3)', async () => {
+  it('transaction() runs the body in a tenant tx that COMMITS its writes (the GUC seam)', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     await aDb.transaction(async (tx) => {
@@ -756,7 +756,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     });
     // The row was committed inside the facade's transaction (which delegates to TenantDb.transaction,
     // populating the app.current_tenant GUC — the SAME-transaction GUC read-back is the authoritative
-    // api-auth A3 test; here we prove the facade's tx actually wraps + commits the write).
+    // api-auth GUC-seam test; here we prove the facade's tx actually wraps + commits the write).
     expect(await aDb.select('meetings', { title: 'in-tx' })).toHaveLength(1);
   });
 
@@ -773,10 +773,10 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────────
-  // C1 — ATOMIC upsert (INSERT … ON CONFLICT DO UPDATE), structurally tenant-safe.
+  // ATOMIC upsert (INSERT … ON CONFLICT DO UPDATE), structurally tenant-safe.
   // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-  it('C1 CROSS-TENANT GUARD: A.upsert on a GLOBAL-unique conflict NEVER overwrites B (the setWhere line)', async () => {
+  it('CROSS-TENANT GUARD: A.upsert on a GLOBAL-unique conflict NEVER overwrites B (the setWhere line)', async () => {
     testsRan += 1;
     // THE critical fail-the-fix test. business_key carries a GLOBAL (non-tenant-scoped) UNIQUE. B owns
     // business_key='K' with title='B'. A upserts the SAME key with title='A'. The INSERT collides with
@@ -805,7 +805,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     expect(await aDb.select('meetings')).toHaveLength(0);
   });
 
-  it('C1 SAME-TENANT: upsert INSERTS then UPDATES this tenant’s row on the same key (returns it)', async () => {
+  it('SAME-TENANT: upsert INSERTS then UPDATES this tenant’s row on the same key (returns it)', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     // First upsert → INSERT path (no conflict). Returns the inserted row.
@@ -835,7 +835,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     expect(rows[0]?.title).toBe('second');
   });
 
-  it('C1 upsert runs the SF-1 / server-controlled guards (no new trust surface)', async () => {
+  it('upsert runs the SF-1 / server-controlled guards (no new trust surface)', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     // A server-controlled column in values → fail-closed (same as insert).
@@ -862,10 +862,10 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
   });
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────────
-  // C11 — read-opts: batched inArray (column-type-aware) + orderBy/limit/offset.
+  // Read-opts: batched inArray (column-type-aware) + orderBy/limit/offset.
   // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-  it('C11 jsonb-vs-inArray: an ARRAY value is set-membership on a SCALAR col, EQUALITY on a jsonb col', async () => {
+  it('jsonb-vs-inArray: an ARRAY value is set-membership on a SCALAR col, EQUALITY on a jsonb col', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     await aDb.insert('meetings', { title: 'alpha', completed: false });
@@ -883,7 +883,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     expect(jEq[0]?.title).toBe('j-eq'); // matched by jsonb equality, NOT membership in [1,2,3]
   });
 
-  it('C11 inArray elements are SF-1 guarded (a crafted non-data element is rejected fail-closed)', async () => {
+  it('inArray elements are SF-1 guarded (a crafted non-data element is rejected fail-closed)', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     // One element is a Drizzle-SQL-ish object → the whole filter is rejected (no injection via the batch).
@@ -894,7 +894,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     ).rejects.toThrow(/forbidden non-data value|must be a plain scalar/);
   });
 
-  it('C11 orderBy + limit + offset: server-side ordering/paging, still tenant-scoped', async () => {
+  it('orderBy + limit + offset: server-side ordering/paging, still tenant-scoped', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     const bDb = makeHandlerDb(forTenant(db, TENANT_B), productTables);
@@ -922,7 +922,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     expect(top.map((r) => r.title)).toEqual(['c']);
   });
 
-  it('C11 orderBy FAILS CLOSED on an unknown column (resolveColumn)', async () => {
+  it('orderBy FAILS CLOSED on an unknown column (resolveColumn)', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
     await expect(

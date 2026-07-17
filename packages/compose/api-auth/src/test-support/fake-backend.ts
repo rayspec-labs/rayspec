@@ -26,7 +26,7 @@ export class FakeRunBackend implements Backend {
    *
    * LEAK-PROOF: prefer `arm()` (below) over setting this directly — `arm()` adds a hard auto-release
    * cap + tracks the pending releaser so afterEach can free a run an assertion-failure left blocked.
-   * (The C4 test sets a REJECTING gate directly to exercise the throw path; that never blocks.)
+   * (The mid-run-failure test sets a REJECTING gate directly to exercise the throw path; that never blocks.)
    */
   gate?: () => Promise<void>;
   /** The releaser for a currently-blocked gated run (so afterEach can release a leaked run). */

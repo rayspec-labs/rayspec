@@ -139,7 +139,7 @@ export interface DeployedProductBoot {
 }
 
 export interface DeployProductYamlOpts {
-  /** LOCAL A1 stand-in: register the built product tables before deploy()'s identity-keyed verify. */
+  /** LOCAL table-registration stand-in: register the built product tables before deploy()'s identity-keyed verify. */
   registerProductTables?: (tables: ReadonlyMap<string, PgTable>) => void;
   /** Env source (default process.env) — injectable for tests. */
   env?: NodeJS.ProcessEnv;

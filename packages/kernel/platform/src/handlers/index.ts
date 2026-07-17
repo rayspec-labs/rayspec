@@ -12,7 +12,7 @@
  *  - store-facade.ts        the serializable-shaped `HandlerDb` over the real `TenantDb` chokepoint
  *                           (the engine builds the init, dispatch.ts is UNCHANGED).
  *  - resolve-tools.ts   (2) declared `tooling[]` → `NeutralTool[]` factory (per-run, tenant-bound).
- *  - route-init.ts          builders for the route/trigger `HandlerInit` (the A2 transaction-wrapped
+ *  - route-init.ts          builders for the route/trigger `HandlerInit` (the transaction-wrapped
  *                           route/trigger path).
  */
 export {

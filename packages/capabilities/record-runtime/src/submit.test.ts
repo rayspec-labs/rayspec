@@ -105,7 +105,7 @@ describe('submitRecord — the durability recipe', () => {
 
     expect(table.rows).toHaveLength(1); // ONE row (idempotent persist)
     expect(sink.emitCount()).toBe(2); // the re-submit RE-EMITTED …
-    expect(sink.deliveredCount()).toBe(1); // … and the sink deduped to ONE delivery (C10)
+    expect(sink.deliveredCount()).toBe(1); // … and the sink deduped to ONE delivery (single-flight)
   });
 
   it('a DIFFERENT payload for the same record key is a LOUD 409 — the STORED event is RE-EMITTED (the heal), the divergent payload never, stored row untouched (requirement 4)', async () => {
