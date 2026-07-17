@@ -155,7 +155,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('OpenAI adapter: tool path goes through ctx.dispatchTool (§10.A chokepoint)', () => {
+describe('OpenAI adapter: tool path goes through ctx.dispatchTool (untrusted-content chokepoint)', () => {
   it('routes via the dispatcher (handler invoked once), opaque-wraps, journals ONE tool step + correlated parts', async () => {
     const calls: unknown[] = [];
     const tool = recordingTool(calls);
@@ -241,8 +241,8 @@ describe('OpenAI adapter: replay reconstructs from journal + store WITHOUT a mod
     expect(live.conversation[0]?.role).toBe('system');
 
     // Replay: rehydrate returns the stored transcript as the REAL untrusted-content read-path would — the
-    // stored 'system' row is COERCED to 'user' (rehydrate.ts coerceRole). C3 must re-attach the
-    // trusted system turn so replay matches live (the dedicated DB-backed C3 test exercises the
+    // stored 'system' row is COERCED to 'user' (rehydrate.ts coerceRole). The replay path must re-attach the
+    // trusted system turn so replay matches live (the dedicated DB-backed replay-parity test exercises the
     // genuine rehydrateConversation; here we simulate its coercion to keep the unit test offline).
     const coerced = live.conversation.map((t, i) =>
       t.role === 'system' ? { ...t, role: 'user' as const, index: i } : t,
@@ -261,7 +261,7 @@ describe('OpenAI adapter: replay reconstructs from journal + store WITHOUT a mod
     // Replay reproduces the final answer from the journal + the transcript from the store.
     expect(replay.status).toBe('completed');
     expect(replay.finalText).toBe(live.finalText);
-    // C3: replay's first turn is the TRUSTED system turn (role='system'), IDENTICAL to live — the
+    // replay's first turn is the TRUSTED system turn (role='system'), IDENTICAL to live — the
     // coerced 'user' instructions turn was stripped + the trusted system turn re-prepended.
     expect(replay.conversation[0]?.role).toBe('system');
     expect(replay.conversation[0]?.parts).toEqual([{ kind: 'text', text: baseSpec.instructions }]);
@@ -293,7 +293,7 @@ describe('OpenAI adapter: replay reconstructs from journal + store WITHOUT a mod
   });
 });
 
-describe('OpenAI adapter: error-path RunResult shape (D1)', () => {
+describe('OpenAI adapter: error-path RunResult shape', () => {
   it('on a model error returns the identical-shape RunResult with error set + a journaled error step', async () => {
     const journal = new FakeJournal();
     runSpy.mockImplementation(async () => {

@@ -376,7 +376,7 @@ export const RunResult = z.object({
    */
   error: z.string().nullable(),
   /**
-   * Neutral upstream-error CLASS (OBS-01). ALWAYS PRESENT (mirroring `error`): one of the
+   * Neutral upstream-error CLASS. ALWAYS PRESENT (mirroring `error`): one of the
    * neutral ErrorClass values on an error run, `null` on success. NOT `.optional()` — a present key
    * with a `null` sentinel, so the "identical shape" invariant + the cross-backend parity key-set
    * assertion both hold. NEUTRAL platform vocabulary: every adapter maps its own SDK error shape
@@ -409,16 +409,16 @@ export type RunResult = z.infer<typeof RunResult>;
  */
 export function assertRunResultKeyPresence(r: RunResult): RunResult {
   if (!Object.hasOwn(r, 'output')) {
-    throw new Error('RunResult key-presence (D1): `output` key is missing — set it to null.');
+    throw new Error('RunResult key-presence: `output` key is missing — set it to null.');
   }
   if (!Object.hasOwn(r, 'error')) {
-    throw new Error('RunResult key-presence (D1): `error` key is missing — set it to null.');
+    throw new Error('RunResult key-presence: `error` key is missing — set it to null.');
   }
-  // OBS-01: errorClass is always-present too — a backend that forgets it (on the success OR
+  // errorClass is always-present too — a backend that forgets it (on the success OR
   // error path) fails LOUDLY here, never silently weakening the identical-shape claim.
   if (!Object.hasOwn(r, 'errorClass')) {
     throw new Error(
-      'RunResult key-presence (D1): `errorClass` key is missing — set it (null on success).',
+      'RunResult key-presence: `errorClass` key is missing — set it (null on success).',
     );
   }
   return r;
@@ -549,7 +549,7 @@ export const CAPABILITIES: Record<BackendId, CapabilityDescriptor> = {
   // codex (@openai/codex-sdk 0.142.2): native structured output (--output-schema →
   // finalResponse JSON), tools (in-proc streamable-HTTP MCP bridge → ctx.dispatchTool), streaming
   // (runStreamed yields events — though text arrives as whole agent_message items, not token-level
-  // deltas; the documented per-backend text_delta CONTENT difference, AC-07), reasoning (codex
+  // deltas; the documented per-backend text_delta CONTENT difference), reasoning (codex
   // surfaces reasoning summaries), subscriptionAuth TRUE — codex IS the OpenAI subscription backend
   // (ChatGPT OAuth). Verified doc-first + a live subscription probe.
   codex: {

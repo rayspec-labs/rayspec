@@ -100,7 +100,7 @@ describe('deriveConversation against a REAL captured SDK history', () => {
     expect(kinds).toEqual(['text', 'text', 'tool_call', 'tool_result', 'text']);
   });
 
-  it('survives the §10.A read-path validator unchanged (every part is neutral-valid)', () => {
+  it('survives the untrusted-content read-path validator unchanged (every part is neutral-valid)', () => {
     // validateConversation drops anything not matching the neutral ConvPart shape; a clean derive
     // must round-trip with ZERO drops.
     const revalidated = validateConversation(conv);
@@ -108,7 +108,7 @@ describe('deriveConversation against a REAL captured SDK history', () => {
   });
 });
 
-describe('normalizeToolOutput (D2 — single {type:"text"} object the SDK emits for a string return)', () => {
+describe('normalizeToolOutput (single {type:"text"} object the SDK emits for a string return)', () => {
   it('unwraps a single {type:"text", text} OBJECT and JSON.parses it (no double-nesting)', () => {
     // The SDK emits a string tool return as a SINGLE { type:'text', text } OBJECT (not array-
     // wrapped). The dispatcher's opaque tool_data wrapper is stringified into that text; the derive

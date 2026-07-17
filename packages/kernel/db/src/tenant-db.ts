@@ -167,7 +167,7 @@ export class TenantDb {
   /**
    * UPDATE a tenant-scoped table, auto-injecting the tenant predicate into the WHERE.
    *
-   * DIM4-3 (defense-in-depth, structural for ALL callers): the `tenantId` key is STRIPPED from the
+   * Defense-in-depth (structural for ALL callers): the `tenantId` key is STRIPPED from the
    * SET — symmetric with `insert` auto-stamping it. So an `update(table, { tenantId: other })` can
    * NEVER move a row to another tenant: the predicate scopes the WHERE to THIS tenant's rows, and the
    * stripped SET means the compiled UPDATE never carries a tenant_id assignment. This is the

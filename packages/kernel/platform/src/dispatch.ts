@@ -16,7 +16,7 @@
  * directly, the untrusted-content re-validation + opaque-wrapping would be bypassed. dispatchTool is the
  * single chokepoint; adapters hold NO handlers (the CI grep gate enforces that).
  *
- * TWO ID SCHEMES, ONE RESOLUTION (review fix A1 + #10):
+ * TWO ID SCHEMES, ONE RESOLUTION:
  *  - the SDK's REAL per-call tool-call id (`toolCallId`, threaded in from the adapter —
  *    OpenAI: details.toolCall.callId) is the per-call CORRELATION + UNIQUENESS id. It is what
  *    the journal step's `idempotencyKey` column carries (the column under the UNIQUE
@@ -73,7 +73,7 @@ const Ajv2020Ctor = ((Ajv2020Module as { default?: unknown }).default ?? Ajv2020
 /**
  * A seq-less event sink: dispatchTool emits NeutralEventInput (no `seq`) and the SINGLE per-run
  * seq authority in run-core (the wrapped onEvent it passes here) stamps the monotonic `seq`. This
- * is C2 (unified seq): dispatchTool no longer hard-codes `seq:0` — every event it emits flows
+ * is the unified-seq contract: dispatchTool no longer hard-codes `seq:0` — every event it emits flows
  * through the same run-core wrapper that stamps the adapter's events, so the whole stream is one
  * monotonic, contiguous sequence.
  */
@@ -102,7 +102,7 @@ export interface DispatchDeps {
   authMode: Parameters<JournalSink['record']>[0]['authMode'];
   /**
    * Optional SEQ-LESS event sink (emits tool_called / tool_result / tool_error WITHOUT a seq). The
-   * single per-run seq authority (run-core's wrapped onEvent) stamps the monotonic seq. C2: never a
+   * single per-run seq authority (run-core's wrapped onEvent) stamps the monotonic seq: never a
    * hard-coded seq here.
    */
   onEvent?: SeqlessEventSink;
@@ -188,7 +188,7 @@ function compile(ajv: AjvInstance, schema: Record<string, unknown>): AnyValidate
 /**
  * A deterministic per-tool CACHE key from the tool name + a stable hash of its args. This is used
  * ONLY as the idempotent-replay cache lookup key (a deterministic re-derivation keyed by args) —
- * NOT as the journal uniqueness key (that is the real per-call toolCallId; see file header A1).
+ * NOT as the journal uniqueness key (that is the real per-call toolCallId; see the file header).
  */
 export function toolCacheKey(name: string, args: unknown): string {
   return `tool:${name}:${hashJson(args)}`;
@@ -235,7 +235,7 @@ export function makeDispatchTool(
   ): Promise<ToolDispatchResult> {
     // The REAL per-call correlation id is the journal step uniqueness key (the column under the
     // UNIQUE (tenantId,runId,idempotencyKey) index) AND the id on the result/events. Two byte-
-    // identical calls in one run get DISTINCT callIds -> DISTINCT rows -> both fire (A1). Fall back
+    // identical calls in one run get DISTINCT callIds -> DISTINCT rows -> both fire. Fall back
     // to a uuid so a missing callId can never collide two calls onto one journal row.
     const callId = toolCallId && toolCallId.length > 0 ? toolCallId : randomUUID();
     // The args `inputHash` is the idempotent-REPLAY cache lookup key ONLY (never the journal
@@ -462,7 +462,7 @@ async function emitResult(deps: DispatchDeps, result: ToolDispatchResult): Promi
  * Record EXACTLY ONE journal step for a tool dispatch (success or fail-closed error).
  *
  * @param callId  the REAL per-call toolCallId — this is the journal step's `idempotencyKey` (the
- *                UNIQUE-index column) so identical-args calls in one run get DISTINCT rows (A1).
+ *                UNIQUE-index column) so identical-args calls in one run get DISTINCT rows.
  */
 async function recordToolStep(
   deps: DispatchDeps,

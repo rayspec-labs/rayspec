@@ -1,5 +1,5 @@
 /**
- * Test-only Postgres helper for the OpenAI-adapter DB-backed replay (C3) test.
+ * Test-only Postgres helper for the OpenAI-adapter DB-backed replay test.
  *
  * Mirrors packages/platform/src/test-support/test-db.ts but in an ISOLATED schema so the two
  * suites do not collide when turbo runs them in parallel against the same DATABASE_URL. Recreates
@@ -52,7 +52,7 @@ export async function resetRunSchema(db: ReturnType<typeof makeTestDb>): Promise
       output_tokens numeric NOT NULL DEFAULT '0',
       total_tokens numeric NOT NULL DEFAULT '0',
       cost_usd numeric NOT NULL DEFAULT '0',
-      -- P2 Slice 4 cost reconciliation + provenance columns (mirrors migration 0005).
+      -- cost reconciliation + provenance columns (mirrors migration 0005).
       provider_cost_usd numeric,
       billed_cost_usd numeric NOT NULL DEFAULT '0',
       cost_drift boolean NOT NULL DEFAULT false,
@@ -95,14 +95,14 @@ export async function resetRunSchema(db: ReturnType<typeof makeTestDb>): Promise
       final_text text,
       output jsonb,
       cost_usd numeric NOT NULL DEFAULT '0',
-      -- P2 Slice 4 run-level cost roll-up columns (mirrors migration 0005).
+      -- run-level cost roll-up columns (mirrors migration 0005).
       provider_cost_usd numeric,
       billed_cost_usd numeric NOT NULL DEFAULT '0',
       cost_drift boolean NOT NULL DEFAULT false,
       created_at timestamptz NOT NULL DEFAULT now()
     );
 
-    -- P2 Slice 3 run_events: run-core now persists every NeutralEvent here (mirrors migration 0004).
+    -- run_events: run-core now persists every NeutralEvent here (mirrors migration 0004).
     CREATE TABLE run_events (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       run_id text NOT NULL,

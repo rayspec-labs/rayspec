@@ -22,7 +22,7 @@
  *   4. MIGRATE    — apply each migration to the target DB via the injected `applyMigration` seam,
  *                   ABORT-ON-FAIL (a failed apply aborts — no partial roll-out; the next step never
  *                   runs). [Rollback is FORWARD-FIX only — see the rollback note below.]
- *   5. ROLL OUT   — VERIFY each product table is admitted by the real TenantDb chokepoint (the A1
+ *   5. ROLL OUT   — VERIFY each product table is admitted by the real TenantDb chokepoint (the
  *                   precondition — see below), load handlers (path-jailed, fail-closed), register
  *                   triggers (parse/register only), and build the app via the
  *                   deployer-supplied `buildApp` callback (the platform stays PRODUCT-FREE: the
@@ -37,20 +37,20 @@
  *    never a deploy abort (by design; recovery is a reviewed forward migration). DIFF is the
  *    review artifact, not a gate.
  *  • The DROP-COLUMN allowlist (LINT/GATE) matches on the EXACT whitespace-collapsed applied-migration
- *    statement text (MIG-3). A schema-qualifier or different quoting on the live statement re-BLOCKS it
+ *    statement text. A schema-qualifier or different quoting on the live statement re-BLOCKS it
  *    (fail-closed by design) — the allowlist entry must be byte-faithful to the statement deploy runs.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * TENANT-TABLE REGISTRATION = A COMMITTED-SOURCE PRECONDITION (A1 / ZPC-3 — PM call, constraint-
+ * TENANT-TABLE REGISTRATION = A COMMITTED-SOURCE PRECONDITION (PM call, constraint-
  * dictated). deploy() VERIFIES, never mutates the deny-by-default Set.
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * Correction A1 (binding): a product table is registered in `TENANT_SCOPED_TABLES` ONLY as COMMITTED
+ * Binding rule: a product table is registered in `TENANT_SCOPED_TABLES` ONLY as COMMITTED
  * SOURCE — the codegen emits `generated/product-schema.ts`, which composes the table into the
  * tuple, and that file is COMMITTED before deploy. A runtime append to the Set was REJECTED as
  * type-infeasible (the tuple is a literal member type) AND as a security hole (the deny-by-default Set
- * mutator `registerScopedTables` is deliberately gate/test-only — ZPC-3 — and FORBIDDEN in shipped
+ * mutator `registerScopedTables` is deliberately gate/test-only — and FORBIDDEN in shipped
  * scoped roots by the Biome ban + `gate:chokepoint`). So a `stores` change is an honest CODEGEN →
- * COMMIT → MIGRATE round-trip, not a hot reload — the cost A1 documents.
+ * COMMIT → MIGRATE round-trip, not a hot reload — the cost this rule documents.
  *
  * Therefore deploy() treats "each declared store's table is in `TENANT_SCOPED_TABLES`" as a
  * deployment PRECONDITION and FAIL-CLOSED VERIFIES it: for each declared store it asks the deployer's
@@ -133,7 +133,7 @@ export interface DeployTarget {
   applyMigration(migration: PlannedMigration): Promise<void>;
   /**
    * FAIL-CLOSED VERIFY that `table` (a built product table for a declared store) is admitted by the
-   * REAL TenantDb chokepoint — i.e. it is registered in `TENANT_SCOPED_TABLES` (the committed A1
+   * REAL TenantDb chokepoint — i.e. it is registered in `TENANT_SCOPED_TABLES` (the committed
    * tuple). The deployer implements this by probing the real chokepoint (e.g.
    * `forTenant(db, anyTenant).select(table)`, which runs `assertScoped` and THROWS deny-by-default if
    * the table is not registered). deploy() NEVER mutates the Set — it only asks this to throw on a
@@ -156,7 +156,7 @@ export interface DeployTarget {
 export interface RolloutConfig {
   /**
    * The CANONICAL product tables — the SAME `PgTable` instances the deployment's committed
-   * `generated/product-schema.ts` composed into `TENANT_SCOPED_TABLES` (A1). deploy() VERIFIES each
+   * `generated/product-schema.ts` composed into `TENANT_SCOPED_TABLES`. deploy() VERIFIES each
    * is admitted by the chokepoint (deny-by-default rejects a non-tuple instance) and threads THESE
    * into the engine. They MUST be the registered instances — the chokepoint Set is keyed by object
    * identity, so a freshly-built table (a different object) would not be admitted. Declared store
@@ -293,7 +293,7 @@ export async function deploy<App = unknown>(config: DeployConfig): Promise<Deplo
         'unsupported_spec',
         `spec '${parsedProduct.value.product.id}' is a valid Product-YAML document, but this deploy ` +
           'supplies no Product-YAML rollout (rollout.productYaml) — the runtime composition (workflow ' +
-          'enqueuer, STT adapter, agent executors, store bindings) is deployer-wired (PY-D5). Supply ' +
+          'enqueuer, STT adapter, agent executors, store bindings) is deployer-wired. Supply ' +
           'rollout.productYaml to mount it, or use `doctor`/`plan` to validate only.',
       );
     }
@@ -350,13 +350,13 @@ export async function deploy<App = unknown>(config: DeployConfig): Promise<Deplo
         'migrate',
         `migration '${migration.name}' failed to apply (${
           e instanceof Error ? e.message : String(e)
-        }). No roll-out. Recovery is a new reviewed FORWARD migration (Fork #4).`,
+        }). No roll-out. Recovery is a new reviewed FORWARD migration.`,
       );
     }
   }
 
-  // --- 5. ROLL OUT (verify A1 precondition → load handlers → triggers → build app) --------
-  // Use the deployer-supplied CANONICAL product tables (the committed A1 tuple instances), then
+  // --- 5. ROLL OUT (verify registration precondition → load handlers → triggers → build app) --------
+  // Use the deployer-supplied CANONICAL product tables (the committed tuple instances), then
   // FAIL-CLOSED VERIFY each declared store has one AND it is admitted by the real chokepoint (deploy
   // NEVER registers — see the header). A missing entry / a non-registered instance aborts.
   const productTables = rollout.productTables;
@@ -367,7 +367,7 @@ export async function deploy<App = unknown>(config: DeployConfig): Promise<Deplo
         'roll out',
         `store '${store.name}' is declared in the spec but no product table was supplied for it in ` +
           'rollout.productTables — the deployment must export it from the committed generated ' +
-          'product-schema.ts (A1: registration = committed source) and pass it here. deploy() never ' +
+          'product-schema.ts (registration = committed source) and pass it here. deploy() never ' +
           'builds/registers product tables itself.',
       );
     }
@@ -378,8 +378,8 @@ export async function deploy<App = unknown>(config: DeployConfig): Promise<Deplo
         'roll out',
         `store '${store.name}' is declared in the spec but its table is NOT registered in ` +
           'TENANT_SCOPED_TABLES (the deny-by-default chokepoint rejected it: ' +
-          `${e instanceof Error ? e.message : String(e)}). Run the Slice-1 codegen and COMMIT the ` +
-          'generated product-schema.ts (A1: registration = committed source), then redeploy. deploy() ' +
+          `${e instanceof Error ? e.message : String(e)}). Run the product-schema codegen and COMMIT the ` +
+          'generated product-schema.ts (registration = committed source), then redeploy. deploy() ' +
           'never mutates the Set.',
       );
     }
