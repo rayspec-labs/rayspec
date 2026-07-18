@@ -1,0 +1,27 @@
+{
+  "name": "rayspec",
+  "version": "0.0.0",
+  "private": true,
+  "files": [
+    "dist"
+  ],
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "description": "The unscoped `rayspec` launcher — a thin bin that hands control to the RaySpec CLI (`@rayspec/cli`). Installing `rayspec` (or `npx rayspec`) puts the `rayspec` command on PATH: `rayspec init` scaffolds a starter project, `rayspec doctor`/`plan` validate and preview a deploy, `rayspec deploy` serves it. All behavior lives in `@rayspec/cli`; this package only re-exposes its bin under the bare `rayspec` name.",
+  "bin": {
+    "rayspec": "./dist/bin.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rayspec/cli": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "22.12.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

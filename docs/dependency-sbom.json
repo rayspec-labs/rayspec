@@ -4,7 +4,7 @@
   "reproduce": "pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs",
   "scope_note": "The package SET is derived from pnpm-lock.yaml (host-independent). Each licence is read verbatim from the installed package.json after a --frozen-lockfile install. Rows with installed:false are optional, platform-gated packages this host does not install; their licence was not read from disk and is recorded as null with an absent_reason, never dropped. 'provenance' below records WHERE the licences were read — it does not describe the scope of this inventory.",
   "lockfile": "pnpm-lock.yaml",
-  "lockfile_sha256": "cebfba94ef0849e5e840f48e3207b3be3e3d95701ea9673998537b93157a71ad",
+  "lockfile_sha256": "102c54deae984730608d4879ccbb9ab198a9b3c8537290d136c68a4c5dc2bb5f",
   "provenance": {
     "host": "darwin-arm64",
     "node": "v22.12.0"
@@ -2217,6 +2217,7 @@
         "examples/local-boot",
         "packages/adapters/deepgram",
         "packages/app/cli",
+        "packages/app/rayspec",
         "packages/app/server",
         "packages/capabilities/audio-runtime",
         "packages/capabilities/conversation-runtime",
@@ -4144,6 +4145,7 @@
         "packages/adapters/openai",
         "packages/adapters/pi",
         "packages/app/cli",
+        "packages/app/rayspec",
         "packages/app/server",
         "packages/capabilities/audio-runtime",
         "packages/capabilities/conversation-runtime",
@@ -4227,6 +4229,7 @@
         "packages/adapters/openai",
         "packages/adapters/pi",
         "packages/app/cli",
+        "packages/app/rayspec",
         "packages/app/server",
         "packages/capabilities/audio-runtime",
         "packages/capabilities/conversation-runtime",
