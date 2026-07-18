@@ -7,7 +7,9 @@
  *    A test composing two tenant-bound fakes over one `SharedFileTable` therefore proves the
  *    tenant-prefixed ref ISOLATES tenants (and would catch a regression that dropped the prefix).
  *  - the facade's upsert semantics: DO-UPDATE is TENANT-SCOPED (a conflict on a foreign tenant's
- *    row writes nothing and returns `undefined`); tenant_id is auto-stamped on insert.
+ *    row writes nothing and returns `undefined`); the `updateWhere` CONDITIONAL-UPDATE guard (a
+ *    conflict row that does not match writes nothing and returns `undefined` — the state-guarded
+ *    first-upload close); tenant_id is auto-stamped on insert.
  *  - select/update/delete are tenant-scoped structurally (every op filters by the bound tenant).
  */
 import type { HandlerDb, StoreRow } from '@rayspec/handler-sdk';
@@ -52,7 +54,7 @@ export function makeFakeFileDb(table: SharedFileTable, tenantId: string): Handle
       table.rows.push(row);
       return { ...row } as StoreRow;
     },
-    async upsert(store, conflictColumns, values) {
+    async upsert(store, conflictColumns, values, opts) {
       requireStore(store);
       if (conflictColumns.length !== 1 || conflictColumns[0] !== 'file_ref') {
         throw new Error(`fake db: unexpected conflict target ${conflictColumns.join(',')}`);
@@ -66,6 +68,15 @@ export function makeFakeFileDb(table: SharedFileTable, tenantId: string): Handle
       // The REAL facade's law: the DO-UPDATE is tenant-scoped — a conflict on a FOREIGN tenant's
       // row updates ZERO rows and returns undefined (fail-closed no-op).
       if (existing.tenant_id !== tenantId) return undefined;
+      // The CONDITIONAL-UPDATE guard (updateWhere): the conflicting row must ALSO match every guard
+      // column — exactly what Postgres's `ON CONFLICT … DO UPDATE … WHERE` enforces (AND-ed beneath the
+      // tenant scope). A row that does NOT match updates ZERO rows and returns undefined. A fake that
+      // IGNORED this guard would prove nothing — it would go green against an unconditional upsert too.
+      if (opts?.updateWhere !== undefined) {
+        for (const [col, val] of Object.entries(opts.updateWhere)) {
+          if (existing[col] !== val) return undefined;
+        }
+      }
       Object.assign(existing, values);
       return { ...existing } as StoreRow;
     },

@@ -1046,6 +1046,73 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     expect(await aDb.select('meetings', { business_key: 'R' })).toHaveLength(1);
   });
 
+  it('conditional upsert (updateWhere): overwrites ONLY a row still matching the guard; a row that left the guarded state no-ops (undefined) and is UNTOUCHED', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // A staged row on the GLOBAL-unique business_key (completed=false is the guarded "still staged" state).
+    const seeded = await aDb.insert('meetings', {
+      title: 'v1',
+      completed: false,
+      business_key: 'K',
+    });
+    const id = seeded.id;
+
+    // (i) GUARD MATCHES (row still completed=false): the ON CONFLICT DO UPDATE applies — the SAME row is
+    // overwritten (id unchanged) and returned.
+    const matched = await aDb.upsert(
+      'meetings',
+      ['business_key'],
+      { title: 'v2', completed: true, business_key: 'K' },
+      { updateWhere: { completed: false } },
+    );
+    expect(matched?.id).toBe(id);
+    expect(matched?.title).toBe('v2');
+    expect(matched?.completed).toBe(true);
+
+    // (ii) The SAME conditional upsert now MIS-matches (the row is completed=true; the guard wants false)
+    // → the tenant-scoped DO-UPDATE + the AND-ed updateWhere match ZERO rows → RETURNING empty →
+    // `undefined` (the fail-closed no-op), and the row is UNTOUCHED. This is the state-guarded first-write
+    // close. WITHOUT the setWhere guard the DO UPDATE would overwrite the row to 'v3'/completed=false
+    // regardless — the RED direction (revert the `updateWhere` → `setWhere` wiring and this goes red).
+    const blocked = await aDb.upsert(
+      'meetings',
+      ['business_key'],
+      { title: 'v3', completed: false, business_key: 'K' },
+      { updateWhere: { completed: false } },
+    );
+    expect(blocked).toBeUndefined();
+    const after = await aDb.select('meetings', { business_key: 'K' });
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ id, title: 'v2', completed: true });
+
+    // (iii) A no-`updateWhere` upsert stays UNCONDITIONAL (the pre-existing behavior, byte-unchanged): it
+    // DOES overwrite the same row — proving `updateWhere` alone gated (ii), not some other guard.
+    const unconditional = await aDb.upsert('meetings', ['business_key'], {
+      title: 'v4',
+      completed: false,
+      business_key: 'K',
+    });
+    expect(unconditional?.id).toBe(id);
+    expect(unconditional?.title).toBe('v4');
+  });
+
+  it('conditional upsert (updateWhere): a NO-conflict call still INSERTS (the guard only scopes the DO-UPDATE arm)', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // No row on business_key 'FRESH' → no conflict → the guard is irrelevant and the row INSERTS
+    // (returns the row, never undefined). Guards the first-upload happy path: a genuine first write is
+    // never blocked by its own updateWhere.
+    const inserted = await aDb.upsert(
+      'meetings',
+      ['business_key'],
+      { title: 'fresh', completed: false, business_key: 'FRESH' },
+      { updateWhere: { completed: false } },
+    );
+    expect(inserted).toBeDefined();
+    expect(inserted?.title).toBe('fresh');
+    expect(inserted?.tenant_id).toBe(TENANT_A);
+  });
+
   it('composite conflict target: insert-then-update the SAME row (both conflict cols excluded from SET)', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);

@@ -43,12 +43,13 @@
  *                             swallowed — the deterministic 409 stands — while the fail-closed
  *                             `FileEventRejectedError` family propagates so the binding maps it
  *                             to the clean 403).
- *  - KNOWN CAVEAT — first-upload TOCTOU: a concurrent FIRST upload
- *    that read "no row" and lands its upsert AFTER another client created+sealed the same
- *    file_ref RESETS the sealed row to `uploaded` (the conflict arm repoints sha/blob_key). The
- *    enqueued run + the sealed bytes stay consistent (content-addressed blob + emitted event);
- *    only the row pointer diverges. Structural close = a conditional-upsert seam in the platform
- *    store facade.
+ *  - first-upload TOCTOU (STRUCTURALLY CLOSED) → post-seal arm: a concurrent FIRST upload that read
+ *    "no row" and lands its upsert AFTER another client created+sealed the same file_ref is STATE-GUARDED
+ *    exactly like the divergent-re-upload replace. The NEW-file upsert's `ON CONFLICT … DO UPDATE` carries
+ *    `updateWhere: { state = 'uploaded' }` (a conditional-upsert seam in the platform store facade), so a
+ *    conflict on a row a submit sealed between the read and the write matches ZERO rows; the request
+ *    re-reads and lands on the post-seal arms above (identical bytes → the idempotent no-op; divergent
+ *    bytes → the 409). A sealed row is NEVER reset to 'uploaded' / repointed to the loser's sha/blob_key.
  *
  * ── CONSISTENCY (why the blob key carries the sha) ────────────────────────────────────────────
  * The pointer row and the blob share no transaction. With a content-addressed key
@@ -352,19 +353,53 @@ export async function uploadFile(
   // ref (db.upsert ONLY — never insert-and-recover; the single-flight 25P02 law). A concurrent first-upload
   // converges here (last write wins pre-seal, and every row always names ITS OWN bytes — the
   // content-key consistency law).
+  //
+  // THE STATE-GUARDED conflict update (`updateWhere: { state: 'uploaded' }`): the ON CONFLICT DO UPDATE
+  // may overwrite ONLY a row that is STILL staged. This closes the first-upload TOCTOU the module header
+  // documented: a CONCURRENT first upload that read "no row" and lands its upsert AFTER another client
+  // created+SEALED the same file_ref now matches ZERO rows (the sealed row is state='submitted', not
+  // 'uploaded') instead of resetting the sealed row to 'uploaded'. This is the sanctioned STRUCTURAL close
+  // (the `ON CONFLICT … DO UPDATE … WHERE` atomic row-level guard) — never an in-tx 23505 catch-and-recover
+  // (which would poison the run transaction).
   await ctx.blob.put(blobKey, bytes, { contentType: mediaType });
-  await ctx.db.upsert(FILE_UPLOADS_STORE, ['file_ref'], {
-    file_id: fileId,
-    file_ref: ref,
-    state: 'uploaded',
-    sha256,
-    size_bytes: bytes.byteLength,
-    content_type: mediaType,
-    original_filename: originalFilename,
-    blob_key: blobKey,
-    uploaded_at: nowIso,
-    submitted_at: null,
-  });
+  const written = await ctx.db.upsert(
+    FILE_UPLOADS_STORE,
+    ['file_ref'],
+    {
+      file_id: fileId,
+      file_ref: ref,
+      state: 'uploaded',
+      sha256,
+      size_bytes: bytes.byteLength,
+      content_type: mediaType,
+      original_filename: originalFilename,
+      blob_key: blobKey,
+      uploaded_at: nowIso,
+      submitted_at: null,
+    },
+    { updateWhere: { state: 'uploaded' } },
+  );
+  if (written === undefined) {
+    // The conditional update matched ZERO rows: a concurrent FIRST upload created+SEALED this file_ref
+    // between our "no row" read above and this write (the file_ref embeds the tenant, so a conflict here
+    // is ALWAYS same-tenant — the only way DO UPDATE no-ops is the state guard, i.e. the row is no longer
+    // 'uploaded'). Re-read and dispatch on the row as it NOW stands — the SAME sealed-row path the
+    // divergent-re-upload arm uses. Our bytes stay orphaned under their own content key (the stated no-GC
+    // cut); the sealed row is NEVER clobbered.
+    const reread = await ctx.db.select(FILE_UPLOADS_STORE, { file_ref: ref }, { limit: 1 });
+    const current = reread[0];
+    if (current === undefined) {
+      // The same fail-closed posture submit's vanished-row arm takes.
+      throw new Error('file-runtime upload: pointer row vanished mid-upload (fail-closed).');
+    }
+    if (current.state === 'submitted') {
+      return sealedRowOutcome(ctx.tenantId, sink, fileId, sha256, bytes.byteLength, current);
+    }
+    // A same-tenant conflict row present but neither our insert nor sealed — no other state exists in this
+    // machine ('uploaded' would have matched the guard). Fail closed rather than guess (parity with the
+    // divergent arm's zero-match posture above).
+    throw new Error('file-runtime upload: pointer row changed shape mid-upload (fail-closed).');
+  }
   return ok({
     file_id: fileId,
     state: 'uploaded',

@@ -42,7 +42,13 @@ import {
   isSoftDeleteTable,
   type TenantDb,
 } from '@rayspec/db';
-import type { HandlerDb, SelectOptions, StoreFilter, StoreRow } from '@rayspec/handler-sdk';
+import type {
+  HandlerDb,
+  SelectOptions,
+  StoreFilter,
+  StoreRow,
+  UpsertOptions,
+} from '@rayspec/handler-sdk';
 import {
   and,
   asc,
@@ -578,6 +584,7 @@ export function makeHandlerDb(
       store: string,
       conflictColumns: string[],
       values: StoreRow,
+      opts?: UpsertOptions,
     ): Promise<StoreRow | undefined> {
       const table = resolveTable(productTables, store);
       // #3/#4 + SF-1: the SAME guard insert uses — fail-closed on unknown/server-controlled cols; reject
@@ -603,24 +610,38 @@ export function makeHandlerDb(
       }
       const tenantCol = resolveColumn(table, 'tenant_id');
       const builder = tdb.insert(table as never, dbValues);
+      // The OPTIONAL conditional-update guard: `updateWhere` (an equality map the conflicting row must
+      // ALSO match). Built with the SAME fail-closed column resolution + SF-1 value guard a filter uses
+      // (`filterPredicate`), so an unknown column throws + an injection value is rejected. `undefined`
+      // when absent (or an empty `{}`) ⇒ the DO-UPDATE is scoped by the tenant predicate ALONE, byte-
+      // behaviorally identical to the pre-`updateWhere` upsert.
+      const updateWherePred = filterPredicate(table, opts?.updateWhere);
       // EMPTY DO-UPDATE SET: when `values` is a SUBSET of `conflictColumns` (an ensure-exists
       // upsert, e.g. upsert('tags',['name'],{name})), the SET-exclusion loop above yields `setValues={}`,
       // and `.onConflictDoUpdate({set:{}})` throws drizzle's synchronous "No values to set". Use DO
       // NOTHING instead: ensure-exists semantics — on a conflict (same OR foreign tenant) it no-ops, on no
       // conflict it inserts. DO NOTHING never WRITES, so there is no cross-tenant write risk and NO
-      // setWhere is needed (a foreign-tenant conflict is a pure no-op).
+      // setWhere is needed (a foreign-tenant conflict is a pure no-op); `updateWhere` is likewise moot
+      // there (nothing is ever overwritten, so the guard is trivially satisfied).
       //
       // ── THE SECURITY-CRITICAL LINE (the DO-UPDATE arm) ───────────────────────────────────────────────
       // Scope the DO-UPDATE to THIS tenant. Without it, a conflict on a NON-tenant-scoped (global) unique
       // column would let the DO-UPDATE OVERWRITE ANOTHER tenant's row — a cross-tenant write. With it, a
       // foreign-tenant conflict matches ZERO rows (a fail-closed no-op), never corrupting another tenant.
+      // The caller-supplied `updateWhere` is AND-combined BENEATH the tenant scope (never in place of it),
+      // so a conditional upsert can never widen the tenant guard — it only NARROWS which same-tenant row
+      // the conflict may overwrite (a still-guarded-state row); a row that has left that state matches
+      // ZERO rows → the fail-closed `undefined` no-op, leaving it untouched.
+      const setWhere: SQL = updateWherePred
+        ? (and(eq(tenantCol, tdb.tenantId), updateWherePred) as SQL)
+        : eq(tenantCol, tdb.tenantId);
       const stmt =
         Object.keys(setValues).length === 0
           ? builder.onConflictDoNothing({ target: targets })
           : builder.onConflictDoUpdate({
               target: targets,
               set: setValues as never,
-              setWhere: eq(tenantCol, tdb.tenantId),
+              setWhere,
             });
       let upserted: Record<string, unknown>[];
       try {
