@@ -56,9 +56,10 @@ export interface TriggerDescriptor {
    * interval that already fired is a no-op), bounded by a look-back window (unbounded history is NOT
    * replayed). Default (undefined/false) = fire once per interval WHILE ACTIVE only (no make-up work).
    *
-   * The durable worker CONSUMES this field. `registerTriggers` does not populate it from `spec.triggers[]`
-   * yet: the spec grammar carries no catch-up field, so a YAML-declared trigger cannot request catch-up
-   * until the grammar gains one; a code-built descriptor sets it directly. Ignored for non-cron kinds.
+   * The durable worker CONSUMES this field. `registerTriggers` populates it from `spec.triggers[].catchUp`
+   * (the spec grammar carries an optional `catchUp` field on a trigger; lint rejects it on a non-cron
+   * kind), so a YAML-declared cron trigger can request catch-up declaratively; a code-built descriptor
+   * may also set it directly. Ignored for non-cron kinds.
    */
   readonly catchUp?: boolean;
   /** The boot-resolved action (agent id / handler id+fn). */
@@ -198,6 +199,10 @@ export function registerTriggers(spec: RaySpec, config: RegisterTriggersConfig):
       kind: trigger.kind,
       ...(trigger.schedule ? { schedule: trigger.schedule } : {}),
       ...(trigger.event ? { event: trigger.event } : {}),
+      // Thread the opt-in cron catch-up flag onto the descriptor the durable worker consumes
+      // (`catchUpSchedulerMode` → DBOS make-up-work mode). Conditional spread so an absent flag
+      // yields NO `catchUp` key (never `catchUp: undefined`) — additive, byte-unchanged otherwise.
+      ...(trigger.catchUp !== undefined ? { catchUp: trigger.catchUp } : {}),
       action,
     });
   }

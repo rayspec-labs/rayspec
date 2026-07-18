@@ -63,6 +63,32 @@ triggers:
     expect(res.value.deployment?.durableWorker).toBe(true);
   });
 
+  it('accepts a cron trigger declaring catchUp (the cron-only make-up-work opt-in)', () => {
+    // catchUp is the additive cron-only opt-in; both true and false are valid ON a cron trigger.
+    const yaml = `
+version: '1.0'
+metadata:
+  name: cron-catchup
+deployment:
+  durableWorker: true
+agents:
+  - id: digest
+    name: digest
+    backend: openai
+    model: gpt-4o-mini
+    instructions: digest
+triggers:
+  - name: nightly
+    kind: cron
+    schedule: '0 2 * * *'
+    catchUp: true
+    action: { kind: agent, agent: digest }
+`;
+    const res = parseSpec(yaml);
+    if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.value.triggers[0]?.catchUp).toBe(true);
+  });
+
   it('accepts an event trigger without a durable worker (only cron/manual are worker-coupled)', () => {
     // `cron` (scheduled) and `manual` (fired on demand) both require the durable worker; an
     // event/webhook trigger does not (their ingress is reserved, not worker-fired here).

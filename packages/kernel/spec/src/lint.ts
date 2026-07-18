@@ -1007,6 +1007,21 @@ export function lintSpec(spec: RaySpec): SpecError[] {
         ),
       );
     }
+    // `catchUp` is a CRON-ONLY opt-in (missed-interval make-up work is meaningful only for a
+    // scheduled trigger). It is fail-closed-rejected for ANY presence (even `false`) on a
+    // non-cron trigger — a webhook/event/manual trigger declaring catchUp is a coherence error,
+    // never silently ignored, so the author fixes the spec rather than shipping a dead field.
+    if (trigger.catchUp !== undefined && trigger.kind !== 'cron') {
+      errors.push(
+        specError(
+          'schema_violation',
+          `trigger '${trigger.name}' declares 'catchUp' but kind is '${trigger.kind}' — catchUp is ` +
+            "valid ONLY for 'cron' triggers (it opts a scheduled trigger into replaying intervals " +
+            'missed while the worker was down). Remove catchUp or change the trigger to kind:cron',
+          `triggers[${ti}].catchUp`,
+        ),
+      );
+    }
   });
 
   // ---- 3. CAPABILITY (every agent through core validateSpec) -----------------------------

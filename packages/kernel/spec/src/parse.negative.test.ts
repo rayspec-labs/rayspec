@@ -216,6 +216,24 @@ describe('negative — schema_violation', () => {
     expect(manualCoupling).toBeDefined();
     expect(manualCoupling?.path).toMatch(/triggers\[\d+\]\.kind/);
   });
+
+  it("rejects 'catchUp' declared on a NON-cron trigger (catchUp is cron-only, fail-closed)", () => {
+    // LINT TOOTH (fail-the-fix): catchUp is a cron-only opt-in. Swap BASE's cron trigger for a MANUAL
+    // one (still WITH durableWorker → the manual variant alone is valid) and add catchUp:true. The ONLY
+    // defect is catchUp-on-non-cron; disabling the lint rule lets the bad spec parse → this goes RED.
+    const manualWithCatchUp = BASE.replace(
+      "    kind: cron\n    schedule: '0 0 * * *'\n    action: { kind: handler, handler: nightly_handler }",
+      '    kind: manual\n    catchUp: true\n    action: { kind: handler, handler: nightly_handler }',
+    );
+    const res = parseSpec(manualWithCatchUp);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    const catchUpCoherence = res.errors.find(
+      (e) => e.code === 'schema_violation' && /catchUp.*valid ONLY for 'cron'/.test(e.message),
+    );
+    expect(catchUpCoherence).toBeDefined();
+    expect(catchUpCoherence?.path).toMatch(/triggers\[\d+\]\.catchUp/);
+  });
 });
 
 describe('negative — dangling_ref', () => {

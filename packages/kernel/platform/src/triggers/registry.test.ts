@@ -53,6 +53,13 @@ const CRON_TO_AGENT_PERSIST: TriggerSpec = {
   schedule: '0 3 * * *',
   action: { kind: 'agent', agent: 'extractor', persistTo: 'extracted_facts' },
 };
+const CRON_WITH_CATCHUP: TriggerSpec = {
+  name: 'nightly-catchup',
+  kind: 'cron',
+  schedule: '0 4 * * *',
+  catchUp: true,
+  action: { kind: 'handler', handler: 'digest_handler' },
+};
 
 describe('registerTriggers — fail-closed boot resolution', () => {
   it('registers a cron→handler + a manual→agent trigger, preserving descriptor fields', () => {
@@ -107,6 +114,34 @@ describe('registerTriggers — fail-closed boot resolution', () => {
     const action = reg.get('kick-summarizer')?.action ?? {};
     expect('persistTo' in action).toBe(false);
     expect(action).toEqual({ kind: 'agent', agentId: 'summarizer' });
+  });
+
+  it("threads a cron trigger's catchUp:true onto the resolved descriptor (so the durable worker registers make-up-work mode)", () => {
+    // REGISTRATION TOOTH (fail-the-fix): the spec-declared catchUp opt-in must reach the descriptor
+    // the durable worker consumes. Dropping the catchUp pass-through in registerTriggers leaves the
+    // descriptor WITHOUT catchUp → the worker registers ExactlyOncePerIntervalWhenActive (no make-up
+    // work) → this assertion goes RED.
+    const reg = registerTriggers(specWith([CRON_WITH_CATCHUP]), {
+      handlers: new Map([['digest_handler', resolved('trigger')]]),
+      agentIds: new Set(),
+    });
+    const descriptor = reg.get('nightly-catchup');
+    expect(descriptor?.kind).toBe('cron');
+    expect(descriptor?.catchUp).toBe(true);
+  });
+
+  it('is ADDITIVE: a cron trigger WITHOUT catchUp resolves to a descriptor with NO catchUp key (never catchUp:undefined)', () => {
+    // The complementary direction: the catchUp threading is conditional (spread only when present), so
+    // a trigger without catchUp must resolve to the byte-identical no-key shape. An over-eager
+    // unconditional spread would leave `catchUp: undefined` on the descriptor → `'catchUp' in d` true.
+    const reg = registerTriggers(specWith([CRON_TO_HANDLER]), {
+      handlers: new Map([['digest_handler', resolved('trigger')]]),
+      agentIds: new Set(),
+    });
+    const descriptor = reg.get('nightly-digest');
+    expect(descriptor).toBeDefined();
+    expect('catchUp' in (descriptor ?? {})).toBe(false);
+    expect(descriptor?.catchUp).toBeUndefined();
   });
 
   it('an empty triggers[] yields an empty registry (stores/api/agents-only spec)', () => {
