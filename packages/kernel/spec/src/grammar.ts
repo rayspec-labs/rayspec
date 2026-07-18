@@ -429,6 +429,9 @@ export const TriggerSpec = z
     schedule: z.string().min(1).optional(),
     /** Logical event name — REQUIRED for `kind:'event'` (lint-enforced). */
     event: z.string().min(1).optional(),
+    /** Opt-in cron CATCH-UP: on startup, replay every interval missed while the worker was down
+     *  (bounded look-back). Valid ONLY for `kind:'cron'` (lint-enforced). Default: no catch-up. */
+    catchUp: z.boolean().optional(),
     action: TriggerAction,
   })
   .strict();

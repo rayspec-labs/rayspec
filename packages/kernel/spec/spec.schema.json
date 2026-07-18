@@ -424,6 +424,9 @@
             "type": "string",
             "minLength": 1
           },
+          "catchUp": {
+            "type": "boolean"
+          },
           "action": {
             "oneOf": [
               {
