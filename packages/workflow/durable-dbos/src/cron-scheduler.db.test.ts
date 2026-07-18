@@ -3,10 +3,11 @@
  *
  * Drives the REAL DBOS engine (`DbosDurableExecutor`) + the `DbosCronScheduler` against a real
  * Postgres isolated schema + a throwaway DBOS SYSTEM database, and proves the firing runtime on GROUND
- * TRUTH (assert the WHOLE invariant, fail-the-fix, not pass-the-shape). The guarantee under test
- * is IDEMPOTENT, at-MOST-once-per-instant firing (it can never double-fire) — NOT at-least-once
- * DELIVERY (a crash between reserve-commit and dispatch-complete DROPS that instant; that crash-window
- * caveat is documented in cron-scheduler.ts and is reliability work, not asserted here):
+ * TRUTH (assert the WHOLE invariant, fail-the-fix, not pass-the-shape). The DEFAULT guarantee is
+ * IDEMPOTENT, at-MOST-once-per-instant firing (it can never double-fire) — NOT at-least-once DELIVERY (a
+ * crash between reserve-commit and dispatch-complete DROPS that instant; that crash-window caveat is
+ * documented in cron-scheduler.ts and is reliability work, not asserted here). An opt-in CATCH-UP trigger
+ * additionally makes up DOWNTIME-missed intervals (items 8–10):
  *
  *  1. THE HEADLINE — exactly-once-per-instant: a SECOND `fireNow(name, T)` for the
  *     SAME instant dispatches ZERO additional work. Asserted as the WHOLE invariant: exactly ONE
@@ -17,12 +18,26 @@
  *     `app.current_tenant` GUC POPULATED (read-back) — proven by the handler writing
  *     a `cron_marks` row (tenant-stamped) AND the captured GUC. A refire is a no-op (one row, not two).
  *  3. AGENT action: firing a cron→agent trigger enqueues `runAgentJob` exactly once → it runs
- *     OFF-REQUEST (run header + journal + run_events persist). A refire enqueues NOTHING new (the runId
- *     is deterministic from the firing key → the engine dedups too).
+ *     OFF-REQUEST (run header + journal + run_events persist). Asserted on the DURABLE, reserve/upsert-
+ *     backed artifacts (one `run_started` reserve, one `runs` header, one `llm` step), NOT the fake's
+ *     raw invocation count — the exactly-once guarantee is one real run PER FIRING KEY, and a raw count
+ *     is blind to that reserve (an untainted safe re-execution re-invokes the backend yet still yields
+ *     exactly one durable run).
  *  4. PER-KIND RESERVED: a declared webhook/event/manual trigger is NOT fired (the scheduler does not
  *     schedule it; a direct `fireNow` for it is fail-closed-rejected).
  *  5. CROSS-TENANT: the cron fires under the scheduler's tenant ONLY — a different tenant observes no
  *     reserve row / no cron_marks row (the reserve + dispatch are tenant-scoped structurally).
+ *  6. EXACTLY-ONCE under a RECOVERY double-fire: a recovery re-execution of an already-completed
+ *     cron→agent run (deterministically simulated by pre-seeding the run-level state) is a genuine
+ *     NO-OP — the run-level guard (`run_started` reserve → the already-succeeded short-circuit) refuses
+ *     the re-run (`realRunsFor(runId) === 0`), fail-the-fix. This exercises the run-level guard directly,
+ *     BYPASSING the trigger reserve (layer 2) that would otherwise MASK a layer-3 regression.
+ *  7. (see 6) The per-runId `realRunsFor` ledger is what makes the fake NON-BLIND to the reserve.
+ *  8. CATCH-UP make-up: a scheduled REPLAY of a DOWNTIME-missed interval (driven via the deterministic
+ *     `fireScheduled` seam) fires once (at-least-once) and a re-replay reuses the reserve → no-op
+ *     (at-most-once). 9. CATCH-UP is BOUNDED: a replay older than the look-back window is reserved
+ *     (consumed) but NOT dispatched (fail-the-fix). 10. an active-and-firing deployment is UNAFFECTED
+ *     (a non-catch-up scheduled fire is never bounded; an active fire of a catch-up trigger dispatches).
  *
  * HONEST SCOPE: like the spine test, this drives the firing path via the DETERMINISTIC
  * `fireNow` seam (the SAME reserve→dispatch path as a scheduled fire — production fires on the crontab,
@@ -35,7 +50,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AgentSpec } from '@rayspec/core';
-import { type Db, forTenant, TENANT_GUC } from '@rayspec/db';
+import { type Db, forTenant, schema, TENANT_GUC } from '@rayspec/db';
 import { buildProductTables, makeDbWithSchema, registerScopedTables } from '@rayspec/db/testing';
 import {
   invokeTriggerHandler,
@@ -56,6 +71,8 @@ import {
   type DbosExecutorDeps,
   firingKey,
   type ResolvedRun,
+  RUN_STARTED_BODY_HASH,
+  RUN_STARTED_SCOPE,
   TRIGGER_FIRE_SCOPE,
 } from './index.js';
 import { FakeSpineBackend } from './test-support/fake-backend.js';
@@ -156,6 +173,20 @@ function webhookDescriptor(name: string): TriggerDescriptor {
 }
 
 /**
+ * A cron→handler descriptor that OPTS INTO catch-up (make-up missed intervals). The `nightly-digest`
+ * shape — writes a `cron_marks` row on dispatch — so a make-up replay's dispatch is observable as a row.
+ */
+function handlerCatchUpDescriptor(name: string): TriggerDescriptor {
+  return {
+    name,
+    kind: 'cron',
+    schedule: '0 2 * * *',
+    catchUp: true,
+    action: { kind: 'handler', handlerId: 'nightly_digest_handler', handler: cronHandlerFn },
+  };
+}
+
+/**
  * Wrap the raw Db so the GUC inside the handler's own tdb.transaction() is OBSERVED — invokeTriggerHandler
  * opens forTenant(db,tenantId).transaction(), and this proxy reads current_setting on that same tx handle
  * AFTER the handler body runs (the GUC read-back pattern). Proves the handler ran in the GUC-populated tx.
@@ -235,6 +266,30 @@ async function countCronMarks(tenant: string): Promise<number> {
   return rows.length;
 }
 
+/** Count the `runs` header rows for a runId — the durable exactly-once artifact (idempotent upsert). */
+async function countRunHeaders(runId: string): Promise<number> {
+  const rows = await db.$client.unsafe('SELECT 1 FROM runs WHERE run_id = $1', [runId]);
+  return rows.length;
+}
+
+/** Count the `llm` journal steps for a runId — the durable exactly-once artifact (idempotency-keyed). */
+async function countLlmSteps(runId: string): Promise<number> {
+  const rows = await db.$client.unsafe(
+    "SELECT 1 FROM journal_steps WHERE run_id = $1 AND type = 'llm'",
+    [runId],
+  );
+  return rows.length;
+}
+
+/** Count the per-run started-once reserve rows for a runId (the run-level exactly-once guard marker). */
+async function countRunStartedMarkers(tenant: string, runId: string): Promise<number> {
+  const rows = await db.$client.unsafe(
+    'SELECT 1 FROM idempotency_keys WHERE tenant_id = $1 AND scope = $2 AND idem_key = $3',
+    [tenant, RUN_STARTED_SCOPE, runId],
+  );
+  return rows.length;
+}
+
 describe.skipIf(!hasDb)(
   'DBOS cron triggers worker — idempotent, at-MOST-once-per-instant firing',
   () => {
@@ -287,6 +342,7 @@ describe.skipIf(!hasDb)(
 
     beforeEach(async () => {
       backend.liveRuns = 0;
+      backend.runInvocations.clear();
       capturedGuc.value = null;
       await db.$client.unsafe(
         'TRUNCATE run_events, journal_steps, conversation_items, runs, idempotency_keys, cron_marks CASCADE',
@@ -337,28 +393,72 @@ describe.skipIf(!hasDb)(
       const first = await scheduler.fireNow('agent-cron', instant);
       expect(first).toBe(true);
 
-      // The agent run ran OFF-REQUEST under the deterministic runId → header + journal persist.
+      // The agent run ran OFF-REQUEST under the deterministic runId. Assert the DURABLE exactly-once
+      // invariant on the reserve/upsert-backed artifacts — NOT the fake's raw invocation counter. The
+      // guarantee the cron→agent path makes is exactly ONE real run PER FIRING KEY: one run-started
+      // reserve, one `runs` header, one `llm` journal step (all keyed on the deterministic runId, so an
+      // idempotent recovery re-execution cannot inflate them). Counting raw `backend.run()` calls would
+      // be BLIND to that reserve — a legitimate untainted safe re-execution re-invokes the backend yet
+      // still produces exactly ONE durable run, so the raw count is not the invariant.
       const status = await waitForTerminal(runId);
       expect(status).toBe('succeeded');
-      expect(backend.liveRuns).toBe(1);
-      const headers = await db.$client.unsafe('SELECT 1 FROM runs WHERE run_id = $1', [runId]);
-      expect(headers).toHaveLength(1);
-      const steps = await db.$client.unsafe(
-        "SELECT 1 FROM journal_steps WHERE run_id = $1 AND type = 'llm'",
-        [runId],
-      );
-      expect(steps).toHaveLength(1);
+      expect(await countRunStartedMarkers(TENANT, runId)).toBe(1); // exactly one run-level reserve
+      expect(await countRunHeaders(runId)).toBe(1); // exactly one durable run header
+      expect(await countLlmSteps(runId)).toBe(1); // exactly one journaled llm step
+      expect(backend.realRunsFor(runId)).toBe(1); // and, for this clean run, the backend ran once
 
       // A REFIRE of the same instant: the trigger reserve (layer 2) loses → `fireNow` returns false
-      // BEFORE it reaches `enqueue`, so NO second job is enqueued. NOTE (honesty): this asserts the
-      // LAYER-2 dedup (the trigger reserve) only — layer 3 (the deterministic runId + the
-      // run_started guard deduping the RUN even if a second job WERE enqueued) is NOT exercised here
-      // (no second enqueue happens), it is proven directly in executor.db.test.ts ("the started-once
-      // safety guard"). The `liveRuns===1` below is the trigger-reserve dedup, not the run-level guard.
+      // BEFORE it reaches `enqueue`, so NO second job is enqueued. This asserts the LAYER-2 dedup (the
+      // trigger reserve); the LAYER-3 run-level guard (a recovery re-execution of the SAME runId is a
+      // genuine no-op) is exercised deterministically by the next test — layer 2 alone can never MASK a
+      // layer-3 regression there, which is what made the old raw-count assertion here blind to it.
       const second = await scheduler.fireNow('agent-cron', instant);
       expect(second).toBe(false);
       await new Promise((r) => setTimeout(r, 200));
-      expect(backend.liveRuns).toBe(1); // runAgent ran exactly once (the trigger reserve blocked the 2nd fire)
+      expect(await countRunHeaders(runId)).toBe(1); // still exactly ONE durable run — no re-fire
+      expect(await countLlmSteps(runId)).toBe(1);
+    });
+
+    it('EXACTLY-ONCE (recovery double-fire): a recovery re-execution of an already-completed cron→agent run is a genuine NO-OP (run-level guard; fail-the-fix)', async () => {
+      // Deterministically simulate DBOS RE-DISPATCHING an already-completed cron→agent workflow (the
+      // recovery double-fire — an intermittently-observed second run under recovery). Pre-seed the state
+      // the FIRST attempt would have committed: the `run_started` reserve + a terminal-SUCCESS `runs`
+      // header (untainted — no tool fired). Then fire the trigger: layer 2 (the trigger reserve) is WON
+      // (first fire of this instant), so the run is enqueued and its body runs — but the run-level guard
+      // (the lost `run_started` reserve → the already-succeeded short-circuit) makes it a genuine NO-OP.
+      // This bypasses layer 2's masking (which is why the AGENT test above could not see a layer-3
+      // regression): here the ONLY thing preventing a second real run is the run-level guard.
+      const instant = new Date('2026-06-24T04:05:00.000Z');
+      const runId = cronRunId('agent-cron', instant);
+
+      // The FIRST attempt's durable footprint (as if it ran + completed, then DBOS re-dispatched it).
+      await forTenant(db, TENANT)
+        .insert(schema.idempotencyKeys, {
+          scope: RUN_STARTED_SCOPE,
+          idemKey: runId,
+          bodyHash: RUN_STARTED_BODY_HASH,
+          snapshot: { runId },
+        })
+        .onConflictDoNothing();
+      await db.$client.unsafe(
+        `INSERT INTO runs (run_id, tenant_id, backend, auth_mode, agent_name, model, status)
+         VALUES ($1, $2, 'openai', 'api-key', 'echo', 'gpt-4.1-mini', 'completed')`,
+        [runId, TENANT],
+      );
+
+      const fired = await scheduler.fireNow('agent-cron', instant);
+      expect(fired).toBe(true); // the TRIGGER fired (won its reserve) — the run was enqueued
+      const status = await waitForTerminal(runId);
+      expect(status).toBe('succeeded'); // the recovery completed — as a no-op success, not a re-run
+
+      // GROUND TRUTH — a genuine NO-OP: the backend was NEVER invoked for this runId (no second real
+      // run), and the durable run is still the single pre-seeded header (no duplicate/second run). This
+      // is FAIL-THE-FIX: without the run-level guard (the run_started reserve routing to the
+      // already-succeeded short-circuit) the body would re-run runAgent → `realRunsFor(runId)` becomes 1
+      // and a second `llm` step appears — the double-fire the guard exists to prevent.
+      expect(backend.realRunsFor(runId)).toBe(0); // the run-level guard refused the re-execution
+      expect(await countRunHeaders(runId)).toBe(1); // still exactly one durable run (the seeded one)
+      expect(await countLlmSteps(runId)).toBe(0); // no journaled llm step — runAgent never re-ran
     });
 
     it('PER-KIND RESERVED: fireNow for a reserved (webhook) trigger is fail-closed-rejected (never fired)', async () => {
@@ -416,6 +516,87 @@ describe.skipIf(!hasDb)(
       expect(await countFireMarkers(TENANT, firingKey('nightly-digest', t1))).toBe(1);
       expect(await countFireMarkers(TENANT, firingKey('nightly-digest', t2))).toBe(1);
       expect(await countCronMarks(TENANT)).toBe(2); // two distinct instants both fired
+    });
+
+    // ── CATCH-UP (opt-in make-up of intervals missed while the deployment was DOWN) ────────────────
+    // DBOS's ExactlyOncePerInterval mode replays each missed interval on startup by calling the
+    // scheduled-fire body (`fireScheduled`) once per missed slot; these tests drive that EXACT body with
+    // a past instant to prove the make-up path deterministically (no wall-clock loop). The mode wiring —
+    // that a catch-up trigger registers under ExactlyOncePerInterval so DBOS actually replays — is proven
+    // by cron-scheduler-catchup.unit.test.ts (the make-up-work mode is what drives this in production).
+
+    it('CATCH-UP: a make-up replay of a DOWNTIME-missed interval fires once; a re-replay reuses the reserve → no-op (at-least-once + at-most-once)', async () => {
+      const catchUpScheduler = new DbosCronScheduler(
+        [handlerCatchUpDescriptor('nightly-digest-catchup')],
+        { db, tenantId: TENANT, executor, productTables, invokeTriggerHandler },
+      );
+      // An interval that SHOULD have fired 30 min ago but did not (the app was down) — no reserve exists.
+      const missed = new Date(Date.now() - 30 * 60_000);
+      const key = firingKey('nightly-digest-catchup', missed);
+      expect(await countFireMarkers(TENANT, key)).toBe(0); // never fired — app down at its instant
+
+      // AT-LEAST-ONCE: the make-up replay reserves + dispatches the missed interval (one cron_marks row).
+      expect(await catchUpScheduler.fireScheduled('nightly-digest-catchup', missed)).toBe(true);
+      expect(await countFireMarkers(TENANT, key)).toBe(1);
+      expect(await countCronMarks(TENANT)).toBe(1);
+
+      // AT-MOST-ONCE: a second make-up replay of the SAME interval reuses the reserve → deduped no-op.
+      expect(await catchUpScheduler.fireScheduled('nightly-digest-catchup', missed)).toBe(false);
+      expect(await countFireMarkers(TENANT, key)).toBe(1);
+      expect(await countCronMarks(TENANT)).toBe(1); // still exactly one dispatch — no double
+    });
+
+    it('CATCH-UP is BOUNDED: a make-up replay OLDER than the look-back window is reserved (consumed) but NOT dispatched — unbounded history is not replayed (fail-the-fix)', async () => {
+      // A deliberately small look-back window so a stale instant is deterministically "beyond" it.
+      const catchUpScheduler = new DbosCronScheduler(
+        [handlerCatchUpDescriptor('nightly-digest-catchup')],
+        {
+          db,
+          tenantId: TENANT,
+          executor,
+          productTables,
+          invokeTriggerHandler,
+          catchUpLookbackMs: 60_000,
+        },
+      );
+
+      // WITHIN the window (30s ago) → the make-up fires.
+      const within = new Date(Date.now() - 30_000);
+      expect(await catchUpScheduler.fireScheduled('nightly-digest-catchup', within)).toBe(true);
+      expect(await countCronMarks(TENANT)).toBe(1);
+
+      // BEYOND the window (10 min ago) → reserved (consumed) but NOT dispatched. FAIL-THE-FIX: without
+      // the look-back bound this would dispatch → a SECOND cron_marks row. The reserve IS written (the
+      // stale slot is consumed, so a later replay is a deduped no-op), but the dispatch is skipped.
+      const beyond = new Date(Date.now() - 10 * 60_000);
+      const beyondKey = firingKey('nightly-digest-catchup', beyond);
+      expect(await catchUpScheduler.fireScheduled('nightly-digest-catchup', beyond)).toBe(false);
+      expect(await countFireMarkers(TENANT, beyondKey)).toBe(1); // consumed (reserved)
+      expect(await countCronMarks(TENANT)).toBe(1); // NOT dispatched — still just the within-window one
+    });
+
+    it('CATCH-UP leaves active firing UNAFFECTED: a non-catch-up scheduled fire is never look-back-bounded, and an active fire of a catch-up trigger dispatches', async () => {
+      // A NON-catch-up trigger's scheduled fire is NEVER look-back-bounded — an active-and-firing
+      // deployment behaves exactly as before: `fireScheduled` for the shared non-catch-up `nightly-digest`
+      // with a weeks-old instant still dispatches (no make-up bound applies to a non-catch-up trigger).
+      const staleForActive = new Date('2026-06-01T02:00:00.000Z');
+      expect(await scheduler.fireScheduled('nightly-digest', staleForActive)).toBe(true);
+      expect(await countCronMarks(TENANT)).toBe(1);
+
+      // And an ACTIVE fire (instant ≈ now) of a catch-up trigger is within any window → dispatches.
+      const catchUpScheduler = new DbosCronScheduler(
+        [handlerCatchUpDescriptor('nightly-digest-catchup')],
+        {
+          db,
+          tenantId: TENANT,
+          executor,
+          productTables,
+          invokeTriggerHandler,
+          catchUpLookbackMs: 60_000,
+        },
+      );
+      expect(await catchUpScheduler.fireScheduled('nightly-digest-catchup', new Date())).toBe(true);
+      expect(await countCronMarks(TENANT)).toBe(2); // both dispatched
     });
   },
 );

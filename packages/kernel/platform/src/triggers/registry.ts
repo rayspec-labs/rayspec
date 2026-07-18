@@ -48,6 +48,19 @@ export interface TriggerDescriptor {
   readonly schedule?: string;
   /** The logical event name (present iff `kind:'event'`; lint-enforced). */
   readonly event?: string;
+  /**
+   * Opt-in MISSED-INTERVAL CATCH-UP (make-up work) for a `cron` trigger. When `true`, the durable cron
+   * worker registers this trigger's scheduled-workflow in the make-up-work mode, so intervals that
+   * SHOULD have fired while the deployment was DOWN are replayed on the next startup — each missed
+   * interval fired exactly once (the worker reuses its tenant-scoped firing reserve, so a replayed
+   * interval that already fired is a no-op), bounded by a look-back window (unbounded history is NOT
+   * replayed). Default (undefined/false) = fire once per interval WHILE ACTIVE only (no make-up work).
+   *
+   * The durable worker CONSUMES this field. `registerTriggers` does not populate it from `spec.triggers[]`
+   * yet: the spec grammar carries no catch-up field, so a YAML-declared trigger cannot request catch-up
+   * until the grammar gains one; a code-built descriptor sets it directly. Ignored for non-cron kinds.
+   */
+  readonly catchUp?: boolean;
   /** The boot-resolved action (agent id / handler id+fn). */
   readonly action: ResolvedTriggerAction;
 }

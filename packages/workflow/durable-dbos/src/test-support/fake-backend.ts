@@ -11,6 +11,16 @@ export class FakeSpineBackend implements Backend {
   /** Counts how many times the LIVE path ran (so the started-once guard test can assert "ran once"). */
   liveRuns = 0;
   /**
+   * PER-RUN real-execution ledger (runId → how many times `run()` was entered for THAT runId). The
+   * durable exactly-once guarantee is keyed on the runId (the `run_started` reserve dedups per runId),
+   * so a test that wants to prove the guard rather than count RAW global invocations asserts on this
+   * ledger: `realRunsFor(runId)` is 0 when a recovery re-execution of that runId was correctly refused/
+   * short-circuited (a genuine NO-OP), and 1 for a single real run. Distinguishing per-runId is what
+   * makes the fake NON-BLIND to the reserve — a global counter cannot tell a legitimate distinct run
+   * from a re-fire of the SAME firing key.
+   */
+  readonly runInvocations = new Map<string, number>();
+  /**
    * When > 0, `run()` THROWS mid-run on the first N invocations (after `liveRuns` is incremented and
    * a run_started/text_delta event has been emitted), simulating a crash INSIDE runAgent/its tx. Used
    * by the crash-mid-tx recovery test (fix I) to prove the reserve marker survives runAgent's tx
@@ -78,12 +88,18 @@ export class FakeSpineBackend implements Backend {
     for (const w of waiters) w();
   }
 
+  /** How many times `run()` was entered for THIS runId (the per-firing-key real-run count). */
+  realRunsFor(runId: string): number {
+    return this.runInvocations.get(runId) ?? 0;
+  }
+
   async resolveAuth() {
     return 'api-key' as const;
   }
 
   async run(spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
     this.liveRuns += 1;
+    this.runInvocations.set(ctx.runId, (this.runInvocations.get(ctx.runId) ?? 0) + 1);
     this.liveConcurrency += 1;
     this.peakConcurrency = Math.max(this.peakConcurrency, this.liveConcurrency);
     try {

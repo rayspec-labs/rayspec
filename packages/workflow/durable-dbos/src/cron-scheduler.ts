@@ -1,5 +1,6 @@
 /**
- * `DbosCronScheduler` — the IDEMPOTENT, at-MOST-once-per-instant CRON firing runtime.
+ * `DbosCronScheduler` — the IDEMPOTENT CRON firing runtime (at-MOST-once-per-instant by default;
+ * opt-in missed-interval CATCH-UP per trigger).
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * WHAT THIS IS (cron ONLY — per-kind build-on-demand).
@@ -24,8 +25,10 @@
  *     across the engine (verified doc-first against the installed 4.21.6 scheduler source:
  *     `scheduler_decorator.js:121` derives `sched-${name}-${date.toISOString()}` and starts the
  *     workflow under that id; default mode `ExactlyOncePerIntervalWhenActive` = fire once per interval
- *     WHILE THE APP IS ACTIVE, NO make-up work for intervals missed while the app was down — our LOCAL
- *     single-node posture; verified doc-first against `scheduler_decorator.d.ts:11-16`).
+ *     WHILE THE APP IS ACTIVE, NO make-up work for intervals missed while the app was down. A trigger
+ *     that opts into CATCH-UP (`descriptor.catchUp`) is instead registered in `ExactlyOncePerInterval`,
+ *     the make-up-work mode — see the CATCH-UP section below; verified doc-first against
+ *     `scheduler_decorator.d.ts:5-17` + the `#schedulerLoop` replay in `scheduler_decorator.js:72-131`).
  *  2. INSIDE the body, BEFORE any dispatch, we RESERVE our OWN tenant-scoped marker
  *     `idempotency_keys(scope='trigger', key='trigger:{name}:{ISO}')` via the atomic
  *     INSERT..ON CONFLICT DO NOTHING RETURNING. This is the IDEMPOTENCY / exactly-once-cap guard —
@@ -57,6 +60,35 @@
  * non-idempotent-taint quarantine's job. Until then, a cron handler/agent must be written to
  * tolerate a rare DROPPED instant (the at-MOST-once posture), and the dispatch must NOT be assumed to
  * have happened just because the reserve row exists.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * CATCH-UP (opt-in, per trigger — make up intervals missed while the deployment was DOWN).
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * A trigger with `descriptor.catchUp === true` is registered in DBOS's `ExactlyOncePerInterval` mode
+ * (the make-up-work mode). On startup DBOS reads the schedule's persisted last-execution watermark and
+ * REPLAYS every interval that should have fired between it and now — calling THIS scheduler's fire body
+ * once per missed slot (verified doc-first: `#schedulerLoop` sets `lastExec` from the persisted
+ * `lastState` and iterates `nextWakeupTime(lastExec)` up to now, firing each `sched-{name}-{ISO}` with
+ * NO sleep/jitter for past slots, `scheduler_decorator.js:72-131`). DBOS owns the slot math — there is
+ * no second cron parser here, so a replayed instant is BYTE-IDENTICAL to what the live tick would have
+ * fired (no divergence, no same-slot double).
+ *
+ * The net contract for a catch-up trigger is EXACTLY-ONCE-WITH-CATCH-UP:
+ *  - AT-LEAST-ONCE for a DOWNTIME-missed interval — one that never got a reserve because the app was
+ *    down at its instant. The replay RESERVES it (a fresh firing key) and DISPATCHES it → recovered.
+ *  - AT-MOST-ONCE preserved — the replay reuses the SAME tenant-scoped `idempotency_keys` reserve, so
+ *    a slot that ALREADY fired (its reserve exists) is a deduped no-op on replay. An active-and-firing
+ *    deployment is UNAFFECTED: its live-tick reserve makes the boot replay of that same slot a no-op.
+ *  - BOUNDED look-back — the make-up dispatch is capped to a look-back window
+ *    ({@link CronSchedulerDeps.catchUpLookbackMs}, default {@link DEFAULT_CATCHUP_LOOKBACK_MS}). A
+ *    replayed slot OLDER than that window is RESERVED (consumed, so it never fires later) but NOT
+ *    dispatched — unbounded history is never replayed. The bound applies ONLY to a scheduled replay of
+ *    a catch-up trigger; an active fire (instant ≈ now) and an explicit `fireNow` are never bounded.
+ *
+ * HONEST BOUNDARY (what catch-up does NOT recover): the reserve-commit-then-crash DROP above stays
+ * at-most-once even under catch-up. That interval's reserve row EXISTS (it fired, then the dispatch was
+ * lost), so a replay sees the reserve and no-ops. Catch-up recovers intervals the app was DOWN for (no
+ * reserve was ever written), NOT a fire that reserved and then crashed before dispatching.
  *
  * QUARANTINE COUPLING (the non-idempotent-taint quarantine — documented, not built here). The
  * quarantine (the `run_taint` marker — `@rayspec/platform` `markRunTainted` /
@@ -92,7 +124,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { DBOS } from '@dbos-inc/dbos-sdk';
+import { DBOS, SchedulerMode } from '@dbos-inc/dbos-sdk';
 import type { Db } from '@rayspec/db';
 import { forTenant, schema } from '@rayspec/db';
 import type {
@@ -142,6 +174,33 @@ export function cronAgentInput(triggerName: string): string {
  * fine enough that two genuinely-distinct cron slots (≥1 minute apart) never collide.
  */
 export const FIRING_INSTANT_GRANULARITY_MS = 1000;
+
+/**
+ * The DEFAULT look-back window (ms) a catch-up trigger will make up missed intervals within — 26 hours.
+ * A replayed interval OLDER than this is reserved (consumed) but NOT dispatched, so unbounded history is
+ * never replayed. 26h comfortably covers a daily (`nightly-digest`) trigger missing ONE scheduled day of
+ * downtime plus slack, while refusing to fan out weeks of stale digests after a long outage. A deployment
+ * with a coarser cadence (or that wants a wider make-up window) overrides via
+ * {@link CronSchedulerDeps.catchUpLookbackMs}. Bounds the DISPATCH; DBOS's own replay iteration is
+ * separately bounded by the actual downtime (its watermark advances as it replays each slot).
+ */
+export const DEFAULT_CATCHUP_LOOKBACK_MS = 26 * 60 * 60 * 1000;
+
+/**
+ * The DBOS scheduler mode a descriptor registers under — a PURE function of its `catchUp` opt-in:
+ *  - `catchUp: true`  → `ExactlyOncePerInterval` (the make-up-work mode: on startup DBOS replays every
+ *    interval missed while the app was down, calling the fire body once per missed slot).
+ *  - otherwise        → `ExactlyOncePerIntervalWhenActive` (fire once per interval while active; NO
+ *    make-up work — the historical default, byte-behaviourally unchanged for a non-catch-up trigger).
+ * Exported so the mode selection is directly assertable (the make-up-work mode is what actually drives
+ * the startup replay in production — the behavioural fire-path tests then prove the replay is
+ * exactly-once + bounded).
+ */
+export function catchUpSchedulerMode(descriptor: { catchUp?: boolean }): SchedulerMode {
+  return descriptor.catchUp === true
+    ? SchedulerMode.ExactlyOncePerInterval
+    : SchedulerMode.ExactlyOncePerIntervalWhenActive;
+}
 
 /**
  * Truncate a firing instant DOWN to {@link FIRING_INSTANT_GRANULARITY_MS} (whole seconds) and emit its
@@ -211,6 +270,14 @@ export interface CronSchedulerDeps {
    * GUC-tx handler-invocation seam — it stays the single source of truth in `@rayspec/platform`).
    */
   readonly invokeTriggerHandler: typeof InvokeTriggerHandlerFn;
+  /**
+   * The look-back window (ms) a CATCH-UP trigger makes up missed intervals within (default
+   * {@link DEFAULT_CATCHUP_LOOKBACK_MS}). A scheduled REPLAY of a catch-up interval older than this is
+   * reserved (consumed) but NOT dispatched — bounding the make-up so an outage never fans out unbounded
+   * stale history. Ignored for triggers that did not opt into `catchUp`, and never applied to an active
+   * fire or an explicit `fireNow`. Optional; deployment-level (like `tenantId`).
+   */
+  readonly catchUpLookbackMs?: number;
 }
 
 /** Thrown when a NON-cron trigger reaches the cron scheduler (per-kind reservation — fail-closed). */
@@ -258,6 +325,8 @@ export class DbosCronScheduler {
   readonly #deps: CronSchedulerDeps;
   /** The cron descriptors this scheduler fires, keyed by name (cron-only — others rejected at add). */
   readonly #crons: Map<string, TriggerDescriptor & { kind: 'cron'; schedule: string }>;
+  /** The bounded catch-up look-back window (ms) — a scheduled replay older than this is not made up. */
+  readonly #catchUpLookbackMs: number;
   #registered = false;
 
   /**
@@ -268,6 +337,7 @@ export class DbosCronScheduler {
    */
   constructor(descriptors: readonly TriggerDescriptor[], deps: CronSchedulerDeps) {
     this.#deps = deps;
+    this.#catchUpLookbackMs = deps.catchUpLookbackMs ?? DEFAULT_CATCHUP_LOOKBACK_MS;
     this.#crons = new Map();
     for (const d of descriptors) {
       if (d.kind === 'cron') {
@@ -290,8 +360,9 @@ export class DbosCronScheduler {
    * Register one DBOS scheduled-workflow per cron trigger. MUST run BEFORE `DBOS.launch()` (DBOS's
    * `registerScheduled` is static + pre-launch by design; the `ScheduledReceiver` lifecycle callback
    * starts each schedule loop at launch). Each scheduled workflow is a registered DBOS workflow whose
-   * body is `fireScheduled(name, scheduledTime)` — so a crash-replay of the body still hits the same
-   * idempotent reserve. Idempotent: calling twice is a no-op (a second register would duplicate the
+   * body is the scheduled-fire path (`#fire(..., { fromSchedule: true })`) — so a crash-replay OR a
+   * catch-up make-up replay of the body still hits the same idempotent reserve (and, for catch-up, the
+   * bounded look-back). Idempotent: calling twice is a no-op (a second register would duplicate the
    * schedule loop).
    */
   registerScheduledWorkflows(): void {
@@ -300,22 +371,24 @@ export class DbosCronScheduler {
       // The scheduled-workflow body for THIS cron trigger. DBOS calls it `(scheduledTime, startTime)`;
       // we fire for the SCHEDULED instant (not the wall-clock the body ran on) so the firing key is
       // deterministic per slot. Wrapped as a registered DBOS workflow so a recovery re-invokes it (and
-      // the idempotent reserve makes that a no-op).
+      // the idempotent reserve makes that a no-op). `fromSchedule` applies the catch-up look-back bound
+      // for a catch-up trigger's make-up replay (an active fire, instant ≈ now, is never bounded).
       const workflowName = `cron:${name}`;
       const body = DBOS.registerWorkflow(
         async (scheduledTime: Date): Promise<void> => {
-          await this.#fire(descriptor, scheduledTime);
+          await this.#fire(descriptor, scheduledTime, { fromSchedule: true });
         },
         { name: workflowName },
       );
-      // Associate the registered workflow with the crontab (default mode
-      // ExactlyOncePerIntervalWhenActive — no make-up work for missed intervals). The scheduled-workflow
-      // id `sched-{workflowName}-{ISO}` gives engine-level at-most-once-per-instant; our reserve is the
-      // tenant-scoped idempotency / exactly-once-cap guard (NOT an at-least-once backstop — see the
-      // crash-window note in the file header).
+      // Associate the registered workflow with the crontab. A catch-up trigger uses ExactlyOncePerInterval
+      // (make-up work — DBOS replays missed intervals on startup); every other trigger keeps the historical
+      // ExactlyOncePerIntervalWhenActive (no make-up work). The scheduled-workflow id `sched-{workflowName}
+      // -{ISO}` gives engine-level at-most-once-per-instant; our reserve is the tenant-scoped idempotency /
+      // exactly-once-cap guard (and, for a catch-up replay, the at-least-once make-up + dedup — see header).
       DBOS.registerScheduled(body as (scheduledTime: Date, startTime: Date) => Promise<void>, {
         name: workflowName,
         crontab: descriptor.schedule,
+        mode: catchUpSchedulerMode(descriptor),
       });
     }
     this.#registered = true;
@@ -345,18 +418,50 @@ export class DbosCronScheduler {
   }
 
   /**
-   * The shared fire path — reserve the tenant-scoped firing marker, then (iff we won) dispatch by
-   * action kind. The reserve-BEFORE-dispatch ordering is the IDEMPOTENCY / at-MOST-once-per-instant
-   * guarantee (it can never DOUBLE-fire). It is NOT at-least-once: a crash/throw in the window between
-   * the reserve commit and the dispatch completing DROPS that one occurrence (on recovery the body
-   * re-runs, LOSES the committed reserve, and skips the dispatch — no make-up work). See the file
-   * header's crash-window note; true at-least-once delivery is reliability work.
+   * Fire a registered cron trigger through the EXACT scheduled-fire path DBOS drives (same firing-key
+   * derivation, same reserve → dispatch), INCLUDING the catch-up look-back bound. This is the body the
+   * registered DBOS scheduled-workflow runs — for an ACTIVE tick, a crash-recovery re-invocation, AND a
+   * catch-up MAKE-UP replay of a missed interval. Exposed as a deterministic seam so a test can drive
+   * the make-up path (a past `instant`) without waiting for DBOS's wall-clock loop:
+   *  - a within-look-back missed interval → dispatched once (the reserve makes a re-replay a no-op);
+   *  - a beyond-look-back interval on a catch-up trigger → reserved (consumed) but NOT dispatched.
+   * The bound applies ONLY to a `catchUp` trigger; a non-catch-up trigger's scheduled fire is
+   * byte-behaviourally identical to `fireNow` (reserve → dispatch, no bound).
    *
-   * @returns `true` iff this call won the reserve and dispatched; `false` if it was a deduped no-op.
+   * @returns `true` iff this call won the reserve and DISPATCHED; `false` if it was a deduped no-op OR a
+   *   bounded (beyond-look-back) make-up skip.
+   */
+  async fireScheduled(name: string, instant: Date = new Date()): Promise<boolean> {
+    const descriptor = this.#crons.get(name);
+    if (!descriptor) {
+      throw new Error(
+        `fireScheduled: '${name}' is not a registered cron trigger on this scheduler ` +
+          '(unknown, or a RESERVED webhook/event/manual kind not built here). Fail-closed.',
+      );
+    }
+    return this.#fire(descriptor, instant, { fromSchedule: true });
+  }
+
+  /**
+   * The shared fire path — reserve the tenant-scoped firing marker, then (iff we won, and — for a
+   * catch-up make-up replay — within the look-back window) dispatch by action kind. The
+   * reserve-BEFORE-dispatch ordering is the IDEMPOTENCY / at-MOST-once-per-instant guarantee (it can
+   * never DOUBLE-fire). By DEFAULT it is NOT at-least-once: a crash/throw in the window between the
+   * reserve commit and the dispatch completing DROPS that one occurrence (on recovery the body re-runs,
+   * LOSES the committed reserve, and skips the dispatch — no make-up work). A `catchUp` trigger fired
+   * `fromSchedule` gets at-least-once for DOWNTIME-missed intervals via DBOS's make-up replay (bounded
+   * to `catchUpLookbackMs`); see the file header's crash-window + CATCH-UP notes.
+   *
+   * @param opts.fromSchedule whether this fire came from the DBOS scheduled-workflow body (an active
+   *   tick, a crash-recovery replay, or a catch-up make-up replay). Only a `fromSchedule` fire of a
+   *   `catchUp` trigger applies the bounded look-back; a `fireNow` (opts absent) never does.
+   * @returns `true` iff this call won the reserve and dispatched; `false` if it was a deduped no-op OR a
+   *   bounded make-up skip.
    */
   async #fire(
     descriptor: TriggerDescriptor & { kind: 'cron'; schedule: string },
     instant: Date,
+    opts?: { fromSchedule?: boolean },
   ): Promise<boolean> {
     const { db, tenantId } = this.#deps;
     const key = firingKey(descriptor.name, instant);
@@ -365,7 +470,10 @@ export class DbosCronScheduler {
     // ── Reserve the firing marker BEFORE dispatch (the idempotency / exactly-once-cap guard) ──────
     // A single INSERT..ON CONFLICT DO NOTHING RETURNING over UNIQUE(tenant, scope, idem_key). The
     // FIRST fire of this (trigger, instant) wins → it dispatches; a duplicate (second ticker / a
-    // fireNow racing the scheduler / a body crash-replay) LOSES → no-op (at-MOST-once-per-instant).
+    // fireNow racing the scheduler / a body crash-replay / a catch-up make-up replay of an
+    // ALREADY-fired slot) LOSES → no-op (at-MOST-once-per-instant). This is the SAME reserve the
+    // catch-up replay reuses, so a slot that already fired while the app was active is a no-op on the
+    // startup make-up sweep (an active-and-firing deployment is unaffected).
     // NOTE (the at-MOST-once caveat): the reserve commits HERE, before the dispatch below, and is not
     // a durable step — so a crash/throw between this commit and the dispatch completing DROPS this
     // occurrence (recovery re-runs the body, loses this committed reserve, skips the dispatch). This is
@@ -384,6 +492,19 @@ export class DbosCronScheduler {
     if (reserved.length === 0) {
       // Already fired for this instant ⇒ deduped no-op (the whole point of the idempotency guard).
       return false;
+    }
+
+    // ── Bounded catch-up look-back (a make-up replay of a stale missed interval) ───────────────────
+    // Only a SCHEDULED fire of a CATCH-UP trigger is bounded. DBOS's ExactlyOncePerInterval replay calls
+    // this body once per interval missed while the app was down; a replayed interval OLDER than the
+    // look-back window is RESERVED above (consumed — a later replay is a deduped no-op) but NOT
+    // dispatched, so an outage never fans out unbounded stale history. An ACTIVE fire (instant ≈ now) is
+    // within the window and dispatches; a non-catch-up trigger and an explicit `fireNow` never reach here.
+    if (opts?.fromSchedule === true && descriptor.catchUp === true) {
+      const ageMs = Date.now() - instant.getTime();
+      if (ageMs > this.#catchUpLookbackMs) {
+        return false;
+      }
     }
 
     // ── Dispatch by action kind (the worker drives BOTH) ──────────────────────────────────────────
