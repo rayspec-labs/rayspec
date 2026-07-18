@@ -80,6 +80,7 @@ import {
 import {
   type BlobStoreFactory,
   type DurableExecutor,
+  type DurableExecutorIdentity,
   ExtensionLoadError,
   type FsSourceFactory,
   invokeTriggerHandler,
@@ -100,6 +101,7 @@ import {
 import type { SttAdapter } from '@rayspec/stt-port';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
+import type { Env, Hono } from 'hono';
 import { exportJWK, importPKCS8 } from 'jose';
 import { stringify as stringifyYaml } from 'yaml';
 import { deployProductYamlSpec, makeSchemaProbe, planUpdateBoot } from './product-boot.js';
@@ -116,6 +118,63 @@ export const DEFAULT_PORT = 8080;
  * choice made only once the external-exposure hardening gate is met — never the silent default.
  */
 export const DEFAULT_HOST = '127.0.0.1';
+
+/** The path of the live-executor-identity readiness probe (registered PUBLIC, exactly like /health). */
+export const RECOVERY_SCOPE_PATH = '/recovery-scope';
+
+/** The computed outcome of the live-executor-identity probe. */
+export interface RecoveryScopeOutcome {
+  /** True ONLY when a durable executor is wired AND both identity fields are present as non-empty
+   *  strings. Gates the 200-vs-503 status: a false `ready` fails closed. */
+  readonly ready: boolean;
+  /** The identity payload — ONLY the two camelCase fields, echoed as-observed even when not ready. */
+  readonly body: DurableExecutorIdentity;
+}
+
+/**
+ * Compute the live-executor-identity probe outcome from an identity accessor. FAIL-CLOSED by design:
+ * `ready` is true ONLY when a durable executor is wired (`identity` is defined) AND both fields come
+ * back as NON-EMPTY strings. Any incomplete state — no durable worker wired, or the engine not yet
+ * launched (its `applicationVersion` is empty until launch) — yields `ready:false`, so a consumer that
+ * requires "both fields present + non-empty string, else fail-closed" is correctly served. The body
+ * carries ONLY the two identity fields (never secret / connection / environment material).
+ */
+export function recoveryScopeResponse(
+  identity: (() => DurableExecutorIdentity) | undefined,
+): RecoveryScopeOutcome {
+  const observed = identity?.() ?? { executorId: '', applicationVersion: '' };
+  const ready =
+    typeof observed.executorId === 'string' &&
+    observed.executorId.length > 0 &&
+    typeof observed.applicationVersion === 'string' &&
+    observed.applicationVersion.length > 0;
+  return {
+    ready,
+    // Re-project to EXACTLY the two identity fields — never spread `observed` (no stray field can leak).
+    body: { executorId: observed.executorId, applicationVersion: observed.applicationVersion },
+  };
+}
+
+/**
+ * Register the live-executor-identity readiness probe on the assembled app. It is PUBLIC (no auth —
+ * the same posture as /health) and product-free: it reports the LIVE durable executor identity (the
+ * executor id + the application version the running engine is serving). An operator/automation reads
+ * it to learn which executor version is live before a version-changing blue/green redeploy — a
+ * freshly-booted process holds no workflow rows and /health reports only DB reachability, so the live
+ * identity is only readable from the running engine here. FAIL-CLOSED: a ready 200 requires a wired
+ * executor AND both fields non-empty; any incomplete state returns 503, so a consumer requiring
+ * "both fields non-empty else fail-closed" is served (a status-only reader also fails closed on the 503).
+ * `identity` is undefined for a boot with no durable worker (auth-only / no-worker) → always 503.
+ */
+export function registerRecoveryScopeRoute<E extends Env>(
+  app: Hono<E>,
+  identity: (() => DurableExecutorIdentity) | undefined,
+): void {
+  app.get(RECOVERY_SCOPE_PATH, (c) => {
+    const { ready, body } = recoveryScopeResponse(identity);
+    return ready ? c.json(body, 200) : c.json(body, 503);
+  });
+}
 
 /** A built app + the metadata the entrypoint logs in its boot banner. */
 export interface BootedServer {
@@ -822,6 +881,9 @@ export async function assembleServer(
   let drift: BootedServer['drift'] = [];
   // A durable-worker shutdown hook to drain DBOS on close() (undefined when none wired).
   let durableExecutorShutdown: (() => Promise<void>) | undefined;
+  // A read of the LIVE durable executor identity for the /recovery-scope probe (undefined when no
+  // durable worker is wired — the probe then fail-closes 503).
+  let durableExecutorIdentity: (() => DurableExecutorIdentity) | undefined;
   // Control seam: the on-demand cron-fire delegate (undefined for an auth-only / no-cron boot).
   let fireCronNow: BootedServer['fireCronNow'];
   // M1 control seam: the on-demand cleanup delegate (undefined for an auth-only / no durable-worker boot).
@@ -867,6 +929,7 @@ export async function assembleServer(
     // deployProductYamlSpec before returning). Mount/materialize stays [] — byte-identical observable.
     drift = deployed.drift;
     durableExecutorShutdown = deployed.durableExecutorShutdown;
+    durableExecutorIdentity = deployed.durableExecutorIdentity;
     eraseTenantNow = deployed.eraseTenantNow;
   } else if (config.specPath) {
     // 6b. A classic rayspec.yaml → run the REAL deploy() GitOps pipeline (validate → diff → lint/gate
@@ -884,6 +947,7 @@ export async function assembleServer(
     deployMode = deployed.deployMode;
     drift = deployed.drift;
     durableExecutorShutdown = deployed.durableExecutorShutdown;
+    durableExecutorIdentity = deployed.durableExecutorIdentity;
     fireCronNow = deployed.fireCronNow;
     runCleanupNow = deployed.runCleanupNow;
     eraseTenantNow = deployed.eraseTenantNow;
@@ -903,6 +967,12 @@ export async function assembleServer(
       return c.json({ status: 'degraded', db: 'unreachable' }, 503);
     }
   });
+
+  // 7b. The live-executor-identity readiness probe — registered right beside /health (same PUBLIC,
+  //     product-free posture, before the static catch-all). It reports the LIVE durable executor
+  //     identity ({ executorId, applicationVersion }); a boot with no durable worker (no accessor
+  //     wired) fail-closes 503.
+  registerRecoveryScopeRoute(app, durableExecutorIdentity);
 
   // 8. Mount the deployed spec's declared static frontend(s) — registered LAST (after every
   //    API/auth/OIDC route + /health) so a static miss never shadows an API path: Hono runs matching
@@ -1119,6 +1189,8 @@ async function deployDeclaredSpec(
   drift: BootedServer['drift'];
   /** Shut down the durable worker on close() (undefined when none was wired). */
   durableExecutorShutdown?: () => Promise<void>;
+  /** Read the LIVE durable executor identity for /recovery-scope (undefined when none was wired). */
+  durableExecutorIdentity?: () => DurableExecutorIdentity;
   /** Control seam: the on-demand cron-fire delegate (undefined when no cron is scheduled). */
   fireCronNow?: BootedServer['fireCronNow'];
   /** M1 control seam: the on-demand cleanup delegate (undefined when no durable worker is wired). */
@@ -1379,6 +1451,9 @@ async function deployDeclaredSpec(
   //    the run surface uses — built from the engine captured when deploy() calls buildApp (below).
   let durableExecutor: DurableExecutor | undefined;
   let durableExecutorShutdown: (() => Promise<void>) | undefined;
+  // Read the LIVE executor identity for /recovery-scope (bound alongside the shutdown hook when the
+  // durable worker is wired; undefined otherwise → the probe fail-closes 503).
+  let durableExecutorIdentity: (() => DurableExecutorIdentity) | undefined;
   // The concrete executor + its dedicated worker DB pool, captured at the OUTER scope so
   // the cron scheduler (wired AFTER deploy() yields the trigger registry, BEFORE launch) can enqueue
   // agent runs onto the same executor + run its tenant-scoped reserve/handler dispatch off the SAME
@@ -1490,6 +1565,8 @@ async function deployDeclaredSpec(
       await executor.shutdown();
       await workerDb.$client.end();
     };
+    // The /recovery-scope probe reads the LIVE executor identity off this same wired executor.
+    durableExecutorIdentity = () => executor.identity();
     pendingExecutorStart = () => executor.start();
   }
 
@@ -1781,6 +1858,7 @@ async function deployDeclaredSpec(
     // Report-only drift (empty here — a non-empty UPDATE-mode drift already threw above).
     drift: result.drift,
     ...(durableExecutorShutdown ? { durableExecutorShutdown } : {}),
+    ...(durableExecutorIdentity ? { durableExecutorIdentity } : {}),
     ...(fireCronNow ? { fireCronNow } : {}),
     ...(runCleanupNow ? { runCleanupNow } : {}),
     ...(eraseTenantNow ? { eraseTenantNow } : {}),

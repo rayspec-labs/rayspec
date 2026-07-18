@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { makeDbWithSchema } from '@rayspec/db/testing';
 import {
   type DurableExecutor,
+  type DurableExecutorIdentity,
   type EnqueueResult,
   invokeTriggerHandler,
   type RunJob,
@@ -70,6 +71,9 @@ class CapturingExecutor implements DurableExecutor {
   }
   async start(): Promise<void> {}
   async shutdown(): Promise<void> {}
+  identity(): DurableExecutorIdentity {
+    return { executorId: 'stub-executor', applicationVersion: 'stub-version' };
+  }
 }
 
 /** A cron→agent descriptor whose action declares an output-persist store. */

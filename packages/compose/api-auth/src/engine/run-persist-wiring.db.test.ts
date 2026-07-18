@@ -17,7 +17,12 @@
  * Skips without DATABASE_URL; the un-skippable ran-guard hard-fails a REQUIRED run.
  */
 import type { AgentSpec, Backend, RunContext, RunResult } from '@rayspec/core';
-import type { DurableExecutor, EnqueueResult, RunJob } from '@rayspec/platform';
+import type {
+  DurableExecutor,
+  DurableExecutorIdentity,
+  EnqueueResult,
+  RunJob,
+} from '@rayspec/platform';
 import type { RaySpec } from '@rayspec/spec';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentRegistry, AgentRegistryEntry } from '../app-context.js';
@@ -138,6 +143,9 @@ class CapturingExecutor implements DurableExecutor {
   }
   async start(): Promise<void> {}
   async shutdown(): Promise<void> {}
+  identity(): DurableExecutorIdentity {
+    return { executorId: 'stub-executor', applicationVersion: 'stub-version' };
+  }
 }
 
 describe.skipIf(!hasDb)(

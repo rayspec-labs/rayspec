@@ -21,7 +21,12 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type Db, TENANT_GUC } from '@rayspec/db';
-import type { DurableExecutor, EnqueueResult, RunJob } from '@rayspec/platform';
+import type {
+  DurableExecutor,
+  DurableExecutorIdentity,
+  EnqueueResult,
+  RunJob,
+} from '@rayspec/platform';
 import { parseSpec, type RaySpec } from '@rayspec/spec';
 import { sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -93,6 +98,9 @@ class StubExecutor implements DurableExecutor {
   }
   async start(): Promise<void> {}
   async shutdown(): Promise<void> {}
+  identity(): DurableExecutorIdentity {
+    return { executorId: 'stub-executor', applicationVersion: 'stub-version' };
+  }
 }
 
 let h: Harness;

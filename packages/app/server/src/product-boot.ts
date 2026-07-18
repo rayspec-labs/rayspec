@@ -72,7 +72,7 @@ import {
   scanMigrationSql,
 } from '@rayspec/db';
 import { DbosDurableExecutor, DbosWorkflowExecutor, type ResolvedRun } from '@rayspec/durable-dbos';
-import type { BlobStoreFactory, FsSourceFactory } from '@rayspec/platform';
+import type { BlobStoreFactory, DurableExecutorIdentity, FsSourceFactory } from '@rayspec/platform';
 import {
   makeFsBlobStoreFactory,
   makeFsSourceFactory,
@@ -140,6 +140,8 @@ export interface DeployedProductBoot {
    */
   drift: BootedServer['drift'];
   durableExecutorShutdown?: () => Promise<void>;
+  /** Read the LIVE durable executor identity for /recovery-scope (undefined when none was wired). */
+  durableExecutorIdentity?: () => DurableExecutorIdentity;
   eraseTenantNow?: BootedServer['eraseTenantNow'];
 }
 
@@ -2371,6 +2373,8 @@ export async function deployProductYamlSpec(
   const durableExecutorShutdown = async (): Promise<void> => {
     await executor.shutdown();
   };
+  // The /recovery-scope probe reads the LIVE executor identity off this same launched executor.
+  const durableExecutorIdentity = (): DurableExecutorIdentity => executor.identity();
 
   const eraseTenantNow: BootedServer['eraseTenantNow'] = (
     targetTenant: string,
@@ -2415,6 +2419,7 @@ export async function deployProductYamlSpec(
     // a residual UPDATE drift threw the fail-closed gate above and never reaches here).
     drift: result.drift,
     durableExecutorShutdown,
+    durableExecutorIdentity,
     eraseTenantNow,
   };
 }

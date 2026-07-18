@@ -62,6 +62,7 @@ export {
 // these neutral types carry NO engine reference (the asymmetry is absorbed inside the adapter).
 export type {
   DurableExecutor,
+  DurableExecutorIdentity,
   DurableJobStatus,
   EnqueueResult,
   RunJob,
