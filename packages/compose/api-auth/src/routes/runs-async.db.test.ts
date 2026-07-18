@@ -14,7 +14,12 @@
  *    slot (the async-vs-sync retry does NOT split the idempotency reservation).
  */
 import type { NeutralTool } from '@rayspec/core';
-import type { DurableExecutor, EnqueueResult, RunJob } from '@rayspec/platform';
+import type {
+  DurableExecutor,
+  DurableExecutorIdentity,
+  EnqueueResult,
+  RunJob,
+} from '@rayspec/platform';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentRegistry, AgentRegistryEntry } from '../app-context.js';
 import { FakeRunBackend } from '../test-support/fake-backend.js';
@@ -91,6 +96,9 @@ class StubExecutor implements DurableExecutor {
   }
   async start(): Promise<void> {}
   async shutdown(): Promise<void> {}
+  identity(): DurableExecutorIdentity {
+    return { executorId: 'stub-executor', applicationVersion: 'stub-version' };
+  }
 }
 
 let h: Harness;

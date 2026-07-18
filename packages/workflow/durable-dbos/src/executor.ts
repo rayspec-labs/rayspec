@@ -56,7 +56,13 @@ import { DBOS, StatusString } from '@dbos-inc/dbos-sdk';
 import type { AgentSpec, Backend, NeutralTool } from '@rayspec/core';
 import type { Db } from '@rayspec/db';
 import { forTenant, schema, type TenantDb } from '@rayspec/db';
-import type { DurableExecutor, DurableJobStatus, EnqueueResult, RunJob } from '@rayspec/platform';
+import type {
+  DurableExecutor,
+  DurableExecutorIdentity,
+  DurableJobStatus,
+  EnqueueResult,
+  RunJob,
+} from '@rayspec/platform';
 import { isRunTainted, runAgent } from '@rayspec/platform';
 import { eq } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
@@ -518,5 +524,16 @@ export class DbosDurableExecutor implements DurableExecutor {
     // clears the process-global workflow registry so a fresh executor can re-register in the same process.
     await DBOS.shutdown(this.#config.deregisterOnShutdown ? { deregister: true } : undefined);
     this.#started = false;
+  }
+
+  /**
+   * The LIVE executor identity, read straight off the DBOS global singleton. `DBOS.executorID` defaults
+   * to a short constant even before launch, but `DBOS.applicationVersion` is EMPTY until `DBOS.launch()`
+   * sets or computes it — so a not-yet-launched engine reports an empty `applicationVersion`, which the
+   * readiness probe treats as fail-closed. camelCase (`executorId` / `applicationVersion`) mirrors the
+   * DBOS/JS convention. Returns ONLY these two identity fields — no secret / connection material.
+   */
+  identity(): DurableExecutorIdentity {
+    return { executorId: DBOS.executorID, applicationVersion: DBOS.applicationVersion };
   }
 }

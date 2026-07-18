@@ -309,4 +309,23 @@ describe('durable-worker boot — real composition root wires + runs an async of
     },
     90_000,
   );
+
+  maybe(
+    'GET /recovery-scope on the LAUNCHED worker → 200 { executorId, applicationVersion } both non-empty',
+    async () => {
+      // The live-executor-identity readiness probe: PUBLIC (no auth, like /health). The composition
+      // root wired it off the SAME durable executor this suite launched, so a booted+launched engine
+      // reports a FULLY PRESENT identity (both fields non-empty strings) → 200.
+      const res = await server!.app.request('/recovery-scope');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { executorId: unknown; applicationVersion: unknown };
+      expect(typeof body.executorId).toBe('string');
+      expect((body.executorId as string).length).toBeGreaterThan(0);
+      expect(typeof body.applicationVersion).toBe('string');
+      expect((body.applicationVersion as string).length).toBeGreaterThan(0);
+      // The payload is EXACTLY the two identity fields — no secret / connection / env leak.
+      expect(Object.keys(body).sort()).toEqual(['applicationVersion', 'executorId']);
+    },
+    30_000,
+  );
 });

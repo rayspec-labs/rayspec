@@ -69,6 +69,27 @@ export interface EnqueueResult {
 }
 
 /**
+ * The LIVE identity of a running durable executor — the executor id and the application version it is
+ * serving. Read from the running engine and ONLY meaningful once the engine has launched: a
+ * not-yet-launched engine reports an INCOMPLETE identity (an empty `applicationVersion`), which a
+ * readiness probe treats as fail-closed (not ready). Carries ONLY these two identity fields — never
+ * secret / connection / environment material. camelCase matches the JS convention.
+ */
+export interface DurableExecutorIdentity {
+  /**
+   * The live executor id — a running engine's executor label (a single-node engine's default is a
+   * short constant). Non-empty on a launched engine.
+   */
+  readonly executorId: string;
+  /**
+   * The application version the live executor is serving — a configured version string, else an
+   * engine-computed identifier. EMPTY until the engine has launched; that emptiness is the readiness
+   * signal a probe fail-closes on.
+   */
+  readonly applicationVersion: string;
+}
+
+/**
  * The neutral durable-execution engine. ONE method to enqueue an off-request run, ONE to read its
  * status, plus lifecycle. An implementation (the DBOS adapter) runs the EXISTING `runAgent`
  * off-request inside `forTenant(db, tenantId).transaction()` — it adds NO new persistence/streaming
@@ -94,4 +115,11 @@ export interface DurableExecutor {
   start(): Promise<void>;
   /** Drain + stop the engine (graceful shutdown). */
   shutdown(): Promise<void>;
+  /**
+   * The LIVE executor identity (executor id + application version), read from the running engine. Only
+   * meaningful AFTER `start()`: a not-yet-launched engine reports an empty `applicationVersion`, which a
+   * readiness probe reads as fail-closed (not ready). Synchronous — it reads the engine's already-live
+   * identity, never any secret/connection material.
+   */
+  identity(): DurableExecutorIdentity;
 }

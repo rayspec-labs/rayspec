@@ -20,7 +20,13 @@
  * Skips when DATABASE_URL is absent.
  */
 import type { NeutralTool } from '@rayspec/core';
-import type { DurableExecutor, EnqueueResult, ResolvedHandler, RunJob } from '@rayspec/platform';
+import type {
+  DurableExecutor,
+  DurableExecutorIdentity,
+  EnqueueResult,
+  ResolvedHandler,
+  RunJob,
+} from '@rayspec/platform';
 import { parseSpec, type RaySpec } from '@rayspec/spec';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentRegistry, AgentRegistryEntry } from '../app-context.js';
@@ -54,6 +60,9 @@ class StubExecutor implements DurableExecutor {
   }
   async start(): Promise<void> {}
   async shutdown(): Promise<void> {}
+  identity(): DurableExecutorIdentity {
+    return { executorId: 'stub-executor', applicationVersion: 'stub-version' };
+  }
 }
 
 /** A deterministic no-tool agent the enqueue resolves against (registry-bound). */
