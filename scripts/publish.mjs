@@ -91,8 +91,14 @@ function allManifestPaths() {
     .map((p) => join(REPO_ROOT, p));
 }
 
-/** Load {name -> {path, json}} for every @rayspec/* workspace package. */
+/**
+ * Load {name -> {path, json}} for every publishable workspace package: the scoped `@rayspec/*`
+ * packages PLUS the unscoped `rayspec` launcher (the bare `npx rayspec` entrypoint). The repo-root
+ * workspace manifest is ALSO named `rayspec`, so it is explicitly excluded — only the member package
+ * under `packages/` is a publish target.
+ */
 function loadRayspecPackages() {
+  const rootManifest = join(REPO_ROOT, 'package.json');
   const map = new Map();
   for (const path of allManifestPaths()) {
     let json;
@@ -101,7 +107,9 @@ function loadRayspecPackages() {
     } catch {
       continue;
     }
-    if (typeof json.name === 'string' && json.name.startsWith('@rayspec/')) {
+    const isScoped = typeof json.name === 'string' && json.name.startsWith('@rayspec/');
+    const isLauncher = json.name === 'rayspec' && path !== rootManifest;
+    if (isScoped || isLauncher) {
       map.set(json.name, { path, json });
     }
   }
@@ -109,13 +117,14 @@ function loadRayspecPackages() {
 }
 
 /**
- * The publish set = the runtime closure of the two bin packages (`@rayspec/cli` + `@rayspec/server`)
- * over PRODUCTION `dependencies` only. Excludes dev/test-only packages (e.g. `@rayspec/parity`) and the
- * `@spike/*` / example fixtures (they are not `@rayspec/*`). Derived — not hardcoded — so it stays
- * correct as the graph evolves.
+ * The publish set = the runtime closure of the bin packages — the unscoped `rayspec` launcher plus
+ * `@rayspec/cli` + `@rayspec/server` — over PRODUCTION `dependencies` only. The launcher's only
+ * dependency is `@rayspec/cli`, so it pulls in the same closure. Excludes dev/test-only packages
+ * (e.g. `@rayspec/parity`) and the `@spike/*` / example fixtures (they are not publish targets).
+ * Derived — not hardcoded — so it stays correct as the graph evolves.
  */
 function computePublishSet(pkgs) {
-  const roots = ['@rayspec/cli', '@rayspec/server'];
+  const roots = ['rayspec', '@rayspec/cli', '@rayspec/server'];
   const seen = new Set();
   const stack = [...roots];
   while (stack.length) {
