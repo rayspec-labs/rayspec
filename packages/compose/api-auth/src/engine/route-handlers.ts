@@ -180,6 +180,11 @@ export function makeRouteHandler(args: {
   mediaTokenService?: MediaTokenService;
 }): (c: Context<AppEnv>) => Promise<Response> {
   const { handler, productTables, deps, mediaTokenService } = args;
+  // the READ-ONLY, path-jailed fs-source factory the deployment wired onto the engine
+  // (`RAYSPEC_FS_SOURCE_ROOT`). When present, a `{handler}` route receives `init.fsSource` — the same
+  // shared, deployment-static read root the tool arm gets. Absent ⇒ `init.fsSource` is omitted (a
+  // handler that reads it fail-closes loudly on `undefined`). Read once at registration.
+  const fsSourceFactory = deps.engine?.fsSourceFactory;
   if (handler.kind !== 'route') {
     // Guarded again at registration; narrows the ResolvedHandler union so `handler.fn` is a RouteHandler.
     throw new Error(`makeRouteHandler: expected a 'route' handler, got '${handler.kind}'.`);
@@ -250,6 +255,9 @@ export function makeRouteHandler(args: {
       collectHeaders(c),
       // the server-derived caller identity → the handler facade stamps `created_by` un-spoofably.
       createdByActor,
+      // the READ-ONLY, path-jailed fs-source factory (shared deployment-static root). Absent ⇒
+      // init.fsSource is omitted (a handler that needs it fail-closes loudly on `undefined`).
+      fsSourceFactory,
     );
     // a BRANDED enriched return chooses the status + headers; a plain return keeps the
     // existing behavior (HTTP 200 + that value as the JSON body). The brand check is unambiguous — a

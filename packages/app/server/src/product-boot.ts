@@ -72,8 +72,13 @@ import {
   scanMigrationSql,
 } from '@rayspec/db';
 import { DbosDurableExecutor, DbosWorkflowExecutor, type ResolvedRun } from '@rayspec/durable-dbos';
-import type { BlobStoreFactory } from '@rayspec/platform';
-import { makeFsBlobStoreFactory, makeHandlerDb, type RunJob } from '@rayspec/platform';
+import type { BlobStoreFactory, FsSourceFactory } from '@rayspec/platform';
+import {
+  makeFsBlobStoreFactory,
+  makeFsSourceFactory,
+  makeHandlerDb,
+  type RunJob,
+} from '@rayspec/platform';
 import {
   type ComposedProductDeploy,
   composeCapabilityStores,
@@ -2053,6 +2058,13 @@ export async function deployProductYamlSpec(
     }
     blobFactory = makeFsBlobStoreFactory(config.blobRoot);
   }
+  // The READ-ONLY fs-source (`init.fsSource`) — purely deploy-config-gated (no capability KIND demands
+  // it, unlike the blob byte-movers above): build the factory when RAYSPEC_FS_SOURCE_ROOT is configured,
+  // else leave it undefined (`init.fsSource` absent; a handler that needs it fail-closes loudly).
+  // `makeFsSourceFactory` fail-closes at build if the root is missing / not a directory.
+  const fsSourceFactory: FsSourceFactory | undefined = config.fsSourceRoot
+    ? makeFsSourceFactory(config.fsSourceRoot)
+    : undefined;
   if (withAudio) {
     if (!config.mediaSigningKey) {
       throw new ProductBootError(
@@ -2306,6 +2318,9 @@ export async function deployProductYamlSpec(
           // we add it HERE, in the deployer-owned buildApp seam, so the frozen surface stays untouched.
           conflictKeys,
           ...(blobFactory ? { blobFactory } : {}),
+          // the READ-ONLY fs-source (when a root is configured) so a tool/route handler's
+          // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.
+          ...(fsSourceFactory ? { fsSourceFactory } : {}),
           ...(mediaTokenService ? { mediaTokenService } : {}),
         };
         return createAuthApp({

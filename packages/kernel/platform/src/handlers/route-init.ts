@@ -20,6 +20,7 @@ import type { TenantDb } from '@rayspec/db';
 import {
   type BlobStoreFactory,
   type EnqueueAgentRun,
+  type FsSourceFactory,
   HTTP_RESPONSE_BRAND,
   type RouteHandler,
   type RouteHandlerInit,
@@ -97,6 +98,10 @@ export async function invokeRouteHandler(
   // OPTIONAL server-derived caller identity (`user:<userId>` / `key:<apiKeyId>`), threaded so the
   // handler's store facade stamps `created_by` un-spoofably on inserts. Absent ⇒ no stamp.
   createdByActor?: string,
+  // An OPTIONAL READ-ONLY, path-jailed fs-source factory. When wired, adds `init.fsSource` (built via
+  // `fsSourceFactory()` — no tenant arg; a shared, deployment-static read root). Absent ⇒ init.fsSource
+  // is omitted (no source root configured; a handler that needs it fail-closes loudly on `undefined`).
+  fsSourceFactory?: FsSourceFactory,
 ): Promise<unknown> {
   return tdb.transaction(async (txTdb) => {
     const init = buildRouteHandlerInit(
@@ -109,6 +114,7 @@ export async function invokeRouteHandler(
       body,
       headers,
       createdByActor,
+      fsSourceFactory,
     );
     return getHandlerRuntime().invokeRoute(fn, init);
   });
@@ -134,6 +140,8 @@ function buildRouteHandlerInit(
   // the handler's store facade stamps `created_by` un-spoofably on inserts (both route postures share
   // this builder, so both stamp identically). Absent ⇒ no stamp (byte-identical to before).
   createdByActor?: string,
+  // The READ-ONLY, path-jailed fs-source factory (shared deployment-static root). Absent ⇒ init.fsSource omitted.
+  fsSourceFactory?: FsSourceFactory,
 ): RouteHandlerInit {
   return {
     tenantId: boundTdb.tenantId,
@@ -141,6 +149,9 @@ function buildRouteHandlerInit(
     // The tenant-bound blob handle, built from the run's server-derived tenant. Spread so the
     // field is ABSENT (not `undefined`) when no factory is injected — keeping the init shape exact.
     ...(blobFactory ? { blob: blobFactory(boundTdb.tenantId) } : {}),
+    // The READ-ONLY, path-jailed fs-source handle (no tenant arg — a shared deployment-static read root).
+    // Spread so ABSENT when no source root is configured — keeping the init shape exact.
+    ...(fsSourceFactory ? { fsSource: fsSourceFactory() } : {}),
     // The play-token mint capability (spread so ABSENT when no media key is wired).
     ...(mintPlayToken ? { mintPlayToken } : {}),
     // The tenant-bound durable-enqueue capability (spread so ABSENT when no worker is wired).
@@ -189,6 +200,9 @@ export async function invokeRouteHandlerDetached(
   // OPTIONAL server-derived caller identity — see invokeRouteHandler. Threaded identically so the
   // handler-managed posture stamps `created_by` the same way the engine-tx posture does.
   createdByActor?: string,
+  // OPTIONAL READ-ONLY fs-source factory — see invokeRouteHandler. Threaded identically so the
+  // handler-managed posture receives `init.fsSource` the same way the engine-tx posture does.
+  fsSourceFactory?: FsSourceFactory,
 ): Promise<unknown> {
   const init = buildRouteHandlerInit(
     tdb,
@@ -200,6 +214,7 @@ export async function invokeRouteHandlerDetached(
     body,
     headers,
     createdByActor,
+    fsSourceFactory,
   );
   return getHandlerRuntime().invokeRoute(fn, init);
 }

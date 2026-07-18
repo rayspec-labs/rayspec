@@ -60,6 +60,23 @@ export type {
 
 import type { BlobStore } from './blob.js';
 
+// The neutral, READ-ONLY, path-jailed `FsSource` capability contract — the injected handle a handler
+// may receive to LIST/READ/SEARCH deployment-static local files under a jailed root (interface only,
+// impl injected at the composition root). Re-exported here so a handler imports every capability shape
+// from the one SDK package.
+export type {
+  FsSource,
+  FsSourceEntry,
+  FsSourceFactory,
+  FsSourceMatch,
+  FsSourceNotFound,
+  FsSourceReadOptions,
+  FsSourceReadResult,
+  FsSourceSearchOptions,
+} from './fs-source.js';
+
+import type { FsSource } from './fs-source.js';
+
 // ---------------------------------------------------------------------------------------
 // The store capability facade — a SERIALIZABLE-shaped, NAME-keyed, tenant-bound DB surface.
 // ---------------------------------------------------------------------------------------
@@ -264,6 +281,18 @@ export interface HandlerInit {
    * preserving the external-exposure isolate seam.
    */
   readonly blob?: BlobStore;
+  /**
+   * The READ-ONLY, path-jailed `FsSource` capability — LIST/READ/SEARCH over a
+   * DEPLOYER-configured local root (reference material, templates, a static content directory). OPTIONAL:
+   * present only when the deployment configured a source root at the composition root (an unset root ⇒
+   * absent), so a handler that needs it fail-closes loudly on `undefined` rather than the engine forcing
+   * a root onto every deployment (mirrors `blob`). There is NO write surface — read-only is structural
+   * (the interface exposes no mutating method). Every path is JAILED strictly under the root (a `..` /
+   * absolute / symlink escape is refused fail-closed — never foreign bytes). It is a SERIALIZABLE-shaped
+   * handle (string paths + bytes), preserving the external-exposure isolate seam. NOT tenant-partitioned
+   * (a shared, deployment-static read root — see `FsSource`).
+   */
+  readonly fsSource?: FsSource;
 }
 
 /**

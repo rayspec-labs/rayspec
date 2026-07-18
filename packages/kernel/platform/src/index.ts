@@ -7,6 +7,10 @@
 // platform consumer (the api-auth declarative engine) can type its blob-injection seam
 // against ONE package (@rayspec/platform) without adding a direct @rayspec/handler-sdk dep. These
 // are TYPE-ONLY re-exports — the impl (the fs backend) is the value export above.
+// Re-export the neutral READ-ONLY fs-source CONTRACT types (defined open-core in
+// @rayspec/handler-sdk) so a platform consumer (the api-auth declarative engine) can type its
+// fs-source-injection seam against ONE package (@rayspec/platform) without adding a direct
+// @rayspec/handler-sdk dep. TYPE-ONLY re-exports — the impl (the fs backend) is the value export below.
 export type {
   BlobNotFound,
   BlobPutOpts,
@@ -15,6 +19,14 @@ export type {
   BlobStat,
   BlobStore,
   BlobStoreFactory,
+  FsSource,
+  FsSourceEntry,
+  FsSourceFactory,
+  FsSourceMatch,
+  FsSourceNotFound,
+  FsSourceReadOptions,
+  FsSourceReadResult,
+  FsSourceSearchOptions,
   // The OPT-IN enriched `{handler}` route response envelope (handler-chosen status +
   // headers). Re-exported here so the api-auth route interpreter types + detects it against the one
   // @rayspec/platform package (the value guards are the value re-export just below).
@@ -79,6 +91,16 @@ export {
   type LoadedExtensions,
   loadExtensions,
 } from './extensions/index.js';
+// The fs-backed READ-ONLY, path-jailed `FsSource` impl + composition-root factory (the path jail is the
+// ENTIRE containment; a symlink/traversal/absolute escape is refused fail-closed — never foreign bytes).
+export {
+  DEFAULT_MAX_READ_BYTES,
+  DEFAULT_MAX_SEARCH_RESULTS,
+  FsSourceConfigError,
+  FsSourceError,
+  FsSourceJailError,
+  makeFsSourceFactory,
+} from './fs-source/index.js';
 // The escape-hatch handler execution model (Option A): path-jailed loader, the
 // single swappable HandlerRuntime indirection, the serializable-shaped HandlerDb facade over the
 // real TenantDb chokepoint, the declared-tooling NeutralTool factory, and the route/trigger
