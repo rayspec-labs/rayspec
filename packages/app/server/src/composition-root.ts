@@ -708,6 +708,14 @@ export async function assembleServer(
     /** A deployment-supplied STT adapter for a Product-YAML boot (dev/CI — else STT_PROVIDER). */
     productSttAdapter?: SttAdapter;
     /**
+     * DEV/TEST ONLY — the module importer used to load extension-pack modules (and, through them, pack
+     * handlers). Defaults to the production compiled-JavaScript-only importer, which fail-closed-rejects
+     * a TypeScript-source module. A dev/test caller may inject `typeStrippingImporter` to load an
+     * UN-BUILT `.ts` pack straight from source. The production entrypoint (`serve.ts`) never sets this,
+     * so a production boot always uses the guarded default — a production boot never loads a `.ts` pack.
+     */
+    moduleImporter?: ModuleImporter;
+    /**
      * The UPDATE flow: reviewed forward DELTA migration(s) to apply to an EXISTING
      * (the backend-profile RaySpec) schema, each carrying its own reviewed destructive-statement
      * allowlist (empty for a purely-additive delta). When present, the materialize/mount/
@@ -843,6 +851,7 @@ export async function assembleServer(
       agentBackendsFactory: opts.agentBackendsFactory,
       registerProductTables: opts.registerProductTables,
       ...(opts.updateMigrations ? { updateMigrations: opts.updateMigrations } : {}),
+      ...(opts.moduleImporter ? { moduleImporter: opts.moduleImporter } : {}),
     });
     app = deployed.app;
     declaredRoutes = deployed.declaredRoutes;
@@ -930,18 +939,29 @@ interface MergedExtensions {
  *
  * `packsRoot` = the deployment's escape-hatch root (a pack referenced by a relative dir resolves under
  * it); a real pack in its own repo is referenced relative to that root or via an explicit packs root.
- * The pack's manifest entry file is `index.ts` (the directory-MVP convention).
+ * The pack's manifest entry is `index` (the directory-MVP convention); `loadExtensions` resolves it
+ * `.js`-preferred (a BUILT pack's compiled `index.js`, else the `index.ts` source). Production loads
+ * compiled JavaScript only — a source-only `.ts` pack is rejected fail-closed unless a dev/test caller
+ * injects the type-stripping importer (`moduleImporter`, never set in production).
  */
 async function mergeExtensions(
   baseSpec: RaySpec,
   baseSpecSource: string,
   packsRoot: string,
   specPath: string,
+  /** DEV/TEST ONLY — the pack module importer; undefined in production (the guarded default is used). */
+  moduleImporter?: ModuleImporter,
 ): Promise<MergedExtensions> {
-  // Absent / empty extensions ⇒ a true no-op (the original spec + source, no importer). This is the
-  // platform main line + every non-pack deployment — zero behavior change.
+  // Absent / empty extensions ⇒ a true no-op for production (the original spec + source, no importer;
+  // deploy() then loads deployment-own handlers with the guarded default importer). A dev/test caller may
+  // still inject `moduleImporter` (the type-stripping seam) to load un-built `.ts` DEPLOYMENT-own handlers
+  // — thread it as the deploy importer so it reaches `loadHandlers`. Production sets nothing → guarded default.
   if (baseSpec.extensions.length === 0) {
-    return { spec: baseSpec, specSource: baseSpecSource };
+    return {
+      spec: baseSpec,
+      specSource: baseSpecSource,
+      ...(moduleImporter ? { extensionImporter: moduleImporter } : {}),
+    };
   }
 
   let loaded: LoadedExtensions;
@@ -949,7 +969,9 @@ async function mergeExtensions(
     loaded = await loadExtensions(baseSpec.extensions, {
       packsRoot,
       deploymentRoot: packsRoot,
-      importer: undefined, // the real path-jailed dynamic import
+      // Production: undefined → the guarded compiled-JavaScript-only dynamic import (a `.ts` pack is
+      // rejected fail-closed). A dev/test caller may inject `typeStrippingImporter` to load un-built source.
+      importer: moduleImporter,
     });
   } catch (e) {
     if (e instanceof ExtensionLoadError) {
@@ -1056,6 +1078,9 @@ async function deployDeclaredSpec(
      * `deploy()` (which gates + applies them). See the `assembleServer` opts docstring.
      */
     updateMigrations?: PlannedMigration[];
+    /** DEV/TEST ONLY — the pack module importer (defaults to the guarded compiled-JavaScript-only
+     * importer; production never sets it). See the `assembleServer` opts docstring. */
+    moduleImporter?: ModuleImporter;
   },
 ): Promise<{
   app: ReturnType<typeof createAuthApp>;
@@ -1109,7 +1134,13 @@ async function deployDeclaredSpec(
     specSource: effectiveSpecSource,
     extensionImporter,
     packBlobFactory,
-  } = await mergeExtensions(parsed.value, specSource, escapeHatchRoot, specPath);
+  } = await mergeExtensions(
+    parsed.value,
+    specSource,
+    escapeHatchRoot,
+    specPath,
+    opts.moduleImporter,
+  );
 
   const specStores = [...effectiveSpec.stores];
   const productTables = buildProductTables(specStores);

@@ -445,17 +445,37 @@ convenience — it provisions a throwaway dev database and drives the redeploy/u
 flow — **not** a requirement for running agents.)
 
 **Custom handlers ship compiled.** A backend-profile document may also point at
-custom escape-hatch handler modules. The production serve runtime imports
-**compiled** modules, so deploying a backend document that references `.ts`
-handlers fails closed at roll-out:
+custom escape-hatch handler modules (and an extension pack is authored the same
+way). The production runtime loads them as **compiled JavaScript only**: it
+fail-closed-rejects a TypeScript-source module path at roll-out, deterministically —
+this does **not** depend on the Node version (some Node versions transparently
+type-strip `.ts` on import; production refuses to rely on that):
 
 ```
-handler '…': failed to import module 'handlers/….ts': Unknown file extension ".ts"
+handler '…': failed to import module 'handlers/….ts' (…): module '…/handlers/….ts' is
+TypeScript source ('.ts') — production loads compiled JavaScript only. Compile it to
+JavaScript first and deploy the built module …
 ```
 
-Compile such handlers to `.js`/`.mjs` before deploying — the deploy runtime ships
-no turnkey `.ts` loader. Use [`rayspec gen-handler`](./cli-reference.md#gen-handler)
-to scaffold a handler, and `doctor` to validate any spec before you deploy it.
+The fix is a build step: transpile the handlers to `.js` and deploy the compiled
+output. (The product profile above carries no code, so it needs no build — this
+applies only to a backend profile with custom handlers, or an extension pack.) The
+bundled examples ship one:
+
+```bash
+# A backend with custom .ts handlers: build -> dist/, then deploy the compiled artifact.
+node examples/acme-notes-backend/build.mjs
+$RAYSPEC deploy examples/acme-notes-backend/dist/rayspec.yaml
+
+# An extension pack authored in .ts: compile the pack, then deploy a spec that references it.
+node examples/stream-backend/build.mjs   # -> examples/stream-backend/packs/stream-pack/dist/
+```
+
+Each `build.mjs` is a thin `tsc` wrapper (see the example's `tsconfig.build.json`).
+Adapt it for your own backend, or run any equivalent transpile — the runtime only
+requires that every handler/pack module resolves to compiled `.js`/`.mjs`. Use
+[`rayspec gen-handler`](./cli-reference.md#gen-handler) to scaffold a handler, and
+`doctor` to validate any spec before you deploy it.
 
 For the security boundaries that apply before you expose any of this beyond a
 trusted local machine, read

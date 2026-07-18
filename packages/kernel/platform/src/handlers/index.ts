@@ -23,12 +23,14 @@ export {
   setHandlerRuntime,
 } from './handler-runtime.js';
 export {
+  assertCompiledJavaScriptModule,
   defaultImporter,
   HandlerLoadError,
   jailModulePath,
   loadHandlers,
   loadHandlersMultiRoot,
   type ModuleImporter,
+  typeStrippingImporter,
 } from './loader.js';
 export { buildToolFactory, type ToolFactory } from './resolve-tools.js';
 export {

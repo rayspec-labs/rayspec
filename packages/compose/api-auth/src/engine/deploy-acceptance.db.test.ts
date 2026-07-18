@@ -35,6 +35,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AgentSpec, Backend, BackendId, RunContext, RunResult } from '@rayspec/core';
 import { type Db, forTenant, generateProductSql, schema, TENANT_GUC } from '@rayspec/db';
+import { typeStrippingImporter } from '@rayspec/platform';
 import { parseSpec, type RaySpec } from '@rayspec/spec';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -189,6 +190,9 @@ describe.skipIf(!hasDb)('throwaway acceptance run (REAL deploy() end-to-end)', (
         escapeHatchRoot: ACME_DIR,
         agentBackends: backends,
         buildApp: h.buildApp,
+        // The throwaway backend ships un-built `.ts` example handlers; opt into the type-stripping
+        // importer seam (production loads compiled `.js` only — this is the single, explicit source seam).
+        importer: typeStrippingImporter,
       },
     });
     app = result.app;

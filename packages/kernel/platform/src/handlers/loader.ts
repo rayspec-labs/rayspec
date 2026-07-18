@@ -37,7 +37,7 @@
  * per-tenant isolate (see handler-runtime.ts). The before-external-exposure gate is absolute.
  */
 import { realpathSync } from 'node:fs';
-import { dirname, isAbsolute, normalize, relative, resolve, sep } from 'node:path';
+import { dirname, extname, isAbsolute, normalize, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { HandlerKind, HandlerSpec } from '@rayspec/spec';
 import type { ResolvedHandler } from './handler-runtime.js';
@@ -60,7 +60,39 @@ export class HandlerLoadError extends Error {
 export type ModuleImporter = (absolutePath: string) => Promise<Record<string, unknown>>;
 
 /**
- * The default importer: a real dynamic `import()` of an absolute file URL (a vetted in-root path).
+ * The TypeScript-source file extensions production refuses to load. The set is CLOSED and matched by a
+ * plain `extname` comparison — so the guard is DETERMINISTIC and independent of the Node runtime's
+ * behavior (whether or not a given Node version transparently type-strips `.ts` on import).
+ */
+const TYPESCRIPT_SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts']);
+
+/**
+ * The COMPILED-JAVASCRIPT contract (fail-closed). Production loads escape-hatch handler + extension-pack
+ * modules as compiled JavaScript ONLY: this rejects any module resolved to a TypeScript-source file
+ * BEFORE it is imported, with an ACTIONABLE message telling the author to compile the module first.
+ *
+ * WHY AN EXPLICIT EXTENSION CHECK (not "let `import()` fail"): some Node versions transparently
+ * type-strip `.ts` on import, so a raw `.ts` handler would RUN — untyped, unchecked, and reliant on an
+ * experimental runtime feature that breaks on enums/namespaces/decorators and can be removed. Enforcing
+ * the compiled-`.js` boundary HERE, by construction, makes the production contract the same on every
+ * Node version. A dev/test caller that intentionally loads un-built source uses `typeStrippingImporter`
+ * (the explicit opt-in seam below) — production always uses the guarded `defaultImporter`.
+ */
+export function assertCompiledJavaScriptModule(absolutePath: string): void {
+  const ext = extname(absolutePath).toLowerCase();
+  if (TYPESCRIPT_SOURCE_EXTENSIONS.has(ext)) {
+    throw new HandlerLoadError(
+      `module '${absolutePath}' is TypeScript source ('${ext}') — production loads compiled ` +
+        'JavaScript only. Compile it to JavaScript first and deploy the built module: the bundled ' +
+        "backend examples ship a build step (run the example's `node build.mjs` and deploy the " +
+        'built output). Refusing to load a TypeScript source module (fail-closed).',
+    );
+  }
+}
+
+/**
+ * A real dynamic `import()` of an absolute file URL (a vetted in-root path) — the shared import
+ * mechanism both importers use, WITHOUT the compiled-JavaScript guard.
  *
  * SECURITY (JAIL-URLDECODE-ESCAPE fix): build the URL with `pathToFileURL` — it PERCENT-ENCODES the
  * path, so a stray `%2e%2e`/`#`/`?` stays LITERAL instead of being URL-DECODED to `..`/fragment/query
@@ -69,7 +101,7 @@ export type ModuleImporter = (absolutePath: string) => Promise<Record<string, un
  * round-trip did not alter the (already jail-vetted) path. The jail ALSO rejects `%`/`#`/`?` outright
  * (jailModulePath), so this is layered defense-in-depth — neither layer alone is relied upon.
  */
-export const defaultImporter: ModuleImporter = async (absolutePath) => {
+const importAbsoluteFileUrl = async (absolutePath: string): Promise<Record<string, unknown>> => {
   const url = pathToFileURL(absolutePath);
   const roundTrip = fileURLToPath(url);
   if (roundTrip !== absolutePath) {
@@ -79,6 +111,29 @@ export const defaultImporter: ModuleImporter = async (absolutePath) => {
     );
   }
   return (await import(url.href)) as Record<string, unknown>;
+};
+
+/**
+ * The default importer (PRODUCTION): assert the module is compiled JavaScript (fail-closed on a
+ * TypeScript-source path, deterministically, on any Node version), then dynamically import it. This is
+ * the importer `deploy()`/`loadHandlers`/`loadExtensions` use unless a caller explicitly injects
+ * another — so the compiled-JavaScript boundary holds at EVERY production module-load site.
+ */
+export const defaultImporter: ModuleImporter = async (absolutePath) => {
+  assertCompiledJavaScriptModule(absolutePath);
+  return importAbsoluteFileUrl(absolutePath);
+};
+
+/**
+ * The DEV/TEST seam importer — an EXPLICIT opt-in that loads a module WITHOUT the compiled-JavaScript
+ * guard, relying on the runtime's TypeScript type-stripping (Node's built-in stripping, or the test
+ * runner's transform) to execute an un-built `.ts` source. It exists ONLY so dev tooling + tests can
+ * exercise un-built example handlers/packs; PRODUCTION never uses it (the production entrypoint injects
+ * nothing, so the guarded `defaultImporter` above is used). Passing this importer is the SINGLE, visible
+ * way un-built source ever loads — there is no ambient path that bypasses the guard.
+ */
+export const typeStrippingImporter: ModuleImporter = async (absolutePath) => {
+  return importAbsoluteFileUrl(absolutePath);
 };
 
 /**

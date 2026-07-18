@@ -375,18 +375,23 @@ change is applied by the explicit `--apply-migration` flag below.
   message and exits `1`.
 - **Profiles — declaration vs. custom code.** `deploy` runs a **product-profile**
   document (like `examples/acme-notes/acme-notes.product.yaml`) directly — it is
-  pure declaration with no custom code. A **backend-profile** document may ship
-  custom escape-hatch handler modules; the serve runtime imports **compiled**
-  modules, so a backend document that references `.ts` handlers fails closed at
-  roll-out:
+  pure declaration with no custom code and no build step. A **backend-profile**
+  document may ship custom escape-hatch handler modules (and an extension pack is
+  authored the same way); the runtime loads them as **compiled JavaScript only** —
+  it fail-closed-rejects a `.ts` module path at roll-out, deterministically (this
+  does not rely on the Node version, even where Node transparently type-strips `.ts`):
 
   ```
-  handler '…': failed to import module 'handlers/….ts': Unknown file extension ".ts"
+  handler '…': module '…/handlers/….ts' is TypeScript source ('.ts') — production
+  loads compiled JavaScript only. Compile it to JavaScript first …
   ```
 
-  Compile such handlers to `.js` before deploying — the deploy runtime ships no
-  turnkey `.ts` loader. ([`gen-handler`](#gen-handler) scaffolds a handler;
-  [`doctor`](#doctor) validates the spec.)
+  Compile such handlers to `.js` first and deploy the compiled artifact — the deploy
+  runtime ships no turnkey `.ts` loader. The bundled examples ship a build step
+  (`build.mjs`): `examples/acme-notes-backend` emits a deploy-ready `dist/rayspec.yaml`,
+  and `examples/stream-backend` compiles its extension pack. See
+  [getting-started → the backend profile](./getting-started.md#the-backend-profile-direct-agent-boot).
+  ([`gen-handler`](#gen-handler) scaffolds a handler; [`doctor`](#doctor) validates the spec.)
 - **Database state.** The serve path applies the committed **platform** migration
   chain to `DATABASE_URL` (idempotent — it bootstraps a clean database and no-ops on an
   up-to-date one), then materializes the declared stores on a clean database or mounts

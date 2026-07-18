@@ -29,6 +29,7 @@ import {
   type ResolvedHandler,
   type RouteHandler,
   type RouteHandlerInit,
+  typeStrippingImporter,
 } from '@rayspec/platform';
 import { parseSpec, type RaySpec } from '@rayspec/spec';
 import { and, eq } from 'drizzle-orm';
@@ -331,6 +332,9 @@ describe.skipIf(!hasDb)('declared agent + tooling + handler model end-to-end', (
     const loaded = await loadHandlers(
       ACME_DIR,
       spec.handlers.filter((h) => !INLINE_HANDLER_IDS.has(h.id)),
+      // Un-built `.ts` example handlers under vitest: opt into the type-stripping importer seam
+      // (production loads compiled `.js` only; this is the single, explicit way un-built source loads).
+      typeStrippingImporter,
     );
     handlers = new Map<string, ResolvedHandler>([
       ...loaded,

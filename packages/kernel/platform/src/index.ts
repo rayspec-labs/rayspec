@@ -84,6 +84,7 @@ export {
 // real TenantDb chokepoint, the declared-tooling NeutralTool factory, and the route/trigger
 // transaction-wrapped invocation. Composed by the api-auth declarative engine.
 export {
+  assertCompiledJavaScriptModule,
   buildToolFactory,
   defaultImporter,
   getHandlerRuntime,
@@ -103,6 +104,7 @@ export {
   StoreInputError,
   setHandlerRuntime,
   type ToolFactory,
+  typeStrippingImporter,
 } from './handlers/index.js';
 export { rehydrateConversation } from './rehydrate.js';
 export type { CostContext, CostRollup, RunOptions } from './run-core.js';

@@ -24,6 +24,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Backend, BackendId } from '@rayspec/core';
 import { generateProductSql } from '@rayspec/db';
+import { typeStrippingImporter } from '@rayspec/platform';
 import { parseSpec, type RaySpec } from '@rayspec/spec';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FakeRunBackend } from '../test-support/fake-backend.js';
@@ -91,6 +92,9 @@ describe.skipIf(!hasDb)('breaking-schema-change proof (REAL deploy() end-to-end)
         // proof itself does not RUN the agent — it only needs the deploy to roll out successfully).
         agentBackends: backends,
         buildApp: h.buildApp,
+        // The throwaway ships un-built `.ts` example handlers; opt into the type-stripping importer seam
+        // (production loads compiled `.js` only — this is the single, explicit source seam).
+        importer: typeStrippingImporter,
       },
     });
   }
