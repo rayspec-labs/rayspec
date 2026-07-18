@@ -35,11 +35,20 @@ import { DeployCliError, runDeploy } from './deploy.js';
 import { DevCliError, runDev } from './dev.js';
 import { runDoctor } from './doctor.js';
 import { GenHandlerCliError, runGenHandler } from './gen-handler.js';
+import { InitCliError, runInit } from './init.js';
 import { runOpenapi } from './openapi.js';
 import { runPlan } from './plan.js';
 import { loadLocalDotenvIfPresent } from './read-env.js';
 
 const USAGE = `rayspec — RaySpec CLI
+
+GET STARTED:
+  rayspec init [dir] [--force]  Scaffold a new project: write a minimal, valid starter rayspec.yaml
+                                (one store + its CRUD routes) into [dir] (default: the current
+                                directory). Product-neutral, no custom code. Refuses to overwrite an
+                                existing rayspec.yaml unless --force. Then validate it with
+                                \`rayspec doctor ./rayspec.yaml\` and preview a deploy with
+                                \`rayspec plan ./rayspec.yaml\`.
 
 READ-ONLY diagnostic floor (never mutates a real/target DB; never prints secrets):
   rayspec doctor <spec.yaml>   Static spec validation (parseSpec). Exit 0 if valid, 1 otherwise.
@@ -152,16 +161,30 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   const rest = args.slice(1);
   if (command === undefined) {
     throw new CliError(
-      'missing command (expected `doctor`, `plan`, `openapi`, `gen-handler`, `deploy`, or `dev`)',
+      'missing command (expected `init`, `doctor`, `plan`, `openapi`, `gen-handler`, `deploy`, or `dev`)',
     );
   }
   if (command.startsWith('-')) {
     throw new CliError(
-      `expected a subcommand (\`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, or \`dev\`), got ${command}`,
+      `expected a subcommand (\`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, or \`dev\`), got ${command}`,
     );
   }
 
   switch (command) {
+    case 'init': {
+      // GET-STARTED: scaffold a starter project. A usage problem (unknown flag, extra positional,
+      // `..`-escape) is an InitCliError → re-thrown as a CliError → exit 2; an existing-spec-without
+      // --force is a normal ok:false → exit 1.
+      let result: Awaited<ReturnType<typeof runInit>>;
+      try {
+        result = await runInit(rest);
+      } catch (e) {
+        if (e instanceof InitCliError) throw new CliError(e.message);
+        throw e;
+      }
+      await emit(result);
+      return result.ok ? 0 : 1;
+    }
     case 'doctor': {
       const result = await runDoctor(parsePositionals(rest));
       await emit(result);
@@ -226,7 +249,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
     }
     default:
       throw new CliError(
-        `unknown command ${JSON.stringify(command)} (expected \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, or \`dev\`)`,
+        `unknown command ${JSON.stringify(command)} (expected \`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, or \`dev\`)`,
       );
   }
 }
