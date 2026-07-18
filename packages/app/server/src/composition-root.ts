@@ -374,15 +374,17 @@ export type AgentBackendsFactory = (
 ) => ReadonlyMap<BackendId, Backend>;
 
 /**
- * The LOCAL table-registration hook (the deny-by-default chokepoint Set is keyed by object
- * IDENTITY). The composition root builds the product tables ONCE and hands those EXACT instances to
- * this hook BEFORE deploy()'s verify-not-register step, so the verify probe sees the same registered
- * objects. A REAL production deployment ships a COMMITTED `generated/product-schema.ts` that composes
- * these tables into `TENANT_SCOPED_TABLES` (so they are registered as committed source) and
- * needs NO hook; this hook is the LOCAL stand-in for that committed tuple, supplied by the dev
- * wrapper via the `@rayspec/db/testing` `registerScopedTables` seam (which the product-free
- * platform must not import). A spec deploy WITHOUT this hook will abort at deploy()'s verify step
- * unless the tables are already registered as committed source — fail-closed by design.
+ * The product-table registration hook — the sanctioned BOOT-TIME door into the deny-by-default
+ * chokepoint Set (which is keyed by object IDENTITY). The composition root builds the product tables
+ * ONCE and hands those EXACT instances to this hook at BOOT, BEFORE deploy()'s verify-not-register
+ * step, so the verify probe sees the same registered objects. In a real serve/deploy boot the hook is
+ * `@rayspec/db/composition`'s validating `registerProductStores` (see serve-opts.ts); the dev/test
+ * harness instead supplies the raw `@rayspec/db/testing` `registerScopedTables` seam (which validates
+ * nothing and the product-free platform must not import). The committed `generated/product-schema.ts`
+ * on the platform main line is the PRODUCT-EMPTY baseline — a type-enforced compile-time seam, NOT a
+ * populated tuple a deployment ships in place of this hook: no shipped boot path registers product
+ * tables by importing a populated one. A spec deploy WITHOUT this hook will abort at deploy()'s verify
+ * step — fail-closed by design.
  */
 export type ProductTableRegistrar = (tables: ReadonlyMap<string, PgTable>) => void;
 
@@ -1076,13 +1078,14 @@ export function assertSpecFamilyMountable(specSource: string, specPath: string):
  * wrapper's pattern but lives in the composition root so a real deployer can drive a declarative
  * deploy from env alone. The deployer supplies the agent backends (the platform ships none).
  *
- * NOTE on the product-table tuple: a REAL production deployment commits a generated `product-schema.ts` that
- * composes the product tables into `TENANT_SCOPED_TABLES`, and deploy() VERIFIES-not-registers. This
- * LOCAL boot does not yet have a committed product-schema for an arbitrary injected spec, so the
- * caller (the dev wrapper) supplies a `registerProductTables` hook — we build the tables ONCE and
- * hand THOSE EXACT instances to the hook BEFORE deploy()'s identity-keyed verify step (the chokepoint
- * Set is keyed by object identity, so the registered instances MUST be the ones deploy verifies). For
- * the auth-only platform main line this branch never runs.
+ * NOTE on product-table registration: a product table joins the deny-by-default chokepoint Set at
+ * BOOT through the sanctioned `registerProductTables` hook (wired to `@rayspec/db/composition`'s
+ * validating `registerProductStores`), and deploy() VERIFIES-not-registers. So this boot builds the
+ * product tables ONCE and hands THOSE EXACT instances to the hook BEFORE deploy()'s identity-keyed
+ * verify step (the chokepoint Set is keyed by object identity, so the registered instances MUST be the
+ * ones deploy verifies). The committed `generated/product-schema.ts` on the main line is the
+ * PRODUCT-EMPTY baseline (a type-enforced compile-time seam), NOT a populated tuple a deployment ships
+ * in place of the hook. For the auth-only platform main line this branch never runs.
  */
 async function deployDeclaredSpec(
   db: Db,
