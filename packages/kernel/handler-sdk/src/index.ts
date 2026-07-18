@@ -106,6 +106,29 @@ export interface SelectOptions {
 }
 
 /**
+ * Options for `upsert` — ALL fields PLAIN SERIALIZABLE values (column NAMES → equality values), so an
+ * `upsert(store, cols, values, opts)` call stays the SAME marshallable request the external-exposure
+ * isolate can ship across a boundary unchanged (the isolate-safe shape, like `StoreFilter`/`SelectOptions`).
+ */
+export interface UpsertOptions {
+  /**
+   * A CONDITIONAL-UPDATE guard on the `ON CONFLICT … DO UPDATE` arm: an equality map the CONFLICTING
+   * row must ALSO match for the update to apply, AND-combined BENEATH the structural tenant scope.
+   * When set, a conflict on the named `conflictColumns` target whose row does NOT match this guard
+   * updates ZERO rows and the upsert returns **`undefined`** (a fail-closed no-op — the same empty
+   * result a foreign-tenant conflict yields), leaving the conflicting row UNTOUCHED. This lets a caller
+   * express "insert, OR overwrite ONLY a row still in the expected state" atomically in one statement —
+   * the sanctioned STRUCTURAL close for a first-write TOCTOU (never an in-tx 23505 catch-and-recover,
+   * which poisons the transaction). Each key is resolved fail-closed to a real column and each value
+   * runs the SAME data-value guard a filter does. Absent ⇒ the conflict DO-UPDATE is scoped by the
+   * tenant predicate ALONE (byte-behaviorally identical to the pre-`updateWhere` upsert). Meaningful
+   * ONLY on the DO-UPDATE arm: an ensure-exists upsert (values ⊆ conflictColumns → DO NOTHING) never
+   * overwrites regardless, so the guard is trivially satisfied there.
+   */
+  readonly updateWhere?: StoreFilter;
+}
+
+/**
  * The tenant-bound DB capability a tool/route/trigger handler receives via `HandlerInit.db`
  * (the handler does NOT receive a raw `TenantDb`; the engine builds this name-keyed
  * facade over `forTenant(db, tenantId)` + the deployment's declared product tables and injects it).
@@ -184,8 +207,18 @@ export interface HandlerDb {
    * `unique constraint violation` (the raw Postgres constraint name is NEVER relayed — it would be a
    * cross-tenant existence oracle). The `undefined` no-op contract above applies ONLY to a conflict on
    * the named target.
+   *
+   * OPTS (`updateWhere`, additive): a CONDITIONAL-UPDATE guard on the DO-UPDATE arm — see
+   * `UpsertOptions.updateWhere`. When set, a conflict whose row does not match the guard adds a THIRD
+   * `undefined` case to the return contract above (a same-tenant conflict that no-ops because the row
+   * is no longer in the guarded state). Omitted ⇒ byte-behaviorally identical to the prior upsert.
    */
-  upsert(store: string, conflictColumns: string[], values: StoreRow): Promise<StoreRow | undefined>;
+  upsert(
+    store: string,
+    conflictColumns: string[],
+    values: StoreRow,
+    opts?: UpsertOptions,
+  ): Promise<StoreRow | undefined>;
   /** Update rows matching `filter` with `patch` (tenant-scoped); returns the updated rows. */
   update(store: string, filter: StoreFilter, patch: StoreRow): Promise<StoreRow[]>;
   /** Delete rows matching `filter` (tenant-scoped); returns the count deleted. */

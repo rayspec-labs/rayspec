@@ -174,6 +174,26 @@ function withBeforeFirstUpdate(inner: HandlerDb, hook: () => Promise<void>): Han
   };
 }
 
+/**
+ * Wrap a `HandlerDb` so `hook` runs ONCE, immediately BEFORE the first `upsert` — the deterministic
+ * TOCTOU seam for the NEW-FILE arm (the first-upload race): the wrapped upload has already done its
+ * "no row" probe read, so staging the racing create+seal here interleaves it exactly between that
+ * stale read and the guarded conditional upsert.
+ */
+function withBeforeFirstUpsert(inner: HandlerDb, hook: () => Promise<void>): HandlerDb {
+  let fired = false;
+  return {
+    ...inner,
+    async upsert(store, conflictColumns, values, opts) {
+      if (!fired) {
+        fired = true;
+        await hook();
+      }
+      return inner.upsert(store, conflictColumns, values, opts);
+    },
+  };
+}
+
 describe('uploadFile — the Content-Length PRE-CHECK (before ANY body byte)', () => {
   it('an ABSENT Content-Length is a 413 file_length_required with the body NEVER read, zero puts, zero rows', async () => {
     const table = new SharedFileTable();
@@ -729,6 +749,73 @@ describe('uploadFile — the upload-racing-submit TOCTOU (arm 1: the state-guard
     expect(racerSink.deliveredCount()).toBe(1);
     // The shaX bytes MAY exist as an orphan under their own content key (the stated no-GC cut) —
     // content-addressed keys keep the sealed row's blob_key pointing at the sealed bytes.
+  });
+});
+
+describe('uploadFile — the upload-racing-submit TOCTOU (arm 2: the state-guarded first-upload write)', () => {
+  it('a concurrent FIRST upload+seal landing between a racing first upload’s stale no-row read and its upsert is NEVER silently overwritten: 409, sealed bytes kept, heal re-emitted', async () => {
+    const table = new SharedFileTable();
+    const bucket = new SharedBlobBucket();
+    const winnerBytes = bytesOf('winner first-upload bytes');
+
+    // THE RACE: the LOSER reads "no row" (the NEW-file arm), then the WINNER — its OWN genuine first
+    // upload of the same file_ref — creates + seals it before the loser's upsert lands. The loser's
+    // conditional upsert (`updateWhere: state = 'uploaded'`) must then match ZERO rows (the winner's row
+    // is 'submitted'), so the loser re-reads and lands on the post-seal arm — never resetting the seal.
+    const winnerSink = sink();
+    const db = withBeforeFirstUpsert(makeFakeFileDb(table, TENANT_A), async () => {
+      const winnerUpload = await uploadFile(
+        {
+          tenantId: TENANT_A,
+          db: makeFakeFileDb(table, TENANT_A),
+          blob: makeFakeBlobStore(bucket, TENANT_A),
+          config: resolveFileConfig(),
+        },
+        { file_id: 'f-1' },
+        req({ bytes: winnerBytes }),
+        winnerSink,
+      );
+      expect(winnerUpload.ok).toBe(true);
+      const sealRes = await submitFile(
+        { tenantId: TENANT_A, db: makeFakeFileDb(table, TENANT_A), config: resolveFileConfig() },
+        { file_id: 'f-1' },
+        undefined,
+        winnerSink,
+      );
+      expect(sealRes.ok).toBe(true);
+    });
+
+    const loserSink = sink();
+    const res = await uploadFile(
+      {
+        tenantId: TENANT_A,
+        db,
+        blob: makeFakeBlobStore(bucket, TENANT_A),
+        config: resolveFileConfig(),
+      },
+      { file_id: 'f-1' },
+      req({ bytes: bytesOf('loser first-upload bytes') }),
+      loserSink,
+    );
+
+    // Exactly ONE row, still SEALED with the WINNER's bytes. The unguarded upsert would have RESET
+    // the sealed row to 'uploaded' and repointed sha/blob_key to the loser — the first-upload TOCTOU.
+    expect(table.rows).toHaveLength(1);
+    expect(table.rows[0]).toMatchObject({
+      state: 'submitted',
+      sha256: sha256Hex(winnerBytes),
+      blob_key: `files/f-1/${sha256Hex(winnerBytes)}`,
+      submitted_at: expect.any(String),
+    });
+    // The loser lands on the post-seal DIVERGENT path: the LOUD 409 + the stored-event heal (winner bytes).
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('unreachable');
+    expect(res.status).toBe(409);
+    expect(res.error).toBe('file_conflict');
+    expect(loserSink.emitCount()).toBe(1);
+    expect(loserSink.deliveredFor(`${TENANT_A}:f-1`)).toMatchObject({
+      sha256: sha256Hex(winnerBytes), // the heal carries the SEALED bytes, never the loser's
+    });
   });
 });
 
