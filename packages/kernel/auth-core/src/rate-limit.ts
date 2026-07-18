@@ -126,6 +126,11 @@ export const DEFAULT_POLICIES: Record<string, RateLimitPolicy> = {
   // unthrottled caller can re-drive the same session's workflow without bound — a cost-DoS. Cap the
   // reprocesses of one (tenant, session) per window; the route keys the bucket by `${tenant}:${session}`.
   reprocess: { max: 5, windowMs: 60_000 },
+  // A manual trigger fire dispatches a declared action (agent run / handler). Within one firing-instant
+  // bucket a re-fire dedups, but distinct instants each dispatch — so an unthrottled caller could fire a
+  // named trigger repeatedly (a cost-DoS). Cap the fires of one (tenant, trigger) per window; the route
+  // keys the bucket by `${tenant}:${name}`.
+  'trigger-fire': { max: 30, windowMs: 60_000 },
 };
 
 /** Duration of the refresh-reuse anti-DoS lock (a stale token cannot be a repeatable DoS). */

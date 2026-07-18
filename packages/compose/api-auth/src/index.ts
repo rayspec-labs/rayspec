@@ -39,6 +39,8 @@ export type {
   AppEnv,
   AuthContext,
   DeclarativeEngine,
+  ManualTriggerFireResult,
+  ManualTriggerFirer,
   ReprocessEnqueued,
   SessionReprocessor,
   SessionReprocessResult,

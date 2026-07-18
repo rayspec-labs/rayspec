@@ -217,6 +217,43 @@ export interface SessionReprocessor {
   }): Promise<SessionReprocessResult>;
 }
 
+/**
+ * The outcome of a manual-trigger fire attempt (opaque to api-auth):
+ *  - `{ notFound: true }` — no fireable MANUAL trigger for this (tenant, name): an unknown name, a
+ *    RESERVED webhook/event/cron kind (not manually fireable via this seam), OR a request tenant that
+ *    is not the deployment tenant. The route maps it to a uniform 404 (no existence leak).
+ *  - `{ notFound: false; fired }` — the manual trigger was fired through the durable worker's
+ *    exactly-once reserve→dispatch machinery: `fired:true` = THIS call won the reserve and dispatched;
+ *    `fired:false` = a deduped no-op (already fired for this firing key).
+ */
+export type ManualTriggerFireResult =
+  | { readonly notFound: true }
+  | { readonly notFound: false; readonly fired: boolean };
+
+/**
+ * The OPTIONAL manual-trigger fire seam (opt-in, injected — omit ⇒ the route fail-closes 501, like
+ * async runs without a durable worker). Fires a declared `kind:'manual'` trigger BY NAME through the
+ * durable off-request worker's exactly-once reserve→dispatch machinery (the SAME path a cron fire
+ * uses); a double fire of the same firing key dedups to ONE dispatch.
+ *
+ * PRODUCT-AGNOSTIC from api-auth's view (opaque): the concrete implementation — wired by the
+ * composition root — owns the trigger registry + the durable scheduler, so api-auth carries no
+ * trigger/schedule knowledge.
+ *
+ * TENANT-SCOPED BY CONSTRUCTION: `tenantId` is the caller's SERVER-DERIVED tenant (from the middleware
+ * chain); the firer NEVER derives its own tenant. It reconciles the request tenant against the
+ * deployment tenant AND restricts firing to `kind:'manual'` — a cron/webhook/event/unknown name, or a
+ * foreign request tenant, yields `notFound:true` (→ the route's uniform 404).
+ */
+export interface ManualTriggerFirer {
+  fireManual(input: {
+    /** The caller's server-derived tenant (never client-supplied). */
+    readonly tenantId: string;
+    /** The manual trigger to fire (the only client-supplied datum — a non-manual/unknown name → notFound). */
+    readonly name: string;
+  }): Promise<ManualTriggerFireResult>;
+}
+
 /** Everything the app needs, wired once at construction. */
 export interface AppDeps {
   db: Db;
@@ -293,6 +330,14 @@ export interface AppDeps {
    * the composition root; the platform main line ships none.
    */
   sessionReprocessor?: SessionReprocessor;
+  /**
+   * the OPTIONAL manual-trigger fire seam. When wired, `POST /v1/triggers/:name/fire` fires a declared
+   * `kind:'manual'` trigger by name through the durable worker's exactly-once reserve→dispatch
+   * machinery. When ABSENT, that route is a clean fail-closed 501 (manual firing requires a configured
+   * durable worker + a declared manual trigger). PRODUCT-AGNOSTIC: the concrete implementation is wired
+   * by the composition root; the platform main line ships none.
+   */
+  manualTriggerFirer?: ManualTriggerFirer;
   /**
    * OPTIONAL override for the per-request JSON/body byte cap the route interpreters enforce on
    * body-bearing routes (register/login, the declared `{handler}` + store CRUD routes, reprocess). A

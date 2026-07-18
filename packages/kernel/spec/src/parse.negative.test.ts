@@ -194,6 +194,28 @@ describe('negative — schema_violation', () => {
     expect(cronCoupling).toBeDefined();
     expect(cronCoupling?.path).toMatch(/triggers\[\d+\]\.kind/);
   });
+
+  it('rejects a manual trigger WITHOUT deployment.durableWorker:true (coupling)', () => {
+    // Swap BASE's cron trigger for a MANUAL one (still WITH durableWorker → valid), then strip the
+    // durableWorker coupling. A manual trigger is fired ON DEMAND through the durable off-request
+    // worker, so without it the trigger could never dispatch — the linter must reject it (fail-the-fix:
+    // the manual variant WITH durableWorker stays valid; removing durableWorker is the ONLY defect).
+    const manualBase = BASE.replace(
+      "    kind: cron\n    schedule: '0 0 * * *'\n    action: { kind: handler, handler: nightly_handler }",
+      '    kind: manual\n    action: { kind: handler, handler: nightly_handler }',
+    );
+    // sanity: the manual variant WITH durableWorker parses (so the coupling below is the ONLY defect).
+    expect(parseSpec(manualBase).ok).toBe(true);
+    const yaml = manualBase.replace('deployment:\n  durableWorker: true\n', '');
+    const res = parseSpec(yaml);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    const manualCoupling = res.errors.find(
+      (e) => e.code === 'schema_violation' && /manual trigger.*durableWorker/.test(e.message),
+    );
+    expect(manualCoupling).toBeDefined();
+    expect(manualCoupling?.path).toMatch(/triggers\[\d+\]\.kind/);
+  });
 });
 
 describe('negative — dangling_ref', () => {

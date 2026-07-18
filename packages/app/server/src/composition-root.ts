@@ -49,6 +49,7 @@ import {
   eraseTenant,
   IdempotencyStore,
   IdentityStore,
+  type ManualTriggerFirer,
   OrgStore,
   type PlannedMigration,
   runScheduledCleanup,
@@ -1321,6 +1322,31 @@ async function deployDeclaredSpec(
   // The agent registry the worker resolves against — set INSIDE buildApp (it needs the engine's
   // loaded handlers). Late-bound via this ref so the executor's resolveRun closure reads it.
   let workerAgentRegistry: AgentRegistry | undefined;
+
+  // ── The MANUAL-trigger fire seam (the consumer's control path) ──────────────────────────────────
+  // A `manual` trigger fires ONLY on demand — the durable scheduler is wired AFTER deploy() (it needs
+  // `result.triggers`), but createAuthApp is built INSIDE deploy(), so the app's injected firer reads
+  // this late-bound scheduler ref at REQUEST time (long after boot). The firer is present ONLY when the
+  // spec declares manual triggers (else the fire route fail-closes 501 — the unwired posture).
+  const hasManualTriggers = effectiveSpec.triggers.some((t) => t.kind === 'manual');
+  let wiredCronScheduler: DbosCronScheduler | undefined;
+  const manualTriggerFirer: ManualTriggerFirer | undefined = hasManualTriggers
+    ? {
+        async fireManual({ tenantId: reqTenant, name }) {
+          // Single-deployment LOCAL posture: a manual trigger fires under the DEPLOYMENT tenant; a
+          // foreign request tenant cannot fire it → uniform not-found (no existence leak), mirroring
+          // the reprocess seam's structural tenant reconciliation.
+          if (!config.cronTenantId || reqTenant !== config.cronTenantId) return { notFound: true };
+          // Restrict to kind:'manual' — an unknown name, a cron/webhook/event kind, or an un-wired
+          // scheduler is fail-closed not-found (the endpoint never fires a cron/reserved trigger).
+          if (!wiredCronScheduler?.manualTriggerNames.includes(name)) return { notFound: true };
+          // Fire NOW through the SAME reserve→dispatch path a cron fire uses (fireNow defaults the
+          // instant to now; a double fire within one firing-instant bucket dedups to one dispatch).
+          const fired = await wiredCronScheduler.fireNow(name);
+          return { notFound: false, fired };
+        },
+      }
+    : undefined;
   // Fix F (startup race): the executor is CONSTRUCTED here but NOT started — `executor.start()`
   // (which calls `DBOS.launch()`, beginning crash-recovery + queue dispatch) runs AFTER deploy()
   // below, by which point buildApp has already bound `workerAgentRegistry`. Starting it before
@@ -1479,6 +1505,9 @@ async function deployDeclaredSpec(
           ...baseDeps,
           engine: engineWithBlob,
           ...(durableExecutor ? { durableExecutor } : {}),
+          // Inject the manual-trigger fire seam (when the spec declares manual triggers) so
+          // POST /v1/triggers/:name/fire drives it; it reads the late-bound scheduler at request time.
+          ...(manualTriggerFirer ? { manualTriggerFirer } : {}),
         }) as App;
       },
     },
@@ -1510,45 +1539,50 @@ async function deployDeclaredSpec(
     );
   }
 
-  // ── Wire the CRON scheduler from the deployed trigger registry (BEFORE launch) ──────
-  // deploy() yields `result.triggers` (the registered descriptors). For each CRON trigger we
-  // register one DBOS scheduled-workflow — but that registration MUST happen BEFORE DBOS.launch() (the
+  // ── Wire the trigger scheduler from the deployed trigger registry (BEFORE launch) ──────
+  // deploy() yields `result.triggers` (the registered descriptors). For each CRON trigger we register
+  // one DBOS scheduled-workflow — that registration MUST happen BEFORE DBOS.launch() (the
   // ScheduledReceiver lifecycle callback starts the schedule loops at launch). So we attach the
   // scheduler's `registerScheduledWorkflows` as a PRE-LAUNCH hook on the executor; `pendingExecutorStart`
-  // (= executor.start()) runs the hooks after registerWorkflow and before launch. cron-only: webhook/
-  // event/manual descriptors stay RESERVED (the scheduler does not schedule them).
+  // (= executor.start()) runs the hooks after registerWorkflow and before launch. A MANUAL trigger is
+  // NOT scheduled — it is fireable ON DEMAND via the same scheduler (the fire route). webhook/event
+  // descriptors stay RESERVED (neither scheduled nor fireable).
   let cronTriggerNames: string[] = [];
-  // The on-demand cron-fire delegate (the control seam), bound to the wired scheduler below.
+  // The on-demand fire delegate (the control seam), bound to the wired scheduler below.
   let fireCronNow: BootedServer['fireCronNow'];
-  const cronTriggers = result.triggers.list().filter((t) => t.kind === 'cron');
-  if (cronTriggers.length > 0) {
-    // (Fail-closed, defense-in-depth with the lint rule.) A cron is fired ONLY by the durable
-    // off-request worker. If the spec declares cron triggers but no durable worker is wired (the spec
-    // omitted deployment.durableWorker, or no agent backends were supplied), the cron would be SILENTLY
-    // never scheduled (it just never fires). Refuse to boot — a half-deployed cron is never silently OK.
-    // The static lint rule (lint.ts) already rejects cron-without-durableWorker at parse/deploy time;
-    // this is the runtime backstop for a code-built spec or a missing-backends boot.
+  // FIREABLE = cron (scheduled + on-demand) OR manual (on-demand only). Both are fired by the durable
+  // worker, so both demand it wired + a known tenant. webhook/event stay reserved (not fireable here).
+  const fireableTriggers = result.triggers
+    .list()
+    .filter((t) => t.kind === 'cron' || t.kind === 'manual');
+  if (fireableTriggers.length > 0) {
+    // (Fail-closed, defense-in-depth with the lint rule.) A cron/manual trigger is fired ONLY by the
+    // durable off-request worker. If the spec declares one but no durable worker is wired (the spec
+    // omitted deployment.durableWorker, or no agent backends were supplied), the trigger could never
+    // fire. Refuse to boot — a half-deployed fireable trigger is never silently OK. The static lint rule
+    // (lint.ts) already rejects cron/manual-without-durableWorker at parse/deploy time; this is the
+    // runtime backstop for a code-built spec or a missing-backends boot.
     if (!(durableExecutorInstance && workerDbHandle)) {
       throw new BootConfigError(
-        `Boot aborted — the spec declares ${cronTriggers.length} cron trigger(s) but no durable ` +
-          'worker is wired (deployment.durableWorker is not true, or no agent backends were ' +
-          'supplied). A cron is fired by the durable worker; without it the trigger would never ' +
-          'fire (silently unscheduled). Set deployment.durableWorker:true and supply agent ' +
-          'backends, or remove the cron trigger(s). Fail-closed.',
+        `Boot aborted — the spec declares ${fireableTriggers.length} cron/manual trigger(s) but no ` +
+          'durable worker is wired (deployment.durableWorker is not true, or no agent backends were ' +
+          'supplied). A cron/manual trigger is fired by the durable worker; without it the trigger ' +
+          'would never fire. Set deployment.durableWorker:true and supply agent backends, or remove ' +
+          'the trigger(s). Fail-closed.',
       );
     }
-    // A cron must fire under a KNOWN tenant (single-deployment LOCAL posture). Fail closed if a cron is
-    // declared but no cron tenant was configured — firing under an unknown tenant is never silently OK.
+    // A cron/manual trigger fires under a KNOWN tenant (single-deployment LOCAL posture). Fail closed if
+    // one is declared but no tenant was configured — firing under an unknown tenant is never silently OK.
     if (!config.cronTenantId) {
       throw new BootConfigError(
-        `Boot aborted — the spec declares ${cronTriggers.length} cron trigger(s) but ` +
-          'RAYSPEC_CRON_TENANT_ID is not set. A cron fires under a known deployment tenant ' +
-          '(single-deployment LOCAL posture; multi-tenant cron fan-out is reserved). Set ' +
-          'RAYSPEC_CRON_TENANT_ID to the org id the cron should fire under. Fail-closed.',
+        `Boot aborted — the spec declares ${fireableTriggers.length} cron/manual trigger(s) but ` +
+          'RAYSPEC_CRON_TENANT_ID is not set. A cron/manual trigger fires under a known deployment ' +
+          'tenant (single-deployment LOCAL posture; multi-tenant fan-out is reserved). Set ' +
+          'RAYSPEC_CRON_TENANT_ID to the org id the trigger should fire under. Fail-closed.',
       );
     }
-    // Validate the cron tenant at BOOT, not lazily at fire time (2am). `forTenant` throws the
-    // fail-closed "tenantId must be a UUID" for a malformed id; the existence probe below catches a
+    // Validate the tenant at BOOT, not lazily at fire time. `forTenant` throws the fail-closed
+    // "tenantId must be a UUID" for a malformed id; the existence probe below catches a
     // well-formed-but-nonexistent org so a bogus tenant fails loud at boot, not via the FK at fire time.
     await assertCronTenantBootable(db, config.cronTenantId);
     const cronScheduler = new DbosCronScheduler(result.triggers.list(), {
@@ -1558,15 +1592,19 @@ async function deployDeclaredSpec(
       productTables,
       invokeTriggerHandler,
     });
+    // Expose the wired scheduler to the late-bound manual-trigger firer (built above, injected into the
+    // app inside deploy()); the firer restricts on-demand fires to its manual triggers.
+    wiredCronScheduler = cronScheduler;
     // Register the scheduled workflows in the pre-launch window (executor.start() runs this hook before
-    // DBOS.launch()). Without a durable worker there is no launch to hook — but cron implies the worker
-    // is wired (durableExecutorInstance is set), so this is always paired with a launch.
+    // DBOS.launch()). A manual-only spec registers ZERO scheduled workflows (nothing to schedule) but
+    // still wires the scheduler for on-demand fires. cron implies the worker is wired, so this is always
+    // paired with a launch.
     durableExecutorInstance.attachPreLaunchHook(() => cronScheduler.registerScheduledWorkflows());
     cronTriggerNames = cronScheduler.cronTriggerNames;
     // Bind the on-demand fire delegate to the WIRED scheduler (the same instance the DBOS schedule
     // loop fires) so an on-demand fire goes through the EXACT reserve→dispatch path + cross-dedups
     // with a scheduled fire for the same instant (firingKey is instant-truncated). Generic control
-    // surface — a future ops endpoint, the deterministic tests, and the CEO demo all use it.
+    // surface — the fire route, the deterministic tests, and the CEO demo all use it.
     fireCronNow = (name: string, instant?: Date) => cronScheduler.fireNow(name, instant);
   }
 

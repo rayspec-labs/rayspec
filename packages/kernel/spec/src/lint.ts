@@ -28,10 +28,11 @@
  * `.strict()` shape validation. For the per-REQUEST `async:true` run signal there is NO grammar field
  * to cross-check (it is `StartRunRequest.async`, runs.ts), and the LOAD-BEARING async gate is the
  * RUNTIME one: `async:true` + no durable executor wired ⇒ a clean fail-closed 501 at `executeAgentRun`.
- * BUT a declared `cron` TRIGGER is a CONFIG-LEVEL coupling we CAN check: a cron is fired ONLY by the
- * durable worker, so a `cron` trigger WITHOUT `deployment.durableWorker:true` would be silently never
- * scheduled — rule (5) below rejects that (`schema_violation`). The composition root ALSO boot-aborts
- * on the same coupling (defense-in-depth), but the static lint rule fails it at parse/deploy time.
+ * BUT a declared `cron` OR `manual` TRIGGER is a CONFIG-LEVEL coupling we CAN check: both are fired by
+ * the durable worker (a cron on its crontab, a manual on demand), so a `cron`/`manual` trigger WITHOUT
+ * `deployment.durableWorker:true` would be silently never scheduled / un-fireable — rule (5) below
+ * rejects that (`schema_violation`). The composition root ALSO boot-aborts on the same coupling
+ * (defense-in-depth), but the static lint rule fails it at parse/deploy time.
  *
  * Returns the FULL list of violations (closed `SpecError` codes) — never the first. Pure function
  * over an already-shape-valid `RaySpec` (the parser calls it after the Zod parse succeeds).
@@ -977,6 +978,22 @@ export function lintSpec(spec: RaySpec): SpecError[] {
           `cron trigger '${trigger.name}' requires 'deployment.durableWorker: true' — a cron is fired ` +
             'by the durable off-request worker; without it the trigger would never fire (silently ' +
             'unscheduled). Set deployment.durableWorker:true or remove the cron trigger',
+          `triggers[${ti}].kind`,
+        ),
+      );
+    }
+    // A manual trigger is FIRED on demand through the SAME durable off-request worker (its exactly-once
+    // reserve→dispatch machinery). Without `deployment.durableWorker:true` no worker is wired, so an
+    // explicit fire could never dispatch — the trigger would be declared but un-fireable. Reject at
+    // config time: a declared manual trigger REQUIRES the durable worker. (Defense-in-depth: the
+    // composition-root boot ALSO aborts if a fireable trigger is registered with no worker wired.)
+    if (trigger.kind === 'manual' && spec.deployment?.durableWorker !== true) {
+      errors.push(
+        specError(
+          'schema_violation',
+          `manual trigger '${trigger.name}' requires 'deployment.durableWorker: true' — a manual ` +
+            'trigger is fired on demand through the durable off-request worker; without it the trigger ' +
+            'could never dispatch. Set deployment.durableWorker:true or remove the manual trigger',
           `triggers[${ti}].kind`,
         ),
       );
