@@ -257,6 +257,48 @@ export const idempotencyKeys = pgTable(
   (t) => [uniqueIndex('idem_tenant_scope_key_idx').on(t.tenantId, t.scope, t.idemKey)],
 );
 
+/**
+ * invites — the out-of-band org-invite tokens. TENANT-SCOPED (registered in TENANT_SCOPED_TABLES
+ * below): an invite grants membership in exactly one org (`tenant_id`), so the tenant predicate is
+ * carried STRUCTURALLY on every issue/consume write through the TenantDb chokepoint — a consume can
+ * never touch another tenant's invite row. The initial token→org RESOLUTION (redeem) is inherently
+ * tenant-agnostic (the presented token is the ONLY thing the redeemer holds), so it is a
+ * hash-equality lookup on `token_hash` via a whitelisted global-resolution store method — exactly the
+ * api-key/session bearer-resolution pattern — after which every write is tenant-scoped.
+ *
+ * HASHES ONLY: only the HMAC `token_hash` of the opaque invite token is stored (plaintext shown ONCE
+ * at issue, conveyed out-of-band by the owner). `email` is the NORMALIZED invited address, `role` the
+ * role to grant, `expires_at` the hard expiry, `consumed_at` the single-use marker (NULL until
+ * redeemed), `created_by` the issuing owner. The issue path NEVER looks up whether the email has an
+ * account, so it reveals no account-existence signal (account existence is resolved only at redeem, by
+ * the invitee). Reached via forTenant() for writes; org-delete cascades the whole tenant's invites.
+ */
+export const invites = pgTable(
+  'invites',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    /** HMAC-SHA256 (with the server pepper) of the opaque invite token. UNIQUE — the redeem lookup key. */
+    tokenHash: text('token_hash').notNull(),
+    /** The NORMALIZED invited email (never used to branch the issue response on account existence). */
+    email: text('email').notNull(),
+    /** The role the invite grants (owner|admin|member) — validated at the edge, stored as text. */
+    role: text('role').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    /** Single-use marker: NULL until redeemed; stamped in one atomic UPDATE that gates single-use. */
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    createdBy: uuid('created_by'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // O(1) redeem lookup + structurally at most one invite per token (the token is 256-bit random).
+    uniqueIndex('invites_token_hash_idx').on(t.tokenHash),
+    index('invites_tenant_idx').on(t.tenantId),
+  ],
+);
+
 // ---------------------------------------------------------------------------------------
 // Run journal (retrofit: tenant_id text → uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE)
 // ---------------------------------------------------------------------------------------
@@ -585,6 +627,7 @@ export const CORE_TENANT_SCOPED_TABLES = [
   runs,
   runEvents,
   idempotencyKeys,
+  invites,
   workflowRuns,
   workflowNodeStates,
   workflowArtifacts,

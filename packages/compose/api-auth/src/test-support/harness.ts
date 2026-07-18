@@ -33,6 +33,7 @@ import { ApiKeyStore } from '../stores/api-key-store.js';
 import { AuditStore } from '../stores/audit-store.js';
 import { IdempotencyStore } from '../stores/idempotency-store.js';
 import { IdentityStore } from '../stores/identity-store.js';
+import { InviteStore } from '../stores/invite-store.js';
 import { OrgStore } from '../stores/org-store.js';
 
 /**
@@ -160,6 +161,17 @@ function buildFullSchemaSql(SCHEMA: string): string {
   );
   CREATE UNIQUE INDEX idem_tenant_scope_key_idx ON idempotency_keys (tenant_id, scope, idem_key);
 
+  -- invites: the out-of-band org-invite tokens (tenant-scoped; mirrors migration 0008).
+  CREATE TABLE invites (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    token_hash text NOT NULL, email text NOT NULL, role text NOT NULL,
+    expires_at timestamptz NOT NULL, consumed_at timestamptz, created_by uuid,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE UNIQUE INDEX invites_token_hash_idx ON invites (token_hash);
+  CREATE INDEX invites_tenant_idx ON invites (tenant_id);
+
   CREATE TABLE journal_steps (
     step_id uuid PRIMARY KEY DEFAULT gen_random_uuid(), run_id text NOT NULL,
     tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -214,7 +226,7 @@ function buildFullSchemaSql(SCHEMA: string): string {
 
 const ALL_TABLES =
   'orgs, users, memberships, sessions, api_keys, auth_audit, oidc_models, ' +
-  'idempotency_keys, journal_steps, conversation_items, runs, run_events';
+  'idempotency_keys, invites, journal_steps, conversation_items, runs, run_events';
 
 /**
  * Build the harness: isolated schema, real signing key, wired app. `withOidc` mounts the provider;
@@ -407,6 +419,7 @@ export async function createHarness(
   const apiKeyStore = new ApiKeyStore(db);
   const auditStore = new AuditStore(db);
   const idempotency = new IdempotencyStore(db);
+  const inviteStore = new InviteStore(db);
   // A short grace window (30ms) so the reuse-detection tests exercise both sides of the grace
   // boundary. Production uses the default ~10s window. When `useFakeClock` is set, the grace tests
   // drive an injected clock (advance/reset) so the boundary is deterministic — no wall-clock race.
@@ -441,6 +454,7 @@ export async function createHarness(
     apiKeyStore,
     auditStore,
     idempotency,
+    inviteStore,
     authService,
     oidcProvider,
     allowedOrigins: ['https://app.rayspec.test'],
@@ -562,6 +576,7 @@ export async function createDeployHarness(opts: {
   const apiKeyStore = new ApiKeyStore(db);
   const auditStore = new AuditStore(db);
   const idempotency = new IdempotencyStore(db);
+  const inviteStore = new InviteStore(db);
   const authService = new AuthService(identityStore, signer, { graceMs: 30 });
 
   const deps: AppDeps = {
@@ -574,6 +589,7 @@ export async function createDeployHarness(opts: {
     apiKeyStore,
     auditStore,
     idempotency,
+    inviteStore,
     authService,
     allowedOrigins: ['https://app.rayspec.test'],
     // the deploy harness does not exercise body-refresh — default cookie-only.

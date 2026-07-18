@@ -147,6 +147,73 @@ export type AddOrgMemberResponse = z.infer<typeof AddOrgMemberResponse>;
 export const OrgMemberListResponse = z.object({ members: z.array(OrgMemberView) });
 export type OrgMemberListResponse = z.infer<typeof OrgMemberListResponse>;
 
+// ---- org invites (out-of-band invite-token flow) -------------------------------------------
+
+/**
+ * Issue an out-of-band org invite (owner-only). `org_id`/`tenant_id` are NEVER body-bindable — the
+ * org is the server-derived tenant. `email` is normalized server-side. `role` defaults to `member`.
+ * `expiresInSeconds` is an OPTIONAL requested lifetime clamped server-side to a floor/ceiling.
+ *
+ * The issue path deliberately does NOT look up whether the email has an account, so the response +
+ * timing are IDENTICAL whether or not it does — no account-existence oracle (the account-existence
+ * check happens only at redeem, performed by the invitee).
+ */
+export const IssueInviteRequest = z.object({
+  email: emailField,
+  role: Role.default('member'),
+  expiresInSeconds: z.number().int().positive().optional(),
+});
+export type IssueInviteRequest = z.infer<typeof IssueInviteRequest>;
+
+/**
+ * The issued invite. `inviteToken` is a DELIBERATE, single-shot secret-in-a-response — the opaque
+ * token is shown EXACTLY ONCE (the owner conveys it out-of-band; only its hash is stored), never
+ * returned again (precedent: `MintApiKeyResponse.plaintext`). The response carries NO account-existence
+ * signal (it is identical for any email).
+ */
+export const IssueInviteResponse = z.object({
+  /** The opaque invite token, shown EXACTLY ONCE; never stored in plaintext, never returned again. */
+  inviteToken: z.string(),
+  email: z.string(),
+  role: Role,
+  /** The hard expiry (ISO 8601). */
+  expiresAt: z.string(),
+});
+export type IssueInviteResponse = z.infer<typeof IssueInviteResponse>;
+
+/**
+ * Redeem an invite (the INVITEE acts, not the owner). The org is resolved FROM the token, never a URL.
+ * `password` is REQUIRED only when the invited email has no account yet (the invitee sets their own
+ * initial credential at accept); it is IGNORED when the email already has an account (the invitee must
+ * instead be authenticated as that account — a token bearer can never set/reset an existing user's
+ * password). `password` shares the register/login shape policy.
+ */
+export const AcceptInviteRequest = z.object({
+  token: z.string().min(1),
+  password: passwordField.optional(),
+  deliverRefreshTokenInBody,
+});
+export type AcceptInviteRequest = z.infer<typeof AcceptInviteRequest>;
+
+/**
+ * The accept result — a token envelope scoped to the joined org (so the response is immediately
+ * usable), plus the membership. `refreshToken` is the gated+opt-in body-delivered refresh secret,
+ * present ONLY on the new-account provisioning path (the invitee is freshly logged in) when the
+ * deployment enables it; an authenticated existing-account accept receives only a fresh org-scoped
+ * access token (its refresh session is untouched).
+ */
+export const AcceptInviteResponse = z.object({
+  accessToken: z.string(),
+  tokenType: z.literal('Bearer'),
+  expiresIn: z.number().int().positive(),
+  activeOrgId: z.string().uuid(),
+  userId: z.string().uuid(),
+  role: Role,
+  /** The rotated refresh secret — gated+opt-in, new-account path only (see the type doc above). */
+  refreshToken: z.string().optional(),
+});
+export type AcceptInviteResponse = z.infer<typeof AcceptInviteResponse>;
+
 // ---- api keys ------------------------------------------------------------------------------
 
 /**

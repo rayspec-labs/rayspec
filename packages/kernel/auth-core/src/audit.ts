@@ -20,6 +20,7 @@ export type AuthEventName =
   | 'org_switch'
   | 'org_member_add'
   | 'org_member_change'
+  | 'org_invite_issued'
   | 'apikey_mint'
   | 'apikey_revoke'
   | 'apikey_auth_failed'

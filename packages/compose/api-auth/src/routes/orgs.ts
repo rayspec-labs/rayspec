@@ -225,12 +225,17 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
       //
       // ⚠ ACCEPTED beta limitation (response-shape account-existence oracle): the response reveals to
       // the org owner whether `email` already has a GLOBAL account — a `oneTimePassword` is present
-      // ONLY when THIS call provisioned a NEW account. This is inherent to the founder-chosen minimal
-      // design (an in-band one-time password, no invite flow), so an owner can probe whether an
-      // address is registered platform-wide. It is accepted for the trusted single-node beta and is
-      // closed by the invite-token flow in the external-hardening layer (see SECURITY.md). The
-      // AVOIDABLE second channel — argon2id timing — IS equalized here (see equalizeProvisionTiming
-      // below) so latency does not compound the oracle.
+      // ONLY when THIS call provisioned a NEW account. This DIRECT in-band member-add is a trusted-beta
+      // convenience: an owner can probe whether an address is registered platform-wide. The AVOIDABLE
+      // second channel — argon2id timing — IS equalized here (see equalizeProvisionTiming below) so
+      // latency does not compound the oracle.
+      //
+      // The ORACLE-FREE alternative now ships in the core: the out-of-band invite-token flow (POST
+      // /v1/orgs/:orgId/invites → POST /v1/invites/accept, see routes/invites.ts + SECURITY.md). The
+      // issue path creates an invite for ANY email without ever looking up account existence, so it
+      // leaks no account-existence signal; the account-existence question is resolved only at redeem,
+      // by the invitee. Prefer the invite flow when the owner must not learn whether an address is
+      // registered. This direct path is retained for backward compatibility / trusted-beta use.
       const existing = await deps.identityStore.findUserByEmail(email);
       let userId: string;
       let oneTimePassword: string | undefined;
@@ -498,7 +503,7 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
  */
 import type { MiddlewareHandler } from 'hono';
 
-function requireBearerForMutation(): MiddlewareHandler<AppEnv> {
+export function requireBearerForMutation(): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const principal = c.get('principal');
     const authHeader = c.req.header('authorization');

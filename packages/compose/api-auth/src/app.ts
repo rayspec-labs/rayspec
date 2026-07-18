@@ -31,6 +31,7 @@ import { clientIpFromContext } from './http/client-ip.js';
 import { authenticate, requestId, securityHeaders } from './http/middleware.js';
 import { mountOidc } from './oidc/mount.js';
 import { registerAuthRoutes } from './routes/auth.js';
+import { registerInviteRoutes } from './routes/invites.js';
 import { registerOAuthRoutes } from './routes/oauth.js';
 import { registerOrgRoutes } from './routes/orgs.js';
 import { registerReprocessRoutes } from './routes/reprocess.js';
@@ -196,6 +197,9 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
   // --- routes -------------------------------------------------------------------------------
   registerAuthRoutes(app, effectiveDeps);
   registerOrgRoutes(app, effectiveDeps);
+  // the out-of-band org-invite flow (issue owner-only + redeem by the invitee) on the SAME
+  // middleware chain (server-derived tenant for issue; token-resolved tenant for redeem).
+  registerInviteRoutes(app, effectiveDeps);
   registerOAuthRoutes(app, effectiveDeps);
   // agent-run HTTP/SSE routes on the SAME middleware chain (server-derived tenant). Uses
   // the effective deps so a declared agent (spec-built registry entry) resolves on /v1/agents/:id/runs

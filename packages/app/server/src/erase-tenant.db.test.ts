@@ -189,6 +189,9 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
     'conversation_items',
     'run_events',
     'idempotency_keys',
+    // invites are tenant-scoped (CORE_TENANT_SCOPED_TABLES), so tenant erasure covers them too (they
+    // carry the invited email = PII). Seeded with 0 rows here — the erase reports them at 0.
+    'invites',
     // the durable workflow journal is tenant-scoped (CORE_TENANT_SCOPED_TABLES), so tenant
     // erasure covers it too (GDPR completeness). Seeded with 0 rows here — the erase reports them at 0.
     'workflow_runs',
@@ -202,6 +205,7 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
     conversation_items: schema.conversationItems as never,
     run_events: schema.runEvents as never,
     idempotency_keys: schema.idempotencyKeys as never,
+    invites: schema.invites as never,
     workflow_runs: schema.workflowRuns as never,
     workflow_node_states: schema.workflowNodeStates as never,
     workflow_artifacts: schema.workflowArtifacts as never,
@@ -305,6 +309,9 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
       conversation_items: 2,
       run_events: 1,
       idempotency_keys: 1,
+      // invites — not seeded here, so the erase reports them at 0 (still covered by tenant erasure;
+      // coreTotalRows stays 7 = 1 + 2 + 2 + 1 + 1).
+      invites: 0,
       // workflow journal tables — not seeded here, so the erase reports them at 0 (they are still
       // covered by tenant erasure; coreTotalRows stays 7 = 1 + 2 + 2 + 1 + 1).
       workflow_runs: 0,

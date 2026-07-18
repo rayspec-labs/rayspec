@@ -106,4 +106,5 @@ export { ApiKeyStore } from './stores/api-key-store.js';
 export { AuditStore } from './stores/audit-store.js';
 export { IdempotencyStore } from './stores/idempotency-store.js';
 export { IdentityStore } from './stores/identity-store.js';
+export { InviteStore } from './stores/invite-store.js';
 export { OrgStore } from './stores/org-store.js';

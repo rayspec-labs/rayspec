@@ -60,6 +60,13 @@ this split is essential to deploying it safely. This section mirrors
 - **Per-backend credential isolation.** Each agent backend uses its own
   operator-supplied credentials; the platform never proxies one party's
   credentials on behalf of another.
+- **An out-of-band org-invite flow (no account-existence oracle).** An org owner
+  adds members by issuing an invite token (conveyed out-of-band) that the invitee
+  redeems — provisioning a new account (setting their own password) or joining as
+  an already-authenticated existing account. The issue path never checks whether
+  the address already has a platform account, so it reveals no account-existence
+  signal to the owner; only the invitee resolves that, at redeem. Tokens are stored
+  hashed, are single-use, and expire.
 
 ### The separate hardening layer (NOT in the core)
 
@@ -72,13 +79,16 @@ distinct hardening layer:
 - cross-node federation and data-residency enforcement — the data model carries the
   federation- and residency-ready columns from day one, but enforcing them belongs
   to this layer,
-- per-tenant execution sandboxing,
-- cryptographic binding of tokens to their client, and
-- an out-of-band org-invite flow. In the core, adding a member by email returns a
-  one-time password only when the call provisions a *new* account, so the response
-  shape reveals to an org owner whether an address already has a platform account.
-  This is accepted for the trusted single-node posture; the invite-token flow in
-  the hardening layer closes that account-existence signal.
+- per-tenant execution sandboxing, and
+- cryptographic binding of tokens to their client.
+
+The core also retains a **direct email member-add** for trusted-beta convenience,
+which returns a one-time password only when it provisions a *new* account — so its
+response shape reveals to an org owner whether an address already has a platform
+account. That account-existence signal is a documented, accepted limitation of that
+one legacy endpoint; the out-of-band invite-token flow above is the oracle-free
+alternative and is preferred when the owner must not learn whether an address is
+registered.
 
 **The core does not ship these, and it says so loudly at boot. Do not place a
 core deployment on a public address for untrusted traffic without that layer.**
