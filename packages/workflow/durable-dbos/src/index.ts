@@ -6,7 +6,8 @@
  * in `@rayspec/platform` and carry NO DBOS reference (the engine asymmetry stays here).
  */
 
-// The CRON firing runtime (cron-only; webhook/event/manual reserved per-kind).
+// The trigger firing runtime — cron is SCHEDULED + on-demand fireable, manual is on-demand fireable
+// only; webhook/event stay reserved per-kind.
 export {
   assertCronOnly,
   type CronSchedulerDeps,
@@ -21,6 +22,7 @@ export {
   TRIGGER_FIRE_BODY_HASH,
   TRIGGER_FIRE_SCOPE,
   TriggerKindNotBuiltError,
+  triggerAgentInput,
 } from './cron-scheduler.js';
 export {
   AGENT_RUNS_QUEUE,

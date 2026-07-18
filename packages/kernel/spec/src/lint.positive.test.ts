@@ -63,8 +63,9 @@ triggers:
     expect(res.value.deployment?.durableWorker).toBe(true);
   });
 
-  it('accepts a NON-cron trigger (event) without a durable worker (the coupling is cron-only)', () => {
-    // Only `cron` triggers require the durable worker; an event/webhook/manual trigger does not.
+  it('accepts an event trigger without a durable worker (only cron/manual are worker-coupled)', () => {
+    // `cron` (scheduled) and `manual` (fired on demand) both require the durable worker; an
+    // event/webhook trigger does not (their ingress is reserved, not worker-fired here).
     const yaml = `
 version: '1.0'
 metadata:

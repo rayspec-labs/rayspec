@@ -117,6 +117,41 @@ export class AuditStore {
   }
 
   /**
+   * append ONE out-of-band manual-trigger-fire record (its own committed insert). An explicit manual
+   * trigger fire dispatches a declared action (agent run / handler) through the durable worker — a
+   * cost-sensitive operational action — so it leaves an immutable trail: the acting principal, the
+   * tenant scope, the trigger name, and whether THIS call actually dispatched (`fired`) or was a
+   * deduped no-op. Like {@link appendReprocess} it is BEST-EFFORT and swallows a write failure — the
+   * fire has ALREADY happened when this is called, so a failed audit must not turn a successful fire
+   * into a 500 a client would retry into MORE fires (the same availability posture).
+   *
+   * The event name is a fixed literal — NOT an `AuthEventName` (a trigger fire is a platform
+   * operational action, not an auth-surface event), mirroring {@link appendReprocess}. `actorOrgId` is
+   * the SERVER-DERIVED tenant (the scope key `readForTenant` surfaces it under); `meta` carries the
+   * trigger name, the fired flag, and the actor tag — ids/flags only, no secret.
+   */
+  async appendTriggerFired(record: {
+    tenantId: string;
+    actorUserId?: string | null;
+    requestId: string;
+    meta: Record<string, unknown>;
+  }): Promise<void> {
+    try {
+      await this.db.insert(schema.authAudit).values({
+        actorOrgId: record.tenantId,
+        actorUserId: record.actorUserId ?? null,
+        event: 'manual_trigger_fired',
+        requestId: record.requestId,
+        targetHash: null,
+        ipHash: null,
+        meta: record.meta,
+      });
+    } catch {
+      // Best-effort: the fire already happened; a failed audit must not fail the request.
+    }
+  }
+
+  /**
    * Read audit rows for ONE tenant (read-gated). The actor_org_id IS the tenant scope here —
    * a tenant can only read rows where it is the authoritative actor org. NEVER returns another
    * tenant's rows.

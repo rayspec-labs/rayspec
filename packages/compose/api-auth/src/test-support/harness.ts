@@ -318,6 +318,12 @@ export async function createHarness(
      */
     sessionReprocessor?: AppDeps['sessionReprocessor'];
     /**
+     * the OPTIONAL manual-trigger fire seam wired into `deps.manualTriggerFirer` (the
+     * `POST /v1/triggers/:name/fire` route's injected dependency). A fire-route suite injects a fake
+     * firer; omit ⇒ the route fail-closes 501 (the unwired posture a test can also exercise).
+     */
+    manualTriggerFirer?: AppDeps['manualTriggerFirer'];
+    /**
      * trusted-proxy CIDRs wired into `deps.trustedProxies` (the rate-limiter client-identity
      * resolution). Default UNSET ⇒ no forwarding header is trusted (the socket peer is the identity).
      * A served-app suite behind loopback opts in (e.g. `['127.0.0.0/8', '::1/128']`) so an
@@ -443,6 +449,7 @@ export async function createHarness(
     agentRegistry: opts.agentRegistry,
     engine,
     ...(opts.sessionReprocessor ? { sessionReprocessor: opts.sessionReprocessor } : {}),
+    ...(opts.manualTriggerFirer ? { manualTriggerFirer: opts.manualTriggerFirer } : {}),
     ...(opts.trustedProxies !== undefined ? { trustedProxies: opts.trustedProxies } : {}),
     ...(opts.maxJsonBodyBytes !== undefined ? { maxJsonBodyBytes: opts.maxJsonBodyBytes } : {}),
   };

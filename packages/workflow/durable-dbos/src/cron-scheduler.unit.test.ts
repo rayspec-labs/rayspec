@@ -12,7 +12,14 @@
  * These run in CI (no `DATABASE_URL` gate) — the DB-backed behavioral dedup is in cron-scheduler.db.test.ts.
  */
 import { describe, expect, it } from 'vitest';
-import { cronRunId, FIRING_INSTANT_GRANULARITY_MS, firingInstantIso, firingKey } from './index.js';
+import {
+  cronAgentInput,
+  cronRunId,
+  FIRING_INSTANT_GRANULARITY_MS,
+  firingInstantIso,
+  firingKey,
+  triggerAgentInput,
+} from './index.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -61,5 +68,14 @@ describe('cron firing-key derivation — truncation + determinism', () => {
     // Different trigger or different bucket ⇒ different runId.
     expect(cronRunId('other', t)).not.toBe(id);
     expect(cronRunId('agent-cron', new Date('2026-06-24T00:05:01.000Z'))).not.toBe(id);
+  });
+
+  it('triggerAgentInput reads honestly by KIND (a manual fire is not labelled a cron fire)', () => {
+    // The fired agent-run input is a self-describing marker; it must name the ACTUAL trigger kind so the
+    // journal/run header reads truthfully. A manual fire labelled "(cron trigger: …)" would be a lie.
+    expect(triggerAgentInput('cron', 'nightly-digest')).toBe('(cron trigger: nightly-digest)');
+    expect(triggerAgentInput('manual', 'kick-off')).toBe('(manual trigger: kick-off)');
+    // The back-compat alias stays byte-identical to the cron form.
+    expect(cronAgentInput('nightly-digest')).toBe(triggerAgentInput('cron', 'nightly-digest'));
   });
 });

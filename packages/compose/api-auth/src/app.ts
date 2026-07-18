@@ -35,6 +35,7 @@ import { registerOAuthRoutes } from './routes/oauth.js';
 import { registerOrgRoutes } from './routes/orgs.js';
 import { registerReprocessRoutes } from './routes/reprocess.js';
 import { registerRunsRoutes } from './routes/runs.js';
+import { registerTriggerRoutes } from './routes/triggers.js';
 
 /** A ContentfulStatusCode-compatible cast for Hono's c.json status arg. */
 type HttpStatus = Parameters<Context['json']>[1];
@@ -203,6 +204,9 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
   // the operational session-reprocess route (opt-in; 501 when no reprocessor is wired). Same
   // middleware chain (server-derived tenant, store:write).
   registerReprocessRoutes(app, effectiveDeps);
+  // the manual-trigger fire route (opt-in; 501 when no firer is wired). Same middleware chain
+  // (server-derived tenant, store:write); the firer restricts to kind:'manual' fail-closed.
+  registerTriggerRoutes(app, effectiveDeps);
   // the declarative engine — interpret `api[]` and register each
   // declared route on THIS app behind the SAME middleware chain. The `{handler}` route now resolves
   // its declared handler from the boot-loaded map. Omitted ⇒ an auth-only app (the platform

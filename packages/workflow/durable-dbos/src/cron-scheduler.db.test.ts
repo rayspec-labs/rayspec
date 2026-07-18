@@ -23,8 +23,9 @@
  *     raw invocation count — the exactly-once guarantee is one real run PER FIRING KEY, and a raw count
  *     is blind to that reserve (an untainted safe re-execution re-invokes the backend yet still yields
  *     exactly one durable run).
- *  4. PER-KIND RESERVED: a declared webhook/event/manual trigger is NOT fired (the scheduler does not
- *     schedule it; a direct `fireNow` for it is fail-closed-rejected).
+ *  4. MANUAL: a declared `manual` trigger is fireable ON DEMAND via `fireNow` (NOT scheduled), through
+ *     the SAME reserve→dispatch path — exactly-once per firing key. A webhook/event trigger stays
+ *     RESERVED (neither scheduled NOR fired; a direct `fireNow` for it is fail-closed-rejected).
  *  5. CROSS-TENANT: the cron fires under the scheduler's tenant ONLY — a different tenant observes no
  *     reserve row / no cron_marks row (the reserve + dispatch are tenant-scoped structurally).
  *  6. EXACTLY-ONCE under a RECOVERY double-fire: a recovery re-execution of an already-completed
@@ -163,12 +164,40 @@ function agentDescriptor(name: string): TriggerDescriptor {
   };
 }
 
-/** A RESERVED (non-cron) descriptor — the scheduler must NOT fire it (per-kind reservation). */
+/** A RESERVED webhook descriptor — the scheduler must neither schedule NOR fire it (per-kind reservation). */
 function webhookDescriptor(name: string): TriggerDescriptor {
   return {
     name,
     kind: 'webhook',
     action: { kind: 'handler', handlerId: 'nightly_digest_handler', handler: cronHandlerFn },
+  };
+}
+
+/** A RESERVED event descriptor — likewise neither scheduled NOR fired (per-kind reservation). */
+function eventDescriptor(name: string): TriggerDescriptor {
+  return {
+    name,
+    kind: 'event',
+    event: 'thing.created',
+    action: { kind: 'handler', handlerId: 'nightly_digest_handler', handler: cronHandlerFn },
+  };
+}
+
+/** A MANUAL→handler descriptor — NOT scheduled, but fireable on demand via fireNow (writes cron_marks). */
+function manualHandlerDescriptor(name: string): TriggerDescriptor {
+  return {
+    name,
+    kind: 'manual',
+    action: { kind: 'handler', handlerId: 'nightly_digest_handler', handler: cronHandlerFn },
+  };
+}
+
+/** A MANUAL→agent descriptor — NOT scheduled, but fireable on demand (enqueues an off-request run). */
+function manualAgentDescriptor(name: string): TriggerDescriptor {
+  return {
+    name,
+    kind: 'manual',
+    action: { kind: 'agent', agentId: 'echo-agent' },
   };
 }
 
@@ -325,13 +354,17 @@ describe.skipIf(!hasDb)(
       });
 
       // The scheduler over the SAME tenant (single-deployment LOCAL posture). It dispatches off the
-      // wrapped db so the handler's GUC is observed. Construct it with BOTH a handler cron + an agent
-      // cron + a RESERVED webhook (proving the per-kind reservation: webhook is NOT scheduled).
+      // wrapped db so the handler's GUC is observed. Construct it with a handler cron + an agent cron
+      // (scheduled + fireable), a manual→handler + a manual→agent (fireable on demand, NOT scheduled),
+      // and RESERVED webhook + event (neither scheduled nor fired — the per-kind reservation).
       scheduler = new DbosCronScheduler(
         [
           handlerDescriptor('nightly-digest'),
           agentDescriptor('agent-cron'),
+          manualHandlerDescriptor('manual-digest'),
+          manualAgentDescriptor('manual-agent'),
           webhookDescriptor('inbound-hook'),
+          eventDescriptor('on-thing'),
         ],
         { db: wrapDb(db), tenantId: TENANT, executor, productTables, invokeTriggerHandler },
       );
@@ -360,10 +393,17 @@ describe.skipIf(!hasDb)(
       }
     }, 30_000);
 
-    it('the scheduler schedules ONLY cron triggers (webhook reserved per-kind, not scheduled)', () => {
-      // The webhook descriptor was passed but must NOT be a scheduled cron (per-kind reservation).
+    it('the scheduler schedules ONLY cron triggers; manual is fireable-not-scheduled; webhook/event reserved', () => {
+      // Only cron triggers are SCHEDULED — manual/webhook/event descriptors were passed but must NOT be
+      // scheduled crons (per-kind reservation).
       expect(scheduler.cronTriggerNames.sort()).toEqual(['agent-cron', 'nightly-digest']);
+      expect(scheduler.cronTriggerNames).not.toContain('manual-digest');
       expect(scheduler.cronTriggerNames).not.toContain('inbound-hook');
+      // Manual triggers are separately FIREABLE on demand (not scheduled) — webhook/event are in NEITHER.
+      expect(scheduler.manualTriggerNames.sort()).toEqual(['manual-agent', 'manual-digest']);
+      expect(scheduler.manualTriggerNames).not.toContain('nightly-digest');
+      expect(scheduler.manualTriggerNames).not.toContain('inbound-hook');
+      expect(scheduler.manualTriggerNames).not.toContain('on-thing');
     });
 
     it('HEADLINE: a SECOND fire of the same (trigger, instant) dispatches ZERO additional — exactly ONE reserve row + ONE handler run', async () => {
@@ -461,12 +501,85 @@ describe.skipIf(!hasDb)(
       expect(await countLlmSteps(runId)).toBe(0); // no journaled llm step — runAgent never re-ran
     });
 
-    it('PER-KIND RESERVED: fireNow for a reserved (webhook) trigger is fail-closed-rejected (never fired)', async () => {
+    it('PER-KIND RESERVED: fireNow for a reserved (webhook OR event) trigger is fail-closed-rejected (never fired)', async () => {
+      // webhook + event stay RESERVED — they are in NEITHER the schedule nor the fireable map, so a
+      // direct fire is fail-closed (manual, by contrast, IS fireable — proven below).
       await expect(scheduler.fireNow('inbound-hook')).rejects.toThrow(
-        /not a registered cron trigger/i,
+        /not a registered fireable trigger/i,
+      );
+      await expect(scheduler.fireNow('on-thing')).rejects.toThrow(
+        /not a registered fireable trigger/i,
       );
       // fireNow for a wholly-unknown name is likewise fail-closed.
-      await expect(scheduler.fireNow('does-not-exist')).rejects.toThrow(/not a registered cron/i);
+      await expect(scheduler.fireNow('does-not-exist')).rejects.toThrow(
+        /not a registered fireable/i,
+      );
+    });
+
+    it('MANUAL→handler: fireNow dispatches the handler once (GUC-populated tenant tx); a refire of the same instant dedups', async () => {
+      const instant = new Date('2026-06-24T09:00:00.000Z');
+      const key = firingKey('manual-digest', instant);
+
+      // FAIL-THE-FIX: a manual trigger is fireable on demand THROUGH the SAME reserve→dispatch path a
+      // cron uses. Without lifting the cron-only reservation, `fireNow('manual-digest')` would throw
+      // "not a registered fireable trigger". The first fire WINS → the handler runs once in the tenant tx.
+      const first = await scheduler.fireNow('manual-digest', instant);
+      expect(first).toBe(true);
+      expect(capturedGuc.value).toBe(TENANT); // the handler ran inside the GUC-populated tenant tx
+      expect(await countFireMarkers(TENANT, key)).toBe(1);
+      expect(await countCronMarks(TENANT)).toBe(1);
+
+      // A SECOND fire of the SAME (trigger, instant) LOSES the reserve → ZERO additional dispatch.
+      capturedGuc.value = null;
+      const second = await scheduler.fireNow('manual-digest', instant);
+      expect(second).toBe(false); // deduped no-op (exactly-once per firing key, identical to cron)
+      expect(capturedGuc.value).toBeNull(); // the handler was NOT invoked again
+      expect(await countFireMarkers(TENANT, key)).toBe(1); // still exactly ONE reserve row
+      expect(await countCronMarks(TENANT)).toBe(1); // still exactly ONE handler row
+    });
+
+    it('MANUAL→agent: fireNow enqueues the off-request run once (deterministic runId); a refire enqueues nothing new', async () => {
+      const instant = new Date('2026-06-24T09:05:00.000Z');
+      const runId = cronRunId('manual-agent', instant);
+
+      const first = await scheduler.fireNow('manual-agent', instant);
+      expect(first).toBe(true);
+
+      // The agent run ran OFF-REQUEST under the deterministic runId → run header + journal persist.
+      // Assert on THIS runId's own rows (not the shared backend counter — a prior test's agent run may
+      // still be settling on the shared DBOS queue, which would taint a global count).
+      const status = await waitForTerminal(runId);
+      expect(status).toBe('succeeded');
+      const headers = await db.$client.unsafe('SELECT 1 FROM runs WHERE run_id = $1', [runId]);
+      expect(headers).toHaveLength(1);
+      const llmSteps = await db.$client.unsafe(
+        "SELECT 1 FROM journal_steps WHERE run_id = $1 AND type = 'llm'",
+        [runId],
+      );
+      expect(llmSteps).toHaveLength(1); // the agent executed EXACTLY once for this fire
+
+      // A refire of the same instant loses the trigger reserve → no second enqueue; the run's own
+      // journal still shows exactly ONE llm step (this run never re-executed).
+      const second = await scheduler.fireNow('manual-agent', instant);
+      expect(second).toBe(false);
+      await new Promise((r) => setTimeout(r, 200));
+      const llmStepsAfter = await db.$client.unsafe(
+        "SELECT 1 FROM journal_steps WHERE run_id = $1 AND type = 'llm'",
+        [runId],
+      );
+      expect(llmStepsAfter).toHaveLength(1);
+    });
+
+    it('MANUAL fires are per-instant like cron: a DIFFERENT instant is a DISTINCT key → it DOES dispatch', async () => {
+      // Guards against an over-broad reserve that would dedup ALL manual fires forever. Two distinct
+      // instants → two reserve rows → two handler rows (the dedup is per-instant, not per-trigger).
+      const t1 = new Date('2026-06-24T09:00:00.000Z');
+      const t2 = new Date('2026-06-25T09:00:00.000Z');
+      expect(await scheduler.fireNow('manual-digest', t1)).toBe(true);
+      expect(await scheduler.fireNow('manual-digest', t2)).toBe(true);
+      expect(await countFireMarkers(TENANT, firingKey('manual-digest', t1))).toBe(1);
+      expect(await countFireMarkers(TENANT, firingKey('manual-digest', t2))).toBe(1);
+      expect(await countCronMarks(TENANT)).toBe(2); // two distinct instants both fired
     });
 
     it('CROSS-TENANT: the cron fires under the scheduler tenant ONLY — the other tenant sees no reserve / no row', async () => {

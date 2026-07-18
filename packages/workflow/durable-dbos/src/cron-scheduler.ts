@@ -3,13 +3,19 @@
  * opt-in missed-interval CATCH-UP per trigger).
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * WHAT THIS IS (cron ONLY — per-kind build-on-demand).
+ * WHAT THIS IS (cron SCHEDULING + on-demand manual firing — per-kind build-on-demand).
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * The triggers PARSE/REGISTER seam (`registerTriggers` → `TriggerRegistry` →
  * `TriggerDescriptor`/`ResolvedTriggerAction`) carries a fail-closed `fireTrigger():never` runtime edge.
- * This module is the FIRING runtime for the ONE trigger kind a consumer declares: **cron** (e.g. a
- * `nightly-digest`). webhook/event/manual stay RESERVED per-kind (a `webhook`/`event`/
- * `manual` descriptor is NOT fired here — see `assertCronOnly`); building them for a single consumer is premature.
+ * This module is the FIRING runtime for the two trigger kinds a consumer can drive:
+ *   - **cron** (e.g. a `nightly-digest`) — SCHEDULED on its crontab (a DBOS scheduled-workflow) AND
+ *     fireable on demand via `fireNow`;
+ *   - **manual** — NOT scheduled (no crontab); fired ONLY on demand via an explicit `fireNow` call
+ *     (the consumer's control path — an auth-guarded endpoint), reusing the SAME exactly-once
+ *     reserve→dispatch machinery a cron fire uses (so a double manual fire of the same logical key
+ *     dedups identically).
+ * webhook/event stay RESERVED per-kind (a `webhook`/`event` descriptor is fired by neither the schedule
+ * nor `fireNow` — see the `fireNow` reservation); building their ingress for a single consumer is premature.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * THE GUARANTEE — IDEMPOTENT, at-MOST-once-per-instant (NOT at-least-once; read this carefully).
@@ -155,14 +161,19 @@ export const TRIGGER_FIRE_SCOPE = 'trigger';
 export const TRIGGER_FIRE_BODY_HASH = 'trigger_fire_marker';
 
 /**
- * The fixed `input` a cron-fired AGENT run carries. A cron fire has no client request body; the
- * agent's declared instructions drive it. The neutral `AgentSpec.input` is `z.string().min(1)`, so a
- * non-empty, self-describing marker (rather than an empty string) satisfies the schema and reads
- * honestly in the journal/run header. Includes the trigger name (DATA — server-derived, not a tenant
- * signal). Kept small + deterministic so the same firing instant always produces the same `RunJob`.
+ * The fixed `input` a trigger-fired AGENT run carries. A fire (cron or manual) has no client request
+ * body; the agent's declared instructions drive it. The neutral `AgentSpec.input` is `z.string().min(1)`,
+ * so a non-empty, self-describing marker (rather than an empty string) satisfies the schema and reads
+ * honestly in the journal/run header. Includes the trigger KIND + name (DATA — server-derived, not a
+ * tenant signal). Kept small + deterministic so the same firing instant always produces the same `RunJob`.
  */
+export function triggerAgentInput(kind: 'cron' | 'manual', triggerName: string): string {
+  return `(${kind} trigger: ${triggerName})`;
+}
+
+/** Back-compat alias for a CRON-fired agent run's input (`triggerAgentInput('cron', name)`). */
 export function cronAgentInput(triggerName: string): string {
-  return `(cron trigger: ${triggerName})`;
+  return triggerAgentInput('cron', triggerName);
 }
 
 /**
@@ -280,23 +291,24 @@ export interface CronSchedulerDeps {
   readonly catchUpLookbackMs?: number;
 }
 
-/** Thrown when a NON-cron trigger reaches the cron scheduler (per-kind reservation — fail-closed). */
+/** Thrown when a NON-cron trigger reaches the cron SCHEDULING path (per-kind reservation — fail-closed). */
 export class TriggerKindNotBuiltError extends Error {
   constructor(triggerName: string, kind: string) {
     super(
-      `trigger '${triggerName}' is kind '${kind}', which the cron worker does NOT fire ` +
-        '(only `cron` is built — webhook/event/manual are RESERVED per-kind, build-on-demand). ' +
-        'This is a fail-closed rejection, not a silent no-op.',
+      `trigger '${triggerName}' is kind '${kind}', which the cron worker does NOT SCHEDULE ` +
+        '(only `cron` carries a crontab — `manual` is fired on demand via fireNow, and webhook/event ' +
+        'are RESERVED per-kind, build-on-demand). This is a fail-closed rejection, not a silent no-op.',
     );
     this.name = 'TriggerKindNotBuiltError';
   }
 }
 
 /**
- * Assert a descriptor is a `cron` trigger with a schedule (the only kind this worker fires). A
- * webhook/event/manual descriptor THROWS `TriggerKindNotBuiltError` — never a silent fire (the
- * per-kind reservation). A cron descriptor missing `schedule` is a malformed registration (lint should
- * have caught it) → a loud throw, not a dangling schedule.
+ * Assert a descriptor is a `cron` trigger with a schedule (the only kind this worker SCHEDULES). A
+ * webhook/event/manual descriptor THROWS `TriggerKindNotBuiltError` — never a silently-scheduled
+ * non-cron (the per-kind reservation; `manual` is still fireable on demand via `fireNow`, just not
+ * scheduled). A cron descriptor missing `schedule` is a malformed registration (lint should have caught
+ * it) → a loud throw, not a dangling schedule.
  */
 export function assertCronOnly(
   descriptor: TriggerDescriptor,
@@ -323,37 +335,55 @@ export function assertCronOnly(
  */
 export class DbosCronScheduler {
   readonly #deps: CronSchedulerDeps;
-  /** The cron descriptors this scheduler fires, keyed by name (cron-only — others rejected at add). */
+  /** The cron descriptors this scheduler SCHEDULES, keyed by name (cron-only — others not scheduled). */
   readonly #crons: Map<string, TriggerDescriptor & { kind: 'cron'; schedule: string }>;
   /** The bounded catch-up look-back window (ms) — a scheduled replay older than this is not made up. */
   readonly #catchUpLookbackMs: number;
+  /**
+   * The MANUAL descriptors this scheduler can FIRE on demand, keyed by name. Manual triggers are NOT
+   * scheduled (no crontab) — they fire ONLY via an explicit `fireNow` (the consumer's control path),
+   * reusing the SAME reserve→dispatch machinery a cron fire uses. Kept SEPARATE from `#crons` so the
+   * scheduling loop never touches them and the cron boot banner (`cronTriggerNames`) stays cron-only.
+   */
+  readonly #manual: Map<string, TriggerDescriptor & { kind: 'manual' }>;
   #registered = false;
 
   /**
    * @param descriptors EVERY registered descriptor (the full `TriggerRegistry.list()`). Cron ones are
-   *   scheduled; a webhook/event/manual one is recorded as RESERVED and is fail-closed on a fire
-   *   attempt (it is NOT scheduled — the per-kind reservation). We filter cron here so a mixed spec
-   *   schedules only its cron triggers without rejecting the whole deployment.
+   *   scheduled AND fireable on demand; a `manual` one is fireable on demand ONLY (not scheduled); a
+   *   webhook/event one is recorded by neither map and is fail-closed on a fire attempt (RESERVED
+   *   per-kind). We filter here so a mixed spec wires only its fireable triggers without rejecting the
+   *   whole deployment.
    */
   constructor(descriptors: readonly TriggerDescriptor[], deps: CronSchedulerDeps) {
     this.#deps = deps;
     this.#catchUpLookbackMs = deps.catchUpLookbackMs ?? DEFAULT_CATCHUP_LOOKBACK_MS;
     this.#crons = new Map();
+    this.#manual = new Map();
     for (const d of descriptors) {
       if (d.kind === 'cron') {
         // assertCronOnly also validates the schedule is present (a malformed cron is a loud throw).
         assertCronOnly(d);
         this.#crons.set(d.name, d);
+      } else if (d.kind === 'manual') {
+        // Manual: fireable on demand (fireNow) but NOT scheduled — no crontab, so it never enters the
+        // scheduling loop. It reuses the exact reserve→dispatch path a cron fire uses.
+        this.#manual.set(d.name, d as TriggerDescriptor & { kind: 'manual' });
       }
-      // Non-cron descriptors are intentionally NOT scheduled (RESERVED per-kind). They remain in the
-      // platform `TriggerRegistry`; this worker simply does not fire them. A direct fire attempt via
-      // `fireNow` for a non-cron name is a clear "not a registered cron trigger" error.
+      // webhook/event descriptors are intentionally in NEITHER map (RESERVED per-kind). They remain in
+      // the platform `TriggerRegistry`; this worker neither schedules NOR fires them. A `fireNow` for a
+      // webhook/event (or unknown) name is a clear fail-closed "not a fireable trigger" error.
     }
   }
 
-  /** The names of the cron triggers this scheduler will fire (for the boot banner / tests). */
+  /** The names of the cron triggers this scheduler SCHEDULES (for the boot banner / tests). */
   get cronTriggerNames(): string[] {
     return [...this.#crons.keys()];
+  }
+
+  /** The names of the MANUAL triggers this scheduler can fire on demand (for wiring the control path). */
+  get manualTriggerNames(): string[] {
+    return [...this.#manual.keys()];
   }
 
   /**
@@ -395,23 +425,27 @@ export class DbosCronScheduler {
   }
 
   /**
-   * Fire a registered cron trigger IMMEDIATELY for a given instant, through the EXACT SAME path as a
-   * scheduled fire (same firing-key derivation, same reserve → dispatch). For tests + the CEO demo,
-   * which cannot wait until 2am and need a deterministic fire. The exactly-once invariant is testable:
-   * `fireNow(name, T)` twice for the same `T` dispatches ZERO additional work (the second loses the
-   * reserve). `instant` defaults to `now` (millisecond-truncated to a stable slot); pass an explicit
+   * Fire a registered FIREABLE trigger (a `cron` OR a `manual`) IMMEDIATELY for a given instant, through
+   * the EXACT SAME path as a scheduled fire (same firing-key derivation, same reserve → dispatch). A cron
+   * uses this for tests + the CEO demo (which cannot wait until 2am); a manual trigger uses it as its
+   * ONLY firing path (an explicit call from the consumer's control endpoint). The exactly-once invariant
+   * is identical for both: `fireNow(name, T)` twice for the same `T` dispatches ZERO additional work (the
+   * second loses the reserve). `instant` defaults to `now` (truncated to a stable slot); pass an explicit
    * `instant` to make the firing key fully deterministic.
+   *
+   * A webhook/event (RESERVED per-kind) or unknown name is fail-closed-REJECTED — never a silent no-op.
    *
    * @returns whether THIS call won the reserve and dispatched (`true`) or was a deduped no-op (`false`).
    */
   async fireNow(name: string, instant: Date = new Date()): Promise<boolean> {
-    const descriptor = this.#crons.get(name);
+    // A cron trigger (scheduled + on-demand) OR a manual trigger (on-demand only) is fireable here.
+    const descriptor = this.#crons.get(name) ?? this.#manual.get(name);
     if (!descriptor) {
-      // Not a registered CRON trigger. If it is a registered non-cron trigger somewhere, it is RESERVED
-      // (per-kind) — either way this worker does not fire it. A loud error, never a silent no-op.
+      // Not a registered FIREABLE trigger. A registered webhook/event trigger is RESERVED (per-kind) —
+      // either way this worker does not fire it. A loud error, never a silent no-op.
       throw new Error(
-        `fireNow: '${name}' is not a registered cron trigger on this scheduler ` +
-          '(unknown, or a RESERVED webhook/event/manual kind not built here). Fail-closed.',
+        `fireNow: '${name}' is not a registered fireable trigger on this scheduler ` +
+          '(unknown, or a RESERVED webhook/event kind not built here). Fail-closed.',
       );
     }
     return this.#fire(descriptor, instant);
@@ -459,7 +493,7 @@ export class DbosCronScheduler {
    *   bounded make-up skip.
    */
   async #fire(
-    descriptor: TriggerDescriptor & { kind: 'cron'; schedule: string },
+    descriptor: TriggerDescriptor & { kind: 'cron' | 'manual' },
     instant: Date,
     opts?: { fromSchedule?: boolean },
   ): Promise<boolean> {
@@ -539,7 +573,9 @@ export class DbosCronScheduler {
       runId,
       tenantId,
       agentId: descriptor.action.agentId,
-      input: cronAgentInput(descriptor.name),
+      // A fixed, self-describing marker input (the agent's declared instructions drive it — a fire has
+      // no client body). Honest by kind so the journal/run header reads truthfully for a manual fire.
+      input: triggerAgentInput(descriptor.kind, descriptor.name),
       // Carry the action's optional output-persist target so the off-request run writes its validated
       // output into the declared store (exactly-once via the run-header completing-transition gate).
       ...(descriptor.action.persistTo !== undefined
