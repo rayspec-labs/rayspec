@@ -137,8 +137,9 @@ export interface DeployTarget {
   applyMigration(migration: PlannedMigration): Promise<void>;
   /**
    * FAIL-CLOSED VERIFY that `table` (a built product table for a declared store) is admitted by the
-   * REAL TenantDb chokepoint — i.e. it is registered in `TENANT_SCOPED_TABLES` (the committed
-   * tuple). The deployer implements this by probing the real chokepoint (e.g.
+   * REAL TenantDb chokepoint — i.e. it was admitted into the `TENANT_SCOPED_TABLES` Set at BOOT
+   * through the sanctioned `registerProductTables` registrar. The deployer implements this by
+   * probing the real chokepoint (e.g.
    * `forTenant(db, anyTenant).select(table)`, which runs `assertScoped` and THROWS deny-by-default if
    * the table is not registered). deploy() NEVER mutates the Set — it only asks this to throw on a
    * missing registration so the deploy aborts with an actionable error. `storeName` is for the message.
@@ -159,12 +160,13 @@ export interface DeployTarget {
 /** The roll-out inputs the deployer supplies (the platform ships none — zero-product-code). */
 export interface RolloutConfig {
   /**
-   * The CANONICAL product tables — the SAME `PgTable` instances the deployment's committed
-   * `generated/product-schema.ts` composed into `TENANT_SCOPED_TABLES`. deploy() VERIFIES each
-   * is admitted by the chokepoint (deny-by-default rejects a non-tuple instance) and threads THESE
-   * into the engine. They MUST be the registered instances — the chokepoint Set is keyed by object
-   * identity, so a freshly-built table (a different object) would not be admitted. Declared store
-   * name → its committed `PgTable`. A store with no entry here aborts the deploy (fail-closed). A
+   * The CANONICAL product tables — the SAME `PgTable` instances the deployment built and admitted
+   * into `TENANT_SCOPED_TABLES` at BOOT via the `registerProductTables` hook (wired to
+   * `@rayspec/db/composition`'s `registerProductStores`). deploy() VERIFIES each is admitted by the
+   * chokepoint (deny-by-default rejects a non-registered instance) and threads THESE into the engine.
+   * They MUST be the registered instances — the chokepoint Set is keyed by object identity, so a
+   * freshly-built table (a different object) would not be admitted. Declared store name → its
+   * built/registered `PgTable`. A store with no entry here aborts the deploy (fail-closed). A
    * stores-free spec passes an empty map.
    */
   readonly productTables: ReadonlyMap<string, PgTable>;
@@ -360,9 +362,10 @@ export async function deploy<App = unknown>(config: DeployConfig): Promise<Deplo
   }
 
   // --- 5. ROLL OUT (verify registration precondition → load handlers → triggers → build app) --------
-  // Use the deployer-supplied CANONICAL product tables (the committed tuple instances), then
-  // FAIL-CLOSED VERIFY each declared store has one AND it is admitted by the real chokepoint (deploy
-  // NEVER registers — see the header). A missing entry / a non-registered instance aborts.
+  // Use the deployer-supplied CANONICAL product tables (the built instances the deployment admitted
+  // via the boot-time registrar), then FAIL-CLOSED VERIFY each declared store has one AND it is
+  // admitted by the real chokepoint (deploy NEVER registers — see the header). A missing entry / a
+  // non-registered instance aborts.
   const productTables = rollout.productTables;
   for (const store of spec.stores) {
     const table = productTables.get(store.name);
@@ -370,9 +373,10 @@ export async function deploy<App = unknown>(config: DeployConfig): Promise<Deplo
       throw new DeployError(
         'roll out',
         `store '${store.name}' is declared in the spec but no product table was supplied for it in ` +
-          'rollout.productTables — the deployment must export it from the committed generated ' +
-          'product-schema.ts (registration = committed source) and pass it here. deploy() never ' +
-          'builds/registers product tables itself.',
+          'rollout.productTables — the deployment must build the product table, admit it via the ' +
+          'registerProductTables hook (the @rayspec/db/composition product-store registrar), and thread ' +
+          'the SAME instance into rollout.productTables here. deploy() never builds/registers product ' +
+          'tables itself.',
       );
     }
     try {
