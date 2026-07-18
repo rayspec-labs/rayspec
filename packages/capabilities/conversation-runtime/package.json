@@ -2,6 +2,9 @@
   "name": "@rayspec/conversation-runtime",
   "version": "0.0.0",
   "private": true,
+  "files": [
+    "dist"
+  ],
   "license": "FSL-1.1-ALv2",
   "type": "module",
   "description": "The generic Tier-B conversational-ingress capability (conversation_input) — an idempotent client-keyed conversation create plus a bounded JSON turn submit that persists the user turn in a capability-owned ledger and emits a durable workflow trigger. Product-neutral; a record×file hybrid (record_input donates the JSON-payload discipline, file_input donates the manifest/handler/mount template).",

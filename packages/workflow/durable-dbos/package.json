@@ -2,6 +2,9 @@
   "name": "@rayspec/durable-dbos",
   "version": "0.0.0",
   "private": true,
+  "files": [
+    "dist"
+  ],
   "license": "FSL-1.1-ALv2",
   "type": "module",
   "description": "The DBOS adapter for the neutral DurableExecutor. The ONLY package that imports @dbos-inc/dbos-sdk — @rayspec/platform / run-core / the adapters stay DBOS-free (engine asymmetry lives inside this adapter). Runs the EXISTING runAgent off-request inside one durable workflow; durability = whole-run re-execution (no step-resume).",
