@@ -15,6 +15,12 @@ out/
 !examples/notes-ui/web/dist/
 !examples/notes-ui/web/dist/**
 
+# Stray in-place-compiled `.js` inside an example extension-pack SOURCE root: packs are authored in
+# `.ts` and built to `dist/`, but the compiled-module pack resolution prefers a sibling `.js` over the
+# `.ts`, so an accidental in-place `tsc` output would shadow the source. Ignore it — no pack commits a
+# `.js` under its source root (build output goes to `dist/`, already ignored above).
+examples/**/packs/**/*.js
+
 # Caches
 .turbo/
 .cache/
