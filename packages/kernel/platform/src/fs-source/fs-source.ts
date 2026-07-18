@@ -23,6 +23,16 @@
  *      directories (a symlink dirent is skipped), so a symlink planted inside the root can never
  *      redirect a walk out of it. An EXPLICIT `read` of a symlink is still allowed IFF its real target
  *      stays within the root (the layer-2 realpath assert decides) — a symlink pointing OUT is refused.
+ *      Each `read`/`search` file access opens the path ONCE and does its `fstat` + read off that single
+ *      FileHandle (never a path-based `stat` then a separate path-based read), so there is no
+ *      check-then-use window a concurrent path swap could exploit — the size-gate and the bytes come
+ *      from ONE inode.
+ *
+ * THREAT MODEL — the containment assumes the configured root (and everything under it) is
+ * DEPLOYMENT-CONTROLLED and NOT attacker-writable: the jail confines a caller-supplied PATH, it does not
+ * defend against an adversary who can already plant/rewrite files or symlinks inside the root at will
+ * (which is out of scope for the trusted, one-deployment-one-tenant, deployment-static posture). Given
+ * that root, a handler can never read OUTSIDE it.
  *
  * NOT TENANT-PARTITIONED: unlike the `BlobStore` (per-tenant writable storage), an `FsSource` reads
  * DEPLOYMENT-static assets shared across the deployment; v1 is one-deployment-one-tenant, so there is no
@@ -36,7 +46,7 @@
  */
 
 import { realpathSync, statSync } from 'node:fs';
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { open, readdir, stat } from 'node:fs/promises';
 import { isAbsolute, normalize, relative, resolve, sep } from 'node:path';
 import type {
   FsSource,
@@ -247,25 +257,36 @@ function makeFsSource(root: string): FsSource {
       opts?: FsSourceReadOptions,
     ): Promise<FsSourceReadResult | FsSourceNotFound> {
       const absolute = jailPath(root, path, false);
-      let st: Awaited<ReturnType<typeof stat>>;
-      try {
-        st = await stat(absolute); // follows a symlink — the jail already confirmed the real target is in-root.
-      } catch {
-        return { notFound: true, path }; // ENOENT → typed not-found (fail-closed).
-      }
-      // A directory / non-regular file is not readable as bytes → typed not-found (never a throw).
-      if (!st.isFile()) return { notFound: true, path };
       const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_READ_BYTES;
-      if (st.size > maxBytes) {
-        // Refuse fail-closed rather than silently truncate (a truncated read is a subtle correctness bug).
-        throw new FsSourceError(
-          `fs-source read of '${path}' is ${st.size} bytes, over the ${maxBytes}-byte cap — refusing ` +
-            '(fail-closed; raise maxBytes to read a larger file).',
-        );
+      // SINGLE-OPEN fd (no check-then-use race): open ONCE (after the jail's realpath assert), then
+      // `fstat` + read the bytes off the SAME FileHandle. The size-check and the read therefore see ONE
+      // inode — a path component swapped to a symlink between a path-based `stat` and a path-based
+      // `readFile` can no longer redirect the read, and the file cannot grow past the cap between the two.
+      // (No O_NOFOLLOW: an explicit read of a symlink whose real target is IN the root stays allowed — the
+      // jail's realpath assert already refused any symlink whose target escapes; open follows it as before.)
+      let fh: Awaited<ReturnType<typeof open>>;
+      try {
+        fh = await open(absolute, 'r');
+      } catch {
+        return { notFound: true, path }; // ENOENT / unreadable → typed not-found (fail-closed).
       }
-      const buf = await readFile(absolute);
-      const bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
-      return { bytes, contentLength: bytes.length };
+      try {
+        const st = await fh.stat();
+        // A directory / non-regular file is not readable as bytes → typed not-found (never a throw).
+        if (!st.isFile()) return { notFound: true, path };
+        if (st.size > maxBytes) {
+          // Refuse fail-closed rather than silently truncate (a truncated read is a subtle correctness bug).
+          throw new FsSourceError(
+            `fs-source read of '${path}' is ${st.size} bytes, over the ${maxBytes}-byte cap — refusing ` +
+              '(fail-closed; raise maxBytes to read a larger file).',
+          );
+        }
+        const buf = await fh.readFile();
+        const bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+        return { bytes, contentLength: bytes.length };
+      } finally {
+        await fh.close();
+      }
     },
 
     async search(query: string, opts?: FsSourceSearchOptions): Promise<FsSourceMatch[]> {
@@ -297,11 +318,18 @@ function makeFsSource(root: string): FsSource {
           if (!dirent.isFile()) continue;
           if (filesScanned >= SEARCH_MAX_FILES_SCANNED) return;
           filesScanned += 1;
+          // SINGLE-OPEN fd per file (no check-then-use race, mirrors `read`): open once, then `fstat` +
+          // read off the SAME FileHandle so the size-gate and the scan see ONE inode.
           let buf: Buffer;
           try {
-            const st = await stat(abs);
-            if (st.size > SEARCH_MAX_FILE_SCAN_BYTES) continue; // too large to scan as text — skip.
-            buf = await readFile(abs);
+            const fh = await open(abs, 'r');
+            try {
+              const st = await fh.stat();
+              if (st.size > SEARCH_MAX_FILE_SCAN_BYTES) continue; // too large to scan as text — skip.
+              buf = await fh.readFile();
+            } finally {
+              await fh.close();
+            }
           } catch {
             continue; // unreadable / vanished — skip fail-closed.
           }
