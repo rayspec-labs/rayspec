@@ -49,6 +49,7 @@ import {
   eraseTenant,
   IdempotencyStore,
   IdentityStore,
+  InviteStore,
   type ManualTriggerFirer,
   OrgStore,
   type PlannedMigration,
@@ -782,6 +783,7 @@ export async function assembleServer(
   const apiKeyStore = new ApiKeyStore(db);
   const auditStore = new AuditStore(db);
   const idempotency = new IdempotencyStore(db);
+  const inviteStore = new InviteStore(db);
   const authService = new AuthService(identityStore, signer);
 
   const baseDeps: Omit<AppDeps, 'engine'> = {
@@ -794,6 +796,7 @@ export async function assembleServer(
     apiKeyStore,
     auditStore,
     idempotency,
+    inviteStore,
     authService,
     oidcProvider,
     // EXPLICIT, possibly-empty allow-list — never dev-permissive (loadServerConfig enforced this).

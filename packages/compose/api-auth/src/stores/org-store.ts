@@ -90,6 +90,48 @@ export class OrgStore {
     return { role: row?.role ?? 'member', activated: row?.activated ?? true };
   }
 
+  /**
+   * Idempotently add a user to an org with a SPECIFIC role (the invite-accept path — the role the
+   * owner chose at issue). Mirrors {@link addMember}'s single-statement upsert semantics EXACTLY, with
+   * ONE difference: a FRESH row or a reactivated TOMBSTONE gets `role` (the invited role) instead of the
+   * hardcoded `member`. An already-ACTIVE membership keeps its stored role UNCHANGED — an invite accept
+   * NEVER demotes (or re-promotes) a current member (`deleted_at IS NULL` ⇒ keep the stored role), so a
+   * replayed/duplicate accept is a safe no-op. `activated` is derived from the PRE-image (same-statement
+   * `prior` CTE) so the route returns 201 on a fresh add/reactivation and 200 on an idempotent no-op.
+   * The role is bound as a parameter (never string-interpolated). ATOMIC single-flight (the DB's
+   * row-level `ON CONFLICT` atomicity is the single-flight point — no read-then-insert TOCTOU).
+   */
+  async addInvitedMember(
+    orgId: string,
+    userId: string,
+    role: Role,
+  ): Promise<{ role: string; activated: boolean }> {
+    const rows = (await this.db.execute(sql`
+      WITH prior AS (
+        SELECT ${schema.memberships.status} AS status, ${schema.memberships.deletedAt} AS deleted_at
+        FROM ${schema.memberships}
+        WHERE ${schema.memberships.userId} = ${userId} AND ${schema.memberships.orgId} = ${orgId}
+      ),
+      upserted AS (
+        INSERT INTO ${schema.memberships} (user_id, org_id, role, status, deleted_at)
+        VALUES (${userId}, ${orgId}, ${role}, 'active', NULL)
+        ON CONFLICT (user_id, org_id) DO UPDATE
+          SET deleted_at = NULL,
+              status = 'active',
+              role = CASE
+                WHEN ${schema.memberships.deletedAt} IS NOT NULL THEN ${role}
+                ELSE ${schema.memberships.role}
+              END
+        RETURNING role
+      )
+      SELECT upserted.role AS role,
+             (prior.status IS NULL OR prior.status <> 'active' OR prior.deleted_at IS NOT NULL) AS activated
+      FROM upserted LEFT JOIN prior ON true
+    `)) as unknown as Array<{ role: string; activated: boolean }>;
+    const row = rows[0];
+    return { role: row?.role ?? role, activated: row?.activated ?? true };
+  }
+
   /** Active members of an org (id + email + role), joined to users; excludes soft-deleted rows. */
   async listMembers(orgId: string): Promise<{ userId: string; email: string; role: string }[]> {
     const rows = await this.db

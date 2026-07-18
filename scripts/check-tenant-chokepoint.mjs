@@ -91,6 +91,11 @@ const UNSCOPED_WHITELIST = new Set([
   'packages/compose/api-auth/src/stores/api-key-store.ts',
   'packages/compose/api-auth/src/stores/audit-store.ts',
   'packages/compose/api-auth/src/stores/oidc-store.ts',
+  // The invite store. `invites` IS a tenant-scoped table (its issue/consume WRITES go through
+  // forTenant), but the ONE redeem RESOLUTION must find an invite by its opaque token BEFORE any
+  // tenant is known — a hash-equality lookup on the unique token_hash index via the raw handle,
+  // structurally identical to the api-key/session bearer-resolution above. Whitelisted for that read.
+  'packages/compose/api-auth/src/stores/invite-store.ts',
 ]);
 
 // The named, per-file allowlist for the `Db`-typed-parameter query form

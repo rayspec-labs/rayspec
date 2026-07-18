@@ -223,6 +223,20 @@ describe('full-surface cross-tenant isolation (CI-BLOCKING)', () => {
       .where(eq(schema.idempotencyKeys.idemKey, 'shared-key'));
     expect(bRows.length).toBe(0);
   });
+
+  it('invites: B cannot read A’s invite rows (tenant-scoped via forTenant)', async () => {
+    const { a, b } = await twoPrincipals();
+    // Seed an invite under orgA (the org an invite grants membership in is the tenant).
+    await forTenant(h.db, a.orgId).insert(schema.invites, {
+      tokenHash: 'a'.repeat(64),
+      email: 'invitee-of-a@example.com',
+      role: 'member',
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    // forTenant(B) — the chokepoint auto-injects the tenant predicate — sees NONE of A's invites.
+    expect((await forTenant(h.db, b.orgId).select(schema.invites).all()).length).toBe(0);
+    expect((await forTenant(h.db, a.orgId).select(schema.invites).all()).length).toBe(1);
+  });
 });
 
 /**

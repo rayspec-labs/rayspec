@@ -131,6 +131,10 @@ export const DEFAULT_POLICIES: Record<string, RateLimitPolicy> = {
   // named trigger repeatedly (a cost-DoS). Cap the fires of one (tenant, trigger) per window; the route
   // keys the bucket by `${tenant}:${name}`.
   'trigger-fire': { max: 30, windowMs: 60_000 },
+  // The invite-accept endpoint is UNAUTHENTICATED (a token bearer redeems) and can PROVISION an
+  // account, so throttle it per source IP to bound token-probing / account-creation abuse. The token
+  // is 256-bit (brute-force is infeasible regardless), but a per-source cap is cheap defense-in-depth.
+  'invite-accept': { max: 10, windowMs: 60_000 },
 };
 
 /** Duration of the refresh-reuse anti-DoS lock (a stale token cannot be a repeatable DoS). */

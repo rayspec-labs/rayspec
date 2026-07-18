@@ -126,6 +126,27 @@ export class AuthService {
   }
 
   /**
+   * Issue a fresh logged-in session for an ALREADY-EXISTING user, scoped to `orgId` (the invite-accept
+   * new-account path — the invitee has just been provisioned + joined, so we log them straight in). A
+   * thin PUBLIC wrapper over the private {@link issueSession}: mints the opaque refresh session + a
+   * short JWT carrying the org + role, and returns the audit event the route commits out-of-band. The
+   * caller (the accept route) owns the user creation + membership attach; this only issues credentials.
+   */
+  async issueSessionFor(
+    userId: string,
+    orgId: string,
+    role: string | undefined,
+    ctx: LoginContext = {},
+  ): Promise<{ accessToken: string; refreshSecret: string; audit: AuditEvent[] }> {
+    const { accessToken, refreshSecret } = await this.issueSession(userId, orgId, role, ctx);
+    return {
+      accessToken,
+      refreshSecret,
+      audit: [{ event: 'login', actorUserId: userId, actorOrgId: orgId }],
+    };
+  }
+
+  /**
    * Register a user (email already normalized by the caller) + argon2id hash. If the email is
    * already taken, throw a generic CONFLICT (NOT a different error than other failures beyond the
    * status — we accept a 409 here since the unique index is the source of truth; enumeration is

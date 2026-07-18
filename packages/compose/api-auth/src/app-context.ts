@@ -29,6 +29,7 @@ import type { ApiKeyStore } from './stores/api-key-store.js';
 import type { AuditStore } from './stores/audit-store.js';
 import type { IdempotencyStore } from './stores/idempotency-store.js';
 import type { IdentityStore } from './stores/identity-store.js';
+import type { InviteStore } from './stores/invite-store.js';
 import type { OrgStore } from './stores/org-store.js';
 
 /**
@@ -277,6 +278,8 @@ export interface AppDeps {
   apiKeyStore: ApiKeyStore;
   auditStore: AuditStore;
   idempotency: IdempotencyStore;
+  /** The out-of-band org-invite store (issue / resolve-by-token / consume). */
+  inviteStore: InviteStore;
   authService: AuthService;
   /** Optional mounted OIDC provider (omit to skip the /oidc mount in unit-only suites). */
   oidcProvider?: Provider;
