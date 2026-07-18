@@ -5,6 +5,61 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-07-18
+
+### Added
+
+- **RaySpec is installable from npm.** `npx rayspec init` scaffolds a new project (a
+  minimal, valid backend spec you can `rayspec plan` and deploy without provider
+  credentials), and `npm i -g rayspec` puts the `rayspec` command on your PATH — no
+  clone-and-build required. The scoped `@rayspec/*` packages are published alongside the
+  unscoped `rayspec` launcher.
+- **Declarative full-text search.** A store can opt into Postgres full-text search with
+  `fullTextSearch: true`: the store gains a generated `tsvector` column over its text
+  columns, a GIN index, and a ranked `__search` query that orders results by relevance.
+  Stores that do not opt in keep the existing substring search unchanged.
+- **Out-of-band organization invites.** Invite a member by email with a single-use,
+  expiring, organization-scoped invite token; the invitee redeems it to join (setting
+  their own password for a new account, or authenticating as an existing one). This
+  closes the account-existence signal the direct member-add response carried.
+- **Read-only, path-jailed file source.** A new `fs_source` capability gives handlers a
+  deployer-configured, read-only reader over local files, contained by a symlink-safe
+  path jail (no traversal or absolute-path escape).
+- **Cron catch-up.** A cron trigger can opt into missed-interval catch-up with
+  `catchUp: true`: on startup the worker replays each interval it missed while it was
+  down (bounded look-back). Default behaviour is unchanged (no catch-up).
+- **Manual trigger firing.** Fire a manual trigger on demand through an auth-guarded,
+  rate-limited, tenant-scoped control route (`POST /v1/triggers/:name/fire`).
+- **Live-executor readiness probe.** A public `GET /recovery-scope` route reports the
+  live durable-executor identity (`{ executorId, applicationVersion }`), failing closed
+  (503) until the engine has finished launching.
+
+### Changed
+
+- **Handler and extension-pack modules load compiled JavaScript in production.** The
+  production loader accepts only compiled `.js` modules (a deterministic, Node-version-
+  independent boundary); a raw `.ts` module is refused fail-closed. The shipped example
+  backends now include a build step, and the docs state the `.js`-only contract.
+- **Durable cron exactly-once is hardened.** The run-level exactly-once guard on the
+  durable cron path is strengthened, with a test that asserts the durable invariant
+  directly rather than counting raw invocations.
+- **A first upload can no longer reset a sealed row.** A conditional upsert closes the
+  race where a first upload could reset an already-sealed row.
+
+### Fixed
+
+- **`rayspec plan` fails on a boot-fatal document.** A document whose stores cannot be
+  derived now returns a non-ok plan verdict instead of reporting `ok: true` and crashing
+  at boot.
+
+### Documentation
+
+- **Tenant-table registration guidance corrected.** The engine `deploy()` and the
+  server composition root now describe the real mechanism — a product table joins the
+  deny-by-default chokepoint set at boot through the sanctioned registration hook, and
+  `deploy()` verifies rather than registers — replacing an out-of-date committed-source
+  description.
+
 ## [1.4.1] - 2026-07-17
 
 ### Security
