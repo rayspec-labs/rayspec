@@ -2,6 +2,9 @@
   "name": "@rayspec/file-runtime",
   "version": "0.0.0",
   "private": true,
+  "files": [
+    "dist"
+  ],
   "license": "FSL-1.1-ALv2",
   "type": "module",
   "description": "The generic Tier-B file-ingest capability (file_input) — a bounded raw-byte upload plus a JSON submit that seals the file and emits a durable workflow trigger. Product-neutral; a record×audio hybrid (record_input donates the manifest/event/submit template, audio_input donates the stream-ingest byte transport).",

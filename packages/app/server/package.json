@@ -2,6 +2,9 @@
   "name": "@rayspec/server",
   "version": "0.0.0",
   "private": true,
+  "files": [
+    "dist"
+  ],
   "license": "FSL-1.1-ALv2",
   "type": "module",
   "description": "LOCAL/single-node production-style boot entrypoint + AppDeps composition root. Pre-external-hardening (no RLS/KMS/per-tenant isolate/DPoP) — NOT internet-facing. Assembles the platform from env, applies the committed migration chain via the real programmatic migrator, fails closed on missing secrets, and serves the Hono app.",

@@ -2,6 +2,9 @@
   "name": "@rayspec/workflow-durable",
   "version": "0.0.0",
   "private": true,
+  "files": [
+    "dist"
+  ],
   "license": "FSL-1.1-ALv2",
   "type": "module",
   "description": "The Tier A DURABLE workflow execution engine — wires the reviewed @rayspec/foundation foundation onto the real platform primitives (TenantDb-journaled workflow_runs/workflow_node_states/workflow_artifacts, the DBOS durable path via @rayspec/durable-dbos, failure semantics retry/repair/drop/quarantine/fail, and real agent/capability/validate/store node execution). Product-free.",

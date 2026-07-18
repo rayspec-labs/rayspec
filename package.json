@@ -36,6 +36,9 @@
     "gate:parity": "pnpm --filter @rayspec/parity test",
     "gate": "pnpm gate:chokepoint && pnpm gate:adapter-handlers && pnpm gate:handler-imports && pnpm gate:extension-capability && pnpm gate:spec-schema && pnpm gate:no-pack && pnpm gate:fixture-neutrality && pnpm gate:byte-identity && pnpm gate:sbom-fresh && pnpm gate:migrations && pnpm gate:shadow-dryrun && pnpm gate:migrate-clean && pnpm gate:parity && pnpm gate:no-archaeology && pnpm gate:skill-drift",
     "bench:tool-latency": "pnpm --filter @rayspec/platform build && node scripts/bench-tool-latency.mjs",
+    "//release": "scripts/publish.mjs is the ONLY sanctioned path to npm: it transiently stamps the release version + flips private:false + ensures files:['dist'] for the CLI runtime closure, then ALWAYS restores the committed tree (private:true / 0.0.0 stays the accidental-publish guard). `release:pack` and `release:dry-run` are no-write proofs; a real registry write is `node scripts/publish.mjs --publish --yes-really-publish` with RAYSPEC_ALLOW_PUBLISH=1 (founder release window). Requires `pnpm build` first.",
+    "release:pack": "node scripts/publish.mjs --pack",
+    "release:dry-run": "node scripts/publish.mjs --dry-run",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down"
   },

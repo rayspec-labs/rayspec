@@ -2,6 +2,9 @@
   "name": "@rayspec/record-runtime",
   "version": "0.0.0",
   "private": true,
+  "files": [
+    "dist"
+  ],
   "license": "FSL-1.1-ALv2",
   "type": "module",
   "description": "The generic Tier-B submit-ingress capability (record_input) — authenticated JSON records in, a durable workflow trigger out. Product-neutral; mirrors @rayspec/audio-runtime's manifest/mount/event pattern.",
