@@ -35,7 +35,12 @@
  */
 
 import type { AgentSpec, Backend, BackendId } from '@rayspec/core';
-import { type BlobStoreFactory, buildToolFactory, type ResolvedHandler } from '@rayspec/platform';
+import {
+  type BlobStoreFactory,
+  buildToolFactory,
+  type FsSourceFactory,
+  type ResolvedHandler,
+} from '@rayspec/platform';
 import type { AgentSpecConfig, RaySpec } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { AgentRegistry, AgentRegistryEntry } from '../app-context.js';
@@ -58,6 +63,13 @@ export interface BuildAgentRegistryConfig {
    * deploy with no blob backend (the tool's `init.blob` is then undefined, fail-closed loudly).
    */
   blobFactory?: BlobStoreFactory;
+  /**
+   * the composition-root `FsSourceFactory` (the SAME one the route arm uses). When wired, each declared
+   * tool's per-run `ToolHandlerInit` carries `init.fsSource` — the READ-ONLY, path-jailed local-file
+   * reader over the deployment's shared source root. Optional: absent when no source root is configured
+   * (the tool's `init.fsSource` is then undefined, fail-closed loudly).
+   */
+  fsSourceFactory?: FsSourceFactory;
 }
 
 /** Build the base neutral `AgentSpec` for a declared agent (the per-request `input` is a placeholder). */
@@ -83,7 +95,7 @@ function baseAgentSpec(agent: AgentSpecConfig): AgentSpec {
  * empty registry (a stores/api-only spec).
  */
 export function buildAgentRegistry(config: BuildAgentRegistryConfig): AgentRegistry {
-  const { spec, agentBackends, handlers, productTables, blobFactory } = config;
+  const { spec, agentBackends, handlers, productTables, blobFactory, fsSourceFactory } = config;
   const registry = new Map<string, AgentRegistryEntry>();
 
   for (const agent of spec.agents) {
@@ -98,8 +110,16 @@ export function buildAgentRegistry(config: BuildAgentRegistryConfig): AgentRegis
     // Build the per-run, tenant-bound tool factory from the agent's declared tool ids. This resolves
     // each tool + its handler at boot (fail-closed) and returns a factory the run surface calls with
     // the run's TenantDb. An agent with no tools gets a factory that yields []. The blobFactory (when
-    // wired) lets each tool init carry a tenant-bound `init.blob`.
-    const toolFactory = buildToolFactory(spec, handlers, productTables, agent.tools, blobFactory);
+    // wired) lets each tool init carry a tenant-bound `init.blob`; the fsSourceFactory (when wired) lets
+    // each tool init carry a READ-ONLY, path-jailed `init.fsSource`.
+    const toolFactory = buildToolFactory(
+      spec,
+      handlers,
+      productTables,
+      agent.tools,
+      blobFactory,
+      fsSourceFactory,
+    );
 
     registry.set(agent.id, {
       spec: baseAgentSpec(agent),

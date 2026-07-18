@@ -116,6 +116,12 @@ const SELF_CONSTRUCT_VECTORS = [
     re: /\bmakeFsBlobStoreFactory\s*\(/,
     what: 'makeFsBlobStoreFactory(...) (a raw blob backend factory — use the injected init.blob handle)',
   },
+  // A raw READ-ONLY fs-source backend — constructing the path-jailed local-file reader instead of using
+  // the injected init.fsSource (a self-built one over an unrestricted root would defeat the path jail).
+  {
+    re: /\bmakeFsSourceFactory\s*\(/,
+    what: 'makeFsSourceFactory(...) (a raw fs-source backend factory — use the injected init.fsSource handle)',
+  },
 ];
 
 function* walk(dir) {
@@ -237,6 +243,7 @@ function selfTest() {
     { rel: 'h/x.ts', src: 'const d = drizzle(client);', expect: true },
     { rel: 'h/x.ts', src: 'const blob = new FsBlobStore(root, tenantId);', expect: true },
     { rel: 'h/x.ts', src: "const f = makeFsBlobStoreFactory('/data/blobs');", expect: true },
+    { rel: 'h/x.ts', src: "const s = makeFsSourceFactory('/data/reference');", expect: true },
     // a COMMENT mentioning a forbidden token — must NOT fire (prose, not code)
     {
       rel: 'h/x.ts',

@@ -351,6 +351,9 @@ function withDeclaredAgents(deps: AppDeps): AppDeps {
     // thread the wired blob backend so a declared tool's init carries a tenant-bound
     // `init.blob` (the SAME factory the route/stream arms use). Absent on a no-blob-backend deploy.
     ...(engine.blobFactory ? { blobFactory: engine.blobFactory } : {}),
+    // thread the wired READ-ONLY fs-source so a declared tool's init carries a path-jailed
+    // `init.fsSource` (the SAME factory the route arm reads). Absent when no source root is configured.
+    ...(engine.fsSourceFactory ? { fsSourceFactory: engine.fsSourceFactory } : {}),
   });
   // Merge: direct entries first, spec-declared entries override on id collision (spec is the source).
   const merged = new Map(deps.agentRegistry ?? []);

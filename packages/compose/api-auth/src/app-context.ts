@@ -16,6 +16,7 @@ import type { Db, StoreConflictKeys } from '@rayspec/db';
 import type {
   BlobStoreFactory,
   DurableExecutor,
+  FsSourceFactory,
   ResolvedHandler,
   ToolFactory,
 } from '@rayspec/platform';
@@ -128,6 +129,17 @@ export interface DeclarativeEngine {
    * its ENTIRE tenant isolation — it does NOT traverse the SQL chokepoint).
    */
   blobFactory?: BlobStoreFactory;
+  /**
+   * the composition-root `FsSourceFactory` — the READ-ONLY, path-jailed local-file reader
+   * a tool/route handler receives as `init.fsSource` (`fsSourceFactory()`, no tenant arg: a shared,
+   * deployment-static read root jailed by construction). Injected exactly like `blobFactory` (the
+   * platform ships no backend): the deployment wires an fs source over the deployer-configured root
+   * (`RAYSPEC_FS_SOURCE_ROOT`). OPTIONAL: absent when no source root is configured — a handler that
+   * reads `init.fsSource` then fail-closes loudly on `undefined`. Unlike `blobFactory` no route KIND
+   * requires it (there is no `stream`-equivalent trigger), so it is purely deploy-config-gated: set the
+   * root ⇒ available to every handler; unset ⇒ absent. NOT tenant-partitioned (see `FsSource`).
+   */
+  fsSourceFactory?: FsSourceFactory;
   /**
    * the media-token service for the `stream` (mode:'playback') arm — the SECOND
    * auth path (HS256, distinct `RAYSPEC_MEDIA_SIGNING_KEY`). Injected exactly like `blobFactory` (the

@@ -80,11 +80,13 @@ import {
   type BlobStoreFactory,
   type DurableExecutor,
   ExtensionLoadError,
+  type FsSourceFactory,
   invokeTriggerHandler,
   type LoadedExtensions,
   loadExtensions,
   type ModuleImporter,
   makeFsBlobStoreFactory,
+  makeFsSourceFactory,
   type RunJob,
 } from '@rayspec/platform';
 import {
@@ -267,6 +269,17 @@ export interface ServerConfig {
    * sandbox is the external-exposure hardening). An S3/object-store backend is a later pack option (the interface is neutral).
    */
   blobRoot?: string;
+  /**
+   * The LOCAL filesystem ROOT the READ-ONLY `FsSource` capability reads under — the jail root a
+   * tool/route handler's `init.fsSource` is confined to (deployment-static assets: reference material,
+   * templates, a static content directory the deployer placed on the box). Set via
+   * RAYSPEC_FS_SOURCE_ROOT. OPTIONAL: unset ⇒ no fs-source is wired (`init.fsSource` is absent; a
+   * handler that needs it fail-closes loudly). Unlike `blobRoot` no route KIND requires it — it is
+   * purely deploy-config-gated. Resolved to an absolute path here; VALIDATED to be an existing directory
+   * at factory-build time (a missing/non-dir root fail-closes the boot). READ-ONLY + SHARED (NOT
+   * per-tenant; the path jail is its containment — LOCAL/self-host, pre-hardening).
+   */
+  fsSourceRoot?: string;
   /**
    * The DISTINCT HS256 secret for the media-token (playback) auth path — set via
    * RAYSPEC_MEDIA_SIGNING_KEY. It is SEPARATE from the RS256 `jwtSigningKeyPem` (a leaked media URL
@@ -501,6 +514,12 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
   // path (the fs backend resolves under it; the per-tenant subdir is created lazily on first put).
   const blobRoot = env.RAYSPEC_BLOB_ROOT?.trim();
   if (blobRoot) config.blobRoot = resolve(blobRoot);
+
+  // The READ-ONLY fs-source root (the jail root for `init.fsSource`). Purely deploy-config-gated: set
+  // it ⇒ every handler receives `init.fsSource`; unset ⇒ it is absent. Resolved to an absolute path;
+  // existence/is-a-dir is fail-closed-validated at factory-build time (makeFsSourceFactory).
+  const fsSourceRoot = env.RAYSPEC_FS_SOURCE_ROOT?.trim();
+  if (fsSourceRoot) config.fsSourceRoot = resolve(fsSourceRoot);
 
   // The distinct media signing key (HS256). Whether it is REQUIRED is decided at deploy
   // time (only a spec with a playback route needs it) — loadServerConfig just resolves it;
@@ -1276,6 +1295,16 @@ async function deployDeclaredSpec(
     }
   }
 
+  // ── The READ-ONLY FS-SOURCE backend build ──────────────────────────────────
+  // The READ-ONLY, path-jailed `FsSource` (`init.fsSource`) reads deployment-static assets under
+  // RAYSPEC_FS_SOURCE_ROOT. Purely deploy-config-gated (no route KIND requires it, unlike the stream→blob
+  // guard): build the factory when a root is configured, else leave it undefined (a handler that reads
+  // `init.fsSource` then fail-closes loudly). `makeFsSourceFactory` fail-closes at build if the root is
+  // missing / not a directory. Injected into the engine in buildApp (below), like blobFactory.
+  const fsSourceFactory: FsSourceFactory | undefined = config.fsSourceRoot
+    ? makeFsSourceFactory(config.fsSourceRoot)
+    : undefined;
+
   // ── The MEDIA-TOKEN service (playback's 2nd auth path) deploy guard + build ──
   // A `kind:'stream', mode:'playback'` route is authenticated by a signed `?token=` media-JWT (HS256,
   // a DISTINCT key from the RS256 API/JWKS chain — a leaked media URL must not grant API access). FAIL
@@ -1527,6 +1556,9 @@ async function deployDeclaredSpec(
         const engineWithBlob: DeclarativeEngine = {
           ...engine,
           ...(blobFactory ? { blobFactory } : {}),
+          // Inject the READ-ONLY fs-source (when a root is configured) so a tool/route handler's
+          // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.
+          ...(fsSourceFactory ? { fsSourceFactory } : {}),
           // Inject the media-token service (when wired) so the playback arm's 2nd auth path
           // + the mint capability are available. Spread so ABSENT for a no-playback spec.
           ...(mediaTokenService ? { mediaTokenService } : {}),

@@ -31,7 +31,12 @@
  */
 import type { NeutralTool } from '@rayspec/core';
 import type { TenantDb } from '@rayspec/db';
-import type { BlobStoreFactory, ToolHandler, ToolHandlerInit } from '@rayspec/handler-sdk';
+import type {
+  BlobStoreFactory,
+  FsSourceFactory,
+  ToolHandler,
+  ToolHandlerInit,
+} from '@rayspec/handler-sdk';
 import type { RaySpec, ToolSpecConfig } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { getHandlerRuntime, type ResolvedHandler } from './handler-runtime.js';
@@ -50,6 +55,11 @@ export type ToolFactory = (tdb: TenantDb) => NeutralTool[];
  * (the run's `TenantDb.tenantId`, NEVER a tool/arg-supplied value) — EXACTLY as `invokeRouteHandler`
  * builds a route handler's `init.blob`. Omitted ⇒ `init.blob` is ABSENT (a stores/api-only deploy
  * wires no blob backend; a tool that needs it then fail-closes loudly on `undefined`, like a route).
+ *
+ * An OPTIONAL `fsSourceFactory` adds `init.fsSource` — the READ-ONLY, path-jailed local-file reader,
+ * built per run via `fsSourceFactory()` (no tenant argument: the source root is a shared, deployment-
+ * static read root, jailed by construction). Omitted ⇒ `init.fsSource` is ABSENT (no source root
+ * configured; a tool that needs it fail-closes loudly on `undefined`, like `init.blob`).
  */
 function buildNeutralTool(
   tool: ToolSpecConfig,
@@ -57,6 +67,7 @@ function buildNeutralTool(
   tdb: TenantDb,
   productTables: ReadonlyMap<string, PgTable>,
   blobFactory?: BlobStoreFactory,
+  fsSourceFactory?: FsSourceFactory,
 ): NeutralTool {
   return {
     spec: {
@@ -74,6 +85,9 @@ function buildNeutralTool(
         // the field is ABSENT (not `undefined`) when no factory is injected — keeping the init shape
         // exact. Mirrors invokeRouteHandler exactly (same factory, same server-derived tenant).
         ...(blobFactory ? { blob: blobFactory(tdb.tenantId) } : {}),
+        // The READ-ONLY, path-jailed fs-source handle (shared deployment-static root, no tenant arg).
+        // Spread so ABSENT when no source root is configured — keeping the init shape exact.
+        ...(fsSourceFactory ? { fsSource: fsSourceFactory() } : {}),
       };
       return getHandlerRuntime().invokeTool(fn, rawArgs, init);
     },
@@ -101,6 +115,9 @@ function buildNeutralTool(
  * @param blobFactory   OPTIONAL composition-root `BlobStoreFactory` — when wired, each
  *                      tool init carries `init.blob` bound to the run's server-derived tenant; absent
  *                      on a no-blob-backend deploy (the tool's `init.blob` is then undefined).
+ * @param fsSourceFactory OPTIONAL composition-root `FsSourceFactory` — when wired, each tool init
+ *                      carries `init.fsSource` (the READ-ONLY, path-jailed local-file reader over the
+ *                      deployment's shared source root); absent on a no-source-root deploy.
  */
 export function buildToolFactory(
   spec: RaySpec,
@@ -108,6 +125,7 @@ export function buildToolFactory(
   productTables: ReadonlyMap<string, PgTable>,
   toolIds: readonly string[],
   blobFactory?: BlobStoreFactory,
+  fsSourceFactory?: FsSourceFactory,
 ): ToolFactory {
   const toolById = new Map(spec.tooling.map((t) => [t.id, t]));
 
@@ -137,5 +155,7 @@ export function buildToolFactory(
   }
 
   return (tdb: TenantDb): NeutralTool[] =>
-    resolved.map(({ tool, fn }) => buildNeutralTool(tool, fn, tdb, productTables, blobFactory));
+    resolved.map(({ tool, fn }) =>
+      buildNeutralTool(tool, fn, tdb, productTables, blobFactory, fsSourceFactory),
+    );
 }
