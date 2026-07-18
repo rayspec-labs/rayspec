@@ -650,6 +650,37 @@ describe('buildDeclaredRoutesOpenApi — emitted document is STRUCTURALLY VALID'
     expect(params.some((p) => p.name === 'search')).toBe(true);
     expect(params.some((p) => p.name === 'label__contains')).toBe(true);
     expect(params.some((p) => p.name === 'count__contains')).toBe(false); // integer is not searchable
+    expect(params.some((p) => p.name === '__search')).toBe(false); // not a fullTextSearch store
+    expect(structuralOpenApiProblems(doc)).toEqual([]);
+  });
+
+  it('a fullTextSearch store emits the ranked `__search` param; a non-FTS store omits it', () => {
+    // The `__search` control param is documented IFF the store enables full-text search (mirrors the
+    // runtime: `?__search=` 400s on a store without it). RED-first: without the emit-openapi gate an FTS
+    // store's document would omit `__search` while the server accepts it (an undocumented param).
+    const doc = buildDeclaredRoutesOpenApi(
+      specFromObject({
+        version: '1.0',
+        metadata: { name: 'fts-backend' },
+        stores: [
+          {
+            name: 'docs',
+            fullTextSearch: true,
+            columns: [{ name: 'title', type: 'text' }],
+          },
+        ],
+        api: [
+          { method: 'GET', path: '/docs', action: { kind: 'store', store: 'docs', op: 'list' } },
+        ],
+      }),
+    );
+    const params = doc.paths['/docs'].get.parameters ?? [];
+    const fts = params.filter((p) => p.name === '__search' && p.in === 'query');
+    expect(fts).toHaveLength(1);
+    expect(fts[0].required ?? false).toBe(false);
+    expect(fts[0].description).toMatch(/full-text search/i);
+    // Still emits the substring `search` (the store has a text column) — both modes documented, no dup.
+    expect(params.some((p) => p.name === 'search')).toBe(true);
     expect(structuralOpenApiProblems(doc)).toEqual([]);
   });
 

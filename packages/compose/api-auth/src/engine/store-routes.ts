@@ -281,7 +281,7 @@ export function makeStoreHandler(args: {
             // Equality filters + order + keyset pagination, all folded THROUGH the tenant
             // chokepoint (`and(tenantPredicate, extra)`) so NO query can cross tenants. Unknown params
             // fail closed (400). Default order is `id asc` (deterministic + keyset-stable).
-            const { where, orderBy, limit, order } = buildListQuery(
+            const { where, orderBy, limit, order, rankedSearch } = buildListQuery(
               store,
               table,
               new URL(c.req.url).searchParams,
@@ -292,11 +292,15 @@ export function makeStoreHandler(args: {
               .orderBy(...orderBy)
               .limit(limit)) as Record<string, unknown>[];
             if (rows.length === limit) {
-              // The page hit the cap — signal HONESTLY + hand back the opaque next-page cursor.
+              // The page hit the cap — signal HONESTLY. A ranked full-text-search page (`?__search=`) is
+              // ordered by `ts_rank`, NOT a stored order column, so it mints NO keyset cursor (relevance
+              // search returns a single bounded page); the normal keyset path hands back the next cursor.
               c.header('X-Result-Truncated', 'true');
-              const last = rows[rows.length - 1];
-              const cursor = last ? nextCursor(order, last) : undefined;
-              if (cursor) c.header('X-Next-Cursor', cursor);
+              if (!rankedSearch) {
+                const last = rows[rows.length - 1];
+                const cursor = last ? nextCursor(order, last) : undefined;
+                if (cursor) c.header('X-Next-Cursor', cursor);
+              }
             }
             return c.json(rows.map((r) => serializeRow(store, r)));
           }

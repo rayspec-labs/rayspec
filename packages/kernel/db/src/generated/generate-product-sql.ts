@@ -26,6 +26,7 @@
 import {
   assertSafeIdentifier,
   type ColumnType,
+  FTS_COLUMN_NAME,
   type StoreColumn,
   type StoreForeignKey,
   type StoreSpec,
@@ -90,6 +91,39 @@ function assertStoreSafeSql(store: StoreSpec): void {
       );
     }
   }
+  // (FTS) A `fullTextSearch` store needs at least one text column to build the tsvector over, and may
+  // not declare the reserved `search_vector` column name. Both are rejected at config time by
+  // @rayspec/spec lint; re-assert here (defense-in-depth for a code-built spec that bypassed parseSpec)
+  // so we never emit a `to_tsvector('simple', )` with no columns or a colliding column.
+  if (store.fullTextSearch === true) {
+    if (!store.columns.some((c) => c.type === 'text')) {
+      throw new Error(
+        `generate-product-sql: store '${store.name}' enables fullTextSearch but has no text column — ` +
+          'the generated tsvector would index nothing (rejected at config time by @rayspec/spec lint).',
+      );
+    }
+    if (store.columns.some((c) => c.name === FTS_COLUMN_NAME)) {
+      throw new Error(
+        `generate-product-sql: store '${store.name}' declares reserved column '${FTS_COLUMN_NAME}' ` +
+          '(the injected full-text-search vector; rejected at config time by @rayspec/spec lint).',
+      );
+    }
+  }
+}
+
+/**
+ * Emit the GENERATED-ALWAYS-STORED `search_vector` tsvector column line for a `fullTextSearch` store:
+ * `to_tsvector('simple', coalesce("c1",'') || ' ' || coalesce("c2",''))` over the store's TEXT columns
+ * in declared order. `'simple'` is the language-neutral config (no stemming/stopwords). Column names are
+ * already re-asserted safe (assertStoreSafeSql) before this interpolation. The caller guarantees at
+ * least one text column.
+ */
+function emitFtsVectorColumnSql(store: StoreSpec): string {
+  const textExpr = store.columns
+    .filter((c) => c.type === 'text')
+    .map((c) => `coalesce("${c.name}", '')`)
+    .join(" || ' ' || ");
+  return `\t"${FTS_COLUMN_NAME}" tsvector GENERATED ALWAYS AS (to_tsvector('simple', ${textExpr})) STORED`;
 }
 
 /** Emit ONE author business column line (matches drizzle DDL: `"name" type [NOT NULL]`). */
@@ -123,6 +157,10 @@ export function emitStoreSql(store: StoreSpec, conflictKeys?: ReadonlySet<string
   for (const inj of INJECTED_BEFORE) colLines.push(`\t${inj.sqlDef}`);
   for (const col of store.columns) colLines.push(emitColumnSql(col));
   for (const inj of INJECTED_AFTER) colLines.push(`\t${inj.sqlDef}`);
+  // (FTS) A generated `search_vector` tsvector column LAST (after the injected columns) when the store
+  // opts into full-text search — a GENERATED-ALWAYS-STORED derivation over the store's text columns.
+  // Absent field ⇒ no column ⇒ the CREATE TABLE is byte-identical to the pre-FTS output.
+  if (store.fullTextSearch === true) colLines.push(emitFtsVectorColumnSql(store));
 
   statements.push(`CREATE TABLE "${store.name}" (\n${colLines.join(',\n')}\n)`);
 
@@ -170,6 +208,16 @@ export function emitStoreSql(store: StoreSpec, conflictKeys?: ReadonlySet<string
   statements.push(
     `CREATE INDEX "${store.name}_tenant_idx" ON "${store.name}" USING btree ("tenant_id")`,
   );
+
+  // (FTS) A GIN index on the generated `search_vector` column so a `@@ websearch_to_tsquery(...)` match +
+  // `ts_rank` ordering is index-backed. Purely additive (CREATE INDEX) — the destructive scan has no
+  // finding. Absent field ⇒ no index.
+  if (store.fullTextSearch === true) {
+    statements.push(
+      `CREATE INDEX "${store.name}_${FTS_COLUMN_NAME}_idx" ON "${store.name}" ` +
+        `USING gin ("${FTS_COLUMN_NAME}")`,
+    );
+  }
 
   return statements;
 }

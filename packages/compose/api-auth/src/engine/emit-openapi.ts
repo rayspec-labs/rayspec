@@ -441,6 +441,23 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
       schema: { type: 'string' },
     });
   }
+  // The ranked FULL-TEXT-SEARCH control param — emitted ONLY when the store enables `fullTextSearch`
+  // (mirrors the runtime: `?__search=` 400s on a store without full-text search). It is mutually
+  // exclusive with `order`/`after`/`search` (the server rejects the combination) and returns a single
+  // relevance-ordered page (no keyset cursor). `__search` is a reserved query keyword, so no declared
+  // column can share its name.
+  if (store.fullTextSearch === true) {
+    params.push({
+      name: '__search',
+      in: 'query',
+      required: false,
+      description:
+        'Ranked full-text search: matches rows whose text columns satisfy the query ' +
+        '(websearch syntax) and orders them by relevance (ts_rank). Mutually exclusive with ' +
+        'order/after/search; returns a single relevance-ordered page (no keyset cursor).',
+      schema: { type: 'string' },
+    });
+  }
   // The `<col>__in` SET-filter companions — one per equality column, EXCEPT when the companion name is
   // ITSELF a declared equality param. That collision arises when a column is literally named `<x>__in`
   // (its own equality param clashes with `<x>`'s IN-companion) or a business column is named

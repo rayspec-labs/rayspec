@@ -43,6 +43,10 @@ export {
   enumWhitelistFor,
   markEnumWhitelist,
 } from './enum-whitelist-registry.js';
+// The full-text-search table-identity registry: `buildProductTables` marks a `fullTextSearch` store's
+// runtime table so a facade-level full-text consumer can resolve it by object identity (parity with the
+// soft-delete registry). The ranked list-query surface itself reads `store.fullTextSearch` directly.
+export { isFtsTable, markFtsTable } from './fts-registry.js';
 // The PURE product-schema MECHANISM (generator + drift). Product-agnostic platform/
 // deploy tooling. The platform main line ships these + a PRODUCT-EMPTY generated baseline; a
 // deployment / the throwaway runs the generator over its own spec. The GATE-ONLY product-tenancy
