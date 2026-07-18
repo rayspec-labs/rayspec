@@ -439,7 +439,7 @@ describe('negative — reserved list-query control keyword as a column name', ()
   // (control param + per-column filter param, same name+location) → an invalid OpenAPI 3.1 doc.
   // Fail-the-fix: without the RESERVED_QUERY_KEYWORDS check the spec parses+lints CLEAN (the keyword is a
   // valid safe-identifier), so each rejection below goes RED.
-  for (const kw of ['order', 'after', 'limit', 'search'] as const) {
+  for (const kw of ['order', 'after', 'limit', 'search', '__search'] as const) {
     it(`rejects a business column named '${kw}'`, () => {
       const yaml = BASE.replace(
         '      - { name: label, type: text }',
@@ -461,6 +461,65 @@ describe('negative — reserved list-query control keyword as a column name', ()
     } else {
       expect(res.ok).toBe(true);
     }
+  });
+});
+
+describe('negative — fullTextSearch coherence', () => {
+  // A store that opts into full-text search needs at least one text column to build the tsvector over,
+  // and may not declare the reserved generated `search_vector` column. Fail-the-fix: without the FTS
+  // coherence rule both specs parse+lint CLEAN (the grammar accepts the optional boolean), so each
+  // rejection below goes RED.
+  it('rejects fullTextSearch:true on a store with NO text column → schema_violation', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: fts-no-text
+stores:
+  - name: counters
+    fullTextSearch: true
+    columns:
+      - { name: total, type: integer }
+`;
+    const res = parseSpec(yaml);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(
+      res.errors.some(
+        (e) => e.code === 'schema_violation' && /fullTextSearch.*no 'text' column/.test(e.message),
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects a fullTextSearch store declaring the reserved column search_vector → reserved_column_name', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: fts-clash
+stores:
+  - name: docs
+    fullTextSearch: true
+    columns:
+      - { name: title, type: text }
+      - { name: search_vector, type: text }
+`;
+    expectRejection(yaml, 'reserved_column_name');
+  });
+
+  it('accepts fullTextSearch:true on a store WITH a text column (the positive counterpart)', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: fts-ok
+stores:
+  - name: docs
+    fullTextSearch: true
+    columns:
+      - { name: title, type: text }
+      - { name: views, type: integer }
+`;
+    const res = parseSpec(yaml);
+    if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.value.stores[0]?.fullTextSearch).toBe(true);
   });
 });
 

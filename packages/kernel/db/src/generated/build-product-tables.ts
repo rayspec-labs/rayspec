@@ -27,6 +27,7 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 import { markEnumWhitelist } from '../enum-whitelist-registry.js';
+import { markFtsTable } from '../fts-registry.js';
 import { orgs } from '../schema.js';
 import { markSoftDeleteTable } from '../soft-delete-registry.js';
 import type { StoreConflictKeys } from './generate-product-sql.js';
@@ -179,6 +180,11 @@ export function buildProductTables(
     // tombstone-invisibility the CRUD routes do. Default (hard-delete) stores are never marked → their
     // facade behaviour is byte-behaviourally unchanged.
     if (store.softDelete === true) markSoftDeleteTable(table);
+    // A `fullTextSearch` store's runtime table is marked in the FTS identity registry (parity with
+    // soft-delete) so a facade-level full-text consumer can resolve it by object identity. The generated
+    // `search_vector` tsvector column itself is DB-level (NOT an ORM twin column), so the runtime table
+    // shape is byte-behaviourally unchanged; only the registry membership differs.
+    if (store.fullTextSearch === true) markFtsTable(table);
     // A store's declared column `enum` value whitelists are recorded in the identity registry so the
     // handler-db facade rejects an out-of-whitelist write value (parity with the HTTP create/update
     // route + the workflow store.write node). Keyed by the DECLARED column name; a store with no `enum`

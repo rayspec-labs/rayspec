@@ -124,6 +124,9 @@
           },
           "softDelete": {
             "type": "boolean"
+          },
+          "fullTextSearch": {
+            "type": "boolean"
           }
         },
         "required": [

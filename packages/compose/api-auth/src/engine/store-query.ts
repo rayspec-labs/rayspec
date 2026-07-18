@@ -7,10 +7,11 @@
  * the tenant predicate stays STRUCTURAL (`and(tenantPredicate, extra)`) and can NEVER be dropped — a
  * filter/order/keyset from tenant B can never surface tenant A's rows.
  *
- * Fail-CLOSED: every query param must be a recognized control key (`order`/`after`/`limit`/`search`), a
- * filterable column (a declared business column, or the injected `created_by`), a `<col>__in` set
- * filter, or a `<col>__contains` substring filter on one such column. An UNKNOWN param is a
- * VALIDATION_ERROR (never silently ignored — a typo'd filter must not return the whole table).
+ * Fail-CLOSED: every query param must be a recognized control key (`order`/`after`/`limit`/`search`, and
+ * `__search` on a `fullTextSearch` store), a filterable column (a declared business column, or the
+ * injected `created_by`), a `<col>__in` set filter, or a `<col>__contains` substring filter on one such
+ * column. An UNKNOWN param is a VALIDATION_ERROR (never silently ignored — a typo'd filter must not
+ * return the whole table).
  *
  * Deliberately NARROW: equality filters (`?col=v`, AND-combined) + a per-column set filter
  * (`?col__in=v1,v2,…` → SQL `IN`) + a case-insensitive substring search (`?search=term` matched over
@@ -34,7 +35,7 @@
  */
 
 import { ApiError } from '@rayspec/auth-core';
-import type { ColumnType, StoreSpec } from '@rayspec/spec';
+import { type ColumnType, FTS_COLUMN_NAME, FTS_SEARCH_PARAM, type StoreSpec } from '@rayspec/spec';
 import {
   and,
   asc,
@@ -63,7 +64,15 @@ const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
  * (@rayspec/spec `RESERVED_QUERY_KEYWORDS`) rejects such a column at config; this skip is belt-and-braces
  * for a code-built spec that bypassed the parser.
  */
-export const CONTROL_KEYS: ReadonlySet<string> = new Set(['order', 'after', 'limit', 'search']);
+export const CONTROL_KEYS: ReadonlySet<string> = new Set([
+  'order',
+  'after',
+  'limit',
+  'search',
+  // The ranked full-text-search control key (`?__search=`), available only on a `fullTextSearch` store
+  // (mirrors @rayspec/spec RESERVED_QUERY_KEYWORDS — the KEEP-IN-SYNC copy).
+  FTS_SEARCH_PARAM,
+]);
 
 /** Bounded page size: 1..200, default 200 (the hard cap). */
 const DEFAULT_LIMIT = 200;
@@ -118,6 +127,22 @@ function containsPredicate(col: PgColumn, term: string): SQL {
   return sql`${col} ilike ${`%${escapeLikeTerm(term)}%`} escape '\\'`;
 }
 
+/**
+ * The ranked FULL-TEXT-SEARCH predicate over the generated `search_vector` tsvector column: a
+ * `search_vector @@ websearch_to_tsquery('simple', term)` match. The column name is a fixed platform
+ * constant (never user input), referenced via `sql.identifier` (double-quoted, injection-safe); the
+ * search TERM is a BOUND parameter fed to `websearch_to_tsquery` (never interpolated — same discipline
+ * as the ILIKE bound param). `'simple'` is the language-neutral config the generator's tsvector uses.
+ */
+function ftsMatchPredicate(term: string): SQL {
+  return sql`${sql.identifier(FTS_COLUMN_NAME)} @@ websearch_to_tsquery('simple', ${term})`;
+}
+
+/** The `ts_rank` relevance score for the same tsvector + query — used to order ranked results DESC. */
+function ftsRankExpr(term: string): SQL {
+  return sql`ts_rank(${sql.identifier(FTS_COLUMN_NAME)}, websearch_to_tsquery('simple', ${term}))`;
+}
+
 /** The injected columns that are FILTERABLE in addition to the declared business columns. */
 const INJECTED_FILTERABLE: ReadonlyMap<string, ColumnType> = new Map([['created_by', 'text']]);
 /**
@@ -140,6 +165,12 @@ export interface ListQuery {
   limit: number;
   /** The resolved order column (snake name) + direction — used to mint the next-page cursor. */
   order: { column: string; direction: 'asc' | 'desc'; type: ColumnType };
+  /**
+   * True when this is a ranked full-text-search query (`?__search=`): the ORDER BY is `ts_rank` DESC,
+   * NOT a stored order column, so the route does NOT mint a keyset `X-Next-Cursor` (ranked search
+   * returns a single relevance-ordered page bounded by `limit`). Absent/false ⇒ the normal keyset path.
+   */
+  rankedSearch?: boolean;
 }
 
 function validationError(message: string): never {
@@ -306,6 +337,39 @@ export function buildListQuery(
 
   const order = parseOrder(store, params.get('order'));
 
+  // --- ranked full-text search (`?__search=term`): available ONLY on a `fullTextSearch` store. It owns
+  // the ordering (`ts_rank` DESC) and does NOT support keyset pagination, so it is MUTUALLY EXCLUSIVE
+  // with `order`, `after`, and the substring `search` mode (each fail-closed). A non-FTS store rejects
+  // the param entirely (never exposes full-text search). Equality / `__in` / `__contains` filters still
+  // compose (they fold into the SAME AND-chain as the tsvector match below). ---
+  let ftsTerm: string | undefined;
+  const rawFts = params.get(FTS_SEARCH_PARAM);
+  if (rawFts !== null) {
+    if (store.fullTextSearch !== true) {
+      validationError(
+        `Query '${FTS_SEARCH_PARAM}' is not available: this store does not enable full-text search.`,
+      );
+    }
+    if (rawFts === '') validationError(`Query '${FTS_SEARCH_PARAM}' must not be empty.`);
+    if ([...rawFts].length > MAX_SEARCH_TERM) {
+      validationError(`Query '${FTS_SEARCH_PARAM}' must be at most ${MAX_SEARCH_TERM} characters.`);
+    }
+    if (params.get('order') !== null) {
+      validationError(
+        `Query 'order' cannot be combined with '${FTS_SEARCH_PARAM}' (full-text search ranks by relevance).`,
+      );
+    }
+    if (params.get('after') !== null) {
+      validationError(
+        `Query 'after' (keyset pagination) is not supported with '${FTS_SEARCH_PARAM}'.`,
+      );
+    }
+    if (params.get(SEARCH_KEY) !== null) {
+      validationError(`Query 'search' (substring) cannot be combined with '${FTS_SEARCH_PARAM}'.`);
+    }
+    ftsTerm = rawFts;
+  }
+
   // --- limit ---
   let limit = DEFAULT_LIMIT;
   const rawLimit = params.get('limit');
@@ -419,6 +483,13 @@ export function buildListQuery(
     predicates.push(isNull(drizzleColumn(table, 'deleted_at')) as SQL);
   }
 
+  // --- ranked full-text-search predicate: fold the `search_vector @@ websearch_to_tsquery('simple',
+  // term)` match into the SAME AND-chain (composes with equality/`__in`/`__contains` filters, the
+  // soft-delete tombstone filter, and the tenant chokepoint). Ordering by `ts_rank` is set below. ---
+  if (ftsTerm !== undefined) {
+    predicates.push(ftsMatchPredicate(ftsTerm));
+  }
+
   // --- keyset cursor (compared against (order_col, id) in the sort direction) ---
   const rawAfter = params.get('after');
   if (rawAfter !== null) {
@@ -429,14 +500,22 @@ export function buildListQuery(
     predicates.push(keysetPredicate(table, order, cursor));
   }
 
-  // --- ORDER BY (order column, then the id tiebreaker — same direction — for determinism) ---
-  const dir = order.direction === 'asc' ? asc : desc;
+  // --- ORDER BY --------------------------------------------------------------------------------
   const idCol = drizzleColumn(table, 'id');
-  const orderBy: SQL[] =
-    order.column === 'id'
-      ? [dir(idCol) as SQL]
-      : [dir(drizzleColumn(table, order.column)) as SQL, dir(idCol) as SQL];
+  let orderBy: SQL[];
+  if (ftsTerm !== undefined) {
+    // Ranked full-text search: order by relevance (`ts_rank` DESC), then `id` ASC as a deterministic
+    // tiebreaker for equal ranks. No keyset cursor is minted for this path (see `rankedSearch`).
+    orderBy = [sql`${ftsRankExpr(ftsTerm)} desc`, asc(idCol) as SQL];
+  } else {
+    // Default: the order column, then the `id` tiebreaker (same direction) for determinism.
+    const dir = order.direction === 'asc' ? asc : desc;
+    orderBy =
+      order.column === 'id'
+        ? [dir(idCol) as SQL]
+        : [dir(drizzleColumn(table, order.column)) as SQL, dir(idCol) as SQL];
+  }
 
   const where = predicates.length === 0 ? undefined : (and(...predicates) as SQL);
-  return { where, orderBy, limit, order };
+  return { where, orderBy, limit, order, rankedSearch: ftsTerm !== undefined };
 }

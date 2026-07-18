@@ -88,7 +88,31 @@ export const RESERVED_QUERY_KEYWORDS: ReadonlySet<string> = new Set([
   'after',
   'limit',
   'search',
+  // The ranked full-text-search control key (see `FTS_SEARCH_PARAM`) — reserved for the SAME reason as
+  // `search`: a business column of this name would be un-filterable (routed to the FTS control parser)
+  // and would emit a duplicate OpenAPI query parameter on a full-text-search store.
+  '__search',
 ]);
+
+/**
+ * The name of the GENERATED tsvector column the store generator injects when a store declares
+ * `fullTextSearch: true` (a GENERATED-ALWAYS-STORED `to_tsvector('simple', …)` column over the store's
+ * text columns, backed by a GIN index — see @rayspec/db generate-product-sql). It is a DB-level search
+ * structure (NOT represented in the Drizzle ORM twins, exactly like the injected `<table>_tenant_idx`
+ * and the idempotency unique index), so it never surfaces in a list response. Reserved: an FTS store may
+ * not declare a business column of this name (the FTS coherence check below rejects the clash).
+ */
+export const FTS_COLUMN_NAME = 'search_vector';
+
+/**
+ * The ranked full-text-search list-query control key (`?__search=<term>`). Distinct from the substring
+ * `search` control key: `__search` is available ONLY on a store that declares `fullTextSearch: true`,
+ * runs a `search_vector @@ websearch_to_tsquery('simple', term)` match, and orders by `ts_rank` DESC.
+ * A store WITHOUT full-text search rejects the param fail-closed. Mirrored in the compose package's
+ * store-query.ts `CONTROL_KEYS` (this package cannot import compose — a KEEP-IN-SYNC copy, guarded by
+ * the reserved-keyword membership above).
+ */
+export const FTS_SEARCH_PARAM = '__search';
 
 /**
  * Route prefixes the PLATFORM owns — a declared static frontend mount may neither claim one nor nest
@@ -537,9 +561,9 @@ export function lintSpec(spec: RaySpec): SpecError[] {
           specError(
             'reserved_query_keyword',
             `store '${store.name}' declares column '${col.name}', which collides with a reserved ` +
-              'list-query control keyword (order/after/limit/search) the declarative list route uses ' +
-              'for sorting/keyset pagination/substring search — the column would be un-filterable and ' +
-              'would emit a duplicate OpenAPI query parameter; rename the business column',
+              'list-query control keyword (order/after/limit/search/__search) the declarative list route ' +
+              'uses for sorting/keyset pagination/substring/full-text search — the column would be ' +
+              'un-filterable and would emit a duplicate OpenAPI query parameter; rename the business column',
             `stores[${si}].columns[${ci}].name`,
           ),
         );
@@ -576,6 +600,37 @@ export function lintSpec(spec: RaySpec): SpecError[] {
         }
       }
     });
+
+    // (FTS) A store that opts into full-text search MUST declare at least one `text` column — the
+    // generated tsvector is built over the store's text columns, so a text-less FTS store would index
+    // nothing (fail-closed rather than materialize a useless empty-vector column). It also may not
+    // declare a business column named `search_vector` (FTS_COLUMN_NAME), the reserved name the generator
+    // injects for the GENERATED-ALWAYS tsvector column when full-text search is enabled.
+    if (store.fullTextSearch === true) {
+      if (!store.columns.some((c) => c.type === 'text')) {
+        errors.push(
+          specError(
+            'schema_violation',
+            `store '${store.name}' enables fullTextSearch but declares no 'text' column — the ` +
+              'generated full-text-search vector would index nothing; add a text column or remove ' +
+              'fullTextSearch',
+            `stores[${si}].fullTextSearch`,
+          ),
+        );
+      }
+      const clashIndex = store.columns.findIndex((c) => c.name === FTS_COLUMN_NAME);
+      if (clashIndex >= 0) {
+        errors.push(
+          specError(
+            'reserved_column_name',
+            `store '${store.name}' declares column '${FTS_COLUMN_NAME}', which is reserved for the ` +
+              'generated tsvector column the generator injects when fullTextSearch is enabled; rename ' +
+              'the business column',
+            `stores[${si}].columns[${clashIndex}].name`,
+          ),
+        );
+      }
+    }
 
     store.foreignKeys.forEach((fk, fi) => {
       // (FK-NAME-LEN) The generated Postgres constraint name is a TOTAL function of

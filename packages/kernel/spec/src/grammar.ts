@@ -181,6 +181,9 @@ export const StoreSpec = z
     foreignKeys: z.array(StoreForeignKey).default([]),
     /** Opt-in soft delete: a delete marks the row deleted instead of removing it (default: hard delete). */
     softDelete: z.boolean().optional(),
+    /** Opt-in full-text search: the store gets a generated tsvector column (over its text columns) + a
+     *  GIN index, and a ranked search query surface. Default: substring (ILIKE) search only. */
+    fullTextSearch: z.boolean().optional(),
   })
   .strict();
 export type StoreSpec = z.infer<typeof StoreSpec>;

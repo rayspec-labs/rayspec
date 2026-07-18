@@ -576,16 +576,16 @@ export function checkProductStores(
           ),
         );
       } else if (RESERVED_QUERY_KEYWORDS.has(col.name)) {
-        // A column named after a list-query control keyword (order/after/limit/search) would be
+        // A column named after a list-query control keyword (order/after/limit/search/__search) would be
         // un-filterable AND would emit a duplicate OpenAPI query parameter on a list route — reject at
         // config with a rename hint (symmetric with the backend store lint).
         errors.push(
           specError(
             'reserved_query_keyword',
             `store '${store.name}' declares column '${col.name}', which collides with a reserved ` +
-              'list-query control keyword (order/after/limit/search) used for sorting/keyset ' +
-              'pagination/substring search — the column would be un-filterable and would emit a ' +
-              'duplicate OpenAPI query parameter; rename the business column',
+              'list-query control keyword (order/after/limit/search/__search) used for sorting/keyset ' +
+              'pagination/substring/full-text search — the column would be un-filterable and would emit ' +
+              'a duplicate OpenAPI query parameter; rename the business column',
             `${base}.columns[${ci}].name`,
           ),
         );
