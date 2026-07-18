@@ -31,7 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { OpenAIAdapter } from '@rayspec/adapter-openai';
 import { buildAgentRegistry } from '@rayspec/api-auth';
 import type { BackendId } from '@rayspec/core';
-import { loadExtensions, loadHandlers } from '@rayspec/platform';
+import { loadExtensions, loadHandlers, typeStrippingImporter } from '@rayspec/platform';
 import { parseSpec, type RaySpec } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
@@ -69,6 +69,9 @@ async function loadMergedDeployment(): Promise<{
   const loaded = await loadExtensions(base.extensions, {
     packsRoot: DEPLOYMENT_DIR,
     deploymentRoot: DEPLOYMENT_DIR,
+    // Un-built `.ts` pack under vitest: opt into the type-stripping importer seam (production loads
+    // compiled `.js` only; this is the single, explicit way un-built source loads).
+    importer: typeStrippingImporter,
   });
   const spec: RaySpec = {
     ...base,

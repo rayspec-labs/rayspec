@@ -1,0 +1,15 @@
+{
+  "//": "Build config for the stream-backend extension pack. `rayspec` serve/deploy runs on a compiled JavaScript runtime, so a pack whose entry/handlers are authored in `.ts` must be compiled to `.js` before deploy. This transpiles the pack's `index.ts` + `handlers/*.ts` to ESM `.js` (see build.mjs). `noCheck` (transpile-only) needs no dependency resolution: the handler modules import `@rayspec/handler-sdk` type-only (erased), and the entry keeps its `@rayspec/platform` value import (resolved from the workspace at load).",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2022",
+    "verbatimModuleSyntax": true,
+    "removeComments": true,
+    "noCheck": true,
+    "types": [],
+    "rootDir": ".",
+    "outDir": "./dist"
+  },
+  "include": ["index.ts", "handlers/**/*.ts"]
+}

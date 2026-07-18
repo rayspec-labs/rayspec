@@ -31,7 +31,8 @@
  * pack handler is doubly-jailed (against its pack root here, AND trivially in-root by `deploy()`), and
  * neither `deploy.ts` nor `loadHandlers`'s single-root signature changes.
  */
-import { basename, isAbsolute, normalize } from 'node:path';
+import { existsSync } from 'node:fs';
+import { basename, extname, isAbsolute, normalize } from 'node:path';
 import {
   type AgentSpecConfig,
   AgentSpecConfig as AgentSpecConfigSchema,
@@ -171,9 +172,11 @@ export async function loadExtensions(
     }
     const packRoot = jailModulePathFor(ctx.packsRoot, ref.module, ref.id);
 
-    // The pack's ENTRY module within the pack root (jailed against the pack root). The manifest is the
-    // branded default export of that module.
-    const entryAbsolute = jailModulePathFor(packRoot, entryFile, ref.id);
+    // The pack's ENTRY module within the pack root (jailed against the pack root, `.js`-preferred). The
+    // manifest is the branded default export of that module. A BUILT pack ships a compiled `index.js`;
+    // resolvePackModule resolves that when it exists (so the production importer loads compiled JS), and
+    // a source-only pack resolves to `index.ts` (which the production importer rejects fail-closed).
+    const entryAbsolute = resolvePackModule(packRoot, entryFile, ref.id);
     let mod: Record<string, unknown>;
     try {
       mod = await importer(entryAbsolute);
@@ -231,8 +234,11 @@ export async function loadExtensions(
             'BOTH escape-hatch gates scan); a handler outside it would load unscanned (fail-closed).',
         );
       }
-      // Jail the pack handler module against the PACK root (a pack handler can never climb out).
-      const realHandlerAbsolute = jailModulePathFor(packRoot, h.module, `${ref.id}:${h.id}`);
+      // Jail the pack handler module against the PACK root (a pack handler can never climb out),
+      // `.js`-preferred: a BUILT pack's compiled `handlers/<n>.js` sibling is loaded when it exists
+      // (so the production importer loads compiled JS with NO manifest rewrite — the manifest keeps its
+      // authored `.ts` module path); a source-only pack resolves to the `.ts` the production importer rejects.
+      const realHandlerAbsolute = resolvePackModule(packRoot, h.module, `${ref.id}:${h.id}`);
       // FIX C (virtual-path collision): derive the virtual segment from a GUARANTEED-unique authority —
       // the ref's loop INDEX (`<refIndex>__<sanitize(id)>`) — so two DISTINCT `ref.id`s that
       // sanitize-collide (`acme:v1` vs `acme_v1`, both valid `z.string().min(1)`) can NEVER collapse
@@ -364,6 +370,33 @@ function isUnderHandlersDir(moduleSpec: string): boolean {
   const segments = normalize(moduleSpec).split(/[/\\]/).filter(Boolean);
   // Require at least `handlers/<file>` (a bare `handlers` dir or empty is not a handler module).
   return segments.length >= 2 && segments[0] === 'handlers';
+}
+
+/** The TypeScript-source extensions whose compiled `.js` sibling `resolvePackModule` prefers when built. */
+const TYPESCRIPT_SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts']);
+
+/**
+ * Resolve a pack module (the pack entry or a pack handler) against the pack root, path-jailed, PREFERRING
+ * a compiled `.js` sibling when one exists on disk.
+ *
+ * A pack is AUTHORED in TypeScript (`index.ts`, `handlers/*.ts`) and its build step emits compiled `.js`
+ * siblings that production loads (the production importer loads compiled JavaScript only, fail-closed on
+ * a `.ts` path). So when the declared module is a TypeScript-source path AND its `.js` sibling exists in
+ * the pack (a BUILT pack), we resolve — and FULLY RE-JAIL — the `.js` sibling. A source-only pack (no
+ * build) resolves to the declared `.ts`, which the production importer rejects fail-closed (the dev/test
+ * seam importer loads it). This lets a BUILT pack deploy with NO manifest rewrite (the manifest keeps its
+ * authored `.ts` module paths) while the production compiled-JavaScript boundary still holds.
+ */
+function resolvePackModule(packRoot: string, moduleSpec: string, id: string): string {
+  const ext = extname(moduleSpec).toLowerCase();
+  if (TYPESCRIPT_SOURCE_EXTENSIONS.has(ext)) {
+    const compiledSpec = `${moduleSpec.slice(0, -ext.length)}.js`;
+    // Re-jail the compiled sibling spec with the FULL discipline (traversal/containment/symlink), then
+    // prefer it only when it actually exists on disk (a built pack); otherwise fall through to the source.
+    const compiledAbsolute = jailModulePathFor(packRoot, compiledSpec, id);
+    if (existsSync(compiledAbsolute)) return compiledAbsolute;
+  }
+  return jailModulePathFor(packRoot, moduleSpec, id);
 }
 
 /**

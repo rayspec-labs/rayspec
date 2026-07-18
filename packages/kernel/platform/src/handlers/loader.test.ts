@@ -10,7 +10,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { HandlerSpec } from '@rayspec/spec';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { HandlerLoadError, jailModulePath, loadHandlers, type ModuleImporter } from './loader.js';
+import {
+  assertCompiledJavaScriptModule,
+  defaultImporter,
+  HandlerLoadError,
+  jailModulePath,
+  loadHandlers,
+  type ModuleImporter,
+  typeStrippingImporter,
+} from './loader.js';
 
 const ROOT = '/srv/app/escape-hatch';
 
@@ -172,5 +180,65 @@ describe('loadHandlers — fail-closed resolution at boot', () => {
     expect(map.get('t')?.kind).toBe('tool');
     expect(map.get('r')?.kind).toBe('route');
     expect(map.get('g')?.kind).toBe('trigger');
+  });
+});
+
+/**
+ * The compiled-JavaScript boundary (fail-closed) — DETERMINISTIC + Node-version-INDEPENDENT.
+ *
+ * `assertCompiledJavaScriptModule` is a pure `extname` check: it CANNOT depend on the Node runtime's
+ * behavior (whether a given Node version transparently type-strips `.ts` on import). These assert the
+ * closed reject-set (every TypeScript-source extension) + the accept-set (compiled JavaScript), and that
+ * the production `defaultImporter` fires the guard BEFORE any import while the dev/test `typeStrippingImporter`
+ * seam does not. FAIL-THE-FIX: remove the `assertCompiledJavaScriptModule(...)` call from `defaultImporter`
+ * and the "defaultImporter rejects a .ts path" assertion flips (it would type-strip + import instead).
+ */
+describe('assertCompiledJavaScriptModule — compiled-JavaScript boundary (fail-closed, Node-independent)', () => {
+  it('REJECTS every TypeScript-source extension (.ts/.tsx/.mts/.cts), case-insensitively', () => {
+    for (const p of [
+      '/srv/app/escape-hatch/handlers/x.ts',
+      '/srv/app/escape-hatch/handlers/x.tsx',
+      '/srv/app/escape-hatch/handlers/x.mts',
+      '/srv/app/escape-hatch/handlers/x.cts',
+      '/srv/app/escape-hatch/handlers/X.TS',
+    ]) {
+      expect(() => assertCompiledJavaScriptModule(p)).toThrow(HandlerLoadError);
+      expect(() => assertCompiledJavaScriptModule(p)).toThrow(/TypeScript source|compiled/i);
+    }
+  });
+
+  it('ACCEPTS compiled JavaScript (.js/.mjs/.cjs) — no throw', () => {
+    for (const p of [
+      '/srv/app/escape-hatch/handlers/x.js',
+      '/srv/app/escape-hatch/handlers/x.mjs',
+      '/srv/app/escape-hatch/handlers/x.cjs',
+    ]) {
+      expect(() => assertCompiledJavaScriptModule(p)).not.toThrow();
+    }
+  });
+
+  it('defaultImporter (PRODUCTION) fails closed on a .ts module path BEFORE importing it', async () => {
+    // The path need not exist — the guard is a deterministic extension check that fires before import()
+    // (so this is NOT a "file missing" error, and it does NOT depend on Node type-stripping `.ts`).
+    await expect(
+      defaultImporter('/srv/app/escape-hatch/handlers/does-not-exist.ts'),
+    ).rejects.toThrow(/TypeScript source|compiled JavaScript/i);
+  });
+
+  it('loadHandlers with the default (production) importer rejects a .ts handler deterministically', async () => {
+    await expect(
+      loadHandlers(ROOT, [spec({ module: './handlers/x.ts' })], defaultImporter),
+    ).rejects.toThrow(HandlerLoadError);
+    await expect(
+      loadHandlers(ROOT, [spec({ module: './handlers/x.ts' })], defaultImporter),
+    ).rejects.toThrow(/TypeScript source|compiled JavaScript/i);
+  });
+
+  it('the dev/test typeStrippingImporter seam does NOT apply the compiled-JavaScript guard', async () => {
+    // The seam skips the guard: a `.ts` path reaches the underlying dynamic import (which then fails on
+    // the MISSING file, NOT on the guard) — proving the guard is bypassed only through this explicit seam.
+    await expect(
+      typeStrippingImporter('/srv/app/escape-hatch/handlers/does-not-exist.ts'),
+    ).rejects.not.toThrow(/TypeScript source|compiled JavaScript/i);
   });
 });

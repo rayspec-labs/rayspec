@@ -27,6 +27,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { registerScopedTables } from '@rayspec/db/testing';
+import { typeStrippingImporter } from '@rayspec/platform';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -191,6 +192,9 @@ extensions:
           // The LOCAL table-registration stand-in: register THESE exact (pack-contributed) product-table instances.
           registerScopedTables([...tables.values()]);
         },
+        // The fixture pack is un-built `.ts`; opt into the type-stripping importer seam (production loads
+        // compiled `.js` only). This drives the REAL composition root — production never sets this.
+        moduleImporter: typeStrippingImporter,
       });
 
       // (2) GROUND TRUTH — the PACK store materialized through the UNCHANGED migration gate. Query the
@@ -263,6 +267,7 @@ extensions:
           registerProductTables: (tables) => {
             registerScopedTables([...tables.values()]);
           },
+          moduleImporter: typeStrippingImporter,
         });
       } catch (err) {
         caught = err;
@@ -271,6 +276,35 @@ extensions:
       expect((caught as BootConfigError).message).toMatch(/version SKEW/i);
       expect((caught as BootConfigError).message).toContain('9.9.9'); // the spec's wrong pin.
       expect((caught as BootConfigError).message).toContain('1.0.0'); // the pack's real version.
+    },
+    120_000,
+  );
+
+  maybe(
+    '(5) PRODUCTION FAIL-CLOSED: a boot WITHOUT the seam rejects the un-built .ts pack deterministically',
+    async () => {
+      // The SAME thin fixture, but the boot injects NO importer — the PRODUCTION path a real deploy runs.
+      // The guarded default importer fail-closed-rejects the pack's `.ts` entry (compiled-JavaScript only),
+      // so the boot aborts with the guard message wrapped in a BootConfigError — NEVER loads the `.ts`.
+      // FAIL-THE-FIX: this is the exact reason a production deploy of an un-built pack is refused; removing
+      // the compiled-JavaScript guard would let the boot proceed and this assertion goes RED.
+      process.env.RAYSPEC_SPEC_PATH = FULL_YAML_PATH;
+      process.env.RAYSPEC_HANDLER_ROOT = STREAM_DIR;
+
+      const config = loadServerConfig();
+      let caught: unknown;
+      try {
+        // NO moduleImporter — the production boot (serve.ts) never sets one.
+        await assembleServer(config, {
+          registerProductTables: (tables) => {
+            registerScopedTables([...tables.values()]);
+          },
+        });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(BootConfigError);
+      expect((caught as BootConfigError).message).toMatch(/TypeScript source|compiled JavaScript/i);
     },
     120_000,
   );

@@ -37,7 +37,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildProductTables } from '@rayspec/db';
 import { registerScopedTables } from '@rayspec/db/testing';
-import { makeFsBlobStoreFactory } from '@rayspec/platform';
+import { makeFsBlobStoreFactory, typeStrippingImporter } from '@rayspec/platform';
 import { parseSpec } from '@rayspec/spec';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
@@ -206,6 +206,10 @@ describe('stream blob-backend boot guard — composition root fail-closed + real
           registerProductTables: (tables) => {
             registerScopedTables([...tables.values()]);
           },
+          // The fixture pack is un-built `.ts`; opt into the type-stripping importer seam (production
+          // loads compiled `.js` only). This test drives the REAL composition root — production never sets
+          // this, so a production boot always uses the guarded default.
+          moduleImporter: typeStrippingImporter,
         });
       } catch (err) {
         caught = err;
@@ -236,6 +240,9 @@ describe('stream blob-backend boot guard — composition root fail-closed + real
           // same objects). buildProductTables here is only to assert the spec materialized one table.
           registerScopedTables([...tables.values()]);
         },
+        // The inline spec references an un-built `.ts` example handler; opt into the type-stripping
+        // importer seam (production loads compiled `.js` only; production never sets this).
+        moduleImporter: typeStrippingImporter,
       });
 
       // Sanity: the spec's single product store materialized (the boot ran deploy()'s migration).

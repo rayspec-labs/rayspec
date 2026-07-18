@@ -19,7 +19,12 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadExtensions, loadHandlers, type ResolvedHandler } from '@rayspec/platform';
+import {
+  loadExtensions,
+  loadHandlers,
+  type ResolvedHandler,
+  typeStrippingImporter,
+} from '@rayspec/platform';
 import { parseSpec, type RaySpec } from '@rayspec/spec';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -48,9 +53,12 @@ export async function loadStreamPack(): Promise<LoadedStreamPack> {
   const base = parsed.value;
 
   // Resolve + merge the pack (DIRECTORY-ONLY path-jailed; version-pin fail-closed; pack-handler-jailed).
+  // The pack is un-built `.ts` source, so this test explicitly opts into the type-stripping importer seam
+  // (production loads compiled `.js` only; the seam is the single, visible way un-built source loads).
   const loaded = await loadExtensions(base.extensions, {
     packsRoot: STREAM_DEPLOYMENT_DIR,
     deploymentRoot: STREAM_DEPLOYMENT_DIR,
+    importer: typeStrippingImporter,
   });
 
   // Assemble the merged spec (deployment ⊕ pack fragments); drop the spent `extensions[]` ref.

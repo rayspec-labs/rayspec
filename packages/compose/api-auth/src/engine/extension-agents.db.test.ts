@@ -22,7 +22,12 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { BackendId } from '@rayspec/core';
 import { forTenant, schema } from '@rayspec/db';
-import { loadExtensions, loadHandlers, type ResolvedHandler } from '@rayspec/platform';
+import {
+  loadExtensions,
+  loadHandlers,
+  type ResolvedHandler,
+  typeStrippingImporter,
+} from '@rayspec/platform';
 import { lintSpec, parseSpec, type RaySpec } from '@rayspec/spec';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -66,6 +71,9 @@ async function loadAgentPack(includeAgents = true): Promise<Loaded> {
   const loaded = await loadExtensions(base.extensions, {
     packsRoot: DEPLOYMENT_DIR,
     deploymentRoot: DEPLOYMENT_DIR,
+    // Un-built `.ts` pack under vitest: opt into the type-stripping importer seam (production loads
+    // compiled `.js` only; this is the single, explicit way un-built source loads).
+    importer: typeStrippingImporter,
   });
 
   const spec: RaySpec = {
