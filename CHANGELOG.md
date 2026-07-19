@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-07-19
+
+### Documentation
+
+- Add a per-package `README.md` to the 22 published packages that shipped without one, so
+  every package page on npm renders a purpose description, quickstart pointers, and the
+  license summary. Docs-only release: no runtime, API, or dependency changes.
+
 ## [1.5.0] - 2026-07-18
 
 ### Added
