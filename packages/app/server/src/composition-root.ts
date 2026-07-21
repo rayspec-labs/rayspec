@@ -27,7 +27,15 @@
  * auth-only boot (no spec) is the default.
  */
 
-import { accessSync, constants, readFileSync, statSync } from 'node:fs';
+import {
+  accessSync,
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readFileSync,
+  statSync,
+} from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { AgentRuntimeRegistry } from '@rayspec/agent-runtime';
 import {
@@ -449,32 +457,177 @@ export type AgentBackendsFactory = (
 export type ProductTableRegistrar = (tables: ReadonlyMap<string, PgTable>) => void;
 
 /**
+ * Read ONE boot secret out of the file named by a `<VAR>_FILE` variable. FAIL CLOSED on anything
+ * that is not a readable, non-empty regular file — a misconfigured secret mount must ABORT the boot,
+ * never silently downgrade to the weaker plain-env source (see `resolveBootSecret`).
+ *
+ * TRIM: the returned value is `.trim()`ed, and for the RS256 PEM that is HARDENING rather than
+ * convenience. A file written by `echo` / `printf` / a container secret projection carries a
+ * TRAILING newline, and an editor or a `--from-file` round-trip just as easily leaves a LEADING
+ * newline, space, or UTF-8 byte-order mark. A PKCS#8 import requires the PEM header at offset 0, so
+ * any one of those leading bytes rejects the key — and rejects it LATE, at signer construction,
+ * after the Db handle is open and the migration chain has already run, as a raw TypeError the
+ * entrypoint has no fail-closed branch for (so a whitespace typo surfaces as a stack trace).
+ * `trim()` strips all of them, the byte-order mark included, so a leading-byte mistake cannot reach
+ * that point. For the api-key pepper trimming is a correctness requirement: the pepper IS the HMAC
+ * key, so a surviving trailing newline would silently change every hash and invalidate every issued
+ * api key. For the connection string the plain-env path already trims, so the file form stays
+ * byte-equivalent either way. Shape VALIDATION deliberately stays out of this function — it resolves
+ * values, it does not parse them.
+ *
+ * The file holds the REAL bytes: a multi-line PEM with real newlines. The `\n`-unescaping the
+ * single-line dotenv form needs is deliberately NOT applied here.
+ *
+ * The abort names the VARIABLE, the PATH, and — where the read itself failed — the OS error CODE,
+ * but NEVER the file CONTENT; it is deliberately unlike the sibling config aborts in this file,
+ * which echo the offending value. A secret file's content IS the secret, and an abort message
+ * reaches every log the process writes to. The path and the error code are safe by construction:
+ * the path is operator-supplied configuration and an actionable error needs it, and the code is a
+ * fixed symbol the OS chooses from, never anything read out of the file. The messages are asserted
+ * by exact equality in the tests, so any interpolation added here has to be added there too.
+ */
+function readBootSecretFile(fileVar: string, path: string): string {
+  // SINGLE ACCESS: open the file ONCE and drive every decision off that one descriptor —
+  // `fstatSync(fd)` classifies it and `readFileSync(fd)` reads it, neither ever touching the path a
+  // second time. The file inspected is therefore provably the file read: there is no window between
+  // a path-based check and a path-based use in which the path could be repointed at another target.
+  //
+  // `openSync` / `readFileSync` FOLLOW symlinks, and that is deliberate — do not "harden" this into
+  // an `O_NOFOLLOW` / `lstatSync` guard. A container secret projection routinely presents the value
+  // through a symlink chain (`secret` -> `..data/secret`, `..data` -> a timestamped directory, so an
+  // atomic rename can swap the whole set), and refusing symlinks would abort the boot on every such
+  // mount. A symlinked mount is pinned by a test arm so the choice cannot be reverted silently.
+  const notARegularFile = () =>
+    new BootConfigError(
+      `Boot aborted — ${fileVar} points at '${path}', which is missing or not a regular file. ` +
+        'Point it at a readable file holding the secret. Refusing to start (fail-closed) — a ' +
+        'secret file that cannot be read NEVER falls back to the plain environment variable.',
+    );
+  // Surface the OS error CODE and nothing else. The code is a fixed symbol — an errno name
+  // (`EACCES`, `ELOOP`, `ENAMETOOLONG`, `EIO`) or one of the runtime's own `ERR_*` names
+  // (`ERR_STRING_TOO_LONG` for a file past the maximum string length, `ERR_FS_FILE_TOO_LARGE` past
+  // the maximum buffer length) — so it cannot carry any of the file's bytes, and it is the one
+  // detail that separates a permission problem from a symlink loop, a failing disk, or a mount
+  // pointed at something far too big to be a secret; without it every read failure reads as "fix the
+  // file mode". The shape guard therefore admits the underscore those `ERR_*` names carry, while
+  // still emitting ONLY a fixed uppercase symbol: anything that is not one — including any value that
+  // could have come out of the file — collapses to `unknown`. The error's message and cause stay
+  // out: those are the parts that could quote what was being read.
+  const unreadable = (err: unknown) => {
+    const rawCode = (err as { code?: unknown }).code;
+    const code =
+      typeof rawCode === 'string' && /^[A-Z][A-Z0-9_]*$/.test(rawCode) ? rawCode : 'unknown';
+    return new BootConfigError(
+      `Boot aborted — ${fileVar} points at '${path}', which could not be read (${code}). Check ` +
+        'ownership and file mode; the server process must be able to read it. Refusing to start ' +
+        '(fail-closed) — an unreadable secret file NEVER falls back to the plain environment ' +
+        'variable.',
+    );
+  };
+
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch (err) {
+    // A path that resolves to no node is the "missing / not a regular file" abort; a path that
+    // exists but cannot be opened (permission, symlink loop, over-long name) is a read failure and
+    // carries its OS code — the same split a directory (opened, then rejected below) and an
+    // unreadable regular file draw.
+    const code = (err as { code?: unknown }).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') throw notARegularFile();
+    throw unreadable(err);
+  }
+  let value: string;
+  try {
+    // A directory (and any other non-regular node) opens on Linux/macOS but is not a secret file —
+    // reject it here, off the SAME descriptor, so no second path lookup can disagree with the read.
+    if (!fstatSync(fd).isFile()) throw notARegularFile();
+    value = readFileSync(fd, 'utf8').trim();
+  } catch (err) {
+    if (err instanceof BootConfigError) throw err;
+    // A raw failure from `fstatSync`/`readFileSync` on the open descriptor (e.g. a file too large to
+    // read as a string, or a mid-read I/O error) surfaces as the read-failure abort with its code.
+    throw unreadable(err);
+  } finally {
+    closeSync(fd);
+  }
+  if (value.length === 0) {
+    throw new BootConfigError(
+      `Boot aborted — ${fileVar} points at '${path}', which is empty. Refusing to start ` +
+        '(fail-closed) — an empty secret file NEVER falls back to the plain environment variable.',
+    );
+  }
+  return value;
+}
+
+/**
+ * Resolve one boot secret from EITHER a `<VAR>_FILE` file mount OR the plain `<VAR>` variable.
+ *
+ * PRECEDENCE: `<VAR>_FILE` wins outright — when it is set the plain variable is not consulted at
+ * all (not merged, not preferred, not a fallback). Reading a secret from a mounted file (mode 600)
+ * instead of the environment keeps it out of the container's declared environment (`docker inspect`)
+ * and out of this process's own exec environment (`/proc/<pid>/environ`). It does NOT keep it out of
+ * a CHILD process's environment: `assembleServer` places the two auth secrets on `process.env` for
+ * the components that read them there, and a spawned child is exec'd with that environment.
+ *
+ * A BLANK `<VAR>_FILE` (empty / whitespace-only) counts as NOT SET, so the plain variable is used.
+ * Container orchestrators routinely materialize an unset variable as `""`, and treating that as a
+ * broken mount would abort every such boot; this matches the blank-is-unset convention the rest of
+ * this file already uses (`RAYSPEC_HOST`, the ALLOWED_ORIGINS blank-drop). A NON-blank `<VAR>_FILE`
+ * whose file is missing / unreadable / a directory / empty ABORTS — never a silent downgrade.
+ *
+ * The plain-env branch returns the RAW value, so each caller keeps its existing shape (the
+ * connection string trims, the two secrets stay byte-exact and are only blank-checked).
+ *
+ * BOTH variables are read off the INJECTED `env`, never off `process.env`. Callers that build a
+ * config from an explicit environment (rather than the ambient one) must get exactly what they
+ * passed: an ambient `<VAR>_FILE` would otherwise outrank the value they supplied and quietly
+ * redirect the boot at a file they never named.
+ */
+function resolveBootSecret(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const fileVar = `${name}_FILE`;
+  const path = env[fileVar]?.trim();
+  if (!path) return env[name];
+  return readBootSecretFile(fileVar, path);
+}
+
+/**
  * Read + VALIDATE the boot config from the ambient environment, FAIL CLOSED on anything missing or
- * unsafe. This does NOT read any file or touch the DB — it only resolves + checks env, so the
- * entrypoint can surface a clean, actionable error before any side effect.
+ * unsafe. The only filesystem read is a `<VAR>_FILE` secret mount (`resolveBootSecret`); nothing
+ * here touches the DB, so the entrypoint can surface a clean, actionable error before any side
+ * effect.
  *
  * Secrets fail closed: `assertBootSecrets` (inside createAuthApp) is the authoritative gate for the
  * two boot secrets, but we ALSO check them here so the abort message is actionable at the entrypoint
  * (and so the OIDC PEM import below has a value to work with). DATABASE_URL is required (no default —
  * a real boot must point at its DB explicitly). CORS is NEVER dev-permissive: ALLOWED_ORIGINS is an
  * explicit comma-separated list; UNSET ⇒ EMPTY (no cross-origin), never a localhost default.
+ *
+ * All three boot secrets resolve through `resolveBootSecret`, so each also accepts a `<VAR>_FILE`
+ * file-mount variant that takes precedence over the plain variable. Resolving them HERE is enough
+ * for the whole process: `assembleServer` mirrors the resolved secrets onto `process.env` before
+ * anything reads them, and every downstream reader (`assertBootSecrets`, `getApiKeyPepper`) reads
+ * env lazily inside a function — none at module scope.
  */
 export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const missing: string[] = [];
-  const databaseUrl = env.DATABASE_URL?.trim();
+  const databaseUrl = resolveBootSecret(env, 'DATABASE_URL')?.trim();
   if (!databaseUrl) missing.push('DATABASE_URL');
-  const jwtSigningKeyPem = env.RAYSPEC_JWT_SIGNING_KEY;
+  const jwtSigningKeyPem = resolveBootSecret(env, 'RAYSPEC_JWT_SIGNING_KEY');
   if (!jwtSigningKeyPem || jwtSigningKeyPem.trim().length === 0) {
     missing.push('RAYSPEC_JWT_SIGNING_KEY');
   }
-  const apiKeyPepper = env.RAYSPEC_API_KEY_PEPPER;
+  const apiKeyPepper = resolveBootSecret(env, 'RAYSPEC_API_KEY_PEPPER');
   if (!apiKeyPepper || apiKeyPepper.trim().length === 0) missing.push('RAYSPEC_API_KEY_PEPPER');
   if (missing.length > 0) {
     throw new BootConfigError(
       `Boot aborted — required env var(s) missing: ${missing.join(', ')}. ` +
         'DATABASE_URL is the Postgres connection string; RAYSPEC_JWT_SIGNING_KEY is the RS256 ' +
         'PKCS#8 PEM; RAYSPEC_API_KEY_PEPPER is the api-key pepper. These live in env / a secret ' +
-        'manager only (never DB/git). Refusing to start (fail-closed).',
+        'manager only (never DB/git). Each also accepts a <VAR>_FILE variant — DATABASE_URL_FILE, ' +
+        'RAYSPEC_JWT_SIGNING_KEY_FILE, RAYSPEC_API_KEY_PEPPER_FILE — naming a file to read the ' +
+        'value from, which TAKES PRECEDENCE over the plain variable when set. ' +
+        'Refusing to start (fail-closed).',
     );
   }
 
