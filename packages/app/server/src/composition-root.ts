@@ -101,6 +101,7 @@ import {
 } from '@rayspec/platform';
 import {
   detectSpecKind,
+  type FrontendSpec,
   parseAnySpec,
   parseProductSpec,
   parseSpec,
@@ -109,7 +110,7 @@ import {
 import type { SttAdapter } from '@rayspec/stt-port';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
-import type { Env, Hono } from 'hono';
+import { type Env, Hono, type MiddlewareHandler } from 'hono';
 import { exportJWK, importPKCS8 } from 'jose';
 import { stringify as stringifyYaml } from 'yaml';
 import { deployProductYamlSpec, makeSchemaProbe, planUpdateBoot } from './product-boot.js';
@@ -841,6 +842,206 @@ function parsePort(raw: string | undefined): number {
     throw new BootConfigError(`Boot aborted — PORT='${raw}' is not a valid TCP port (1–65535).`);
   }
   return n;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Static profile — a frontend-only document boots WITHOUT a database, JWT signing key, or api-key
+// pepper, mounting NO auth/OIDC/runs/API route. This is a SEPARATE boot path (`assembleStaticServer`,
+// selected by serve.ts's detection branch); the normal `assembleServer` / `createAuthApp` / DB
+// composition below is byte-unchanged — the safe static boot BRANCHES AWAY from it rather than
+// neutering it (a lenient auth app backed by a DB that was never opened would be exposed-but-broken).
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The top-level RaySpec sections `isStaticProfile` has reasoned about — a SEPARATE allowlist from the
+ * grammar's own schema. FAIL-CLOSED tripwire: if the grammar ever grows a NEW top-level section, a
+ * parsed doc carrying it has a key OUTSIDE this set and `isStaticProfile` returns false (⇒ the normal
+ * boot with full auth, the safe direction). A new ROUTE-BEARING grammar field MUST be added here (and
+ * emptiness-checked in `isStaticProfile`) or it can never silently pass the static gate.
+ */
+const STATIC_PROFILE_KNOWN_KEYS: ReadonlySet<string> = new Set([
+  'version',
+  'metadata',
+  'stores',
+  'api',
+  'agents',
+  'tooling',
+  'triggers',
+  'handlers',
+  'extensions',
+  'deployment',
+  'frontend',
+]);
+
+/**
+ * Is `specSource` a STATIC-PROFILE backend document — a frontend-only spec SAFE to boot with NO
+ * database, JWT signing key, or api-key pepper, mounting NO auth/OIDC/runs/API route?
+ *
+ * "Frontend-only" is an ABSENCE predicate, NOT a positive grammar shape: the auth surface
+ * (`createAuthApp`) is not spec-derived — it mounts unconditionally — so a spec can only ADD routes,
+ * never subtract the always-on auth surface. This predicate is therefore NECESSARY BUT NOT SUFFICIENT
+ * on its own; the security guarantee comes from the caller BRANCHING to `assembleStaticServer` (a fresh
+ * bare app that never constructs the auth/DB composition), never from a "static" verdict alone.
+ *
+ * FAIL-CLOSED throughout — any doubt resolves to false:
+ *   - a product-profile doc is categorically never static;
+ *   - a doc that does not parse as a valid backend RaySpec is not static (the normal path then surfaces
+ *     the real parse error rather than silently serving a doc that never validated);
+ *   - a doc carrying ANY top-level section outside `STATIC_PROFILE_KNOWN_KEYS` is not static (the
+ *     future-grammar-field tripwire);
+ *   - EVERY route/DB/agent/handler-bearing section must be empty — `extensions` INCLUDED, because
+ *     `mergeExtensions` concatenates each pack's stores/handlers/tooling/api/agents onto the spec
+ *     before deploy, so a non-empty `extensions[]` would smuggle in every route-bearing field the
+ *     other empty checks catch;
+ *   - a durable off-request worker (`deployment.durableWorker`) needs a DB, so it disqualifies;
+ *   - `frontend` must be non-empty (a static boot with nothing to serve is not a static profile).
+ */
+export function isStaticProfile(specSource: string): boolean {
+  // A product-profile doc implies capabilities/workflows/stores/views — never static.
+  if (detectSpecKind(specSource) === 'product') return false;
+  // Must parse as a valid backend RaySpec; a parse failure is NOT static (fail closed → the normal boot
+  // surfaces the real error instead of statically serving a doc that never validated).
+  const parsed = parseSpec(specSource);
+  if (!parsed.ok) return false;
+  const spec = parsed.value;
+  // FAIL-CLOSED keys-allowlist: a future top-level section this predicate has not reasoned about makes
+  // the doc non-static (see STATIC_PROFILE_KNOWN_KEYS).
+  for (const key of Object.keys(spec)) {
+    if (!STATIC_PROFILE_KNOWN_KEYS.has(key)) return false;
+  }
+  // No route/DB/agent/handler-bearing section (extensions INCLUDED — the pack-merge smuggle path).
+  if (
+    spec.stores.length > 0 ||
+    spec.api.length > 0 ||
+    spec.agents.length > 0 ||
+    spec.tooling.length > 0 ||
+    spec.triggers.length > 0 ||
+    spec.handlers.length > 0 ||
+    spec.extensions.length > 0
+  ) {
+    return false;
+  }
+  // A durable off-request worker needs a database — disqualifies the static boot.
+  if (spec.deployment?.durableWorker === true) return false;
+  // The one field a static profile MUST carry: something to serve.
+  return spec.frontend !== undefined && spec.frontend.length > 0;
+}
+
+/**
+ * The secure-default Content-Security-Policy for the static boot when RAYSPEC_FRONTEND_CSP is unset:
+ * `default-src 'self'` (same-origin only) plus the hardening companions. It deliberately carries NO
+ * `'unsafe-inline'` — a SPA that needs inline styles/scripts must opt into a weaker policy EXPLICITLY
+ * via RAYSPEC_FRONTEND_CSP; weakening the baseline is an operator choice, never the shipped default.
+ */
+export const DEFAULT_FRONTEND_CSP =
+  "default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'";
+
+/**
+ * The secure-default Permissions-Policy for the static boot when RAYSPEC_PERMISSIONS_POLICY is unset —
+ * deny the high-risk device features. Overridable verbatim via the env var.
+ */
+export const DEFAULT_PERMISSIONS_POLICY = 'camera=(), microphone=(), geolocation=()';
+
+/**
+ * The validated STATIC-boot configuration — a strict subset of `ServerConfig` that touches NONE of the
+ * three boot secrets (DATABASE_URL / RAYSPEC_JWT_SIGNING_KEY / RAYSPEC_API_KEY_PEPPER). A frontend-only
+ * deployment boots with none of them set. (CORS is deliberately omitted — the static boot serves only
+ * same-origin assets, so there is no cross-origin API grant to configure.)
+ */
+export interface StaticServerConfig {
+  port: number;
+  host: string;
+  /** The static-frontend Content-Security-Policy header value (env or the secure default). */
+  frontendCsp: string;
+  /** The static-frontend Permissions-Policy header value (env or the secure default). */
+  permissionsPolicy: string;
+}
+
+/**
+ * Read the STATIC-boot config from the environment. Validates ONLY the static-relevant knobs (PORT,
+ * HOST, and the two native-serve security-header values) and reads NONE of the three boot secrets —
+ * this is the config half of the DB-less / auth-less boot. `loadServerConfig` (the normal path) is
+ * untouched and still fail-closes on the missing secrets for every non-static boot.
+ *
+ * CSP + Permissions-Policy are read from ENV, never from the grammar, so a deployment tunes them
+ * without a change to the spec grammar. Unset ⇒ the secure defaults above; a deployer overrides
+ * either verbatim.
+ */
+export function loadStaticServerConfig(env: NodeJS.ProcessEnv = process.env): StaticServerConfig {
+  return {
+    port: parsePort(env.PORT),
+    host: env.RAYSPEC_HOST?.trim() || DEFAULT_HOST,
+    frontendCsp: env.RAYSPEC_FRONTEND_CSP?.trim() || DEFAULT_FRONTEND_CSP,
+    permissionsPolicy: env.RAYSPEC_PERMISSIONS_POLICY?.trim() || DEFAULT_PERMISSIONS_POLICY,
+  };
+}
+
+/**
+ * The static boot's assembled server — the shape serve.ts serves + the static banner reads. Distinct
+ * from `BootedServer`: a static boot has no OIDC issuer, no deploy mode, no durable worker, no DB pool.
+ */
+export interface StaticBootedServer {
+  /**
+   * The bare static Hono app — the static security chain + a liveness `/health` + the frontend
+   * mounts, and NO auth/OIDC/runs/API route (the surface is never constructed).
+   */
+  app: Hono;
+  /** The declared frontend mounts this boot serves (for the banner). */
+  frontendMounts: readonly FrontendSpec[];
+  /** No-op close — the static boot opens no DB pool and launches no durable worker. */
+  close: () => Promise<void>;
+}
+
+/**
+ * The static boot's OWN security-header chain. The static app does NOT pass through the normal path's
+ * global `securityHeaders`, so it emits FULL parity itself: the four base headers the normal chain sets
+ * (nosniff / frame-DENY / no-referrer / HSTS) PLUS the two the normal chain leaves to nginx and a native
+ * (nginx-less) serve must add — Content-Security-Policy + Permissions-Policy (values from ENV, see
+ * `loadStaticServerConfig`). Runs post-`next` (like the normal chain) and keeps the same
+ * Cache-Control:no-store default, never clobbering an explicit value a file server set.
+ */
+function staticSecurityHeaders(csp: string, permissionsPolicy: string): MiddlewareHandler {
+  return async (c, next) => {
+    await next();
+    c.header('X-Content-Type-Options', 'nosniff');
+    c.header('X-Frame-Options', 'DENY');
+    c.header('Referrer-Policy', 'no-referrer');
+    c.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    c.header('Content-Security-Policy', csp);
+    c.header('Permissions-Policy', permissionsPolicy);
+    if (!c.res.headers.has('Cache-Control')) c.header('Cache-Control', 'no-store');
+  };
+}
+
+/**
+ * Assemble the STATIC boot — a fresh bare Hono app that serves ONLY the declared static frontend(s)
+ * behind the static security chain, plus a liveness-only `/health`. It NEVER imports or calls
+ * `createAuthApp`, `makeDb`, `applyMigrations`, `createSigner`, `createOidcProvider`, `AuthService`, the
+ * stores, or the durable worker — so there is provably NO auth/OIDC/runs/API route in the app, not
+ * because the spec is empty but because the code that mounts them is never reached. Requires NONE of the
+ * three boot secrets.
+ *
+ * `/health` is LIVENESS-ONLY: `200 {status:'ok'}` with the `db` field OMITTED (a static cell has no
+ * database — never `db:'ok'`, a lie, and never the DB-probing 503). Do NOT wire a DB-readiness monitor
+ * onto a static cell.
+ */
+export function assembleStaticServer(
+  config: StaticServerConfig,
+  spec: { specPath: string; frontend: readonly FrontendSpec[] },
+): StaticBootedServer {
+  const app = new Hono();
+  // The static boot's own security chain (registered first so it wraps every response): the CSP +
+  // Permissions-Policy the normal path leaves to nginx, plus the four base headers — full parity.
+  app.use('*', staticSecurityHeaders(config.frontendCsp, config.permissionsPolicy));
+  // Liveness-only /health — 200 {status:'ok'}, the `db` field OMITTED (see the docstring). Registered
+  // BEFORE the frontend mounts (which decline the reserved `/health` prefix anyway), so a `/` spa
+  // catch-all can never shadow it.
+  app.get('/health', (c) => c.json({ status: 'ok' }, 200));
+  // Mount the declared static frontend(s) — the ONLY request surface. `mountFrontend` (the SAME hardened
+  // module the normal path uses) declines the reserved `/v1`,`/health`,`/oidc` prefixes, so an
+  // unregistered auth/OIDC/runs path falls through to a uniform 404 — the surface is simply not there.
+  mountFrontend(app, spec.frontend, dirname(spec.specPath));
+  return { app, frontendMounts: spec.frontend, close: () => Promise.resolve() };
 }
 
 /**
