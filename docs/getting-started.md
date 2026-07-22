@@ -137,6 +137,16 @@ needs when it declares audio, media playback, cron, or blob storage — is
 documented in [`.env.example`](../.env.example). Copy variables from there as your
 spec grows.
 
+> **In production, read the boot secrets from a file mount instead of the
+> environment.** Each of `DATABASE_URL`, `RAYSPEC_JWT_SIGNING_KEY`, and
+> `RAYSPEC_API_KEY_PEPPER` also accepts a `<VAR>_FILE` variant (e.g.
+> `RAYSPEC_API_KEY_PEPPER_FILE=/run/secrets/api-key-pepper`) naming a file to read
+> the value from — a mounted secret (mode `600`) stays out of `docker inspect` and
+> the process environment. A set `<VAR>_FILE` takes precedence, and a broken mount
+> fails the boot closed (it never falls back to the plain variable). See the
+> [CLI reference](./cli-reference.md#rayspec-serve--the-boot-server) and
+> [`.env.example`](../.env.example) for the full precedence and per-command scope.
+
 ---
 
 ## 3. Author and validate a spec
@@ -508,6 +518,53 @@ curl -s http://localhost:8080/health      # → the health JSON, never the UI sh
 [`frontend`](./spec-reference.md#frontend) reference for the fields, the collision
 rules, and what static serving does **not** do in v1. A ready-to-run example lives in
 [`examples/notes-ui/`](../examples/notes-ui/).
+
+### A frontend-only (static) deployment
+
+The mount above serves a UI *next to* a full API. If a document declares **only** a
+`frontend` — no stores, api, agents, tooling, triggers, handlers, or extensions, and
+no durable worker — RaySpec boots it as a **static profile**: it needs **no database
+and none of the three boot secrets**, and it mounts **no** auth / OIDC / run route.
+The auth-and-database composition is never constructed, so there is provably no
+authenticated surface behind the assets, and `/health` is liveness-only. This is the
+way to serve a built single-page app directly, with no reverse proxy in front.
+
+```yaml
+version: '1.0'
+metadata:
+  name: my-ui
+frontend:
+  - route: /
+    dir: web/dist
+    spa: true
+```
+
+```bash
+# No DATABASE_URL, no JWT key, no pepper — a static profile needs none of them.
+RAYSPEC_SPEC_PATH=$PWD/my-ui.yaml $RAYSPEC_SERVE
+# (equivalently: $RAYSPEC deploy ./my-ui.yaml)
+
+curl -s http://localhost:8080/            # → index.html (200)
+curl -s http://localhost:8080/health      # → {"status":"ok"}   (liveness only — no db field)
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/v1/auth/me
+#   → 404 — no auth surface is mounted at all in a static profile (the reserved
+#     /v1, /health, and /oidc prefixes are declined even under the SPA fallback)
+```
+
+Because a static profile runs with no proxy in front, the app supplies the two
+response security headers a proxy would otherwise add — `Content-Security-Policy` and
+`Permissions-Policy` — itself, from two environment variables, each with a secure
+default when unset:
+
+- `RAYSPEC_FRONTEND_CSP` — the `Content-Security-Policy`. Default:
+  `default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'`.
+  The default deliberately carries **no** `'unsafe-inline'`, so a SPA that needs
+  inline styles or scripts must opt into a weaker policy explicitly (an operator
+  choice, never the shipped default).
+- `RAYSPEC_PERMISSIONS_POLICY` — the `Permissions-Policy`. Default:
+  `camera=(), microphone=(), geolocation=()` (the high-risk device features denied).
+
+Override either verbatim to match your app.
 
 ---
 

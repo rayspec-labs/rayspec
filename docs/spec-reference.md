@@ -580,6 +580,19 @@ request.
 an asset build/bundling pipeline, cache-control/CDN headers, and the product profile —
 `frontend` is backend-profile only.
 
+**Frontend-only (static) deployment.** The `frontend` section above serves static
+assets *alongside* the full API. Separately, a document that declares **only** a
+`frontend` — every route/data/agent section empty (`stores`, `api`, `agents`,
+`tooling`, `triggers`, `handlers`, `extensions`) and no durable worker — boots as a
+**static profile**: with no database and no auth/OIDC/run surface constructed at all,
+for serving a built single-page app directly with no reverse proxy in front. That
+boot form, and the two response-header environment variables it reads
+(`RAYSPEC_FRONTEND_CSP`, `RAYSPEC_PERMISSIONS_POLICY`, each with a secure default),
+are described in
+[getting-started → a frontend-only (static) deployment](./getting-started.md#a-frontend-only-static-deployment)
+and [concepts → serving a frontend](./concepts.md#serving-a-frontend). It is a boot
+behaviour selected by the spec's shape and the environment, not a new grammar field.
+
 ---
 
 # The product profile
@@ -853,6 +866,36 @@ extractors:
   - `materialization` — required; `target: typed_artifact_ref`.
 - `extraction_constraints` — optional list of plain-text limits (not executable
   instructions).
+- `instructions` — optional. The extraction system prompt, written inline as a
+  YAML block scalar. This is the one field in an extractor where free-form prompt
+  text is admitted (see the guardrail note below). Mutually exclusive with
+  `instructions_ref` and — at boot — with the legacy sidecar `prompt_file`.
+- `instructions_ref` — optional. A **hash-pinned** external prompt file, as
+  `{ file, sha256 }`: `file` is a spec-relative path (read through the same
+  traversal jail as every other spec-relative path) and `sha256` is the
+  lowercase-hex `^[0-9a-f]{64}$` digest of the file's bytes. At boot the file is
+  read and its digest is compared to the pin; a missing/unreadable file or a
+  mismatch is **fail-closed** (the boot aborts, naming the extractor), so a prompt
+  swapped after authoring is caught rather than silently used. Mutually exclusive
+  with `instructions`.
+
+Exactly **one** prompt source is used per extractor — inline `instructions`, a
+pinned `instructions_ref`, or the legacy sidecar `prompt_file` (the prompt the
+extractor's `extraction/<id>.extractor.json` config points at). Declaring more
+than one is fail-closed at boot. Whichever source resolves, the prompt feeds the
+same trusted, deployer-authored system channel the sidecar prompt always did:
+moving the text inline changes *where* it is authored, not the trust model — the
+raw record the extractor reads stays untrusted data throughout.
+
+> **The no-code guardrail is narrowed here, not removed.** A product document is
+> otherwise fail-closed against embedded prompt or code text: the keys `prompt`,
+> `prompt_template`, `system_prompt`, and `user_prompt` are banned, and a string
+> value that reads like a prompt-execution instruction or like code is rejected
+> wherever it appears. `instructions` is the single designated exception — free-form
+> prompt text is admitted **only** at `extractors[].instructions`. Everywhere else
+> stays fail-closed: `purpose`, `extraction_constraints`, the `instructions_ref`
+> filename and digest, and every banned key are all still scanned and rejected
+> exactly as before.
 
 ## `workflows`
 

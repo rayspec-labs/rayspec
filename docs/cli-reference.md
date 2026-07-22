@@ -99,10 +99,16 @@ introspects a live target.
   generates and drops afterward — to prove the SQL is clean. It **never** mutates
   the target database. A fail-closed guard refuses to shadow-apply if the shadow
   URL resolves to the same host and database name as `DATABASE_URL`. That guard
-  needs a plain `DATABASE_URL` to compare against: `plan` does not read the
-  [`DATABASE_URL_FILE`](#rayspec-serve--the-boot-server) mount, so with only the
-  file form set there is nothing to compare and the guard does not fire — set
-  the plain `DATABASE_URL` as well wherever you run `plan`.
+  resolves its comparison target from a
+  [`DATABASE_URL_FILE`](#rayspec-serve--the-boot-server) file mount as well as the
+  plain `DATABASE_URL` (the file form takes precedence when set), so it still fires
+  when the connection string is supplied only through the mount. Because `plan` is
+  read-only and never connects to the real database, a broken `DATABASE_URL_FILE`
+  (missing, unreadable, a directory, or empty) is **not** fatal here — unlike a
+  server boot: `plan` emits one stderr warning (naming the variable, the path, and
+  the OS error code, never the file content) and proceeds with no comparison target
+  rather than falling back to a possibly-stale plain `DATABASE_URL`. With neither
+  form set there is nothing to compare and the guard does not fire.
 - **Flags:**
   - `--against <old-spec.yaml>` — optional. Switches to **update mode**: instead
     of a first materialization, `plan` diffs the prior spec file into a *delta*
@@ -453,6 +459,15 @@ deployment sets its configuration through its orchestrator or secret manager.
   that select it. (`rayspec deploy <spec>` is the same boot with `RAYSPEC_SPEC_PATH`
   set for you; see
   [getting-started](./getting-started.md#serving-your-declared-backend).)
+- A **frontend-only** spec — one that declares only a `frontend` (no `stores`,
+  `api`, `agents`, `tooling`, `triggers`, `handlers`, or `extensions`, and no
+  durable worker) — boots as a **static profile**: it requires **none** of the
+  three boot secrets and mounts **no** auth / OIDC / run route (`/health` is
+  liveness-only, with no database probe). It emits its own `Content-Security-Policy`
+  and `Permissions-Policy` response headers, read from `RAYSPEC_FRONTEND_CSP` and
+  `RAYSPEC_PERMISSIONS_POLICY` (each with a secure default when unset), so a built
+  single-page app can be served directly with no reverse proxy in front — see
+  [getting-started → a frontend-only (static) deployment](./getting-started.md#a-frontend-only-static-deployment).
 
 It listens on `PORT` (default `8080`) and shuts down gracefully on `SIGINT` /
 `SIGTERM`. The full set of environment variables is documented in
