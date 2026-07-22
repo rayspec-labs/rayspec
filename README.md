@@ -46,7 +46,8 @@ in the platform — everything comes from the spec you inject.
 
 - **A declarative backend.** One `version: '1.0'` spec declares your stores, HTTP
   routes, agents, tools, triggers, and escape-hatch handlers. The platform reads
-  it and builds the running backend — no bespoke wiring code.
+  it and builds the running backend — no bespoke wiring code. (A spec that declares
+  only a static frontend even boots as a database-less, auth-less static profile.)
 - **Owned accounts, auth, and tenancy.** Organizations, memberships, users, API
   keys, JWT/OIDC — all first-class and yours. Every data query carries a tenant
   predicate, enforced structurally so a query can't accidentally cross tenants.
@@ -71,6 +72,51 @@ in the platform — everything comes from the spec you inject.
 ---
 
 ## Quickstart
+
+### From npm (fastest)
+
+No clone and no build — [`npx`](https://docs.npmjs.com/cli/commands/npx) fetches the
+published CLI (`rayspec`; Node `>=22`). Scaffold a project, validate it, and preview
+the deploy — none of which needs a database:
+
+```bash
+npx -y rayspec init                    # writes a starter rayspec.yaml (one store + its CRUD routes)
+npx -y rayspec doctor ./rayspec.yaml   # static validation — no database
+npx -y rayspec plan   ./rayspec.yaml   # read-only deploy preview (the migration SQL) — no database
+```
+
+Their real output (the `plan` migration SQL abridged), each a single JSON object on
+stdout:
+
+```jsonc
+// npx -y rayspec init
+{ "ok": true, "command": "init", "created": ["rayspec.yaml"],
+  "nextSteps": ["rayspec doctor rayspec.yaml", "rayspec plan rayspec.yaml",
+                "rayspec dev gen-secrets   # mint the boot secrets, then set DATABASE_URL to deploy"] }
+
+// npx -y rayspec doctor ./rayspec.yaml          (exit 0)
+{ "ok": true, "errors": [], "warnings": [] }
+
+// npx -y rayspec plan ./rayspec.yaml            (exit 0)
+{ "ok": true,
+  "stores": [{ "name": "items", "columns": 2, "foreignKeys": 0 }],
+  "migrationSql": "CREATE TABLE \"items\" ( \"id\" uuid PRIMARY KEY …, \"tenant_id\" uuid NOT NULL, … );",
+  "routes": [{ "method": "POST", "path": "/items", "action": "store" }, … ],
+  "gateSummary": "destructive-scan: no destructive statements.",
+  "breakingChangeBlocked": false, "errors": [] }
+```
+
+To put the `rayspec` command on your `PATH` instead of prefixing each call with
+`npx`, run `npm i -g rayspec`.
+
+**Deploying** the scaffolded backend needs a reachable Postgres and the boot
+secrets. Mint the secrets (`npx -y rayspec dev gen-secrets` writes a `chmod 600`
+`.env`), point `DATABASE_URL` at your database, then `rayspec deploy ./rayspec.yaml`.
+The full walkthrough — creating the database, provisioning the first tenant, and
+making an authenticated request — is in
+**[getting-started](./docs/getting-started.md)**.
+
+### From source
 
 Prerequisites: Node `>=22`, pnpm `10.12.4`, and a Postgres you can reach
 (`pnpm db:up` brings up a local one and needs Docker with Compose v2). No pnpm on
@@ -187,6 +233,11 @@ row-level security, per-tenant sandboxing, and token binding) is a separate laye
 and is **not** part of the core. Do not put a core deployment on a public address
 without that layer. The boot process says so loudly, and so does
 [ARCHITECTURE](./docs/ARCHITECTURE.md).
+
+Boot secrets never have to sit in the environment: each of `DATABASE_URL`,
+`RAYSPEC_JWT_SIGNING_KEY`, and `RAYSPEC_API_KEY_PEPPER` can instead be read from a
+`<VAR>_FILE` file mount (mode `600`), which keeps the value out of `docker inspect`
+and the process environment and fails the boot closed on a broken mount.
 
 ---
 

@@ -134,6 +134,39 @@ gate) — so even a read-only handler is reachable only by a caller that holds
 
 ---
 
+## Serving a frontend
+
+A backend-profile document can serve a built web UI itself, in one of two forms.
+
+- **Alongside the API.** Add a `frontend` mount (a `{ route, dir, spa }` entry) and
+  the same server that answers your API also serves the built static assets at that
+  route. Static mounts are the last fallback, so every platform and API route
+  (`/health`, `/v1/*`, `/oidc/*`, and any declared `api` path) always wins over
+  them, and serving is fail-closed (no traversal, no dotfiles, no directory
+  listing). This is the [`frontend` section](./spec-reference.md#frontend) of the
+  backend profile.
+- **Frontend-only — a static profile.** A document that declares **only** a
+  `frontend` — with no stores, api, agents, tooling, triggers, handlers, or
+  extensions, and no durable worker — boots as a **static profile**: no database,
+  no JWT signing key, no API-key pepper, and **no auth / OIDC / run route mounted at
+  all**. The auth-and-database composition is not merely left empty — the boot
+  branches away from it entirely, so there is provably no authenticated surface
+  behind the assets. `/health` is liveness-only (`200 {"status":"ok"}`, with no
+  database probe). This is the form for serving a built single-page app directly,
+  with no reverse proxy in front.
+
+Because a static profile runs with no proxy in front, the app emits the two response
+security headers a proxy would normally add — `Content-Security-Policy` and
+`Permissions-Policy` — itself, read from the environment as `RAYSPEC_FRONTEND_CSP`
+and `RAYSPEC_PERMISSIONS_POLICY`. Each has a secure default when unset: a same-origin
+`default-src 'self'` CSP baseline (deliberately with no `'unsafe-inline'`, so a SPA
+that needs inline styles or scripts must opt into a weaker policy explicitly), and a
+Permissions-Policy that denies camera, microphone, and geolocation. A deployer can
+override either verbatim. See
+[getting-started → a frontend-only (static) deployment](./getting-started.md#a-frontend-only-static-deployment).
+
+---
+
 ## Agents and the neutral backend
 
 An **agent** is a model-backed step: instructions, an optional structured-output
@@ -198,6 +231,30 @@ process authenticates from it. If a token or key is *also* present in the enviro
 it wins over the seeded login (SDK precedence: `ANTHROPIC_API_KEY` >
 `CLAUDE_CODE_OAUTH_TOKEN` > the seeded login), and the boot warns loudly. Without the
 flag, boot behaviour is unchanged (fail-closed when no credential is present).
+
+---
+
+## Boot secrets and file mounts
+
+The server fails closed at boot unless three secrets are set: `DATABASE_URL`, the
+RS256 JWT/OIDC signing key (`RAYSPEC_JWT_SIGNING_KEY`), and the API-key pepper
+(`RAYSPEC_API_KEY_PEPPER`). Secrets live in the environment or a secret manager —
+never in the database or in git.
+
+Each of the three also accepts a `<VAR>_FILE` variant — `DATABASE_URL_FILE`,
+`RAYSPEC_JWT_SIGNING_KEY_FILE`, `RAYSPEC_API_KEY_PEPPER_FILE` — naming a file to read
+the value from. A mounted secret file (mode `600`) keeps the value out of the
+container's declared environment (`docker inspect`) and out of the process's own
+environment. The precedence is fail-closed: a set `<VAR>_FILE` wins outright over the
+plain variable, a blank `<VAR>_FILE` counts as not set (the plain variable is used),
+and a non-blank `<VAR>_FILE` pointing at a missing, unreadable, or empty file aborts
+the boot rather than silently downgrading to the plain variable. The exact precedence
+and the per-command scope are in the
+[CLI reference](./cli-reference.md#rayspec-serve--the-boot-server) and
+[`.env.example`](../.env.example).
+
+A [frontend-only static profile](#serving-a-frontend) needs none of these three
+secrets — it boots with no database and no auth surface at all.
 
 ---
 

@@ -5,6 +5,75 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-07-22
+
+### Added
+
+- **Boot secrets can be read from a file mount.** Each of the three boot
+  secrets — `DATABASE_URL`, `RAYSPEC_JWT_SIGNING_KEY`, and
+  `RAYSPEC_API_KEY_PEPPER` — now also accepts a `<VAR>_FILE` variant
+  (`DATABASE_URL_FILE`, `RAYSPEC_JWT_SIGNING_KEY_FILE`,
+  `RAYSPEC_API_KEY_PEPPER_FILE`) naming a file to read the value from, so a
+  mounted secret (mode `600`) stays out of the container's declared environment
+  (`docker inspect`) and out of the process's own environment. Precedence is
+  unambiguous and fail-closed: a set `<VAR>_FILE` wins outright (the plain
+  variable is not consulted); a blank `<VAR>_FILE` counts as not set (the plain
+  variable is used); and a non-blank `<VAR>_FILE` pointing at a missing,
+  unreadable, or empty file **aborts the boot** rather than silently downgrading
+  to the plain variable. Documented in the CLI reference and `.env.example`.
+- **A frontend-only spec boots as a static profile — no database, no auth
+  surface.** A backend-profile document that declares only a `frontend` (empty
+  `stores`, `api`, `agents`, `tooling`, `triggers`, `handlers`, and
+  `extensions`, and no durable worker) now boots with **no** `DATABASE_URL`, JWT
+  signing key, or API-key pepper, and mounts **no** auth / OIDC / run route — the
+  database-and-auth composition is never reached (not merely left empty).
+  `/health` is liveness-only (`200 {"status":"ok"}`, no database probe). The two
+  response security headers a reverse proxy would otherwise supply —
+  `Content-Security-Policy` and `Permissions-Policy` — are read from the
+  environment (`RAYSPEC_FRONTEND_CSP` and `RAYSPEC_PERMISSIONS_POLICY`), each with
+  a secure default when unset, so the app can serve a static UI directly with no
+  proxy in front. This is distinct from serving a static `frontend` **alongside**
+  a full API, which is unchanged.
+- **Inline and hash-pinned extraction prompts.** A product-profile `extractors[]`
+  entry may now carry its extraction system prompt inline as an `instructions`
+  block scalar, or pin an external prompt file by hash with
+  `instructions_ref: { file, sha256 }` — the file is read spec-relative
+  (traversal-jailed) and **sha256-verified at boot**, fail-closed on a missing
+  file or a hash mismatch. Exactly one prompt source is allowed (inline
+  `instructions`, a pinned `instructions_ref`, or the existing sidecar
+  `prompt_file`); declaring more than one fails closed. The no-code guardrail is
+  **narrowed, not removed**: free-form prompt text is admitted only at the
+  designated `instructions` field, and everywhere else — including `purpose`,
+  `extraction_constraints`, and the still-banned `prompt` / `system_prompt` keys —
+  the guardrail stays fail-closed.
+
+### Changed
+
+- **`rayspec plan`'s read-only shadow guard resolves its target from
+  `DATABASE_URL_FILE` too.** The guard that refuses to shadow-apply when
+  `SHADOW_DATABASE_URL` resolves to the same host and database as the real
+  `DATABASE_URL` now resolves that comparison target from a `DATABASE_URL_FILE`
+  file mount as well (with precedence over the plain variable), so it still fires
+  when the connection string is supplied only through the mount. Because `plan`
+  is read-only and never connects to the real database, a broken mount is **not**
+  fatal here (unlike a server boot): it emits one stderr warning — naming the
+  variable, the path, and the OS error code, never the file content — and
+  proceeds with no comparison target rather than falling back to a possibly-stale
+  plain `DATABASE_URL`.
+
+### Security
+
+- **Dependency advisories patched.** Six advisories are resolved by upgrade
+  (across `hono`, `brace-expansion`, `fast-uri`, and `protobufjs` — direct
+  dependencies and their transitive copies), and the dependency SBOM is
+  refreshed. One remaining advisory — a Windows-only `@hono/node-server`
+  `serve-static` path traversal, reached only transitively (the fixed 2.x line is
+  used directly; the older copy is pulled in solely for a child-process JSON-RPC
+  transport, never for static file serving) and not exercised on this project's
+  Linux code paths — is **not** silently ignored: it is a single, tightly scoped,
+  documented suppression in the vulnerability-scan allowlist, so a new advisory on
+  any other package still fails the dependency audit.
+
 ## [1.5.1] - 2026-07-19
 
 ### Documentation
