@@ -11,12 +11,12 @@
  *  - shadowApplied:false when SHADOW_DATABASE_URL is unset (doctor-level validity still holds);
  *  - no secret leak in the output.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { scanMigrationSql } from '@rayspec/db';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { runPlan } from './plan.js';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { resolveGuardComparisonUrl, runPlan } from './plan.js';
 
 /** Repo root, relative to this test file (packages/cli/src → rayspec). */
 const REPO_ROOT = resolve(import.meta.dirname, '../../../..');
@@ -278,6 +278,252 @@ describe('plan — refuse a shadow that targets the REAL DB (no admin connection
     expect(shadowCalls).toBe(1);
     expect(r.ok).toBe(true);
     expect(r.shadowApplied).toBe(true);
+  });
+});
+
+describe('resolveGuardComparisonUrl — the read-only guard reads DATABASE_URL_FILE with precedence', () => {
+  // Injected-env + real-temp-file unit tests (no process.env mutation, no DB). The connection string a
+  // file mount carries is a secret, so the never-leak-content discipline is proven with a sentinel.
+  const SENTINEL = 'sentinel-connection-string-that-must-never-leave-the-file';
+  let secretsDir: string;
+
+  beforeAll(() => {
+    secretsDir = mkdtempSync(join(tmpdir(), 'rayspec-plan-guard-'));
+  });
+  afterAll(() => {
+    rmSync(secretsDir, { recursive: true, force: true });
+  });
+
+  function fileWith(name: string, content: string): string {
+    const p = join(secretsDir, name);
+    writeFileSync(p, content, 'utf8');
+    return p;
+  }
+
+  it('resolves the comparison target from DATABASE_URL_FILE when the plain variable is unset', () => {
+    const url = 'postgres://u:p@db.internal:5432/rayspec';
+    expect(resolveGuardComparisonUrl({ DATABASE_URL_FILE: fileWith('only-file', url) })).toBe(url);
+  });
+
+  it('the FILE value WINS over a plain DATABASE_URL that is also set (precedence)', () => {
+    const fileUrl = 'postgres://u:p@db.internal:5432/rayspec';
+    const target = resolveGuardComparisonUrl({
+      DATABASE_URL: 'postgres://u:p@other.host:5432/other',
+      DATABASE_URL_FILE: fileWith('prec-file', fileUrl),
+    });
+    expect(target).toBe(fileUrl);
+    // The plain value was not consulted — not merged, not preferred.
+    expect(target).not.toContain('other');
+  });
+
+  it('trims the trailing newline a file mount carries', () => {
+    const url = 'postgres://u:p@db.internal:5432/rayspec';
+    expect(
+      resolveGuardComparisonUrl({ DATABASE_URL_FILE: fileWith('trim-file', `${url}\n`) }),
+    ).toBe(url);
+  });
+
+  it('a BLANK DATABASE_URL_FILE counts as NOT SET and falls back to the plain DATABASE_URL', () => {
+    const plain = 'postgres://u:p@db.internal:5432/rayspec';
+    for (const blank of ['', '   ', '\t\n']) {
+      expect(resolveGuardComparisonUrl({ DATABASE_URL: plain, DATABASE_URL_FILE: blank })).toBe(
+        plain,
+      );
+    }
+  });
+
+  it('neither variable set ⇒ no comparison target (undefined) and NO warning', () => {
+    let warned = 0;
+    const target = resolveGuardComparisonUrl({}, () => {
+      warned += 1;
+    });
+    expect(target).toBeUndefined();
+    expect(warned).toBe(0);
+  });
+
+  it('a MISSING DATABASE_URL_FILE path warns (naming the var + path) and yields no target — never throws', () => {
+    // Plant a sentinel file ELSEWHERE to prove the warning only ever names the path it was given, never
+    // some other file's content.
+    fileWith('unrelated-sentinel', SENTINEL);
+    const missing = join(secretsDir, 'does-not-exist');
+    const warnings: string[] = [];
+    const target = resolveGuardComparisonUrl({ DATABASE_URL_FILE: missing }, (m) =>
+      warnings.push(m),
+    );
+    expect(target).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('DATABASE_URL_FILE');
+    expect(warnings[0]).toContain(missing);
+    expect(warnings[0]).not.toContain(SENTINEL);
+  });
+
+  it('a DIRECTORY DATABASE_URL_FILE warns and yields no target (no raw EISDIR escape)', () => {
+    const asDir = join(secretsDir, 'a-directory');
+    mkdirSync(asDir, { recursive: true });
+    const warnings: string[] = [];
+    const target = resolveGuardComparisonUrl({ DATABASE_URL_FILE: asDir }, (m) => warnings.push(m));
+    expect(target).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(asDir);
+  });
+
+  it('an EMPTY / whitespace-only file warns and yields no target — its content is not in the warning', () => {
+    const path = fileWith('empty-file', '  \n\t ');
+    const warnings: string[] = [];
+    const target = resolveGuardComparisonUrl({ DATABASE_URL_FILE: path }, (m) => warnings.push(m));
+    expect(target).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(path);
+  });
+
+  it('an UNREADABLE file holding a secret warns with the OS code and NEVER the content', (ctx) => {
+    // The teeth of the never-leak-content rule: a real secret genuinely sits at the path the resolver
+    // opens and fails on, so an implementation that reached for the content on the way to the warning
+    // would have something to leak here.
+    const path = fileWith('unreadable', `${SENTINEL}\n`);
+    chmodSync(path, 0o000);
+    // A process running as root reads a mode-000 file happily, which would make this arm vacuous.
+    if (typeof process.getuid === 'function' && process.getuid() === 0) ctx.skip();
+    const warnings: string[] = [];
+    const target = resolveGuardComparisonUrl({ DATABASE_URL_FILE: path }, (m) => warnings.push(m));
+    expect(target).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('DATABASE_URL_FILE');
+    expect(warnings[0]).toContain(path);
+    expect(warnings[0]).toContain('EACCES');
+    expect(warnings[0]).not.toContain(SENTINEL);
+  });
+});
+
+describe('plan — the read-only guard fires on a DATABASE_URL_FILE-sourced target (end-to-end)', () => {
+  // These drive `runPlan` WITHOUT an explicit `databaseUrl` opt, so the guard resolves its comparison
+  // target from the ambient environment — the exact path `rayspec plan` uses. process.env is saved and
+  // restored around each case so a fake URL never leaks into a later DB-backed test.
+  const same = 'postgres://u:p@db.internal:5432/rayspec';
+  let guardDir: string;
+
+  beforeAll(() => {
+    guardDir = mkdtempSync(join(tmpdir(), 'rayspec-plan-guard-e2e-'));
+  });
+  afterAll(() => {
+    rmSync(guardDir, { recursive: true, force: true });
+  });
+
+  async function withEnv(
+    patch: { DATABASE_URL?: string | undefined; DATABASE_URL_FILE?: string | undefined },
+    run: () => Promise<void>,
+  ): Promise<void> {
+    const saved = {
+      DATABASE_URL: process.env.DATABASE_URL,
+      DATABASE_URL_FILE: process.env.DATABASE_URL_FILE,
+    };
+    const apply = (k: 'DATABASE_URL' | 'DATABASE_URL_FILE', v: string | undefined) => {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    };
+    apply('DATABASE_URL', patch.DATABASE_URL);
+    apply('DATABASE_URL_FILE', patch.DATABASE_URL_FILE);
+    try {
+      await run();
+    } finally {
+      apply('DATABASE_URL', saved.DATABASE_URL);
+      apply('DATABASE_URL_FILE', saved.DATABASE_URL_FILE);
+    }
+  }
+
+  it('DATABASE_URL_FILE === the shadow URL, plain DATABASE_URL unset ⇒ refused, shadowApply NEVER called', async () => {
+    const filePath = join(guardDir, 'target-same');
+    writeFileSync(filePath, same, 'utf8');
+    await withEnv({ DATABASE_URL: undefined, DATABASE_URL_FILE: filePath }, async () => {
+      let shadowCalls = 0;
+      const r = await runPlan(['rayspec.yaml'], {
+        shadowDatabaseUrl: same,
+        shadowApply: async () => {
+          shadowCalls += 1;
+          return { ok: true, dbName: 'x' };
+        },
+      });
+      expect(r.ok).toBe(false);
+      expect(r.phase).toBe('shadow');
+      expect(r.errors[0]?.message).toMatch(/refusing to shadow-apply/i);
+      // The FILE value drove the comparison — a _FILE-blind guard sees an unset DATABASE_URL and would
+      // run the shadow against the real DB (shadowCalls === 1). No admin connection was opened.
+      expect(shadowCalls).toBe(0);
+      // No secret leak in the refusal.
+      expect(JSON.stringify(r)).not.toContain('postgres://');
+    });
+  });
+
+  it('DATABASE_URL_FILE (matches shadow) beats a DIFFERENT plain DATABASE_URL ⇒ guard fires (precedence)', async () => {
+    const filePath = join(guardDir, 'target-precedence');
+    writeFileSync(filePath, same, 'utf8');
+    // If the plain variable won, it points at a DIFFERENT db and the guard would NOT fire.
+    await withEnv(
+      {
+        DATABASE_URL: 'postgres://u:p@db.internal:5432/rayspec_other',
+        DATABASE_URL_FILE: filePath,
+      },
+      async () => {
+        let shadowCalls = 0;
+        const r = await runPlan(['rayspec.yaml'], {
+          shadowDatabaseUrl: same,
+          shadowApply: async () => {
+            shadowCalls += 1;
+            return { ok: true, dbName: 'x' };
+          },
+        });
+        expect(r.ok).toBe(false);
+        expect(r.phase).toBe('shadow');
+        expect(shadowCalls).toBe(0);
+      },
+    );
+  });
+
+  it('a broken DATABASE_URL_FILE is NOT fatal: the guard cannot fire, the shadow proceeds, and a warning reaches stderr', async () => {
+    const missing = join(guardDir, 'broken-missing');
+    await withEnv({ DATABASE_URL: undefined, DATABASE_URL_FILE: missing }, async () => {
+      const written: string[] = [];
+      const spy = vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: unknown) => {
+        written.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write);
+      let shadowCalls = 0;
+      try {
+        const r = await runPlan(['rayspec.yaml'], {
+          shadowDatabaseUrl: same,
+          shadowApply: async () => {
+            shadowCalls += 1;
+            return { ok: true, dbName: 'x' };
+          },
+        });
+        expect(r.ok).toBe(true);
+        expect(r.shadowApplied).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+      // The shadow ran (no comparison target to fire the guard) AND the operator was warned on stderr
+      // (the default warn sink, not an injected one).
+      expect(shadowCalls).toBe(1);
+      const text = written.join('');
+      expect(text).toContain('DATABASE_URL_FILE');
+      expect(text).toContain(missing);
+    });
+  });
+
+  it('pre-existing behaviour holds through the env path: no _FILE, plain DATABASE_URL === shadow ⇒ refused', async () => {
+    await withEnv({ DATABASE_URL: same, DATABASE_URL_FILE: undefined }, async () => {
+      let shadowCalls = 0;
+      const r = await runPlan(['rayspec.yaml'], {
+        shadowDatabaseUrl: same,
+        shadowApply: async () => {
+          shadowCalls += 1;
+          return { ok: true, dbName: 'x' };
+        },
+      });
+      expect(r.ok).toBe(false);
+      expect(r.phase).toBe('shadow');
+      expect(shadowCalls).toBe(0);
+    });
   });
 });
 
