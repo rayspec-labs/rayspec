@@ -5,6 +5,19 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-07-22
+
+### Fixed
+
+- **`@rayspec/db` ships its migration chain in the npm tarball.** The package
+  declared `files: ["dist"]`, which excluded the committed `drizzle/` platform
+  migration chain (`meta/_journal.json` and `0000..0008_*.sql`) from the
+  published tarball. A backend booted from the npm packages therefore failed at
+  startup in `applyMigrations()` — `migrationsDir()` resolves to `<pkg>/drizzle`,
+  absent in the installed package — before reaching the database. Adding
+  `drizzle` to `files` ships the chain, so an npm-consumed boot applies its
+  migrations. No API or runtime code changed.
+
 ## [1.6.0] - 2026-07-22
 
 ### Added
