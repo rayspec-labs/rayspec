@@ -715,7 +715,12 @@ export function composeProductDeploy(
     product: spec.product,
     requires: spec.requires,
     capabilities: spec.capabilities,
-    extractors: spec.extractors,
+    // The bridge consumes ONLY an extractor's `id` + `extraction` (declaredAgentOperations /
+    // compileAgentExtraction); it never reads `instructions`/`instructions_ref`. STRIP the inline prompt
+    // (and its hash pin) before the neutrality walk so the trusted deployer-authored prompt text never
+    // enters the bridge — keeping the bridge neutrality guardrail 100% intact (the ONLY prompt-VALUE
+    // exemption lives on the parser side, at the designated `instructions` leaf).
+    extractors: spec.extractors.map(({ instructions, instructions_ref, ...rest }) => rest),
     workflows: spec.workflows,
     ...(spec.deployment_overrides ? { deployment_overrides: spec.deployment_overrides } : {}),
   };

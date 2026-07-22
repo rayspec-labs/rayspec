@@ -4,6 +4,7 @@
  * product-yaml-boot.db.test.ts + the live gpt-5 smoke. Fail-the-fix: buildLiveAgent asserts the base
  * prompt AND the DECLARED extraction_constraints are BOTH composed into the instructions.
  */
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -30,6 +31,7 @@ import {
   planUpdateBoot,
   readProductUpdateMigrations,
   resolveExtractorConfigPath,
+  resolveExtractorPromptText,
   resolveInputContext,
   resolveStructuredOutputMode,
   routePresentMatchingUpdate,
@@ -184,6 +186,8 @@ function writeExtractionDir(
     mode?: 'native' | 'validated';
     legacyBool?: boolean;
     inputContext?: unknown;
+    /** Omit the sidecar prompt_file (+ its .prompt.md) — the prompt is inline / hash-pinned in the doc. */
+    omitPrompt?: boolean;
   }>,
 ): string {
   const d = mkdtempSync(join(tmpdir(), 'rayspec-boot-'));
@@ -191,13 +195,14 @@ function writeExtractionDir(
   const extractionDir = join(d, 'extraction');
   mkdirSync(extractionDir, { recursive: true });
   for (const c of configs) {
-    writeFileSync(join(extractionDir, `${c.id}.prompt.md`), `PROMPT for ${c.id}`);
+    if (!c.omitPrompt)
+      writeFileSync(join(extractionDir, `${c.id}.prompt.md`), `PROMPT for ${c.id}`);
     writeFileSync(join(extractionDir, `${c.id}.schema.json`), JSON.stringify({ type: 'object' }));
     const cfg: Record<string, unknown> = {
       agent_id: c.id,
       backend: c.backend,
       model: 'gpt-5',
-      prompt_file: `${c.id}.prompt.md`,
+      ...(c.omitPrompt ? {} : { prompt_file: `${c.id}.prompt.md` }),
       schema_file: `${c.id}.schema.json`,
       output_schema_name: `schema_${c.id}`,
     };
@@ -1175,5 +1180,232 @@ describe('extractDestructiveTarget — target parsing for the superset-blind kin
   it('returns undefined for an unparseable statement (fail-closed → refuse upstream)', () => {
     expect(extractDestructiveTarget('drop-table', 'DROP TABLE "a", "b"')).toBeUndefined();
     expect(extractDestructiveTarget('truncate', 'TRUNCATE "x"')).toBeUndefined();
+  });
+});
+
+// ── inline / hash-pinned extraction prompts ────────────────────────────────────────────────────────
+
+describe('resolveExtractorPromptText — exactly one prompt source, fail-closed', () => {
+  type Extractor = ProductSpec['extractors'][number];
+  const extractor = (fields: Partial<Extractor>): Extractor =>
+    ({ id: 'note_extractor', purpose: 'x', ...fields }) as Extractor;
+  const cfg = (promptFile?: string): Parameters<typeof resolveExtractorPromptText>[2] =>
+    ({
+      agent_id: 'note_extractor',
+      backend: 'openai',
+      model: 'gpt-5',
+      schema_file: 's.json',
+      output_schema_name: 's',
+      ...(promptFile ? { prompt_file: promptFile } : {}),
+    }) as never;
+  const HEX64 = 'a'.repeat(64);
+
+  it('returns an inline instructions verbatim', () => {
+    expect(
+      resolveExtractorPromptText(
+        '/x/p.yaml',
+        '/x/extraction',
+        cfg(),
+        extractor({ instructions: 'INLINE PROMPT' }),
+      ),
+    ).toBe('INLINE PROMPT');
+  });
+
+  it('reads + returns a hash-pinned file when the sha256 matches', () => {
+    const d = mkdtempSync(join(tmpdir(), 'rayspec-ref-'));
+    TMP_DIRS.push(d);
+    mkdirSync(join(d, 'prompts'), { recursive: true });
+    const body = 'PINNED PROMPT BODY\n';
+    writeFileSync(join(d, 'prompts/sys.md'), body);
+    const sha = createHash('sha256').update(Buffer.from(body)).digest('hex');
+    expect(
+      resolveExtractorPromptText(
+        join(d, 'product.yaml'),
+        join(d, 'extraction'),
+        cfg(),
+        extractor({ instructions_ref: { file: 'prompts/sys.md', sha256: sha } }),
+      ),
+    ).toBe(body);
+  });
+
+  it('FAIL-CLOSED: a tampered pinned file (sha256 mismatch) throws, naming the extractor', () => {
+    const d = mkdtempSync(join(tmpdir(), 'rayspec-ref-'));
+    TMP_DIRS.push(d);
+    mkdirSync(join(d, 'prompts'), { recursive: true });
+    writeFileSync(join(d, 'prompts/sys.md'), 'SWAPPED CONTENT');
+    // Pin the hash of DIFFERENT content — the file was changed after it was pinned.
+    const stalePin = createHash('sha256').update(Buffer.from('ORIGINAL CONTENT')).digest('hex');
+    const call = () =>
+      resolveExtractorPromptText(
+        join(d, 'product.yaml'),
+        join(d, 'extraction'),
+        cfg(),
+        extractor({ instructions_ref: { file: 'prompts/sys.md', sha256: stalePin } }),
+      );
+    expect(call).toThrow(ProductBootError);
+    expect(call).toThrow(/note_extractor.*does not match its sha256 pin/s);
+  });
+
+  it('FAIL-CLOSED: a `..`/absolute instructions_ref.file escapes the spec dir (traversal jail)', () => {
+    for (const file of ['../../../../../etc/passwd', '/etc/passwd']) {
+      expect(() =>
+        resolveExtractorPromptText(
+          '/x/deploy/p.yaml',
+          '/x/deploy/extraction',
+          cfg(),
+          extractor({ instructions_ref: { file, sha256: HEX64 } }),
+        ),
+      ).toThrow(/path-traversal guard/);
+    }
+  });
+
+  it('FAIL-CLOSED: a missing pinned file throws, naming the extractor', () => {
+    const d = mkdtempSync(join(tmpdir(), 'rayspec-ref-'));
+    TMP_DIRS.push(d);
+    expect(() =>
+      resolveExtractorPromptText(
+        join(d, 'product.yaml'),
+        join(d, 'extraction'),
+        cfg(),
+        extractor({ instructions_ref: { file: 'prompts/missing.md', sha256: HEX64 } }),
+      ),
+    ).toThrow(/could not read the pinned instructions_ref file/);
+  });
+
+  it('FAIL-CLOSED: an inline instructions AND a sidecar prompt_file is ambiguous', () => {
+    expect(() =>
+      resolveExtractorPromptText(
+        '/x/p.yaml',
+        '/x/extraction',
+        cfg('p.md'),
+        extractor({ instructions: 'INLINE' }),
+      ),
+    ).toThrow(/exactly ONE source/);
+  });
+
+  it('FAIL-CLOSED: an instructions_ref AND a sidecar prompt_file is ambiguous', () => {
+    expect(() =>
+      resolveExtractorPromptText(
+        '/x/p.yaml',
+        '/x/extraction',
+        cfg('p.md'),
+        extractor({ instructions_ref: { file: 'prompts/sys.md', sha256: HEX64 } }),
+      ),
+    ).toThrow(/exactly ONE source/);
+  });
+
+  it('FAIL-CLOSED: neither inline/ref NOR a prompt_file → a prompt source is required', () => {
+    expect(() =>
+      resolveExtractorPromptText('/x/p.yaml', '/x/extraction', cfg(), extractor({})),
+    ).toThrow(/no prompt source/);
+  });
+
+  it('legacy: reads the sidecar prompt_file when no inline/ref is declared (unchanged path)', () => {
+    const d = mkdtempSync(join(tmpdir(), 'rayspec-legacy-'));
+    TMP_DIRS.push(d);
+    const ext = join(d, 'extraction');
+    mkdirSync(ext, { recursive: true });
+    writeFileSync(join(ext, 'note.prompt.md'), 'LEGACY PROMPT');
+    expect(
+      resolveExtractorPromptText(
+        join(d, 'product.yaml'),
+        ext,
+        cfg('note.prompt.md'),
+        extractor({}),
+      ),
+    ).toBe('LEGACY PROMPT');
+  });
+});
+
+describe('buildLiveAgent — inline + hash-pinned extraction prompts (end-to-end, fail-closed at boot)', () => {
+  const withInline = (inline: string): ProductSpec => {
+    const base = acmeSpec();
+    return { ...base, extractors: base.extractors.map((e) => ({ ...e, instructions: inline })) };
+  };
+  const withRef = (ref: { file: string; sha256: string }): ProductSpec => {
+    const base = acmeSpec();
+    return { ...base, extractors: base.extractors.map((e) => ({ ...e, instructions_ref: ref })) };
+  };
+
+  it('boots from an inline instructions (no prompt_file) and composes prompt + declared constraints', () => {
+    // A real system prompt carries code-like phrasing — it is admitted at the designated leaf.
+    const inline =
+      'You extract structured notes. Do not import modules or make an llm call yourself.';
+    const spec = withInline(inline);
+    const specPath = writeExtractionDir([
+      { id: 'note_extractor', backend: 'openai', omitPrompt: true },
+    ]);
+    const live = buildLiveAgent({ OPENAI_API_KEY: 'sk-x' }, specPath, spec);
+    expect(live.agentIds).toEqual(['note_extractor']);
+    expect(
+      typeof live.buildNodeForAgent('note_extractor', { tdb: FAKE_TDB, tenantId: LIVE_TENANT }),
+    ).toBe('function');
+    // The composed AgentSpec.instructions is the SAME slot prompt_file feeds: assembleExtractionInstructions
+    // over the resolved (inline) prompt + the declared constraints — exactly what buildLiveAgent builds.
+    const configDir = join(dirname(specPath), 'extraction');
+    const cfg = JSON.parse(readFileSync(join(configDir, 'note_extractor.extractor.json'), 'utf8'));
+    const ex0 = spec.extractors[0];
+    if (!ex0) throw new Error('acme-notes must declare an extractor');
+    const constraints = ex0.extraction_constraints ?? [];
+    expect(constraints.length).toBeGreaterThan(0); // acme-notes declares constraints (a real append)
+    const promptText = resolveExtractorPromptText(specPath, configDir, cfg, ex0);
+    expect(promptText).toBe(inline);
+    const composed = assembleExtractionInstructions(promptText, constraints);
+    expect(composed.startsWith(inline)).toBe(true);
+    for (const c of constraints) expect(composed).toContain(`- ${c}`);
+  });
+
+  it('boots from a hash-pinned instructions_ref whose sha256 matches (no prompt_file)', () => {
+    const specPath = writeExtractionDir([
+      { id: 'note_extractor', backend: 'openai', omitPrompt: true },
+    ]);
+    const d = dirname(specPath);
+    mkdirSync(join(d, 'prompts'), { recursive: true });
+    const body = 'PINNED SYSTEM PROMPT\n';
+    writeFileSync(join(d, 'prompts/sys.md'), body);
+    const sha = createHash('sha256').update(Buffer.from(body)).digest('hex');
+    const live = buildLiveAgent(
+      { OPENAI_API_KEY: 'sk-x' },
+      specPath,
+      withRef({ file: 'prompts/sys.md', sha256: sha }),
+    );
+    expect(live.agentIds).toEqual(['note_extractor']);
+    expect(
+      typeof live.buildNodeForAgent('note_extractor', { tdb: FAKE_TDB, tenantId: LIVE_TENANT }),
+    ).toBe('function');
+  });
+
+  it('FAIL-CLOSED at boot: a tampered instructions_ref file (sha256 mismatch)', () => {
+    const specPath = writeExtractionDir([
+      { id: 'note_extractor', backend: 'openai', omitPrompt: true },
+    ]);
+    const d = dirname(specPath);
+    mkdirSync(join(d, 'prompts'), { recursive: true });
+    writeFileSync(join(d, 'prompts/sys.md'), 'SWAPPED');
+    const stalePin = createHash('sha256').update(Buffer.from('ORIGINAL')).digest('hex');
+    expect(() =>
+      buildLiveAgent(
+        { OPENAI_API_KEY: 'sk-x' },
+        specPath,
+        withRef({ file: 'prompts/sys.md', sha256: stalePin }),
+      ),
+    ).toThrow(/does not match its sha256 pin/);
+  });
+
+  it('FAIL-CLOSED at boot: an inline instructions AND a sidecar prompt_file (ambiguous source)', () => {
+    // The config KEEPS its prompt_file (omitPrompt not set) while the doc declares an inline instructions.
+    const specPath = writeExtractionDir([{ id: 'note_extractor', backend: 'openai' }]);
+    expect(() =>
+      buildLiveAgent({ OPENAI_API_KEY: 'sk-x' }, specPath, withInline('INLINE PROMPT')),
+    ).toThrow(/exactly ONE source/);
+  });
+
+  it('FAIL-CLOSED at boot: neither inline/ref NOR a prompt_file (a prompt source is required)', () => {
+    const specPath = writeExtractionDir([
+      { id: 'note_extractor', backend: 'openai', omitPrompt: true },
+    ]);
+    expect(() => buildLiveAgent({ OPENAI_API_KEY: 'sk-x' }, specPath, acmeSpec())).toThrow(
+      /no prompt source/,
+    );
   });
 });

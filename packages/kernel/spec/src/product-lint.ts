@@ -157,6 +157,17 @@ const STREAMING_ROUTE_MARKER = /\b(?:playback|(?:live)?stream(?:ing|s)?)\b/i;
 // bridge-compile time.
 
 /**
+ * The ONE leaf exempt from the string-VALUE scans: an extractor's inline system prompt
+ * (`extractors[<int>].instructions`, a direct child of an `extractors[]` element). A real system prompt is
+ * free-form text that WOULD trip the code-like / prompt-execution VALUE patterns, so the designated
+ * `instructions` field is the trusted deployer-authored channel where that text is admitted. The exemption
+ * is EXACTLY this leaf — `purpose`, `extraction_constraints[]`, `instructions_ref.file`/`.sha256`, any
+ * nested object, and every other section stay fully scanned; the banned KEY sets are untouched. The path
+ * is identical in the GLOBAL and the GRAPH walks (both root the extractors subtree at `extractors`).
+ */
+const INLINE_INSTRUCTIONS_LEAF = /^extractors\[\d+\]\.instructions$/;
+
+/**
  * Walk an arbitrary value, applying `onKey` to every object key and `onString` to every string leaf,
  * building a JSON path for the message. Pure structural recursion (arrays index, objects descend).
  */
@@ -219,6 +230,7 @@ export function scanProductGuardrails(raw: unknown): SpecError[] {
         }
       },
       (str, strPath) => {
+        if (INLINE_INSTRUCTIONS_LEAF.test(strPath)) return; // the exempt inline-prompt leaf
         if (CODE_LIKE_VALUE.test(str)) {
           errors.push(
             specError(
@@ -262,6 +274,7 @@ export function scanProductGuardrails(raw: unknown): SpecError[] {
         }
       },
       (str, strPath) => {
+        if (INLINE_INSTRUCTIONS_LEAF.test(strPath)) return; // the exempt inline-prompt leaf
         // MIRRORS the bridge's `walkWorkflowDeclarations` string checks in ORDER (compiler.ts): product-
         // owned path → provider name → production-execution claim → prompt/LLM-execution claim. Keeping
         // both this order and the regexes identical is the anti-drift contract (parity-tested).

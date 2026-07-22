@@ -308,8 +308,34 @@ export const ExtractorSpec = z
     extraction: AgentExtraction,
     /** Declarative extraction LIMITS — plain text, NOT executable instructions. */
     extraction_constraints: z.array(z.string().min(1)).optional(),
+    /**
+     * Inline extraction system prompt (a YAML block scalar). The TRUSTED deployer-authored system channel —
+     * the SAME vocabulary word as `RecordNormalizerConfig.instructions` / `ResponderConfig.instructions`.
+     * This is the ONE field where free-form prompt text is admitted (the no-code VALUE scan is narrowed to
+     * exempt exactly this leaf); it is mutually exclusive with `instructions_ref` and, at boot, with the
+     * sidecar `prompt_file`.
+     */
+    instructions: z.string().min(1).optional(),
+    /**
+     * Hash-pinned external prompt file (tamper-evident): the file is read + sha256-verified at boot, so a
+     * prompt swapped after authoring is caught fail-closed. The `file` is a spec-relative path; `sha256` is
+     * lowercase-hex of the file bytes. Mutually exclusive with `instructions`.
+     */
+    instructions_ref: z
+      .object({ file: z.string().min(1), sha256: z.string().regex(/^[0-9a-f]{64}$/) })
+      .strict()
+      .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((v, ctx) => {
+    if (v.instructions !== undefined && v.instructions_ref !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['instructions_ref'],
+        message: 'declare instructions OR instructions_ref, not both',
+      });
+    }
+  });
 export type ExtractorSpec = z.infer<typeof ExtractorSpec>;
 
 // ---------------------------------------------------------------------------------------

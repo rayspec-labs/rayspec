@@ -496,6 +496,28 @@
               "type": "string",
               "minLength": 1
             }
+          },
+          "instructions": {
+            "type": "string",
+            "minLength": 1
+          },
+          "instructions_ref": {
+            "type": "object",
+            "properties": {
+              "file": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "file",
+              "sha256"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [

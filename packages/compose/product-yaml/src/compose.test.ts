@@ -968,3 +968,35 @@ describe('makeFailSoftMediaPrep — the FAIL-SOFT media-prep hook', () => {
     expect(logged).toHaveLength(0);
   });
 });
+
+describe('composeProductDeploy — inline extraction prompts are stripped before the bridge', () => {
+  // An extractor's inline `instructions` is the trusted deployer-authored system channel; a real prompt is
+  // free-form text that WOULD trip the bridge's neutrality VALUE walk. compose STRIPS `instructions`/
+  // `instructions_ref` before compiling the workflow, so that prompt text never enters the bridge — the
+  // bridge neutrality guardrail stays 100% intact. Fail-the-fix: revert the strip ⇒ the bridge rejects the
+  // dangerous inline value ⇒ compose throws (the teeth for this narrowing live here).
+  const DANGEROUS_INLINE =
+    '    instructions: "import x; function f; make one llm call; SELECT a FROM b"\n';
+  const withInlineInstructions = NOTETOOL_YAML.replace(
+    '    purpose: Extract grounded findings from transcript spans.\n',
+    `    purpose: Extract grounded findings from transcript spans.\n${DANGEROUS_INLINE}`,
+  );
+
+  it('parses a doc whose extractor carries a dangerous inline instructions (leaf exempt at parse)', () => {
+    // The base fixture already parses; the injected inline prompt must NOT flip it to a parse error.
+    expect(() => parseFixture(withInlineInstructions)).not.toThrow();
+  });
+
+  it('composes it end-to-end (the dangerous inline value is stripped, so the bridge accepts the graph)', () => {
+    const composed = composeProductDeploy(parseFixture(withInlineInstructions), rollout());
+    // Composed exactly like the base fixture — the workflow compiled through the real bridge.
+    expect([...composed.workflows.keys()]).toEqual(['process_recording']);
+    // The node registry still wires the declared agent (the extractor is intact minus the prompt fields).
+    const registry = composed.buildNodeRegistry({
+      tdb: {} as TenantDb,
+      productTables: new Map(),
+      tenantId: TENANT,
+    });
+    expect(registry.ids()).toContain('agent.note_extractor');
+  });
+});

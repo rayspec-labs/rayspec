@@ -26,7 +26,7 @@
  * This lives in the composition root (server) — the DBOS wiring belongs here (server/src is where the
  * concrete engines are wired), NOT in the frozen-surface deploy.ts (the family dispatch already exists).
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, relative, resolve as resolvePath } from 'node:path';
 import { AnthropicAdapter } from '@rayspec/adapter-anthropic';
@@ -688,7 +688,13 @@ interface ExtractorConfig {
   agent_id: string;
   backend: string;
   model: string;
-  prompt_file: string;
+  /**
+   * The sidecar prompt-file path (config-dir-relative) — the LEGACY prompt source. Now OPTIONAL: the
+   * prompt may instead be authored inline in the product document (`extractors[].instructions`) or
+   * hash-pinned (`extractors[].instructions_ref`). Exactly one source is resolved at boot; declaring a
+   * `prompt_file` alongside an inline/pinned source is fail-closed (ambiguous). See `resolveExtractorPromptText`.
+   */
+  prompt_file?: string;
   schema_file: string;
   output_schema_name: string;
   /**
@@ -1054,6 +1060,83 @@ function jailToExtractionDir(extractionDir: string, resolved: string, agentId: s
 }
 
 /**
+ * The traversal jail for a hash-pinned `instructions_ref.file` (mirrors `jailToExtractionDir`, rooted at
+ * the SPEC dir): the pinned prompt file must resolve INSIDE the product-spec directory. A `..`/absolute
+ * `file` resolves outside → fail-closed, naming the extractor. The sha256 pin is the tamper-evidence guard;
+ * this jail is the belt-and-suspenders that a swapped-in path cannot even READ an arbitrary file.
+ */
+function jailToSpecDir(specDir: string, resolved: string, extractorId: string): string {
+  const rel = relative(specDir, resolved);
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+    throw new ProductBootError(
+      `extractor '${extractorId}': the pinned instructions_ref.file resolves outside the product spec ` +
+        `directory (${resolved} is not inside ${specDir}) — refusing to read outside it ` +
+        '(path-traversal guard). Fail-closed.',
+    );
+  }
+  return resolved;
+}
+
+/**
+ * Resolve an extractor's system-prompt text from EXACTLY ONE source, fail-closed:
+ *  - `extractor.instructions` — an inline prompt authored in the product document (the block scalar);
+ *  - `extractor.instructions_ref` — a hash-pinned external file: read spec-relative (traversal-jailed),
+ *    then sha256-verified against the pin (mismatch or missing file → fail-closed, tamper-evidence);
+ *  - the legacy sidecar `cfg.prompt_file` — config-dir-relative, BYTE-BEHAVIOUR-IDENTICAL to before.
+ * A YAML-authored source (inline/ref) present ALONGSIDE a sidecar `prompt_file` is ambiguous → fail-closed
+ * (no silent override). Neither source present → fail-closed (a prompt is required). The resolved text
+ * still flows through the SAME `assembleExtractionInstructions` → `makeLiveExtractionNode` slot.
+ */
+export function resolveExtractorPromptText(
+  specPath: string,
+  configDir: string,
+  cfg: ExtractorConfig,
+  extractor: ProductSpec['extractors'][number],
+): string {
+  const inline = extractor.instructions;
+  const ref = extractor.instructions_ref;
+  if ((inline !== undefined || ref !== undefined) && cfg.prompt_file !== undefined) {
+    throw new ProductBootError(
+      `extractor '${extractor.id}': the product document declares an inline ${
+        inline !== undefined ? 'instructions' : 'instructions_ref'
+      } AND the extraction config declares a prompt_file — a prompt has exactly ONE source. ` +
+        'Remove one. Fail-closed.',
+    );
+  }
+  if (inline !== undefined) return inline;
+  if (ref !== undefined) {
+    const specDir = dirname(specPath);
+    const resolved = jailToSpecDir(specDir, resolvePath(specDir, ref.file), extractor.id);
+    let bytes: Buffer;
+    try {
+      bytes = readFileSync(resolved);
+    } catch (e) {
+      throw new ProductBootError(
+        `extractor '${extractor.id}': could not read the pinned instructions_ref file at ${resolved} (${
+          e instanceof Error ? e.message : String(e)
+        }). Fail-closed.`,
+      );
+    }
+    const actual = createHash('sha256').update(bytes).digest('hex');
+    if (actual !== ref.sha256) {
+      throw new ProductBootError(
+        `extractor '${extractor.id}': the pinned instructions_ref file at ${resolved} does not match its ` +
+          `sha256 pin (pinned ${ref.sha256}, actual ${actual}) — the prompt file changed after it was ` +
+          'pinned. Re-pin it or restore the original. Fail-closed.',
+      );
+    }
+    return bytes.toString('utf8');
+  }
+  if (cfg.prompt_file === undefined) {
+    throw new ProductBootError(
+      `extractor '${extractor.id}': no prompt source — declare an inline instructions / instructions_ref ` +
+        'in the product document, or a prompt_file in the extraction config. Fail-closed.',
+    );
+  }
+  return readFileSync(resolvePath(configDir, cfg.prompt_file), 'utf8');
+}
+
+/**
  * Resolve the extractor-config PATH for ONE declared agent (the per-agent convention):
  * `<specDir>/extraction/<agent_id>.extractor.json`. A SINGLE-agent document keeps the legacy default
  * (`<specDir>/extraction/extractor.json`) + the `RAYSPEC_EXTRACTION_CONFIG` single-file override, so
@@ -1170,7 +1253,7 @@ export function buildLiveAgent(
       );
     }
     const configDir = dirname(configPath);
-    const promptText = readFileSync(resolvePath(configDir, cfg.prompt_file), 'utf8');
+    const promptText = resolveExtractorPromptText(specPath, configDir, cfg, extractor);
     const schema = JSON.parse(
       readFileSync(resolvePath(configDir, cfg.schema_file), 'utf8'),
     ) as Record<string, unknown>;
