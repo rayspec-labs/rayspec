@@ -43,13 +43,15 @@
  *     CREATEd on the SHADOW server, and DROPped in a `finally` (see `shadow-apply.ts`);
  *   • the shadow connects ONLY to a URL DERIVED from `SHADOW_DATABASE_URL` (never `DATABASE_URL`);
  *   • the read-only guard — a fail-closed STRUCTURAL guard REFUSES the shadow (and opens NO admin connection) when
- *     the resolved shadow URL points at the SAME host:port AND SAME database name as `DATABASE_URL`;
+ *     the resolved shadow URL points at the SAME host:port AND SAME database name as the real database
+ *     (its URL resolved from `DATABASE_URL`, or a `DATABASE_URL_FILE` file mount with precedence);
  *   • the update-mode baseline comes from the OLD SPEC FILE, never a live introspection of the target.
  *
  * The output is a stable JSON envelope (see `PlanResult`). Update/product fields are ADDITIVE and
  * omitted on the backend first-materialization path, so that output stays byte-identical. NO
  * secrets: the DB URL / credentials are NEVER echoed (only a throwaway DB NAME, which is non-sensitive).
  */
+import { readFileSync } from 'node:fs';
 import {
   type AllowlistEntry,
   type DestructiveKind,
@@ -256,12 +258,84 @@ function shadowTargetsRealDb(shadowUrl: string, databaseUrl: string): boolean {
 /** The shadow decision: skip (no url / no SQL), refuse (read-only guard), or run against `url`. */
 type ShadowTarget = 'skip' | 'refuse' | { readonly url: string };
 
+/**
+ * A one-line WARNING sink, defaulting to stderr. The plan JSON envelope is written to STDOUT, so a
+ * warning goes to STDERR to keep that machine-readable output clean. Injectable so a test can capture it.
+ */
+type WarnSink = (message: string) => void;
+const stderrWarn: WarnSink = (message) => {
+  process.stderr.write(`${message}\n`);
+};
+
+/**
+ * Resolve the read-only guard's COMPARISON TARGET — the real-database URL the resolved shadow URL is
+ * checked against — from EITHER a `DATABASE_URL_FILE` file mount OR the plain `DATABASE_URL`, with the
+ * file mount taking PRECEDENCE (the same file-vs-env convention the server uses for its boot secrets).
+ * This exists so the guard still fires when the operator supplies the connection string ONLY through the
+ * file mount: without it `DATABASE_URL` is undefined, the guard's comparison operand is falsy, and a
+ * shadow URL mistyped to point at the real database would slip through unguarded.
+ *
+ * This URL is read to COMPARE host + database name, never to CONNECT — `plan` never connects to the real
+ * database. So the read here is a comparison input, not a credential in use.
+ *
+ * PRECEDENCE + BLANK: a NON-blank `DATABASE_URL_FILE` wins outright and the plain variable is not
+ * consulted; a BLANK (empty / whitespace-only) `DATABASE_URL_FILE` counts as NOT SET, so the plain
+ * variable is used (container orchestrators routinely materialize an unset variable as `""`).
+ *
+ * TRIM: the file content is `.trim()`ed — the plain path already parses an untrimmed value the same way,
+ * and a file written by `echo` / a secret projection carries a trailing newline that must not reach the
+ * URL parse.
+ *
+ * NOT FATAL, but NOT silent: a broken `DATABASE_URL_FILE` (missing / unreadable / a directory / empty)
+ * must not abort a read-only command, but leaving the operator silently unprotected is worse than a
+ * warning. So a broken mount emits ONE warning and returns NO comparison target (the guard cannot fire).
+ * The warning names the VARIABLE and the PATH — both operator-supplied configuration — and, for a read
+ * failure, the fixed OS error CODE, but NEVER the file CONTENT: the content is the secret, and a warning
+ * reaches every log the process writes to. The code is a fixed symbol the runtime chooses (an errno
+ * name, or an `ERR_*` name), so it can never carry any of the file's bytes.
+ */
+export function resolveGuardComparisonUrl(
+  env: NodeJS.ProcessEnv,
+  warn: WarnSink = stderrWarn,
+): string | undefined {
+  const fileVar = 'DATABASE_URL_FILE';
+  const path = env[fileVar]?.trim();
+  if (!path) return env.DATABASE_URL; // blank / unset _FILE ⇒ the plain variable (unchanged behaviour)
+  let content: string;
+  try {
+    content = readFileSync(path, 'utf8').trim();
+  } catch (err) {
+    const rawCode = (err as { code?: unknown }).code;
+    const code =
+      typeof rawCode === 'string' && /^[A-Z][A-Z0-9_]*$/.test(rawCode) ? rawCode : 'unknown';
+    warn(
+      `warning: ${fileVar} points at '${path}', which could not be read (${code}) — the read-only ` +
+        'shadow guard has no real-database URL to compare against and cannot fire. Point it at a ' +
+        'readable file, or set DATABASE_URL.',
+    );
+    return undefined;
+  }
+  if (content.length === 0) {
+    warn(
+      `warning: ${fileVar} points at '${path}', which is empty — the read-only shadow guard has no ` +
+        'real-database URL to compare against and cannot fire. Point it at a non-empty file, or set ' +
+        'DATABASE_URL.',
+    );
+    return undefined;
+  }
+  return content;
+}
+
 /** Resolve the shadow target from opts/env, applying the read-only guard. Opens NO connection (pure decision). */
 function resolveShadowTarget(opts: RunPlanOpts, migrationSql: string): ShadowTarget {
   const shadowUrl =
     'shadowDatabaseUrl' in opts ? opts.shadowDatabaseUrl : process.env.SHADOW_DATABASE_URL;
   if (!shadowUrl || migrationSql.trim().length === 0) return 'skip';
-  const databaseUrl = 'databaseUrl' in opts ? opts.databaseUrl : process.env.DATABASE_URL;
+  // The comparison target: an explicit `opts.databaseUrl` override wins (the injected test seam);
+  // otherwise resolve it from the ambient environment, honouring a `DATABASE_URL_FILE` file mount with
+  // precedence over the plain variable.
+  const databaseUrl =
+    'databaseUrl' in opts ? opts.databaseUrl : resolveGuardComparisonUrl(process.env);
   if (databaseUrl && shadowTargetsRealDb(shadowUrl, databaseUrl)) return 'refuse';
   return { url: shadowUrl };
 }
