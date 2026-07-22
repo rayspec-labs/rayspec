@@ -44,6 +44,69 @@ curl -s http://127.0.0.1:8080/health
 Missing `DATABASE_URL` / `RAYSPEC_JWT_SIGNING_KEY` / `RAYSPEC_API_KEY_PEPPER` → the boot aborts
 with an actionable message (fail-closed), never a partial start.
 
+### Reading the boot values from a file
+
+Each of those three also accepts a `<VAR>_FILE` variant — `DATABASE_URL_FILE`,
+`RAYSPEC_JWT_SIGNING_KEY_FILE`, `RAYSPEC_API_KEY_PEPPER_FILE` — naming a file (a mounted secret,
+mode `600`) to read the value from. The value then stays out of the image, out of the compose file,
+out of the container's declared environment (`docker inspect` does not show it), and out of the
+server's own exec environment in `/proc/<pid>/environ` — and it removes the need for a wrapper
+entrypoint that materializes secrets into the environment before starting the server.
+
+One caveat, so the benefit is not read for more than it is: at boot the server places the two auth
+secrets into its process environment for the components that read them there, so any child process
+it spawns is exec'd with them and they do appear in that child's `/proc/<pid>/environ`. The
+connection string is not placed there.
+
+- **Precedence:** when `<VAR>_FILE` is set it wins — the plain variable is not consulted at all. A
+  `<VAR>_FILE` left in a local `.env` therefore takes precedence for every component that resolves
+  its configuration from the ambient environment.
+- **Blank counts as unset:** an empty / whitespace-only `<VAR>_FILE` is treated as not set, so the
+  plain variable is used (orchestrators routinely materialize an unset variable as `""`).
+- **Fail-closed:** a `<VAR>_FILE` pointing at a missing, unreadable, empty, or non-regular file
+  **aborts the boot**. It never falls back to the plain variable — a broken secret mount must not
+  silently downgrade to the weaker source. The abort names the variable, the path, and — when the
+  read itself failed — the OS error code, never the file content.
+- **The variable holds a path, not the secret:** the abort quotes that path so the error is
+  actionable, which is a deliberate trade — a secret pasted into `<VAR>_FILE` by mistake is quoted
+  back in the abort. Treat such a value as exposed and rotate it.
+- **Content:** the real bytes of the value, with surrounding whitespace trimmed. That covers both a
+  trailing newline and a leading newline / space / byte-order mark — the latter would otherwise
+  reject the signing key at signer construction, well after the database is open. The flip side is
+  that a secret whose real bytes begin or end with whitespace cannot be expressed in the file form;
+  that limit applies to the two auth secrets, which are used exactly as written, and not to the
+  connection string, which the plain path trims as well. The signing-key file holds a **real
+  multi-line PEM**, not the single-line `\n`-escaped form a `.env` file uses.
+- **Where:** point `<VAR>_FILE` outside the repository — a tmpfs or orchestrator secret mount such
+  as `/run/secrets/`, or another path only the server user can read. Create the file so it is never
+  readable by others — the umask in the same subshell as the redirect **and** a `chmod` after it:
+
+  ```bash
+  (umask 077; openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+    > /run/secrets/jwt-signing-key)
+  chmod 600 /run/secrets/jwt-signing-key
+  ```
+
+  Both, because they cover different failure modes: the umask constrains a file being *created*, so
+  it closes the window a later `chmod` would leave open — but it does not touch a file that already
+  exists, so a rotation onto a path an earlier key or a configuration-management copy left
+  group- or world-readable keeps that mode when the redirect truncates it, and only the `chmod`
+  corrects that.
+- **Server boot only:** `rayspec-serve` and `rayspec deploy` read `<VAR>_FILE`; the CLI subcommands
+  that need a database URL of their own (`rayspec plan`, `rayspec dev db`) read the plain
+  `DATABASE_URL`. With only `DATABASE_URL_FILE` set, `rayspec plan` has no connection string to
+  compare `SHADOW_DATABASE_URL` against, so its guard against a dry-run landing on the real database
+  does not fire — set the plain `DATABASE_URL` as well wherever you run those.
+- **The local development wrapper is both:** `examples/local-boot` requires all three *plain*
+  variables of its own accord, because it provisions a throwaway dev database from `DATABASE_URL`
+  before the resolver is ever reached — so a `_FILE`-only environment fails there first, early and
+  loudly. It then points `DATABASE_URL` at that dev database and hands over to the ordinary server
+  boot, which resolves from the ambient environment, where `<VAR>_FILE` still wins. An ambient
+  `DATABASE_URL_FILE` therefore outranks the dev database the wrapper just provisioned, while the
+  boot banner still names the dev database. On a machine that has no such file the boot aborts
+  fail-closed instead of retargeting anything silently; leave `<VAR>_FILE` out of a local `.env`
+  unless you mean it for every boot.
+
 ## What it is (and is not)
 
 - **Product-free:** the boot names no product table, route, agent, or domain. An auth-only

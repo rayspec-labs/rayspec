@@ -98,7 +98,11 @@ introspects a live target.
   applies the generated SQL to a **throwaway shadow database** whose name it
   generates and drops afterward — to prove the SQL is clean. It **never** mutates
   the target database. A fail-closed guard refuses to shadow-apply if the shadow
-  URL resolves to the same host and database name as `DATABASE_URL`.
+  URL resolves to the same host and database name as `DATABASE_URL`. That guard
+  needs a plain `DATABASE_URL` to compare against: `plan` does not read the
+  [`DATABASE_URL_FILE`](#rayspec-serve--the-boot-server) mount, so with only the
+  file form set there is nothing to compare and the guard does not fire — set
+  the plain `DATABASE_URL` as well wherever you run `plan`.
 - **Flags:**
   - `--against <old-spec.yaml>` — optional. Switches to **update mode**: instead
     of a first materialization, `plan` diffs the prior spec file into a *delta*
@@ -422,6 +426,11 @@ deployment sets its configuration through its orchestrator or secret manager.
   `RAYSPEC_JWT_SIGNING_KEY` (the RS256 PKCS#8 PEM), and `RAYSPEC_API_KEY_PEPPER`
   are set — secrets live in the environment or a secret manager, never in the
   database or in git.
+- Each of those three also accepts a `<VAR>_FILE` variant (`DATABASE_URL_FILE`,
+  `RAYSPEC_JWT_SIGNING_KEY_FILE`, `RAYSPEC_API_KEY_PEPPER_FILE`) naming a file to
+  read the value from, which **takes precedence** over the plain variable; a
+  `<VAR>_FILE` pointing at a missing, unreadable, or empty file **aborts the
+  boot** rather than falling back to the plain variable.
 - On boot it **applies the committed platform migration chain** to the target
   database (idempotent — it bootstraps a clean database and no-ops on an up-to-date
   one), then materializes a spec's declared stores on a clean database or mounts them
