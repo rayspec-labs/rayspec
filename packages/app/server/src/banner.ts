@@ -6,7 +6,7 @@
  * the gate before any internet-facing deployment and is NOT built yet. CAPABILITIES.md says the
  * same. Pure string-building (no I/O) so it is unit-testable and the entrypoint just logs it.
  */
-import type { BootedServer } from './composition-root.js';
+import type { BootedServer, StaticBootedServer } from './composition-root.js';
 
 const RULE = '─'.repeat(86);
 
@@ -83,6 +83,39 @@ export function bootBanner(server: BootedServer, base: string): string {
       lines.push(`    cron '${name}'`);
     }
     lines.push('    (webhook/event/manual trigger kinds are RESERVED per-kind — not fired.)');
+  }
+  lines.push(RULE);
+  lines.push('');
+  return lines.join('\n');
+}
+
+/**
+ * Build the boot banner for a STATIC-PROFILE (frontend-only) server. Distinct from `bootBanner`: this
+ * boot mounts NO auth/OIDC/runs/API route and opens no database, so the banner honestly advertises ONLY
+ * the served static frontend(s) + the liveness `/health` — it never claims the platform auth/run routes
+ * a static boot does not have.
+ */
+export function staticBootBanner(server: StaticBootedServer, base: string): string {
+  const lines: string[] = [];
+  lines.push('');
+  lines.push(RULE);
+  lines.push('  RaySpec server — STATIC PROFILE (frontend-only) — no database, no auth surface');
+  lines.push(RULE);
+  lines.push(
+    '  This boot serves ONLY the declared static frontend(s). No auth/OIDC/runs/API route is mounted,',
+  );
+  lines.push('  and no database, JWT signing key, or api-key pepper is required.');
+  lines.push(RULE);
+  lines.push(`  Base URL:     ${base}`);
+  lines.push('');
+  lines.push('  Liveness:');
+  lines.push(
+    '    GET  /health   (liveness-only — reports process liveness, not database readiness)',
+  );
+  lines.push('');
+  lines.push('  Served static frontend mounts:');
+  for (const m of server.frontendMounts) {
+    lines.push(`    ${m.route.padEnd(12)} → ${m.dir}${m.spa ? '   (SPA fallback)' : ''}`);
   }
   lines.push(RULE);
   lines.push('');

@@ -24,9 +24,17 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { DeployError } from '@rayspec/api-auth';
-import { bootBanner, bootBaseUrl } from './banner.js';
+import { type FrontendSpec, parseSpec } from '@rayspec/spec';
+import { bootBanner, bootBaseUrl, staticBootBanner } from './banner.js';
 import { BootTimeoutError, resolveBootTimeoutMs, withBootTimeout } from './boot-timeout.js';
-import { assembleServer, BootConfigError, loadServerConfig } from './composition-root.js';
+import {
+  assembleServer,
+  assembleStaticServer,
+  BootConfigError,
+  isStaticProfile,
+  loadServerConfig,
+  loadStaticServerConfig,
+} from './composition-root.js';
 import { ProductBootError } from './product-boot.js';
 import { assembleOptsFromEnv } from './serve-opts.js';
 
@@ -61,13 +69,70 @@ function loadLocalDotenvIfPresent(): void {
   }
 }
 
+/**
+ * If RAYSPEC_SPEC_PATH names a STATIC-PROFILE (frontend-only) backend spec, return its resolved path +
+ * parsed frontend mounts for the DB-less / auth-less static boot; otherwise undefined (⇒ the normal
+ * boot). Reads ONLY the spec file — never the three boot secrets — so a frontend-only deployment boots
+ * with none of them set. A missing/unreadable spec falls through to the normal boot, which raises its
+ * own error exactly as today (this detection never changes the normal path's error behaviour).
+ */
+function detectStaticBoot(): { specPath: string; frontend: readonly FrontendSpec[] } | undefined {
+  const raw = process.env.RAYSPEC_SPEC_PATH?.trim();
+  if (!raw) return undefined;
+  const specPath = resolve(raw);
+  let specSource: string;
+  try {
+    specSource = readFileSync(specPath, 'utf8');
+  } catch {
+    return undefined; // unreadable/missing spec → the normal boot raises its own error
+  }
+  if (!isStaticProfile(specSource)) return undefined;
+  // isStaticProfile already proved this parses as a backend RaySpec with a non-empty frontend; re-parse
+  // to hand the typed mounts to assembleStaticServer.
+  const parsed = parseSpec(specSource);
+  if (!parsed.ok || parsed.value.frontend === undefined || parsed.value.frontend.length === 0) {
+    return undefined;
+  }
+  return { specPath, frontend: parsed.value.frontend };
+}
+
 async function main(): Promise<void> {
+  loadLocalDotenvIfPresent();
+
+  // Static-profile detection BEFORE the secret-requiring config load: a frontend-only spec boots with
+  // NO database/JWT/pepper and mounts NO auth surface (see assembleStaticServer). It branches AWAY from
+  // the whole DB/auth composition, so it must run before loadServerConfig (which fail-closes on the
+  // three secrets). Every non-static boot is byte-unchanged below.
+  const staticBoot = detectStaticBoot();
+  if (staticBoot) {
+    console.log(
+      '[rayspec-serve] booting — static profile (frontend-only): no database, no auth surface…',
+    );
+    const staticConfig = loadStaticServerConfig();
+    const staticServer = assembleStaticServer(staticConfig, staticBoot);
+    const httpServer = serve(
+      { fetch: staticServer.app.fetch, hostname: staticConfig.host, port: staticConfig.port },
+      (info) => {
+        console.log(staticBootBanner(staticServer, bootBaseUrl(info.address, info.port)));
+      },
+    );
+    const shutdown = (signal: string) => {
+      console.log(`\n[rayspec-serve] ${signal} received — shutting down…`);
+      httpServer.close(async () => {
+        await staticServer.close();
+        process.exit(0);
+      });
+    };
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    return;
+  }
+
   // Print a progress line BEFORE the (potentially slow) assemble step so a hang is never silent — the
   // banner below prints only once the whole boot succeeds. Names the phases this boot is about to run.
   console.log(
     '[rayspec-serve] booting — loading config, connecting to the database, applying migrations…',
   );
-  loadLocalDotenvIfPresent();
   const config = loadServerConfig();
   // Guard the assemble step (DB connect → migration chain → product boot) with a boot timeout so a hung
   // boot is DIAGNOSED (see boot-timeout.ts) rather than hanging forever. The happy path is unchanged: a
