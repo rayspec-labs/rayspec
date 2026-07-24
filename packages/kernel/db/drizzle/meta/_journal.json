@@ -64,6 +64,13 @@
       "when": 1784364948575,
       "tag": "0008_invites",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1784909410487,
+      "tag": "0009_journal_steps_created_at_index",
+      "breakpoints": true
     }
   ]
 }
