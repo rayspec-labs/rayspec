@@ -253,6 +253,17 @@ and the per-command scope are in the
 [CLI reference](./cli-reference.md#rayspec-serve--the-boot-server) and
 [`.env.example`](../.env.example).
 
+Every boot secret carries the same whitespace-trim **contract**, whichever source it
+comes from: leading and trailing whitespace — including a trailing newline (the
+`echo`/`printf`/env-file classic) and a leading byte-order mark — is stripped from the
+resolved value, whether it is read from a `<VAR>_FILE` mount or from the plain variable.
+Interior bytes are never touched, so a multi-line PEM keeps its internal newlines and its
+`-----BEGIN` header at offset 0. This matters for correctness, not just tidiness: the
+API-key pepper is the HMAC key, so a stray trailing newline would otherwise silently
+change every key hash. The one limit of the contract: a secret whose real bytes must
+begin or end with whitespace cannot be expressed directly (it would be stripped) — encode
+such a value (for example, base64).
+
 A [frontend-only static profile](#serving-a-frontend) needs none of these three
 secrets — it boots with no database and no auth surface at all.
 

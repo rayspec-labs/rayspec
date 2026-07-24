@@ -143,7 +143,10 @@ spec grows.
 > `RAYSPEC_API_KEY_PEPPER_FILE=/run/secrets/api-key-pepper`) naming a file to read
 > the value from — a mounted secret (mode `600`) stays out of `docker inspect` and
 > the process environment. A set `<VAR>_FILE` takes precedence, and a broken mount
-> fails the boot closed (it never falls back to the plain variable). See the
+> fails the boot closed (it never falls back to the plain variable). Whichever source a
+> secret comes from, leading and trailing whitespace (a trailing newline, a leading BOM)
+> is stripped from the resolved value while interior bytes are preserved — so a value that
+> needs edge whitespace must be base64-encoded. See the
 > [CLI reference](./cli-reference.md#rayspec-serve--the-boot-server) and
 > [`.env.example`](../.env.example) for the full precedence and per-command scope.
 

@@ -453,6 +453,50 @@ describe('loadServerConfig — file content is trimmed to the byte-equivalent of
   });
 });
 
+describe('loadServerConfig — the plain-env source is normalized to the same contract as a file mount', () => {
+  // A boot secret carries the same whitespace-trim CONTRACT whichever source it comes from: leading
+  // and trailing whitespace (spaces, tabs, CR/LF, a leading byte-order mark) is stripped, interior
+  // bytes are untouched. The file-mount arms above pin that for the file source; these pin the SAME
+  // guarantee for the plain variable, which used to flow through byte-raw.
+  it('strips a trailing newline off a plain-env pepper — the HMAC-key regression', () => {
+    // The pepper IS the api-key HMAC key. A plain-env value like `abc\n` (the `echo >>`/env-file
+    // classic) surviving un-trimmed silently changes every api-key hash. It must resolve to `abc`.
+    const config = loadServerConfig({ ...plainEnv, RAYSPEC_API_KEY_PEPPER: `${PEPPER}\n` });
+    expect(config.apiKeyPepper).toBe(PEPPER);
+    expect(config.apiKeyPepper).not.toContain('\n');
+  });
+
+  it('strips a leading BOM+newline off a plain-env signing key and keeps its interior newlines', () => {
+    // A PKCS#8 import needs the PEM header at offset 0, so a leading BOM/newline breaks it — the same
+    // failure the file form guards against, now guarded for the plain variable too.
+    const config = loadServerConfig({
+      ...plainEnv,
+      RAYSPEC_JWT_SIGNING_KEY: `﻿\n${SIGNING_KEY}\n`,
+    });
+    expect(config.jwtSigningKeyPem).toBe(SIGNING_KEY);
+    // The edges are gone but the interior newlines survive — a multi-line PEM stays a multi-line PEM.
+    expect(config.jwtSigningKeyPem.split('\n')).toHaveLength(3);
+    expect(config.jwtSigningKeyPem.startsWith('signing-key-line-one')).toBe(true);
+  });
+
+  it('strips leading spaces and a trailing CRLF off a plain-env value', () => {
+    const config = loadServerConfig({ ...plainEnv, RAYSPEC_API_KEY_PEPPER: `  ${PEPPER}\r\n` });
+    expect(config.apiKeyPepper).toBe(PEPPER);
+  });
+
+  it('treats a whitespace-only plain-env value as empty → the aggregated missing-variable abort', () => {
+    // Fail-closed, exactly as an empty value does today: a value that is nothing but whitespace is
+    // not a usable secret, so the boot aborts naming the variable rather than booting on blank bytes.
+    let message = '';
+    try {
+      loadServerConfig({ ...plainEnv, RAYSPEC_API_KEY_PEPPER: '   ' });
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain('missing: RAYSPEC_API_KEY_PEPPER');
+  });
+});
+
 describe('loadServerConfig — neither variant set', () => {
   it('throws the aggregated missing-variable abort listing all three PLAIN names', () => {
     let message = '';

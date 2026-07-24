@@ -237,7 +237,9 @@ without that layer. The boot process says so loudly, and so does
 Boot secrets never have to sit in the environment: each of `DATABASE_URL`,
 `RAYSPEC_JWT_SIGNING_KEY`, and `RAYSPEC_API_KEY_PEPPER` can instead be read from a
 `<VAR>_FILE` file mount (mode `600`), which keeps the value out of `docker inspect`
-and the process environment and fails the boot closed on a broken mount.
+and the process environment and fails the boot closed on a broken mount. Whichever
+source a secret comes from, leading and trailing whitespace (a trailing newline, a
+leading BOM) is stripped while interior bytes are preserved.
 
 ---
 

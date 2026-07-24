@@ -458,23 +458,37 @@ export type AgentBackendsFactory = (
 export type ProductTableRegistrar = (tables: ReadonlyMap<string, PgTable>) => void;
 
 /**
+ * Normalize a resolved boot secret to its CONTRACT form: strip LEADING + TRAILING whitespace
+ * (spaces, tabs, CR/LF) and a leading byte-order mark via `String.prototype.trim()`. INTERIOR bytes
+ * are never touched — a multi-line PEM keeps its internal newlines and its `-----BEGIN` header lands
+ * at offset 0 (a PKCS#8 import needs it there).
+ *
+ * This is the SINGLE normalization point for a boot secret, applied to the resolved value from BOTH
+ * sources — a `<VAR>_FILE` file mount AND the plain `<VAR>` variable — so the two are byte-equivalent
+ * whichever the operator chose. A file written by `echo` / `printf` / a container secret projection,
+ * and an env line built with `echo >>` / an env-file round-trip, both leave the same stray edge
+ * whitespace; this strips it once, in one place, for every secret.
+ *
+ * CONTRACT LIMIT (honest): a secret whose real bytes legitimately begin or end with whitespace CANNOT
+ * be expressed through this path — it would be silently stripped. A well-formed api-key pepper
+ * (base64) and an RS256 PEM never carry meaningful edge whitespace, so the strip is a no-op for every
+ * well-formed secret and only fixes the stray-newline-from-a-file-or-env-line class of typo. A value
+ * that genuinely needs edge whitespace must be encoded (e.g. base64).
+ */
+function normalizeBootSecret(value: string): string {
+  return value.trim();
+}
+
+/**
  * Read ONE boot secret out of the file named by a `<VAR>_FILE` variable. FAIL CLOSED on anything
  * that is not a readable, non-empty regular file — a misconfigured secret mount must ABORT the boot,
  * never silently downgrade to the weaker plain-env source (see `resolveBootSecret`).
  *
- * TRIM: the returned value is `.trim()`ed, and for the RS256 PEM that is HARDENING rather than
- * convenience. A file written by `echo` / `printf` / a container secret projection carries a
- * TRAILING newline, and an editor or a `--from-file` round-trip just as easily leaves a LEADING
- * newline, space, or UTF-8 byte-order mark. A PKCS#8 import requires the PEM header at offset 0, so
- * any one of those leading bytes rejects the key — and rejects it LATE, at signer construction,
- * after the Db handle is open and the migration chain has already run, as a raw TypeError the
- * entrypoint has no fail-closed branch for (so a whitespace typo surfaces as a stack trace).
- * `trim()` strips all of them, the byte-order mark included, so a leading-byte mistake cannot reach
- * that point. For the api-key pepper trimming is a correctness requirement: the pepper IS the HMAC
- * key, so a surviving trailing newline would silently change every hash and invalidate every issued
- * api key. For the connection string the plain-env path already trims, so the file form stays
- * byte-equivalent either way. Shape VALIDATION deliberately stays out of this function — it resolves
- * values, it does not parse them.
+ * The RAW file bytes are returned; the single whitespace-trim of the CONTRACT is applied by the
+ * caller (`resolveBootSecret` → `normalizeBootSecret`), so this function never double-trims. It only
+ * inspects the NORMALIZED form to make ONE decision: an empty / whitespace-only file ABORTS (a
+ * whitespace-only file holds no secret, so it is fail-closed the same as an empty one). Shape
+ * VALIDATION deliberately stays out of this function — it resolves values, it does not parse them.
  *
  * The file holds the REAL bytes: a multi-line PEM with real newlines. The `\n`-unescaping the
  * single-line dotenv form needs is deliberately NOT applied here.
@@ -543,7 +557,10 @@ function readBootSecretFile(fileVar: string, path: string): string {
     // A directory (and any other non-regular node) opens on Linux/macOS but is not a secret file —
     // reject it here, off the SAME descriptor, so no second path lookup can disagree with the read.
     if (!fstatSync(fd).isFile()) throw notARegularFile();
-    value = readFileSync(fd, 'utf8').trim();
+    // Return the RAW bytes — the single whitespace-trim of the CONTRACT is applied once by the
+    // caller (`resolveBootSecret` → `normalizeBootSecret`). Only the emptiness DECISION below looks
+    // at the normalized form.
+    value = readFileSync(fd, 'utf8');
   } catch (err) {
     if (err instanceof BootConfigError) throw err;
     // A raw failure from `fstatSync`/`readFileSync` on the open descriptor (e.g. a file too large to
@@ -552,7 +569,9 @@ function readBootSecretFile(fileVar: string, path: string): string {
   } finally {
     closeSync(fd);
   }
-  if (value.length === 0) {
+  // Decide emptiness on the NORMALIZED form so a whitespace-only file (which holds no secret once
+  // trimmed) aborts exactly as a zero-byte one does. The RAW value is still what is returned.
+  if (normalizeBootSecret(value).length === 0) {
     throw new BootConfigError(
       `Boot aborted — ${fileVar} points at '${path}', which is empty. Refusing to start ` +
         '(fail-closed) — an empty secret file NEVER falls back to the plain environment variable.',
@@ -577,8 +596,11 @@ function readBootSecretFile(fileVar: string, path: string): string {
  * this file already uses (`RAYSPEC_HOST`, the ALLOWED_ORIGINS blank-drop). A NON-blank `<VAR>_FILE`
  * whose file is missing / unreadable / a directory / empty ABORTS — never a silent downgrade.
  *
- * The plain-env branch returns the RAW value, so each caller keeps its existing shape (the
- * connection string trims, the two secrets stay byte-exact and are only blank-checked).
+ * The resolved value is normalized ONCE, HERE, through `normalizeBootSecret` — the single trim point
+ * for BOTH sources. So the plain `<VAR>` and a `<VAR>_FILE` mount are byte-equivalent: leading +
+ * trailing whitespace (a stray newline, spaces, a leading BOM) is stripped either way, interior bytes
+ * are preserved (a multi-line PEM is safe). A secret needing edge whitespace must be base64-encoded
+ * (the CONTRACT LIMIT documented on `normalizeBootSecret`).
  *
  * BOTH variables are read off the INJECTED `env`, never off `process.env`. Callers that build a
  * config from an explicit environment (rather than the ambient one) must get exactly what they
@@ -587,9 +609,11 @@ function readBootSecretFile(fileVar: string, path: string): string {
  */
 function resolveBootSecret(env: NodeJS.ProcessEnv, name: string): string | undefined {
   const fileVar = `${name}_FILE`;
+  // The `<VAR>_FILE` PATH is blank-checked here to decide whether the mount is set at all; the
+  // resolved secret VALUE is normalized once below, for whichever source won.
   const path = env[fileVar]?.trim();
-  if (!path) return env[name];
-  return readBootSecretFile(fileVar, path);
+  const raw = path ? readBootSecretFile(fileVar, path) : env[name];
+  return raw === undefined ? undefined : normalizeBootSecret(raw);
 }
 
 /**
@@ -605,14 +629,17 @@ function resolveBootSecret(env: NodeJS.ProcessEnv, name: string): string | undef
  * explicit comma-separated list; UNSET ⇒ EMPTY (no cross-origin), never a localhost default.
  *
  * All three boot secrets resolve through `resolveBootSecret`, so each also accepts a `<VAR>_FILE`
- * file-mount variant that takes precedence over the plain variable. Resolving them HERE is enough
- * for the whole process: `assembleServer` mirrors the resolved secrets onto `process.env` before
- * anything reads them, and every downstream reader (`assertBootSecrets`, `getApiKeyPepper`) reads
- * env lazily inside a function — none at module scope.
+ * file-mount variant that takes precedence over the plain variable. `resolveBootSecret` also applies
+ * the single whitespace-trim CONTRACT to the resolved value from BOTH sources, so the values arrive
+ * here already normalized — no per-call-site trim is needed (the blank-checks below are CHECKS on the
+ * already-normalized value). Resolving them HERE is enough for the whole process: `assembleServer`
+ * mirrors the resolved secrets onto `process.env` before anything reads them, and every downstream
+ * reader (`assertBootSecrets`, `getApiKeyPepper`) reads env lazily inside a function — none at module
+ * scope.
  */
 export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const missing: string[] = [];
-  const databaseUrl = resolveBootSecret(env, 'DATABASE_URL')?.trim();
+  const databaseUrl = resolveBootSecret(env, 'DATABASE_URL');
   if (!databaseUrl) missing.push('DATABASE_URL');
   const jwtSigningKeyPem = resolveBootSecret(env, 'RAYSPEC_JWT_SIGNING_KEY');
   if (!jwtSigningKeyPem || jwtSigningKeyPem.trim().length === 0) {
