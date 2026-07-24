@@ -437,6 +437,10 @@ deployment sets its configuration through its orchestrator or secret manager.
   read the value from, which **takes precedence** over the plain variable; a
   `<VAR>_FILE` pointing at a missing, unreadable, or empty file **aborts the
   boot** rather than falling back to the plain variable.
+- Leading and trailing whitespace (a trailing newline, a leading byte-order mark) is
+  **stripped** from a resolved secret regardless of source — a `<VAR>_FILE` mount and the
+  plain variable are byte-equivalent — while interior bytes are preserved (a multi-line
+  PEM is safe). A secret whose real bytes need edge whitespace must be base64-encoded.
 - On boot it **applies the committed platform migration chain** to the target
   database (idempotent — it bootstraps a clean database and no-ops on an up-to-date
   one), then materializes a spec's declared stores on a clean database or mounts them

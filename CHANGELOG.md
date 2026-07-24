@@ -23,6 +23,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the 404 metadata without a body. On an `spa:true` mount the SPA `index.html` fallback
   still wins, so the custom page is a plain-mount not-found surface.
 
+### Changed
+
+- **Boot secrets are whitespace-trimmed uniformly, whatever their source.** Leading
+  and trailing whitespace — a trailing newline (the `echo`/`printf`/env-file classic)
+  and a leading byte-order mark included — is now stripped from every resolved boot
+  secret (`DATABASE_URL`, `RAYSPEC_JWT_SIGNING_KEY`, `RAYSPEC_API_KEY_PEPPER`) whether
+  it is read from a `<VAR>_FILE` mount or from the plain variable, giving the two
+  sources one documented contract instead of source-dependent behavior. Interior bytes
+  are never touched, so a multi-line PEM keeps its internal newlines and its header at
+  offset 0. This is backward compatible: a well-formed secret carries no edge
+  whitespace (a base64 pepper and an RS256 PEM never do), and the file path already
+  trimmed — so the only change in effect is that a plain-variable value with stray edge
+  whitespace (for example an API-key pepper with a trailing newline, which is the HMAC
+  key and would otherwise silently alter every key hash) is now normalized to the same
+  value a file mount produces. The one contract limit: a secret whose real bytes must
+  begin or end with whitespace cannot be expressed through a boot variable and must be
+  base64-encoded.
+
 ## [1.6.1] - 2026-07-22
 
 ### Fixed
