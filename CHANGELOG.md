@@ -32,14 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it is read from a `<VAR>_FILE` mount or from the plain variable, giving the two
   sources one documented contract instead of source-dependent behavior. Interior bytes
   are never touched, so a multi-line PEM keeps its internal newlines and its header at
-  offset 0. This is backward compatible: a well-formed secret carries no edge
-  whitespace (a base64 pepper and an RS256 PEM never do), and the file path already
-  trimmed — so the only change in effect is that a plain-variable value with stray edge
-  whitespace (for example an API-key pepper with a trailing newline, which is the HMAC
-  key and would otherwise silently alter every key hash) is now normalized to the same
-  value a file mount produces. The one contract limit: a secret whose real bytes must
-  begin or end with whitespace cannot be expressed through a boot variable and must be
-  base64-encoded.
+  offset 0. For every well-formed secret this is a no-op: a base64 pepper and an RS256
+  PEM carry no edge whitespace, and the file path already trimmed. The one behavioral
+  change is on the plain variable — a value carrying stray edge whitespace (for example
+  an API-key pepper with a trailing newline) is now trimmed to the same value a file
+  mount produces. Because the pepper is the HMAC key for api-key, session, and invite
+  hashes, a deployment whose plain `RAYSPEC_API_KEY_PEPPER` currently carries significant
+  edge whitespace must strip it before upgrading (already-issued keys and sessions were
+  hashed under the untrimmed value and would otherwise stop verifying). The one contract
+  limit: a secret whose real bytes must begin or end with whitespace cannot be expressed
+  through a boot variable — encode such a value (for example, base64).
 
 ## [1.6.1] - 2026-07-22
 
