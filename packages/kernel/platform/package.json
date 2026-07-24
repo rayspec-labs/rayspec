@@ -1,6 +1,6 @@
 {
   "name": "@rayspec/platform",
-  "version": "0.0.0",
+  "version": "1.6.2",
   "private": true,
   "files": [
     "dist"
