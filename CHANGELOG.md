@@ -43,6 +43,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limit: a secret whose real bytes must begin or end with whitespace cannot be expressed
   through a boot variable — encode such a value (for example, base64).
 
+### Security
+
+- **Transitive `postcss` pinned to 8.5.18 (GHSA-r28c-9q8g-f849).** A pnpm override raises
+  the transitive `postcss` — pulled only by the `vite`/`vitest` development toolchain, never
+  a runtime dependency — to the patched 8.5.18, clearing a source-map (`sourceMappingURL`)
+  path-traversal advisory flagged by the dependency audit. Build- and test-time only: no
+  runtime code path is affected and no published package's contents change.
+
 ## [1.6.1] - 2026-07-22
 
 ### Fixed

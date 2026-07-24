@@ -4,16 +4,16 @@
   "reproduce": "pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs",
   "scope_note": "The package SET is derived from pnpm-lock.yaml (host-independent). Each licence is read verbatim from the installed package.json after a --frozen-lockfile install. Rows with installed:false are optional, platform-gated packages this host does not install; their licence was not read from disk and is recorded as null with an absent_reason, never dropped. 'provenance' below records WHERE the licences were read — it does not describe the scope of this inventory.",
   "lockfile": "pnpm-lock.yaml",
-  "lockfile_sha256": "d4cbb454f1d312f918369a461625f57b4c0b179edfbf2109024ca8b3a583bcec",
+  "lockfile_sha256": "1ee9a2fe85bc69eb1ca8a85a55818a776cddadf0db6344fcda8313263f6779ba",
   "provenance": {
     "host": "darwin-arm64",
     "node": "v22.12.0"
   },
   "counts": {
     "lockfile_distinct": 485,
-    "installed_here": 372,
-    "license_read_from_manifest": 372,
-    "license_not_read": 113
+    "installed_here": 374,
+    "license_read_from_manifest": 374,
+    "license_not_read": 111
   },
   "classification": {
     "strong_copyleft": "\\b(?:AGPL|LGPL|GPL)(?:-[\\d.]+(?:-only|-or-later)?)?\\b",
@@ -21,9 +21,9 @@
     "custom_or_proprietary": "^\\s*(?:SEE LICENSE IN|UNLICENSED)"
   },
   "license_groups": {
-    "MIT": 266,
+    "MIT": 267,
     "Apache-2.0": 57,
-    "BSD-3-Clause": 16,
+    "BSD-3-Clause": 17,
     "ISC": 16,
     "BlueOak-1.0.0": 5,
     "BSD-2-Clause": 2,
@@ -146,7 +146,6 @@
       "@esbuild/win32-ia32@0.28.1",
       "@esbuild/win32-x64@0.25.12",
       "@esbuild/win32-x64@0.28.1",
-      "@hono/node-server@2.0.10",
       "@mariozechner/clipboard-darwin-x64@0.3.9",
       "@mariozechner/clipboard-linux-arm64-gnu@0.3.9",
       "@mariozechner/clipboard-linux-arm64-musl@0.3.9",
@@ -181,7 +180,6 @@
       "@turbo/windows-64@2.9.18",
       "@turbo/windows-arm64@2.9.18",
       "@tybys/wasm-util@0.10.2",
-      "fast-uri@3.1.4",
       "lightningcss-android-arm64@1.32.0",
       "lightningcss-darwin-x64@1.32.0",
       "lightningcss-freebsd-x64@1.32.0",
@@ -1341,10 +1339,9 @@
     {
       "name": "@hono/node-server",
       "version": "2.0.10",
-      "license": null,
-      "license_file_present": null,
-      "installed": false,
-      "absent_reason": "not installed: reachable only through an optional, platform-gated package this host skips, so its licence was NOT read from disk",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true,
       "direct_dependents": [
         "<workspace root>",
         "examples/local-boot",
@@ -2843,10 +2840,9 @@
     {
       "name": "fast-uri",
       "version": "3.1.4",
-      "license": null,
-      "license_file_present": null,
-      "installed": false,
-      "absent_reason": "not installed: reachable only through an optional, platform-gated package this host skips, so its licence was NOT read from disk"
+      "license": "BSD-3-Clause",
+      "license_file_present": true,
+      "installed": true
     },
     {
       "name": "fast-xml-builder",
@@ -3713,7 +3709,7 @@
     },
     {
       "name": "postcss",
-      "version": "8.5.15",
+      "version": "8.5.18",
       "license": "MIT",
       "license_file_present": true,
       "installed": true
