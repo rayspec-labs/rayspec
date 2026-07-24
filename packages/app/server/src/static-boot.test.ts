@@ -161,3 +161,45 @@ describe('static boot — security-header parity (net-new fail-the-fix coverage)
     expect(res.headers.get('permissions-policy')).toBe(permissionsPolicy);
   });
 });
+
+describe('static boot — a custom 404.html page carries the security-header chain', () => {
+  // A DEDICATED fixture (spa:false, an index.html + a 404.html) proves the boot-level composition:
+  // the post-`next` static security chain wraps the custom 404 response the same as a served 200, so a
+  // native (nginx-less) serve still emits nosniff + CSP on the not-found page.
+  const NOTFOUND_SENTINEL = 'STATIC-BOOT-404-PAGE-SENTINEL';
+  let customRoot = '';
+
+  beforeAll(() => {
+    customRoot = mkdtempSync(join(tmpdir(), 'rayspec-static-boot-404-'));
+    mkdirSync(join(customRoot, 'web', 'dist'), { recursive: true });
+    writeFileSync(
+      join(customRoot, 'web', 'dist', 'index.html'),
+      `<!doctype html><title>${INDEX_SENTINEL}</title>`,
+      'utf8',
+    );
+    writeFileSync(
+      join(customRoot, 'web', 'dist', '404.html'),
+      `<!doctype html><title>${NOTFOUND_SENTINEL}</title>`,
+      'utf8',
+    );
+  });
+
+  afterAll(() => {
+    rmSync(customRoot, { recursive: true, force: true });
+  });
+
+  it('a genuine miss → 404 with the 404.html bytes AND the static security headers', async () => {
+    const config: StaticServerConfig = loadStaticServerConfig({});
+    const { app } = assembleStaticServer(config, {
+      specPath: join(customRoot, 'rayspec.yaml'),
+      frontend: [{ route: '/', dir: 'web/dist', spa: false }],
+    });
+    const res = await app.request('/no/such/deep/link');
+    expect(res.status).toBe(404);
+    expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    expect(await res.text()).toContain(NOTFOUND_SENTINEL);
+    // The post-`next` static security chain wraps the custom 404 response, not only served 200s.
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(res.headers.get('content-security-policy')).toBe(DEFAULT_FRONTEND_CSP);
+  });
+});

@@ -30,6 +30,18 @@
  * for an `spa:true` mount — a traversal/dotfile attempt must not be answered with `index.html`). A
  * directory is never listed. This module is import-safe (no side effects at module load).
  *
+ * CUSTOM 404 PAGE — at the GENUINE-miss fall-through (a request that resolved to no file, has no
+ * `dir/index.html`, and no SPA fallback took over), if the mount root ships a `404.html` it is served
+ * with status 404 and `text/html` — the GitHub Pages / Netlify / Cloudflare Pages convention. Absent ⇒
+ * the platform's uniform 404, byte-unchanged (fully backward compatible). This runs ONLY after the
+ * reserved-prefix decline and the fail-closed path guard, so a reserved namespace (`/v1`, `/health`,
+ * `/oidc`) and a refused attack path (traversal / dotfile / symlink-escape) keep the uniform 404 and
+ * never reach the custom page; on an `spa:true` mount the SPA `index.html` still wins, so the custom
+ * page is a plain (`spa:false`) mount's not-found surface. Only the EXACT root FILE `404.html` is
+ * eligible: a `404.html` that is a directory, is absent, or is a symlink escaping the served directory
+ * is refused (→ the uniform 404, never followed). A HEAD/OPTIONS miss carries the 404 metadata
+ * (`Content-Type` + `Content-Length`) but no body, honoring the module's HEAD contract.
+ *
  * RANGE (RFC-7233): `serveStatic` 2.0.6 mishandles an UNSATISFIABLE byte range — a CLOSED range beyond
  * EOF (e.g. `bytes=999999-1000000` on a small file) yields a malformed 0-byte 206, and an OPEN one
  * (`bytes=99999-`) throws `ERR_OUT_OF_RANGE` (surfaced as a 500). An additive range guard runs AFTER the
@@ -43,7 +55,7 @@
  * Range math against `index.html`, so its range is validated against `index.html` too — only a genuine
  * miss with no SPA fallback falls through unguarded to `serveStatic`'s normal 404.
  */
-import { existsSync, realpathSync, type Stats, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, type Stats, statSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { type FrontendSpec, RESERVED_ROUTE_PREFIXES } from '@rayspec/spec';
@@ -176,6 +188,42 @@ function unsatisfiableRangeResponse(
 }
 
 /**
+ * Serve the mount-root `404.html` on a GENUINE content miss (no file, no `dir/index.html`, no SPA
+ * fallback), returning it with status 404 and `text/html` — the GitHub Pages / Netlify / Cloudflare
+ * Pages convention for a custom not-found page. Returns `undefined` when the mount ships no such page,
+ * so the caller falls through to the platform's uniform 404 UNCHANGED (fully backward compatible for a
+ * deployment that ships no root `404.html`). Runs the SAME fail-closed hardening as the rest of the
+ * module: it serves ONLY the EXACT root FILE `404.html` — a `404.html` that is a directory, or is
+ * absent, yields `undefined` (→ the uniform 404), and the safe-path guard rejects a dotfile/traversal
+ * `404.html` and a `404.html` symlink escaping the served directory (never followed). `method` carries
+ * the request verb: for HEAD/OPTIONS the response carries the metadata (status + `Content-Type` +
+ * `Content-Length`) but NO body, honoring the module's HEAD contract; every other verb gets the bytes.
+ * Reached ONLY after the reserved-prefix decline and the fail-closed path guard, so a reserved
+ * namespace or a refused attack path keeps the uniform 404 and never gets here.
+ */
+function serveNotFoundPage(
+  baseDir: string,
+  realBaseDir: string,
+  method: string,
+): Response | undefined {
+  // Only the EXACT root FILE `404.html` (never a directory named 404.html); same fail-closed hardening
+  // as the rest of the module, so a `404.html` symlink escaping the served directory is refused.
+  if (!isSafeStaticPath(baseDir, realBaseDir, '/404.html')) return undefined;
+  const file = join(baseDir, '404.html');
+  const stat = statSyncSafe(file);
+  if (stat === undefined || !stat.isFile()) return undefined;
+  const headers: Record<string, string> = { 'Content-Type': 'text/html; charset=utf-8' };
+  // HEAD/OPTIONS carry the metadata but never a body (the module's HEAD contract).
+  if (method === 'HEAD' || method === 'OPTIONS') {
+    return new Response(null, {
+      status: 404,
+      headers: { ...headers, 'Content-Length': String(stat.size) },
+    });
+  }
+  return new Response(readFileSync(file), { status: 404, headers });
+}
+
+/**
  * Register a hardened static handler per declared frontend mount on `app`.
  *
  *  - `mounts`  — the parsed `FrontendSpec[]` (from the deployed spec's `frontend` section).
@@ -258,6 +306,10 @@ export function mountFrontend<E extends Env>(
         const spaRes = await spaServer(c, noop);
         if (spaRes) return spaRes;
       }
+      // A genuine miss with no SPA fallback: if the mount ships a root `404.html`, serve it with status 404
+      // (the GitHub Pages / Netlify / Cloudflare Pages convention). Absent → the platform's uniform 404, unchanged.
+      const notFoundRes = serveNotFoundPage(baseDir, realBaseDir, c.req.method);
+      if (notFoundRes) return notFoundRes;
       return next();
     };
 

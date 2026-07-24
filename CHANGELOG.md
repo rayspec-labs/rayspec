@@ -5,6 +5,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Static frontends can ship a custom `404.html`.** When a request to a mounted
+  static frontend misses (no file, no `dir/index.html`, and no SPA fallback), and the
+  mount's root contains a `404.html` file, the response is that file's contents with
+  HTTP status 404 (`Content-Type: text/html`) — the GitHub Pages / Netlify /
+  Cloudflare Pages convention. Backward compatible for a deployment that does not
+  already ship a root `404.html`: without the file, behavior is unchanged (the
+  platform's uniform 404). A deployment whose static root already contains a `404.html`
+  (or a nested mount that ships one) will begin serving it (status 404) on a miss —
+  the convention. The custom page is served only on a genuine content miss: reserved
+  platform prefixes (`/v1`, `/health`, `/oidc`) and refused paths (traversal,
+  dotfiles, symlink escapes) keep the uniform 404, and a `HEAD`/`OPTIONS` miss returns
+  the 404 metadata without a body. On an `spa:true` mount the SPA `index.html` fallback
+  still wins, so the custom page is a plain-mount not-found surface.
+
 ## [1.6.1] - 2026-07-22
 
 ### Fixed
