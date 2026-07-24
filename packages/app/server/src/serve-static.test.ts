@@ -395,3 +395,255 @@ describe('mountFrontend — Range / HEAD (partial content for media seek/resume)
     }
   }
 });
+
+describe('mountFrontend — custom 404.html page', () => {
+  // Each arm mints its OWN fixture directory so it controls EXACTLY which files (index.html / 404.html /
+  // assets / a dotfile / a leaking symlink) the served root holds — the shared beforeAll fixture is left
+  // byte-untouched. Distinct sentinels keep the custom-page assertion from ever confusing the 404.html
+  // body with the SPA shell, a real asset, or a secret.
+  const CUSTOM_404_SENTINEL = 'CUSTOM-404-PAGE-SENTINEL';
+  const LOCAL_INDEX_SENTINEL = 'CUSTOM-404-INDEX-SENTINEL';
+  const LOCAL_ASSET_SENTINEL = 'CUSTOM-404-ASSET-SENTINEL';
+  const LOCAL_DOTFILE_SECRET = 'CUSTOM-404-DOTFILE-SECRET';
+  const LOCAL_SYMLINK_SECRET = 'CUSTOM-404-SYMLINK-SECRET';
+
+  const tempRoots: string[] = [];
+
+  /**
+   * Mint a fresh served-directory fixture at `<root>/web/dist` and return its specDir (`root`, so the
+   * `web/dist` mount dir resolves back under it). Each file is present only when its flag is set, so an
+   * arm can assert exactly the "404.html present / absent" case it needs.
+   */
+  function mintFixture(opts: {
+    index?: boolean;
+    notFound?: boolean;
+    asset?: boolean;
+    dotfile?: boolean;
+    symlink?: boolean;
+  }): string {
+    const root = mkdtempSync(join(tmpdir(), 'rayspec-custom-404-'));
+    tempRoots.push(root);
+    const dir = join(root, 'web', 'dist');
+    mkdirSync(dir, { recursive: true });
+    if (opts.index) {
+      writeFileSync(
+        join(dir, 'index.html'),
+        `<!doctype html><title>${LOCAL_INDEX_SENTINEL}</title>`,
+        'utf8',
+      );
+    }
+    if (opts.notFound) {
+      writeFileSync(
+        join(dir, '404.html'),
+        `<!doctype html><title>${CUSTOM_404_SENTINEL}</title>`,
+        'utf8',
+      );
+    }
+    if (opts.asset) {
+      mkdirSync(join(dir, 'assets'), { recursive: true });
+      writeFileSync(
+        join(dir, 'assets', 'app.js'),
+        `console.log('${LOCAL_ASSET_SENTINEL}');`,
+        'utf8',
+      );
+    }
+    if (opts.dotfile) {
+      writeFileSync(join(dir, '.env'), `SECRET=${LOCAL_DOTFILE_SECRET}`, 'utf8');
+    }
+    if (opts.symlink) {
+      const outside = join(root, 'outside');
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(outside, 'secret.txt'), LOCAL_SYMLINK_SECRET, 'utf8');
+      symlinkSync(join(outside, 'secret.txt'), join(dir, 'leak.txt'));
+    }
+    return root;
+  }
+
+  afterAll(() => {
+    for (const root of tempRoots) rmSync(root, { recursive: true, force: true });
+  });
+
+  it('spa:false — a miss with a root 404.html present → 404 text/html carrying the 404.html bytes', async () => {
+    const app = buildApp([plainMount], mintFixture({ index: true, asset: true, notFound: true }));
+    const res = await app.request('/no/such/page');
+    expect(res.status).toBe(404);
+    expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    expect(await res.text()).toContain(CUSTOM_404_SENTINEL);
+  });
+
+  it('spa:false — a miss with NO root 404.html → the uniform 404 (no custom page, backward compatible)', async () => {
+    const app = buildApp([plainMount], mintFixture({ index: true, asset: true, notFound: false }));
+    const res = await app.request('/no/such/page');
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain(CUSTOM_404_SENTINEL);
+  });
+
+  it('spa:true — a missed deep link still returns index.html (200), NOT the 404.html (SPA still wins)', async () => {
+    const app = buildApp([spaMount], mintFixture({ index: true, notFound: true }));
+    const res = await app.request('/dashboard/deep/link');
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain(LOCAL_INDEX_SENTINEL);
+    expect(body).not.toContain(CUSTOM_404_SENTINEL);
+  });
+
+  it('a nested existing asset still serves 200 with its content even though a 404.html exists (file server still wins)', async () => {
+    const app = buildApp([plainMount], mintFixture({ index: true, asset: true, notFound: true }));
+    const res = await app.request('/assets/app.js');
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain(LOCAL_ASSET_SENTINEL);
+    expect(body).not.toContain(CUSTOM_404_SENTINEL);
+  });
+
+  // FAIL-CLOSED: with a 404.html present, an attack path is refused by the guard BEFORE the custom-page
+  // branch, so it still gets the uniform 404 — never the custom page and never the secret bytes.
+  const attackArms: Array<{ name: string; path: string }> = [
+    { name: 'dotfile (/.env)', path: '/.env' },
+    { name: 'encoded traversal (/..%2f.env)', path: '/..%2f.env' },
+    { name: 'symlink-escape (/leak.txt)', path: '/leak.txt' },
+  ];
+  for (const arm of attackArms) {
+    it(`fail-closed: ${arm.name} with a 404.html present → uniform 404, never the custom page nor the secret`, async () => {
+      const app = buildApp(
+        [plainMount],
+        mintFixture({ index: true, notFound: true, dotfile: true, symlink: true }),
+      );
+      const res = await app.request(arm.path);
+      expect(res.status).toBe(404);
+      const body = await res.text();
+      expect(body).not.toContain(CUSTOM_404_SENTINEL);
+      expect(body).not.toContain(LOCAL_DOTFILE_SECRET);
+      expect(body).not.toContain(LOCAL_SYMLINK_SECRET);
+    });
+  }
+
+  it('reserved prefixes (/v1, /health) keep the uniform 404, never the custom 404.html page', async () => {
+    const root = mintFixture({ index: true, notFound: true });
+    const app = new Hono();
+    app.get('/v1/registered', (c) => c.json({ registered: true }));
+    app.get('/health', (c) => c.json({ status: 'ok' }));
+    mountFrontend(app, [plainMount], root);
+
+    const v1 = await app.request('/v1/nonexistent');
+    expect(v1.status).toBe(404);
+    expect(await v1.text()).not.toContain(CUSTOM_404_SENTINEL);
+
+    const health = await app.request('/health/whatever');
+    expect(health.status).toBe(404);
+    expect(await health.text()).not.toContain(CUSTOM_404_SENTINEL);
+  });
+
+  // The custom 404 page must honor the module's HEAD contract: a metadata-only verb (HEAD/OPTIONS)
+  // carries the status + content-type + Content-Length but NEVER a body. Against a body-for-every-method
+  // helper, OPTIONS leaks the full 404.html bytes and neither verb advertises a Content-Length.
+  const NOTFOUND_BYTES = Buffer.byteLength(
+    `<!doctype html><title>${CUSTOM_404_SENTINEL}</title>`,
+    'utf8',
+  );
+  for (const method of ['HEAD', 'OPTIONS'] as const) {
+    it(`spa:false — ${method} on a miss with a root 404.html present → 404 text/html, Content-Length, EMPTY body`, async () => {
+      const app = buildApp([plainMount], mintFixture({ index: true, notFound: true }));
+      const res = await app.request('/no/such/page', { method });
+      expect(res.status).toBe(404);
+      expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
+      // Metadata-only: advertise the byte size, write no body.
+      expect(res.headers.get('content-length')).toBe(String(NOTFOUND_BYTES));
+      expect(await res.text()).toBe('');
+    });
+  }
+
+  it('a root 404.html that is a symlink escaping the served dir → uniform 404, never the outside bytes', async () => {
+    const OUTSIDE_404_SECRET = 'ESCAPING-404-SYMLINK-SECRET';
+    const root = mkdtempSync(join(tmpdir(), 'rayspec-custom-404-symlink-'));
+    tempRoots.push(root);
+    const dir = join(root, 'web', 'dist');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'index.html'),
+      `<!doctype html><title>${LOCAL_INDEX_SENTINEL}</title>`,
+      'utf8',
+    );
+    const outside = join(root, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(
+      join(outside, 'secret-404.html'),
+      `<!doctype html><title>${OUTSIDE_404_SECRET}</title>`,
+      'utf8',
+    );
+    // The mount's `404.html` is a symlink pointing OUT of the served directory — the fail-closed guard
+    // must refuse to follow it, keeping the uniform 404 (never the escaped file's bytes).
+    symlinkSync(join(outside, 'secret-404.html'), join(dir, '404.html'));
+
+    const app = buildApp([plainMount], root);
+    const res = await app.request('/no/such/page');
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain(OUTSIDE_404_SECRET);
+  });
+
+  it('a root 404.html that is a DIRECTORY (not a file) → uniform 404, never its index.html (file-only)', async () => {
+    const DIR_404_INDEX_SENTINEL = 'DIRECTORY-404-INDEX-SENTINEL';
+    const root = mkdtempSync(join(tmpdir(), 'rayspec-custom-404-dir-'));
+    tempRoots.push(root);
+    const dir = join(root, 'web', 'dist');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'index.html'),
+      `<!doctype html><title>${LOCAL_INDEX_SENTINEL}</title>`,
+      'utf8',
+    );
+    // `404.html` is a DIRECTORY holding an index.html — the dir→index resolution must NOT apply here;
+    // only the exact FILE `404.html` is a custom 404 page, so this is a genuine miss (uniform 404).
+    mkdirSync(join(dir, '404.html'), { recursive: true });
+    writeFileSync(
+      join(dir, '404.html', 'index.html'),
+      `<!doctype html><title>${DIR_404_INDEX_SENTINEL}</title>`,
+      'utf8',
+    );
+
+    const app = buildApp([plainMount], root);
+    const res = await app.request('/no/such/page');
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain(DIR_404_INDEX_SENTINEL);
+  });
+
+  it('cross-mount: an inner /docs mount with its own 404.html answers ITS subtree miss, not the outer SPA index', async () => {
+    // Two overlapping mounts — a plain `/docs` shipping its own 404.html and a `/` SPA catch-all. A miss
+    // under /docs is answered by the docs mount's 404.html (status 404), by design — it does NOT fall
+    // through to the outer catch-all's SPA index. This pins the intended cross-mount behavior.
+    const DOCS_404_SENTINEL = 'DOCS-MOUNT-404-SENTINEL';
+    const APP_INDEX_SENTINEL = 'APP-ROOT-SPA-INDEX-SENTINEL';
+    const root = mkdtempSync(join(tmpdir(), 'rayspec-custom-404-crossmount-'));
+    tempRoots.push(root);
+    const docsDir = join(root, 'docs');
+    const appDir = join(root, 'app');
+    mkdirSync(docsDir, { recursive: true });
+    mkdirSync(appDir, { recursive: true });
+    writeFileSync(
+      join(docsDir, '404.html'),
+      `<!doctype html><title>${DOCS_404_SENTINEL}</title>`,
+      'utf8',
+    );
+    writeFileSync(
+      join(appDir, 'index.html'),
+      `<!doctype html><title>${APP_INDEX_SENTINEL}</title>`,
+      'utf8',
+    );
+
+    const app = new Hono();
+    mountFrontend(
+      app,
+      [
+        { route: '/docs', dir: 'docs', spa: false },
+        { route: '/', dir: 'app', spa: true },
+      ],
+      root,
+    );
+
+    const res = await app.request('/docs/client-route');
+    expect(res.status).toBe(404);
+    const body = await res.text();
+    expect(body).toContain(DOCS_404_SENTINEL); // the docs mount's own custom 404 page
+    expect(body).not.toContain(APP_INDEX_SENTINEL); // NOT the outer catch-all SPA shell
+  });
+});
