@@ -345,6 +345,10 @@ export const journalSteps = pgTable(
   (t) => [
     index('journal_run_idx').on(t.runId),
     index('journal_tenant_idx').on(t.tenantId),
+    // Index the step-journal time dimension so created-at range/day-bucket scans over the
+    // journal are index-backed instead of sequential. Additive, non-destructive — mirrored
+    // by migration 0009 (parallels `runs_created_at_idx` on the run header).
+    index('journal_steps_created_at_idx').on(t.createdAt),
     // Replay cache, STRUCTURALLY tenant-partitioned (RLS-ready): exactly one
     // cached step per (tenant, run, key). Replaces the old (run_id, idempotency_key) index.
     uniqueIndex('journal_idem_idx').on(t.tenantId, t.runId, t.idempotencyKey),

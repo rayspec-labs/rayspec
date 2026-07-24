@@ -1,0 +1,1 @@
+CREATE INDEX "journal_steps_created_at_idx" ON "journal_steps" USING btree ("created_at");

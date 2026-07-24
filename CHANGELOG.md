@@ -43,6 +43,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limit: a secret whose real bytes must begin or end with whitespace cannot be expressed
   through a boot variable — encode such a value (for example, base64).
 
+- **`journal_steps` gains a `created_at` index.** Migration `0009` adds a btree index
+  (`journal_steps_created_at_idx`) on `journal_steps(created_at)`, so time-range and
+  day-bucket scans over the step journal are index-backed instead of sequential —
+  paralleling the existing `runs_created_at_idx` on the run header. The change is
+  additive and non-destructive; `drizzle-kit migrate` builds the index on the existing
+  table (a plain, non-`CONCURRENTLY` build that briefly locks writes for its duration,
+  consistent with the run-header index).
+
 ### Security
 
 - **Transitive `postcss` pinned to 8.5.18 (GHSA-r28c-9q8g-f849).** A pnpm override raises
