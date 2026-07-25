@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- Bump the transitive `brace-expansion` dependency to `5.0.8` (pinned via `pnpm.overrides`),
+  resolving GHSA-mh99-v99m-4gvg — a regular-expression denial-of-service (ReDoS) advisory in the
+  affected versions. Transitive-only; no API or behavior change.
+
 ## [1.6.2] - 2026-07-24
 
 ### Added
