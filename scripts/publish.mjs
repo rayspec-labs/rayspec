@@ -5,9 +5,10 @@
  *
  * WHY THIS SCRIPT EXISTS
  * ----------------------
- * Every RaySpec package is committed as `private: true` at version `0.0.0` — that is the deliberate
- * accidental-publish guard: a bare `pnpm publish` / `npm publish` at the repo root or in any package
- * refuses, and nothing in CI publishes. This script is the ONLY place that lifts that guard, and it
+ * Every RaySpec package is committed as `private: true` at the current release version — the
+ * `private: true` flag (not the version) is the deliberate accidental-publish guard: a bare
+ * `pnpm publish` / `npm publish` at the repo root or in any package refuses, and nothing in CI
+ * publishes. This script is the ONLY place that lifts that guard, and it
  * does so TRANSIENTLY and IN MEMORY of the working tree: for the duration of a pack/publish run it
  * rewrites each publish target's `package.json` to
  *   - `version`  → the single release version (default `1.5.0`, coupled to the `v1.5.0` tag),
@@ -242,7 +243,7 @@ function main() {
   else {
     console.log(`\n${flags.mode}: ${order.length} package(s) at ${flags.version}.`);
     if (outDir) console.log(`tarballs → ${outDir}`);
-    console.log('working tree restored (private:true / version:0.0.0).');
+    console.log('working tree restored to committed bytes (private:true).');
   }
 }
 
