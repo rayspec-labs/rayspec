@@ -20,6 +20,15 @@
  * `pnpm build` before this suite. Without that dist the suite self-skips (loudly, naming the command
  * that fixes it); where the built CLI is REQUIRED (CI) the ran-guard hard-fails instead, so the proof
  * can never green-skip in the lane that stands for it.
+ *
+ * That deliberately differs from packages/app/rayspec/src/equivalence.test.ts, which drives the same
+ * dist and hard-fails on its absence with no skip at all. The distinction is what a skip COSTS each
+ * package: the `rayspec` launcher's src holds nothing but bin.ts and that one file, so its ENTIRE test
+ * surface is the dist proof — a self-skip there reports a green package that proved nothing. Here the
+ * dist proof is 1 of 27 suites in @rayspec/cli, most of which exercise the CLI from source, so skipping
+ * this one locally still leaves real signal behind it, and the CI ran-guard keeps the proof mandatory
+ * where it stands for the shipped bin. The rule both files follow: skip only where the package still
+ * says something without the suite.
  */
 import { type ChildProcess, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';

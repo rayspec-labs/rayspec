@@ -15,7 +15,11 @@
  *
  * These bins are DIST artifacts, so `pnpm build` must precede this suite (it does in the gate/CI:
  * build runs before test). If a dist is missing we fail LOUDLY with a build hint rather than skip —
- * a silent skip would be a false green.
+ * a silent skip would be a false green: this file and bin.ts are the WHOLE of this package's src, so
+ * a skipped suite here is a green package that proved nothing at all. (The dist-backed suite in
+ * @rayspec/cli, packages/app/cli/src/deploy-static-profile.test.ts, self-skips locally instead — it is
+ * 1 of 27 suites there, most of which exercise the CLI from source, so the package still says
+ * something without it. Same prerequisite, different cost to skipping it; see that file's header.)
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
