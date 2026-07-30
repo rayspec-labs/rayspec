@@ -68,20 +68,10 @@ agents:
     tools:
       - lookup_notebook
     maxTurns: 6
-    # Structured output: the agent returns VALIDATED JSON in RunResult.output (native on
-    # OpenAI/Anthropic; Pi would emulate). The agent outputSchema is {name, schema}.
-    outputSchema:
-      name: note_summary
-      schema:
-        type: object
-        additionalProperties: false
-        properties:
-          summary: { type: string }
-          tldr: { type: string }
-          highlights:
-            type: array
-            items: { type: string }
-        required: [summary, tldr, highlights]
+    # NO top-level outputSchema: this agent uses TOOLS. A structured output would be projected into
+    # the backend's native structured-output slot, so the model would answer in one turn and never
+    # call lookup_notebook. A tool-using agent puts its structured shape on a tool's `parameters`
+    # (the linter rejects the combination — `agent_output_schema_shortcircuits_tools`).
 
 # --- tooling ----------------------------------------------------------------------------------
 # WRAPS core.ToolSpec (name/description/parameters) + the resolver fields. `idempotent` is a

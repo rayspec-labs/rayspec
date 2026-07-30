@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **An agent that declares both `tools` and an `outputSchema` is now a config error.** The
+  linter adds `agent_output_schema_shortcircuits_tools`: an `agents[]` entry carrying a
+  non-empty `tools` list AND a top-level `outputSchema` is rejected by `doctor`, `plan`, and
+  boot, at `agents[<i>].outputSchema`. The combination is dead at runtime — the backend
+  projects the schema into its native structured-output slot, so the model answers in one
+  turn and never calls a tool, and a declared lookup/persist loop silently never fires.
+  Previously such a spec passed `doctor` with `ok: true` and only a live run exposed it. A
+  spec of this shape must move the structured shape onto the persist tool's `parameters` and
+  drop the agent's `outputSchema` (the agent's terminal action is then the tool call). A
+  tool-less agent with an `outputSchema` — including the `persistTo` structured-output shape —
+  is unaffected, as is a tool-using agent without one. The `examples/acme-notes-backend`
+  reference document carried the combination and has been corrected the same way.
+
 ### Security
 
 - Bump the transitive `brace-expansion` dependency to `5.0.8` (pinned via `pnpm.overrides`),

@@ -1123,6 +1123,29 @@ export function lintSpec(spec: RaySpec): SpecError[] {
     }
   });
 
+  // ---- agents[] — TOOL LOOP vs STRUCTURED OUTPUT (fail-closed) ---------------------------
+  // An agent carrying BOTH a non-empty `tools` list AND an `outputSchema` is grammar-valid but DEAD at
+  // runtime: an adapter projects a present `outputSchema` into the backend's NATIVE structured-output
+  // slot (the openai adapter's `toOutputType`), so the model emits the structured object in ONE turn
+  // and never calls a tool — a declared lookup/persist loop silently never fires and only a live smoke
+  // would catch it. The condition is purely STRUCTURAL (not a heuristic), so it hard-blocks rather than
+  // warns. There is NO exemption for an action's `persistTo`: `persistTo` + tools + `outputSchema` is
+  // exactly the broken combination. Revisit ONLY if a backend ever supports tools AND native structured
+  // output in one run.
+  spec.agents.forEach((agent, ai) => {
+    if (agent.tools.length > 0 && agent.outputSchema) {
+      errors.push(
+        specError(
+          'agent_output_schema_shortcircuits_tools',
+          `agent '${agent.id}' declares both tools and an outputSchema — the structured output ` +
+            'short-circuits the tool loop and no tool will ever be called. Move the structured shape ' +
+            "onto the persist tool's 'parameters'",
+          `agents[${ai}].outputSchema`,
+        ),
+      );
+    }
+  });
+
   // ---- 4. EMBEDDED SCHEMAS COMPILE (tool parameters/outputSchema + agent outputSchema.schema) --
   // One Ajv instance for the whole pass. strict:false so a tool schema using vendor keywords or
   // draft-mixing does not hard-fail compilation (matches dispatch.ts) — a STRUCTURALLY malformed

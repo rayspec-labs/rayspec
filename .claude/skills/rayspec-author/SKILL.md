@@ -430,19 +430,14 @@ proceed. Confirm the reported `stores` / `routes` / `agents` match what you inte
 handler (`dangling_ref`); an `agents[].tools[]` referencing an undeclared tool (`dangling_ref`); a
 duplicate tool **name** / handler id (`duplicate_name`; **dispatch keys on the tool NAME**, so tool
 names must be unique); a `parameters` that isn't `type:object` or won't Ajv-compile; a non-compiling
-`outputSchema`; a backend `capability_violation`. They WILL NOT catch — a **missing or misnamed
+`outputSchema`; a backend `capability_violation`; a **tools-bearing agent that also carries a top-level
+`outputSchema`** (`agent_output_schema_shortcircuits_tools` — the structured output would short-circuit
+the tool loop, so the linter hard-blocks it). They WILL NOT catch — a **missing or misnamed
 `.gen.ts` file**, a wrong `export` symbol, a TS type error, or a runtime bug (those surface at Phase-5
 deploy via the path-jailed loader, or at the Phase-6 live smoke).
 
 **It.2 — ADD static self-checks BEFORE deploy** (cheap, additive; `doctor`/`plan` do NOT catch these;
 the self-correction loop covers them too, re-deriving + re-rendering on failure):
-0. **The tool-loop short-circuit fence (a known footgun — `doctor`/`plan` will NOT catch it).**
-   For It.2, assert that **NO agent that references `tooling` (i.e. has a non-empty `agents[].tools`)
-   carries a top-level `outputSchema`.** Such an agent is grammar-valid AND passes `doctor`/`plan`, but
-   at runtime the SDK emits the structured output in ONE turn and **never calls a tool** — the persist
-   never fires, the loop is silently broken, and only the Phase-6 live smoke would catch it. If you find
-   a tools-bearing agent with a top-level `outputSchema`, **STOP and fix it**: remove the agent
-   `outputSchema` (the structured shape belongs on the persist tool's `parameters`, per the It.2 rule).
 1. Confirm every `handlers[].module` file EXISTS and EXPORTS the declared symbol (pre-empts the
    deploy-time loader abort with an actionable message). E.g. for each handler, check the rendered
    `examples/<slug>/handlers/<name>.gen.ts` exists and contains `export const <export>`.
@@ -1055,9 +1050,10 @@ a `frontend` mount serving a bundled `web/dist/index.html`).
 There is no single "pure It.1" golden, but two real, `rayspec doctor`-validated backend-profile documents
 show the pieces — read them for the grammar, and copy only the parts your verdict calls for:
 - **`examples/acme-notes-backend/rayspec.yaml`** — the fullest backend document: two stores (`notebooks`,
-  `entries`) + full CRUD `api` (**the It.0 CRUD core**) + an agent with a structured `outputSchema`
-  (the It.1 shape). ⚠ It ALSO declares surfaces this skill does NOT author — a `cron` trigger, a
-  `{handler}` route, a lookup tool — so treat those as out-of-scope reference, not a template to copy.
+  `entries`) + full CRUD `api` (**the It.0 CRUD core**) + an agent wired to a lookup tool (with NO
+  top-level `outputSchema` — it would short-circuit the tool loop). ⚠ It ALSO declares surfaces this
+  skill does NOT author — a `cron` trigger, a `{handler}` route, a lookup tool — so treat those as
+  out-of-scope reference, not a template to copy.
 - **`examples/lead-qualifier/lead-qualifier.rayspec.yaml`** — a backend whose declared agent actually
   runs and records its verdict via a persist tool. ⚠ It qualifies OFF-request on the durable worker
   (`deployment.durableWorker`) via escape-hatch `.mjs` handlers — beyond the pure It.0/It.1/It.2 scope;

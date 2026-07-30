@@ -387,7 +387,11 @@ agents:
   default `[]`.
 - `outputSchema` — optional structured-output contract with a `name` and a
   `schema` (a JSON-Schema object). When present, the run must return JSON
-  matching the schema.
+  matching the schema. An agent that declares a non-empty `tools` list may **not**
+  also declare an `outputSchema`: the structured output short-circuits the tool
+  loop (the model answers in one turn and never calls a tool), so the combination
+  is rejected at validation time. Put the structured shape on the tool's
+  `parameters` instead.
 - `maxTurns` — optional positive integer cap on the agent loop, default `8`.
 - `requireNativeStructuredOutput` — optional boolean, default `false`. When
   `true`, an `outputSchema` *demands* native structured output; a backend that
