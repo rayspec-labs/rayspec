@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A mounted static frontend answers non-content methods with `405` instead of the SPA
+  fallback.** A static mount serves `GET`, `HEAD` and `OPTIONS`; every other method on any
+  path under the mount now returns HTTP 405 carrying `Allow: GET, HEAD, OPTIONS` and the
+  platform's uniform JSON error envelope, with the new `METHOD_NOT_ALLOWED` code joining the
+  closed error-code set. Previously, on an `spa:true` mount a `POST` or `DELETE` to a path
+  that does not exist — a removed API route, for example — was answered `200` with
+  `index.html`, so a caller could not tell a route that is gone apart from a write that
+  succeeded; no data was written and no authorization was bypassed, the status was simply
+  wrong. What integrators observe: a non-content method against a static mount that used to
+  come back `200` (SPA mount) or `404` (plain mount) now comes back `405` with the `Allow`
+  header. Everything else is unchanged — `GET`/`HEAD` of existing files, the `GET` deep-link
+  fallback (`200` + `index.html`, so History-API navigation still works), the reserved
+  platform prefixes (`/v1`, `/health`, `/oidc`), the fail-closed path guard (traversal,
+  dotfiles, symlink escapes), the `404.html` convention including its `HEAD`/`OPTIONS`
+  metadata handling, and the unsatisfiable-range `416`, each of which still answers first and
+  keeps its exact response for every method.
+
 ### Security
 
 - Bump the transitive `brace-expansion` dependency to `5.0.8` (pinned via `pnpm.overrides`),
