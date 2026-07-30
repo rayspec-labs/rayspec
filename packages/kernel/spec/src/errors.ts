@@ -53,10 +53,13 @@ import { z } from 'zod';
  *                               apply. Self-references are EXEMPT (a self-FK applies after its own CREATE).
  *  - `agent_output_schema_shortcircuits_tools`
  *                             — an agent declares BOTH a non-empty `tools` list AND an `outputSchema`.
- *                               The backend projects the schema into its NATIVE structured-output slot,
- *                               so the model answers in ONE turn and never calls a tool — a lookup/persist
- *                               loop silently never fires. The structured shape belongs on the persist
- *                               tool's `parameters`.
+ *                               A backend with NATIVE structured output (`openai`, `anthropic`, `codex`)
+ *                               projects the schema into that slot; the backend that EMULATES it through
+ *                               instructions (`pi`) appends a JSON-only directive that pulls the answer
+ *                               the same way. Either way the model answers in ONE turn and never calls a
+ *                               tool — a lookup/persist loop silently never fires. Rejected UNIFORMLY,
+ *                               fail-closed, on every backend (not per capability). The structured shape
+ *                               belongs on the persist tool's `parameters`.
  *
  * PRODUCT-YAML codes — used ONLY by the Product-YAML validation path (`parseProductSpec`,
  * `product-lint.ts`). They share this closed envelope so a fresh session sees ONE error vocabulary
