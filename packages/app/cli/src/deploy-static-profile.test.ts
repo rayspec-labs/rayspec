@@ -22,7 +22,7 @@
  * RUNS. Stated exactly: under `turbo run test` that required-run signal is NOT part of the task hash,
  * so a skip recorded without it could replay from a warm shared cache instead of reaching the guard.
  * That replay cannot happen in this repo's CI today — both required lanes start cold-cache and build
- * before testing — and the dist state itself IS a hashed input (packages/app/cli/turbo.json).
+ * before testing — and the dist entry the guard probes IS a hashed input (packages/app/cli/turbo.json).
  *
  * That deliberately differs from packages/app/rayspec/src/equivalence.test.ts, which drives the same
  * dist and hard-fails on its absence with no skip at all. The distinction is what a skip COSTS each
