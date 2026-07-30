@@ -382,6 +382,14 @@ change is applied by the explicit `--apply-migration` flag below.
   rayspec deploy --dry-run examples/acme-notes/acme-notes.product.yaml
   ```
 
+  A **frontend-only** document has nothing to compose, so it is answered for the boot
+  it actually takes (the static profile below): the verdict is `ok: true` (exit `0`)
+  and carries a `staticProfile` block instead of `composed` — the profile named, the
+  `frontendMounts` that boot would serve, and the statement that no database is
+  touched, no migration applies, and there is nothing to compose. What such a check
+  does not prove narrows accordingly: it reads only the document, so it says nothing
+  about whether the declared directories hold built assets, or that the app serves.
+
 - **`--apply-migration <delta.sql>`** applies a **reviewed forward migration** in
   place before serving — the supported path for evolving an existing deployment's
   schema (author the delta with [`plan --against`](#plan)). It reaches the same gated
@@ -404,7 +412,10 @@ change is applied by the explicit `--apply-migration` flag below.
   run route mounted (`/health` is liveness-only), with the `Content-Security-Policy`
   and `Permissions-Policy` defaults emitted by the app itself. Because it touches no
   database it applies no migration, so `--apply-migration` / `--allowlist` against such a
-  document are **refused** as a usage error (exit `2`) rather than silently ignored. See
+  document are **refused** as a usage error (exit `2`) rather than silently ignored.
+  `--dry-run` reports this profile and the mounts it would serve (`ok: true`, exit `0`)
+  instead of a compose verdict — the same detection the boot branches on, so the check
+  and the boot cannot disagree. See
   [getting-started → a frontend-only (static) deployment](./getting-started.md#a-frontend-only-static-deployment).
 - **Flags:** `--port <n>` overrides `PORT` (serve path); `--dry-run` selects the
   one-shot compose check; `--apply-migration <delta.sql>` applies a reviewed forward

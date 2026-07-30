@@ -59,6 +59,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`rayspec deploy --dry-run` reports a frontend-only document truthfully instead of `ok: false`.**
+  Such a document is not a product document, so composing it against the product runtime was never
+  the question — yet that is what the check did, and it answered with three schema violations and
+  exit `1` for a document the same command **boots** on the static branch. When the product grammar
+  rejects a document, the dry-run now classifies it with the same detection that boot branches on and
+  answers for the boot it would perform: `ok: true` and exit `0`, with a `staticProfile` block in
+  place of `composed` naming the profile, listing the `frontendMounts` it would serve, and stating
+  outright that no database is touched, no migration applies, and there is nothing to compose. The
+  honest boundary narrows with it — only the document was read, so what stays unproven is whether the
+  declared directories hold built assets and that the app serves. Every other document's verdict is
+  byte-for-byte what it was: the compose path, its `composed` summary and its `notProven` list are
+  untouched, it stays as fast as it was (a product document's dry-run — whether it composes or
+  reports violations — loads no boot machinery for the new classification, which is asked only of a
+  document that is not the product profile), and the guards are unchanged (`--apply-migration` with
+  `--dry-run`, and `--apply-migration` against a frontend-only document, are both still refused as
+  usage errors).
+
 - **`rayspec deploy` boots a frontend-only document as the static profile, before any secret is
   read.** A document whose only section is `frontend` is detected by the same fail-closed shape
   predicate the `rayspec-serve` entrypoint uses, and takes the same database-less, secret-less
