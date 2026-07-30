@@ -54,10 +54,19 @@
  * fallback would serve: on an `spa:true` mount a missed deep link would otherwise re-run the same buggy
  * Range math against `index.html`, so its range is validated against `index.html` too — only a genuine
  * miss with no SPA fallback falls through unguarded to `serveStatic`'s normal 404.
+ *
+ * CONTENT METHODS — a static mount is a CONTENT surface: it serves GET, HEAD and OPTIONS, and answers
+ * every OTHER verb with a 405 carrying `Allow: GET, HEAD, OPTIONS` and the platform's uniform JSON error
+ * envelope. Without it a `POST`/`DELETE` to a path that does not exist under an `spa:true` mount reaches
+ * the SPA fallback and comes back as 200 + `index.html` — a success status a client cannot tell apart
+ * from a completed write. The guard runs AFTER the reserved-prefix decline, the fail-closed path guard
+ * and the range guard (each keeps its exact response for every verb) and BEFORE the file server, so it
+ * covers the served files, the SPA fallback and the `404.html` page alike.
  */
 import { existsSync, readFileSync, realpathSync, type Stats, statSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { serveStatic } from '@hono/node-server/serve-static';
+import { errorEnvelope } from '@rayspec/auth-core';
 import { type FrontendSpec, RESERVED_ROUTE_PREFIXES } from '@rayspec/spec';
 import type { Env, Hono, MiddlewareHandler, Next } from 'hono';
 
@@ -187,6 +196,22 @@ function unsatisfiableRangeResponse(
   return undefined;
 }
 
+/** The methods a static CONTENT mount serves; every other verb is answered 405 (see the guard below). */
+const CONTENT_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'OPTIONS']);
+/** The `Allow` header the 405 advertises — the same set, in the same order. */
+const ALLOW_HEADER = 'GET, HEAD, OPTIONS';
+
+/**
+ * The platform request id the uniform error envelope echoes. `mountFrontend` is generic over the app's
+ * Env, so the variable is read structurally: on the assembled app the `requestId` middleware has already
+ * set it, while a bare Hono (no middleware) has none — then the fall-back is the SAME `'unknown'` the
+ * platform's own error paths use, so the envelope shape never varies.
+ */
+function requestIdOf(vars: Readonly<Record<string, unknown>>): string {
+  const rid = vars.requestId;
+  return typeof rid === 'string' ? rid : 'unknown';
+}
+
 /**
  * Serve the mount-root `404.html` on a GENUINE content miss (no file, no `dir/index.html`, no SPA
  * fallback), returning it with status 404 and `text/html` — the GitHub Pages / Netlify / Cloudflare
@@ -297,6 +322,25 @@ export function mountFrontend<E extends Env>(
       if (rangeHeader !== undefined && c.req.method !== 'HEAD' && c.req.method !== 'OPTIONS') {
         const rangeRes = unsatisfiableRangeResponse(baseDir, subPath, spa, rangeHeader);
         if (rangeRes) return rangeRes;
+      }
+      // METHOD: a static mount is a CONTENT surface — it serves GET/HEAD/OPTIONS and answers every other
+      // verb 405 with `Allow` + the platform's uniform JSON envelope, instead of handing it to the file
+      // server or the SPA fallback. A POST/DELETE to a path that no longer exists under an spa:true mount
+      // would otherwise come back as 200 + index.html, a success status a client cannot tell apart from a
+      // completed write. Runs AFTER the reserved-prefix decline, the fail-closed path guard and the range
+      // guard — so a reserved namespace, a refused attack path and an unsatisfiable range keep their exact
+      // responses for EVERY verb — and BEFORE the file server, so it covers the served files, the SPA
+      // fallback and the `404.html` page alike. ALTERNATIVE CONSIDERED: answer 404 instead, which reveals
+      // less about which paths exist. Rejected — a static mount's paths are public content anyway, so the
+      // existence signal costs nothing, while 405 + `Allow` names the removed-route case exactly (the
+      // surface does not take this method) rather than folding it into the not-found bucket, where it is
+      // indistinguishable from a mistyped path.
+      if (!CONTENT_METHODS.has(c.req.method)) {
+        return c.json(
+          errorEnvelope('METHOD_NOT_ALLOWED', 'Method not allowed.', requestIdOf(c.var)),
+          405,
+          { Allow: ALLOW_HEADER },
+        );
       }
       // Serve the file; on a hit serveStatic returns the Response. On a miss it returns undefined —
       // then the SPA fallback (if any) gets a turn; if THAT misses too, fall through to the 404.

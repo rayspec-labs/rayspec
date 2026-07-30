@@ -13,6 +13,7 @@ export const ErrorCode = z.enum([
   'UNAUTHENTICATED', // 401 — missing/invalid credential (uniform, no enumeration)
   'FORBIDDEN', // 403 — authenticated but not permitted (live authz deny)
   'NOT_FOUND', // 404 — missing OR cross-tenant (no existence leak)
+  'METHOD_NOT_ALLOWED', // 405 — the path exists as a surface but not for this verb (carries `Allow`)
   'CONFLICT', // 409 — uniqueness / state conflict
   'IDEMPOTENCY_CONFLICT', // 409 — same Idempotency-Key, different body
   'PAYLOAD_TOO_LARGE', // 413 — request body exceeds the configured byte cap (rejected pre-side-effect)
@@ -30,6 +31,7 @@ export const STATUS_BY_CODE: Record<ErrorCode, number> = {
   UNAUTHENTICATED: 401,
   FORBIDDEN: 403,
   NOT_FOUND: 404,
+  METHOD_NOT_ALLOWED: 405,
   CONFLICT: 409,
   IDEMPOTENCY_CONFLICT: 409,
   PAYLOAD_TOO_LARGE: 413,
