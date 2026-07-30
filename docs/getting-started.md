@@ -487,8 +487,10 @@ node examples/stream-backend/build.mjs   # -> examples/stream-backend/packs/stre
 Each `build.mjs` is a thin `tsc` wrapper (see the example's `tsconfig.build.json`).
 Adapt it for your own backend, or run any equivalent transpile — the runtime only
 requires that every handler/pack module resolves to compiled `.js`/`.mjs`. Use
-[`rayspec gen-handler`](./cli-reference.md#gen-handler) to scaffold a handler, and
-`doctor` to validate any spec before you deploy it.
+[`rayspec gen-handler`](./cli-reference.md#gen-handler) to scaffold a handler —
+with [`--emit js`](./cli-reference.md#which-target-to-emit) it renders the handler
+as plain ESM JavaScript, deployable without a build step at all — and `doctor` to
+validate any spec before you deploy it.
 
 For the security boundaries that apply before you expose any of this beyond a
 trusted local machine, read

@@ -4,10 +4,14 @@
  * Drives `runGenHandler` (the CLI body) in-process: it renders a handler from a holes file to an out
  * dir, returns a stable JSON envelope, and is FAIL-CLOSED on a bad hole-set / a path escape / a bad
  * `--file`. The renders themselves are golden-tested in gen-handler/templates.test.ts; here we cover
- * the argv/IO plumbing + the fail-closed surface.
+ * the argv/IO plumbing + the fail-closed surface — plus the `--emit js` target, whose whole point is
+ * that the written file is a module the PRODUCTION loader accepts (a plain dynamic `import()` of
+ * compiled JavaScript), so it is imported for real here rather than only pattern-matched.
  */
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { GenHandlerCliError, runGenHandler } from './gen-handler.js';
 
@@ -66,6 +70,87 @@ describe('runGenHandler — happy path', () => {
     ]);
     expect(result.ok).toBe(true);
     expect(result.file).toBe('out/my-handler.ts');
+  });
+});
+
+describe('runGenHandler — --emit js writes a directly deployable ESM module', () => {
+  /** Mark the out dir as ESM, exactly as a real deployment does (the acme-notes build step writes the
+   * same `{"type":"module"}` next to its compiled handlers) so a bare `.js` resolves as ESM. */
+  function markOutDirEsm(): void {
+    writeFileSync(join(tmp, 'out/package.json'), '{ "type": "module" }\n', 'utf8');
+  }
+
+  it('defaults the filename to <name>.gen.js and node imports the file as plain ESM', async () => {
+    const holes = writeHoles('h.json', PERSIST);
+    const result = await runGenHandler(['--holes', holes, '--out', 'out', '--emit', 'js']);
+    expect(result.ok).toBe(true);
+    expect(result.file).toBe('out/code-claim.gen.js');
+    markOutDirEsm();
+
+    // Import the written file for real and drive it with a stubbed init — proving the emission is
+    // executable JavaScript, not merely TypeScript with the annotations pattern-matched away.
+    const abs = join(tmp, 'out/code-claim.gen.js');
+    const href = pathToFileURL(abs).href;
+    const mod = (await import(href)) as Record<string, unknown>;
+    const handler = mod.codeClaim as (
+      args: Record<string, unknown>,
+      init: unknown,
+    ) => Promise<unknown>;
+    expect(typeof handler).toBe('function');
+    const init = { tenantId: 't1', db: { update: async () => [{ id: 'c1' }] } };
+    await expect(handler({ claim_id: 'c1', category_code: 'travel' }, init)).resolves.toEqual({
+      status: 'coded',
+      id: 'c1',
+    });
+
+    // …and again from a BARE node, with no test-runner transform in between: that is exactly what
+    // the production handler loader does (a plain dynamic import of the resolved module path).
+    const exported = execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `const m = await import(${JSON.stringify(href)});\nprocess.stdout.write(JSON.stringify(Object.keys(m)));`,
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(JSON.parse(exported)).toEqual(['codeClaim']);
+  });
+
+  it('the emitted module carries NO TypeScript-only syntax', async () => {
+    const holes = writeHoles('h.json', PERSIST);
+    await runGenHandler(['--holes', holes, '--out', 'out', '--emit', 'js']);
+    const src = readFileSync(join(tmp, 'out/code-claim.gen.js'), 'utf8');
+    expect(src).not.toMatch(/^\s*import\b/m); // the SDK import was type-only — nothing survives it
+    expect(src).not.toMatch(/\binterface\s+\w+\s*\{/);
+    expect(src).not.toMatch(/\bas\s+(const|readonly|Record<)/);
+    expect(src).not.toMatch(/:\s*(StoreRow|StoreFilter|ToolHandler|Promise<|Record<)/);
+    expect(src).toContain('export const codeClaim = async (args, init) => {');
+  });
+});
+
+describe('runGenHandler — the envelope carries nextSteps (as `init` already does)', () => {
+  it('ts (the default): names the build step, the example wrapper AND the --emit js way out', async () => {
+    const holes = writeHoles('h.json', PERSIST);
+    const result = await runGenHandler(['--holes', holes, '--out', 'out']);
+    expect(result.ok).toBe(true);
+    const steps = result.nextSteps ?? [];
+    expect(steps.length).toBeGreaterThan(0);
+    // The recommendation is ONE self-contained sentence — it must stand on its own when quoted.
+    expect(steps[0]).toContain('TypeScript source');
+    expect(steps[0]).toContain('examples/acme-notes-backend/build.mjs');
+    expect(steps[0]).toContain('--emit js');
+    expect(steps.join(' ')).toContain('handlers[].module');
+  });
+
+  it('js: next steps with NO build step at all', async () => {
+    const holes = writeHoles('h.json', PERSIST);
+    const result = await runGenHandler(['--holes', holes, '--out', 'out', '--emit', 'js']);
+    expect(result.ok).toBe(true);
+    const steps = (result.nextSteps ?? []).join(' ');
+    expect(steps).toContain('out/code-claim.gen.js');
+    expect(steps).toContain('handlers[].module');
+    expect(steps).not.toMatch(/build\.mjs|compile|tsc/i);
   });
 });
 
@@ -128,6 +213,20 @@ describe('runGenHandler — fail-closed', () => {
     await expect(
       runGenHandler(['--holes', holes, '--out', 'out', '--file', 'x.js']),
     ).rejects.toThrow(/end in \.ts/);
+  });
+
+  it('throws on a --file whose extension contradicts --emit js', async () => {
+    const holes = writeHoles('h.json', PERSIST);
+    await expect(
+      runGenHandler(['--holes', holes, '--out', 'out', '--emit', 'js', '--file', 'x.ts']),
+    ).rejects.toThrow(/end in \.js/);
+  });
+
+  it('throws on an --emit value outside the closed ts|js set', async () => {
+    const holes = writeHoles('h.json', PERSIST);
+    await expect(
+      runGenHandler(['--holes', holes, '--out', 'out', '--emit', 'mjs']),
+    ).rejects.toThrow(/--emit/);
   });
 
   it('throws on an unknown flag', async () => {

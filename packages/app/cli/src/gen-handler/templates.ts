@@ -1,9 +1,10 @@
 /**
  * The DETERMINISTIC handler renderers (the bounded-template catalog T1/T2/T3).
  *
- * Pure `holes -> .ts string` functions. The emitted code is byte-stable for fixed holes (golden-gated),
- * imports `@rayspec/handler-sdk` TYPE-ONLY, takes ZERO npm deps, reaches the DB ONLY through the
- * injected tenant-bound `init.db` facade, coerces every model arg as UNTRUSTED DATA (never throws —
+ * Pure `holes -> module source` functions, rendered for one of two EMIT TARGETS (TypeScript source or
+ * plain ESM JavaScript — see `EmitTarget`). The emitted code is byte-stable for fixed holes
+ * (golden-gated), imports `@rayspec/handler-sdk` TYPE-ONLY, takes ZERO npm deps, reaches the DB ONLY
+ * through the injected tenant-bound `init.db` facade, coerces every model arg as UNTRUSTED DATA (never throws —
  * returns `{status:'failed'}`, the fail-soft coercion pattern), never writes injected/server
  * columns, and (T1 upsert arm) tenant-NAMESPACES the natural key server-side. See `holes.ts` for the
  * trusted-author-NOT-sandboxed posture (the hardening isolate is the real boundary; this is authoring
@@ -23,13 +24,37 @@ import {
   validateHoles,
 } from './holes.js';
 
+/**
+ * The emit TARGET — annotated TypeScript source (`ts`, the default) or plain ESM JavaScript (`js`).
+ *
+ * The templates use TypeScript for ANNOTATIONS and for the TYPE-ONLY SDK import ONLY, so the two
+ * targets render the SAME program: `js` drops exactly what a compiler would erase and nothing else.
+ * That makes the `js` render deployable as it stands (production loads compiled JavaScript only),
+ * while the `ts` render stays byte-for-byte what it has always been (the goldens gate precisely that).
+ */
+export type EmitTarget = 'ts' | 'js';
+
+/** A type annotation `: T` — emitted for `ts`, erased for `js`. */
+function ann(target: EmitTarget, type: string): string {
+  return target === 'ts' ? `: ${type}` : '';
+}
+
+/** A type assertion `<expr> as T` — emitted for `ts`, reduced to the bare expression for `js`. */
+function asType(target: EmitTarget, expr: string, type: string): string {
+  return target === 'ts' ? `${expr} as ${type}` : expr;
+}
+
 /** The shared file header every rendered handler carries (the honest trusted-author-NOT-sandboxed note). */
-const HEADER = (kind: 'persist' | 'lookup'): string =>
+const HEADER = (kind: 'persist' | 'lookup', target: EmitTarget): string =>
   `// AUTO-GENERATED ${kind === 'persist' ? 'persist-tool' : 'store-lookup'} handler ` +
   `(bounded template ${kind === 'persist' ? 'T1' : 'T2'}). Do NOT edit by hand —
 // regenerate via \`rayspec gen-handler\`. TRUSTED-AUTHOR, NOT SANDBOXED: it runs in-process; the two
 // CI gates (handler-imports / extension-capability) are TRIPWIRES, not a sandbox — the real per-tenant
-// isolate is a later hardening milestone (deferred). Imports @rayspec/handler-sdk TYPE-ONLY; ZERO npm deps; reaches
+// isolate is a later hardening milestone (deferred). ${
+    target === 'ts'
+      ? 'Imports @rayspec/handler-sdk TYPE-ONLY'
+      : 'ZERO imports (the SDK types are compile-time only)'
+  }; ZERO npm deps; reaches
 // the DB ONLY through the injected, tenant-bound, declared-stores-only init.db facade.`;
 
 /** Emit a JS scalar literal for a fixed-filter value (string/number/boolean) — JSON-safe quoting. */
@@ -56,7 +81,7 @@ function emitFixedFilter(filter: Readonly<Record<string, string | number | boole
  * Emits a block that reads `o['<col>']` and either assigns `row['<col>']`, sets `null`, drops the key,
  * or `return { ... failed }`. NEVER throws. `enumValues` constrains a text column to a closed set.
  */
-function emitCoerceColumn(c: ColumnHole): string {
+function emitCoerceColumn(c: ColumnHole, target: EmitTarget): string {
   const col = c.col;
   const v = member('o', col);
   const rowCol = member('row', col);
@@ -73,10 +98,11 @@ function emitCoerceColumn(c: ColumnHole): string {
     case 'uuid': {
       if (c.enumValues && c.jsonType === 'text') {
         const set = `[${c.enumValues.map((e) => emitScalar(e)).join(', ')}]`;
+        const members = target === 'ts' ? `(${set} as readonly string[])` : set;
         return `  // ${col}: text (closed enum) — UNTRUSTED arg, membership-checked.
   {
     const val = ${v};
-    if (typeof val === 'string' && (${set} as readonly string[]).includes(val)) {
+    if (typeof val === 'string' && ${members}.includes(val)) {
       ${rowCol} = val;
     } else { ${onBad} }
   }`;
@@ -121,23 +147,41 @@ function emitCoerceColumn(c: ColumnHole): string {
 }
 
 /** Build the `coerceRow` helper body for a persist template (T1 + T3). */
-function emitCoerceRow(holes: PersistHandlerHoles): string {
-  const blocks = holes.columns.map(emitCoerceColumn).join('\n');
+function emitCoerceRow(holes: PersistHandlerHoles, target: EmitTarget): string {
+  const blocks = holes.columns.map((c) => emitCoerceColumn(c, target)).join('\n');
+  const coerceResult =
+    "{ ok: true; row: StoreRow } | { ok: false; status: 'failed'; detail: string }";
   return `/**
  * Coerce the UNTRUSTED model args into the row to persist (T3 shape-map + per-ColumnType coercion).
  * Drops any non-declared key (additionalProperties:false parity with the tool parameters), never
  * throws (returns a failed result on a required/enum violation), and never writes an injected column.
  */
-function coerceRow(args: Record<string, unknown>): { ok: true; row: StoreRow } | { ok: false; status: 'failed'; detail: string } {
-  const o = typeof args === 'object' && args !== null ? (args as Record<string, unknown>) : {};
-  const row: StoreRow = {};
+function coerceRow(args${ann(target, 'Record<string, unknown>')})${ann(target, coerceResult)} {
+  const o = typeof args === 'object' && args !== null ? ${asArgsRecord(target)} : {};
+  const row${ann(target, 'StoreRow')} = {};
 ${blocks}
   return { ok: true, row };
 }`;
 }
 
+/** The `args`-as-a-record expression both templates open with (`ts` keeps the widening assertion). */
+function asArgsRecord(target: EmitTarget): string {
+  return target === 'ts' ? '(args as Record<string, unknown>)' : 'args';
+}
+
+/**
+ * The TYPE-ONLY SDK import line plus its trailing blank line — emitted for `ts`, NOTHING for `js`
+ * (the import carries no runtime value, so the JavaScript emission has no import at all).
+ */
+function typeImport(target: EmitTarget, names: string): string {
+  return target === 'ts' ? `import type { ${names} } from '@rayspec/handler-sdk';\n` : '';
+}
+
 /** Render the auto-persist tool handler (Template T1). */
-export function renderPersistHandler(holes: PersistHandlerHoles): string {
+export function renderPersistHandler(
+  holes: PersistHandlerHoles,
+  target: EmitTarget = 'ts',
+): string {
   const fk = holes.fkRevalidate;
   // Server-STAMPED fixed values merged onto the coerced row before the write (author constants — a
   // model can never override them; they overwrite any same-named coerced value). Emitted as a literal
@@ -155,7 +199,7 @@ export function renderPersistHandler(holes: PersistHandlerHoles): string {
     {
       const code = ${member('coerced.row', fk.codeArg)};
       const lookupFilter${fk.lookupFixedFilter ? ` = { ...${emitFixedFilter(fk.lookupFixedFilter)}, ${fk.lookupColumn}: code }` : ` = { ${fk.lookupColumn}: code }`};
-      const matches = await init.db.select(${emitScalar(fk.lookupStore)}, lookupFilter as Record<string, unknown>);
+      const matches = await init.db.select(${emitScalar(fk.lookupStore)}, ${asType(target, 'lookupFilter', 'Record<string, unknown>')});
       if (matches.length === 0) {
         return { status: 'failed', detail: 'the chosen ${fk.codeArg} is not a valid code in ${fk.lookupStore}.' };
       }
@@ -166,7 +210,7 @@ export function renderPersistHandler(holes: PersistHandlerHoles): string {
   if (holes.mode === 'update-by-id') {
     const idArg = holes.idArg as string;
     armBody = `    // ── ARM A — update-by-id (the existing-row case). The id is a model arg, validated as DATA.
-    const idRaw = (args as Record<string, unknown>)[${emitScalar(idArg)}];
+    const idRaw = ${asArgsRecord(target)}[${emitScalar(idArg)}];
     const id = typeof idRaw === 'string' ? idRaw : '';
     if (id.length === 0) return { status: 'failed', detail: '${idArg} missing or not a string.' };${fkBlock}${stampBlock}
     const updated = await init.db.update(STORE, { id }, coerced.row);
@@ -182,7 +226,7 @@ export function renderPersistHandler(holes: PersistHandlerHoles): string {
       return { status: 'failed', detail: 'natural key ${nk} missing or not a string.' };
     }${fkBlock}${stampBlock}
     const ref = \`\${init.tenantId}:\${keyVal}\`;
-    const rowWithRef: StoreRow = { ...coerced.row, ${nk}: ref };
+    const rowWithRef${ann(target, 'StoreRow')} = { ...coerced.row, ${nk}: ref };
     const existing = await init.db.select(STORE, { ${nk}: ref });
     if (existing[0]) {
       await init.db.update(STORE, { ${nk}: ref }, rowWithRef);
@@ -194,26 +238,41 @@ export function renderPersistHandler(holes: PersistHandlerHoles): string {
     return { status: ${emitScalar(holes.successStatus)}, id: typeof inserted.id === 'string' ? inserted.id : undefined };`;
   }
 
-  return `${HEADER('persist')}
-import type { StoreRow, ToolHandler, ToolHandlerInit } from '@rayspec/handler-sdk';
-
-const STORE = ${emitScalar(holes.store)}; // a DECLARED store; init.db fail-closes on any other name.
-
-${emitCoerceRow(holes)}
-
-interface PersistResult {
+  // The RESULT SHAPE: a declared interface for `ts`, the same contract as a JSDoc typedef for `js`
+  // (documentation either way — it carries no runtime weight, exactly like the annotations it replaces).
+  const resultShape =
+    target === 'ts'
+      ? `interface PersistResult {
   /** The success status (${emitScalar(holes.successStatus)}) or 'failed'. */
   status: string;
   /** The affected row id, when known. */
   id?: string;
   /** A human-readable detail on failure. */
   detail?: string;
-}
-
-export const ${holes.exportName}: ToolHandler<Record<string, unknown>, PersistResult> = async (
+}`
+      : `/**
+ * @typedef {object} PersistResult
+ * @property {string} status The success status (${emitScalar(holes.successStatus)}) or 'failed'.
+ * @property {string} [id] The affected row id, when known.
+ * @property {string} [detail] A human-readable detail on failure.
+ */`;
+  const signature =
+    target === 'ts'
+      ? `export const ${holes.exportName}: ToolHandler<Record<string, unknown>, PersistResult> = async (
   args: Record<string, unknown>,
   init: ToolHandlerInit,
-): Promise<PersistResult> => {
+): Promise<PersistResult> => {`
+      : `export const ${holes.exportName} = async (args, init) => {`;
+
+  return `${HEADER('persist', target)}
+${typeImport(target, 'StoreRow, ToolHandler, ToolHandlerInit')}
+const STORE = ${emitScalar(holes.store)}; // a DECLARED store; init.db fail-closes on any other name.
+
+${emitCoerceRow(holes, target)}
+
+${resultShape}
+
+${signature}
   const coerced = coerceRow(args);
   if (!coerced.ok) return { status: 'failed', detail: coerced.detail };
   try {
@@ -227,9 +286,11 @@ ${armBody}
 }
 
 /** Render the store-lookup tool handler (Template T2). */
-export function renderLookupHandler(holes: LookupHandlerHoles): string {
-  const filterColsLit = `[${holes.filterCols.map((c) => emitScalar(c)).join(', ')}] as const`;
-  const projectColsLit = `[${holes.projectCols.map((c) => emitScalar(c)).join(', ')}] as const`;
+export function renderLookupHandler(holes: LookupHandlerHoles, target: EmitTarget = 'ts'): string {
+  const cols = (list: readonly string[]): string =>
+    asType(target, `[${list.map((c) => emitScalar(c)).join(', ')}]`, 'const');
+  const filterColsLit = cols(holes.filterCols);
+  const projectColsLit = cols(holes.projectCols);
   const baseFilterLit = holes.fixedFilter ? emitFixedFilter(holes.fixedFilter) : '{}';
   const substringBlock =
     holes.substringArg && holes.substringCol
@@ -250,39 +311,52 @@ export function renderLookupHandler(holes: LookupHandlerHoles): string {
       : `
   const candidates = rows;`;
 
-  return `${HEADER('lookup')}
-import type { StoreFilter, StoreRow, ToolHandler, ToolHandlerInit } from '@rayspec/handler-sdk';
-
-const STORE = ${emitScalar(holes.store)};
-const FILTER_COLS = ${filterColsLit}; // CLOSED allowlist — ONLY these args may build the equality filter.
-const PROJECT_COLS = ${projectColsLit}; // the columns projected into each returned row (drop the rest).
-const BASE_FILTER: StoreFilter = ${baseFilterLit}; // the OPTIONAL fixed predicate.
-const MAX_ROWS = ${holes.maxRows}; // hard cap on rows returned to the model (bounds the context).
-
-interface LookupResult {
+  // The RESULT SHAPE: a declared interface for `ts`, the same contract as a JSDoc typedef for `js`.
+  const resultShape =
+    target === 'ts'
+      ? `interface LookupResult {
   /** The projected, capped rows (each restricted to PROJECT_COLS). */
   rows: StoreRow[];
   /** The number of rows returned (after the cap). */
   count: number;
-}
+}`
+      : `/**
+ * @typedef {object} LookupResult
+ * @property {object[]} rows The projected, capped rows (each restricted to PROJECT_COLS).
+ * @property {number} count The number of rows returned (after the cap).
+ */`;
+  const signature =
+    target === 'ts'
+      ? `export const ${holes.exportName}: ToolHandler<Record<string, unknown>, LookupResult> = async (
+  args: Record<string, unknown>,
+  init: ToolHandlerInit,
+): Promise<LookupResult> => {`
+      : `export const ${holes.exportName} = async (args, init) => {`;
+
+  return `${HEADER('lookup', target)}
+${typeImport(target, 'StoreFilter, StoreRow, ToolHandler, ToolHandlerInit')}
+const STORE = ${emitScalar(holes.store)};
+const FILTER_COLS = ${filterColsLit}; // CLOSED allowlist — ONLY these args may build the equality filter.
+const PROJECT_COLS = ${projectColsLit}; // the columns projected into each returned row (drop the rest).
+const BASE_FILTER${ann(target, 'StoreFilter')} = ${baseFilterLit}; // the OPTIONAL fixed predicate.
+const MAX_ROWS = ${holes.maxRows}; // hard cap on rows returned to the model (bounds the context).
+
+${resultShape}
 
 /** Project a row to the declared PROJECT_COLS only (drop everything else — incl. injected columns). */
-function project(row: StoreRow): StoreRow {
-  const out: StoreRow = {};
+function project(row${ann(target, 'StoreRow')})${ann(target, 'StoreRow')} {
+  const out${ann(target, 'StoreRow')} = {};
   for (const col of PROJECT_COLS) {
     if (col in row) out[col] = row[col];
   }
   return out;
 }
 
-export const ${holes.exportName}: ToolHandler<Record<string, unknown>, LookupResult> = async (
-  args: Record<string, unknown>,
-  init: ToolHandlerInit,
-): Promise<LookupResult> => {
-  const o = typeof args === 'object' && args !== null ? (args as Record<string, unknown>) : {};
+${signature}
+  const o = typeof args === 'object' && args !== null ? ${asArgsRecord(target)} : {};
   // Build the filter from the FIXED predicate + ONLY allowlisted arg keys (a non-allowlisted key can
   // never craft a filter over an unintended/injected column). Values are DATA (scalars only).
-  const filter: StoreFilter = { ...BASE_FILTER };
+  const filter${ann(target, 'StoreFilter')} = { ...BASE_FILTER };
   for (const col of FILTER_COLS) {
     const v = o[col];
     if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') filter[col] = v;
@@ -295,13 +369,15 @@ ${substringBlock}
 `;
 }
 
-/** Render one handler from its (already-validated) holes. */
-export function renderHandler(holes: HandlerHoles): string {
-  return holes.template === 'persist' ? renderPersistHandler(holes) : renderLookupHandler(holes);
+/** Render one handler from its (already-validated) holes, for the given emit target. */
+export function renderHandler(holes: HandlerHoles, target: EmitTarget = 'ts'): string {
+  return holes.template === 'persist'
+    ? renderPersistHandler(holes, target)
+    : renderLookupHandler(holes, target);
 }
 
 /** Validate then render — the single entrypoint the CLI subcommand + the goldens call. */
-export function genHandler(holes: unknown): string {
+export function genHandler(holes: unknown, target: EmitTarget = 'ts'): string {
   validateHoles(holes);
-  return renderHandler(holes);
+  return renderHandler(holes, target);
 }
