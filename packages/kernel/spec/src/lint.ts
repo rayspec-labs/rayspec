@@ -1130,8 +1130,11 @@ export function lintSpec(spec: RaySpec): SpecError[] {
   // and never calls a tool — a declared lookup/persist loop silently never fires and only a live smoke
   // would catch it. The condition is purely STRUCTURAL (not a heuristic), so it hard-blocks rather than
   // warns. There is NO exemption for an action's `persistTo`: `persistTo` + tools + `outputSchema` is
-  // exactly the broken combination. Revisit ONLY if a backend ever supports tools AND native structured
-  // output in one run.
+  // exactly the broken combination. The rule is NOT backend-conditional: the openai/anthropic/codex
+  // path is the native projection above, and on the one backend that EMULATES structured output via
+  // instructions (pi — CAPABILITIES.pi.nativeStructuredOutput === false) the appended JSON-only
+  // directive pulls the answer the same way, so the shape is rejected UNIFORMLY, fail-closed. Revisit
+  // ONLY if a backend ever supports tools AND native structured output in one run.
   spec.agents.forEach((agent, ai) => {
     if (agent.tools.length > 0 && agent.outputSchema) {
       errors.push(

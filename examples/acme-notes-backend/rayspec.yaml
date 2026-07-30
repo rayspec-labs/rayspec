@@ -68,10 +68,12 @@ agents:
     tools:
       - lookup_notebook
     maxTurns: 6
-    # NO top-level outputSchema: this agent uses TOOLS. A structured output would be projected into
-    # the backend's native structured-output slot, so the model would answer in one turn and never
-    # call lookup_notebook. A tool-using agent puts its structured shape on a tool's `parameters`
-    # (the linter rejects the combination — `agent_output_schema_shortcircuits_tools`).
+    # NO top-level outputSchema: this agent uses TOOLS. On a backend with NATIVE structured output
+    # (openai here, also anthropic/codex) the schema would be projected into that slot, so the model
+    # would answer in one turn and never call lookup_notebook; on the EMULATING backend (pi) the
+    # JSON-only instruction pulls the answer the same way. A tool-using agent puts its structured
+    # shape on a tool's `parameters` — the linter rejects the combination on EVERY backend
+    # (`agent_output_schema_shortcircuits_tools`).
 
 # --- tooling ----------------------------------------------------------------------------------
 # WRAPS core.ToolSpec (name/description/parameters) + the resolver fields. `idempotent` is a
