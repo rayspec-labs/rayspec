@@ -65,6 +65,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolving GHSA-mh99-v99m-4gvg — a regular-expression denial-of-service (ReDoS) advisory in the
   affected versions. Transitive-only; no API or behavior change.
 
+- **Dependency advisories are re-checked on a schedule, not only on a push.** A new
+  `Dependency advisories` workflow scans the committed `pnpm-lock.yaml` against OSV.dev every
+  Monday at 06:00 UTC (and on manual dispatch), with the same pinned, SHA-256-verified scanner
+  build the push/pull-request audit uses — so an advisory published against a dependency that
+  has not changed surfaces on its own instead of waiting for the next unrelated push to run CI.
+  A finding becomes exactly one issue per advisory id, labeled `dependencies` (the label is
+  created if it does not exist) and refreshed on later runs rather than re-filed, so an advisory
+  never accumulates duplicates; a clean run files nothing, comments nothing and notifies nobody.
+  The round is read-only: it changes no dependency, so the committed dependency SBOM and its
+  freshness gate are untouched — that gate keeps tracking dependency drift while this round
+  tracks advisory drift against a lockfile that has not moved. Repository infrastructure only:
+  no published package, API or runtime behavior changes. The report-to-issue sync ships as
+  `scripts/sync-advisory-issues.mjs` and runs locally via `pnpm test:advisory-sync`.
+
 ## [1.6.2] - 2026-07-24
 
 ### Added

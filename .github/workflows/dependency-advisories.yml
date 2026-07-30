@@ -1,0 +1,110 @@
+name: Dependency advisories
+
+# ────────────────────────────────────────────────────────────────────────────────────────────────
+# THE SCHEDULED DEPENDENCY-ADVISORY ROUND.
+#
+# WHY IT EXISTS. ci.yml already audits the lockfile against OSV.dev on every push and pull request,
+# and that audit is a merge gate. But it answers a question about a COMMIT — "does the tree being
+# pushed carry a known-vulnerable dependency?" — and OSV.dev is a LIVE database. An advisory
+# published today lands against a lockfile nobody has touched in weeks, so a commit that was green
+# at tag time can be red an hour later with no change to the code. Between two pushes, nothing asks.
+# During a quiet period a new advisory surfaces only when some unrelated push happens to run CI.
+#
+# This round asks on a timer instead. It does NOT re-litigate a release: a tag freezes a commit that
+# was green when it was cut, and "red later" is not "release broken" — it is a maintenance task.
+# The round exists to make that task appear, on its own, in the issue tracker.
+#
+# WHEN IT RUNS. Monday 06:00 UTC, plus a manual workflow_dispatch when someone wants an answer now.
+# Weekly, because that is the cadence at which a human actually triages: a daily round that mostly
+# reports nothing trains everyone to ignore it, and the push/PR audit in ci.yml already covers every
+# change the tree does receive. GitHub may delay a scheduled run under load, and disables schedules
+# in a repository with no activity for 60 days — both are acceptable for a maintenance round.
+#
+# WHAT IT DOES. Downloads the SAME pinned, SHA256-verified osv-scanner build ci.yml uses (the two
+# version+hash pairs are deliberately identical, so the scheduled round and the merge gate can never
+# disagree about what "an advisory" means), scans the frozen pnpm-lock.yaml — the whole workspace
+# dependency tree, no install and no build needed — and asks for machine-readable output instead of
+# a human table. `osv-scanner.toml` at the repo root is picked up automatically, so a triaged
+# [[IgnoredVulns]] exception suppresses the finding here exactly as it does in ci.yml.
+#
+# WHAT A FINDING PRODUCES. scripts/sync-advisory-issues.mjs turns the report into EXACTLY ONE issue
+# per advisory id, labeled `dependencies` (the label is ensured idempotently, so a first finding
+# cannot fail on a label that does not exist yet). An advisory that already has an open issue gets
+# that issue's body refreshed — never a second one, however many weeks it stays open. A clean run
+# performs no GitHub call at all: no issue, no comment, no e-mail, nothing. Silence is the signal
+# that there is nothing to do; a routine that reports every week gets ignored by the second week.
+# What to do with a filed issue is written into the issue body itself.
+#
+# THE SCAN STEP DOES NOT FAIL THE ROUND. osv-scanner exits 1 when it matches an advisory, and that
+# is the case this workflow exists for — the issue is the outcome, not a red run. Only a genuine
+# scanner or network failure (any other exit code) fails the job. The sync step fails the job if it
+# cannot reach the tracker, because a sync that silently did nothing would look exactly like a clean
+# round.
+#
+# RELATIONSHIP TO THE DEPENDENCY SBOM. `gate:sbom-fresh` / `gen:dependency-sbom` track DEPENDENCY
+# DRIFT: they fail when the committed SBOM stops describing the lockfile on disk. This round tracks
+# ADVISORY DRIFT against a lockfile that has not moved. The two compose and do not compete — this
+# workflow changes no dependency and therefore never touches the SBOM. The remediation for a finding
+# does change the lockfile, and that is where the SBOM gate takes over: it fails the resulting pull
+# request until the SBOM is regenerated.
+#
+# TOKEN SCOPE. `issues: write` (file and refresh the issues) plus `contents: read` (check out the
+# lockfile and the script). Nothing else, and no secret beyond the run's own GITHUB_TOKEN.
+# ────────────────────────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # Monday 06:00 UTC — an hour ahead of the weekly CodeQL re-scan, so the two do not contend.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+# One round at a time. A manual dispatch that overlaps the scheduled run would race it for the same
+# issue titles; queueing (never cancelling) keeps the deduplication decision serialized.
+concurrency:
+  group: dependency-advisories
+  cancel-in-progress: false
+
+jobs:
+  advisories:
+    name: Scan the lockfile and file findings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # Node runs the sync script only — it has no dependencies, so there is no install and no
+      # build in this workflow at all. Pinning the version keeps it off whatever the runner image
+      # happens to ship.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      # Version + hash are kept byte-identical to the dependency-audit step in ci.yml on purpose.
+      # Exit 1 means "advisories matched" — the outcome this round is built to handle, not an error;
+      # anything else is a scanner/network failure and must fail the job loudly rather than be
+      # mistaken for a clean scan.
+      - name: Scan the lockfile (osv-scanner / OSV.dev)
+        run: |
+          OSV=2.4.0
+          OSV_SHA256=15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0
+          curl -sSL -o /tmp/osv-scanner "https://github.com/google/osv-scanner/releases/download/v${OSV}/osv-scanner_linux_amd64"
+          echo "${OSV_SHA256}  /tmp/osv-scanner" | sha256sum -c -
+          chmod +x /tmp/osv-scanner
+          set +e
+          /tmp/osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output=/tmp/osv-advisories.json
+          code=$?
+          set -e
+          if [ "${code}" -ne 0 ] && [ "${code}" -ne 1 ]; then
+            echo "osv-scanner failed with exit ${code} — this is a scanner failure, not a finding." >&2
+            exit "${code}"
+          fi
+
+      # One issue per advisory, deduplicated against the open issues; completely silent when the
+      # report is empty. Locally testable: `pnpm test:advisory-sync`.
+      - name: File or refresh the advisory issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/sync-advisory-issues.mjs --input /tmp/osv-advisories.json
