@@ -18,8 +18,11 @@
  *
  * Like deploy.db.test.ts, the unit under test is the BUILT CLI (packages/app/cli/dist/index.js) — run
  * `pnpm build` before this suite. Without that dist the suite self-skips (loudly, naming the command
- * that fixes it); where the built CLI is REQUIRED (CI) the ran-guard hard-fails instead, so the proof
- * can never green-skip in the lane that stands for it.
+ * that fixes it); where the built CLI is REQUIRED (CI) the ran-guard hard-fails instead WHENEVER IT
+ * RUNS. Stated exactly: under `turbo run test` that required-run signal is NOT part of the task hash,
+ * so a skip recorded without it could replay from a warm shared cache instead of reaching the guard.
+ * That replay cannot happen in this repo's CI today — both required lanes start cold-cache and build
+ * before testing — and the dist state itself IS a hashed input (packages/app/cli/turbo.json).
  *
  * That deliberately differs from packages/app/rayspec/src/equivalence.test.ts, which drives the same
  * dist and hard-fails on its absence with no skip at all. The distinction is what a skip COSTS each
@@ -54,6 +57,8 @@ const distBuilt = existsSync(CLI_DIST);
 // Keyed on CI rather than a dedicated RAYSPEC_REQUIRE_* opt-in: turbo forwards CI to the task by default,
 // whereas a new variable would ALSO have to be declared in turbo.json's `test.env` allowlist to reach the
 // child at all — an opt-in that silently does nothing under `turbo run test` is worse than none.
+// Its limit: turbo FORWARDS CI but does not HASH it, so a skip recorded without CI can replay from a
+// warm cache instead of running the guard below — unreachable in repo CI (cold cache, builds first).
 const distRequired = Boolean(process.env.CI);
 // The un-skippable ran-guard (fires synchronously at collection): where the built CLI is REQUIRED, refuse
 // to let this dist-backed suite self-skip to a false green — fail exactly as an unbuilt dist always has.
