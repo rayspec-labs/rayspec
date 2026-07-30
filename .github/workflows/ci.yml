@@ -60,7 +60,7 @@ jobs:
       # app config. DEV/TEST-ONLY, an explicit NON-secret placeholder (allowlisted in .gitleaks.toml).
       RAYSPEC_API_KEY_PEPPER: ci-dev-pepper-not-a-real-secret
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # gitleaks (dir mode) scans the working tree; full history is fetched so a future
           # history-mode scan / PR-range diff has what it needs.
@@ -84,7 +84,7 @@ jobs:
         with:
           version: 10.12.4
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
@@ -275,7 +275,7 @@ jobs:
       # DB suites can NOT silently self-skip: the un-skippable ran-guards hard-fail if the DB is absent.
       RAYSPEC_REQUIRE_DB_TESTS: 'true'
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Create shadow DB
         run: |
@@ -286,7 +286,7 @@ jobs:
         with:
           version: 10.12.4
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
@@ -403,7 +403,7 @@ jobs:
       # BILLS the API instead of using the $0 subscription harness — and its stray-key self-check would
       # flag it. The subscription OAuth token above is the only anthropic credential this lane provides.
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Fail-fast credential preflight, before the minutes of install/build/live calls. It proves the
       # required live credentials are PRESENT and — for the two providers with a clean, cheap,
@@ -471,7 +471,7 @@ jobs:
         with:
           version: 10.12.4
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
