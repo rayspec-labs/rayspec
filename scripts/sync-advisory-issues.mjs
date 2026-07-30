@@ -81,8 +81,10 @@ function clean(value, max) {
   );
 }
 
-/** Escape the one markdown character that would break a table row. */
-const cell = (value) => value.replace(/\|/g, '\\|');
+/** Escape the markdown characters that would break a table row. The backslash MUST be escaped
+ *  first: escaping only the pipe turns an advisory's literal `\|` into `\\|`, where the `\\` is
+ *  itself a complete escape and the pipe is left bare to split the row. */
+const cell = (value) => value.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
 
 /** Run `gh` with an argv VECTOR — never a shell string, so untrusted text cannot become a command. */
 function gh(args) {

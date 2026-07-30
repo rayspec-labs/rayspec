@@ -19,6 +19,10 @@
  *       list item as lazy continuation and prints them as raw pipes. Asserting that a package name
  *       appears SOMEWHERE in the body does not catch that, so the block structure is pinned here —
  *       for a full advisory and for a bare one, where absent optional bullets are dropped.
+ *   (P) A PIPE CANNOT ESCAPE ITS TABLE CELL — the table rows are assembled by hand, so a pipe in
+ *       untrusted advisory text adds a COLUMN, shifting every later field one cell right and
+ *       dropping the last. Escaping the pipe alone does not fix it: a literal `\|` becomes `\\|`,
+ *       an escaped backslash followed by a bare delimiter, so the backslash must be escaped first.
  *   (U) UPDATE, NEVER DUPLICATE — with an open issue already carrying the advisory's title, the run
  *       EDITS it and creates nothing. Re-filing weekly is how a tracker becomes unusable.
  *   (Q) A CLEAN RUN IS SILENT — a scanner report with no matches performs ZERO `gh` calls: no
@@ -169,6 +173,24 @@ function reportBareAdvisory() {
   };
 }
 
+/** A scanner report whose package name carries a pipe behind a backslash — the sequence that
+ *  escapes out of a table cell when only the pipe is escaped. */
+function reportPipeInPackageName() {
+  return {
+    results: [
+      {
+        source: { path: 'pnpm-lock.yaml', type: 'lockfile' },
+        packages: [
+          {
+            package: { name: 'left-pad\\|INJECTED', version: '1.0.0', ecosystem: 'npm' },
+            vulnerabilities: [{ id: ADVISORY }],
+          },
+        ],
+      },
+    ],
+  };
+}
+
 /** Assert the issue body's block structure: every separator that markdown needs is present. */
 function assertWellFormedBody(body, label) {
   assert.match(
@@ -222,6 +244,46 @@ try {
       '(M) a dropped optional bullet must not leave a double blank line',
     );
     console.log('ok (M) — the issue body keeps its markdown block structure, bullets or not');
+  }
+
+  // ── (P) a pipe in advisory text stays INSIDE its table cell ────────────────────────────────────
+  // The row is built by hand, so an unescaped pipe does not corrupt markup in the abstract — it
+  // adds a column, silently shifting `Version`/`Ecosystem`/`Source` one cell to the right and
+  // dropping the last. Escaping the pipe alone is not enough: a literal `\|` becomes `\\|`, an
+  // escaped BACKSLASH followed by a bare pipe, which splits the row anyway.
+  {
+    const r = runSync(reportPipeInPackageName());
+    assert.equal(r.code, 0, `(P) the sync must exit 0; got ${r.code}: ${r.err}`);
+    const [call] = verbs(r.calls, 'issue', 'create');
+    assert.ok(call, '(P) the advisory must be filed');
+    const header = '| Package | Version | Ecosystem | Source |';
+    // A pipe delimits a cell unless an ODD number of backslashes precedes it — `\|` is a literal
+    // pipe, `\\|` is an escaped backslash followed by a REAL delimiter. Counting with a naive
+    // "not preceded by a backslash" rule would call the broken output well-formed.
+    const columns = (row) => {
+      let cells = 1;
+      let slashes = 0;
+      for (const ch of row) {
+        if (ch === '\\') {
+          slashes += 1;
+          continue;
+        }
+        if (ch === '|' && slashes % 2 === 0) cells += 1;
+        slashes = 0;
+      }
+      return cells;
+    };
+    const [dataRow] = call.body
+      .split('\n')
+      .filter((l) => l.startsWith('| `') && !l.startsWith('| --- '));
+    assert.ok(dataRow, '(P) the table must still carry a data row');
+    assert.equal(
+      columns(dataRow),
+      columns(header),
+      `(P) an escaped pipe must not add a column — header has ${columns(header)}, row has ${columns(dataRow)}: ${dataRow}`,
+    );
+    assert.match(dataRow, /\| `1\.0\.0` \|/, '(P) the version must stay in its own cell');
+    console.log('ok (P) — a pipe in advisory text cannot escape its table cell');
   }
 
   // ── (D) one advisory across two packages → exactly ONE issue, naming both packages ─────────────
