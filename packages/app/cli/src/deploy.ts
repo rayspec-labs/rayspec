@@ -27,6 +27,7 @@
 
 import { parseArgs } from 'node:util';
 import type { ProductYamlRollout } from '@rayspec/product-yaml';
+import type { FrontendSpec } from '@rayspec/spec';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
 
 /** A usage/argument problem in `deploy` (mapped to exit 2 by index.ts, like the other subcommands). */
@@ -46,6 +47,19 @@ export interface DeployDryRunResult {
     readonly triggerEvents: readonly string[];
     readonly workflows: readonly string[];
   };
+  /**
+   * What the DB-free detection found when the doc is FRONTEND-ONLY (a static profile), else absent —
+   * the counterpart of `composed` for the one document shape there is nothing to compose for. Reported
+   * INSTEAD of a compose summary; a product/backend doc's verdict carries `composed` as before.
+   */
+  readonly staticProfile?: {
+    /** The boot profile the doc selects — the DB-less, auth-less static boot. */
+    readonly profile: 'static';
+    /** The frontend mounts that boot would serve (route → dir, plus the SPA-fallback flag). */
+    readonly frontendMounts: readonly FrontendSpec[];
+    /** What such a deploy does NOT do — stated outright rather than left to inference. */
+    readonly notes: readonly string[];
+  };
   /** The fail-closed reasons compose/parse rejected the doc (ok:false). */
   readonly errors: readonly string[];
   /** The honest boundary — what --dry-run does NOT prove. */
@@ -58,6 +72,23 @@ const DRY_RUN_NOT_PROVEN = [
   'boot-env sufficiency (secrets / blob root / media key are not read)',
   'any provider credential (STT / extraction / responder are stubbed)',
   'live-schema drift against an existing deployment',
+  'that the app actually serves (no port was bound)',
+] as const;
+
+/** The work a FRONTEND-ONLY (static-profile) deploy does not do — the substance of its dry-run verdict. */
+const STATIC_PROFILE_NOTES = [
+  'no database is touched (the static boot opens none)',
+  'no migration applies (the static boot reaches no migration engine)',
+  'there is nothing to compose (the document declares no store, route, trigger, or workflow)',
+] as const;
+
+/**
+ * What a STATIC-PROFILE `--dry-run` does NOT prove. The DB/provider entries of DRY_RUN_NOT_PROVEN do not
+ * apply to a boot that opens no database and stubs no adapter; what stays unproven is the filesystem the
+ * mounts point at (only the document was read) and the serve itself.
+ */
+const STATIC_DRY_RUN_NOT_PROVEN = [
+  'that the declared frontend directories exist or hold built assets (only the document was read)',
   'that the app actually serves (no port was bound)',
 ] as const;
 
@@ -203,6 +234,12 @@ export async function runDeploy(args: readonly string[]): Promise<DeployOutcome>
  * the runtime-only instances (the durable enqueuer, the STT adapter, the extraction executors, the
  * conversation responder, the file blob reader) are inert stubs that compose only checks for PRESENCE,
  * never invokes. It proves the doc VALIDATES and COMPOSES against the wired surface — and nothing more.
+ *
+ * A FRONTEND-ONLY (static-profile) document is answered BEFORE any of that: it is not a product doc, so
+ * `parseProductSpec` would reject its shape — an ok:false verdict on a document this very command BOOTS
+ * (the static branch in serveDeployment). It is classified with the SAME shared `detectStaticProfile` that
+ * branch takes, so the check and the boot cannot disagree, and its mounts ARE the plan — a static profile
+ * has nothing to compose.
  */
 async function dryRunCompose(specPath: string, specText: string): Promise<DeployDryRunResult> {
   const base = {
@@ -211,6 +248,25 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     spec: specPath,
     notProven: DRY_RUN_NOT_PROVEN,
   };
+
+  // Dynamic like every other import here (and for the same reason it is dynamic in serveDeployment:
+  // `rayspec doctor` must not drag the boot dependencies in).
+  const { detectStaticProfile } = await import('@rayspec/server');
+  const staticBoot = detectStaticProfile(specPath);
+  if (staticBoot) {
+    return {
+      ...base,
+      ok: true,
+      staticProfile: {
+        profile: 'static',
+        frontendMounts: staticBoot.frontend,
+        notes: STATIC_PROFILE_NOTES,
+      },
+      errors: [],
+      notProven: STATIC_DRY_RUN_NOT_PROVEN,
+    };
+  }
+
   const { parseProductSpec } = await import('@rayspec/spec');
   const {
     composeCapabilityStores,

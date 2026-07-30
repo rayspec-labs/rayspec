@@ -19,6 +19,16 @@ const repoRoot = resolve(here, '../../../..');
 const ACME_REL = 'examples/acme-notes/acme-notes.product.yaml';
 const DOCTORED = join(repoRoot, '_deploy_test_doctored.product.yaml');
 const GARBAGE = join(repoRoot, '_deploy_test_garbage.product.yaml');
+const STATIC_REL = '_deploy_test_static.rayspec.yaml';
+const STATIC_DOC = join(repoRoot, STATIC_REL);
+
+/** A FRONTEND-ONLY document — the shape `deploy` boots as the static profile (no DB, no boot secret). */
+const FRONTEND_ONLY_SPEC = `version: '1.0'
+metadata:
+  name: static-profile-ui
+frontend:
+  - { route: /, dir: web/dist, spa: true }
+`;
 
 // The read-spec jail resolves against the CWD; run every dry-run from the repo root so the example
 // path (and the temp fixtures written at the root) are inside the jail.
@@ -31,6 +41,7 @@ afterEach(() => {
   process.chdir(prevCwd);
   rmSync(DOCTORED, { force: true });
   rmSync(GARBAGE, { force: true });
+  rmSync(STATIC_DOC, { force: true });
 });
 
 describe('rayspec deploy --dry-run', () => {
@@ -91,6 +102,53 @@ describe('rayspec deploy --dry-run', () => {
 
   it('a spec path escaping the CWD is refused (fail-closed jail)', async () => {
     await expect(runDeploy(['--dry-run', '../etc/passwd'])).rejects.toBeInstanceOf(DeployCliError);
+  });
+});
+
+/**
+ * `--dry-run` against a FRONTEND-ONLY (static-profile) document — the doc `deploy` itself boots on the
+ * DB-less static branch. Composing it was never the question: it is not a product document, so the
+ * verdict has to report the profile it would boot instead of rejecting the shape.
+ */
+describe('rayspec deploy --dry-run — a frontend-only (static-profile) document', () => {
+  beforeEach(() => {
+    writeFileSync(STATIC_DOC, FRONTEND_ONLY_SPEC, 'utf8');
+  });
+
+  it('answers ok:true, naming the static profile and the mounts it would serve', async () => {
+    const outcome = await runDeploy(['--dry-run', STATIC_REL]);
+    if (outcome.kind !== 'dry-run') throw new Error('unreachable');
+    const r = outcome.result;
+    expect(r.ok).toBe(true);
+    expect(r.errors).toEqual([]);
+    // A static profile declares no store/route/trigger/workflow — there is nothing to compose, so the
+    // compose summary is absent and the static block carries the answer instead.
+    expect(r.composed).toBeUndefined();
+    expect(r.staticProfile?.profile).toBe('static');
+    expect(r.staticProfile?.frontendMounts).toEqual([{ route: '/', dir: 'web/dist', spa: true }]);
+    // The three facts stated outright rather than left to inference.
+    const notes = (r.staticProfile?.notes ?? []).join(' ');
+    expect(notes).toMatch(/no database/);
+    expect(notes).toMatch(/no migration/);
+    expect(notes).toMatch(/nothing to compose/);
+    // The honest boundary is still carried (a document-only check binds no port).
+    expect(r.notProven.length).toBeGreaterThan(0);
+  });
+
+  it('leaves a product document on the compose path (no static block, same boundary)', async () => {
+    const outcome = await runDeploy(['--dry-run', ACME_REL]);
+    if (outcome.kind !== 'dry-run') throw new Error('unreachable');
+    expect(outcome.result.staticProfile).toBeUndefined();
+    expect(outcome.result.composed?.product).toBe('acme_notes');
+    expect(outcome.result.notProven).toEqual(
+      expect.arrayContaining(['the migration (no DB was touched)']),
+    );
+  });
+
+  it('--apply-migration with --dry-run stays refused against it (a dry-run applies no migration)', async () => {
+    await expect(
+      runDeploy(['--dry-run', '--apply-migration', 'delta.sql', STATIC_REL]),
+    ).rejects.toBeInstanceOf(DeployCliError);
   });
 });
 

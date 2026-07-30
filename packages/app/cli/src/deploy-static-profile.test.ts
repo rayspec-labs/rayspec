@@ -251,6 +251,44 @@ describe('rayspec deploy — a spec with stores/api ALONGSIDE a frontend is NOT 
   }, 60_000);
 });
 
+describe('rayspec deploy --dry-run — the verdict on a frontend-only spec matches the boot it describes', () => {
+  /**
+   * The one-shot check must answer for the boot this same command performs: a frontend-only document
+   * takes the static branch, so the verdict names that profile + the mounts it would serve and exits 0
+   * — instead of rejecting the document's shape against the product grammar it was never written in.
+   */
+  it('exits 0 with ok:true, the static profile named and the mounts listed', async () => {
+    const child = spawn(process.execPath, [CLI_DIST, 'deploy', '--dry-run', './rayspec.yaml'], {
+      cwd: root,
+      env: childEnv(),
+    });
+    let out = '';
+    let err = '';
+    child.stdout?.on('data', (d) => {
+      out += String(d);
+    });
+    child.stderr?.on('data', (d) => {
+      err += String(d);
+    });
+    const code = await new Promise<number | null>((r) => {
+      child.on('exit', (c) => r(c));
+    });
+    expect(code, `--- stdout ---\n${out}\n--- stderr ---\n${err}`).toBe(0);
+    const verdict = JSON.parse(out);
+    expect(verdict.ok).toBe(true);
+    expect(verdict.mode).toBe('dry-run');
+    expect(verdict.errors).toEqual([]);
+    expect(verdict.staticProfile.profile).toBe('static');
+    expect(verdict.staticProfile.frontendMounts).toEqual([
+      { route: '/', dir: 'web/dist', spa: true },
+    ]);
+    // Nothing was composed (a static profile declares no store/route/trigger/workflow) and the verdict
+    // says so outright rather than leaving the operator to infer it from an absent section.
+    expect(verdict.composed).toBeUndefined();
+    expect(verdict.staticProfile.notes.join(' ')).toMatch(/no database/);
+  }, 60_000);
+});
+
 describe('rayspec deploy — --apply-migration on a frontend-only spec is REFUSED, never silently dropped', () => {
   /**
    * A static boot touches no database and never reaches the migration engine, so accepting the delta
