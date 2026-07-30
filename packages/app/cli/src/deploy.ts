@@ -239,9 +239,9 @@ export async function runDeploy(args: readonly string[]): Promise<DeployOutcome>
  * it is not a product doc, so `parseProductSpec` rejects its shape — an ok:false verdict on a document
  * this very command BOOTS (the static branch in serveDeployment). It is classified with the SAME shared
  * `detectStaticProfile` that branch takes, so the check and the boot cannot disagree, and its mounts ARE
- * the plan — a static profile has nothing to compose. Classifying on the REJECT arm is exhaustive (a doc
- * that parses as a product doc is categorically never static — `isStaticProfile` refuses the product
- * profile outright) and keeps the boot-side import off the composing path.
+ * the plan — a static profile has nothing to compose. That classification is asked only of a document
+ * that is NOT the product profile, so no product document — valid or still being fixed — pays for the
+ * boot-side import.
  */
 async function dryRunCompose(specPath: string, specText: string): Promise<DeployDryRunResult> {
   const base = {
@@ -251,7 +251,7 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     notProven: DRY_RUN_NOT_PROVEN,
   };
 
-  const { parseProductSpec } = await import('@rayspec/spec');
+  const { detectSpecKind, parseProductSpec } = await import('@rayspec/spec');
   const {
     composeCapabilityStores,
     composeProductDeploy,
@@ -268,24 +268,31 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     // the ONE shape `deploy` itself boots without a database: a frontend-only (static-profile) doc. It is
     // classified with the SAME shared `detectStaticProfile` the boot branches on, so verdict and boot
     // cannot disagree. This arm is the only one that can be static (a doc `parseProductSpec` ACCEPTS is a
-    // product doc, and `isStaticProfile` refuses the product profile on its first line), so the check is
-    // exhaustive here AND the @rayspec/server import stays off the composing path — a product dry-run
-    // never loads the boot dependency graph. Dynamic for the same reason it is dynamic in serveDeployment:
-    // `rayspec doctor` must not drag the boot dependencies in.
-    const { detectStaticProfile } = await import('@rayspec/server');
-    const staticBoot = detectStaticProfile(specPath);
-    if (staticBoot) {
-      return {
-        ...base,
-        ok: true,
-        staticProfile: {
-          profile: 'static',
-          frontendMounts: staticBoot.frontend,
-          notes: STATIC_PROFILE_NOTES,
-        },
-        errors: [],
-        notProven: STATIC_DRY_RUN_NOT_PROVEN,
-      };
+    // product doc), so the check is exhaustive here.
+    //
+    // Asked only of a NON-product document, keyed on the same `product:` discriminant `isStaticProfile`
+    // fails closed on in its own first line — "a product-profile doc is categorically never static", the
+    // invariant static-profile.test.ts pins. So the guard can change no verdict; what it changes is the
+    // cost: @rayspec/server's barrel re-exports the boot dependency graph (the durable engine, the model
+    // adapters, the postgres driver), and this keeps that off EVERY product document's dry-run — the ones
+    // that compose and the ones an operator is still fixing. Dynamic for the same reason it is dynamic in
+    // serveDeployment: `rayspec doctor` must not drag the boot dependencies in.
+    if (detectSpecKind(specText) !== 'product') {
+      const { detectStaticProfile } = await import('@rayspec/server');
+      const staticBoot = detectStaticProfile(specPath);
+      if (staticBoot) {
+        return {
+          ...base,
+          ok: true,
+          staticProfile: {
+            profile: 'static',
+            frontendMounts: staticBoot.frontend,
+            notes: STATIC_PROFILE_NOTES,
+          },
+          errors: [],
+          notProven: STATIC_DRY_RUN_NOT_PROVEN,
+        };
+      }
     }
     return {
       ...base,

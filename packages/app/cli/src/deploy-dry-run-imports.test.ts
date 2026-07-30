@@ -4,9 +4,10 @@
  * The dry-run is documented (docs/cli-reference.md) as a fast, DB-free, network-free check, and deploy.ts
  * keeps the boot machinery behind dynamic imports precisely so the non-serving paths never pay for it.
  * `@rayspec/server`'s barrel re-exports the product-boot graph (the durable engine, the model adapters,
- * the postgres driver), so composing a PRODUCT document must not reach for it — the static-profile
- * classification therefore lives on the branch the product grammar REJECTED, the only branch that can be
- * static (`isStaticProfile` refuses the product profile outright).
+ * the postgres driver), so no PRODUCT document must reach for it — neither one that composes nor one an
+ * operator is still fixing, which is the document shape a `--dry-run` loop spends its time on. The
+ * static-profile classification therefore runs only where the product grammar REJECTED the document AND
+ * the document is not the product profile (`isStaticProfile` refuses that profile outright).
  *
  * The `@rayspec/server` mock factory below is the probe: it runs the FIRST time that module is imported,
  * so a counter inside it turns "did this document shape load the boot graph?" into an assertion. Its
@@ -39,6 +40,8 @@ import { runDeploy } from './deploy.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '../../../..');
 const ACME_REL = 'examples/acme-notes/acme-notes.product.yaml';
+/** The negative twin — a PRODUCT document that fails validation (an undeclared artifact contract). */
+const ACME_INVALID_REL = 'examples/acme-notes/acme-notes.invalid.product.yaml';
 const STATIC_REL = '_deploy_dry_run_imports_static.rayspec.yaml';
 const STATIC_DOC = join(repoRoot, STATIC_REL);
 
@@ -70,6 +73,18 @@ describe('rayspec deploy --dry-run — the boot dependency graph stays off the c
     expect(outcome.result.composed?.product).toBe('acme_notes');
     // The document composed, so it is a product document — categorically never static, so the
     // classification (and the module behind it) is work this path must not do.
+    expect(outcome.result.staticProfile).toBeUndefined();
+    expect(h.serverLoads).toBe(before);
+  });
+
+  it('a product document that FAILS validation never imports @rayspec/server either', async () => {
+    const before = h.serverLoads;
+    const outcome = await runDeploy(['--dry-run', ACME_INVALID_REL]);
+    if (outcome.kind !== 'dry-run') throw new Error('unreachable');
+    // It carries `product:`, so it is the product profile — categorically never static, however many
+    // grammar violations it has. The verdict is its violations, and it pays for nothing else.
+    expect(outcome.result.ok).toBe(false);
+    expect(outcome.result.errors.length).toBeGreaterThan(0);
     expect(outcome.result.staticProfile).toBeUndefined();
     expect(h.serverLoads).toBe(before);
   });
