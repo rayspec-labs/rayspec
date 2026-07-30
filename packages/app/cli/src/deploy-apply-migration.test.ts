@@ -41,9 +41,13 @@ vi.mock('@rayspec/server', () => {
     bootBanner: () => 'banner',
     bootBaseUrl: () => 'http://127.0.0.1:0',
     DeployError,
-    // The update-env wiring under test is the NORMAL (secret-requiring) boot: a false predicate keeps
-    // every case on that path, so the static-boot stubs beside it are present but never called. The
-    // static-profile usage guard flips it to true for its one case (and back again).
+    // The update-env wiring under test is the NORMAL (secret-requiring) boot: an undetected static
+    // profile keeps every case on that path, so the static-boot stubs beside it are present but never
+    // called. (`detectStaticProfile` is the SHARED read+classify wrapper serveDeployment branches on;
+    // its real fall-through table is proven in the server package's static-profile suite.)
+    detectStaticProfile: vi.fn(() => undefined),
+    // The predicate behind the --apply-migration usage guard; false keeps every case on the normal
+    // path, and the static-profile guard flips it to true for its one case (and back again).
     isStaticProfile: vi.fn(() => false),
     loadServerConfig: () => ({ port: 0 }),
     loadStaticServerConfig: () => ({ port: 0, host: '127.0.0.1' }),

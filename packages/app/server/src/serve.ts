@@ -24,14 +24,14 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { DeployError } from '@rayspec/api-auth';
-import { type FrontendSpec, parseSpec } from '@rayspec/spec';
+import type { FrontendSpec } from '@rayspec/spec';
 import { bootBanner, bootBaseUrl, staticBootBanner } from './banner.js';
 import { BootTimeoutError, resolveBootTimeoutMs, withBootTimeout } from './boot-timeout.js';
 import {
   assembleServer,
   assembleStaticServer,
   BootConfigError,
-  isStaticProfile,
+  detectStaticProfile,
   loadServerConfig,
   loadStaticServerConfig,
 } from './composition-root.js';
@@ -72,28 +72,14 @@ function loadLocalDotenvIfPresent(): void {
 /**
  * If RAYSPEC_SPEC_PATH names a STATIC-PROFILE (frontend-only) backend spec, return its resolved path +
  * parsed frontend mounts for the DB-less / auth-less static boot; otherwise undefined (⇒ the normal
- * boot). Reads ONLY the spec file — never the three boot secrets — so a frontend-only deployment boots
- * with none of them set. A missing/unreadable spec falls through to the normal boot, which raises its
- * own error exactly as today (this detection never changes the normal path's error behaviour).
+ * boot). This entrypoint owns only the ENV → path resolution; the read+classify itself is the SHARED
+ * `detectStaticProfile` (composition-root.ts) the `rayspec deploy` CLI branches on too, so both
+ * entrypoints classify a document — and fall through — identically.
  */
 function detectStaticBoot(): { specPath: string; frontend: readonly FrontendSpec[] } | undefined {
   const raw = process.env.RAYSPEC_SPEC_PATH?.trim();
   if (!raw) return undefined;
-  const specPath = resolve(raw);
-  let specSource: string;
-  try {
-    specSource = readFileSync(specPath, 'utf8');
-  } catch {
-    return undefined; // unreadable/missing spec → the normal boot raises its own error
-  }
-  if (!isStaticProfile(specSource)) return undefined;
-  // isStaticProfile already proved this parses as a backend RaySpec with a non-empty frontend; re-parse
-  // to hand the typed mounts to assembleStaticServer.
-  const parsed = parseSpec(specSource);
-  if (!parsed.ok || parsed.value.frontend === undefined || parsed.value.frontend.length === 0) {
-    return undefined;
-  }
-  return { specPath, frontend: parsed.value.frontend };
+  return detectStaticProfile(resolve(raw));
 }
 
 async function main(): Promise<void> {

@@ -874,9 +874,10 @@ function parsePort(raw: string | undefined): number {
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Static profile — a frontend-only document boots WITHOUT a database, JWT signing key, or api-key
 // pepper, mounting NO auth/OIDC/runs/API route. This is a SEPARATE boot path (`assembleStaticServer`,
-// selected by serve.ts's detection branch); the normal `assembleServer` / `createAuthApp` / DB
-// composition below is byte-unchanged — the safe static boot BRANCHES AWAY from it rather than
-// neutering it (a lenient auth app backed by a DB that was never opened would be exposed-but-broken).
+// selected by the shared `detectStaticProfile` branch BOTH entrypoints take — the `rayspec-serve` bin
+// and the `rayspec deploy` CLI); the normal `assembleServer` / `createAuthApp` / DB composition below is
+// byte-unchanged — the safe static boot BRANCHES AWAY from it rather than neutering it (a lenient auth
+// app backed by a DB that was never opened would be exposed-but-broken).
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -952,6 +953,38 @@ export function isStaticProfile(specSource: string): boolean {
   if (spec.deployment?.durableWorker === true) return false;
   // The one field a static profile MUST carry: something to serve.
   return spec.frontend !== undefined && spec.frontend.length > 0;
+}
+
+/**
+ * If `specPath` names a STATIC-PROFILE (frontend-only) backend document, return the `assembleStaticServer`
+ * input — its path + the parsed frontend mounts; otherwise undefined (⇒ the normal boot). Reads ONLY the
+ * spec file — never the three boot secrets — so a frontend-only deployment boots with none of them set.
+ * An unreadable/missing/non-static document falls through to the normal boot, which raises its own error
+ * exactly as today (this detection never changes the normal path's error behaviour).
+ *
+ * The ONE detection BOTH entrypoints branch on — the `rayspec-serve` bin (serve.ts, which resolves the
+ * path from RAYSPEC_SPEC_PATH) and the `rayspec deploy` CLI (packages/app/cli/src/deploy.ts, which passes
+ * the operator's positional). It lives here beside `isStaticProfile` because a per-entrypoint copy of the
+ * read+classify wrapper is exactly what lets the two DRIFT apart: only the predicate was shared, so a
+ * change to one entrypoint's fall-through semantics silently left the other behind.
+ */
+export function detectStaticProfile(
+  specPath: string,
+): { specPath: string; frontend: readonly FrontendSpec[] } | undefined {
+  let specSource: string;
+  try {
+    specSource = readFileSync(specPath, 'utf8');
+  } catch {
+    return undefined; // unreadable/missing spec → the normal boot raises its own error
+  }
+  if (!isStaticProfile(specSource)) return undefined;
+  // isStaticProfile already proved this parses as a backend RaySpec with a non-empty frontend; re-parse
+  // to hand the typed mounts to assembleStaticServer.
+  const parsed = parseSpec(specSource);
+  if (!parsed.ok || parsed.value.frontend === undefined || parsed.value.frontend.length === 0) {
+    return undefined;
+  }
+  return { specPath, frontend: parsed.value.frontend };
 }
 
 /**
