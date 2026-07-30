@@ -120,16 +120,21 @@ absorbed in the adapter. The parity suite holds every adapter to the identical
 neutral contract, so "write the agent once, run it on any backend" is a tested
 property, not an aspiration.
 
-What the boundary unifies is **semantics**, not streaming **granularity**.
-Token-incremental `text_delta` frames are a per-backend property: the Pi adapter
-relays its SDK's incremental deltas, the Anthropic and Codex adapters emit one
-whole-message `text_delta` per assistant message, and the OpenAI adapter drives the
-non-streaming `run()` overload and emits none at all. A client therefore treats the
-streamed delta count as a **lower bound** and reads the complete reply from the
-terminal frame of the stream, never from an accumulation of deltas. The parity suite
-asserts the same neutral event vocabulary for every adapter; it deliberately does
-**not** equalize the stream itself, because levelling down to the lowest common
-denominator would take token-level streaming away from the backends that have it.
+What the boundary unifies is **semantics**, not streaming **granularity**. The
+`text_delta` events of the neutral event stream are a per-backend property: the Pi
+adapter relays its SDK's token-incremental deltas, the Anthropic adapter emits one
+whole-message `text_delta` per assistant message, the Codex adapter emits at most
+one per run (the first completed agent message — a second is deliberately not
+re-emitted), and the OpenAI adapter drives the non-streaming `run()` overload and
+emits none at all. A client therefore treats the streamed delta count as a **lower
+bound** and never reconstructs the reply by accumulating deltas. The complete text
+lives in the run's result: returned directly on the JSON path, and surfaced by the
+conversation capability as the terminal reply event that closes its event stream.
+The neutral stream's own terminal event, `run_completed`, carries the run status
+and the aggregate usage — not text. The parity suite asserts the same neutral event
+vocabulary for every adapter; it deliberately does **not** equalize the event stream
+itself, because levelling down to the lowest common denominator would take
+token-level streaming away from the backends that have it.
 
 ### 2. The fail-closed tenant chokepoint
 
