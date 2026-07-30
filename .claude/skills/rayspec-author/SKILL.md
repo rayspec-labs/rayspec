@@ -82,7 +82,9 @@ the spec file). Use `route: /` + `spa: true` for a single-page app served at the
 `examples/notes-ui/rayspec.yaml`.
 
 **Out of scope for the backend profile** (It.0/It.1/It.2 — say so plainly and **STOP**, do not fake it
-with a declarative approximation; recommend it as a future iteration or the product profile):
+with a declarative approximation; recommend it as a future iteration or the product profile). These are
+limits of **THIS authoring flow**, NOT of the platform — the platform ships cron triggers, the durable
+worker, and `async:true` runs (see `examples/lead-qualifier`); this flow simply does not author them yet:
 - **triggers / cron / background / scheduled jobs**, `deployment.durableWorker`, `async:true`
 - **stream routes, blob / media** ingest/playback. (A DOCUMENT-UPLOAD pipeline is authorable in the
   **product profile** instead — `file_input` is unlocked there; and a **sync chat / conversational**
