@@ -1,5 +1,6 @@
 /**
- * `isStaticProfile` + `loadStaticServerConfig` — pure-unit proofs (no DB, no network, no secrets).
+ * `isStaticProfile` + `detectStaticProfile` + `loadStaticServerConfig` — pure-unit proofs (no DB, no
+ * network, no secrets).
  *
  * `isStaticProfile` is the FAIL-CLOSED absence predicate that decides whether a frontend-only spec may
  * boot WITHOUT a database / JWT signing key / api-key pepper and mount NO auth surface. The table below
@@ -10,15 +11,24 @@
  *   - a product-profile doc → false; an unknown top-level key / unsupported version → false;
  *   - a frontend that is empty or absent → false (a static boot with nothing to serve is not static).
  *
+ * `detectStaticProfile` is the file-reading wrapper BOTH entrypoints (`rayspec-serve` and `rayspec
+ * deploy`) branch on, so its fall-through table is what keeps the two identical: a static doc yields the
+ * `assembleStaticServer` input, and EVERY other outcome — non-static, missing, unreadable — yields
+ * undefined WITHOUT throwing, so the normal boot still raises its own error.
+ *
  * `loadStaticServerConfig` must resolve WITHOUT any of the three boot secrets — that is the whole point
  * — and default the CSP + Permissions-Policy to the secure baselines while honouring an env override.
  */
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   DEFAULT_FRONTEND_CSP,
   DEFAULT_HOST,
   DEFAULT_PERMISSIONS_POLICY,
   DEFAULT_PORT,
+  detectStaticProfile,
   isStaticProfile,
   loadStaticServerConfig,
 } from './composition-root.js';
@@ -285,6 +295,66 @@ metadata:
   name: no-frontend
 `;
     expect(isStaticProfile(doc)).toBe(false);
+  });
+});
+
+describe('detectStaticProfile — the shared wrapper both entrypoints branch on', () => {
+  let root = ''; // a temp project: the static doc, the non-static doc, and a path that is not a file
+
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), 'rayspec-detect-static-'));
+    writeFileSync(join(root, 'static.yaml'), FRONTEND_ONLY, 'utf8');
+    writeFileSync(
+      join(root, 'with-api.yaml'),
+      `
+version: '1.0'
+metadata:
+  name: not-static
+stores:
+  - name: notes
+    columns:
+      - name: body
+        type: text
+api:
+  - method: GET
+    path: /notes
+    action:
+      kind: store
+      store: notes
+      op: list
+frontend:
+  - route: /
+    dir: web/dist
+`,
+      'utf8',
+    );
+  });
+
+  afterAll(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it('a STATIC doc yields the path + the parsed frontend mounts assembleStaticServer needs', () => {
+    const specPath = join(root, 'static.yaml');
+    const detected = detectStaticProfile(specPath);
+    expect(detected).toBeDefined();
+    expect(detected?.specPath).toBe(specPath);
+    // The TYPED mounts, not the raw source — assembleStaticServer mounts these verbatim.
+    expect(detected?.frontend).toEqual([{ route: '/', dir: 'web/dist', spa: true }]);
+  });
+
+  it('a NON-static doc (stores + api alongside the frontend) yields undefined ⇒ the normal boot', () => {
+    expect(detectStaticProfile(join(root, 'with-api.yaml'))).toBeUndefined();
+  });
+
+  it('a MISSING spec falls through (undefined, never a throw) — the normal boot raises its own error', () => {
+    expect(detectStaticProfile(join(root, 'does-not-exist.yaml'))).toBeUndefined();
+  });
+
+  it('an UNREADABLE spec path (a directory) falls through the same way', () => {
+    // readFileSync on a directory throws EISDIR; the wrapper must swallow it exactly like a missing
+    // file, so an operator typo can never turn into a boot crash from THIS branch.
+    expect(detectStaticProfile(root)).toBeUndefined();
   });
 });
 

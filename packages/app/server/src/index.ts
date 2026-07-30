@@ -32,11 +32,13 @@ export {
   withBootTimeout,
 } from './boot-timeout.js';
 // The composition root. Its STATIC (frontend-only) half — `isStaticProfile` (the fail-closed shape
-// predicate), `loadStaticServerConfig` (the secret-free config) and `assembleStaticServer` (the bare
-// app that never constructs the auth/DB composition) — is exported, with `staticBootBanner` above, so
-// the `rayspec deploy` CLI (packages/app/cli/src/deploy.ts) branches to the SAME static boot the
-// `rayspec-serve` bin takes instead of duplicating it; a frontend-only spec then boots identically on
-// both paths.
+// predicate), `detectStaticProfile` (the read+classify wrapper the boot branches on),
+// `loadStaticServerConfig` (the secret-free config) and `assembleStaticServer` (the bare app that never
+// constructs the auth/DB composition) — is exported, with `staticBootBanner` above, so the `rayspec
+// deploy` CLI (packages/app/cli/src/deploy.ts) branches to the SAME static boot the `rayspec-serve` bin
+// takes instead of duplicating it; a frontend-only spec then boots identically on both paths.
+// `detectStaticProfile` is exported for the same reason `assembleOptsFromEnv` below is: both entrypoints
+// share ONE detection instead of duplicating the wrapper (a duplicated wrapper drifts).
 export {
   type AgentBackendsFactory,
   applyMigrations,
@@ -45,6 +47,7 @@ export {
   BootConfigError,
   type BootedServer,
   DEFAULT_PORT,
+  detectStaticProfile,
   isStaticProfile,
   loadServerConfig,
   loadStaticServerConfig,

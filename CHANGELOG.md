@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Both fields are additive and only present on success — a parser reading `ok`/`file`/`exportName`/
   `template` is unaffected.
 
+- **`detectStaticProfile` is re-exported from the `@rayspec/server` package root.** It resolves a spec
+  path into the static boot's input (the path plus the parsed `frontend` mounts) when the document is a
+  frontend-only one, and returns nothing for a non-static, missing, or unreadable document. The
+  `rayspec-serve` entrypoint and `rayspec deploy` now share this one detection instead of carrying a
+  copy each; both boot exactly as before.
+
 ### Changed
 
 - **An agent that declares both `tools` and an `outputSchema` is now a config error.** The
