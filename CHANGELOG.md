@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`rayspec gen-handler --emit js` renders a handler that deploys as it stands.** The new
+  `--emit <ts|js>` flag picks the emit target; `ts` stays the default and its output is
+  byte-for-byte what it has always been, so nothing changes for an existing invocation. With
+  `--emit js` the same bounded template renders the same program as plain ESM JavaScript — the
+  default filename becomes `<name>.gen.js` — which the production loader accepts directly, closing
+  the gap between "codegen worked" and "it runs": a `.ts` render is TypeScript source, and `deploy`
+  fail-closed-refuses to load one until a build step has compiled it. The emission is sound because
+  the templates import the handler SDK **type-only**, so the JavaScript target drops exactly what a
+  compiler would erase (the annotations, the type-only import) and nothing else — same coercion of
+  untrusted args, same tenant-namespaced natural key, same zero npm dependencies, still no import at
+  all. A deployment directory holding the emitted `.js` must resolve it as ESM (`"type": "module"`
+  in its nearest `package.json`, exactly as the bundled `build.mjs` wrapper writes). `--file` now
+  has to end in the extension `--emit` selects, so a name can no longer contradict the module's
+  actual form.
+
+- **The `gen-handler` JSON envelope carries `nextSteps` and `emit`.** Following the shape
+  `rayspec init` already returns, a successful render now names what stands between it and a
+  running deployment: for a `ts` render, that the module is TypeScript source needing a build step
+  before deploy, with the bundled `examples/acme-notes-backend/build.mjs` wrapper and `--emit js`
+  as the two ways out; for a `js` render, the wiring and deploy steps with no build step at all.
+  Both fields are additive and only present on success — a parser reading `ok`/`file`/`exportName`/
+  `template` is unaffected.
+
 ### Changed
 
 - **An agent that declares both `tools` and an `outputSchema` is now a config error.** The
@@ -26,11 +51,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is unaffected, as is a tool-using agent without one. The `examples/acme-notes-backend`
   reference document carried the combination and has been corrected the same way.
 
+### Fixed
+
+- **A mounted static frontend answers non-content methods with `405` instead of the SPA
+  fallback.** A static mount serves `GET`, `HEAD` and `OPTIONS`; every other method on any
+  path under the mount now returns HTTP 405 carrying `Allow: GET, HEAD, OPTIONS` and the
+  platform's uniform JSON error envelope, with the new `METHOD_NOT_ALLOWED` code joining the
+  closed error-code set. Previously, on an `spa:true` mount a `POST` or `DELETE` to a path
+  that does not exist — a removed API route, for example — was answered `200` with
+  `index.html`, so a caller could not tell a route that is gone apart from a write that
+  succeeded; no data was written and no authorization was bypassed, the status was simply
+  wrong. What integrators observe, by what the path used to resolve to: a non-content method
+  against an **existing file** came back `200` with that file's bytes on either mount type;
+  against a **missing path** it came back `200` + `index.html` on an `spa:true` mount, and on
+  a plain mount either the `404.html` page (when the mount ships one) or the uniform `404`.
+  All of them now come back `405` with the `Allow` header. Still answering first and keeping
+  their exact response for every method: the reserved platform prefixes (`/v1`, `/health`,
+  `/oidc`), the fail-closed path guard (traversal, dotfiles, symlink escapes) and the
+  unsatisfiable-range `416` — all three run ahead of the method guard. Unchanged for the
+  methods a mount serves: `GET`/`HEAD` of existing files, the `GET` deep-link fallback (`200`
+  + `index.html`, so History-API navigation still works), and the `404.html` convention — a
+  `GET`/`HEAD`/`OPTIONS` miss still gets the custom page, including its `HEAD`/`OPTIONS`
+  metadata handling. The custom page is the one preserved surface that narrows: it sits
+  *behind* the method guard, so on a mount that ships a `404.html` a non-content verb is now
+  answered `405` before the page is consulted. This **narrows the `1.6.2` note** that
+  described the custom page as a plain mount's not-found surface without qualifying it by
+  method.
+
 ### Security
 
 - Bump the transitive `brace-expansion` dependency to `5.0.8` (pinned via `pnpm.overrides`),
   resolving GHSA-mh99-v99m-4gvg — a regular-expression denial-of-service (ReDoS) advisory in the
   affected versions. Transitive-only; no API or behavior change.
+
+- **Dependency advisories are re-checked on a schedule, not only on a push.** A new
+  `Dependency advisories` workflow scans the committed `pnpm-lock.yaml` against OSV.dev every
+  Monday at 06:00 UTC (and on manual dispatch), with the same pinned, SHA-256-verified scanner
+  build the push/pull-request audit uses — so an advisory published against a dependency that
+  has not changed surfaces on its own instead of waiting for the next unrelated push to run CI.
+  A finding becomes exactly one issue per advisory id, labeled `dependencies` (the label is
+  created if it does not exist) and refreshed on later runs rather than re-filed, so an advisory
+  never accumulates duplicates; a clean run files nothing, comments nothing and notifies nobody.
+  The round is read-only: it changes no dependency, so the committed dependency SBOM and its
+  freshness gate are untouched — that gate keeps tracking dependency drift while this round
+  tracks advisory drift against a lockfile that has not moved. Repository infrastructure only:
+  no published package, API or runtime behavior changes. The report-to-issue sync ships as
+  `scripts/sync-advisory-issues.mjs` and runs locally via `pnpm test:advisory-sync`.
 
 ## [1.6.2] - 2026-07-24
 

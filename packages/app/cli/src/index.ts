@@ -10,7 +10,7 @@
  *      [--allowlist <file.json>]  diffs prior->new into a DELTA (destructive delta BLOCKED unless the
  *                                 --allowlist covers it). With SHADOW_DATABASE_URL set, shadow-applies
  *                                 to a THROWAWAY DB (never the real target). Mutates NOTHING on it.
- *   rayspec gen-handler …        Render ONE bounded-template handler (.ts) from a holes contract.
+ *   rayspec gen-handler …        Render ONE bounded-template handler (.ts or .js) from a holes contract.
  *
  * LOCAL-DEV, MUTATING (`dev` group — deliberately creates a dev DB / writes secret files; distinct
  * from the diagnostic floor above):
@@ -65,9 +65,12 @@ READ-ONLY diagnostic floor (never mutates a real/target DB; never prints secrets
                                 created_by / idempotency_key: the delta then also carries their
                                 idempotent ADD COLUMN IF NOT EXISTS + idempotency index. Never mutates
                                 the real/target DB. Exit 0/1.
-  rayspec gen-handler --holes <holes.json> --out <dir> [--file <name.ts>]
-                                Render ONE bounded-template handler (.ts) from a holes contract
-                                Deterministic; type-only SDK import; zero npm deps.
+  rayspec gen-handler --holes <holes.json> --out <dir> [--emit <ts|js>] [--file <name>]
+                                Render ONE bounded-template handler from a holes contract.
+                                Deterministic; type-only SDK import; zero npm deps. --emit ts (the
+                                default) writes TypeScript source, which needs a build step before
+                                deploy; --emit js writes the same program as plain ESM JavaScript,
+                                deployable as it stands. The JSON envelope carries the next steps.
   rayspec openapi <spec.yaml>  Emit the OpenAPI 3.1 document for a product-profile doc's declared
                                 VIEW surface (read routes → paths/params/response schemas). Product profile only.
 
@@ -154,7 +157,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   loadLocalDotenvIfPresent();
 
   // The subcommand is the FIRST raw token; the rest is handed to that subcommand UNPARSED (each owns
-  // its own arg grammar). `gen-handler` carries its own `--holes/--out/--file` flags, so the top-level
+  // its own arg grammar). `gen-handler` carries its own `--holes/--out/--emit/--file` flags, so the top-level
   // must NOT strict-parse them; `doctor`/`plan` take a single positional path. (A leading `--flag` —
   // no subcommand — is a usage error.)
   const command = args[0];

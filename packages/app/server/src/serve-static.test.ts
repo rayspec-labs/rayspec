@@ -17,10 +17,17 @@
  *     the full size (BEFORE serveStatic, which would otherwise emit a malformed 0-byte 206 or throw a
  *     500); and the fail-closed guard stays method/range-agnostic (dotfile, traversal, and symlink-escape
  *     each still 404 under BOTH a Range GET and a HEAD).
+ *   - CONTENT METHODS: a mount serves GET/HEAD/OPTIONS; every other verb gets 405 + `Allow` and the
+ *     uniform JSON envelope — so a POST/DELETE to a missing path under an spa:true mount is never
+ *     answered 200 with the SPA shell — while the reserved-prefix decline and the fail-closed path
+ *     guard, which both run first, keep their 404. The guard also sits AHEAD of the custom-404
+ *     fall-through, so a write verb on a mount that ships a 404.html gets the 405, never the page.
  *
  * Fail-the-fix: remove the guard in serve-static.ts and the traversal/dotfile/symlink arms serve the
  * secret file (200) instead of 404 — the `.not.toContain(SECRET)` + status assertions go red. Remove the
  * reserved-prefix decline and `/v1/nonexistent` serves the SPA shell (200) — its `.not.toContain` goes red.
+ * Remove the method guard and a POST/DELETE to a missing path returns 200 + the SPA shell — the 405 arms
+ * go red.
  */
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -471,6 +478,20 @@ describe('mountFrontend — custom 404.html page', () => {
     expect(await res.text()).toContain(CUSTOM_404_SENTINEL);
   });
 
+  it('spa:false — a non-content method on a mount that ships a 404.html → 405 + Allow, never the custom page', async () => {
+    // The method guard sits AHEAD of the custom-page fall-through, so the page is a GET/HEAD/OPTIONS
+    // surface only: a write verb is answered 405 before the page is ever consulted. This is the one
+    // response the 404.html convention narrowed, so pin it explicitly.
+    const app = buildApp([plainMount], mintFixture({ index: true, asset: true, notFound: true }));
+    const res = await app.request('/no/such/page', { method: 'POST' });
+    expect(res.status).toBe(405);
+    expect(res.headers.get('allow')).toBe('GET, HEAD, OPTIONS');
+    expect(res.headers.get('content-type')).toMatch(/application\/json/);
+    const body = await res.text();
+    expect(body).not.toContain(CUSTOM_404_SENTINEL);
+    expect(body).not.toContain(LOCAL_INDEX_SENTINEL);
+  });
+
   it('spa:false — a miss with NO root 404.html → the uniform 404 (no custom page, backward compatible)', async () => {
     const app = buildApp([plainMount], mintFixture({ index: true, asset: true, notFound: false }));
     const res = await app.request('/no/such/page');
@@ -645,5 +666,83 @@ describe('mountFrontend — custom 404.html page', () => {
     const body = await res.text();
     expect(body).toContain(DOCS_404_SENTINEL); // the docs mount's own custom 404 page
     expect(body).not.toContain(APP_INDEX_SENTINEL); // NOT the outer catch-all SPA shell
+  });
+});
+
+describe('mountFrontend — content methods (a static mount is not a write surface)', () => {
+  // A static mount serves GET/HEAD/OPTIONS; every other verb gets 405 with `Allow` and the platform's
+  // uniform JSON envelope. Fail-the-fix: without the method guard a POST/DELETE to a path that does not
+  // exist under an spa:true mount falls through to the SPA fallback and returns 200 + index.html — a
+  // success status a client cannot tell apart from a completed write.
+  const ALLOW = 'GET, HEAD, OPTIONS';
+  /** The uniform envelope the guard returns; the bare Hono of these unit proofs sets no request id. */
+  const ENVELOPE = {
+    error: { code: 'METHOD_NOT_ALLOWED', message: 'Method not allowed.', requestId: 'unknown' },
+  };
+
+  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE'] as const) {
+    it(`spa:true — ${method} to a nonexistent path → 405 + Allow + the uniform envelope, never the SPA shell`, async () => {
+      const app = buildApp([spaMount], specDir());
+      const res = await app.request('/route-that-does-not-exist', { method });
+      expect(res.status).toBe(405);
+      expect(res.status).not.toBe(200);
+      expect(res.headers.get('allow')).toBe(ALLOW);
+      expect(res.headers.get('content-type')).toMatch(/application\/json/);
+      expect(await res.json()).toEqual(ENVELOPE);
+    });
+  }
+
+  it('spa:true — POST to an EXISTING file → 405 too (the mount serves content, it never accepts a write)', async () => {
+    const app = buildApp([spaMount], specDir());
+    const res = await app.request('/assets/app.js', { method: 'POST' });
+    expect(res.status).toBe(405);
+    expect(res.headers.get('allow')).toBe(ALLOW);
+    expect(await res.text()).not.toContain(ASSET_SENTINEL);
+  });
+
+  it('spa:false — POST to a nonexistent path → 405 + Allow (the guard is not SPA-specific)', async () => {
+    const app = buildApp([plainMount], specDir());
+    const res = await app.request('/route-that-does-not-exist', { method: 'POST' });
+    expect(res.status).toBe(405);
+    expect(res.headers.get('allow')).toBe(ALLOW);
+  });
+
+  // The three surfaces the guard must leave alone.
+  for (const method of ['GET', 'HEAD', 'OPTIONS'] as const) {
+    it(`${method} on an existing file is untouched — 200, no Allow header`, async () => {
+      const app = buildApp([spaMount], specDir());
+      const res = await app.request('/assets/app.js', { method });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('allow')).toBeNull();
+    });
+  }
+
+  it('spa:true — GET a deep link still returns index.html (200): History-API navigation is unaffected', async () => {
+    const app = buildApp([spaMount], specDir());
+    const res = await app.request('/deep/link');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain(INDEX_SENTINEL);
+  });
+
+  it('spa:true — OPTIONS to a nonexistent path keeps its current 200 (the guard exempts it), never a 405', async () => {
+    const app = buildApp([spaMount], specDir());
+    const res = await app.request('/deep/link', { method: 'OPTIONS' });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('allow')).toBeNull();
+  });
+
+  it('the reserved-prefix decline runs FIRST — POST /v1/nonexistent keeps the platform fall-through 404', async () => {
+    const app = buildApp([spaMount], specDir());
+    const res = await app.request('/v1/nonexistent', { method: 'POST' });
+    expect(res.status).toBe(404);
+    expect(res.status).not.toBe(405);
+  });
+
+  it('the fail-closed path guard runs FIRST — POST /.env stays a 404, never a 405 and never the secret', async () => {
+    const app = buildApp([spaMount], specDir());
+    const res = await app.request('/.env', { method: 'POST' });
+    expect(res.status).toBe(404);
+    expect(res.status).not.toBe(405);
+    expect(await res.text()).not.toContain(DOTFILE_SECRET);
   });
 });
