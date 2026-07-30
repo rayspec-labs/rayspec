@@ -390,11 +390,22 @@ change is applied by the explicit `--apply-migration` flag below.
   the boot classifies the live schema first and mounts a present-matching schema
   instead of re-applying a non-idempotent delta, so a `Restart=always` unit applies the
   delta once and mounts thereafter (still, drop the flag once it lands to keep intent
-  explicit). It is rejected with `--dry-run` (a dry-run touches no database), and a bare
+  explicit). It is rejected with `--dry-run` (a dry-run touches no database) and against a
+  frontend-only spec (the static profile below touches no database either), and a bare
   `--allowlist` without `--apply-migration` is refused (it would be silently ignored).
   Both file paths are jailed exactly like the spec path.
 - **Postgres:** required for the serve path (it applies the committed **platform**
-  migration chain and materializes/mounts stores). `--dry-run` touches no database.
+  migration chain and materializes/mounts stores). `--dry-run` touches no database,
+  and neither does a frontend-only spec — see the static-profile bullet below.
+- **Frontend-only (static profile).** A document that declares only a `frontend`
+  boots the **static profile**, the same branch
+  [`rayspec-serve`](#rayspec-serve--the-boot-server) takes and entered **before** any
+  secret is read: no database, none of the three boot secrets, and **no** auth / OIDC /
+  run route mounted (`/health` is liveness-only), with the `Content-Security-Policy`
+  and `Permissions-Policy` defaults emitted by the app itself. Because it touches no
+  database it applies no migration, so `--apply-migration` / `--allowlist` against such a
+  document are **refused** as a usage error (exit `2`) rather than silently ignored. See
+  [getting-started → a frontend-only (static) deployment](./getting-started.md#a-frontend-only-static-deployment).
 - **Flags:** `--port <n>` overrides `PORT` (serve path); `--dry-run` selects the
   one-shot compose check; `--apply-migration <delta.sql>` applies a reviewed forward
   migration; `--allowlist <file.json>` (requires `--apply-migration`) covers reviewed

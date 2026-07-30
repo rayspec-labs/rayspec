@@ -21,7 +21,7 @@ export { DeployError, type PlannedMigration } from '@rayspec/api-auth';
 // `BootedServer.drift`. It originates in @rayspec/db (drift-detect.ts); the server already depends on
 // @rayspec/db, so re-exporting here spares a consumer a direct db dep. Additive — a pure type re-export.
 export type { DriftFinding } from '@rayspec/db';
-export { bootBanner, bootBaseUrl } from './banner.js';
+export { bootBanner, bootBaseUrl, staticBootBanner } from './banner.js';
 // The boot-timeout guard — shared by the `rayspec-serve` bin (serve.ts) and the local-boot dev wrapper
 // so a hung assemble step is diagnosed rather than silent. Pure (timer race); no entrypoint side effect.
 export {
@@ -31,16 +31,27 @@ export {
   resolveBootTimeoutMs,
   withBootTimeout,
 } from './boot-timeout.js';
+// The composition root. Its STATIC (frontend-only) half — `isStaticProfile` (the fail-closed shape
+// predicate), `loadStaticServerConfig` (the secret-free config) and `assembleStaticServer` (the bare
+// app that never constructs the auth/DB composition) — is exported, with `staticBootBanner` above, so
+// the `rayspec deploy` CLI (packages/app/cli/src/deploy.ts) branches to the SAME static boot the
+// `rayspec-serve` bin takes instead of duplicating it; a frontend-only spec then boots identically on
+// both paths.
 export {
   type AgentBackendsFactory,
   applyMigrations,
   assembleServer,
+  assembleStaticServer,
   BootConfigError,
   type BootedServer,
   DEFAULT_PORT,
+  isStaticProfile,
   loadServerConfig,
+  loadStaticServerConfig,
   type ProductTableRegistrar,
   type ServerConfig,
+  type StaticBootedServer,
+  type StaticServerConfig,
 } from './composition-root.js';
 // The Product-YAML boot composition + its extraction-config helpers (deployment wiring).
 // The per-agent / multi-backend extraction seam — the boot-side backend factory,
