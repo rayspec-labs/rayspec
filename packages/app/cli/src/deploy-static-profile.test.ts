@@ -45,6 +45,11 @@ const CLI_DIST = join(repoRoot, 'packages/app/cli/dist/index.js');
 // BUILT CLI instead of DATABASE_URL. turbo's `test` task depends on `^build` (the UPSTREAM packages)
 // only, never on this package's own build, so a bare local `pnpm --filter @rayspec/cli test` legitimately
 // meets an absent dist — that must be an ergonomic skip, not a wall.
+//
+// This path is also the `test` task's extra cache-key input (packages/app/cli/turbo.json). It has to be:
+// a self-skip is a cacheable SUCCESS, and dist/ is gitignored, so by default turbo would hash an unbuilt
+// run and a built one alike and replay the recorded skip after `pnpm build` — the false green this guard
+// exists to prevent. Keep the two in step: whatever this constant probes is what that input must hash.
 const distBuilt = existsSync(CLI_DIST);
 // Keyed on CI rather than a dedicated RAYSPEC_REQUIRE_* opt-in: turbo forwards CI to the task by default,
 // whereas a new variable would ALSO have to be declared in turbo.json's `test.env` allowlist to reach the
