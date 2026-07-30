@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`rayspec gen-handler --emit js` renders a handler that deploys as it stands.** The new
+  `--emit <ts|js>` flag picks the emit target; `ts` stays the default and its output is
+  byte-for-byte what it has always been, so nothing changes for an existing invocation. With
+  `--emit js` the same bounded template renders the same program as plain ESM JavaScript — the
+  default filename becomes `<name>.gen.js` — which the production loader accepts directly, closing
+  the gap between "codegen worked" and "it runs": a `.ts` render is TypeScript source, and `deploy`
+  fail-closed-refuses to load one until a build step has compiled it. The emission is sound because
+  the templates import the handler SDK **type-only**, so the JavaScript target drops exactly what a
+  compiler would erase (the annotations, the type-only import) and nothing else — same coercion of
+  untrusted args, same tenant-namespaced natural key, same zero npm dependencies, still no import at
+  all. A deployment directory holding the emitted `.js` must resolve it as ESM (`"type": "module"`
+  in its nearest `package.json`, exactly as the bundled `build.mjs` wrapper writes). `--file` now
+  has to end in the extension `--emit` selects, so a name can no longer contradict the module's
+  actual form.
+
+- **The `gen-handler` JSON envelope carries `nextSteps` and `emit`.** Following the shape
+  `rayspec init` already returns, a successful render now names what stands between it and a
+  running deployment: for a `ts` render, that the module is TypeScript source needing a build step
+  before deploy, with the bundled `examples/acme-notes-backend/build.mjs` wrapper and `--emit js`
+  as the two ways out; for a `js` render, the wiring and deploy steps with no build step at all.
+  Both fields are additive and only present on success — a parser reading `ok`/`file`/`exportName`/
+  `template` is unaffected.
+
 ### Fixed
 
 - **A mounted static frontend answers non-content methods with `405` instead of the SPA

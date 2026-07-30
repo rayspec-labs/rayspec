@@ -194,10 +194,10 @@ as a deterministic client contract.
 ## `gen-handler`
 
 ```
-rayspec gen-handler --holes <holes.json> --out <dir> [--file <name.ts>]
+rayspec gen-handler --holes <holes.json> --out <dir> [--emit <ts|js>] [--file <name>]
 ```
 
-Renders **one** escape-hatch handler `.ts` file from a bounded template, driven by
+Renders **one** escape-hatch handler module from a bounded template, driven by
 a "holes" contract (a small JSON file). The emitted code imports the handler SDK
 **type-only**, takes zero npm dependencies, and reaches the database only through
 the injected tenant-bound handle — so a generated handler cannot escape tenancy.
@@ -208,17 +208,36 @@ the injected tenant-bound handle — so a generated handler cannot escape tenanc
     path-jailed to the cwd).
   - `--out <dir>` — **required**. The output directory (created if absent;
     path-jailed to the cwd).
-  - `--file <name.ts>` — optional. A **bare** filename (no path separators, must
-    end in `.ts`) overriding the default filename. The default is the export name
-    lower-kebab-cased plus `.gen.ts` (e.g. `persistNote` → `persist-note.gen.ts`).
+  - `--emit <ts|js>` — optional, default `ts`. The emit target. `ts` renders
+    TypeScript source; `js` renders the *same* program as plain ESM JavaScript.
+    Because the SDK import is type-only, `js` drops exactly what a compiler would
+    erase — and nothing else.
+  - `--file <name>` — optional. A **bare** filename (no path separators, ending in
+    the extension `--emit` selects) overriding the default filename. The default is
+    the export name lower-kebab-cased plus `.gen.<ts|js>` (e.g. `persistNote` →
+    `persist-note.gen.ts`).
 - **Output:**
 
   ```json
-  { "ok": true, "file": "handlers/persist-note.gen.ts", "exportName": "persistNote", "template": "persist", "errors": [] }
+  { "ok": true, "file": "handlers/persist-note.gen.ts", "exportName": "persistNote", "template": "persist", "emit": "ts", "nextSteps": ["…"], "errors": [] }
   ```
 
   A malformed holes set is `ok: false` with an `errors` entry (exit `1`); a
   missing/invalid flag is a usage error (exit `2`).
+
+### Which target to emit
+
+`deploy` loads every `handlers[].module` as **compiled JavaScript only** — it
+refuses a `.ts` module fail-closed (the failure and the fix are walked in
+[getting-started → the backend profile](./getting-started.md#the-backend-profile-direct-agent-boot)).
+So a `--emit ts` render is not yet deployable: compile it first (the
+`examples/acme-notes-backend/build.mjs` wrapper transpiles the handlers and
+rewrites the spec's `module:` paths) and point `handlers[].module` at the built
+`.js`. A `--emit js` render skips that step — wire `handlers[].module` straight at
+the emitted file and deploy, provided the deployment directory resolves `.js` as
+ESM (`"type": "module"` in its nearest `package.json`, which the build wrapper
+also writes). The `nextSteps` field of the envelope states this for the target
+you actually asked for.
 
 ---
 

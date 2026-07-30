@@ -47,6 +47,38 @@ describe('golden render — the committed Expense-Claim handlers re-render byte-
   });
 });
 
+describe('JavaScript emit — the same holes render as plain ESM', () => {
+  it("an explicit 'ts' target is byte-identical to the default render (the goldens)", () => {
+    expect(genHandler(persistHoles, 'ts')).toBe(readGolden('code-claim.gen.ts'));
+    expect(genHandler(lookupHoles, 'ts')).toBe(readGolden('lookup-categories.gen.ts'));
+  });
+
+  it('carries no import at all and no TypeScript-only syntax (both templates)', () => {
+    for (const code of [genHandler(persistHoles, 'js'), genHandler(lookupHoles, 'js')]) {
+      // The SDK import was TYPE-ONLY, so nothing survives it — the JS emission has zero imports.
+      expect(code).not.toMatch(/^\s*import\b/m);
+      expect(code).not.toMatch(/\binterface\s+\w+\s*\{/);
+      expect(code).not.toMatch(/\bas\s+(const|readonly|Record<)/);
+      expect(code).not.toMatch(/:\s*(StoreRow|StoreFilter|ToolHandler|Promise<|Record<)/);
+      expect(code).toMatch(/^export const \w+ = async \(args, init\) => \{$/m);
+    }
+  });
+
+  it('keeps the safety properties of the TypeScript render', () => {
+    const persistJs = genHandler(persistHoles, 'js');
+    const lookupJs = genHandler(lookupHoles, 'js');
+    for (const code of [persistJs, lookupJs]) {
+      expect(code).toContain('TRUSTED-AUTHOR, NOT SANDBOXED');
+      expect(code).not.toMatch(/\brequire\s*\(/);
+      expect(code).not.toMatch(/\bimport\s*\(/);
+      expect(code).toMatch(/init\.db\.(update|insert|select)/);
+    }
+    expect(persistJs).toContain('UNTRUSTED');
+    expect(persistJs).toContain('coerceRow');
+    expect(lookupJs).toContain('.slice(0, MAX_ROWS)');
+  });
+});
+
 describe('safety properties — every rendered handler', () => {
   const persistCode = renderPersistHandler(persistHoles);
   const lookupCode = renderLookupHandler(lookupHoles);
