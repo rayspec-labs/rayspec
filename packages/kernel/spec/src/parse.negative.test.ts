@@ -374,6 +374,84 @@ agents:
   });
 });
 
+describe('negative — agent_output_schema_shortcircuits_tools', () => {
+  it('rejects an agent declaring BOTH tools and an outputSchema (the tool loop never fires)', () => {
+    // BASE's `helper` already declares `tools: [echo]`; adding an outputSchema is the ONE defect.
+    // LINT TOOTH (fail-the-fix): disabling the rule lets this spec parse ok → this goes RED.
+    const yaml = BASE.replace(
+      '    tools: [echo]\n',
+      '    tools: [echo]\n    outputSchema:\n      name: result\n      schema:\n        type: object\n',
+    );
+    const res = parseSpec(yaml);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    const shortCircuit = res.errors.find(
+      (e) => e.code === 'agent_output_schema_shortcircuits_tools',
+    );
+    expect(shortCircuit).toBeDefined();
+    expect(shortCircuit?.path).toBe('agents[0].outputSchema');
+    expect(shortCircuit?.message).toContain("persist tool's 'parameters'");
+  });
+
+  it('rejects the combination even under an action persistTo (persistTo is NOT an exemption)', () => {
+    // `persistTo` REQUIRES an agent outputSchema — but persistTo + tools + outputSchema is exactly
+    // the broken combination: the structured output short-circuits the loop, so the tools are dead.
+    const yaml = `
+version: '1.0'
+metadata:
+  name: persist-shortcircuit
+stores:
+  - name: facts
+    columns:
+      - { name: title, type: text }
+api:
+  - method: POST
+    path: /extract
+    action: { kind: agent, agent: extractor, persistTo: facts }
+agents:
+  - id: extractor
+    name: extractor
+    backend: openai
+    model: gpt-4o-mini
+    instructions: extract
+    tools: [lookup]
+    outputSchema:
+      name: Facts
+      schema:
+        type: object
+        required: [title]
+        properties:
+          title: { type: string }
+tooling:
+  - id: lookup
+    name: lookup
+    description: look up a fact
+    parameters: { type: object }
+    handler: lookup_h
+    idempotent: true
+    timeoutMs: 1000
+handlers:
+  - { id: lookup_h, module: handlers/lookup.ts, export: lookup, kind: tool }
+`;
+    const res = parseSpec(yaml);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    // The persistTo mapping itself is sound — the short-circuit is the ONLY violation.
+    expect(res.errors.map((e) => e.code)).toEqual(['agent_output_schema_shortcircuits_tools']);
+  });
+
+  it('an agent with an outputSchema and NO tools parses ok (the COMBINATION is the defect)', () => {
+    const yaml = BASE.replace(
+      '    tools: [echo]\n',
+      '    outputSchema:\n      name: result\n      schema:\n        type: object\n',
+    );
+    const res = parseSpec(yaml);
+    if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.value.agents[0]?.tools).toEqual([]);
+    expect(res.value.agents[0]?.outputSchema?.name).toBe('result');
+  });
+});
+
 describe('negative — tool parameters must be an object schema', () => {
   it('rejects a tool whose parameters is a (compilable) non-object schema', () => {
     // type:'string' compiles fine as JSON-Schema but is invalid as model-facing tool args.

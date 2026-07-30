@@ -3,8 +3,15 @@
  * valid must pass the full pipeline (parse → lint) with `ok:true`. These guard against an
  * over-eager linter (a false rejection) — the dual of the negative tests' false-acceptance guard.
  */
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parseSpec } from './parse.js';
+
+const here = dirname(fileURLToPath(import.meta.url));
+// packages/kernel/spec/src -> repo-root/examples/expense-claim-coder
+const CODER_YAML = resolve(here, '../../../../examples/expense-claim-coder/rayspec.yaml');
 
 describe('lintSpec — positive (valid specs pass the full pipeline)', () => {
   it('accepts a minimal spec (only version + metadata; all sections default to [])', () => {
@@ -183,6 +190,16 @@ handlers:
     expect(res.value.stores).toHaveLength(2);
     expect(res.value.api).toHaveLength(3);
     expect(res.value.triggers[0]?.event).toBe('thing.created');
+  });
+
+  it('accepts the tool-using expense-claim-coder example (tools, NO agent outputSchema)', () => {
+    // The committed tool-loop example is the shape the short-circuit rule PROTECTS: the structured
+    // shape lives on the persist tool's `parameters`, not on the agent — it must stay green.
+    const res = parseSpec(readFileSync(CODER_YAML, 'utf8'));
+    if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
+    const coder = res.value.agents.find((a) => a.id === 'expense_coder');
+    expect(coder?.tools.length).toBeGreaterThan(0);
+    expect(coder?.outputSchema).toBeUndefined();
   });
 
   it('aggregates MULTIPLE violations in one pass (not just the first)', () => {

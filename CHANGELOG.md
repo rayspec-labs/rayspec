@@ -32,6 +32,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Both fields are additive and only present on success — a parser reading `ok`/`file`/`exportName`/
   `template` is unaffected.
 
+### Changed
+
+- **An agent that declares both `tools` and an `outputSchema` is now a config error.** The
+  linter adds `agent_output_schema_shortcircuits_tools`: an `agents[]` entry carrying a
+  non-empty `tools` list AND a top-level `outputSchema` is rejected by `doctor`, `plan`, and
+  boot, at `agents[<i>].outputSchema`. The combination is dead at runtime: a backend with
+  native structured output (`openai`, `anthropic`, `codex`) projects the schema into that
+  slot, so the model answers in one turn and never calls a tool; the backend that emulates
+  structured output through instructions (`pi`) appends a JSON-only directive that pulls the
+  answer the same way. Either way a declared lookup/persist loop silently never fires. The
+  rule is uniform and fail-closed — it rejects the shape on every backend rather than per
+  capability. Previously such a spec passed `doctor` with `ok: true` and only a live run
+  exposed it. A spec of this shape must move the structured shape onto the persist tool's
+  `parameters` and drop the agent's `outputSchema` (the agent's terminal action is then the
+  tool call). A
+  tool-less agent with an `outputSchema` — including the `persistTo` structured-output shape —
+  is unaffected, as is a tool-using agent without one. The `examples/acme-notes-backend`
+  reference document carried the combination and has been corrected the same way.
+
 ### Fixed
 
 - **A mounted static frontend answers non-content methods with `405` instead of the SPA

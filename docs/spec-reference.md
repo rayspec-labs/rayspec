@@ -387,11 +387,21 @@ agents:
   default `[]`.
 - `outputSchema` — optional structured-output contract with a `name` and a
   `schema` (a JSON-Schema object). When present, the run must return JSON
-  matching the schema.
+  matching the schema. An agent that declares a non-empty `tools` list may **not**
+  also declare an `outputSchema`: the structured output short-circuits the tool
+  loop, so the combination is rejected at validation time — uniformly and
+  fail-closed, on every backend. A backend with native structured output
+  (`openai`, `anthropic`, `codex`) projects the schema into that slot and the
+  model answers in one turn without ever calling a tool; the backend that
+  emulates structured output through instructions (`pi` — see
+  `requireNativeStructuredOutput` below) appends a JSON-only directive that pulls
+  the answer the same way. Put the structured shape on the tool's `parameters`
+  instead.
 - `maxTurns` — optional positive integer cap on the agent loop, default `8`.
 - `requireNativeStructuredOutput` — optional boolean, default `false`. When
   `true`, an `outputSchema` *demands* native structured output; a backend that
-  lacks it is rejected at validation time rather than failing at runtime.
+  lacks it (`pi`, which emulates via instructions) is rejected at validation time
+  rather than failing at runtime.
 
 There is no `input` field: the task input is a runtime value supplied per
 request, not part of the spec.

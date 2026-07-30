@@ -51,6 +51,15 @@ import { z } from 'zod';
  *                               so no CREATE order satisfies every FK. Rejected fail-closed at config time
  *                               rather than surfacing as a cryptic `42P01 relation does not exist` at
  *                               apply. Self-references are EXEMPT (a self-FK applies after its own CREATE).
+ *  - `agent_output_schema_shortcircuits_tools`
+ *                             — an agent declares BOTH a non-empty `tools` list AND an `outputSchema`.
+ *                               A backend with NATIVE structured output (`openai`, `anthropic`, `codex`)
+ *                               projects the schema into that slot; the backend that EMULATES it through
+ *                               instructions (`pi`) appends a JSON-only directive that pulls the answer
+ *                               the same way. Either way the model answers in ONE turn and never calls a
+ *                               tool — a lookup/persist loop silently never fires. Rejected UNIFORMLY,
+ *                               fail-closed, on every backend (not per capability). The structured shape
+ *                               belongs on the persist tool's `parameters`.
  *
  * PRODUCT-YAML codes — used ONLY by the Product-YAML validation path (`parseProductSpec`,
  * `product-lint.ts`). They share this closed envelope so a fresh session sees ONE error vocabulary
@@ -111,6 +120,7 @@ export const SpecErrorCode = z.enum([
   'frontend_route_collision',
   'frontend_dir_missing',
   'fk_cycle',
+  'agent_output_schema_shortcircuits_tools',
   'no_code_in_yaml',
   'provider_native_leak',
   'invalid_capability_status',
