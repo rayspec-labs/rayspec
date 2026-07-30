@@ -37,6 +37,7 @@
  * Returns the FULL list of violations (closed `SpecError` codes) — never the first. Pure function
  * over an already-shape-valid `RaySpec` (the parser calls it after the Zod parse succeeds).
  */
+import { extname } from 'node:path';
 import { type AgentSpec, type BackendId, validateSpec } from '@rayspec/core';
 // ajv ships CJS with no `exports` map; under NodeNext + verbatimModuleSyntax the default import
 // types as the module NAMESPACE even though at runtime it IS the class (ajv sets
@@ -46,6 +47,7 @@ import type { Ajv2020 as Ajv2020Class } from 'ajv/dist/2020.js';
 import * as Ajv2020Module from 'ajv/dist/2020.js';
 import { type SpecError, type SpecWarning, specError, specWarning } from './errors.js';
 import { type ColumnType, MAX_IDENTIFIER_LENGTH, type RaySpec } from './grammar.js';
+import { TYPESCRIPT_SOURCE_EXTENSIONS } from './module-extensions.js';
 
 type AjvInstance = Ajv2020Class;
 const Ajv2020Ctor = ((Ajv2020Module as { default?: unknown }).default ?? Ajv2020Module) as new (
@@ -1214,12 +1216,13 @@ export function lintSpec(spec: RaySpec): SpecError[] {
  * Pure over an already-shape-valid `RaySpec`. `doctor`/`plan` surface these alongside the `ok` result so
  * an author sees a documented interaction without being blocked.
  *
- * Today it flags ONE interaction: a `softDelete` store that is the TARGET of a `restrict` foreign key —
+ * The first interaction it flags: a `softDelete` store that is the TARGET of a `restrict` foreign key —
  * EITHER an id-target FK (referencing the parent's injected `id`) OR a business-key FK
  * (`referencesColumn`). Both carry the identical footgun: soft-deleting such a parent is an
  * `UPDATE(deleted_at)` that does NOT fire the database ON DELETE restrict, so the referencing rows keep
  * pointing at the (tombstoned) parent — the restrict guarantee only binds on a HARD delete. This is a
- * permitted, documented interaction, so it is a WARNING, not a fail-closed error.
+ * permitted, documented interaction, so it is a WARNING, not a fail-closed error. The other two —
+ * `fk_forward_reference` and `typescript_handler_module` — are documented at their own blocks below.
  */
 export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
   const warnings: SpecWarning[] = [];
@@ -1271,6 +1274,34 @@ export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
         ),
       );
     });
+  });
+
+  // TYPESCRIPT HANDLER MODULE — a `handlers[].module` whose extension is TypeScript source. The
+  // production handler loader refuses exactly this set fail-closed at boot ("production loads compiled
+  // JavaScript only"), and the extension is STATICALLY visible in the document, so the author can learn
+  // it here instead of from a restart loop. ADVISORY, not fail-closed: authoring against TypeScript
+  // source is the documented loop (the dev loader takes un-built source through an explicit opt-in, and
+  // the build step compiles the modules and rewrites these `module:` paths on the way to a deploy), so
+  // erroring would break the authoring flow the shipped examples themselves use.
+  //
+  // SCOPE: `handlers[]` ONLY. `extensions[].module` is deliberately NOT flagged — a BUILT pack keeps its
+  // authored TypeScript module paths in its manifest and the pack resolver PREFERS the compiled `.js`
+  // sibling when it exists on disk, so a `.ts` there is not the same dead end.
+  spec.handlers.forEach((handler, hi) => {
+    const ext = extname(handler.module).toLowerCase();
+    if (!TYPESCRIPT_SOURCE_EXTENSIONS.has(ext)) return;
+    warnings.push(
+      specWarning(
+        'typescript_handler_module',
+        `handler '${handler.id}' declares the module '${handler.module}', which is TypeScript source ` +
+          `('${ext}') — this document needs a build step before deploy. \`rayspec deploy\` loads ` +
+          'compiled JavaScript only, so before deploying either compile it to `.js` with a build step ' +
+          '(see `examples/acme-notes-backend/build.mjs`, which transpiles the handlers and rewrites ' +
+          "the spec's `module:` paths) or re-render it as deployable ESM with `rayspec gen-handler " +
+          '--emit js`',
+        `handlers[${hi}].module`,
+      ),
+    );
   });
 
   return warnings;

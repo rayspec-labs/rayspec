@@ -1,9 +1,10 @@
 /**
  * `lintSpecWarnings` — the NON-FATAL advisory pass. A warning is surfaced (doctor/plan) but never
- * fails a parse. These tests pin the ONE interaction it flags today: a `softDelete` store that is the
- * TARGET of a `restrict` foreign key — id-target OR business-key (`referencesColumn`) — since
- * soft-deleting such a parent is an `UPDATE(deleted_at)` that does NOT fire the database ON DELETE
- * restrict, so children keep pointing at the tombstoned row.
+ * fails a parse. These tests pin the interactions it flags: a `softDelete` store that is the TARGET
+ * of a `restrict` foreign key — id-target OR business-key (`referencesColumn`) — since soft-deleting
+ * such a parent is an `UPDATE(deleted_at)` that does NOT fire the database ON DELETE restrict, so
+ * children keep pointing at the tombstoned row; a foreign key onto a store declared LATER in the
+ * array; and a `handlers[].module` that is TypeScript source, which the production loader refuses.
  *
  * Fail-the-fix: the positive case asserts the warning FIRES (RED if `lintSpecWarnings` misses it) AND
  * that the spec still parses `ok:true` (a warning is not an error); the negative cases assert NO warning
@@ -171,5 +172,70 @@ stores:
       - { column: parent_id, references: nodes, onDelete: 'set null' }
 `;
     expect(lintSpecWarnings(parseOk(yaml))).toEqual([]);
+  });
+});
+
+describe('lintSpecWarnings — typescript_handler_module (a handler module the deploy loader refuses)', () => {
+  /** A backend doc with ONE handler whose module path carries the given extension. */
+  const handlerSpec = (modulePath: string) => `
+version: '1.0'
+metadata:
+  name: ts-handler
+handlers:
+  - { id: lookup, module: ${modulePath}, export: run, kind: tool }
+`;
+
+  it.each([
+    'handlers/lookup.ts',
+    'handlers/lookup.tsx',
+    'handlers/lookup.mts',
+    'handlers/lookup.cts',
+  ])('FIRES for a TypeScript-source handler module (%s) — and the doc still parses ok', (modulePath) => {
+    const value = parseOk(handlerSpec(modulePath)); // still valid — a warning is not an error
+    const warnings = lintSpecWarnings(value);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.code).toBe('typescript_handler_module');
+    expect(warnings[0]?.path).toBe('handlers[0].module');
+    // Names the handler + the offending path, and points at BOTH documented ways out.
+    expect(warnings[0]?.message).toContain('lookup');
+    expect(warnings[0]?.message).toContain(modulePath);
+    expect(warnings[0]?.message).toContain('build.mjs');
+    expect(warnings[0]?.message).toContain('rayspec gen-handler --emit js');
+  });
+
+  it.each([
+    'handlers/lookup.js',
+    'handlers/lookup.mjs',
+    'handlers/lookup.cjs',
+  ])('does NOT fire for a compiled JavaScript handler module (%s)', (modulePath) => {
+    expect(lintSpecWarnings(parseOk(handlerSpec(modulePath)))).toEqual([]);
+  });
+
+  it('does NOT fire for an EXTENSION pack module with a `.ts` path (a built pack keeps its authored path)', () => {
+    // `resolvePackModule` PREFERS the compiled `.js` sibling when the pack is built, so a `.ts` entry
+    // in `extensions[].module` is NOT the same dead end — warning on it would over-fire.
+    const yaml = `
+version: '1.0'
+metadata:
+  name: ts-extension
+extensions:
+  - { id: pack, module: ./packs/notes/index.ts, version: 1.0.0 }
+`;
+    expect(lintSpecWarnings(parseOk(yaml))).toEqual([]);
+  });
+
+  it('fires ONCE PER TypeScript handler, pinning each handler index', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: ts-handlers
+handlers:
+  - { id: compiled, module: handlers/compiled.js, export: run, kind: tool }
+  - { id: source, module: handlers/source.gen.ts, export: run, kind: route }
+`;
+    const warnings = lintSpecWarnings(parseOk(yaml));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.code).toBe('typescript_handler_module');
+    expect(warnings[0]?.path).toBe('handlers[1].module');
   });
 });
