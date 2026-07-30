@@ -211,8 +211,9 @@ export async function runGenHandler(args: readonly string[]): Promise<GenHandler
   // the handler's snake-cased export name. The bare-filename rule keeps the write inside `--out`.
   const h = holes as { exportName: string };
   // Default to a `.gen.<target>` suffix — it SIGNALS "generated, do not edit by hand" AND is excluded
-  // from the biome formatter/linter (biome.json `!**/*.gen.ts`), so the committed file stays
-  // byte-identical to the raw render (the golden) without a formatter pass mutating it. The extension
+  // from the biome formatter/linter (biome.json carries BOTH `!**/*.gen.ts` and `!**/*.gen.js`), so a
+  // committed render stays byte-identical to the raw one (the golden) without a formatter pass
+  // mutating it. A repo that vendors these renders needs the same pair of ignores. The extension
   // follows `--emit`, since it is what decides whether production can load the module. `--file` may
   // override the name, but never the extension — a `.ts` name for a JavaScript render (or the
   // reverse) would mislabel the one property the loader keys on.
