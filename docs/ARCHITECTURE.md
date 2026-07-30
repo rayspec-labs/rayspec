@@ -113,12 +113,23 @@ construction — you cannot write ordinary code that bypasses it.
 All four agent backends implement one neutral `Backend` interface, and everything
 above the adapters speaks only that interface. Each adapter is an anti-corruption
 layer: it translates the neutral request into its vendor SDK's shape and the
-vendor's response back into neutral types, absorbing asymmetries (streaming
-semantics, structured-output support, tool-call formats) internally. The rule is
+vendor's response back into neutral types, absorbing asymmetries (error
+taxonomies, structured-output support, tool-call formats) internally. The rule is
 that the neutral types do **not** move when a vendor SDK churns — the churn is
 absorbed in the adapter. The parity suite holds every adapter to the identical
 neutral contract, so "write the agent once, run it on any backend" is a tested
 property, not an aspiration.
+
+What the boundary unifies is **semantics**, not streaming **granularity**.
+Token-incremental `text_delta` frames are a per-backend property: the Pi adapter
+relays its SDK's incremental deltas, the Anthropic and Codex adapters emit one
+whole-message `text_delta` per assistant message, and the OpenAI adapter drives the
+non-streaming `run()` overload and emits none at all. A client therefore treats the
+streamed delta count as a **lower bound** and reads the complete reply from the
+terminal frame of the stream, never from an accumulation of deltas. The parity suite
+asserts the same neutral event vocabulary for every adapter; it deliberately does
+**not** equalize the stream itself, because levelling down to the lowest common
+denominator would take token-level streaming away from the backends that have it.
 
 ### 2. The fail-closed tenant chokepoint
 
