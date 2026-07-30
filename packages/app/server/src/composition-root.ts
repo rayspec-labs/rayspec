@@ -480,6 +480,56 @@ function normalizeBootSecret(value: string): string {
 }
 
 /**
+ * A one-line WARNING sink for the boot path, defaulting to `console.warn`. INJECTABLE so a test can
+ * capture what was emitted — the same shape the CLI's `resolveGuardComparisonUrl` uses. Every caller
+ * that does not pass one gets the default, so an existing boot is unchanged.
+ */
+type BootWarnSink = (message: string) => void;
+const consoleWarn: BootWarnSink = (message) => {
+  console.warn(message);
+};
+
+/** U+FEFF. Spelled as an escape so no literal byte-order mark sits in this source file. */
+const BYTE_ORDER_MARK = '\uFEFF';
+
+/**
+ * Build the one-line warning for a boot secret that `normalizeBootSecret` actually CHANGED.
+ *
+ * WHY IT EXISTS: normalization is silent, and the damage pattern is a silent mass-401 on upgrade —
+ * a secret with edge whitespace that worked before is now trimmed, everything starts rejecting, and
+ * the operator searches the auth logic, the database, the proxy while the cause is an invisible
+ * character. This is the runtime signal that names it, at the moment it happens.
+ *
+ * WHAT IT MAY SAY: the VARIABLE the secret was resolved from (`<VAR>`, or `<VAR>_FILE` when the
+ * mount won — operator-supplied configuration, and the name they have to go fix) and the KIND of
+ * change, drawn from a CLOSED, VALUE-FREE vocabulary. NEVER the value or any part of it — not
+ * truncated, not hashed, not a length, not a count, not a character, not an excerpt of the removed
+ * part. The value IS the secret and a warning reaches every log the process writes to; the kinds
+ * below are fixed strings chosen by comparing the raw and normalized forms, so none of them can
+ * carry a byte of either. The tests assert that no substring of a sentinel value survives here.
+ *
+ * The BOM is called out separately from "leading whitespace" because it is the kind an operator
+ * cannot see at all, and the one that breaks a PKCS#8 import (the PEM header must sit at offset 0);
+ * `trim()` strips it because it counts as whitespace. A BOM at the trailing edge is stripped by the
+ * same rule and reported as trailing whitespace — the vocabulary stays closed rather than growing a
+ * kind for a case that has no failure mode behind it.
+ */
+function bootSecretNormalizationWarning(sourceVar: string, raw: string): string {
+  const leading = raw.slice(0, raw.length - raw.trimStart().length);
+  const kinds: string[] = [];
+  if (leading.includes(BYTE_ORDER_MARK)) kinds.push('a leading byte-order mark removed');
+  if (leading.replaceAll(BYTE_ORDER_MARK, '').length > 0) kinds.push('leading whitespace removed');
+  if (raw.trimEnd().length < raw.length) kinds.push('trailing whitespace removed');
+  return (
+    `warning: the boot secret resolved from ${sourceVar} was changed by normalization — ` +
+    `${kinds.join(', ')}. The normalized value is the one in use, so it differs from the bytes ` +
+    'supplied; if this secret stopped being accepted, that difference is the cause. Supply it ' +
+    'without edge whitespace (base64-encode a value that genuinely needs it). The value itself is ' +
+    'never logged.'
+  );
+}
+
+/**
  * Read ONE boot secret out of the file named by a `<VAR>_FILE` variable. FAIL CLOSED on anything
  * that is not a readable, non-empty regular file — a misconfigured secret mount must ABORT the boot,
  * never silently downgrade to the weaker plain-env source (see `resolveBootSecret`).
@@ -606,14 +656,33 @@ function readBootSecretFile(fileVar: string, path: string): string {
  * config from an explicit environment (rather than the ambient one) must get exactly what they
  * passed: an ambient `<VAR>_FILE` would otherwise outrank the value they supplied and quietly
  * redirect the boot at a file they never named.
+ *
+ * NOT SILENT when normalization actually CHANGED the value: one warning (see
+ * `bootSecretNormalizationWarning`) names the source variable and the kind of change, never the
+ * value. It is emitted HERE because this is the single trim point — `readBootSecretFile` normalizes
+ * too, but only to DECIDE emptiness before its fail-closed abort, so warning there would fire on the
+ * abort path and could double-warn for the same variable. The warning is purely additive: the
+ * returned value, the precedence, and every abort are exactly what they were. A value that
+ * normalizes to EMPTY does not warn — nothing survives to be in use, and the missing-variable abort
+ * in `loadServerConfig` already names the variable, so a second message there would be noise on a
+ * boot that is failing anyway.
  */
-function resolveBootSecret(env: NodeJS.ProcessEnv, name: string): string | undefined {
+function resolveBootSecret(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  warn: BootWarnSink,
+): string | undefined {
   const fileVar = `${name}_FILE`;
   // The `<VAR>_FILE` PATH is blank-checked here to decide whether the mount is set at all; the
   // resolved secret VALUE is normalized once below, for whichever source won.
   const path = env[fileVar]?.trim();
   const raw = path ? readBootSecretFile(fileVar, path) : env[name];
-  return raw === undefined ? undefined : normalizeBootSecret(raw);
+  if (raw === undefined) return undefined;
+  const normalized = normalizeBootSecret(raw);
+  if (normalized !== raw && normalized.length > 0) {
+    warn(bootSecretNormalizationWarning(path ? fileVar : name, raw));
+  }
+  return normalized;
 }
 
 /**
@@ -636,16 +705,24 @@ function resolveBootSecret(env: NodeJS.ProcessEnv, name: string): string | undef
  * mirrors the resolved secrets onto `process.env` before anything reads them, and every downstream
  * reader (`assertBootSecrets`, `getApiKeyPepper`) reads env lazily inside a function — none at module
  * scope.
+ *
+ * `warn` is the boot's one-line WARNING sink, defaulting to `console.warn`; it exists so a test can
+ * capture what normalization reported (see `resolveBootSecret`). It is EMIT-ONLY: no returned value,
+ * no abort decision and no control flow here depends on it, so a caller that omits it boots exactly
+ * as it did before.
  */
-export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
+export function loadServerConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  warn: BootWarnSink = consoleWarn,
+): ServerConfig {
   const missing: string[] = [];
-  const databaseUrl = resolveBootSecret(env, 'DATABASE_URL');
+  const databaseUrl = resolveBootSecret(env, 'DATABASE_URL', warn);
   if (!databaseUrl) missing.push('DATABASE_URL');
-  const jwtSigningKeyPem = resolveBootSecret(env, 'RAYSPEC_JWT_SIGNING_KEY');
+  const jwtSigningKeyPem = resolveBootSecret(env, 'RAYSPEC_JWT_SIGNING_KEY', warn);
   if (!jwtSigningKeyPem || jwtSigningKeyPem.trim().length === 0) {
     missing.push('RAYSPEC_JWT_SIGNING_KEY');
   }
-  const apiKeyPepper = resolveBootSecret(env, 'RAYSPEC_API_KEY_PEPPER');
+  const apiKeyPepper = resolveBootSecret(env, 'RAYSPEC_API_KEY_PEPPER', warn);
   if (!apiKeyPepper || apiKeyPepper.trim().length === 0) missing.push('RAYSPEC_API_KEY_PEPPER');
   if (missing.length > 0) {
     throw new BootConfigError(

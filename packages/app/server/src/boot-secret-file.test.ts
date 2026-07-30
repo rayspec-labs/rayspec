@@ -497,6 +497,174 @@ describe('loadServerConfig — the plain-env source is normalized to the same co
   });
 });
 
+describe('loadServerConfig — normalization that CHANGED a secret warns, naming the variable only', () => {
+  // The operator-visible failure this guards: a secret with edge whitespace that worked before is
+  // now trimmed, every request starts rejecting, and nothing says why — the cause is an invisible
+  // character. The warning is the runtime signal. It names the VARIABLE the secret was resolved
+  // from and the KIND of change, and NOTHING else: the value is the secret, and a warning reaches
+  // every log the process writes to.
+  //
+  // A distinctive sentinel with edge whitespace on a MULTI-LINE value (the signing key is a PEM in
+  // production). Deliberately random-looking, so "no part of it appears in the output" cannot pass
+  // by colliding with ordinary English in the message.
+  const BOM = '\uFEFF'; // U+FEFF, as an escape so the assertions below stay readable
+  const LEAK = 'Xq7vNb2ZpL9wKd4RtY6sHc3JmF8gQa5eUi0oPzVn';
+  const LEAK_CLEAN = `${LEAK}\nsecond-${LEAK}\nthird-${LEAK}`;
+  // Edge whitespace on BOTH sides plus a leading byte-order mark — every kind at once. The removed
+  // bytes are exactly: U+FEFF, spaces, CR, LF.
+  const LEAK_RAW = `  ${BOM}${LEAK_CLEAN}  \r\n`;
+  /** Every substring of `value` of length `size` — the "any substring long enough to matter" probe. */
+  function windows(value: string, size: number): string[] {
+    const out: string[] = [];
+    for (let i = 0; i + size <= value.length; i += 1) out.push(value.slice(i, i + size));
+    return out;
+  }
+  /** Run a boot with a captured warning sink; returns the config (or undefined on abort) + warnings. */
+  function boot(env: NodeJS.ProcessEnv): {
+    config?: ReturnType<typeof loadServerConfig>;
+    warnings: string[];
+  } {
+    const warnings: string[] = [];
+    let config: ReturnType<typeof loadServerConfig> | undefined;
+    try {
+      config = loadServerConfig(env, (m) => warnings.push(m));
+    } catch {
+      // Several arms boot on an aborting env; what is under test is what was warned on the way.
+    }
+    return { config, warnings };
+  }
+
+  it('warns once per changed secret, naming the variable and the kinds of change', () => {
+    const { config, warnings } = boot({ ...plainEnv, RAYSPEC_API_KEY_PEPPER: `  ${PEPPER}\r\n` });
+    expect(config?.apiKeyPepper).toBe(PEPPER);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('RAYSPEC_API_KEY_PEPPER');
+    expect(warnings[0]).toContain('leading whitespace removed');
+    expect(warnings[0]).toContain('trailing whitespace removed');
+  });
+
+  it('warns for EACH of the three boot secrets, under its own variable name', () => {
+    for (const name of ['DATABASE_URL', 'RAYSPEC_JWT_SIGNING_KEY', 'RAYSPEC_API_KEY_PEPPER']) {
+      const { warnings } = boot({ ...plainEnv, [name]: `  ${plainEnv[name]}\n` });
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(name);
+    }
+  });
+
+  it('names a leading byte-order mark as its own kind of change', () => {
+    const { config, warnings } = boot({
+      ...plainEnv,
+      RAYSPEC_JWT_SIGNING_KEY: `${BOM}${SIGNING_KEY}`,
+    });
+    expect(config?.jwtSigningKeyPem).toBe(SIGNING_KEY);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('byte-order mark');
+  });
+
+  it('warns for a _FILE-sourced secret too, naming the _FILE variable it was resolved from', () => {
+    const { config, warnings } = boot({
+      ...plainEnv,
+      RAYSPEC_API_KEY_PEPPER_FILE: secretFile('warn-pepper', `${PEPPER}\n`),
+    });
+    expect(config?.apiKeyPepper).toBe(PEPPER);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('RAYSPEC_API_KEY_PEPPER_FILE');
+    expect(warnings[0]).toContain('trailing whitespace removed');
+    expect(warnings[0]).not.toContain('leading whitespace removed');
+  });
+
+  it('a CLEAN secret boots SILENTLY — from either source', () => {
+    const { config: fromEnv, warnings: envWarnings } = boot({ ...plainEnv });
+    expect(fromEnv?.apiKeyPepper).toBe(plainEnv.RAYSPEC_API_KEY_PEPPER);
+    expect(envWarnings).toEqual([]);
+
+    const { config: fromFile, warnings: fileWarnings } = boot({
+      DATABASE_URL_FILE: secretFile('silent-db', DB_URL),
+      RAYSPEC_JWT_SIGNING_KEY_FILE: secretFile('silent-key', SIGNING_KEY),
+      RAYSPEC_API_KEY_PEPPER_FILE: secretFile('silent-pepper', PEPPER),
+    });
+    expect(fromFile?.apiKeyPepper).toBe(PEPPER);
+    expect(fileWarnings).toEqual([]);
+  });
+
+  it('NO PART of the value reaches the output — not the trimmed-away part, not any substring', () => {
+    const { config, warnings } = boot({ ...plainEnv, RAYSPEC_JWT_SIGNING_KEY: LEAK_RAW });
+    // The change really happened — otherwise "nothing leaked" would be free.
+    expect(config?.jwtSigningKeyPem).toBe(LEAK_CLEAN);
+    expect(config?.jwtSigningKeyPem).not.toBe(LEAK_RAW);
+    // A multi-line value survives with its INTERIOR bytes untouched.
+    expect(config?.jwtSigningKeyPem.split('\n')).toHaveLength(3);
+    expect(warnings).toHaveLength(1);
+    const warning = warnings[0] ?? '';
+    // It really is the warning for this variable — so the assertions below are about a message that
+    // was actually emitted for the leaking value.
+    expect(warning).toContain('RAYSPEC_JWT_SIGNING_KEY');
+    // Neither the raw value, nor the normalized one, nor the distinctive core of either.
+    expect(warning).not.toContain(LEAK_RAW);
+    expect(warning).not.toContain(LEAK_CLEAN);
+    expect(warning).not.toContain(LEAK);
+    // The TRIMMED-AWAY part on its own: the removed bytes were exactly U+FEFF, spaces, CR and LF.
+    // A single-line, whitespace-collapsed message carries none of them.
+    expect(warning).not.toContain(BOM);
+    expect(warning).not.toContain('\r');
+    expect(warning).not.toContain('\n');
+    expect(warning).not.toMatch(/ {2}/);
+    // And no substring long enough to matter — every 6-character window of the raw value.
+    for (const window of windows(LEAK_RAW, 6)) expect(warning).not.toContain(window);
+  });
+
+  it('emits NOTHING on the abort path — a broken mount aborts without a normalization warning', () => {
+    // `readBootSecretFile` normalizes the raw bytes purely to decide EMPTINESS before its
+    // fail-closed abort. That is not the trim point, so it must not warn: warning there would fire
+    // on the abort path and could double-warn for the same variable.
+    const { config, warnings } = boot({
+      ...plainEnv,
+      RAYSPEC_API_KEY_PEPPER_FILE: secretFile('warn-empty', '  \n'),
+    });
+    expect(config).toBeUndefined();
+    expect(warnings).toEqual([]);
+  });
+
+  it('a whitespace-only PLAIN value aborts as missing, without a normalization warning', () => {
+    // Nothing survives normalization, so there is no secret in use to warn about — and the abort
+    // already names the variable. A second message here would be noise on a failing boot.
+    const { config, warnings } = boot({ ...plainEnv, RAYSPEC_API_KEY_PEPPER: '   ' });
+    expect(config).toBeUndefined();
+    expect(warnings).toEqual([]);
+  });
+
+  it('the warning changes NO returned value — the config is byte-identical either way', () => {
+    // The whole point: this is a warning, not a behaviour change. A boot with a captured sink and
+    // one with none resolve exactly the same config.
+    const env = {
+      ...plainEnv,
+      DATABASE_URL: `  ${DB_URL}\n`,
+      RAYSPEC_JWT_SIGNING_KEY: `${BOM}${SIGNING_KEY}\r\n`,
+      RAYSPEC_API_KEY_PEPPER: `${PEPPER}  `,
+    };
+    const captured = boot(env).config;
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let byDefault: ReturnType<typeof loadServerConfig> | undefined;
+    let defaultSinkCalls: unknown[][] = [];
+    try {
+      byDefault = loadServerConfig(env);
+      // Snapshot the calls BEFORE restoring — `mockRestore` also resets the recorded ones.
+      defaultSinkCalls = spy.mock.calls.map((args) => [...args]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(byDefault).toEqual(captured);
+    expect(byDefault?.databaseUrl).toBe(DB_URL);
+    expect(byDefault?.jwtSigningKeyPem).toBe(SIGNING_KEY);
+    expect(byDefault?.apiKeyPepper).toBe(PEPPER);
+    // The DEFAULT sink is `console.warn` — one call per changed secret, and nothing leaked there
+    // either.
+    expect(defaultSinkCalls).toHaveLength(3);
+    const text = defaultSinkCalls.flat().map(String).join('\n');
+    for (const secret of [DB_URL, SIGNING_KEY, PEPPER]) expect(text).not.toContain(secret);
+  });
+});
+
 describe('loadServerConfig — neither variant set', () => {
   it('throws the aggregated missing-variable abort listing all three PLAIN names', () => {
     let message = '';
