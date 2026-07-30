@@ -20,7 +20,8 @@
  *   - CONTENT METHODS: a mount serves GET/HEAD/OPTIONS; every other verb gets 405 + `Allow` and the
  *     uniform JSON envelope — so a POST/DELETE to a missing path under an spa:true mount is never
  *     answered 200 with the SPA shell — while the reserved-prefix decline and the fail-closed path
- *     guard, which both run first, keep their 404.
+ *     guard, which both run first, keep their 404. The guard also sits AHEAD of the custom-404
+ *     fall-through, so a write verb on a mount that ships a 404.html gets the 405, never the page.
  *
  * Fail-the-fix: remove the guard in serve-static.ts and the traversal/dotfile/symlink arms serve the
  * secret file (200) instead of 404 — the `.not.toContain(SECRET)` + status assertions go red. Remove the
@@ -475,6 +476,20 @@ describe('mountFrontend — custom 404.html page', () => {
     expect(res.status).toBe(404);
     expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
     expect(await res.text()).toContain(CUSTOM_404_SENTINEL);
+  });
+
+  it('spa:false — a non-content method on a mount that ships a 404.html → 405 + Allow, never the custom page', async () => {
+    // The method guard sits AHEAD of the custom-page fall-through, so the page is a GET/HEAD/OPTIONS
+    // surface only: a write verb is answered 405 before the page is ever consulted. This is the one
+    // response the 404.html convention narrowed, so pin it explicitly.
+    const app = buildApp([plainMount], mintFixture({ index: true, asset: true, notFound: true }));
+    const res = await app.request('/no/such/page', { method: 'POST' });
+    expect(res.status).toBe(405);
+    expect(res.headers.get('allow')).toBe('GET, HEAD, OPTIONS');
+    expect(res.headers.get('content-type')).toMatch(/application\/json/);
+    const body = await res.text();
+    expect(body).not.toContain(CUSTOM_404_SENTINEL);
+    expect(body).not.toContain(LOCAL_INDEX_SENTINEL);
   });
 
   it('spa:false — a miss with NO root 404.html → the uniform 404 (no custom page, backward compatible)', async () => {

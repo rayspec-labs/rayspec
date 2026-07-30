@@ -17,14 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that does not exist — a removed API route, for example — was answered `200` with
   `index.html`, so a caller could not tell a route that is gone apart from a write that
   succeeded; no data was written and no authorization was bypassed, the status was simply
-  wrong. What integrators observe: a non-content method against a static mount that used to
-  come back `200` (SPA mount) or `404` (plain mount) now comes back `405` with the `Allow`
-  header. Everything else is unchanged — `GET`/`HEAD` of existing files, the `GET` deep-link
-  fallback (`200` + `index.html`, so History-API navigation still works), the reserved
-  platform prefixes (`/v1`, `/health`, `/oidc`), the fail-closed path guard (traversal,
-  dotfiles, symlink escapes), the `404.html` convention including its `HEAD`/`OPTIONS`
-  metadata handling, and the unsatisfiable-range `416`, each of which still answers first and
-  keeps its exact response for every method.
+  wrong. What integrators observe, by what the path used to resolve to: a non-content method
+  against an **existing file** came back `200` with that file's bytes on either mount type;
+  against a **missing path** it came back `200` + `index.html` on an `spa:true` mount, and on
+  a plain mount either the `404.html` page (when the mount ships one) or the uniform `404`.
+  All of them now come back `405` with the `Allow` header. Still answering first and keeping
+  their exact response for every method: the reserved platform prefixes (`/v1`, `/health`,
+  `/oidc`), the fail-closed path guard (traversal, dotfiles, symlink escapes) and the
+  unsatisfiable-range `416` — all three run ahead of the method guard. Unchanged for the
+  methods a mount serves: `GET`/`HEAD` of existing files, the `GET` deep-link fallback (`200`
+  + `index.html`, so History-API navigation still works), and the `404.html` convention — a
+  `GET`/`HEAD`/`OPTIONS` miss still gets the custom page, including its `HEAD`/`OPTIONS`
+  metadata handling. The custom page is the one preserved surface that narrows: it sits
+  *behind* the method guard, so on a mount that ships a `404.html` a non-content verb is now
+  answered `405` before the page is consulted. This **narrows the `1.6.2` note** that
+  described the custom page as a plain mount's not-found surface without qualifying it by
+  method.
 
 ### Security
 
