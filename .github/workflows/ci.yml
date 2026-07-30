@@ -173,10 +173,11 @@ jobs:
       # The scheduled dependency-advisory round (dependency-advisories.yml) writes to the issue tracker,
       # and its only logic lives in scripts/sync-advisory-issues.mjs — which nothing else exercises,
       # because that workflow runs on a timer, not on a pull request. This standalone test drives the
-      # REAL script with the `gh` boundary mocked and holds its four load-bearing properties: one issue
+      # REAL script with the `gh` boundary mocked and holds its load-bearing properties: one issue
       # per advisory (not per affected package), an existing open issue is refreshed instead of
-      # duplicated, a clean report performs ZERO GitHub calls, and a missing/refused label never costs a
-      # finding. DB-free / secret-free / network-free → lane 1.
+      # duplicated, a clean report performs ZERO GitHub calls, a missing/refused label never costs a
+      # finding, and the filed body keeps the blank lines that make its package table and footer
+      # render as markdown. DB-free / secret-free / network-free → lane 1.
       - name: Advisory-issue sync regression
         run: pnpm test:advisory-sync
 

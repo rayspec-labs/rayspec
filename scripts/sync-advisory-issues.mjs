@@ -175,13 +175,16 @@ function bodyFor(entry) {
       (p) =>
         `| \`${cell(p.name)}\` | \`${cell(p.version)}\` | ${cell(p.ecosystem)} | \`${cell(p.source)}\` |`,
     );
+  // `''` is a DELIBERATE blank line — markdown needs one to end a list and start a table, a heading
+  // or a paragraph, or the block is swallowed as lazy continuation of the preceding list item. An
+  // absent optional bullet is `null` instead, so that dropping it cannot drop a separator with it.
   return [
     `The scheduled dependency-advisory round matched **${entry.id}** against the committed lockfile.`,
     '',
     `- **Advisory:** https://osv.dev/vulnerability/${entry.id}`,
-    entry.aliases.length > 0 ? `- **Aliases:** ${cell(entry.aliases.join(', '))}` : '',
-    entry.severity ? `- **Severity (as reported by the scanner):** ${cell(entry.severity)}` : '',
-    entry.summary ? `- **Summary:** ${cell(entry.summary)}` : '',
+    entry.aliases.length > 0 ? `- **Aliases:** ${cell(entry.aliases.join(', '))}` : null,
+    entry.severity ? `- **Severity (as reported by the scanner):** ${cell(entry.severity)}` : null,
+    entry.summary ? `- **Summary:** ${cell(entry.summary)}` : null,
     '',
     '| Package | Version | Ecosystem | Source |',
     '| --- | --- | --- | --- |',
@@ -203,7 +206,7 @@ function bodyFor(entry) {
     '',
     `_Last observed: ${observed}${runUrl ? ` — [run log](${runUrl})` : ''}. This body is rewritten by each round; the title is the deduplication key, so do not rename it._`,
   ]
-    .filter((line) => line !== '')
+    .filter((line) => line !== null)
     .join('\n');
 }
 

@@ -9,10 +9,16 @@
  * every invocation (argv plus the contents of any `--body-file`), and answers `label list` /
  * `issue list` from the case's fixture. No test-only flag or seam exists in the script itself.
  *
- * The four properties that matter, each a real failure mode:
+ * The properties that matter, each a real failure mode:
  *
  *   (D) DEDUPLICATION — one advisory that hits TWO packages is ONE issue, not two, and the single
  *       body names both packages. A per-package filer would open an issue storm for one advisory.
+ *   (M) THE BODY IS WELL-FORMED MARKDOWN — the blank lines that separate the lead sentence, the
+ *       bullet list, the affected-package table, the `### What to do` heading and the footer are
+ *       load-bearing: without them markdown swallows the table and the footer into the preceding
+ *       list item as lazy continuation and prints them as raw pipes. Asserting that a package name
+ *       appears SOMEWHERE in the body does not catch that, so the block structure is pinned here —
+ *       for a full advisory and for a bare one, where absent optional bullets are dropped.
  *   (U) UPDATE, NEVER DUPLICATE — with an open issue already carrying the advisory's title, the run
  *       EDITS it and creates nothing. Re-filing weekly is how a tracker becomes unusable.
  *   (Q) A CLEAN RUN IS SILENT — a scanner report with no matches performs ZERO `gh` calls: no
@@ -145,7 +151,79 @@ function reportOneAdvisoryTwoPackages(summary = 'Prototype pollution in the affe
   };
 }
 
+/** A scanner report carrying an advisory with NO aliases, severity or summary — the case where the
+ *  optional bullets are dropped and could take the structural blank lines with them. */
+function reportBareAdvisory() {
+  return {
+    results: [
+      {
+        source: { path: 'pnpm-lock.yaml', type: 'lockfile' },
+        packages: [
+          {
+            package: { name: 'left-pad', version: '1.0.0', ecosystem: 'npm' },
+            vulnerabilities: [{ id: ADVISORY }],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/** Assert the issue body's block structure: every separator that markdown needs is present. */
+function assertWellFormedBody(body, label) {
+  assert.match(
+    body,
+    /lockfile\.\n\n- \*\*Advisory:\*\* /,
+    `${label} the bullet list must start its own block, or it joins the lead paragraph`,
+  );
+  assert.match(
+    body,
+    /\n\n\| Package \| Version \| Ecosystem \| Source \|\n\| --- \| --- \| --- \| --- \|\n/,
+    `${label} the table must be preceded by a blank line and its own header row, or GFM renders it as raw pipes inside the last bullet`,
+  );
+  assert.match(
+    body,
+    /\n\n### What to do\n\n1\. /,
+    `${label} the heading must be isolated by blank lines on both sides`,
+  );
+  assert.match(
+    body,
+    /\n\n_Last observed: /,
+    `${label} the footer must be its own block, not a continuation of the numbered list`,
+  );
+}
+
 try {
+  // ── (M) the body is well-formed markdown, with and without the optional bullets ────────────────
+  {
+    const full = runSync(reportOneAdvisoryTwoPackages());
+    assert.equal(
+      full.code,
+      0,
+      `(M) the sync must exit 0 on a finding; got ${full.code}: ${full.err}`,
+    );
+    const [fullCall] = verbs(full.calls, 'issue', 'create');
+    assert.ok(fullCall, '(M) the advisory must be filed');
+    assertWellFormedBody(fullCall.body, '(M/full)');
+
+    const bare = runSync(reportBareAdvisory());
+    assert.equal(bare.code, 0, `(M) a bare advisory must exit 0; got ${bare.code}: ${bare.err}`);
+    const [bareCall] = verbs(bare.calls, 'issue', 'create');
+    assert.ok(bareCall, '(M) the bare advisory must be filed');
+    assertWellFormedBody(bareCall.body, '(M/bare)');
+    assert.doesNotMatch(
+      bareCall.body,
+      /^- \*\*(Aliases|Severity|Summary)/m,
+      '(M) an absent optional field must leave no bullet behind',
+    );
+    assert.doesNotMatch(
+      bareCall.body,
+      /\n\n\n/,
+      '(M) a dropped optional bullet must not leave a double blank line',
+    );
+    console.log('ok (M) — the issue body keeps its markdown block structure, bullets or not');
+  }
+
   // ── (D) one advisory across two packages → exactly ONE issue, naming both packages ─────────────
   {
     const r = runSync(reportOneAdvisoryTwoPackages());
