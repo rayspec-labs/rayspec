@@ -11,6 +11,7 @@
       "!**/dist",
       "!**/node_modules",
       "!**/*.gen.ts",
+      "!**/*.gen.js",
       "!**/drizzle",
       "!packages/kernel/spec/spec.schema.json",
       "!packages/kernel/spec/product.schema.json",
