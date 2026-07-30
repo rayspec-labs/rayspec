@@ -53,6 +53,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`rayspec deploy` boots a frontend-only document as the static profile, before any secret is
+  read.** A document whose only section is `frontend` is detected by the same fail-closed shape
+  predicate the `rayspec-serve` entrypoint uses, and takes the same database-less, secret-less
+  static boot — so `rayspec deploy ./my-ui.yaml` is now what the documentation says it is: the
+  equivalent of `RAYSPEC_SPEC_PATH=./my-ui.yaml rayspec-serve`. Both previous outcomes were wrong,
+  in opposite directions. With the three boot secrets present in the environment, `deploy` silently
+  booted the **full** server on such a document: a live OIDC issuer answering
+  `/oidc/.well-known/openid-configuration`, `GET /v1/auth/me` answering `401` instead of `404`, and
+  no `Content-Security-Policy` or `Permissions-Policy` on the served assets — the documented
+  "provably no authenticated surface behind the assets" turned into its opposite with no signal.
+  Without those secrets — the documented scenario — it refused to start at all, naming
+  `DATABASE_URL`, `RAYSPEC_JWT_SIGNING_KEY` and `RAYSPEC_API_KEY_PEPPER` as missing. What an
+  operator observes now, either way: the static boot banner, no database and no boot secret
+  required, no auth / OIDC / run route mounted (`/v1/auth/me` → `404`), `/health` liveness-only,
+  and the `Content-Security-Policy` + `Permissions-Policy` secure defaults on every served
+  response (still overridable verbatim through `RAYSPEC_FRONTEND_CSP` and
+  `RAYSPEC_PERMISSIONS_POLICY`). A document that declares anything else — stores, api, agents,
+  tooling, triggers, handlers, extensions, or a durable worker — is unaffected and takes exactly
+  the boot it took before, including its fail-closed error on a missing secret. The static boot
+  itself is unchanged; its entry points (`isStaticProfile`, `loadStaticServerConfig`,
+  `assembleStaticServer`, `staticBootBanner`) are now re-exported from the `@rayspec/server`
+  package root, so a wrapper can reach them as well.
+
 - **A mounted static frontend answers non-content methods with `405` instead of the SPA
   fallback.** A static mount serves `GET`, `HEAD` and `OPTIONS`; every other method on any
   path under the mount now returns HTTP 405 carrying `Allow: GET, HEAD, OPTIONS` and the

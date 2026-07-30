@@ -36,11 +36,17 @@ vi.mock('@rayspec/server', () => {
       };
       return { app: { fetch: () => new Response('ok') }, close: async () => {} };
     }),
+    assembleStaticServer: vi.fn(),
     BootConfigError,
     bootBanner: () => 'banner',
     bootBaseUrl: () => 'http://127.0.0.1:0',
     DeployError,
+    // The update-env wiring under test is the NORMAL (secret-requiring) boot: a false predicate keeps
+    // every case on that path, so the static-boot stubs beside it are present but never called.
+    isStaticProfile: () => false,
     loadServerConfig: () => ({ port: 0 }),
+    loadStaticServerConfig: () => ({ port: 0, host: '127.0.0.1' }),
+    staticBootBanner: () => 'static banner',
   };
 });
 vi.mock('@hono/node-server', () => ({

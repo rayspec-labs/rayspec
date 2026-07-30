@@ -25,8 +25,10 @@
  * into `rayspec doctor` / the read-only floor.
  */
 
+import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import type { ProductYamlRollout } from '@rayspec/product-yaml';
+import type { FrontendSpec } from '@rayspec/spec';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
 
 /** A usage/argument problem in `deploy` (mapped to exit 2 by index.ts, like the other subcommands). */
@@ -291,6 +293,35 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
 }
 
 /**
+ * If `specPath` names a STATIC-PROFILE (frontend-only) backend spec, return its path + parsed frontend
+ * mounts for the DB-less / auth-less static boot; otherwise undefined (⇒ the normal boot). Reads ONLY
+ * the spec file — never the three boot secrets — so a frontend-only deployment boots with none of them
+ * set. An unreadable/non-static doc falls through to the normal boot, which raises its own error exactly
+ * as today. Mirrors the `rayspec-serve` bin's detection (packages/app/server/src/serve.ts) so both
+ * entrypoints classify a document identically.
+ */
+async function detectStaticDeployment(
+  specPath: string,
+): Promise<{ specPath: string; frontend: readonly FrontendSpec[] } | undefined> {
+  const { isStaticProfile } = await import('@rayspec/server');
+  const { parseSpec } = await import('@rayspec/spec');
+  let specSource: string;
+  try {
+    specSource = readFileSync(specPath, 'utf8');
+  } catch {
+    return undefined; // unreadable/missing spec → the normal boot raises its own error
+  }
+  if (!isStaticProfile(specSource)) return undefined;
+  // isStaticProfile already proved this parses as a backend RaySpec with a non-empty frontend; re-parse
+  // to hand the typed mounts to assembleStaticServer.
+  const parsed = parseSpec(specSource);
+  if (!parsed.ok || parsed.value.frontend === undefined || parsed.value.frontend.length === 0) {
+    return undefined;
+  }
+  return { specPath, frontend: parsed.value.frontend };
+}
+
+/**
  * Boot + SERVE the deployment (long-running). Wraps `assembleServer` (NOT the frozen-surface `deploy()`),
  * building its deployer-seam opts from the SHARED `assembleOptsFromEnv` builder (the sanctioned
  * validating registrar as the product-table hook + an env-driven agent-backend factory when the spec is
@@ -300,6 +331,10 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
  * unreviewed destructive migration via DeployError, a product-boot misconfig) it prints an actionable
  * message + exits 1 (mirrors deployments/acme-notes/serve.mts). Returns once the server is listening;
  * the open port + SIGINT/SIGTERM handlers keep the process alive.
+ *
+ * All of the above is the NORMAL boot. A FRONTEND-ONLY (static-profile) spec takes the DB-less /
+ * auth-less static boot instead — the same branch rayspec-serve takes, entered BEFORE any secret is
+ * read — and is otherwise served identically (same port/host wiring, same signal handling).
  */
 export async function serveDeployment(
   specPath: string,
@@ -340,16 +375,50 @@ export async function serveDeployment(
   const {
     assembleOptsFromEnv,
     assembleServer,
+    assembleStaticServer,
     BootConfigError,
     bootBanner,
     bootBaseUrl,
     DeployError,
     loadServerConfig,
+    loadStaticServerConfig,
+    staticBootBanner,
   } = await import('@rayspec/server');
   const { sealProductStores } = await import('@rayspec/db/composition');
 
   let server: Awaited<ReturnType<typeof assembleServer>>;
   try {
+    // Static-profile detection BEFORE the secret-requiring config load: a frontend-only spec boots with
+    // NO database/JWT/pepper and mounts NO auth surface (see assembleStaticServer). It branches AWAY
+    // from the whole DB/auth composition, so it must run before loadServerConfig (which fail-closes on
+    // the three secrets) — and it is what makes `rayspec deploy <frontend-only-spec>` the documented
+    // equivalent of `RAYSPEC_SPEC_PATH=<spec> rayspec-serve`. Every non-static deploy is unchanged below.
+    // (Nothing to seal here: a static boot registers no product store — it never reaches the chokepoint.)
+    const staticBoot = await detectStaticDeployment(specPath);
+    if (staticBoot) {
+      console.log(
+        '[rayspec deploy] booting — static profile (frontend-only): no database, no auth surface…',
+      );
+      const staticConfig = loadStaticServerConfig();
+      const staticServer = assembleStaticServer(staticConfig, staticBoot);
+      const httpStatic = serve(
+        { fetch: staticServer.app.fetch, hostname: staticConfig.host, port: staticConfig.port },
+        (info) => {
+          console.log(staticBootBanner(staticServer, bootBaseUrl(info.address, info.port)));
+        },
+      );
+      const shutdownStatic = (signal: string): void => {
+        console.log(`\n[rayspec deploy] ${signal} received — shutting down…`);
+        httpStatic.close(async () => {
+          await staticServer.close();
+          process.exit(0);
+        });
+      };
+      process.on('SIGINT', () => shutdownStatic('SIGINT'));
+      process.on('SIGTERM', () => shutdownStatic('SIGTERM'));
+      return;
+    }
+
     const config = loadServerConfig();
     // Build the deployer-seam opts from the SAME shared builder rayspec-serve uses: the sanctioned
     // validating registrar (registerProductStores) for ANY spec, PLUS an env-driven agentBackendsFactory
