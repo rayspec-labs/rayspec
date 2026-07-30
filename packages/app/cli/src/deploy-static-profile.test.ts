@@ -11,8 +11,10 @@
  *       headers (Content-Security-Policy + Permissions-Policy) are present on a served asset;
  *   (b) EMPTY environment — deploy must BOOT, not fail closed on the three missing boot secrets.
  *
- * Plus the fail-closed guard: a spec that declares stores/api ALONGSIDE a frontend is NOT a static
- * profile, so it must keep taking the normal (secret-requiring) path.
+ * Plus the two fail-closed guards: a spec that declares stores/api ALONGSIDE a frontend is NOT a static
+ * profile, so it must keep taking the normal (secret-requiring) path; and `--apply-migration` against a
+ * frontend-only spec is REFUSED as a usage error (exit 2) rather than silently ignored — a static boot
+ * touches no database, so it can apply no migration.
  *
  * Like deploy.db.test.ts, the unit under test is the BUILT CLI (packages/app/cli/dist/index.js) — run
  * `pnpm build` before this suite.
@@ -76,6 +78,9 @@ beforeAll(() => {
   );
   writeFileSync(join(root, 'rayspec.yaml'), FRONTEND_ONLY_SPEC, 'utf8');
   writeFileSync(join(root, 'with-api.yaml'), API_PLUS_FRONTEND_SPEC, 'utf8');
+  // A reviewed forward delta for the --apply-migration refusal arm. Its CONTENT is never read: the
+  // usage guard fires before any engine sees it — the file only has to exist + pass the path jail.
+  writeFileSync(join(root, 'delta.sql'), 'ALTER TABLE notes ADD COLUMN pinned boolean;\n', 'utf8');
 });
 
 afterAll(() => {
@@ -243,5 +248,62 @@ describe('rayspec deploy — a spec with stores/api ALONGSIDE a frontend is NOT 
     } finally {
       await stop(booted);
     }
+  }, 60_000);
+});
+
+describe('rayspec deploy — --apply-migration on a frontend-only spec is REFUSED, never silently dropped', () => {
+  /**
+   * A static boot touches no database and never reaches the migration engine, so accepting the delta
+   * would drop an operator's explicit reviewed-forward-migration intent behind a green boot banner —
+   * the exact no-op `deploy` already refuses for `--dry-run` and for a bare `--allowlist`. The refusal
+   * is a USAGE error (exit 2), it happens BEFORE anything binds a port, and the message names the flag.
+   */
+  it('exits 2 naming the flag instead of booting the static profile', async () => {
+    const port = EMPTY_ENV_PORT + 2000;
+    const child = spawn(
+      process.execPath,
+      [
+        CLI_DIST,
+        'deploy',
+        './rayspec.yaml',
+        '--apply-migration',
+        './delta.sql',
+        '--port',
+        String(port),
+      ],
+      { cwd: root, env: childEnv() },
+    );
+    let out = '';
+    let err = '';
+    child.stdout?.on('data', (d) => {
+      out += String(d);
+    });
+    child.stderr?.on('data', (d) => {
+      err += String(d);
+    });
+    // A REGRESSION here means the delta was accepted and the static profile booted — i.e. the child
+    // never exits. Bound the wait and kill it, so the failure is the assertion below (with both
+    // streams attached) rather than a suite timeout leaving a listening subprocess behind.
+    const code = await new Promise<number | null | 'still-serving'>((r) => {
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL');
+        r('still-serving');
+      }, 20_000);
+      child.on('exit', (c) => {
+        clearTimeout(timer);
+        r(c);
+      });
+    });
+    // Exit 2 is the CLI's usage-error code (a fail-closed boot error would be 1).
+    expect(
+      code,
+      `deploy did not refuse the flag\n--- stdout ---\n${out}\n--- stderr ---\n${err}`,
+    ).toBe(2);
+    const combined = `${out}${err}`;
+    expect(combined).toMatch(/--apply-migration/);
+    expect(combined).toMatch(/static-profile|frontend-only/);
+    // It refused instead of booting: no static banner, and nothing is listening on the port.
+    expect(combined).not.toContain('STATIC PROFILE (frontend-only)');
+    await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
   }, 60_000);
 });

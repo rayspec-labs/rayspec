@@ -42,8 +42,9 @@ vi.mock('@rayspec/server', () => {
     bootBaseUrl: () => 'http://127.0.0.1:0',
     DeployError,
     // The update-env wiring under test is the NORMAL (secret-requiring) boot: a false predicate keeps
-    // every case on that path, so the static-boot stubs beside it are present but never called.
-    isStaticProfile: () => false,
+    // every case on that path, so the static-boot stubs beside it are present but never called. The
+    // static-profile usage guard flips it to true for its one case (and back again).
+    isStaticProfile: vi.fn(() => false),
     loadServerConfig: () => ({ port: 0 }),
     loadStaticServerConfig: () => ({ port: 0, host: '127.0.0.1' }),
     staticBootBanner: () => 'static banner',
@@ -55,6 +56,7 @@ vi.mock('@hono/node-server', () => ({
 }));
 vi.mock('@rayspec/db/composition', () => ({ sealProductStores: () => {} }));
 
+import { isStaticProfile } from '@rayspec/server';
 import { DeployCliError, parseDeployArgs, runDeploy, serveDeployment } from './deploy.js';
 import { ReadSpecError, resolveSpecPath } from './read-spec.js';
 
@@ -63,6 +65,9 @@ const repoRoot = resolve(here, '../../../..');
 // A committed spec that exists + is readable (used only to get PAST the pre-flight read into the usage
 // guards — its content is never composed here).
 const ANY_SPEC_REL = 'examples/acme-notes/acme-notes.product.yaml';
+// Likewise a committed, readable, in-jail .sql: the usage guards fire before a delta's CONTENT is ever
+// read, so any regular file under the repo root serves as the "reviewed delta" argument.
+const ANY_DELTA_REL = 'examples/acme-notes-backend/drizzle/0000_product_stores.sql';
 
 // Snapshot the env keys serveDeployment mutates so each case starts clean and the suite leaves no trace.
 const ENV_KEYS = [
@@ -137,6 +142,29 @@ describe('runDeploy — the --apply-migration usage guards', () => {
     await expect(
       runDeploy([ANY_SPEC_REL, '--apply-migration', '../outside.sql']),
     ).rejects.toBeInstanceOf(DeployCliError);
+  });
+
+  it('--apply-migration against a frontend-only (static-profile) doc is refused (it applies no migration)', async () => {
+    // The static boot touches no database and never reaches the migration engine, so accepting the
+    // delta here would silently drop it — the same no-op the --dry-run and bare---allowlist guards
+    // above refuse. isStaticProfile is the mocked stand-in for the real predicate (the REAL classifier
+    // + the REAL CLI exit code are proven end-to-end in deploy-static-profile.test.ts).
+    vi.mocked(isStaticProfile).mockReturnValue(true);
+    try {
+      let err: unknown;
+      try {
+        await runDeploy([ANY_SPEC_REL, '--apply-migration', ANY_DELTA_REL]);
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(DeployCliError);
+      // The message must name the flag and the reason, so the operator sees WHY it was refused.
+      expect((err as Error).message).toMatch(/--apply-migration/);
+      expect((err as Error).message).toMatch(/static-profile|frontend-only/);
+      expect((err as Error).message).toMatch(/no database/);
+    } finally {
+      vi.mocked(isStaticProfile).mockReturnValue(false);
+    }
   });
 });
 

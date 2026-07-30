@@ -71,7 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response (still overridable verbatim through `RAYSPEC_FRONTEND_CSP` and
   `RAYSPEC_PERMISSIONS_POLICY`). A document that declares anything else — stores, api, agents,
   tooling, triggers, handlers, extensions, or a durable worker — is unaffected and takes exactly
-  the boot it took before, including its fail-closed error on a missing secret. The static boot
+  the boot it took before, including its fail-closed error on a missing secret. Because that boot
+  touches no database it reaches no migration engine, so `--apply-migration` / `--allowlist`
+  against a frontend-only document are now **refused** as a usage error (exit `2`, the message
+  names the flag) instead of being accepted and dropped — the same rule `deploy` already applied
+  to `--apply-migration --dry-run` and to a bare `--allowlist`. The static boot
   itself is unchanged; its entry points (`isStaticProfile`, `loadStaticServerConfig`,
   `assembleStaticServer`, `staticBootBanner`) are now re-exported from the `@rayspec/server`
   package root, so a wrapper can reach them as well.

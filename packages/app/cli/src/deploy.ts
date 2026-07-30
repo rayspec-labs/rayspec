@@ -176,6 +176,24 @@ export async function runDeploy(args: readonly string[]): Promise<DeployOutcome>
       '--allowlist requires --apply-migration (the allowlist reviews the delta destructive statements)',
     );
   }
+  // Same rule, third database-free path: a FRONTEND-ONLY (static-profile) document takes the DB-less
+  // static boot, which — exactly like --dry-run — touches no database and so can apply no migration.
+  // Refuse the combination up front rather than accepting the reviewed delta and dropping it behind a
+  // green boot banner. Checked with the SAME predicate the boot branch uses (isStaticProfile, which
+  // already proves the doc parses as a backend RaySpec with a non-empty frontend), against the spec
+  // text the pre-flight read returned. Reached ONLY when the operator passed the flag, so the
+  // @rayspec/server import stays off the flagless path (it is dynamic here for the same reason it is
+  // in serveDeployment: `rayspec doctor` must not drag the boot dependencies in).
+  if (migrationPath !== undefined) {
+    const { isStaticProfile } = await import('@rayspec/server');
+    if (isStaticProfile(specText)) {
+      throw new DeployCliError(
+        '--apply-migration/--allowlist cannot be combined with a frontend-only (static-profile) ' +
+          'document (it boots the static profile, which touches no database, so it applies no ' +
+          'migration)',
+      );
+    }
+  }
 
   await serveDeployment(specPath, port, migrationPath, allowlistPath, host);
   return { kind: 'served' };
@@ -394,6 +412,8 @@ export async function serveDeployment(
     // the three secrets) — and it is what makes `rayspec deploy <frontend-only-spec>` the documented
     // equivalent of `RAYSPEC_SPEC_PATH=<spec> rayspec-serve`. Every non-static deploy is unchanged below.
     // (Nothing to seal here: a static boot registers no product store — it never reaches the chokepoint.)
+    // This branch reaches no migration engine, which is why runDeploy REFUSES --apply-migration against
+    // a static-profile document up front — the update env above is unreachable here, never ignored.
     const staticBoot = await detectStaticDeployment(specPath);
     if (staticBoot) {
       console.log(
