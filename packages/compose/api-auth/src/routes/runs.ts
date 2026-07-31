@@ -15,6 +15,9 @@
  *                                         timeout. Agent resolved from the injected (minimal) registry.
  *  - GET    /v1/runs/{id}               — reconstruct the neutral RunResult from the journal +
  *                                         conversation store for THIS tenant (404 on foreign/absent).
+ *                                         The run header exists from ENQUEUE on, so a run that has not
+ *                                         finished reads back its non-terminal status here (and is
+ *                                         reachable on /events) instead of 404ing until it ends.
  *  - GET    /v1/runs/{id}/events        — REPLAY run_events as SSE (id: = seq), ONE-SHOT (not a live
  *                                         tail): it streams the durable rows with seq > lastEventId and
  *                                         then ENDS. A client resumes / pulls newly-persisted events for
@@ -39,7 +42,15 @@ import { ApiError, errorEnvelope } from '@rayspec/auth-core';
 import type { AgentSpec, ConvTurn, ErrorClass, RunResult, Usage } from '@rayspec/core';
 import { assertSpecValid, classifyUpstreamError, isErrorClass, NeutralEvent } from '@rayspec/core';
 import { forTenant, schema, type TenantDb } from '@rayspec/db';
-import { isRunTainted, rehydrateConversation, runAgent } from '@rayspec/platform';
+import {
+  deleteEnqueuedRunHeader,
+  insertEnqueuedRunHeader,
+  isRunTainted,
+  isTerminalRunStatus,
+  type RunHeaderStatus,
+  rehydrateConversation,
+  runAgent,
+} from '@rayspec/platform';
 import { and, asc, eq, gt } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
@@ -80,8 +91,12 @@ export const StartRunRequest = z
   })
   .strict();
 
-/** What GET /runs/{id} reconstructs — the neutral RunResult (always-present output/error). */
-type ReconstructedRun = RunResult;
+/**
+ * What GET /runs/{id} reconstructs — the neutral RunResult (always-present output/error), with
+ * `status` widened to `RunHeaderStatus`: a run that has not finished reads back the NON-terminal
+ * header status it currently carries ('enqueued' / 'running') rather than 404ing.
+ */
+type ReconstructedRun = Omit<RunResult, 'status'> & { status: RunHeaderStatus };
 
 export function registerRunsRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
   // POST /v1/agents/:id/runs — start a run (agent:run; non-sensitive but tenant + Bearer/api-key).
@@ -247,15 +262,19 @@ export async function executeAgentRun(
       }
       const priorRunId = (existing?.snapshot as { runId?: string } | undefined)?.runId;
       if (priorRunId) {
-        // Same body: replay the winner's run if it has completed (its header is written). If it
-        // is NOT yet reconstructable, the winner is STILL EXECUTING (a true concurrent collision)
-        // → a clean 409; the loser never executes the agent.
+        // Same body: replay the winner's run once it has FINISHED — i.e. its header carries a
+        // TERMINAL status. A header now also exists while the winner is still executing, so
+        // terminality (not mere header presence) is what separates "replayable" from "still
+        // running"; a still-running winner is a true concurrent collision → a clean 409, and the
+        // loser never executes the agent.
         if (wantsSse) {
-          const ownership = await tdb.runHeaderOwnership(priorRunId);
-          if (ownership === 'owned') return replayEventsAsSse(c, tdb, priorRunId, -1);
+          const priorStatus = await readRunHeaderStatus(tdb, priorRunId);
+          if (priorStatus !== null && isTerminalRunStatus(priorStatus)) {
+            return replayEventsAsSse(c, tdb, priorRunId, -1);
+          }
         } else {
           const prior = await reconstructRun(tdb, priorRunId);
-          if (prior) {
+          if (prior && isTerminalRunStatus(prior.status)) {
             // HTTP-1: replay at the SAME HTTP status the LIVE run would have produced for this class
             // (no 429-vs-200 divergence). Transient classes release their reservation (above) so only
             // non-transient runs reach here — `statusForErrorClass` returns 200 for those — but applying
@@ -507,7 +526,8 @@ async function enqueueAgentRun(
   // uniform NOT_FOUND (no existence leak; no silent/dangling enqueue) — the SAME registry the sync run
   // surface resolves against (deps.agentRegistry = the engine-built ⊕ injected map). This is what stops
   // a pack's init.enqueue from enqueueing an undeclared agent.
-  if (!deps.agentRegistry?.has(inp.agentId)) {
+  const entry = deps.agentRegistry?.get(inp.agentId);
+  if (!entry) {
     throw new ApiError('NOT_FOUND', 'Not found.');
   }
 
@@ -543,10 +563,27 @@ async function enqueueAgentRun(
     // reservation.won === true → runId is reservedRunId; fall through to enqueue.
   }
 
-  // Enqueue the neutral RunJob onto the durable worker (the durable workflowID = runId). The worker
-  // resolves agentId → { backend, spec, tools } at fire time and runs the EXISTING runAgent
-  // off-request inside forTenant(db, tenantId).transaction(). The reservation is KEPT (in-flight).
+  // Create the run header, then enqueue the neutral RunJob onto the durable worker (the durable
+  // workflowID = runId). The worker resolves agentId → { backend, spec, tools } at fire time and runs
+  // the EXISTING runAgent off-request inside forTenant(db, tenantId).transaction(). The reservation is
+  // KEPT (in-flight).
+  //
+  // The header is written BEFORE the enqueue so the runId this call hands back RESOLVES on
+  // GET /v1/runs/{id} and on the GET /v1/runs/{id}/events path the 202 advertises for the WHOLE run,
+  // instead of 404ing until the worker finishes it — and so no worker can already hold this runId's
+  // header row inside its run transaction when the write runs (the job does not exist yet). Tenant-
+  // scoped from the SERVER-DERIVED tenantId through the TenantDb chokepoint — the same tenant the job
+  // runs under. `headerCreated` records whether THIS call created the row, so the failure path below
+  // can remove it again for a job that provably never existed.
+  const headerDb = forTenant(deps.db, inp.tenantId);
+  let headerCreated = false;
   try {
+    headerCreated = await insertEnqueuedRunHeader(headerDb, {
+      runId,
+      backend: entry.backend.id,
+      agentName: entry.spec.name,
+      model: entry.spec.model,
+    });
     await deps.durableExecutor.enqueue(inp.tenantId, {
       runId,
       tenantId: inp.tenantId,
@@ -557,26 +594,31 @@ async function enqueueAgentRun(
       ...(inp.persistTo !== undefined ? { persistTo: inp.persistTo } : {}),
     });
   } catch (err) {
-    // Enqueue THREW — but the throw does NOT prove the job did not start. The durable engine persists
-    // the workflow status BEFORE `enqueue` resolves (DBOS `startWorkflow` writes the row first), so a
-    // throw AFTER that persist means the workflow WILL still run on the worker / via crash recovery.
-    // Blindly releasing the reservation here would let a same-key retry mint a NEW runId and enqueue a
-    // SECOND job → runAgent runs twice → a non-idempotent tool fires twice (the exact hazard this
-    // slice prevents). So: probe the engine for the runId's status and RELEASE the reservation ONLY
-    // when the job is provably ABSENT (status 'unknown' — never durably created); if it EXISTS in any
-    // state, KEEP the reservation (the durable run owns the key; a same-key retry hits the loser path
-    // and returns the existing runId, not a second run). The status read is fail-CLOSED: if it throws,
-    // we do NOT release (treat the job as possibly-live), so a re-fire is never enabled by a release.
-    if (inp.idemKey) {
-      let jobAbsent = false;
-      try {
-        jobAbsent = (await deps.durableExecutor.status(runId)) === 'unknown';
-      } catch {
-        jobAbsent = false; // status unreadable ⇒ assume the job may exist ⇒ KEEP the reservation
-      }
-      if (jobAbsent) {
+    // The header write or the enqueue THREW — but the throw does NOT prove the job did not start. The
+    // durable engine persists the workflow status BEFORE `enqueue` resolves (DBOS `startWorkflow`
+    // writes the row first), so a throw AFTER that persist means the workflow WILL still run on the
+    // worker / via crash recovery. Blindly releasing the reservation here would let a same-key retry
+    // mint a NEW runId and enqueue a SECOND job → runAgent runs twice → a non-idempotent tool fires
+    // twice (the exact hazard this slice prevents). So: probe the engine for the runId's status and
+    // undo ONLY when the job is provably ABSENT (status 'unknown' — never durably created); if it
+    // EXISTS in any state, KEEP the reservation (the durable run owns the key; a same-key retry hits
+    // the loser path and returns the existing runId, not a second run) and KEEP the header (the run it
+    // belongs to is live). The status read is fail-CLOSED: if it throws, we undo nothing (treat the job
+    // as possibly-live), so a re-fire is never enabled by a release.
+    let jobAbsent = false;
+    try {
+      jobAbsent = (await deps.durableExecutor.status(runId)) === 'unknown';
+    } catch {
+      jobAbsent = false; // status unreadable ⇒ assume the job may exist ⇒ KEEP the reservation
+    }
+    if (jobAbsent) {
+      if (inp.idemKey) {
         await deps.idempotency.release(inp.tenantId, RUN_IDEM_SCOPE, inp.idemKey).catch(() => {});
       }
+      // Remove the header THIS call created for a job that provably never existed, so a runId that
+      // will never run does not read back as `enqueued` for ever. Best-effort (like the release
+      // above): a failure here must not mask the original error.
+      if (headerCreated) await deleteEnqueuedRunHeader(headerDb, runId).catch(() => {});
     }
     throw err;
   }
@@ -874,7 +916,9 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
  * executed and the body carries `status`/`errorClass`. (GET /v1/runs/{id} is a durable re-read and is
  * ALWAYS 200 — this mapping is only for the live run.)
  */
-function statusForErrorClass(result: RunResult): HttpStatusCode {
+function statusForErrorClass(
+  result: Pick<ReconstructedRun, 'status' | 'errorClass'>,
+): HttpStatusCode {
   if (result.status !== 'error') return 200;
   switch (result.errorClass) {
     case 'rate_limited':
@@ -970,6 +1014,19 @@ function serializeEventData(data: unknown): string | undefined {
 }
 
 /**
+ * Read the run-header status for `runId`, tenant-scoped. Returns null when THIS tenant has no header
+ * for it (absent, or another tenant's run — the chokepoint AND-combines the tenant predicate, so a
+ * foreign runId reads as no rows and can never be distinguished from an absent one).
+ */
+async function readRunHeaderStatus(tdb: TenantDb, runId: string): Promise<string | null> {
+  const rows = (await tdb
+    .select(schema.runs, { status: schema.runs.status })
+    .where(eq(schema.runs.runId, runId))
+    .limit(1)) as Array<{ status: string }>;
+  return rows[0]?.status ?? null;
+}
+
+/**
  * Reconstruct the neutral RunResult for `runId` from the tenant-scoped run header + journal +
  * conversation store. Returns null if there is no run header for THIS tenant (foreign/absent →
  * the caller maps to 404, no leak). The conversation is re-derived via the read-path
@@ -1024,7 +1081,7 @@ async function reconstructRun(tdb: TenantDb, runId: string): Promise<Reconstruct
     runId: header.runId,
     backend: header.backend as RunResult['backend'],
     authMode: header.authMode as RunResult['authMode'],
-    status: header.status as RunResult['status'],
+    status: header.status as RunHeaderStatus,
     finalText: header.finalText ?? '',
     // always-present: output is the stored structured output (or null).
     output: header.output ?? null,
