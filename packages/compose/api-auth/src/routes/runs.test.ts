@@ -750,6 +750,37 @@ describe('POST /v1/agents/:id/runs (SSE)', () => {
     expect(parsed.every((e, i) => e.seq === Number(frames[i]?.id))).toBe(true);
   });
 
+  it('the per-run wall-clock bound ends the stream with a terminal `error` frame classed `timeout`', async () => {
+    const { token } = await principal('ssebound@example.com', 'SseBoundOrg');
+    // The SSE arm cannot answer 504: the 200 status line is already on the wire when the ceiling
+    // fires. What it CAN do is carry the same neutral class on the terminal error frame, which is
+    // what the changelog claims for a streaming request. Parked at the PRE-gate so the bound is what
+    // ends the run and no durable work is in flight.
+    const { release, arrived } = backend.armPre();
+    process.env.RAYSPEC_AGENT_RUN_MAX_MS = '40';
+    try {
+      const res = await h.app.request('/v1/agents/echo-agent/runs', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: 'text/event-stream',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ input: 'bounded-stream' }),
+      });
+      expect(res.status).toBe(200);
+      const frames = await parseSse(res);
+      const last = frames.at(-1);
+      expect(last?.event).toBe('error');
+      expect(JSON.parse(last?.data ?? '{}').errorClass).toBe('timeout');
+      await arrived;
+    } finally {
+      delete process.env.RAYSPEC_AGENT_RUN_MAX_MS;
+      release();
+      await backend.settle();
+    }
+  });
+
   it('GET /runs/{id}/events?lastEventId=N replays ONLY seq > N (resume from the durable log)', async () => {
     const { token } = await principal('resume@example.com', 'ResumeOrg');
     // First run it (JSON) so run_events is durably populated.
