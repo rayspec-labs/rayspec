@@ -4,7 +4,7 @@
   "reproduce": "pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs",
   "scope_note": "The package SET is derived from pnpm-lock.yaml (host-independent). Each licence is read verbatim from the installed package.json after a --frozen-lockfile install. Rows with installed:false are optional, platform-gated packages this host does not install; their licence was not read from disk and is recorded as null with an absent_reason, never dropped. 'provenance' below records WHERE the licences were read — it does not describe the scope of this inventory.",
   "lockfile": "pnpm-lock.yaml",
-  "lockfile_sha256": "8ecde36a2a357bf2029897fac86ebffc6dee5872ff96522d714125a56e6f33e0",
+  "lockfile_sha256": "f27290fa084d11262844c455e607ce547ec4d7ecb3f38c2863aef2d44d35e210",
   "provenance": {
     "host": "darwin-arm64",
     "node": "v22.12.0"
@@ -3565,7 +3565,8 @@
       "version": "6.44.0",
       "license": "Apache-2.0",
       "license_file_present": true,
-      "installed": true
+      "installed": true,
+      "direct_dependents": ["packages/adapters/openai"]
     },
     {
       "name": "openapi3-ts",

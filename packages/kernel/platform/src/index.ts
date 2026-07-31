@@ -44,6 +44,16 @@ export type {
 // imports `isHttpResponse`; a handler may import `httpResponse`). Re-exported here so a platform
 // consumer needs no direct @rayspec/handler-sdk dep (mirrors the blob CONTRACT re-export above).
 export { httpResponse, isHttpResponse } from '@rayspec/handler-sdk';
+// The optional agent-run bounds resolved from the environment. run-core consumes the run-level one
+// itself; the composition root reads the two request-level ones and hands them to the adapter.
+export {
+  RunBoundTimeoutError,
+  resolveAgentMaxAttempts,
+  resolveAgentRequestTimeoutMs,
+  resolveRunMaxMs,
+  runBoundTimeoutMessage,
+  withRunBound,
+} from './agent-bounds.js';
 export {
   BlobJailError,
   BlobStoreConfigError,

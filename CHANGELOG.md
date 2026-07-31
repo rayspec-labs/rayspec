@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Optional upper bounds on an agent run: `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`,
+  `RAYSPEC_AGENT_MAX_ATTEMPTS` and `RAYSPEC_AGENT_RUN_MAX_MS`.** A provider that accepts a request and
+  never answers used to keep a run alive for as long as the model client's own retry window lasted —
+  on the durable worker that occupies one of its run slots for the whole time, and nothing in the
+  deployment could shorten it. The first two bound the model client the OpenAI backend registers: a
+  per-request timeout, and how many attempts it makes for one request — the first try plus its
+  retries, so `1` is a single attempt with no retry (the client's own knob counts retries, one fewer,
+  and the mapping is pinned by a test). The third is a wall-clock ceiling `run-core` applies to one
+  whole run, on the synchronous request path and the durable worker alike; when it expires the run
+  fails with the neutral `timeout` class. Be precise about what that ceiling does: it stops run-core
+  waiting, it does **not** cancel the model call — there is no cancellation path, so the provider
+  request continues until it settles by itself. What it does give you is the caller and the worker
+  slot back, and no event emitted by the abandoned call afterwards is persisted. All three are off
+  unless set, and an unusable value (not a number, or not greater than zero) is treated as unset, so
+  a deployment that sets none behaves exactly as it did before. The OpenAI adapter gained the
+  matching optional `timeoutMs` / `maxAttempts` options, and `openai` — until now in the tree only
+  through the agents SDK — is a direct pinned dependency of that package. All three variables are
+  documented in `.env.example`.
+
 - **`rayspec plan` surfaces the non-fatal spec advisories.** A backend-profile document that carries
   a finding from the advisory lint pass — the same findings `doctor` has always reported in its
   `warnings` field, such as a `handlers[].module` that is TypeScript source and so needs a build step

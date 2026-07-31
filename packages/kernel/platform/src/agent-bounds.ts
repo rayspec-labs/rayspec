@@ -1,0 +1,102 @@
+/**
+ * Agent-run bounds — the optional upper bounds an operator can put on an agent run.
+ *
+ * Three variables, all OFF unless set, so a deployment that sets none behaves exactly as it did
+ * before they existed:
+ *
+ *   RAYSPEC_AGENT_REQUEST_TIMEOUT_MS  per HTTP request the model client makes (the OpenAI adapter
+ *                                     carries it onto the client it registers)
+ *   RAYSPEC_AGENT_MAX_ATTEMPTS        how many attempts that client makes for one request
+ *   RAYSPEC_AGENT_RUN_MAX_MS          wall clock run-core waits for one whole run
+ *
+ * The parsing rule is the one `resolveBootTimeoutMs` uses for RAYSPEC_BOOT_TIMEOUT_MS: trim, parse,
+ * and fall back to the default on anything unusable. Here the default is "no bound", so an absent,
+ * non-numeric, or non-positive value leaves the run exactly as unbounded as it is today.
+ */
+
+/** Parse a positive-integer millisecond/count value; anything else (including 0) is "not set". */
+function positiveInt(raw: string | undefined): number | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  return Math.floor(n);
+}
+
+/**
+ * The per-request timeout for the model client, in milliseconds (`RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`).
+ * Undefined ⇒ the client keeps its own default.
+ */
+export function resolveAgentRequestTimeoutMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number | undefined {
+  return positiveInt(env.RAYSPEC_AGENT_REQUEST_TIMEOUT_MS);
+}
+
+/**
+ * How many attempts the model client makes for one request (`RAYSPEC_AGENT_MAX_ATTEMPTS`) — the
+ * first try plus its retries, so 1 means a single attempt. Undefined ⇒ the client keeps its own
+ * default.
+ */
+export function resolveAgentMaxAttempts(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  return positiveInt(env.RAYSPEC_AGENT_MAX_ATTEMPTS);
+}
+
+/**
+ * The wall-clock upper bound for one whole run, in milliseconds (`RAYSPEC_AGENT_RUN_MAX_MS`).
+ * Undefined ⇒ run-core waits for the backend as long as it takes (the behaviour before this
+ * variable existed).
+ */
+export function resolveRunMaxMs(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  return positiveInt(env.RAYSPEC_AGENT_RUN_MAX_MS);
+}
+
+/**
+ * Raised when a run outlives `RAYSPEC_AGENT_RUN_MAX_MS`. The class NAME is load-bearing:
+ * `classifyUpstreamError` keys the neutral `timeout` class off `/Timeout|MaxTurnsExceeded/`, so a
+ * bounded run surfaces as `timeout` rather than a generic internal error.
+ */
+export class RunBoundTimeoutError extends Error {
+  readonly runId: string;
+  readonly boundMs: number;
+  constructor(runId: string, boundMs: number) {
+    super(runBoundTimeoutMessage(runId, boundMs));
+    this.name = 'RunBoundTimeoutError';
+    this.runId = runId;
+    this.boundMs = boundMs;
+  }
+}
+
+/** The operator-facing message: what expired, and what it did and did not stop. */
+export function runBoundTimeoutMessage(runId: string, boundMs: number): string {
+  return (
+    `run ${runId} exceeded the RAYSPEC_AGENT_RUN_MAX_MS bound of ${boundMs}ms and was given up on. ` +
+    'The bound stops run-core waiting; it does not cancel the model call, which continues until it ' +
+    'settles on its own. Raise RAYSPEC_AGENT_RUN_MAX_MS if legitimate runs need longer.'
+  );
+}
+
+/**
+ * Race `work` against a `boundMs` deadline. Resolves with `work`'s value when it finishes in time;
+ * rejects with a {@link RunBoundTimeoutError} when the deadline fires first. The timer is cleared
+ * once the race settles and is unref'd, so it can never on its own keep the process alive.
+ *
+ * When the deadline wins, `work` is still pending. `Promise.race` has already subscribed to it, so
+ * its eventual rejection counts as handled and cannot surface as an unhandled rejection.
+ */
+export async function withRunBound<T>(
+  work: PromiseLike<T>,
+  boundMs: number,
+  runId: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new RunBoundTimeoutError(runId, boundMs)), boundMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}

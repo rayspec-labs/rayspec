@@ -38,6 +38,7 @@ import {
 import { schema, type TenantDb } from '@rayspec/db';
 import { and, desc, eq, ne, sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
+import { RunBoundTimeoutError, resolveRunMaxMs, withRunBound } from './agent-bounds.js';
 import { makeDispatchTool } from './dispatch.js';
 import { EventPipeline } from './event-pipeline.js';
 import { makeHandlerDb } from './handlers/store-facade.js';
@@ -402,11 +403,18 @@ export async function runAgent(
     maxQueue: opts.maxEventQueue,
   });
 
+  // Set when the per-run bound below fires: the backend call is then still in flight, and anything
+  // it emits from here on belongs to a run this function has already given up on. Routing those
+  // frames into the pipeline would write run_events rows after the run ended — on the durable path,
+  // through a transaction handle that is being rolled back. So the sink goes inert instead. Without
+  // the bound configured this is never set and the sink is the same one as before.
+  let abandoned = false;
+
   // The adapter + dispatchTool emit through this wrapped sink: stamp the single seq, then hand to the
   // pipeline (persist-before-flush). We AWAIT emit so the producer feels back-pressure when the queue
   // is full of non-droppable frames (the back-pressure contract).
   const wrappedOnEvent = (event: NeutralEventInput | NeutralEvent): Promise<void> =>
-    pipeline.emit(stampSeq(event));
+    abandoned ? Promise.resolve() : pipeline.emit(stampSeq(event));
 
   // Resolve the run's REAL authMode ONCE, here, and attribute BOTH
   // the central dispatchTool's `tool` steps AND (via ctx.authMode) the adapter's `llm` steps to it
@@ -476,6 +484,11 @@ export async function runAgent(
     // re-validation) WITHOUT calling the model — never from the SDK RunState.
     rehydrate: () => rehydrateConversation(tdb, runId),
   };
+  // The run's wall-clock bound, read once per run. Undefined (the default, and what an unset or
+  // unusable RAYSPEC_AGENT_RUN_MAX_MS yields) means run-core waits for the backend as long as it
+  // takes — the behaviour before this variable existed.
+  const runMaxMs = resolveRunMaxMs();
+
   // The pipeline worker persists run_events ASYNCHRONOUSLY. If
   // backend.run THROWS, we must STILL await the pipeline so no run_events INSERT is left in flight on
   // a pooled connection after runAgent rejects — an unawaited straggler races later work (e.g. a
@@ -496,8 +509,22 @@ export async function runAgent(
     // Execution still routes through `ctx.dispatchTool` by name (unchanged); this only feeds the
     // adapter's model-facing tool LIST. For a direct-AgentSpec path `opts.tools` derives from
     // `spec.tools`, so `tools.map(t.spec)` reproduces the existing `spec.tools` (parity-gate-verified).
-    result = await backend.run({ ...spec, tools: tools.map((t) => t.spec) }, ctx);
+    //
+    // PER-RUN WALL-CLOCK BOUND (RAYSPEC_AGENT_RUN_MAX_MS, off unless set). A provider that accepts a
+    // request and never answers keeps this call pending for the model client's whole retry window; on
+    // the durable path that occupies a worker slot for all of it. The bound caps how long we WAIT: it
+    // rejects with a RunBoundTimeoutError, which reaches the callers through the same path a backend
+    // that throws mid-run already takes. It does NOT cancel the call — run-core has no cancellation
+    // path — so the model request runs on until it settles by itself. With the variable unset this
+    // is the same bare `await` as before.
+    const runCall = backend.run({ ...spec, tools: tools.map((t) => t.spec) }, ctx);
+    result = runMaxMs === undefined ? await runCall : await withRunBound(runCall, runMaxMs, runId);
   } catch (runErr) {
+    // The bound fired: the backend call is still in flight, so stop routing its later events into
+    // the pipeline before draining (an abandoned call must not write run_events for a run we have
+    // given up on). `withRunBound` already subscribed to the call, so its eventual rejection is
+    // handled and cannot surface as an unhandled rejection.
+    if (runErr instanceof RunBoundTimeoutError) abandoned = true;
     await pipeline.drain().catch(() => {});
     throw runErr;
   }
