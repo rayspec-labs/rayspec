@@ -402,7 +402,9 @@ Deriving holes (the mapping from the spec):
   business columns (NEVER an injected col) with `jsonType`/`required`/`nullable`/`enumValues`; `mode`
   + (`idArg` for update-by-id | `naturalKeyCol` for upsert); optional `fkRevalidate` (re-check a
   model-chosen code against a lookup store server-side); optional `fixedValues` (author CONSTANTS
-  server-stamped on top, e.g. `status:'coded'`); `successStatus`.
+  server-stamped on top, e.g. `status:'coded'`); optional `clampValues` (a server-side UPPER BOUND on a
+  model-chosen enum column, e.g. `policy_flag:{max:'review'}` — declare `clamped` in that tool's
+  `outputSchema`); `successStatus`.
 - **lookup holes** ← the lookup tool: `store`; `filterCols` (the CLOSED allowlist of business columns a
   model arg may filter on — may be `[]`); optional `fixedFilter` (a fixed predicate, e.g.
   `{active:true}`); `projectCols` (the columns returned to the model); `maxRows`; optional
@@ -995,7 +997,10 @@ Notes that matter:
 > whether the agent READS the named column or only WRITES it. Treat it as a prompt to make the
 > decision, never as a verdict that it was made. Where the guarantee must be structural rather than
 > prompt-side, bound the model's choice in code — the way `examples/expense-claim-coder` re-validates
-> the agent's chosen category against the catalog server-side.
+> the agent's chosen category against the catalog server-side (`fkRevalidate`) and caps its
+> `policy_flag` at `review` (`clampValues`). The first answers the assertive class where the decision
+> rule is a lookup table; the second answers the policy class where it is a judgment call, which is
+> exactly the case no instruction wording holds for.
 
 ### `tooling[]` — `ToolSpec` (IT.2 ONLY)
 
@@ -1160,6 +1165,10 @@ injected column (`id`/`tenant_id`/`created_at`/`deleted_at`/`retention_days`/`re
   "fixedValues": { "status": "coded" },  // OPTIONAL author CONSTANTS server-stamped ON TOP of the
                                          //   coerced args (a model can never override them); keys are
                                          //   declared business cols (never injected)
+  "clampValues": {                       // OPTIONAL server-side BOUNDS on model-chosen ENUM columns
+    "policy_flag": { "max": "review" }   //   cap this column at "review" in its DECLARED enumValues
+  },                                     //   order; a higher proposal is written AS the bound
+
   "fkRevalidate": {                      // OPTIONAL server-side FK re-validation before the write
     "codeArg": "<col>",                  //   a column in `columns` whose value must be a real code
     "lookupStore": "<declared_store>",   //   the lookup store to re-check it against
@@ -1186,6 +1195,28 @@ What the persist renderer GUARANTEES (the safety baked in — you do not write a
 - `fixedValues`: `Object.assign`-ed onto the coerced row as author constants (they overwrite a same-
   named coerced value). `validateHoles` rejects an incoherent overlap (a `fixedValues` key that equals
   the `fkRevalidate.codeArg` — it would silently no-op the FK safety) and an injected-col key.
+- `clampValues`: a per-column **upper bound** on a model-chosen enum column, applied AFTER the coercion
+  and BEFORE the write. RANK is the column's DECLARED `enumValues` ORDER and nothing else defines it, so
+  `{"policy_flag":{"max":"review"}}` over `["ok","review","violation"]` rewrites a proposed `violation`
+  to `review`. Use it where `fkRevalidate` cannot reach: a lookup CODE can be re-checked against a
+  store, a JUDGMENT CALL (a severity, a risk level, a policy verdict) has no store to re-check against,
+  and no instruction wording bounds it reliably. The model still chooses — the bound only refuses to let
+  the choice go higher — so pick a `max` that leaves the judgment meaningful (a cap at the BOTTOM of the
+  ladder makes the column a constant; use `fixedValues` if that is what you meant).
+  - A bound that FIRES is reported on the handler result as
+    `clamped: [{ column, proposed, applied }]` — the model's original choice next to the value actually
+    written. That result is what `dispatchTool` journals, so both survive the run.
+    **The tool's `outputSchema` MUST therefore declare `clamped`** (`{ type: array, items: { type:
+    object, additionalProperties: true } }`) alongside `status`/`id`/`detail`; without it, `dispatchTool`
+    rejects the tool result the FIRST time a bound fires and the model retries to MaxTurns. The key is
+    absent (never an empty array) on a write where no bound fired.
+  - `validateHoles` fail-closes on a clamp that cannot mean what it says: a key that is not one of
+    `columns`, a key on a column with no `enumValues` (no order to rank by), a `max` outside that
+    column's `enumValues`, a key that also carries a `fixedValues` constant (the stamp is the LAST
+    mutation before the write, so the bound would never reach the store), and a key equal to
+    `fkRevalidate.codeArg` (that column is an identifier re-checked against a store, not a ranked
+    classification). A clamp is an **unconditional** `max` — any other key in the rule is rejected
+    rather than silently ignored.
 
 ### Template T2 — LOOKUP handler holes (`template: "lookup"`)
 

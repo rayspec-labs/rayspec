@@ -24,6 +24,20 @@ function persist(over: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
+/** A persist column list carrying BOTH a plain text column and a closed-enum (rankable) one. */
+function enumColumns(): Record<string, unknown>[] {
+  return [
+    { col: 'category_code', jsonType: 'text', required: true, nullable: false },
+    {
+      col: 'policy_flag',
+      jsonType: 'text',
+      required: true,
+      nullable: false,
+      enumValues: ['ok', 'review', 'violation'],
+    },
+  ];
+}
+
 /** A minimal valid lookup hole-set. */
 function lookup(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -55,6 +69,22 @@ describe('validateHoles — clean hole-sets pass', () => {
               enumValues: ['ok', 'review'],
             },
           ],
+          fixedValues: { status: 'coded' },
+          fkRevalidate: {
+            codeArg: 'category_code',
+            lookupStore: 'expense_categories',
+            lookupColumn: 'code',
+          },
+        }),
+      ),
+    ).not.toThrow();
+  });
+  it('accepts a persist with a clampValues bound on a declared enum column', () => {
+    expect(() =>
+      validateHoles(
+        persist({
+          columns: enumColumns(),
+          clampValues: { policy_flag: { max: 'review' } },
           fixedValues: { status: 'coded' },
           fkRevalidate: {
             codeArg: 'category_code',
@@ -213,6 +243,69 @@ describe('validateHoles — fail-closed on malformed hole-sets', () => {
         }),
       ),
     ).not.toThrow();
+  });
+  it('rejects a clampValues bound that cannot mean what its author declared', () => {
+    // A clamp RANKS a model-chosen classification by the column's DECLARED enumValues order and caps it
+    // server-side. Each arm below is a hole-set whose bound could never do that — and every one of them
+    // fails SILENTLY if it is allowed through (the render simply emits no bound, or a bound that is
+    // overwritten before the write), which is the worst failure mode for a safety hole. RED-first:
+    // remove the clampValues block in validateHoles → every arm goes RED.
+    const columns = enumColumns();
+    // (a) a clamp on a column with NO declared enumValues — there is no order to rank by.
+    expect(() =>
+      validateHoles(persist({ columns, clampValues: { category_code: { max: 'TRAVEL' } } })),
+    ).toThrow(/not an enum column/);
+    // (b) a clamp key that is not a declared column at all (nothing to bound).
+    expect(() =>
+      validateHoles(persist({ columns, clampValues: { severity: { max: 'ok' } } })),
+    ).toThrow(/must be one of holes.columns/);
+    // (c) a max outside the column's own declared enumValues (an unrankable bound).
+    expect(() =>
+      validateHoles(persist({ columns, clampValues: { policy_flag: { max: 'catastrophic' } } })),
+    ).toThrow(/enumValues/);
+    // (d) a clamp key that also carries a fixedValues constant — the stamp is the LAST mutation before
+    // the write, so the author constant would overwrite the clamped value and the bound would never
+    // reach the store.
+    expect(() =>
+      validateHoles(
+        persist({
+          columns,
+          clampValues: { policy_flag: { max: 'review' } },
+          fixedValues: { policy_flag: 'violation' },
+        }),
+      ),
+    ).toThrow(/overlaps holes.fixedValues/);
+    // (e) a clamp key that is the fkRevalidate.codeArg — that column is a model-chosen IDENTIFIER
+    // re-checked against a lookup store, not a ranked classification, so the clamp would persist a
+    // value the FK re-check never saw. (Enum-typed here so it reaches the overlap rule, not the
+    // not-an-enum-column rule above.)
+    expect(() =>
+      validateHoles(
+        persist({
+          columns,
+          clampValues: { policy_flag: { max: 'review' } },
+          fkRevalidate: {
+            codeArg: 'policy_flag',
+            lookupStore: 'expense_categories',
+            lookupColumn: 'code',
+          },
+        }),
+      ),
+    ).toThrow(/overlaps holes.fkRevalidate.codeArg/);
+  });
+  it('rejects a CONDITIONAL clamp form (a clamp is an unconditional max bound)', () => {
+    // A conditional key would be SILENTLY IGNORED by the renderer, leaving the author believing the
+    // bound is narrower than it is. Fail closed rather than emit a bound nobody declared.
+    expect(() =>
+      validateHoles(
+        persist({
+          columns: enumColumns(),
+          clampValues: {
+            policy_flag: { max: 'review', unless: { field: 'employee_email', equals: 'x' } },
+          },
+        }),
+      ),
+    ).toThrow(/unsupported key/);
   });
   it('rejects a fixedValues key that overlaps fkRevalidate.codeArg (silently no-ops the FK safety)', () => {
     // The renderer FK-validates the model's coerced value, then Object.assign(coerced.row, fixedValues)

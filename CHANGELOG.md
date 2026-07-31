@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A persist handler can cap a model-chosen enum column server-side: the `clampValues` hole.** The
+  persist templates already re-checked a model-chosen IDENTIFIER against a store before writing it
+  (`fkRevalidate`) — the guarantee that makes "never trust the model's choice" structural rather than a
+  matter of prompt wording. There was no counterpart for a model-chosen CLASSIFICATION, because there is
+  no store to re-check a judgment call against: a severity, a risk level, a policy verdict was whatever
+  the model returned, and the only thing standing between untrusted input and the value that got
+  persisted was how the instructions happened to be phrased. `clampValues` is that counterpart. An
+  author declares, next to `fixedValues`, an upper bound per enum column —
+  `"clampValues": { "policy_flag": { "max": "review" } }` — and the renderer emits a deterministic cap
+  applied after the untrusted-arg coercion and before the write. Rank is the column's declared
+  `enumValues` order and nothing else defines it, so a proposal ranked above the bound is written AS the
+  bound. The model still chooses: unlike a `fixedValues` constant, everything at or below the bound
+  persists exactly as proposed, so the judgment stays the model's and only the ceiling is the author's.
+  A bound that FIRES is reported on the handler's result as `clamped: [{ column, proposed, applied }]` —
+  the model's original choice next to the value actually written — and since that result is what the
+  central tool dispatch opaque-wraps and journals, both survive in the run journal and in the tool
+  result the transcript carries. **A tool whose handler declares a clamp must declare `clamped` in its
+  `outputSchema`**, or dispatch rejects the tool result the first time a bound fires. The key is absent,
+  never an empty array, on a write no bound touched. `validateHoles` fail-closes on a clamp that cannot
+  mean what it says: a key that is not a declared column, a key on a column with no `enumValues` (there
+  is no order to rank by), a `max` outside that column's `enumValues`, a key that is also pinned by
+  `fixedValues` (the constant is stamped last, so the bound would never reach the store) and a key equal
+  to `fkRevalidate.codeArg` (an identifier is not a ranked classification). The bound is unconditional
+  by design — a rule carrying any key other than `max` is rejected rather than silently ignored. The
+  hole is optional and additive: a hole-set that declares none renders byte-for-byte what it always did,
+  for both `--emit ts` and `--emit js`. The shipped Expense-Claim example now caps its `policy_flag` at
+  `review` — an agent may raise "a human should look at this" but may not declare a `violation` on its
+  own — and its smoke asserts that a claim description demanding one cannot push the stored value past
+  the bound.
+
 - **Optional upper bounds on an agent run: `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`,
   `RAYSPEC_AGENT_MAX_ATTEMPTS` and `RAYSPEC_AGENT_RUN_MAX_MS`.** A provider that accepts a request and
   never answers used to keep a run alive for as long as the model client's own retry window lasted —

@@ -18,6 +18,7 @@
     }
   ],
   "fixedValues": { "status": "coded" },
+  "clampValues": { "policy_flag": { "max": "review" } },
   "fkRevalidate": {
     "codeArg": "category_code",
     "lookupStore": "expense_categories",

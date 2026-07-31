@@ -79,6 +79,52 @@ describe('JavaScript emit — the same holes render as plain ESM', () => {
   });
 });
 
+// The JavaScript render of the CLAMP-BEARING reference hole-set. The example ships a TypeScript handler
+// module (its spec pins `handlers/code-claim.gen.ts`), so the `js` target has no home under examples/ —
+// it is pinned here instead, byte-for-byte, next to the renderer it comes from.
+function readJsGolden(): string {
+  return readFileSync(join(here, '__fixtures__/code-claim.gen.js'), 'utf8');
+}
+
+describe('server-side clamp — a clamp-bearing hole-set renders its bound deterministically', () => {
+  it('caps the declared enum column, ranked by that column’s declared enumValues order', () => {
+    const code = genHandler(persistHoles);
+    // RANK is the DECLARED enumValues order and nothing else; the bound is a literal in the emission.
+    expect(code).toContain('const ORDER = ["ok", "review", "violation"];');
+    expect(code).toContain('const proposed = coerced.row.policy_flag;');
+    expect(code).toContain('coerced.row.policy_flag = "review";');
+    // A clamp that FIRES carries BOTH the model's original choice and the applied bound onto the
+    // result — which is the object dispatchTool journals, so the record survives the run.
+    expect(code).toContain('clamped.push({ column: "policy_flag", proposed, applied: "review" });');
+    expect(code).toContain('...(clamped.length > 0 ? { clamped } : {})');
+  });
+
+  it('applies the bound AFTER the coercion and BEFORE the write (and before the fixed-value stamp)', () => {
+    const code = genHandler(persistHoles);
+    const clamp = code.indexOf('clamped.push(');
+    expect(clamp).toBeGreaterThan(code.indexOf('const coerced = coerceRow(args);'));
+    expect(clamp).toBeLessThan(code.indexOf('Object.assign(coerced.row'));
+    expect(clamp).toBeLessThan(code.indexOf('init.db.update(STORE'));
+  });
+
+  it('the JavaScript render of the same clamp-bearing holes matches its committed golden', () => {
+    expect(genHandler(persistHoles, 'js')).toBe(readJsGolden());
+  });
+
+  it('BACK-COMPAT: the same holes WITHOUT clampValues carry no clamp machinery at all', () => {
+    // The clamp is strictly opt-in: a hole-set that declares none renders exactly what it always did,
+    // which is what keeps every committed golden of an unclamped hole-set byte-stable.
+    const { clampValues: _none, ...unclamped } = persistHoles as PersistHandlerHoles & {
+      clampValues?: unknown;
+    };
+    for (const target of ['ts', 'js'] as const) {
+      const code = genHandler(unclamped, target);
+      expect(code).not.toContain('clamp');
+      expect(code).not.toContain('ORDER');
+    }
+  });
+});
+
 describe('safety properties — every rendered handler', () => {
   const persistCode = renderPersistHandler(persistHoles);
   const lookupCode = renderLookupHandler(lookupHoles);
@@ -168,6 +214,18 @@ describe('rendered handlers type-check against @rayspec/handler-sdk (tsc --noEmi
     try {
       writeFileSync(join(scratch, 'lookup.ts'), readGolden('lookup-categories.gen.ts'));
       writeFileSync(join(scratch, 'code.ts'), readGolden('code-claim.gen.ts'));
+      // The clamp reaches BOTH persist arms, but the committed golden is update-by-id only. Compile the
+      // upsert arm of the same clamp-bearing holes too, so its `clamped` return (spread onto a result
+      // whose id is a conditional expression) cannot type-break unnoticed.
+      writeFileSync(
+        join(scratch, 'upsert.ts'),
+        renderPersistHandler({
+          ...persistHoles,
+          mode: 'upsert-by-natural-key',
+          idArg: undefined,
+          naturalKeyCol: 'category_code',
+        } as PersistHandlerHoles),
+      );
       const tsconfig = join(scratch, 'tsconfig.json');
       // Extend the platform tsconfig so the workspace @rayspec/handler-sdk resolves exactly as it does
       // for platform source (NodeNext + verbatimModuleSyntax — the real compile conditions).

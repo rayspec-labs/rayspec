@@ -177,6 +177,43 @@ function typeImport(target: EmitTarget, names: string): string {
   return target === 'ts' ? `import type { ${names} } from '@rayspec/handler-sdk';\n` : '';
 }
 
+/**
+ * OPTIONAL server-side CLAMP block(s) — the classification analogue of the FK re-check. Each declared
+ * enum column is capped at its author bound, RANKED by that column's own `enumValues` order, between
+ * the coercion and the write. Nothing here reads a model arg: the order, the bound and its rank are
+ * all render-time constants, so the cap is deterministic and indifferent to how the untrusted input is
+ * worded. A clamp that FIRES is pushed onto `clamped` and returned on the result — the object
+ * `dispatchTool` journals — so the run journal keeps BOTH the model's original choice and the bound
+ * written in its place.
+ */
+function emitClampBlock(holes: PersistHandlerHoles, target: EmitTarget): string {
+  const clamps = holes.clampValues;
+  if (!clamps || Object.keys(clamps).length === 0) return '';
+  const byCol = new Map(holes.columns.map((c) => [c.col, c]));
+  const blocks = Object.entries(clamps).map(([col, rule]) => {
+    // validateHoles has already proven the column exists, declares enumValues, and contains `max` —
+    // so the rank below is always a real index. Enum values reach the emission ONLY through
+    // `emitScalar` (never a comment), so a value's content can never break out of a literal.
+    const order = (byCol.get(col) as ColumnHole).enumValues as readonly string[];
+    return `
+    {
+      // ${col}: RANK is the position in ORDER (its DECLARED enumValues). Anything ranked above the
+      // bound is rewritten DOWN to it, and the model's original choice is kept for the journal.
+      const ORDER = [${order.map((v) => emitScalar(v)).join(', ')}];
+      const proposed = ${member('coerced.row', col)};
+      if (typeof proposed === 'string' && ORDER.indexOf(proposed) > ${order.indexOf(rule.max)}) {
+        ${member('coerced.row', col)} = ${emitScalar(rule.max)};
+        clamped.push({ column: ${emitScalar(col)}, proposed, applied: ${emitScalar(rule.max)} });
+      }
+    }`;
+  });
+  return `
+    // Server-side CLAMP: the model PROPOSES, the author's declared bound CAPS. Applied after the
+    // coercion and before the write, so no wording of the untrusted input can raise what is persisted
+    // past the bound. A clamp that fires is reported on the result (and so journaled).
+    const clamped${ann(target, 'ClampRecord[]')} = [];${blocks.join('')}`;
+}
+
 /** Render the auto-persist tool handler (Template T1). */
 export function renderPersistHandler(
   holes: PersistHandlerHoles,
@@ -205,6 +242,10 @@ export function renderPersistHandler(
       }
     }`
     : '';
+  const clampBlock = emitClampBlock(holes, target);
+  // A clamp that fired travels back on the result (and thence into the journaled step); a run where
+  // none fired returns exactly the shape it always did — the key is absent, never an empty array.
+  const clampReturn = clampBlock === '' ? '' : ', ...(clamped.length > 0 ? { clamped } : {})';
 
   let armBody: string;
   if (holes.mode === 'update-by-id') {
@@ -212,10 +253,10 @@ export function renderPersistHandler(
     armBody = `    // ── ARM A — update-by-id (the existing-row case). The id is a model arg, validated as DATA.
     const idRaw = ${asArgsRecord(target)}[${emitScalar(idArg)}];
     const id = typeof idRaw === 'string' ? idRaw : '';
-    if (id.length === 0) return { status: 'failed', detail: '${idArg} missing or not a string.' };${fkBlock}${stampBlock}
+    if (id.length === 0) return { status: 'failed', detail: '${idArg} missing or not a string.' };${fkBlock}${clampBlock}${stampBlock}
     const updated = await init.db.update(STORE, { id }, coerced.row);
     if (updated.length === 0) return { status: 'failed', detail: 'no ${holes.store} row found for the given id.' };
-    return { status: ${emitScalar(holes.successStatus)}, id };`;
+    return { status: ${emitScalar(holes.successStatus)}, id${clampReturn} };`;
   } else {
     const nk = holes.naturalKeyCol as string;
     armBody = `    // ── ARM B — upsert-by-natural-key (the create case). The natural key is tenant-NAMESPACED
@@ -224,37 +265,72 @@ export function renderPersistHandler(
     const keyVal = ${member('coerced.row', nk)};
     if (typeof keyVal !== 'string' || keyVal.length === 0) {
       return { status: 'failed', detail: 'natural key ${nk} missing or not a string.' };
-    }${fkBlock}${stampBlock}
+    }${fkBlock}${clampBlock}${stampBlock}
     const ref = \`\${init.tenantId}:\${keyVal}\`;
     const rowWithRef${ann(target, 'StoreRow')} = { ...coerced.row, ${nk}: ref };
     const existing = await init.db.select(STORE, { ${nk}: ref });
     if (existing[0]) {
       await init.db.update(STORE, { ${nk}: ref }, rowWithRef);
-      return { status: ${emitScalar(holes.successStatus)}, id: typeof existing[0].id === 'string' ? existing[0].id : undefined };
+      return { status: ${emitScalar(holes.successStatus)}, id: typeof existing[0].id === 'string' ? existing[0].id : undefined${clampReturn} };
     }
     // Last-writer-wins (a BOUNDED simplification vs a full re-read / human-edit
     // preservation — that is product-specific business logic, not template-derivable).
     const inserted = await init.db.insert(STORE, rowWithRef);
-    return { status: ${emitScalar(holes.successStatus)}, id: typeof inserted.id === 'string' ? inserted.id : undefined };`;
+    return { status: ${emitScalar(holes.successStatus)}, id: typeof inserted.id === 'string' ? inserted.id : undefined${clampReturn} };`;
   }
+
+  // The CLAMP RECORD contract — emitted ONLY for a clamp-bearing hole-set, so a hole-set that declares
+  // no clamp renders byte-for-byte what it always did. A tool's `outputSchema` must declare `clamped`
+  // alongside status/id/detail, or dispatchTool rejects the result the first time a bound fires.
+  const clampShape =
+    clampBlock === ''
+      ? ''
+      : target === 'ts'
+        ? `interface ClampRecord {
+  /** The bounded column. */
+  column: string;
+  /** The value the MODEL chose, before the bound was applied. */
+  proposed: string;
+  /** The author-declared bound written in its place. */
+  applied: string;
+}
+
+`
+        : `/**
+ * @typedef {object} ClampRecord
+ * @property {string} column The bounded column.
+ * @property {string} proposed The value the MODEL chose, before the bound was applied.
+ * @property {string} applied The author-declared bound written in its place.
+ */
+
+`;
+  const clampResultField =
+    clampBlock === ''
+      ? ''
+      : target === 'ts'
+        ? `
+  /** The bounds that FIRED on this write (present only when at least one did). */
+  clamped?: ClampRecord[];`
+        : `
+ * @property {ClampRecord[]} [clamped] The bounds that FIRED on this write (present only when at least one did).`;
 
   // The RESULT SHAPE: a declared interface for `ts`, the same contract as a JSDoc typedef for `js`
   // (documentation either way — it carries no runtime weight, exactly like the annotations it replaces).
   const resultShape =
     target === 'ts'
-      ? `interface PersistResult {
+      ? `${clampShape}interface PersistResult {
   /** The success status (${emitScalar(holes.successStatus)}) or 'failed'. */
   status: string;
   /** The affected row id, when known. */
   id?: string;
   /** A human-readable detail on failure. */
-  detail?: string;
+  detail?: string;${clampResultField}
 }`
-      : `/**
+      : `${clampShape}/**
  * @typedef {object} PersistResult
  * @property {string} status The success status (${emitScalar(holes.successStatus)}) or 'failed'.
  * @property {string} [id] The affected row id, when known.
- * @property {string} [detail] A human-readable detail on failure.
+ * @property {string} [detail] A human-readable detail on failure.${clampResultField}
  */`;
   const signature =
     target === 'ts'
