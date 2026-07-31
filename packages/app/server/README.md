@@ -53,10 +53,12 @@ out of the container's declared environment (`docker inspect` does not show it),
 server's own exec environment in `/proc/<pid>/environ` — and it removes the need for a wrapper
 entrypoint that materializes secrets into the environment before starting the server.
 
-One caveat, so the benefit is not read for more than it is: at boot the server places the two auth
-secrets into its process environment for the components that read them there, so any child process
-it spawns is exec'd with them and they do appear in that child's `/proc/<pid>/environ`. The
-connection string is not placed there.
+It also stays out of the environment of every child the server spawns: the boot hands the two auth
+secrets to the components that need them in-process and never writes them back into its environment,
+so a spawned child is exec'd without them and they do not appear in that child's
+`/proc/<pid>/environ` either. A value supplied as the plain variable instead is left exactly where
+you put it, and a child inherits it like any other environment variable — that is the difference the
+file mount buys.
 
 - **Precedence:** when `<VAR>_FILE` is set it wins — the plain variable is not consulted at all. A
   `<VAR>_FILE` left in a local `.env` therefore takes precedence for every component that resolves

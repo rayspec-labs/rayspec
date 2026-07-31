@@ -733,9 +733,11 @@ function readBootSecretFile(fileVar: string, path: string): string {
  * PRECEDENCE: `<VAR>_FILE` wins outright — when it is set the plain variable is not consulted at
  * all (not merged, not preferred, not a fallback). Reading a secret from a mounted file (mode 600)
  * instead of the environment keeps it out of the container's declared environment (`docker inspect`)
- * and out of this process's own exec environment (`/proc/<pid>/environ`). It does NOT keep it out of
- * a CHILD process's environment: `assembleServer` places the two auth secrets on `process.env` for
- * the components that read them there, and a spawned child is exec'd with that environment.
+ * and out of this process's own exec environment (`/proc/<pid>/environ`) — and out of every CHILD
+ * process's environment too: `assembleServer` hands the two auth secrets to auth-core in-process
+ * (`setBootSecrets`) and nothing writes them back onto `process.env`, so a spawned child is exec'd
+ * with an environment that does not carry them either. A value the operator supplies as the plain
+ * variable is of course left where they put it, and a child inherits it like any other variable.
  *
  * A BLANK `<VAR>_FILE` (empty / whitespace-only) counts as NOT SET, so the plain variable is used.
  * Container orchestrators routinely materialize an unset variable as `""`, and treating that as a
