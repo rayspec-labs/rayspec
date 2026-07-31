@@ -27,15 +27,7 @@
  * auth-only boot (no spec) is the default.
  */
 
-import {
-  accessSync,
-  closeSync,
-  constants,
-  fstatSync,
-  openSync,
-  readFileSync,
-  statSync,
-} from 'node:fs';
+import { closeSync, fstatSync, openSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { AgentRuntimeRegistry } from '@rayspec/agent-runtime';
 import {
@@ -114,7 +106,12 @@ import { type Env, Hono, type MiddlewareHandler } from 'hono';
 import { exportJWK, importPKCS8 } from 'jose';
 import { stringify as stringifyYaml } from 'yaml';
 import { deployProductYamlSpec, makeSchemaProbe, planUpdateBoot } from './product-boot.js';
-import { type FrontendReadiness, frontendMountsReadiness, mountFrontend } from './serve-static.js';
+import {
+  type FrontendReadiness,
+  frontendMountsReadiness,
+  mountFrontend,
+  mountUnservableReason,
+} from './serve-static.js';
 
 /** The default local port (overridable via PORT). Local DX only — not a reserved well-known port. */
 export const DEFAULT_PORT = 8080;
@@ -200,8 +197,10 @@ interface HealthOutcome {
 /**
  * Compute the `/health` outcome from the observed state of each covered dependency. `undefined` means
  * "this boot does not have that dependency" and OMITS the field: a static profile has no database, and
- * a deployment declaring no frontend mounts has no mounts — such a boot answers exactly as it always
- * has (`{status,db}` for the full platform, `{status}` for the static profile).
+ * a full-platform deployment declaring no frontend mounts has no mounts — such a boot answers
+ * `{status,db}`, exactly as it always has. A status-only `{status}` body is not reachable from either
+ * boot: the static profile's shape predicate requires a NON-EMPTY `frontend` (see `isStaticProfile`)
+ * and `assembleStaticServer` always passes a defined readiness, so its body is `{status,frontend}`.
  *
  * `ready` is false as soon as one covered dependency is not ready, and the 503 then carries EVERY
  * field, so one read of the body names which dependency is at fault.
@@ -2020,30 +2019,33 @@ async function deployDeclaredSpec(
     }
   }
 
-  // ── The static FRONTEND deploy guard (fail-closed on a missing/unreadable assets dir) ──
+  // ── The static FRONTEND deploy guard (fail-closed on a mount that cannot be served) ──
   // A declared frontend mount serves built static assets from `dir` (relative to the spec file). FAIL
-  // CLOSED at deploy if the directory is missing / not a directory / unreadable — the mount would
-  // otherwise serve nothing (every asset 404s) with no actionable signal. Mirrors the stream/playback
-  // guards above; the actual mounting runs in assembleServer AFTER deployDeclaredSpec returns.
+  // CLOSED at deploy on the SAME per-mount check `/health` reports — `mountUnservableReason`, the one
+  // definition of servable — so the gate and the probe cannot disagree about a mount. They did: the
+  // gate tested only the directory, so an `spa:true` mount whose directory existed without an
+  // index.html booted, served its API and its real assets, and answered `/health` 503 for the rest of
+  // the process's life (readiness is computed once at boot and cached, so nothing could re-evaluate
+  // it). Mirrors the stream/playback guards above; the actual mounting runs in assembleServer AFTER
+  // deployDeclaredSpec returns.
+  const frontendSpecDir = dirname(specPath);
   for (const mount of effectiveSpec.frontend ?? []) {
-    const resolvedDir = resolve(dirname(specPath), mount.dir);
-    let isDir = false;
-    try {
-      isDir = statSync(resolvedDir).isDirectory();
-      // isDirectory() alone does NOT test read/traverse permission — a mode-0000 dir passes stat but
-      // then every asset EACCES-misses. Require R_OK|X_OK too so an unreadable/untraversable dir is
-      // treated the same as missing (fails closed with the message below).
-      if (isDir) accessSync(resolvedDir, constants.R_OK | constants.X_OK);
-    } catch {
-      isDir = false;
-    }
-    if (!isDir) {
+    const unservable = mountUnservableReason(mount, frontendSpecDir);
+    if (unservable === undefined) continue;
+    const resolvedDir = resolve(frontendSpecDir, mount.dir);
+    if (unservable === 'dir') {
       throw new BootConfigError(
         `Boot aborted — the deployed spec at ${specPath} declares a frontend at route '${mount.route}' ` +
           `but its static directory '${mount.dir}' (resolved to ${resolvedDir}) is missing or unreadable. ` +
           'Point frontend.dir at a readable directory of built assets. Fail-closed.',
       );
     }
+    throw new BootConfigError(
+      `Boot aborted — the deployed spec at ${specPath} declares an spa frontend at route '${mount.route}' ` +
+        `but its static directory '${mount.dir}' (resolved to ${resolvedDir}) has no readable index.html. ` +
+        'An spa mount serves index.html for every unmatched deep link, so without it the mount cannot ' +
+        'answer one. Build the frontend into frontend.dir, or set spa: false. Fail-closed.',
+    );
   }
 
   // ── Wire the off-request DURABLE WORKER iff the spec declares deployment.durableWorker

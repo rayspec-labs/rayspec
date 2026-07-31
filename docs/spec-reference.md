@@ -570,7 +570,9 @@ frontend:
   actionable error (`doctor` reports a missing/unreadable directory too).
 - `spa` — optional boolean (default `false`). When `true`, an unmatched path under
   the mount returns `index.html` (History-API single-page-app routing); when
-  `false`, an unmatched path is a `404`.
+  `false`, an unmatched path is a `404`. An `spa: true` mount's `index.html` must be
+  a readable file in `dir` at boot, or the deploy fails closed with an actionable
+  error — the same requirement the readiness check below applies.
 
 **Readiness.** Declaring a mount adds a `frontend` field to the `/health` response,
 valued `"ok"` or `"unavailable"`. It reports whether the mounts can be served — the

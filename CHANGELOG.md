@@ -106,6 +106,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An `spa: true` frontend mount without an `index.html` now fails the deploy closed instead of
+  booting into a permanent `503`.** The deploy guard that fail-closes on an unusable `frontend.dir`
+  and the `/health` readiness probe disagreed about what makes a declared mount servable. The guard
+  tested only the mount's directory; the probe additionally requires, for an `spa: true` mount, that
+  the directory carries a readable `index.html`. A document whose spa directory existed but shipped no
+  `index.html` therefore passed the gate, booted, served every API route and every real asset — and
+  answered `/health` `503` for the rest of the process's life, because mount readiness is computed
+  once at boot and cached, so nothing re-evaluated it. A readiness probe pulls such a process out of
+  service permanently even though its API works. Both now decide from one shared per-mount check, so
+  the deploy refuses the mounts the probe would call `"unavailable"`, with a `BootConfigError` naming
+  the route, the declared `dir` and the resolved path. The directory case keeps its existing message
+  verbatim; the spa case has its own, which additionally says that an spa mount serves `index.html`
+  for every unmatched deep link and points at building the frontend into `frontend.dir` or setting
+  `spa: false`. The probe itself is unchanged — same fields, same values, same status codes — and a
+  deployment declaring no frontend mounts, or one whose mounts are servable, boots and answers exactly
+  as before.
+
 - **An async run's `runId` resolves while the run is still going, instead of `404` until it ends.**
   `POST /v1/agents/{id}/runs` with `async: true` answers `202` with a `runId` and the
   `/v1/runs/{runId}/events` path to stream completion from. But the `runs` header row was written only
@@ -209,8 +226,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Without those secrets — the documented scenario — it refused to start at all, naming
   `DATABASE_URL`, `RAYSPEC_JWT_SIGNING_KEY` and `RAYSPEC_API_KEY_PEPPER` as missing. What an
   operator observes now, either way: the static boot banner, no database and no boot secret
-  required, no auth / OIDC / run route mounted (`/v1/auth/me` → `404`), `/health` liveness-only,
-  and the `Content-Security-Policy` + `Permissions-Policy` secure defaults on every served
+  required, no auth / OIDC / run route mounted (`/v1/auth/me` → `404`), `/health` reporting the
+  declared mounts' readiness (`{"status","frontend"}`, still no `db` field and still no database
+  probe), and the `Content-Security-Policy` + `Permissions-Policy` secure defaults on every served
   response (still overridable verbatim through `RAYSPEC_FRONTEND_CSP` and
   `RAYSPEC_PERMISSIONS_POLICY`). A document that declares anything else — stores, api, agents,
   tooling, triggers, handlers, extensions, or a durable worker — is unaffected and takes exactly
