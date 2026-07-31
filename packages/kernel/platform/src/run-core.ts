@@ -42,6 +42,7 @@ import { makeDispatchTool } from './dispatch.js';
 import { EventPipeline } from './event-pipeline.js';
 import { makeHandlerDb } from './handlers/store-facade.js';
 import { rehydrateConversation } from './rehydrate.js';
+import { markRunHeaderRunning } from './run-header.js';
 import { markRunTainted } from './run-taint.js';
 
 export interface RunOptions {
@@ -415,6 +416,19 @@ export async function runAgent(
   // effects (e.g. setDefaultOpenAIKey); it is idempotent.
   const authMode = await backend.resolveAuth();
 
+  // Publish the run header NOW that the run is starting, so the run-read routes resolve this runId
+  // while the run is in flight instead of only once it finishes. Additive: this INSERTS a missing
+  // header or performs the `enqueued` → `running` transition and nothing else — it can never move a
+  // header that already carries an outcome, so the completing upsert below stays the ONE completion
+  // transition (see run-header.ts).
+  await markRunHeaderRunning(tdb, {
+    runId,
+    backend: backend.id,
+    authMode,
+    agentName: spec.name,
+    model: spec.model,
+  });
+
   // Build the central tool dispatcher and wire it (+ the tools) onto the context. The
   // OpenAI adapter marshals every SDK tool-call into ctx.dispatchTool — the ONLY
   // sanctioned tool path; it holds no handlers. Tool steps are attributed to the run's REAL
@@ -502,7 +516,8 @@ export async function runAgent(
 
   // Persist the run header. output is ALWAYS-PRESENT and may be null; persist it verbatim.
   //
-  // On the FIRST (no-conflict) run this is a plain insert — byte-identical to before. But a runId can be
+  // A header row always EXISTS by now — `markRunHeaderRunning` above either inserted one or left the
+  // one already there — so this is the conflict branch. And a runId can be
   // executed MORE THAN ONCE: the durable executor's recovery re-dispatch re-runs runAgent under the same
   // runId (replay=false) after a lost checkpoint, and a replay can fall through to a live re-run. When an
   // EARLIER attempt ERRORED it already persisted a header at status='error', finalText=''. A plain

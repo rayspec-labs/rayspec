@@ -11,6 +11,7 @@
  */
 
 import { computeCost, type NeutralTool } from '@rayspec/core';
+import { isTerminalRunStatus } from '@rayspec/platform';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentRegistry, AgentRegistryEntry } from '../app-context.js';
 import { FakeRunBackend } from '../test-support/fake-backend.js';
@@ -89,17 +90,19 @@ async function parseSse(
 
 /**
  * Deterministic quiescence barrier for the HTTP-2 throw-path test: poll the tenant-scoped `runs`
- * header until the background runAgent (which outlived the held-request timeout) has written it (its
- * LAST durable write) — so no straggler write races the next test's TRUNCATE. Bounded; the pool's
- * startup search_path resolves the unqualified table to this suite's schema.
+ * header until the background runAgent (which outlived the held-request timeout) has reached a
+ * TERMINAL status — so no straggler write races the next test's TRUNCATE. The header row itself
+ * appears when the run STARTS, so its mere presence is no longer a barrier; the completing write is.
+ * Bounded; the pool's startup search_path resolves the unqualified table to this suite's schema.
  */
 async function waitForRunHeader(harness: Harness, tenantId: string): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    const rows = await harness.db.$client.unsafe(
-      `SELECT 1 FROM runs WHERE tenant_id = '${tenantId}' LIMIT 1;`,
-    );
-    if (rows.length > 0) return;
+    const rows = (await harness.db.$client.unsafe(
+      `SELECT status FROM runs WHERE tenant_id = '${tenantId}' LIMIT 1;`,
+    )) as unknown as Array<{ status: string }>;
+    const status = rows[0]?.status;
+    if (status !== undefined && isTerminalRunStatus(status)) return;
     await new Promise((r) => setTimeout(r, 25));
   }
 }
@@ -541,6 +544,53 @@ describe('POST /v1/agents/:id/runs run-level idempotency', () => {
       runIds[0],
     ]);
     expect(runRows.length).toBe(1);
+  });
+
+  it('a same-key POST while the winner is still IN FLIGHT → 409, and a 200 replay only once it finishes', async () => {
+    const { token } = await principal('idem-inflight@example.com', 'IdemInflightOrg');
+    const headers = {
+      authorization: `Bearer ${token}`,
+      accept: 'application/json',
+      'idempotency-key': 'run-key-inflight',
+    };
+    const { release, arrived } = backend.arm();
+    const winner = jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+      body: { input: 'inflight' },
+      headers,
+    });
+    // The winner is executing, so its run header already exists at a NON-terminal status. The loser
+    // must key on TERMINALITY, not on the header's presence — otherwise it answers 200 with the
+    // winner's half-finished run instead of the "already in progress" 409.
+    await arrived;
+    const loser = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+      body: { input: 'inflight' },
+      headers,
+    });
+    expect(loser.status).toBe(409);
+    expect((await loser.json()).error.code).toBe('IDEMPOTENCY_CONFLICT');
+
+    // Same for an SSE loser: it must not start replaying an unfinished run's event log.
+    const sseLoser = await h.app.request('/v1/agents/echo-agent/runs', {
+      method: 'POST',
+      headers: { ...headers, accept: 'text/event-stream', 'content-type': 'application/json' },
+      body: JSON.stringify({ input: 'inflight' }),
+    });
+    expect(sseLoser.status).toBe(409);
+
+    release();
+    const winnerRes = await winner;
+    expect(winnerRes.status).toBe(200);
+    const winnerRunId = (await winnerRes.json()).runId as string;
+    expect(backend.liveRuns).toBe(1);
+
+    // Once the winner has FINISHED, the same key replays its terminal run (unchanged behaviour).
+    const replay = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+      body: { input: 'inflight' },
+      headers,
+    });
+    expect(replay.status).toBe(200);
+    expect((await replay.json()).runId).toBe(winnerRunId);
+    expect(backend.liveRuns).toBe(1);
   });
 
   it('B1 (stress): 50 CONCURRENT reserves on the SAME key → EXACTLY ONE wins, every time (atomicity)', async () => {

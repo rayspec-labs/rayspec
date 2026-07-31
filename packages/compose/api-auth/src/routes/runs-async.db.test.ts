@@ -12,6 +12,9 @@
  *    invariant: one job, one runId — not merely "a job exists"); same key + different body → 409.
  *  - HASH-EXCLUDES-ASYNC: a SYNC then an ASYNC POST of the same logical input under one key share ONE
  *    slot (the async-vs-sync retry does NOT split the idempotency reservation).
+ *  - IN-FLIGHT OBSERVABILITY: the runId the 202 hands out resolves on GET /v1/runs/{id} (with the
+ *    non-terminal status) and on the advertised GET /v1/runs/{id}/events BEFORE the run finishes,
+ *    while a foreign tenant still gets 404 on both.
  */
 import type { NeutralTool } from '@rayspec/core';
 import type {
@@ -337,5 +340,66 @@ describe('async enqueue failure releases the reservation (retryable)', () => {
     expect(retry.status).toBe(202);
     expect((await retry.json()).runId).toBe(firstRunId); // the SAME durable run, replayed
     expect(stub.enqueued).toHaveLength(1); // NO second job enqueued (no double-fire)
+  });
+});
+
+describe('an in-flight async run is observable through the API', () => {
+  it('GET /v1/runs/{id} answers with the enqueued run and GET /v1/runs/{id}/events is reachable before it finishes', async () => {
+    h.deps.durableExecutor = stub;
+    const { token } = await principal('asyncinflight@example.com', 'AsyncInflight');
+    const res = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+      body: { input: 'a long one', async: true },
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+    });
+    expect(res.status).toBe(202);
+    const accepted = await res.json();
+    const runId = accepted.runId as string;
+    // The stub RECORDS the job but never executes it, so the run is still in flight here.
+    expect(stub.enqueued).toHaveLength(1);
+    expect(backend.liveRuns).toBe(0);
+
+    // The runId the 202 handed out RESOLVES, carrying the non-terminal status.
+    const got = await jsonRequest(h.app, 'GET', `/v1/runs/${runId}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(got.status).toBe(200);
+    const body = await got.json();
+    expect(body.runId).toBe(runId);
+    expect(body.status).toBe('enqueued');
+
+    // The path the 202 body advertises for streaming completion is reachable too.
+    const events = await h.app.request(accepted.events as string, {
+      headers: { authorization: `Bearer ${token}`, accept: 'text/event-stream' },
+    });
+    expect(events.status).toBe(200);
+  });
+
+  it('a foreign tenant still gets 404 on BOTH routes while the run is in flight', async () => {
+    h.deps.durableExecutor = stub;
+    const a = await principal('asyncxt-a@example.com', 'AsyncXtA');
+    const b = await principal('asyncxt-b@example.com', 'AsyncXtB');
+    const res = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+      body: { input: 'A-secret-input', async: true },
+      headers: { authorization: `Bearer ${a.token}`, accept: 'application/json' },
+    });
+    expect(res.status).toBe(202);
+    const runId = (await res.json()).runId as string;
+
+    const bGet = await jsonRequest(h.app, 'GET', `/v1/runs/${runId}`, {
+      headers: { authorization: `Bearer ${b.token}` },
+    });
+    expect(bGet.status).toBe(404);
+    expect(JSON.stringify(await bGet.json())).not.toContain('A-secret-input');
+
+    const bEvents = await h.app.request(`/v1/runs/${runId}/events`, {
+      headers: { authorization: `Bearer ${b.token}`, accept: 'text/event-stream' },
+    });
+    expect(bEvents.status).toBe(404);
+
+    // A still sees its own in-flight run (no collateral damage).
+    const aGet = await jsonRequest(h.app, 'GET', `/v1/runs/${runId}`, {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(aGet.status).toBe(200);
   });
 });

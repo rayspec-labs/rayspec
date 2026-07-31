@@ -300,6 +300,30 @@ describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
     expect(rows[0]?.title).toBe('Q3 review');
   });
 
+  it('CONCURRENT dispatches of the SAME runId persist the output EXACTLY ONCE', async () => {
+    persistTestsRan++;
+    const backend = new PersistBackend();
+    const runId = 'persist-concurrent-run';
+
+    // Two dispatches of the same runId IN FLIGHT AT ONCE — the same shape as the recovery re-dispatch
+    // above, but racing. The `runs` PK serializes them: exactly one wins the completing transition
+    // (non-empty returning) and persists; the loser's returning is empty and it writes nothing.
+    const dispatch = () =>
+      forTenant(db, TENANT_A).transaction((txTdb) =>
+        runAgent(txTdb, backend, spec, { runId, persistTo: 'extracted_facts', productTables }),
+      );
+    const results = await Promise.all([dispatch(), dispatch()]);
+    expect(results.map((r) => r.status)).toEqual(['completed', 'completed']);
+
+    const rows = await readFacts(TENANT_A);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.title).toBe('Q3 review');
+
+    const header = await db.select().from(schema.runs).where(eq(schema.runs.runId, runId));
+    expect(header).toHaveLength(1);
+    expect(header[0]?.status).toBe('completed');
+  });
+
   it('ATOMICITY: a persist that violates a UNIQUE business column rolls back the run header WITH the failed persist (winner intact, exactly one row, loser not completed)', async () => {
     persistTestsRan++;
     const backend = new PersistBackend();
@@ -330,8 +354,10 @@ describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.title).toBe('Q3 review');
 
-    // A's run header is completed; B has NO run header at all — its completing transition rolled back
-    // atomically with the failed persist (the exactly-once, fail-closed property this coupling guarantees).
+    // A's run header is completed. B's header is the one its START wrote (`running`, committed before
+    // the run began) and it was NEVER completed: B's completing transition rolled back atomically with
+    // the failed persist — the exactly-once, fail-closed property this coupling guarantees is that no
+    // run is marked COMPLETED without its row.
     const headerA = await db
       .select()
       .from(schema.runs)
@@ -341,7 +367,8 @@ describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
       .select()
       .from(schema.runs)
       .where(eq(schema.runs.runId, 'unique-run-b'));
-    expect(headerB).toHaveLength(0);
+    expect(headerB).toHaveLength(1);
+    expect(headerB[0]?.status).toBe('running');
   });
 
   it('does NOT persist when persistTo is set but productTables is absent (inert, no throw)', async () => {

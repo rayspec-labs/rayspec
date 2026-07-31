@@ -90,6 +90,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An async run's `runId` resolves while the run is still going, instead of `404` until it ends.**
+  `POST /v1/agents/{id}/runs` with `async: true` answers `202` with a `runId` and the
+  `/v1/runs/{runId}/events` path to stream completion from. But the `runs` header row was written only
+  by the completing upsert at the very end of the run, and both run-read routes read that row —
+  `GET /v1/runs/{id}` reconstructs the result from it, and `GET /v1/runs/{id}/events` guards on it —
+  so for the whole duration of the run, exactly when a caller most needs an answer, both replied
+  `404`, indistinguishable from "no such run". The header is now created at ENQUEUE with
+  `status: "enqueued"`, and run-core moves it to `"running"` when execution starts, so
+  `GET /v1/runs/{id}` returns the run with its current, non-terminal status and the advertised events
+  path is reachable throughout. A consumer that treated that endpoint's `status` as always one of
+  `completed` / `error` now also sees `enqueued` and `running`; the two terminal values are unchanged,
+  and so are the `404`s for an unknown or another tenant's runId — the header read is tenant-scoped,
+  so a foreign run in flight is exactly as invisible as a foreign finished one. Both new writes are
+  strictly additive: the enqueue-time insert is an `ON CONFLICT DO NOTHING`, and the `running`
+  transition applies only to a header that is still `enqueued`, so neither can touch a run that
+  already carries an outcome. The completing upsert, which updates only a header that is not already
+  `completed`, remains the one write that puts a run into a terminal status, and the exactly-once gate
+  that couples it to `persistTo` output persistence is untouched. One behaviour inside the run surface
+  moves with it: a second `POST` under an `Idempotency-Key` whose run is still executing continues to
+  answer `409` "already in progress" rather than replaying a half-finished run, but that decision now
+  keys on the header being terminal instead of on the header merely existing.
+
 - **A document whose handler modules are TypeScript source no longer lints green and then aborts at
   boot.** A backend document declaring a `handlers[].module` with a TypeScript extension (`.ts`,
   `.tsx`, `.mts`, `.cts`) validated with `ok: true` and no warnings at all, and the container then

@@ -139,6 +139,18 @@ export {
   runAgent,
   SUBSCRIPTION_AUTH_MODE,
 } from './run-core.js';
+// The `runs` header lifecycle: the status vocabulary a run passes through, and the two NON-TERMINAL
+// writes (at enqueue, and when execution starts) that make an in-flight run readable through the
+// run-read routes. Neither is a completion transition — run-core's completing upsert stays that.
+export {
+  insertEnqueuedRunHeader,
+  isTerminalRunStatus,
+  markRunHeaderRunning,
+  RUN_STATUS_ENQUEUED,
+  RUN_STATUS_RUNNING,
+  type RunHeaderIdentity,
+  type RunHeaderStatus,
+} from './run-header.js';
 // The run/job observability read-path (SAFE half): surfaces a run's status + taint /
 // quarantine state derived ENTIRELY from the already-persisted journal/run_events/markers (no new store).
 export { getRunObservability, type RunObservability } from './run-observability.js';
