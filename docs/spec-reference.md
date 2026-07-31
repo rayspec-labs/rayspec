@@ -266,7 +266,7 @@ mounts on the media-token path described above, not on that chain.
 
 ## Declared route throttling
 
-Every route on that chain is rate limited, and the tier a call gets is decided
+Every declared route is rate limited, and the tier a call gets is decided
 **after** the credential has been validated — not from the presence of an
 `Authorization` header. That ordering is the whole point: a front proxy can only
 see *whether* a header was sent, so tiering there is forgeable, and junk in the
