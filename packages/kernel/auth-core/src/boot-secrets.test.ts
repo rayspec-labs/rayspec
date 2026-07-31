@@ -23,9 +23,9 @@ import { getApiKeyPepper, hashApiKey } from './api-key.js';
 import {
   API_KEY_PEPPER_ENV,
   assertBootSecrets,
-  clearBootSecrets,
   getJwtSigningKeyPem,
   JWT_SIGNING_KEY_ENV,
+  resetBootSecretsForTests,
   setBootSecrets,
 } from './config.js';
 
@@ -39,11 +39,11 @@ describe('boot secrets supplied in-process', () => {
     for (const k of [JWT_SIGNING_KEY_ENV, API_KEY_PEPPER_ENV]) saved[k] = process.env[k];
     delete process.env[JWT_SIGNING_KEY_ENV];
     delete process.env[API_KEY_PEPPER_ENV];
-    clearBootSecrets();
+    resetBootSecretsForTests();
   });
 
   afterEach(() => {
-    clearBootSecrets();
+    resetBootSecretsForTests();
     for (const k of [JWT_SIGNING_KEY_ENV, API_KEY_PEPPER_ENV]) {
       const v = saved[k];
       if (v === undefined) delete process.env[k];
@@ -112,10 +112,10 @@ describe('boot secrets supplied in-process', () => {
     expect(() => getApiKeyPepper()).toThrow(/required at boot/);
   });
 
-  it('clearBootSecrets returns the process to the environment-only path', () => {
+  it('resetBootSecretsForTests returns the process to the environment-only path', () => {
     setBootSecrets({ jwtSigningKeyPem: SUPPLIED_PEM, apiKeyPepper: SUPPLIED_PEPPER });
     expect(getApiKeyPepper()).toBe(SUPPLIED_PEPPER);
-    clearBootSecrets();
+    resetBootSecretsForTests();
     expect(() => getApiKeyPepper()).toThrow(/required at boot/);
   });
 });
