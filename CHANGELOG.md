@@ -192,7 +192,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nested `lookup` field whose sub-read matches more than one row embeds that same lowest-`id` match,
   and a `collect`, a paged `list`, or a `list`/`counts` sub-read without `order_by` now returns a
   defined order and a defined window. A handler rendered by `rayspec gen-handler` observes it too: a
-  generated lookup tool reads the store unordered and caps the result in the handler (`max_rows`), so
+  generated lookup tool reads the store unordered and caps the result in the handler (`maxRows`), so
   the rows a model receives are now the lowest-`id` matches rather than an arbitrary subset that
   shifted between runs — the template is unchanged, only what it returns is now defined.
   The order column is the injected primary key every store table carries, so it always resolves. A
