@@ -157,7 +157,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `model_refusal`, `internal`) and `tool_error` for a `tool` step — a value the neutral vocabulary
   deliberately does not contain, so the column carries MORE than the API ever reports:
   `GET /v1/runs/{id}` validates the class it reports and still answers `internal` for a run whose only
-  failure was a tool error, exactly as before. `retry_after_ms` holds the upstream's Retry-After when
+  failure was a tool error, exactly as before. Read "holds the class the adapter reported" precisely:
+  the sink promotes it only if it is one of those six, so a failing step whose output carries no class,
+  or one the platform does not recognise, records `null` rather than an unvouched-for string. Filter a
+  journal for failures on `status = 'error'`; `error_class IS NOT NULL` is the narrower question of
+  which of those the platform could classify. `retry_after_ms` holds the upstream's Retry-After when
   it sent one, in MILLISECONDS — the journaled advice is in seconds and is converted on write — and is
   null otherwise, because advice is never invented. The HTTP `Retry-After` header is unchanged: still
   whole seconds, still only on a retry-advisable status. Nothing moved out of the jsonb: the existing
