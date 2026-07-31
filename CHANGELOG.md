@@ -96,8 +96,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   jails it as the pack root and appends its own entry file inside it — so there is no authored
   module extension there for the advisory to read. The extension set behind all three decisions —
   the loader's fail-closed guard, the pack resolver's sibling preference, and the new advisory — is
-  now one exported constant rather than two module-private copies that could drift; both loaders
-  make byte-for-byte the decisions they made before.
+  written down in exactly one place rather than in copies that could drift, and `@rayspec/spec`
+  exposes it as the function `typeScriptSourceExtensionOf(modulePath)`, which answers with the
+  TypeScript-source extension a module path carries — case-folded — or nothing when it carries none.
+  It is a function and not a shared set on purpose: a set handed across the package boundary is a
+  live object any consumer, or any code merely sharing the process, can add to or clear, and the
+  loader's fail-closed guard reads that answer, so it must not rest on state a caller can rewrite.
+  The match is case-insensitive at all three sites, so an uppercase extension is the same dead end
+  as a lowercase one. All three make byte-for-byte the decisions they made before.
 
 - **`rayspec deploy --dry-run` reports a frontend-only document truthfully instead of `ok: false`.**
   Such a document is not a product document, so composing it against the product runtime was never
