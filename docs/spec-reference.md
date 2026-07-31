@@ -266,11 +266,16 @@ mounts on the media-token path described above, not on that chain.
 
 ## Declared route throttling
 
-Every declared route is rate limited, and the tier a call gets is decided
-**after** the credential has been validated — not from the presence of an
-`Authorization` header. That ordering is the whole point: a front proxy can only
-see *whether* a header was sent, so tiering there is forgeable, and junk in the
-header would buy the generous allowance.
+Declared routes are rate limited, and the tier a call gets is decided **after**
+the credential has been validated — not from the presence of an `Authorization`
+header. That ordering is the whole point: a front proxy can only see *whether* a
+header was sent, so tiering there is forgeable, and junk in the header would buy
+the generous allowance.
+
+The one declared route this does **not** cover is a stream `playback` route. It
+is authorized by a signed media token rather than the Bearer chain, so it mounts
+its own middleware and is bounded by the per-user concurrent-stream limit
+described under [`stream`](#stream) instead of by these two tiers.
 
 - A call whose credential is **absent or does not validate** — no header, an
   expired or forged token, an unknown API key — is counted in a **strict** bucket
@@ -303,11 +308,36 @@ throttle fires *before* the route runs, so no agent executed, and no
 `Idempotency-Key` reservation was taken or released — a same-key retry after the
 window is a first attempt, not a re-run.
 
-One limitation to plan around: the counters live **in the process**, so each
-instance of a multi-instance deployment counts on its own and a caller
-effectively gets one budget per instance it reaches. Treat these numbers as a
-per-instance floor rather than a cluster-wide guarantee, and keep a shared
-front-line limit if you need a hard cluster-wide ceiling.
+**Both allowances are one budget for the whole declared surface, not one per
+route.** A caller spends the same 30 or 600 whether it calls one route or twenty;
+the key is the source or the principal, never the path. Sizing a deployment means
+counting a client's calls across all of its declared routes together.
+
+Three limitations to plan around.
+
+**The counters live in the process.** Each instance of a multi-instance
+deployment counts on its own, so a caller effectively gets one budget per
+instance it reaches. Treat these numbers as a per-instance floor rather than a
+cluster-wide guarantee, and keep a shared front-line limit if you need a hard
+cluster-wide ceiling.
+
+**The strict tier is only as precise as `RAYSPEC_TRUSTED_PROXIES`.** The client
+source is the socket peer unless that variable lists the peer as a trusted proxy,
+in which case the forwarding header is believed. That default is deliberate — it
+is what stops a caller spoofing its way into a fresh bucket with an invented
+`X-Forwarded-For` — but it has a consequence worth setting the variable for: left
+unset behind a load balancer, every unvalidated request in the deployment
+presents the balancer as its source and therefore shares **one** 30-per-minute
+bucket. A first-party client whose access token has merely expired then meets a
+`429` instead of the `401` it would have refreshed on. Set the variable to your
+balancer's CIDR and the strict tier keys on real client addresses again.
+
+**The tier decision bounds route work, not credential checking.** Because the
+tier is chosen after validation — which is the entire point — a request carrying
+a forged credential still costs one API-key lookup or one token verification
+before it is refused. That is the price of not letting junk in a header buy the
+generous allowance; a front-line limit is still the right tool for bounding
+unauthenticated volume itself.
 
 ## Store route runtime semantics
 
