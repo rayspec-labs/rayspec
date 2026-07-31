@@ -361,9 +361,11 @@ be refused.
 ## Agent route runtime semantics
 
 An `agent` route executes the run **inside the request** and answers with the
-neutral run result. Two parts of that answer deserve a rule you can code a client
-against: the HTTP status a **failed** run gets, and the `status` vocabulary a run
-reports.
+neutral run result — unless the request body asks for an asynchronous run, which
+enqueues the work and answers `202` with the `runId` to poll instead. Everything in
+this section describes the synchronous answer; the status vocabulary at the end
+covers both. Two parts of that answer deserve a rule you can code a client against:
+the HTTP status a **failed** run gets, and the `status` vocabulary a run reports.
 
 ### `errorClass` → HTTP status
 
@@ -402,6 +404,23 @@ non-idempotent tool (one declared [`idempotent: false`](#tooling)) keeps its
 reservation whatever its class, because re-running it would fire that side effect
 a second time. A same-key retry therefore replays it — and a transient one replays
 at its transient status, `429` / `502` / `504`, not at `200`.
+
+### When a same-key request answers `409` instead
+
+Replay is not the only outcome of a repeated `Idempotency-Key` on this surface. Two
+cases answer **`409 CONFLICT`** with the standard error envelope, and a client that
+retries under one key should expect both:
+
+- **The key is reused with a different agent or a different body.** The key names one
+  request, so a second request that differs is refused rather than being answered
+  with the first one's result.
+- **The winner is still running.** Replay needs a *finished* run, so a same-key
+  request that arrives while the first is still executing is a genuine concurrent
+  collision and is refused. It never executes the agent a second time. Once the first
+  run reaches a terminal status, the same request replays as described above.
+
+That second case is why a run header existing is not the same as a run being
+replayable — terminality is what separates them.
 
 ### `Retry-After`
 
