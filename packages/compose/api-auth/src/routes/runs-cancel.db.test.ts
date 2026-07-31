@@ -324,6 +324,11 @@ describe('POST /v1/runs/:id/cancel — an EXECUTING run receives the signal', ()
       headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
     });
     expect(res.status).toBe(200);
+    // Pin the BODY, not just the status: in this single-process shape the signal reaches the run, it
+    // unwinds and frees its header row, so the same call goes on to record the outcome. `cancelled:
+    // true` is therefore the ordinary answer for a run caught in flight — `false` is reserved for a run
+    // still HOLDING its header row (one on a worker process no signal reached) or one already finished.
+    expect(await res.json()).toMatchObject({ runId, cancelled: true, signalled: true });
 
     // The held request settles WITHOUT the gate ever being released: the run itself was aborted.
     const heldRes = await held;

@@ -23,8 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the record that it needs review. The response is `200` with
   `{ runId, cancelled, status, signalled }`; `cancelled` says whether *this call* made the run terminal,
   so it is `false` for a run that had already finished (whose own outcome is never overwritten — which
-  also makes a repeated cancel harmless) and for a run still executing, which owns its own record until
-  it ends.
+  also makes a repeated cancel harmless) and for a run still **holding its own header row** — one
+  executing on a worker process the abort signal did not reach, which records the cancellation itself
+  when it ends. An executing run IS signalled first, so in the single-process shape it unwinds and the
+  same call goes on to record it: `cancelled: true` is the ordinary answer for a run caught in flight.
 
   **What it stops, precisely, because the three cases genuinely differ.** A run that has not started is
   recorded cancelled and never dispatched: the record is what a worker consults, so neither a first

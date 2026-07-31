@@ -528,9 +528,9 @@ different runs:
   else is written, so it is never delayed by the run it is ending;
 - a run **executing on another worker process** gets no signal. The durable engine's own
   cancellation is cooperative and the whole run occupies one engine step, so the model
-  call in flight is not interrupted: the run stops when it stops. It is still recorded
-  cancelled — a run finishing under a cancellation writes the cancellation as its
-  outcome rather than its own — and it is never dispatched again.
+  call in flight is not interrupted: the run stops when it stops. A run that reaches its
+  own end writes the cancellation as its outcome rather than its own, and it is never
+  dispatched again.
 
 The cancel request itself never waits for the run it ends. An executing run holds its
 own header row for as long as it runs, so the terminal record is written by whichever
@@ -539,7 +539,12 @@ side when it is — from inside the run when it produces a result, and from the 
 once the run's transaction has rolled back when it ends by failing instead (a failing
 run takes everything it wrote down with it, including a record made inside it).
 `cancelled: false` with a non-terminal `status` means that second case — the run was
-ended, and it is recorded when the run stops, whichever way it stops.
+ended, and its own side records it when it stops: from inside the run when it produces a
+result, from the worker when it ends by failing, and from the next dispatch attempt if
+the process died before either of those could. Should the process running it die after
+the engine has already ended the job, no attempt follows and the header keeps the
+non-terminal status it had; the run is still never executed again, and re-reading it
+reports the status it really has.
 
 **Which runs can you name?** Cancellation is by run id, and the only call that hands
 an id back **before** the run ends is an asynchronous one — `async: true` answers

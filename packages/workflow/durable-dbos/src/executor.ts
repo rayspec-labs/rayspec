@@ -382,7 +382,17 @@ export class DbosDurableExecutor implements DurableExecutor {
         // the side that ended for a run that was already executing when it was ended — see the rollback
         // catch below. Failing the workflow here would add an engine-level error on top of a run that
         // is already accounted for.
-        if (await readCancelledWithBoundedRetry(tdb, job.runId)) return;
+        if (await readCancelledWithBoundedRetry(tdb, job.runId)) {
+          // Record before returning. `recordRunCancelled` is idempotent and guarded on the run not
+          // already being terminal, so for the ordinary case — a run cancelled before it started, whose
+          // outcome the cancel surface already wrote — this reads the header, sees a terminal status and
+          // writes nothing. It earns its place in the branch a RECOVERY re-dispatch takes: a run
+          // cancelled WHILE EXECUTING whose worker died before it could unwind was recorded by neither
+          // side (the cancel surface gave up on the header row the run was holding), and without this
+          // the header would stay non-terminal for good while the caller had been told the run ended.
+          await recordRunCancelled(tdb, job.runId);
+          return;
+        }
 
         // ── Resolve the run FIRST (before the marker) ─────────────────────────────────────────
         // resolveRun reads the agent definition LIVE (no serialized object graph). It runs BEFORE

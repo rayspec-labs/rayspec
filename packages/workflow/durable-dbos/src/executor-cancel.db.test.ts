@@ -18,7 +18,10 @@
  * so it survived the crash) and enqueue under that runId, so the workflow BODY runs, its reserve finds
  * the marker taken, and the recovery branch is what the cancellation gate stands in front of. A guard
  * runs the SAME seeding plus a taint marker and requires the QUARANTINE — the one outcome only the
- * recovery branch produces — so the seeding is load-bearing rather than decorative. The other
+ * recovery branch produces — so the seeding is load-bearing rather than decorative. The gate also
+ * RECORDS what it refuses: seeding the enqueue-time header alongside those markers reproduces the run
+ * that was cancelled WHILE EXECUTING and whose worker died before it could unwind — the one case
+ * neither side had written down — and the re-dispatch is what makes it terminal. The other
  * fail-the-fix guards prove the gate does not blunt anything else: an uncancelled run still runs, and a
  * cancelled run's marker is tenant-scoped.
  *
@@ -262,6 +265,41 @@ describe('DBOS worker cancellation', () => {
     expect(backend.liveRuns).toBe(0);
   });
 
+  it('a RECOVERY re-dispatch RECORDS the outcome of a run cancelled while it was executing', async () => {
+    testsRan += 1;
+    const runId = randomUUID();
+    const tdb = forTenant(db, TENANT);
+    // Seed exactly what a worker that died mid-run leaves behind. The run was EXECUTING when it was
+    // cancelled, so it held its own header row and the cancel surface gave up on the terminal record
+    // (`cancelled: false` — the run was expected to write it when it ended). Then the process died, so
+    // the run never wrote anything: the enqueue-time header survives at `enqueued`, the `run_started`
+    // marker survives because its reserve committed outside the run's transaction, and the cancellation
+    // marker survives because it was written by the cancel surface, not by the run.
+    await insertEnqueuedRunHeader(tdb, {
+      runId,
+      backend: backend.id,
+      agentName: baseSpec.name,
+      model: baseSpec.model,
+    });
+    await seedRunStarted(runId);
+    await markRunCancelled(tdb, runId);
+    expect(await runHeaderStatus(runId)).toBe('enqueued');
+
+    const job: RunJob = { runId, tenantId: TENANT, agentId: 'echo-agent', input: 'crashed' };
+    const handle = await executor.enqueue(TENANT, job);
+    expect(await waitForTerminal(handle.jobId)).toBe('succeeded');
+
+    // The gate still refuses to execute it — that half was already true.
+    expect(backend.liveRuns).toBe(0);
+    // RED-FIRST tell: without the gate recording what it refuses, the header stays 'enqueued' and the
+    // journal stays empty forever, so `GET /v1/runs/{id}` reports a run that is still waiting to start
+    // — to a caller who was told it had been ended.
+    expect(await runHeaderStatus(runId)).toBe('error');
+    const steps = await journalSteps(runId);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({ type: 'cancel', status: 'error', error_class: 'cancelled' });
+  });
+
   it('FAIL-THE-FIX GUARD: the seeded marker really does land on the RECOVERY branch (the same seed, plus a taint, quarantines)', async () => {
     testsRan += 1;
     const runId = randomUUID();
@@ -393,7 +431,7 @@ describe('DBOS worker cancellation', () => {
 // The ran-guard: registered LAST + no beforeAll dependency, so a beforeAll throw that skipped the
 // tests above can never read as a passing (green) file.
 describe('DBOS worker cancellation — ran-guard (not skippable-as-green)', () => {
-  it('the cancellation tests ACTUALLY RAN (all eight)', () => {
-    expect(testsRan).toBe(8);
+  it('the cancellation tests ACTUALLY RAN (all nine)', () => {
+    expect(testsRan).toBe(9);
   });
 });
