@@ -15,9 +15,10 @@
  *                                         timeout. Agent resolved from the injected (minimal) registry.
  *  - GET    /v1/runs/{id}               — reconstruct the neutral RunResult from the journal +
  *                                         conversation store for THIS tenant (404 on foreign/absent).
- *                                         The run header exists from ENQUEUE on, so a run that has not
- *                                         finished reads back its non-terminal status here (and is
- *                                         reachable on /events) instead of 404ing until it ends.
+ *                                         The run header exists from ENQUEUE on when that best-effort
+ *                                         write lands, so a run that has not finished reads back its
+ *                                         non-terminal status here (and is reachable on /events)
+ *                                         instead of 404ing until it ends.
  *  - GET    /v1/runs/{id}/events        — REPLAY run_events as SSE (id: = seq), ONE-SHOT (not a live
  *                                         tail): it streams the durable rows with seq > lastEventId and
  *                                         then ENDS. A client resumes / pulls newly-persisted events for
@@ -568,13 +569,24 @@ async function enqueueAgentRun(
   // the EXISTING runAgent off-request inside forTenant(db, tenantId).transaction(). The reservation is
   // KEPT (in-flight).
   //
-  // The header is written BEFORE the enqueue so the runId this call hands back RESOLVES on
-  // GET /v1/runs/{id} and on the GET /v1/runs/{id}/events path the 202 advertises for the WHOLE run,
-  // instead of 404ing until the worker finishes it — and so no worker can already hold this runId's
-  // header row inside its run transaction when the write runs (the job does not exist yet). Tenant-
-  // scoped from the SERVER-DERIVED tenantId through the TenantDb chokepoint — the same tenant the job
-  // runs under. `headerCreated` records whether THIS call created the row, so the failure path below
-  // can remove it again for a job that provably never existed.
+  // The header is written BEFORE the enqueue so that — when it lands — the runId this call hands back
+  // RESOLVES on GET /v1/runs/{id} and on the GET /v1/runs/{id}/events path the 202 advertises for the
+  // WHOLE run, instead of 404ing until the worker finishes it — and so no worker can already hold this
+  // runId's header row inside its run transaction when the write runs (the job does not exist yet).
+  // Tenant-scoped from the SERVER-DERIVED tenantId through the TenantDb chokepoint — the same tenant
+  // the job runs under. `headerCreated` records whether THIS call created the row, so the failure path
+  // below can remove it again for a job that provably never existed.
+  //
+  // BEST-EFFORT: this write is ADVISORY, so it gets its OWN try/catch — a failing header write must
+  // not turn an enqueue the caller could have had into a 5xx. What a failure costs is NOT cosmetic:
+  // a run that RETURNS re-persists its header either way (run-core's `markRunHeaderRunning` INSERTs
+  // when none exists), but the durable worker runs the agent inside ONE transaction
+  // (`tdb.transaction(...)`, packages/workflow/durable-dbos/src/executor.ts), so a run that THROWS
+  // rolls that write back and leaves NO header at all. A failure here therefore means this runId 404s
+  // on GET /v1/runs/{id} and on the advertised events path for the whole run — and for good, if the
+  // run ends by throwing (a timeout, an exception out of the backend). The failure is LOGGED in the
+  // operational `console.error('[api-auth] …')` style rather than swallowed, so an operator sees that
+  // it happened.
   const headerDb = forTenant(deps.db, inp.tenantId);
   let headerCreated = false;
   try {
@@ -584,6 +596,10 @@ async function enqueueAgentRun(
       agentName: entry.spec.name,
       model: entry.spec.model,
     });
+  } catch (err) {
+    console.error(`[api-auth] enqueue-time run header write failed runId=${runId}`, err);
+  }
+  try {
     await deps.durableExecutor.enqueue(inp.tenantId, {
       runId,
       tenantId: inp.tenantId,
@@ -594,7 +610,7 @@ async function enqueueAgentRun(
       ...(inp.persistTo !== undefined ? { persistTo: inp.persistTo } : {}),
     });
   } catch (err) {
-    // The header write or the enqueue THREW — but the throw does NOT prove the job did not start. The
+    // The enqueue THREW — but the throw does NOT prove the job did not start. The
     // durable engine persists the workflow status BEFORE `enqueue` resolves (DBOS `startWorkflow`
     // writes the row first), so a throw AFTER that persist means the workflow WILL still run on the
     // worker / via crash recovery. Blindly releasing the reservation here would let a same-key retry
