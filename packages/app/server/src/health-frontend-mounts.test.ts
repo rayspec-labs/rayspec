@@ -25,7 +25,7 @@ import {
   loadStaticServerConfig,
   registerHealthRoute,
 } from './composition-root.js';
-import { frontendMountsReadiness } from './serve-static.js';
+import { frontendMountsReadiness, mountUnservableReason } from './serve-static.js';
 
 /** Every `node:fs` call made through the mocked module, in order, by name. */
 const fsCalls: string[] = [];
@@ -140,6 +140,43 @@ describe('frontendMountsReadiness — what "servable" means for a mount', () => 
 
   it("an empty mount list is 'ok' (nothing declared, nothing to fail)", () => {
     expect(frontendMountsReadiness([], root)).toBe('ok');
+  });
+});
+
+describe('mountUnservableReason — the one definition the boot guard and the probe share', () => {
+  it('a servable spa mount has no reason', () => {
+    expect(mountUnservableReason(SPA_OK, root)).toBeUndefined();
+  });
+
+  it("a missing directory is reported as 'dir'", () => {
+    expect(mountUnservableReason(MISSING_DIR, root)).toBe('dir');
+  });
+
+  it("an spa mount whose directory carries no index.html is reported as 'spa-index'", () => {
+    expect(mountUnservableReason(SPA_NO_INDEX, root)).toBe('spa-index');
+  });
+
+  it('a plain (non-spa) mount over that same directory has no reason', () => {
+    expect(mountUnservableReason(PLAIN_NO_INDEX, root)).toBeUndefined();
+  });
+
+  it("a file where a directory is declared is reported as 'dir', not 'spa-index'", () => {
+    // `no-index/app.js` is a regular file — statSync succeeds, isDirectory() is false.
+    expect(mountUnservableReason({ route: '/', dir: 'no-index/app.js', spa: true }, root)).toBe(
+      'dir',
+    );
+  });
+
+  it('the readiness the probe reports is exactly "no mount has a reason"', () => {
+    // What the boot guard relies on: this predicate and the probe agree mount for mount, so the
+    // guard refuses precisely the mounts the probe would call 'unavailable'. That guard lives in
+    // `deployDeclaredSpec` (the full-platform deploy) alone — the static profile has none, and boots
+    // such a mount into a 503 it then keeps for the life of the process, which the 'static profile
+    // probe' block below pins.
+    for (const mount of [SPA_OK, SPA_NO_INDEX, PLAIN_NO_INDEX, MISSING_DIR]) {
+      const expected = mountUnservableReason(mount, root) === undefined ? 'ok' : 'unavailable';
+      expect(frontendMountsReadiness([mount], root)).toBe(expected);
+    }
   });
 });
 

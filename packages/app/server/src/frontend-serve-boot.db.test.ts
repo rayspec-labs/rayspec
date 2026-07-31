@@ -17,7 +17,7 @@
  * stream-blob-boot.db.test.ts — the migration chain materializes the platform into a database's
  * default + `drizzle` schema, so per-schema isolation does not fit the chain-based boot.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +31,7 @@ import {
   type BootedServer,
   loadServerConfig,
 } from './composition-root.js';
+import { frontendMountsReadiness } from './serve-static.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 // packages/app/server/src -> repo-root/examples/notes-ui
@@ -274,6 +275,81 @@ frontend:
       expect(caught).toBeInstanceOf(BootConfigError);
       expect((caught as BootConfigError).message).toMatch(/frontend/i);
       expect((caught as BootConfigError).message).toContain('web/does-not-exist');
+      // The message is actionable and consumers read it: pin it whole, so the directory case keeps
+      // saying exactly what it has always said.
+      expect((caught as BootConfigError).message).toBe(
+        `Boot aborted — the deployed spec at ${badSpecPath} declares a frontend at route '/' ` +
+          `but its static directory 'web/does-not-exist' (resolved to ${join(tmpDir, 'web/does-not-exist')}) ` +
+          'is missing or unreadable. Point frontend.dir at a readable directory of built assets. ' +
+          'Fail-closed.',
+      );
+    },
+    120_000,
+  );
+
+  maybe(
+    '(f) FAIL-CLOSED: an spa mount whose directory has no index.html aborts the boot, rather than booting into a permanent 503',
+    async () => {
+      // The mount directory EXISTS and is readable + traversable and carries a real asset, so the
+      // directory half of the guard passes; what it lacks is the `index.html` an `spa: true` mount
+      // serves for every unmatched deep link — the SAME requirement `/health` reports through
+      // `frontendMountsReadiness`. Before the guard shared that check, this spec booted: the API and
+      // the real assets served, and `/health` answered `503 {"status":"degraded","db":"ok",
+      // "frontend":"unavailable"}` for the whole life of the process, because mount readiness is
+      // computed once at boot and cached and so could never re-evaluate. GREEN only because the guard
+      // now refuses the same mounts the probe would call unavailable.
+      const tmpDir = mkdtempSync(join(tmpdir(), 'rayspec-frontend-no-index-'));
+      mkdirSync(join(tmpDir, 'web', 'dist'), { recursive: true });
+      writeFileSync(join(tmpDir, 'web', 'dist', 'app.js'), 'export {};', 'utf8');
+      const badSpecPath = join(tmpDir, 'rayspec.yaml');
+      writeFileSync(
+        badSpecPath,
+        `version: '1.0'
+metadata:
+  name: notes-ui-spa-without-index
+stores:
+  - name: notes
+    columns:
+      - { name: title, type: text }
+      - { name: body, type: text, nullable: true }
+api:
+  - { method: GET, path: '/api/notes', action: { kind: store, store: notes, op: list } }
+frontend:
+  - { route: /, dir: web/dist, spa: true }
+`,
+        'utf8',
+      );
+      // The probe's verdict on this exact mount, from the shipped predicate — the boot must agree.
+      expect(frontendMountsReadiness([{ route: '/', dir: 'web/dist', spa: true }], tmpDir)).toBe(
+        'unavailable',
+      );
+
+      process.env.RAYSPEC_SPEC_PATH = badSpecPath;
+      const config = loadServerConfig();
+      let caught: unknown;
+      try {
+        await assembleServer(config, {
+          registerProductTables: (tables) => {
+            registerScopedTables([...tables.values()]);
+          },
+        });
+      } catch (err) {
+        caught = err;
+      } finally {
+        process.env.RAYSPEC_SPEC_PATH = NOTES_UI_YAML; // restore
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+      expect(caught).toBeInstanceOf(BootConfigError);
+      const message = (caught as BootConfigError).message;
+      // Its own wording, as actionable as the directory case's: the route, the declared dir, the
+      // resolved path, why index.html is needed, and the two ways out.
+      expect(message).toContain("declares an spa frontend at route '/'");
+      expect(message).toContain("static directory 'web/dist'");
+      expect(message).toContain(join(tmpDir, 'web/dist'));
+      expect(message).toContain('no readable index.html');
+      expect(message).toContain('serves index.html for every unmatched deep link');
+      expect(message).toContain('Build the frontend into frontend.dir, or set spa: false');
+      expect(message).toContain('Fail-closed.');
     },
     120_000,
   );

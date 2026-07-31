@@ -141,6 +141,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A full-platform deploy — a document that declares more than a `frontend` — now fails closed on an
+  `spa: true` mount without an `index.html`, instead of booting into a permanent `503`.** The deploy
+  guard that fail-closes on an unusable `frontend.dir` and the `/health` readiness probe disagreed
+  about what makes a declared mount servable. The guard tested only the mount's directory; the probe
+  additionally requires, for an `spa: true` mount, that the directory carries a readable `index.html`.
+  A document whose spa directory existed but shipped no `index.html` therefore passed the gate, booted,
+  served every API route and every real asset — and answered `/health` `503` for the rest of the
+  process's life, because mount readiness is computed once at boot and cached, so nothing re-evaluated
+  it. A readiness probe pulls such a process out of service permanently even though its API works. Both
+  now decide from one shared per-mount check, so that guard refuses the mounts the probe would call
+  `"unavailable"`, with a `BootConfigError` naming the route, the declared `dir` and the resolved path.
+  The directory case keeps its existing message verbatim; the spa case has its own, which additionally
+  says that an spa mount serves `index.html` for every unmatched deep link and points at building the
+  frontend into `frontend.dir` or setting `spa: false`. A frontend-only document is outside this
+  guard's scope: both documented entrypoints branch it to the static profile before the guard runs, and
+  an unservable mount there is still reported the way it always has been — `/health` `503` with
+  `"frontend":"unavailable"`, for the life of the process. The probe itself is unchanged — same fields,
+  same values, same status codes — and a deployment declaring no frontend mounts, or one whose mounts
+  are servable, boots and answers exactly as before.
+
 - **An async run's `runId` resolves while the run is still going, instead of `404` until it ends.**
   `POST /v1/agents/{id}/runs` with `async: true` answers `202` with a `runId` and the
   `/v1/runs/{runId}/events` path to stream completion from. But the `runs` header row was written only
@@ -148,23 +168,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GET /v1/runs/{id}` reconstructs the result from it, and `GET /v1/runs/{id}/events` guards on it —
   so for the whole duration of the run, exactly when a caller most needs an answer, both replied
   `404`, indistinguishable from "no such run". The header is now created at ENQUEUE with
-  `status: "enqueued"`, and run-core moves it to `"running"` when execution starts, so
-  `GET /v1/runs/{id}` returns the run with its current, non-terminal status and the advertised events
-  path is reachable throughout. A consumer that treated that endpoint's `status` as always one of
-  `completed` / `error` now also sees `enqueued` and `running`; the two terminal values are unchanged,
-  and so are the `404`s for an unknown or another tenant's runId — the header read is tenant-scoped,
-  so a foreign run in flight is exactly as invisible as a foreign finished one. Both new writes are
-  strictly additive: the enqueue-time insert is an `ON CONFLICT DO NOTHING`, and the `running`
-  transition applies only to a header that is still `enqueued`, so neither can touch a run that
-  already carries an outcome. The completing upsert, which updates only a header that is not already
-  `completed`, remains the one write that puts a run into a terminal status, and the exactly-once gate
-  that couples it to `persistTo` output persistence is untouched. The enqueue-time header is written
-  BEFORE the job reaches the durable worker — so it can never wait on a worker transaction that holds
-  that row — and is removed again when the engine confirms the job was never created.
+  `status: "enqueued"`, so — when that write lands — `GET /v1/runs/{id}` returns the run with a
+  non-terminal status and the advertised events path is reachable throughout. run-core also moves the
+  header to `"running"` when execution starts, but the durable worker runs the agent inside ONE
+  transaction, so an async caller polling the endpoint reads `enqueued` for the whole run and then the
+  terminal status; `"running"` is what a SYNC run publishes, which executes outside a transaction. A
+  consumer that treated that endpoint's `status` as always one of `completed` / `error` now also sees
+  `enqueued` and `running`; the two terminal values are unchanged, and so are the `404`s for an
+  unknown or another tenant's runId — the header read is tenant-scoped, so a foreign run in flight is
+  exactly as invisible as a foreign finished one. Both new writes are strictly additive: the
+  enqueue-time insert is an `ON CONFLICT DO NOTHING`, and the `running` transition applies only to a
+  header that is still `enqueued`, so neither can touch a run that already carries an outcome. The
+  completing upsert, which updates only a header that is not already `completed`, remains the one
+  write that puts a run into a terminal status, and the exactly-once gate that couples it to
+  `persistTo` output persistence is untouched. The enqueue-time header is written BEFORE the job
+  reaches the durable worker — so it can never wait on a worker transaction that holds that row — and
+  is removed again when the engine confirms the job was never created. That write is ADVISORY and
+  best-effort: a failure to write it at enqueue is logged and the request still answers `202` with the
+  runId rather than failing — but that runId then does not resolve, `GET /v1/runs/{id}` and the
+  advertised events path answer `404` for the whole run as they did before this change, and never
+  resolve at all for a run that ends by throwing, because the header such a run writes for itself
+  rolls back with the worker transaction it is written in.
 
   Two consequences worth knowing. First, a run that THROWS (a crash, a timeout, an exception out of
-  the backend) reaches no completing write at all, so its header stays at a non-terminal status and
-  nothing reaps it: `GET /v1/runs/{id}` then answers `200` with `enqueued`/`running` for a run that
+  the backend) reaches no completing write at all, so any header it has stays at a non-terminal status
+  and nothing reaps it: `GET /v1/runs/{id}` then answers `200` with `enqueued`/`running` for a run that
   will never finish, where it used to answer `404`. Second, two places that read a run header now key
   on the status being TERMINAL rather than on the header merely existing: a second `POST` under an
   `Idempotency-Key` whose run is still executing continues to answer `409` "already in progress"
@@ -178,10 +206,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   but was invisible in the document: a playback route mounts its own middleware tuple and is
   authorized by a signed `?token=` media token, not by the Bearer chain the other routes mount on,
   and that token is minted through `init.mintPlayToken`, a capability only a `kind: handler` route's
-  handler receives — so a deployment that declares no route minting one has a playback route nothing
-  can reach. `doctor` and `plan` now report that shape as the new non-fatal
-  `stream_playback_media_token` advisory, once per playback route, pinned to that route's own
-  `api[<i>].action.mode`. It states the authorization shape and what follows if nothing mints a
+  handler receives — so a deployment that declares no route minting one leaves that playback route
+  unreachable without an externally issued token. `doctor` and `plan` now report that shape as the
+  new non-fatal `stream_playback_media_token` advisory, once per playback route declared in the
+  document's own `api[]`, pinned to that route's own `api[<i>].action.mode`. A playback route a pack
+  contributes through `extensions[]` is merged into the spec at boot, while the advisory pass reads
+  the parsed document, so such a route is outside its field of view — a property of every advisory,
+  not of this one. It states the authorization shape and what follows if nothing mints a
   token; it deliberately does not claim the mint route is missing, because the mint call lives in
   handler module source and the advisory pass is pure over the parsed document. As with every
   advisory it never affects `ok`, so no document that parsed before stops parsing. The `stream`
@@ -244,8 +275,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Without those secrets — the documented scenario — it refused to start at all, naming
   `DATABASE_URL`, `RAYSPEC_JWT_SIGNING_KEY` and `RAYSPEC_API_KEY_PEPPER` as missing. What an
   operator observes now, either way: the static boot banner, no database and no boot secret
-  required, no auth / OIDC / run route mounted (`/v1/auth/me` → `404`), `/health` liveness-only,
-  and the `Content-Security-Policy` + `Permissions-Policy` secure defaults on every served
+  required, no auth / OIDC / run route mounted (`/v1/auth/me` → `404`), `/health` reporting the
+  declared mounts' readiness (`{"status","frontend"}`, still no `db` field and still no database
+  probe), and the `Content-Security-Policy` + `Permissions-Policy` secure defaults on every served
   response (still overridable verbatim through `RAYSPEC_FRONTEND_CSP` and
   `RAYSPEC_PERMISSIONS_POLICY`). A document that declares anything else — stores, api, agents,
   tooling, triggers, handlers, extensions, or a durable worker — is unaffected and takes exactly

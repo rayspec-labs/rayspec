@@ -24,7 +24,7 @@ import type {
   EnqueueResult,
   RunJob,
 } from '@rayspec/platform';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentRegistry, AgentRegistryEntry } from '../app-context.js';
 import { FakeRunBackend } from '../test-support/fake-backend.js';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
@@ -383,6 +383,122 @@ describe('async enqueue failure releases the reservation (retryable)', () => {
     expect(retry.status).toBe(202);
     expect((await retry.json()).runId).toBe(firstRunId); // the SAME durable run, replayed
     expect(stub.enqueued).toHaveLength(1); // NO second job enqueued (no double-fire)
+  });
+});
+
+describe('the enqueue-time run header is advisory (best-effort)', () => {
+  /** Make every INSERT into `runs` raise, i.e. the enqueue-time header write fails at the database. */
+  async function rejectRunHeaderWrites(): Promise<void> {
+    await h.db.$client.unsafe(
+      "CREATE FUNCTION reject_run_header() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RAISE EXCEPTION 'run header write rejected'; END $fn$",
+    );
+    await h.db.$client.unsafe(
+      'CREATE TRIGGER reject_run_header_trg BEFORE INSERT ON runs FOR EACH ROW EXECUTE FUNCTION reject_run_header()',
+    );
+  }
+
+  async function allowRunHeaderWrites(): Promise<void> {
+    await h.db.$client.unsafe('DROP TRIGGER IF EXISTS reject_run_header_trg ON runs');
+    await h.db.$client.unsafe('DROP FUNCTION IF EXISTS reject_run_header()');
+  }
+
+  it('a failing header write still answers 202 with the runId, and the job is enqueued', async () => {
+    h.deps.durableExecutor = stub;
+    const { token } = await principal('asynchdrfail@example.com', 'AsyncHdrFail');
+    await rejectRunHeaderWrites();
+    try {
+      const res = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+        body: { input: 'header write will fail', async: true },
+        headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+      });
+      // FAIL-THE-FIX: with the advisory write on the critical path nothing is enqueued (the throw
+      // happens before `enqueue` is reached) and the request answers 500 — the run the caller asked
+      // for never happens, and it gets no runId back.
+      expect(stub.enqueued).toHaveLength(1);
+      expect(res.status).toBe(202);
+      const body = await res.json();
+      expect(body.runId).toBe(stub.enqueued[0]!.job.runId);
+    } finally {
+      await allowRunHeaderWrites();
+    }
+  });
+
+  it('a failing header write is reported on the server log, not swallowed', async () => {
+    h.deps.durableExecutor = stub;
+    const { token } = await principal('asynchdrlog@example.com', 'AsyncHdrLog');
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await rejectRunHeaderWrites();
+    try {
+      const res = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+        body: { input: 'header write will fail', async: true },
+        headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+      });
+      expect(res.status).toBe(202);
+      const runId = (await res.json()).runId as string;
+      const lines = logged.mock.calls.map((call) => String(call[0]));
+      expect(lines.some((line) => line.includes(runId))).toBe(true);
+    } finally {
+      await allowRunHeaderWrites();
+      logged.mockRestore();
+    }
+  });
+
+  it('an Idempotency-Key reservation survives a failing header write (no second job on a retry)', async () => {
+    h.deps.durableExecutor = stub;
+    const { token } = await principal('asynchdridem@example.com', 'AsyncHdrIdem');
+    const headers = {
+      authorization: `Bearer ${token}`,
+      'idempotency-key': 'k-header-fail',
+      accept: 'application/json',
+    };
+    await rejectRunHeaderWrites();
+    try {
+      const first = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+        body: { input: 'keyed', async: true },
+        headers,
+      });
+      expect(first.status).toBe(202);
+      const runId = (await first.json()).runId as string;
+      const retry = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+        body: { input: 'keyed', async: true },
+        headers,
+      });
+      expect(retry.status).toBe(202);
+      expect((await retry.json()).runId).toBe(runId);
+      expect(stub.enqueued).toHaveLength(1);
+    } finally {
+      await allowRunHeaderWrites();
+    }
+  });
+
+  it('what the failure costs: the 202 runId then answers 404 on GET /v1/runs/{id} AND on the advertised events path', async () => {
+    h.deps.durableExecutor = stub;
+    const { token } = await principal('asynchdrcost@example.com', 'AsyncHdrCost');
+    await rejectRunHeaderWrites();
+    let accepted: { runId: string; events: string };
+    try {
+      const res = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+        body: { input: 'header write will fail', async: true },
+        headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+      });
+      expect(res.status).toBe(202);
+      accepted = (await res.json()) as { runId: string; events: string };
+      // The stub RECORDS the job but never executes it, so the run is genuinely in flight below.
+      expect(stub.enqueued).toHaveLength(1);
+    } finally {
+      // Writes are allowed again BEFORE the reads, so a 404 can only mean "no header row".
+      await allowRunHeaderWrites();
+    }
+
+    const got = await jsonRequest(h.app, 'GET', `/v1/runs/${accepted.runId}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(got.status).toBe(404);
+
+    const events = await h.app.request(accepted.events, {
+      headers: { authorization: `Bearer ${token}`, accept: 'text/event-stream' },
+    });
+    expect(events.status).toBe(404);
   });
 });
 
