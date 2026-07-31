@@ -96,7 +96,7 @@ const recordingTool = (calls: unknown[]): NeutralTool => ({
   idempotent: true,
 });
 
-function makeCtx(journal: FakeJournal, tools: NeutralTool[]): RunContext {
+function makeCtx(journal: FakeJournal, tools: NeutralTool[], signal?: AbortSignal): RunContext {
   const runId = 'run-anth-1';
   const authMode: AuthMode = 'subscription-oauth-official-harness';
   const events: unknown[] = [];
@@ -125,6 +125,7 @@ function makeCtx(journal: FakeJournal, tools: NeutralTool[]): RunContext {
     authMode,
     tools,
     dispatchTool,
+    ...(signal ? { signal } : {}),
   };
 }
 
@@ -891,5 +892,53 @@ describe('Anthropic adapter: coalesce assistant stream frames into real model ca
     const llmSteps = journal.records.filter((s) => s.type === 'llm');
     expect(llmSteps.length).toBe(1);
     expect(res.stepCount).toBe(1);
+  });
+});
+
+describe('Anthropic adapter: the run’s cancellation signal reaches the child it owns', () => {
+  it('links ctx.signal to the AbortController it hands the SDK, so cancelling tears the child down', async () => {
+    const journal = new FakeJournal();
+    const controller = new AbortController();
+    let abortedWhileRunning: boolean | undefined;
+    querySpy.mockImplementation((params: unknown) => {
+      const handed = (params as { options?: { abortController?: AbortController } }).options
+        ?.abortController;
+      // MID-CALL, before the adapter's teardown runs. Asserting after the run would prove nothing:
+      // the `finally` aborts this controller either way, so a missing link would still look aborted.
+      expect(handed).toBeInstanceOf(AbortController);
+      expect(handed?.signal.aborted).toBe(false);
+      controller.abort();
+      abortedWhileRunning = handed?.signal.aborted;
+      return mockQueryWithToolCall('toolu_SIG')(params);
+    });
+
+    const tool = recordingTool([]);
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
+    await adapter.run({ ...baseSpec, tools: [tool.spec] }, makeCtx(journal, [tool], controller.signal));
+
+    // The run's signal reached the controller the adapter hands the SDK, while the call was live.
+    expect(abortedWhileRunning).toBe(true);
+  });
+
+  it('an already-aborted signal is honoured (the run was cancelled before the call started)', async () => {
+    const journal = new FakeJournal();
+    // Captured OUTSIDE the mock and asserted after: an `expect` that throws inside the SDK call is
+    // caught by the adapter's own error handling and would never fail the test.
+    let abortedAtCallTime: boolean | undefined;
+    querySpy.mockImplementation((params: unknown) => {
+      const handed = (params as { options?: { abortController?: AbortController } }).options
+        ?.abortController;
+      abortedAtCallTime = handed?.signal.aborted;
+      return mockQueryWithToolCall('toolu_SIG2')(params);
+    });
+
+    const controller = new AbortController();
+    controller.abort();
+    const tool = recordingTool([]);
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
+    await adapter.run({ ...baseSpec, tools: [tool.spec] }, makeCtx(journal, [tool], controller.signal));
+    // Cancelled BEFORE the backend call started: the controller must already be aborted when the SDK
+    // receives it, not merely by the time the run unwinds.
+    expect(abortedAtCallTime).toBe(true);
   });
 });
