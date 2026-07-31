@@ -150,6 +150,7 @@ export {
   armRunCancellation,
   isRunCancelled,
   markRunCancelled,
+  RUN_CANCEL_LOCK_WAIT_MS,
   RUN_CANCELLED_BODY_HASH,
   RUN_CANCELLED_SCOPE,
   RUN_CANCELLED_STEP_KEY,

@@ -80,9 +80,11 @@ import OpenAI from 'openai';
  *
  * `signal` is a real member of the SDK's shared run options (`SharedRunOptions.signal?: AbortSignal`,
  * @openai/agents-core 0.11.8 run.d.ts) — the SAME overload this pins — so a cancelled run's abort
- * reaches the model call itself. It is spread CONDITIONALLY: the emitted option object is compared
- * exactly by the wire goldens, so a run with no signal must produce the object it always produced, not
- * one carrying an explicit `signal: undefined`.
+ * reaches the model call itself. It is spread CONDITIONALLY so a RunContext carrying NO signal emits
+ * the object it always emitted rather than one with an explicit `signal: undefined`; adapter.integration
+ * .test.ts pins both option bags exactly (the key set as well as the values). Every platform path DOES
+ * supply one — run-core arms a run's controller unconditionally and always sets `ctx.signal` — so on a
+ * real run the bag is `{stream, maxTurns, signal}`; the unset case is a directly-built RunContext.
  */
 // biome-ignore lint/suspicious/noExplicitAny: matches the SDK's run() signature (Agent<any, any>).
 function runNonStream(agent: Agent<any, any>, input: string, maxTurns: number, signal?: AbortSignal) {

@@ -215,10 +215,29 @@ export class TenantDb {
    * which Postgres' SET grammar rejects (syntax error). set_config is a function that DOES
    * accept the value as a parameter — so the GUC is set transaction-locally and the tenantId
    * is never concatenated into raw SQL.
+   *
+   * `opts.lockTimeoutMs` BOUNDS how long a statement in this transaction waits for a row lock another
+   * transaction holds: past it Postgres aborts the statement with SQLSTATE 55P03 (`isLockTimeout`)
+   * instead of waiting. It is opt-in per call and omitted by default, so every existing transaction
+   * keeps Postgres' default (wait indefinitely). Pass it where a contended row must not hold the
+   * caller — a request handler touching a row a long-running run's transaction owns.
    */
-  async transaction<R>(fn: (tx: TenantDb) => Promise<R>): Promise<R> {
+  async transaction<R>(
+    fn: (tx: TenantDb) => Promise<R>,
+    opts?: { lockTimeoutMs?: number },
+  ): Promise<R> {
+    const lockTimeoutMs = opts?.lockTimeoutMs;
+    const bounded =
+      typeof lockTimeoutMs === 'number' && Number.isFinite(lockTimeoutMs) && lockTimeoutMs > 0;
     return this.raw.transaction(async (txRaw) => {
       await txRaw.execute(sql`select set_config(${TENANT_GUC}, ${this.tenantId}, true)`);
+      // Same set_config reason as the tenant GUC above: SET's grammar rejects a bind parameter. The
+      // value is a whole number of milliseconds (the GUC's own default unit — it rejects a fraction),
+      // and `is_local` makes it last exactly as long as this transaction.
+      if (bounded) {
+        const ms = String(Math.ceil(lockTimeoutMs as number));
+        await txRaw.execute(sql`select set_config('lock_timeout', ${ms}, true)`);
+      }
       // txRaw is a Drizzle transaction handle structurally compatible with Db's query API.
       const txTenant = new TenantDb(txRaw as unknown as Db, this.tenantId);
       return fn(txTenant);

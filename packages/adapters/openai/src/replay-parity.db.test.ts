@@ -54,7 +54,9 @@ beforeAll(async () => {
   await resetRunSchema(db);
 });
 beforeEach(async () => {
-  await db.$client.unsafe('TRUNCATE journal_steps, conversation_items, run_events, runs CASCADE');
+  await db.$client.unsafe(
+    'TRUNCATE journal_steps, conversation_items, run_events, runs, idempotency_keys CASCADE',
+  );
   await seedOrgs(db, TENANT_A);
   runSpy.mockReset();
 });

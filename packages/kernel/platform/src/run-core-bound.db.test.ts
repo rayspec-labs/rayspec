@@ -5,10 +5,13 @@
  * the SDK's own retry window lasts; on the durable path that occupies a worker slot for the whole
  * time. The bound puts a ceiling on how long run-core WAITS: when it expires, `runAgent` rejects.
  *
- * WHAT THE BOUND DOES NOT DO: it does not cancel the in-flight SDK call. There is no cancellation
- * path in run-core, so the model call keeps running until it settles on its own — the bound frees the
- * caller (and, on the durable path, the worker slot), it does not abort the provider request. What it
- * DOES guarantee once it has fired is asserted below, seam by seam: an event the abandoned call emits
+ * WHAT THE BOUND DOES NOT DO: it does not cancel the in-flight SDK call. The bound asks nothing to
+ * stop — it is a deadline on how long run-core waits, so the model call keeps running until it settles
+ * on its own and the bound frees the caller (and, on the durable path, the worker slot), not the
+ * provider request. ENDING the run is the separate, explicit path: a cancellation aborts the run's
+ * signal, which run-core races the backend call against and puts on `ctx.signal` for the adapter (see
+ * run-cancel.db.test.ts). What the bound DOES guarantee once it has fired is asserted below, seam by
+ * seam — and the two paths share that machinery: an event the abandoned call emits
  * is dropped, a journal read or write it makes is refused, a transcript rehydrate is refused, and a
  * tool dispatch it STARTS after that point is refused closed (no handler run, no step, no taint
  * marker). A dispatch already inside the dispatcher is the separate case asserted alongside them: it

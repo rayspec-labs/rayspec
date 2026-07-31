@@ -21,17 +21,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than re-running the agent — cancelling is never a silent re-run, least of all for a run that
   already fired a non-idempotent tool, which stays quarantined under its key with the taint marker as
   the record that it needs review. The response is `200` with
-  `{ runId, cancelled, status, signalled }`; `cancelled` is `false` when the run had already finished,
-  whose own outcome is never overwritten — which also makes a repeated cancel harmless.
+  `{ runId, cancelled, status, signalled }`; `cancelled` says whether *this call* made the run terminal,
+  so it is `false` for a run that had already finished (whose own outcome is never overwritten — which
+  also makes a repeated cancel harmless) and for a run still executing, which owns its own record until
+  it ends.
 
   **What it stops, precisely, because the three cases genuinely differ.** A run that has not started is
   recorded cancelled and never dispatched: the record is what a worker consults, so neither a first
   dispatch nor a recovery re-dispatch can execute it. A run executing **in the same process** is handed
   an abort signal, which run-core races the backend call against and puts on the run context, so the
   backend adapter can stop the work — this is the half that frees the run rather than only the caller
-  waiting on it. A run executing on **another worker process** gets neither: the durable engine's own
-  cancellation is cooperative and the whole run occupies a single engine step, so cancelling it changes
-  what is recorded about the run without interrupting the model call already in flight.
+  waiting on it, and it is delivered before anything is written, so it is never queued behind the run it
+  is ending. A run executing on **another worker process** gets no signal: the durable engine's own
+  cancellation is cooperative and the whole run occupies a single engine step, so the model call already
+  in flight is not interrupted and the run stops when it stops. It is still recorded cancelled — a run
+  that finishes under a cancellation records the cancellation instead of its own outcome, and persists
+  no output — and it is never dispatched again. The cancel request never waits for the run it is ending:
+  an executing run holds its header row for as long as it runs, so the terminal record is written by
+  whichever side can write it, the cancel surface or the run itself.
 
   **Which runs you can name.** Cancellation is by run id, and the only call that returns an id *before*
   the run ends is an asynchronous one (`async: true` answers `202` with the `runId`). A synchronous run
@@ -46,9 +53,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of at the end of the run. `pi` is the weakest: its prompt call takes no signal at all, so
   cancelling brings the session's own `abort()` forward and the model request underneath is never
   handed one. In every case the platform stops waiting immediately; that table is about the provider
-  side, which no platform can promise on an SDK's behalf. A run nobody cancels is unaffected throughout
-  — the signal is never aborted, the emitted SDK options are byte-for-byte the ones they always were,
-  and the pinned adapter fixtures are untouched.
+  side, which no platform can promise on an SDK's behalf. A run nobody cancels is unaffected throughout:
+  the signal is never aborted, nothing that shapes a request to a provider changed, and the pinned
+  adapter fixtures are untouched. (The run context now always carries a signal, so an adapter that
+  passes one through — `openai` — sends it on every run; the emitted option bag is pinned exactly, with
+  and without a signal, by that adapter's own tests.)
+
+  The generated OpenAPI document for a declared `{agent}` route follows the same rule: its `200` names
+  `cancelled` among the terminal classes it also covers, and it documents the `409` a request holding a
+  cancelled run answers.
 
 - **A persist handler can cap a model-chosen enum column server-side: the `clampValues` hole.** The
   persist templates already re-checked a model-chosen IDENTIFIER against a store before writing it

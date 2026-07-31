@@ -981,10 +981,20 @@ function registerRunReadRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
  *
  * ORDER OF OPERATIONS, and why it is this order:
  *  1. tenant-scoped OWNERSHIP probe — a foreign or absent runId is a uniform 404 with ZERO effect;
- *  2. the DURABLE marker + the journaled terminal outcome — written BEFORE anything is signalled, so a
- *     process that dies mid-cancel still leaves a run that no dispatch will execute;
- *  3. the ENGINE cancel (best-effort) — ends a durable job that has not started;
- *  4. the in-process SIGNAL — what actually frees an executing run's work.
+ *  2. the DURABLE marker — written BEFORE anything is signalled, so a process that dies mid-cancel
+ *     still leaves a run that no dispatch will execute. It touches only `idempotency_keys`, which no
+ *     executing run holds, so it is never contended;
+ *  3. the in-process SIGNAL — what actually frees an executing run's work, delivered as early as it can
+ *     be. It is a map lookup and an `abort()`: nothing can delay it;
+ *  4. the ENGINE cancel (best-effort) — ends a durable job that has not started;
+ *  5. the journaled TERMINAL OUTCOME — last, because it is the only step that touches the run's own
+ *     header row, which a run executing inside its transaction holds for its whole life. Ahead of the
+ *     signal it would wait on the very run it is ending — the stall this route exists to end, moved
+ *     into the cancel path; behind it, the run this process signalled has already unwound. It is
+ *     bounded either way (run-cancel.ts), so a run in ANOTHER process cannot hold this request either.
+ *
+ * The crash-ordering guarantee is unchanged by putting the outcome last: the MARKER is what makes a run
+ * un-dispatchable, and it is still written before anything is signalled.
  */
 function registerRunCancelRoute(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
   app.post(
@@ -1003,12 +1013,17 @@ function registerRunCancelRoute(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
       const ownership = await tdb.runHeaderOwnership(runId);
       if (ownership !== 'owned') throw new ApiError('NOT_FOUND', 'Not found.');
 
-      // The DURABLE half. The marker is what a dispatch (fresh or a recovery re-dispatch) consults, so
-      // it is written before any signal goes out; the outcome record makes the run terminal with the
-      // neutral `cancelled` class, exactly the way every other outcome reaches GET /v1/runs/{id}. A run
-      // that had ALREADY finished keeps its own outcome — `cancelled:false` says so.
+      // The MARKER — the durable record a dispatch (fresh or a recovery re-dispatch) consults. Written
+      // before anything is signalled, so a process that dies mid-cancel still leaves a run that no
+      // dispatch will execute. It writes one `idempotency_keys` row, which no executing run holds.
       await markRunCancelled(tdb, runId);
-      const outcome = await recordRunCancelled(tdb, runId);
+
+      // The IN-PROCESS half — the AbortSignal run-core handed the adapter. This is what frees the WORK
+      // rather than only the caller waiting on it, so it goes out FIRST, before any write that could
+      // wait on the run it is ending. It reaches runs executing in THIS process (the shipped
+      // single-process shape); a run on a separate worker process is governed by the marker + the
+      // engine's cooperative cancellation below, neither of which interrupts a model call in flight.
+      const signalled = signalRunCancelled(runId);
 
       // The ENGINE half — ends a durable job that has not been dequeued. BEST-EFFORT on purpose: the
       // persisted marker above is the authoritative record (a worker refuses to execute a marked run
@@ -1023,11 +1038,12 @@ function registerRunCancelRoute(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
         }
       }
 
-      // The IN-PROCESS half — the AbortSignal run-core handed the adapter. This is what frees the WORK
-      // rather than only the caller waiting on it. It reaches runs executing in THIS process; a run on
-      // a separate worker process is governed by the marker + the engine's cooperative cancellation
-      // above, neither of which interrupts a model call already in flight.
-      const signalled = signalRunCancelled(runId);
+      // The TERMINAL OUTCOME — the run made terminal with the neutral `cancelled` class, exactly the way
+      // every other outcome reaches GET /v1/runs/{id}. LAST, and bounded: it is the only step that
+      // touches the run's own header row, which an executing run's transaction holds. `cancelled:false`
+      // says this call did not move the header — the run had already finished and keeps its outcome, or
+      // it is still executing and records the cancellation itself when it ends.
+      const outcome = await recordRunCancelled(tdb, runId);
 
       return c.json(
         { runId, cancelled: outcome.cancelled, status: outcome.status, signalled },

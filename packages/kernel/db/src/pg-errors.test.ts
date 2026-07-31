@@ -7,7 +7,7 @@
  * never a row value.
  */
 import { describe, expect, it } from 'vitest';
-import { isUniqueViolation, uniqueViolationConstraintName } from './pg-errors.js';
+import { isLockTimeout, isUniqueViolation, uniqueViolationConstraintName } from './pg-errors.js';
 
 /** The raw postgres.js PostgresError shape (SQLSTATE + fields on the error itself). */
 function rawPgError(overrides: Record<string, unknown> = {}): Error {
@@ -82,5 +82,26 @@ describe('uniqueViolationConstraintName', () => {
     ).toBeUndefined();
     expect(uniqueViolationConstraintName(new Error('plain'))).toBeUndefined();
     expect(uniqueViolationConstraintName(rawPgError({ code: '23503' }))).toBeUndefined();
+  });
+});
+
+describe('isLockTimeout', () => {
+  /** The raw postgres.js shape of a statement aborted by the transaction's `lock_timeout`. */
+  function rawLockTimeout(): Error {
+    return Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
+  }
+
+  it('is TRUE for the raw driver 55P03, and down the drizzle .cause chain', () => {
+    expect(isLockTimeout(rawLockTimeout())).toBe(true);
+    expect(isLockTimeout(drizzleWrapped(rawLockTimeout()))).toBe(true);
+  });
+
+  it('is FALSE for anything else — a contended row must not be confused with a real failure', () => {
+    // 57014 is a statement_timeout / cancelled query and 40P01 a deadlock: both are genuine failures
+    // with their own handling, not "someone else holds this row", so the detector must not claim them.
+    expect(isLockTimeout(rawPgError({ code: '57014' }))).toBe(false);
+    expect(isLockTimeout(rawPgError({ code: '40P01' }))).toBe(false);
+    expect(isLockTimeout(rawPgError())).toBe(false);
+    expect(isLockTimeout(new Error('plain'))).toBe(false);
   });
 });

@@ -14,22 +14,32 @@
  * and `liveRuns` reaches 1 — a run the caller ended still burns a model call. With the guard it stays 0.
  *
  * SIMULATING A RECOVERY RE-EXECUTION follows the same honest technique the taint / short-circuit files
- * use: pre-seed the markers a first attempt would have committed and enqueue under that runId, so the
- * workflow BODY runs and its guards decide. The fail-the-fix guards prove the cancellation gate does not
- * blunt anything else: an UNCANCELLED run still runs, and a cancelled run's marker is tenant-scoped.
+ * use: pre-seed the `run_started` marker a first attempt committed (outside the run's own transaction,
+ * so it survived the crash) and enqueue under that runId, so the workflow BODY runs, its reserve finds
+ * the marker taken, and the recovery branch is what the cancellation gate stands in front of. A guard
+ * runs the SAME seeding plus a taint marker and requires the QUARANTINE — the one outcome only the
+ * recovery branch produces — so the seeding is load-bearing rather than decorative. The other
+ * fail-the-fix guards prove the gate does not blunt anything else: an uncancelled run still runs, and a
+ * cancelled run's marker is tenant-scoped.
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AgentSpec } from '@rayspec/core';
-import { forTenant } from '@rayspec/db';
+import { forTenant, schema } from '@rayspec/db';
 import { makeDbWithSchema } from '@rayspec/db/testing';
-import { isRunCancelled, markRunCancelled, type RunJob } from '@rayspec/platform';
+import { isRunCancelled, markRunCancelled, RUN_TAINT_SCOPE, type RunJob } from '@rayspec/platform';
 import { config as loadDotenv } from 'dotenv';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { DbosDurableExecutor, type DbosExecutorDeps, type ResolvedRun } from './executor.js';
+import {
+  DbosDurableExecutor,
+  type DbosExecutorDeps,
+  type ResolvedRun,
+  RUN_STARTED_BODY_HASH,
+  RUN_STARTED_SCOPE,
+} from './executor.js';
 import { FakeSpineBackend } from './test-support/fake-backend.js';
 import { buildSpineSchemaSql } from './test-support/schema-ddl.js';
 
@@ -88,6 +98,35 @@ async function dropSysDbSafely(baseUrl: string, sysDb: string): Promise<void> {
 
 /** The ran-guard: a skipped file must never read as a green file. */
 let testsRan = 0;
+
+/**
+ * Pre-seed a `run_started` marker for `runId` — exactly what a first attempt commits before it calls
+ * `runAgent`, and what SURVIVES the crash that lost it (the reserve runs outside the run's own
+ * transaction). Seeding it is what makes the next dispatch a RECOVERY: the body's started-once reserve
+ * finds the marker taken and takes the recovery branch instead of the first-dispatch one.
+ */
+async function seedRunStarted(runId: string): Promise<void> {
+  await forTenant(db, TENANT)
+    .insert(schema.idempotencyKeys, {
+      scope: RUN_STARTED_SCOPE,
+      idemKey: runId,
+      bodyHash: RUN_STARTED_BODY_HASH,
+      snapshot: { runId },
+    })
+    .onConflictDoNothing();
+}
+
+/** Pre-seed a `run_taint` marker for `runId` (as a crashed-after-non-idempotent-tool run would have). */
+async function seedRunTaint(runId: string): Promise<void> {
+  await forTenant(db, TENANT)
+    .insert(schema.idempotencyKeys, {
+      scope: RUN_TAINT_SCOPE,
+      idemKey: runId,
+      bodyHash: 'run_taint_marker',
+      snapshot: { runId },
+    })
+    .onConflictDoNothing();
+}
 
 async function waitForTerminal(jobId: string, ms = 30_000): Promise<string> {
   const deadline = Date.now() + ms;
@@ -165,14 +204,35 @@ describe('DBOS worker cancellation', () => {
   it('a RECOVERY re-dispatch of a cancelled run is refused too (recovery can never resurrect it)', async () => {
     testsRan += 1;
     const runId = randomUUID();
-    // Seed what an interrupted first attempt left behind, then cancel it. A recovery re-dispatch must
-    // consult the cancellation before the started-once / taint machinery decides anything.
+    // Seed what an interrupted first attempt left behind — the `run_started` marker, which its reserve
+    // committed OUTSIDE the run's transaction and which therefore survived the crash. THAT is what makes
+    // this dispatch a recovery: the body's reserve finds the marker taken and takes the recovery branch.
+    // (The guard below proves the seed really does reach that branch: without the cancellation, the very
+    // same shape re-runs.) The cancellation is consulted BEFORE any of that machinery decides anything.
+    await seedRunStarted(runId);
     await markRunCancelled(forTenant(db, TENANT), runId);
     const job: RunJob = { runId, tenantId: TENANT, agentId: 'echo-agent', input: 'recovered' };
 
     const handle = await executor.enqueue(TENANT, job);
     expect(await waitForTerminal(handle.jobId)).toBe('succeeded');
     await new Promise((r) => setTimeout(r, 200));
+    expect(backend.liveRuns).toBe(0);
+  });
+
+  it('FAIL-THE-FIX GUARD: the seeded marker really does land on the RECOVERY branch (the same seed, plus a taint, quarantines)', async () => {
+    testsRan += 1;
+    const runId = randomUUID();
+    // The seeding above is only meaningful if it actually changes which branch the body takes, and the
+    // ONE externally visible difference between a first dispatch and a recovery is what a TAINT does
+    // there: a first dispatch runs the agent, the recovery branch refuses a tainted run outright. So
+    // seed both markers a crashed-after-side-effect attempt left, cancel NOTHING, and require the
+    // quarantine — a run that executed (or a workflow that succeeded) would mean the seed was inert.
+    await seedRunStarted(runId);
+    await seedRunTaint(runId);
+    const job: RunJob = { runId, tenantId: TENANT, agentId: 'echo-agent', input: 'quarantined' };
+
+    const handle = await executor.enqueue(TENANT, job);
+    expect(await waitForTerminal(handle.jobId)).toBe('failed');
     expect(backend.liveRuns).toBe(0);
   });
 
@@ -216,7 +276,7 @@ describe('DBOS worker cancellation', () => {
 // The ran-guard: registered LAST + no beforeAll dependency, so a beforeAll throw that skipped the
 // tests above can never read as a passing (green) file.
 describe('DBOS worker cancellation — ran-guard (not skippable-as-green)', () => {
-  it('the cancellation tests ACTUALLY RAN (all five)', () => {
-    expect(testsRan).toBe(5);
+  it('the cancellation tests ACTUALLY RAN (all six)', () => {
+    expect(testsRan).toBe(6);
   });
 });

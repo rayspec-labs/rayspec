@@ -19,6 +19,7 @@ import { RunAbandonedError } from './agent-bounds.js';
 import {
   isRunCancelled,
   markRunCancelled,
+  RUN_CANCEL_LOCK_WAIT_MS,
   RunCancelledError,
   recordRunCancelled,
   signalRunCancelled,
@@ -344,6 +345,135 @@ describe('the persisted cancellation record', () => {
     const outcome = await recordRunCancelled(forTenant(db, TENANT_A), 'record-finished');
     expect(outcome.cancelled).toBe(false);
     expect(await runHeaderStatus('record-finished')).toBe('completed');
+    // And it wrote NOTHING: a run that produced its own outcome must not gain a contradictory
+    // `cancelled` error step, which would inflate its step count and shadow its real outcome.
+    expect(await countJournalSteps('record-finished')).toBe(0);
+  });
+});
+
+/**
+ * The DURABLE invocation shape is where cancellation is hardest, and it is the shape the shipped
+ * deployment uses: run-core executes inside the executor's transaction, whose `running` write takes the
+ * run header's row lock and holds it for the WHOLE run (run-header.ts states this). Anything the cancel
+ * surface does to that row therefore QUEUES BEHIND THE RUN unless it is ordered and bounded — which is
+ * the difference between ending a run and waiting out the run you are trying to end.
+ */
+describe('cancelling a run that is EXECUTING inside its own transaction', () => {
+  /**
+   * Start a run in the durable shape (inside the run transaction, with an autonomous taint handle).
+   * Settles to the RunResult or to the error, captured AT ONCE: a cancelled run rejects while the
+   * caller is still cancelling, and a handler attached later would read as an unhandled rejection.
+   */
+  function startHeldDurableRun(
+    runId: string,
+    backend: SilentBackend,
+  ): Promise<RunResult | unknown> {
+    return forTenant(db, TENANT_A)
+      .transaction((txTdb) =>
+        runAgent(txTdb, backend, spec, { runId, taintDb: forTenant(db, TENANT_A) }),
+      )
+      .catch((err: unknown) => err);
+  }
+
+  it('the cancel surface reaches it PROMPTLY: the signal goes out first, so the outcome write never waits for the run', async () => {
+    const backend = new SilentBackend();
+    open.push(backend);
+    const runId = 'cancel-held-durable';
+    // The enqueue-time header the run surface commits before the worker picks the job up.
+    await insertEnqueuedRunHeader(forTenant(db, TENANT_A), {
+      runId,
+      backend: 'openai',
+      agentName: spec.name,
+      model: spec.model,
+    });
+    const running = startHeldDurableRun(runId, backend);
+    await waitFor(() => backend.entered === 1);
+
+    // The cancel surface's own sequence, in its shipped ORDER, on a SEPARATE handle (the HTTP pool):
+    // marker → signal → terminal outcome. RED-FIRST tell: move the outcome write ahead of the signal and
+    // it waits on the row lock the run holds, so this takes the FULL lock bound and records nothing
+    // (measured: 2038ms, `cancelled:false`) instead of a few milliseconds. In a deployment that is worse
+    // than slow: the wait is the run's whole remaining life, and by the time the signal is finally sent
+    // the run has ended and released its registration — nothing is freed at all.
+    const tdb = forTenant(db, TENANT_A);
+    const startedAt = Date.now();
+    await markRunCancelled(tdb, runId);
+    expect(signalRunCancelled(runId)).toBe(true);
+    const outcome = await recordRunCancelled(tdb, runId);
+    const elapsedMs = Date.now() - startedAt;
+
+    // The adapter was TOLD (the half that frees the work), and the cancel did not wait out the run.
+    expect(backend.sawAbort).toBe(true);
+    expect(elapsedMs).toBeLessThan(RUN_CANCEL_LOCK_WAIT_MS);
+    expect(await running).toBeInstanceOf(RunCancelledError);
+    // The signalled run unwound its transaction, so the row was free and the outcome IS recorded.
+    expect(outcome).toEqual({ cancelled: true, status: 'error' });
+    expect(await runHeaderStatus(runId)).toBe('error');
+  });
+
+  it('a run no signal reaches is not waited for, and no cancellation is claimed or journaled for it', async () => {
+    const backend = new SilentBackend();
+    open.push(backend);
+    const runId = 'cancel-unreachable-durable';
+    await insertEnqueuedRunHeader(forTenant(db, TENANT_A), {
+      runId,
+      backend: 'openai',
+      agentName: spec.name,
+      model: spec.model,
+    });
+    const running = startHeldDurableRun(runId, backend);
+    await waitFor(() => backend.entered === 1);
+
+    // A run executing in ANOTHER process: the marker and the engine reach it, the in-process signal
+    // cannot. The header row stays held for the whole run, so the completing transition gives up on it.
+    const startedAt = Date.now();
+    const outcome = await recordRunCancelled(forTenant(db, TENANT_A), runId, { lockWaitMs: 200 });
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+    // It reports what it actually did — NOT a cancellation it never made …
+    expect(outcome).toEqual({ cancelled: false, status: 'enqueued' });
+    // … and it wrote nothing at all: no step for a run that is still going.
+    expect(await countJournalSteps(runId)).toBe(0);
+
+    // The run then finishes on its own and its own outcome stands (nothing cancelled it).
+    backend.finish();
+    expect((await running) as RunResult).toMatchObject({ status: 'completed' });
+    expect(await runHeaderStatus(runId)).toBe('completed');
+  });
+
+  it('a CANCELLED run records the cancellation as its own outcome — its completing write never overwrites it', async () => {
+    const backend = new SilentBackend();
+    open.push(backend);
+    const runId = 'cancel-not-overwritten';
+    await insertEnqueuedRunHeader(forTenant(db, TENANT_A), {
+      runId,
+      backend: 'openai',
+      agentName: spec.name,
+      model: spec.model,
+    });
+    const running = startHeldDurableRun(runId, backend);
+    await waitFor(() => backend.entered === 1);
+
+    // Cancelled while executing, with no signal delivered (another worker process): the marker is the
+    // record, and the header row is the run's own until it ends.
+    const tdb = forTenant(db, TENANT_A);
+    await markRunCancelled(tdb, runId);
+    expect(await recordRunCancelled(tdb, runId, { lockWaitMs: 200 })).toEqual({
+      cancelled: false,
+      status: 'enqueued',
+    });
+
+    // The run now runs to completion. Its completing upsert would happily replace an `error` header
+    // (`setWhere ne(status,'completed')` is true for one), so what stops the cancellation from being
+    // erased is that run-core consults the record first — and records the CANCELLATION instead.
+    backend.finish();
+    expect((await running) as RunResult).toMatchObject({ status: 'completed' });
+    expect(await runHeaderStatus(runId)).toBe('error');
+    const rows = (await db.$client.unsafe(
+      'SELECT type, status, error_class FROM journal_steps WHERE run_id = $1',
+      [runId],
+    )) as unknown as Array<{ type: string; status: string; error_class: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ type: 'cancel', status: 'error', error_class: 'cancelled' });
   });
 });
 

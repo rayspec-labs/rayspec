@@ -51,7 +51,13 @@ import { makeDispatchTool } from './dispatch.js';
 import { EventPipeline } from './event-pipeline.js';
 import { makeHandlerDb } from './handlers/store-facade.js';
 import { rehydrateConversation } from './rehydrate.js';
-import { armRunCancellation, RunCancelledError, withRunCancel } from './run-cancel.js';
+import {
+  armRunCancellation,
+  isRunCancelled,
+  RunCancelledError,
+  recordRunCancelled,
+  withRunCancel,
+} from './run-cancel.js';
 import { markRunHeaderRunning } from './run-header.js';
 import { markRunTainted } from './run-taint.js';
 
@@ -694,6 +700,23 @@ export async function runAgent(
   // backend that forgets to set `output`/`error` fails LOUDLY here (presence, not truthiness —
   // null is a valid value) rather than silently weakening the "identical RunResult shape" claim.
   assertRunResultKeyPresence(result);
+
+  // ── A RECORDED CANCELLATION IS AUTHORITATIVE ──────────────────────────────────────────────────
+  // A run can be ended on demand WHILE it executes, and this run got far enough to produce a result
+  // anyway: the signal reached it too late (the post-backend tail), or it is executing in a process the
+  // signal cannot reach at all. Its completing upsert would then overwrite the cancellation with its own
+  // outcome — `setWhere ne(status,'completed')` is true for the `error` header a cancellation leaves —
+  // so the run would read back as if nobody had ended it, and with `persistTo` configured it would
+  // commit its output as well. So the completing write consults the cancellation record FIRST: a
+  // cancelled run records THE CANCELLATION as its outcome and commits nothing else. This is also the
+  // only write path that can reach a header the durable path's own transaction holds, so it is what
+  // completes a cancellation the cancel surface could not (see run-cancel.ts). The write is the same
+  // guarded, idempotent transition the cancel surface makes — `lockWaitMs: 0` because THIS call already
+  // holds the row's lock and can never wait on it — so exactly one of the two ever counts.
+  if (await isRunCancelled(tdb, runId)) {
+    await recordRunCancelled(tdb, runId, { lockWaitMs: 0 });
+    return result;
+  }
 
   // RUN→tenant cost roll-up: aggregate the run's per-step ledger
   // (tenant-scoped via TenantDb, not the adapter's RunResult.costUsd) so the run header's cost is the

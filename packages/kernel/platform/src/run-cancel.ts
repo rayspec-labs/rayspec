@@ -18,16 +18,24 @@
  *     not by itself interrupt an in-flight model call.
  *  3. A JOURNALED TERMINAL OUTCOME — a cancelled run ends like any other run ends: one journal step
  *     carrying the neutral `cancelled` class plus a terminal run header, so `GET /v1/runs/{id}` reports
- *     the outcome instead of a run that simply stopped moving. It is written by the CANCEL surface,
- *     not by run-core: the durable worker runs `runAgent` inside one transaction that a cancelled run's
- *     rejection rolls back, so a write made there would not survive — and the not-yet-started case has
- *     no `runAgent` to write it at all. One writer, one place, both cases.
+ *     the outcome instead of a run that simply stopped moving. The CANCEL surface writes it: the durable
+ *     worker runs `runAgent` inside one transaction that a cancelled run's rejection rolls back, so a
+ *     write made there would not survive — and the not-yet-started case has no `runAgent` to write it at
+ *     all. The one case the cancel surface cannot write is a run still EXECUTING inside that
+ *     transaction, which holds the header row: it does not wait for it (see
+ *     {@link RUN_CANCEL_LOCK_WAIT_MS}), and run-core, which does hold the lock, records the same
+ *     outcome from inside the run when it consults the marker before its completing write. The write is
+ *     idempotent and guarded either way, so the two can never both count.
  */
 
 import type { AuthMode, ErrorClass } from '@rayspec/core';
-import { schema, type TenantDb } from '@rayspec/db';
-import { and, eq } from 'drizzle-orm';
-import { isTerminalRunStatus, type RunHeaderStatus } from './run-header.js';
+import { isLockTimeout, schema, type TenantDb } from '@rayspec/db';
+import { and, eq, notInArray } from 'drizzle-orm';
+import {
+  isTerminalRunStatus,
+  type RunHeaderStatus,
+  TERMINAL_RUN_STATUS_VALUES,
+} from './run-header.js';
 
 /**
  * The `idempotency_keys` scope for the per-run cancellation marker. A row
@@ -243,20 +251,47 @@ export async function withRunCancel<T>(
 
 /** What {@link recordRunCancelled} did: whether it ended the run, and the header status it left. */
 export interface RunCancellationOutcome {
-  /** True iff THIS call made the run terminal (false when it had already finished). */
+  /**
+   * True iff THIS call made the run terminal. False means the run's header was NOT moved by this call
+   * — either it had already finished (its own outcome stands) or it is executing inside its own
+   * transaction, which holds the header row and writes the run's outcome itself.
+   */
   cancelled: boolean;
   /** The run header status after the call, or null when the run has no header for this tenant. */
   status: RunHeaderStatus | null;
 }
 
 /**
- * RECORD a run's terminal cancellation: one journal step carrying the neutral `cancelled` class, then
- * the run header moved to the terminal `error` status. Tenant-scoped throughout via the `TenantDb`
- * chokepoint.
+ * How long {@link recordRunCancelled} waits for the run header's row lock before giving up on the
+ * completing transition.
  *
- * A run that has ALREADY reached a terminal status is left exactly as it is — a finished run's outcome
- * is authoritative and cancelling it afterwards changes nothing (the call reports `cancelled:false`).
- * That also makes a repeated cancel idempotent rather than an error.
+ * WHY A BOUND AT ALL: on the durable path run-core runs inside the executor's transaction and its
+ * `running` write holds the header row for the WHOLE run (see run-header.ts). An unbounded UPDATE
+ * against that row would make a cancel request wait for the run it is trying to end — pinning an HTTP
+ * pool connection for the run's remaining lifetime. The cancel surface delivers the in-process signal
+ * BEFORE this write, so a run this process can reach has already been told to stop and unwinds its
+ * transaction in milliseconds; this bound is the margin for that, and the honest give-up for a run no
+ * signal reached (one executing in another process), whose own completion writes its outcome.
+ */
+export const RUN_CANCEL_LOCK_WAIT_MS = 2000;
+
+/**
+ * RECORD a run's terminal cancellation: the run header moved to the terminal `error` status, plus one
+ * journal step carrying the neutral `cancelled` class. Tenant-scoped throughout via the `TenantDb`
+ * chokepoint, and ATOMIC: both writes are one transaction, so the ledger never carries a cancellation
+ * step for a run whose header was not moved, and never a moved header with no step saying why.
+ *
+ * WHAT IT REPORTS, and why it is derived rather than asserted. The transition is guarded on the run
+ * not already being terminal and returns the rows it actually moved; `cancelled` is that row count.
+ * A run that finished on its own keeps its outcome and this reports `cancelled:false` with the status
+ * the run really has — the call never claims a transition it did not make. A repeated cancel is
+ * therefore idempotent rather than an error.
+ *
+ * `opts.lockWaitMs` bounds the wait for the header row's lock ({@link RUN_CANCEL_LOCK_WAIT_MS} by
+ * default; `0` waits as long as Postgres normally would). A run executing inside its OWN transaction
+ * holds that row: past the bound this reports `cancelled:false` and leaves the outcome to the run,
+ * rather than holding the caller. The run that IS that transaction passes `0` — it already holds the
+ * lock, so it never waits.
  *
  * WHY `error` AND NOT A FIFTH HEADER STATUS: the terminal header statuses are read off the neutral
  * `RunResult.status` options, which are exactly `completed` and `error`; a cancelled run produced no
@@ -266,47 +301,90 @@ export interface RunCancellationOutcome {
 export async function recordRunCancelled(
   tdb: TenantDb,
   runId: string,
+  opts?: { lockWaitMs?: number },
 ): Promise<RunCancellationOutcome> {
-  const headerRows = (await tdb
-    .select(schema.runs, {
-      status: schema.runs.status,
-      backend: schema.runs.backend,
-      authMode: schema.runs.authMode,
-    })
-    .where(eq(schema.runs.runId, runId))
-    .limit(1)) as Array<{ status: string; backend: string; authMode: string }>;
-  const header = headerRows[0];
-  // No header for THIS tenant: absent or another tenant's run. Nothing to end (the caller has already
-  // answered 404 for that case; this keeps the helper self-contained and side-effect-free).
-  if (!header) return { cancelled: false, status: null };
-  if (isTerminalRunStatus(header.status)) {
-    return { cancelled: false, status: header.status as RunHeaderStatus };
+  const lockWaitMs = opts?.lockWaitMs ?? RUN_CANCEL_LOCK_WAIT_MS;
+  try {
+    return await tdb.transaction(
+      async (tx) => {
+        const headerRows = (await tx
+          .select(schema.runs, {
+            status: schema.runs.status,
+            backend: schema.runs.backend,
+            authMode: schema.runs.authMode,
+          })
+          .where(eq(schema.runs.runId, runId))
+          .limit(1)) as Array<{ status: string; backend: string; authMode: string }>;
+        const header = headerRows[0];
+        // No header for THIS tenant: absent or another tenant's run. Nothing to end (the caller has
+        // already answered 404 for that case; this keeps the helper self-contained and side-effect-free).
+        if (!header) return { cancelled: false, status: null };
+        if (isTerminalRunStatus(header.status)) {
+          return { cancelled: false, status: header.status as RunHeaderStatus };
+        }
+
+        // The completing transition, FIRST and GUARDED on the run not already being terminal — the read
+        // above is not a lock, so this statement is what decides. `.returning()` is what makes the
+        // reported outcome true rather than assumed: an empty return means the run reached its own
+        // terminal status first and keeps it.
+        const moved = await tx
+          .update(schema.runs, { status: 'error' })
+          .where(
+            and(
+              eq(schema.runs.runId, runId),
+              notInArray(schema.runs.status, [...TERMINAL_RUN_STATUS_VALUES]),
+            ),
+          )
+          .returning({ runId: schema.runs.runId });
+        if (moved.length === 0) {
+          // The run finished between the read and the write. Report what it actually is — and write NO
+          // step: a run that produced its own outcome must not gain a contradictory `cancelled` error
+          // step in its ledger (it would inflate the step count and shadow the run's real failure).
+          const current = (await tx
+            .select(schema.runs, { status: schema.runs.status })
+            .where(eq(schema.runs.runId, runId))
+            .limit(1)) as Array<{ status: string }>;
+          return {
+            cancelled: false,
+            status: (current[0]?.status ?? null) as RunHeaderStatus | null,
+          };
+        }
+
+        // The outcome step, written only because the transition above took. Usage and cost are zero:
+        // nothing was consumed by ending the run, and the run's roll-ups must keep reporting exactly
+        // what the run actually spent. `onConflictDoNothing` keeps a second cancellation from writing a
+        // second step.
+        await tx
+          .insert(schema.journalSteps, {
+            runId,
+            backend: header.backend,
+            type: RUN_CANCELLED_STEP_TYPE,
+            idempotencyKey: RUN_CANCELLED_STEP_KEY,
+            inputHash: RUN_CANCELLED_STEP_KEY,
+            // The `{ error, errorClass }` shape every failing step carries — it is what the run read
+            // path derives the reported error and class from.
+            output: { error: runCancelledMessage(runId), errorClass: CANCELLED_CLASS },
+            status: 'error',
+            errorClass: CANCELLED_CLASS,
+            authMode: CANCELLED_AUTH_MODE,
+          })
+          .onConflictDoNothing();
+
+        return { cancelled: true, status: 'error' as RunHeaderStatus };
+      },
+      { lockTimeoutMs: lockWaitMs },
+    );
+  } catch (err) {
+    if (!isLockTimeout(err)) throw err;
+    // The header row is held by the run's own transaction — it is executing right now. Nothing was
+    // written (the transaction aborted). The run stays MARKED cancelled, so no dispatch will run it
+    // again, and the run itself is what writes the header from here: run-core consults the marker
+    // before its completing write and records the cancellation as the run's own outcome. Report the
+    // status a plain read sees (an MVCC read never waits on the holder).
+    const current = (await tdb
+      .select(schema.runs, { status: schema.runs.status })
+      .where(eq(schema.runs.runId, runId))
+      .limit(1)) as Array<{ status: string }>;
+    return { cancelled: false, status: (current[0]?.status ?? null) as RunHeaderStatus | null };
   }
-
-  // The outcome step. Usage and cost are zero: nothing was consumed by ending the run, and the run's
-  // roll-ups must keep reporting exactly what the run actually spent. `onConflictDoNothing` keeps a
-  // second cancellation from writing a second step.
-  await tdb
-    .insert(schema.journalSteps, {
-      runId,
-      backend: header.backend,
-      type: RUN_CANCELLED_STEP_TYPE,
-      idempotencyKey: RUN_CANCELLED_STEP_KEY,
-      inputHash: RUN_CANCELLED_STEP_KEY,
-      // The `{ error, errorClass }` shape every failing step carries — it is what the run read path
-      // derives the reported error and class from.
-      output: { error: runCancelledMessage(runId), errorClass: CANCELLED_CLASS },
-      status: 'error',
-      errorClass: CANCELLED_CLASS,
-      authMode: CANCELLED_AUTH_MODE,
-    })
-    .onConflictDoNothing();
-
-  // The completing transition. Guarded on the run NOT already being terminal, so a run that finished
-  // between the read above and this write keeps its own outcome (the read is not a lock).
-  await tdb
-    .update(schema.runs, { status: 'error' })
-    .where(and(eq(schema.runs.runId, runId), eq(schema.runs.status, header.status)));
-
-  return { cancelled: true, status: 'error' };
 }

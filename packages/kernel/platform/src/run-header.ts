@@ -58,9 +58,13 @@ export type RunHeaderStatus =
 
 /**
  * The TERMINAL header statuses — exactly the `RunResult.status` values run-core's completing upsert
- * writes. Read off the neutral schema so the set cannot drift from it.
+ * writes. Read off the neutral schema so the list cannot drift from it. Exported as a LIST because a
+ * SQL guard needs the values themselves (`status NOT IN (…)`), not only a membership test.
  */
-const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(RunResult.shape.status.options);
+export const TERMINAL_RUN_STATUS_VALUES: readonly string[] = RunResult.shape.status.options;
+
+/** The same terminal set, as a Set, for the membership test below. */
+const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(TERMINAL_RUN_STATUS_VALUES);
 
 /** True iff `status` is a terminal header status, i.e. the run has finished (completed or error). */
 export function isTerminalRunStatus(status: string): boolean {

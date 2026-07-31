@@ -348,7 +348,7 @@ describe('buildDeclaredRoutesOpenApi — product-agnostic emission', () => {
     // discoverable solely by provoking one.
     const doc = buildDeclaredRoutesOpenApi(richSpec());
     const responses = doc.paths['/widgets/{id}/run'].post.responses;
-    expect(Object.keys(responses).sort()).toEqual(['200', '202', '429', '502', '504']);
+    expect(Object.keys(responses).sort()).toEqual(['200', '202', '409', '429', '502', '504']);
     // The Retry-After a transient status carries is a documented response header, not folklore — and
     // it is documented on BOTH statuses that can carry one, because the adapter captures retry advice
     // for an upstream 5xx exactly as it does for a rate limit.
@@ -356,8 +356,14 @@ describe('buildDeclaredRoutesOpenApi — product-agnostic emission', () => {
     expect(responses['502'].headers?.['Retry-After']).toBeDefined();
     // The 504 (timeout) is NOT given one: nothing upstream advises a delay for a deadline we imposed.
     expect(responses['504'].headers?.['Retry-After']).toBeUndefined();
-    // The 200 names the terminal classes it also covers, so it is not read as "the run succeeded".
+    // The 200 names the terminal classes it also covers, so it is not read as "the run succeeded" —
+    // ALL of them, including `cancelled` (a run ended on demand is terminal and is replayed the same
+    // way), so a generated client reads the complete rule rather than a stale subset of it.
     expect(responses['200'].description).toContain('model_refusal');
+    expect(responses['200'].description).toContain('cancelled');
+    // The 409 is the run-was-ended-on-demand conflict a HOLDING request answers: it is part of the
+    // documented status set, not something discoverable only by provoking a cancellation.
+    expect(responses['409'].description).toContain('ENDED ON DEMAND');
   });
 });
 

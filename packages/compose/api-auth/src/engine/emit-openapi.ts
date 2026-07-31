@@ -240,18 +240,30 @@ function operationForRoute(
       // `statusForErrorClass`), described here so a generated client reads the same rule the spec
       // reference states instead of having to infer it from a live 429: a TERMINAL class is a real,
       // repeatable outcome that stays 200 and is replayed under the Idempotency-Key, a TRANSIENT one
-      // gets a real error status and releases the key so a same-key retry re-runs.
+      // gets a real error status and releases the key so a same-key retry re-runs. The 409 is the one
+      // status that is NOT an errorClass mapping: it is the state conflict a request answers when the
+      // run it was holding was ended on demand, so it produced no result for this request to carry.
       responses: {
         '200': {
           description:
             'The neutral RunResult (sync) — Accept: text/event-stream streams it as SSE. Also the ' +
             'response for a run that FAILED with a TERMINAL errorClass (upstream_4xx, model_refusal, ' +
-            'internal): the run executed and produced a repeatable outcome, so the body carries it as ' +
-            "status:'error' + errorClass, and a same-key retry replays this result rather than re-running.",
+            'cancelled, internal): the run executed (or was ended on demand) and produced a repeatable ' +
+            "outcome, so the body carries it as status:'error' + errorClass, and a same-key retry " +
+            'replays this result rather than re-running.',
           content: { 'application/json': { schema: OPAQUE_OBJECT } },
         },
         '202': {
           description: 'Accepted — an async run was enqueued (async:true on a durable worker).',
+        },
+        '409': {
+          description:
+            'The run this request was holding was ENDED ON DEMAND (POST /v1/runs/{id}/cancel) before ' +
+            "it produced a result. The run's own terminal outcome — status:'error' with errorClass " +
+            "'cancelled' — is durable and readable at GET /v1/runs/{id}; the Idempotency-Key " +
+            'reservation is KEPT, so a same-key retry replays that outcome (200) rather than re-running ' +
+            'a run someone stopped.',
+          content: { 'application/json': { schema: OPAQUE_OBJECT } },
         },
         '429': {
           description:

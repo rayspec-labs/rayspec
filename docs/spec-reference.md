@@ -508,9 +508,13 @@ The response is `200` with:
 { "runId": "…", "cancelled": true, "status": "error", "signalled": true }
 ```
 
-`cancelled` is `false` when the run had **already finished** — its own outcome stands
-and nothing is overwritten, which also makes a repeated cancel harmless rather than an
-error. `signalled` says whether a run executing **in this process** was reached.
+`cancelled` says whether **this call** made the run terminal. It is `false` when the run
+had **already finished** — its own outcome stands and nothing is overwritten, which also
+makes a repeated cancel harmless rather than an error — and `false` when the run was still
+**holding its own record**: an executing run owns its header row until it ends, so there
+it is the run that writes the cancellation down (see below). `status` is then the status
+the run really has. `signalled` says whether a run executing **in this process** was
+reached.
 
 **What cancelling actually stops, precisely.** Three things happen, and they cover
 different runs:
@@ -520,11 +524,19 @@ different runs:
   re-dispatch can execute it;
 - a run **executing in this process** is handed an abort signal, which the backend
   adapter passes to its SDK call, child process, or session — this is what frees the
-  work rather than only the caller waiting on it;
-- a run **executing on another worker process** gets neither. The durable engine's own
-  cancellation is cooperative and the whole run occupies one engine step, so cancelling
-  such a run changes its recorded state without interrupting the model call in flight.
-  It stops when it stops; the run is already accounted for as cancelled.
+  work rather than only the caller waiting on it. The signal goes out before anything
+  else is written, so it is never delayed by the run it is ending;
+- a run **executing on another worker process** gets no signal. The durable engine's own
+  cancellation is cooperative and the whole run occupies one engine step, so the model
+  call in flight is not interrupted: the run stops when it stops. It is still recorded
+  cancelled — a run finishing under a cancellation writes the cancellation as its
+  outcome rather than its own — and it is never dispatched again.
+
+The cancel request itself never waits for the run it ends. An executing run holds its
+own header row for as long as it runs, so the terminal record is written by whichever
+side can write it: the cancel surface when the run is not holding it, the run itself
+when it is. `cancelled: false` with a non-terminal `status` means the second case —
+the run was ended, and it records that when it stops.
 
 **Which runs can you name?** Cancellation is by run id, and the only call that hands
 an id back **before** the run ends is an asynchronous one — `async: true` answers
