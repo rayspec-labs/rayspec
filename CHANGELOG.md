@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Optional upper bounds on an agent run: `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`,
+  `RAYSPEC_AGENT_MAX_ATTEMPTS` and `RAYSPEC_AGENT_RUN_MAX_MS`.** A provider that accepts a request and
+  never answers used to keep a run alive for as long as the model client's own retry window lasted —
+  on the durable worker that occupies one of its run slots for the whole time, and nothing in the
+  deployment could shorten it. The first two bound the model client the OpenAI backend registers: a
+  per-request timeout, and how many attempts it makes for one request — the first try plus its
+  retries, so `1` is a single attempt with no retry (the client's own knob counts retries, one fewer,
+  and the mapping is pinned by a test). The third is a wall-clock ceiling `run-core` applies to one
+  whole run, on the synchronous request path and the durable worker alike. What each caller then
+  reports differs, so read it exactly: a synchronous JSON request ends as a `504 GATEWAY_TIMEOUT`
+  carrying the neutral `timeout` class — the same envelope the pre-existing held-request timeout
+  returns, so which of the two ceilings expired first does not change what the client reads — and a
+  streaming request, whose `200` status line has already been sent, ends with the terminal `error`
+  frame carrying that same class. On the durable worker there is no such envelope: run-core runs
+  inside the executor's transaction, so the ceiling rolls that transaction back and no terminal run
+  header is written. What the bounded run leaves behind there depends on how it was enqueued: a run
+  enqueued through the API keeps the `enqueued` header that path writes before handing the job over,
+  so reading its outcome has to test the header for TERMINALITY, which is what `isTerminalRunStatus`
+  is for — while a cron trigger's agent action enqueues without writing a header, so a bounded run of
+  that kind leaves no `runs` row at all. Be precise about what the ceiling does: it stops run-core
+  waiting, it does **not** cancel the model call — there is no cancellation path, so the provider
+  request continues until it settles by itself. What it does give you is the caller and the worker
+  slot back, and a run-core that refuses what the abandoned call reaches for afterwards: an event it
+  emits is dropped, a journal read or write is refused, a transcript rehydrate is refused, and a tool
+  dispatch it starts after that point is refused closed — the handler does not run, no step is
+  journaled and no taint marker is written. A dispatch already in flight when the ceiling fires is
+  not stopped: its taint marker is written before the handler, the handler runs to completion, and
+  its journal step is then refused, so a side effect it performs happens without a journal row. All
+  three variables are off unless set, and an unusable value (not a number, or — after flooring —
+  below 1 or above `2147483647`, the largest delay a timer can hold) is treated as unset, so a
+  deployment that sets none behaves exactly as it did before. The
+  OpenAI adapter gained the matching optional `timeoutMs` / `maxAttempts` options,
+  and `openai` — until now in the tree only through the agents SDK — is a direct pinned dependency of
+  that package. All three variables are documented in `.env.example`.
+
 - **`rayspec plan` surfaces the non-fatal spec advisories.** A backend-profile document that carries
   a finding from the advisory lint pass — the same findings `doctor` has always reported in its
   `warnings` field, such as a `handlers[].module` that is TypeScript source and so needs a build step

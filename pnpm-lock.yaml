@@ -186,6 +186,9 @@ importers:
       '@rayspec/core':
         specifier: workspace:*
         version: link:../../kernel/core
+      openai:
+        specifier: 6.44.0
+        version: 6.44.0(ws@8.21.0)(zod@4.4.3)
       zod:
         specifier: 4.4.3
         version: 4.4.3

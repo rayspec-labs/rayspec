@@ -78,6 +78,8 @@ import {
   makeFsSourceFactory,
   makeHandlerDb,
   type RunJob,
+  resolveAgentMaxAttempts,
+  resolveAgentRequestTimeoutMs,
 } from '@rayspec/platform';
 import {
   type ComposedProductDeploy,
@@ -834,7 +836,16 @@ export function makeExtractionBackend(env: NodeJS.ProcessEnv, backend: string): 
         'OPENAI_API_KEY',
         "the OpenAI API key (extraction backend 'openai')",
       );
-      return new OpenAIAdapter({ apiKey });
+      // Optional request-level bounds. Each is omitted when its variable is unset or unusable, so
+      // with neither set the options are the single `apiKey` they have always been and the adapter
+      // registers auth exactly as before.
+      const timeoutMs = resolveAgentRequestTimeoutMs(env);
+      const maxAttempts = resolveAgentMaxAttempts(env);
+      return new OpenAIAdapter({
+        apiKey,
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        ...(maxAttempts === undefined ? {} : { maxAttempts }),
+      });
     }
     case 'anthropic': {
       // Opt-in reuse-login (RAYSPEC_ANTHROPIC_REUSE_LOGIN): when the operator has seeded each per-tenant
