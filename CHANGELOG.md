@@ -185,8 +185,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instructions were replaced with the wording that measurement was made against, so the shipped
   example teaches the whole pattern rather than its first third, and
   `examples/lead-qualifier/injection-smoke.sh` is the new regression that drives all three classes,
-  three runs each, plus two control leads, against a live deployment. No API, envelope or runtime
-  behavior changes.
+  three runs each, plus two control leads, against a live deployment; each run is scored on both
+  verdict fields, `tier` and `owning_queue`, because the policy payload asks for both. Nothing in the
+  platform changes — no API, no envelope, no runtime behavior; what changes is the shipped example's
+  own agent, which is the point of the example.
 
 - **`doctor` and `plan` report a new non-fatal `agent_untrusted_field_precedence` advisory.** It fires
   once per agent whose `instructions` name an unconstrained `text` column of a declared store — one
