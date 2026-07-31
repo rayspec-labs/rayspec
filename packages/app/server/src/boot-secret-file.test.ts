@@ -638,8 +638,8 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
     // was actually emitted for the leaking value.
     expect(warning).toContain('RAYSPEC_JWT_SIGNING_KEY');
 
-    // The shapes the issue names outright — pinned by name, so a leak in one of them reports as
-    // itself rather than as a generic mismatch.
+    // The named shapes, pinned individually so a leak in one of them reports as itself rather than
+    // as a generic mismatch.
     expect(warning).not.toContain(Buffer.from(LEAK_RAW).toString('base64')); // not encoded
     expect(warning).not.toContain(Buffer.from(LEAK_CLEAN).toString('base64'));
     expect(warning).not.toMatch(/[0-9a-f]{16,}/); // not hashed — no hex digest of any length
