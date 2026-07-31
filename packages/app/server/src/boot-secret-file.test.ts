@@ -606,17 +606,8 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
     // was actually emitted for the leaking value.
     expect(warning).toContain('RAYSPEC_JWT_SIGNING_KEY');
 
-    // THE general counterproof: a SECOND boot, same variable, same kinds of change, a value that
-    // shares no byte and not even a length with the first — and the SAME message, byte for byte.
-    // Nothing derived from the value can survive that: an excerpt of ANY length (one character is
-    // enough), the length itself, a count, a digest, an encoding — each differs between the two
-    // secrets, so each would drive the two messages apart. This is what makes the arm's claim a
-    // proof rather than a probe for the shapes someone thought to enumerate.
-    const { warnings: otherWarnings } = boot({ ...plainEnv, RAYSPEC_JWT_SIGNING_KEY: OTHER_RAW });
-    expect(otherWarnings).toHaveLength(1);
-    expect(otherWarnings[0]).toBe(warning);
-
-    // The shapes the issue names outright, pinned by name rather than inferred from the control.
+    // The shapes the issue names outright — pinned by name, so a leak in one of them reports as
+    // itself rather than as a generic mismatch.
     expect(warning).not.toContain(Buffer.from(LEAK_RAW).toString('base64')); // not encoded
     expect(warning).not.toContain(Buffer.from(LEAK_CLEAN).toString('base64'));
     expect(warning).not.toMatch(/[0-9a-f]{16,}/); // not hashed — no hex digest of any length
@@ -635,6 +626,17 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
     // which a random base62 sentinel cannot collide with the message's fixed English vocabulary,
     // so the probe stays a leak detector rather than a source of false reds.
     for (const window of windows(LEAK_RAW, 4)) expect(warning).not.toContain(window);
+
+    // THE general counterproof, which closes the space the enumeration above cannot: a SECOND boot,
+    // same variable, same kinds of change, a value that shares no byte and not even a length with
+    // the first — and the SAME message, byte for byte. Nothing derived from the value can survive
+    // that: an excerpt of ANY length (one character is enough), the length itself, a count, a
+    // digest, an encoding — each differs between the two secrets, so each would drive the two
+    // messages apart. This is what makes the arm's claim a proof rather than a probe for the shapes
+    // someone thought to enumerate.
+    const { warnings: otherWarnings } = boot({ ...plainEnv, RAYSPEC_JWT_SIGNING_KEY: OTHER_RAW });
+    expect(otherWarnings).toHaveLength(1);
+    expect(otherWarnings[0]).toBe(warning);
   });
 
   it('emits NOTHING on the abort path — a broken mount aborts without a normalization warning', () => {
