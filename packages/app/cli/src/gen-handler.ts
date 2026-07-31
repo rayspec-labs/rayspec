@@ -46,6 +46,11 @@ const EMIT_TARGETS: readonly EmitTarget[] = ['ts', 'js'];
  * that names the fact (the render is TypeScript source, which production will not load) AND both ways
  * out (compile it, or re-render as JavaScript). Exported so any other diagnostic reaching the same
  * dead end can cite the SAME wording verbatim instead of inventing a second phrasing for it.
+ *
+ * ONE such diagnostic cannot take that route and re-states the recommendation in its own words: the
+ * `typescript_handler_module` lint advisory in `packages/kernel/spec/src/lint.ts`. `@rayspec/cli`
+ * depends on `@rayspec/spec`, so importing this constant there would run the dependency BACKWARDS —
+ * the duplication is structural, not an oversight. Edit the two together.
  */
 export const TYPESCRIPT_OUTPUT_NEEDS_A_BUILD_STEP =
   'The rendered module is TypeScript source and `rayspec deploy` loads compiled JavaScript only, so ' +
