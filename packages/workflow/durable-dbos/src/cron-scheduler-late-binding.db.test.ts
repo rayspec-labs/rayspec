@@ -2,8 +2,9 @@
  * LATE-BOUND cron tenant — DB-backed (real Postgres isolated schema; a capturing STUB executor, NO
  * DBOS engine in this process).
  *
- * A deployment may be configured with the org id its cron triggers fire under BEFORE that org has
- * been created (the id is chosen up front; the org is registered against the running application).
+ * A deployment may be configured with the org id its cron triggers fire under BEFORE the `orgs` row
+ * carrying that id exists — and, the other way round, that row may be soft-deleted while the
+ * deployment keeps running.
  * The scheduler therefore has to answer the existence question PER FIRING rather than once at wiring
  * time, and it must answer it fail-closed: a firing whose deployment tenant is not (yet) an existing
  * org DISPATCHES NOTHING.

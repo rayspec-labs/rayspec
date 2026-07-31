@@ -253,8 +253,8 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
     'LATE BINDING: boots a cron spec whose tenant org does NOT exist yet, fires nothing until it does, then fires without a restart',
     async () => {
       process.env.RAYSPEC_SPEC_PATH = writeSpec(CRON_SPEC_YAML);
-      // A well-formed org id that NOTHING has created — the one-step bootstrap posture: the operator
-      // picks the id, deploys, and registers the org against the running application afterwards.
+      // A well-formed org id that NOTHING has created — the state a cron deployment legitimately
+      // passes through while its tenant org is not there (yet). The boot must come up on it.
       process.env.RAYSPEC_CRON_TENANT_ID = CRON_TENANT;
 
       const config = loadServerConfig();
@@ -276,8 +276,10 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
       const instant = new Date('2026-06-24T02:00:00.000Z');
       expect(await server.fireCronNow?.('nightly-digest', instant)).toBe(false);
 
-      // The org is registered against the RUNNING application (assembleServer already applied the
-      // migration chain, so `orgs` exists) — no restart, no re-deploy.
+      // The `orgs` row for THAT id appears while the application RUNS (assembleServer already applied
+      // the migration chain, so `orgs` exists) — no restart, no re-deploy. Inserted directly with the
+      // configured id, because that is what makes the id name a real org: `POST /v1/orgs` and register
+      // let the database generate the id, so they cannot be pointed at a pre-chosen one.
       const seedDb = postgres(appDbUrl, { max: 1 });
       try {
         await seedDb.unsafe(

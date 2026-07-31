@@ -491,7 +491,11 @@ export class DbosCronScheduler {
    *
    * A webhook/event (RESERVED per-kind) or unknown name is fail-closed-REJECTED — never a silent no-op.
    *
-   * @returns whether THIS call won the reserve and dispatched (`true`) or was a deduped no-op (`false`).
+   * @returns `true` iff THIS call won the reserve and dispatched. `false` covers TWO different
+   *   outcomes and is NOT on its own evidence that the work ran: a deduped no-op (this firing key
+   *   already fired), OR a skip because the deployment tenant does not exist (yet) — the latter
+   *   dispatched nothing, wrote no marker, and left the firing instant unconsumed, so the same
+   *   instant still fires once the org exists.
    */
   async fireNow(name: string, instant: Date = new Date()): Promise<boolean> {
     // A cron trigger (scheduled + on-demand) OR a manual trigger (on-demand only) is fireable here.
@@ -518,8 +522,10 @@ export class DbosCronScheduler {
    * The bound applies ONLY to a `catchUp` trigger; a non-catch-up trigger's scheduled fire is
    * byte-behaviourally identical to `fireNow` (reserve → dispatch, no bound).
    *
-   * @returns `true` iff this call won the reserve and DISPATCHED; `false` if it was a deduped no-op OR a
-   *   bounded (beyond-look-back) make-up skip.
+   * @returns `true` iff this call won the reserve and DISPATCHED; `false` if it was a deduped no-op, a
+   *   bounded (beyond-look-back) make-up skip, OR a skip because the deployment tenant does not exist
+   *   (yet) — that last one alone leaves the firing instant unconsumed, so it still fires once the org
+   *   exists.
    */
   async fireScheduled(name: string, instant: Date = new Date()): Promise<boolean> {
     const descriptor = this.#crons.get(name);

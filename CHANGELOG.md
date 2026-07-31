@@ -110,13 +110,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **A deployment that declares a cron or manual trigger boots before its tenant org exists.**
-  `RAYSPEC_CRON_TENANT_ID` names the org a trigger fires under, and that org only comes into being
-  once someone has registered against the *running* application — yet the boot used to verify it
-  existed and abort when it did not (`… is a well-formed UUID but no such active org exists`). Every
-  cron deployment was therefore forced to be two-stage: deploy without the trigger, create the org,
-  read its id, set the variable, redeploy. The boot no longer asks that question. A well-formed id
-  naming an org that does not exist yet starts the scheduler, so the id can be chosen up front and
-  the org registered afterwards, in one deployment. Nothing fires under an unknown tenant: the
+  `RAYSPEC_CRON_TENANT_ID` names the org a trigger fires under — yet the boot used to verify that org
+  existed and abort when it did not (`… is a well-formed UUID but no such active org exists`), which
+  is a state a cron deployment legitimately passes through: an org is registered against a *running*
+  application, so a deployment restarting before its org row is there could not come back up at all,
+  and the only way in was to deploy without the trigger first. The boot no longer asks that question.
+  A well-formed id naming an org that does not exist yet starts the scheduler, and firing begins the
+  moment an `orgs` row with that id exists. Which id that is remains the row's to decide: `POST
+  /v1/orgs`, `POST /v1/auth/register` and `rayspec dev bootstrap-tenant` all let the database generate
+  it, so an operator using those still reads the id back before setting the variable, while an id
+  chosen up front has to be the id its `orgs` row is created with. Nothing fires under an unknown
+  tenant: the
   existence check moved to the firing itself, where it runs **before** the firing's reserve, so a
   skipped firing dispatches nothing, writes no marker and therefore does not consume its firing
   instant. Each skipped firing emits exactly one line naming the trigger, the instant and the tenant;

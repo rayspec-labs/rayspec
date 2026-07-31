@@ -303,8 +303,10 @@ export interface BootedServer {
    * reserve→dispatch path the scheduler fires on (a thin delegate to the already-wired
    * `DbosCronScheduler.fireNow`). It is generic platform CONTROL surface (it names no product
    * trigger/agent): an operator who must fire a nightly job now, the deterministic test harness, and
-   * the CEO demo (which cannot wait until 2am) all need it. Returns whether THIS call won the
-   * exactly-once reserve and dispatched (`true`) or was a deduped no-op (`false`). Undefined for an
+   * the CEO demo (which cannot wait until 2am) all need it. Returns `true` iff THIS call won the
+   * exactly-once reserve and dispatched; `false` means it did not dispatch, either as a deduped no-op
+   * (this firing key already fired) or as a skip because the deployment tenant does not exist (yet),
+   * which consumes no firing instant and so still fires once the org exists. Undefined for an
    * auth-only / no-cron / no-worker boot (nothing to fire). NOT an internet-facing endpoint by itself
    * — the entrypoint does not mount it on the public app; a dev wrapper may expose it on a LOCAL
    * control route.
@@ -396,8 +398,10 @@ export interface ServerConfig {
    * The tenant (org id) the deployment's CRON triggers fire under (single-deployment
    * LOCAL posture — multi-tenant cron fan-out is RESERVED, out of scope). Set via
    * RAYSPEC_CRON_TENANT_ID. REQUIRED iff the deployed spec declares cron triggers AND
-   * `deployment.durableWorker:true` (a cron must fire under a known tenant — firing under an unknown
-   * tenant is fail-closed-refused at boot). Absent for an auth-only / no-cron / no-worker boot.
+   * `deployment.durableWorker:true`: an unset or malformed (non-UUID) value is fail-closed-refused at
+   * BOOT. Whether the org it names EXISTS is not a boot question — a well-formed id naming an org that
+   * does not exist yet boots, and each firing is skipped instead (see `cronTenantExists`), so nothing
+   * ever fires under an unknown tenant either way. Absent for an auth-only / no-cron / no-worker boot.
    */
   cronTenantId?: string;
   /**
@@ -1315,9 +1319,10 @@ export async function applyMigrations(db: Db): Promise<void> {
  * chokepoint) rather than re-deriving the regex. Throws `BootConfigError` (the entrypoint surfaces it).
  *
  * EXISTENCE is deliberately NOT checked here. It used to be: a well-formed id with no matching org
- * aborted the boot, which made a cron deployment structurally two-stage — the org only exists once
- * someone has registered against the RUNNING application, so a spec declaring a cron could not be
- * deployed and bootstrapped in one step. The existence question therefore moved to the FIRING (see
+ * aborted the boot — but an org is registered against a RUNNING application, so a cron deployment
+ * whose org row is not there yet (a first bring-up, or a restart that races it) could not come up at
+ * all, and the org it was waiting for could not be created through it. The check therefore moved to
+ * the FIRING (see
  * `cronTenantExists`, injected into `DbosCronScheduler` as its per-firing `tenantExists` probe), where
  * it is answered fail-closed and — unlike a boot gate — picks the org up the moment it appears.
  * Nothing fires under an unknown tenant either way; only the moment of the check changed.
