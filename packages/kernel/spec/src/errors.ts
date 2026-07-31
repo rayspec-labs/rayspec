@@ -188,7 +188,11 @@ export function specError(code: SpecErrorCode, message: string, path?: string): 
  *                               parsed document.
  *  - `agent_untrusted_field_precedence` — an agent whose instructions NAME an unconstrained `text`
  *                               column of a declared store while stating no PRECEDENCE between it
- *                               and the structured fields. A `text` column declaring an `enum`
+ *                               and the structured fields, or without saying the stated rule is the
+ *                               WHOLE rule. Both statements are asked for and the message names the
+ *                               one that is missing: field precedence answers an ASSERTIVE attack and
+ *                               a closed rule answers a POLICY one, so satisfying either alone leaves
+ *                               the other class open. A `text` column declaring an `enum`
  *                               whitelist is excluded: its stored value must be one of the listed
  *                               literals, so it cannot carry an injected sentence — the one case
  *                               where the document itself rules the column out as a free-text

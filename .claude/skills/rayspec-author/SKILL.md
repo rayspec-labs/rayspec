@@ -987,7 +987,9 @@ Notes that matter:
 > | assertive | a data field | your `instructions`: state which field WINS |
 > | policy | the decision rule | your `instructions`: state the rule is CLOSED and COMPLETE |
 >
-> Write all three and the advisory clears. Both halves of the check are keyword matches over prose, so
+> Write all three and the advisory clears; it checks the last two and names whichever is missing, so
+> stating precedence without closing the rule still reports — that combination answers the assertive
+> class and leaves the policy one open. Both halves of the check are keyword matches over prose, so
 > it is wrong in both directions by construction — instructions phrasing precedence in other words are
 > flagged anyway, and instructions merely containing one of its keywords are not. It also cannot tell
 > whether the agent READS the named column or only WRITES it. Treat it as a prompt to make the

@@ -191,9 +191,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`doctor` and `plan` report a new non-fatal `agent_untrusted_field_precedence` advisory.** It fires
   once per agent whose `instructions` name an unconstrained `text` column of a declared store — one
   that can hold free-form text the author does not control — while stating no precedence between that
-  field and the structured ones, pinned to that agent's own `agents[<i>].instructions`. A `text`
-  column that declares an `enum` whitelist is excluded, since its stored value must be one of the
-  listed literals and so cannot carry an injected sentence. Both halves are keyword matches over
+  field and the structured ones **or** without saying the stated rule is the whole rule, pinned to
+  that agent's own `agents[<i>].instructions`. Both statements are asked for and the message names the
+  one that is missing, because they close different attack classes: field precedence answers text that
+  asserts a different field value, a closed rule answers text that invents a policy, and satisfying
+  either alone leaves the other class open. A `text` column that declares an `enum` whitelist is
+  excluded, since its stored value must be one of the listed literals and so cannot carry an injected
+  sentence. Both halves are keyword matches over
   natural-language prose, so this advisory is wrong in both directions by construction: instructions
   that state a precedence in vocabulary outside its small closed list are flagged anyway, and
   instructions that merely contain one of those words are not. It also cannot confirm that the agent

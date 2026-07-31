@@ -1234,6 +1234,26 @@ const FIELD_PRECEDENCE_MARKERS: readonly RegExp[] = [
 ];
 
 /**
+ * The words that read as "this decision rule is CLOSED" — the SECOND half the advisory asks for, and
+ * the one that answers a POLICY injection (an invented standing order violates no rule the
+ * instructions state, so it is weighed like any other fact rather than rejected).
+ *
+ * Kept separate from the precedence list because the two halves close DIFFERENT attack classes and an
+ * author can genuinely have written one without the other — which is the whole reason the advisory
+ * reports them separately. Same heuristic caveat as its sibling: a closed list of vocabulary, matched
+ * on word boundaries against lowercased prose.
+ */
+const CLOSED_RULE_MARKERS: readonly RegExp[] = [
+  /\bclosed\b/,
+  /\bcomplete\b/,
+  /\bexhaustive\b/,
+  /\bwhole rule\b/,
+  /\bonly rule\b/,
+  /\bno other (?:rule|policy|exception)/,
+  /\bno (?:further|additional) (?:rule|policy|exception)/,
+];
+
+/**
  * The NON-FATAL semantic-warning pass — advisory findings that do NOT fail a parse (unlike `lintSpec`).
  * Pure over an already-shape-valid `RaySpec`. `doctor`/`plan` surface these alongside the `ok` result so
  * an author sees a documented interaction without being blocked.
@@ -1414,22 +1434,40 @@ export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
       const named = new Set(prose.match(/[a-z0-9_]+/g) ?? []);
       const fields = freeTextColumns.filter((c) => named.has(c.column));
       if (fields.length === 0) return;
-      if (FIELD_PRECEDENCE_MARKERS.some((marker) => marker.test(prose))) return;
+      // The advisory asks for TWO statements and reports exactly the ones that are missing. Silencing
+      // it on the precedence half alone would have let a document through that answers the ASSERTIVE
+      // class and leaves the POLICY class wide open — which is the very difference the shipped
+      // measurements in `docs/ARCHITECTURE.md` are about, not a hypothetical.
+      const hasPrecedence = FIELD_PRECEDENCE_MARKERS.some((marker) => marker.test(prose));
+      const hasClosedRule = CLOSED_RULE_MARKERS.some((marker) => marker.test(prose));
+      if (hasPrecedence && hasClosedRule) return;
+      const missing: string[] = [];
+      if (!hasPrecedence) {
+        missing.push(
+          'states no PRECEDENCE between them and the structured fields, so text that ASSERTS a ' +
+            'different value for one is weighed rather than rejected',
+        );
+      }
+      if (!hasClosedRule) {
+        missing.push(
+          'does not say the stated rule is the whole rule, so text that INVENTS a policy or ' +
+            'exception violates nothing and is weighed as one more fact',
+        );
+      }
       warnings.push(
         specWarning(
           'agent_untrusted_field_precedence',
           `agent '${agent.id}' names the unconstrained (\`text\`, no \`enum\`) column(s) ` +
             `${fields.map((c) => `'${c.store}.${c.column}'`).join(', ')} in its instructions, but ` +
-            'states no PRECEDENCE between them and the structured fields. Such a column can hold ' +
-            'free-form text the author does not control; whether this agent READS a given one or ' +
-            'only WRITES it is not visible here, because the row is assembled in handler source this ' +
-            'pass does not open. Where one of them is input, the tool-dispatch boundary treats it as ' +
-            'data and never as instructions, which stops an attack that COMMANDS the agent; it does ' +
-            'not stop one that ASSERTS a different value for a structured field or INVENTS a policy, ' +
-            'because both only inform the answer. State which field wins when they disagree, and ' +
-            'that the classification rule as written is the whole rule (see `examples/lead-qualifier` ' +
-            'and the tool-dispatch trust boundary section of `docs/ARCHITECTURE.md`). This is a ' +
-            'keyword heuristic over prose, so it can be wrong in either direction',
+            `${missing.join('; and it ')}. Such a column can hold free-form text the author does ` +
+            'not control; whether this agent READS a given one or only WRITES it is not visible ' +
+            'here, because the row is assembled in handler source this pass does not open. Where ' +
+            'one of them is input, the tool-dispatch boundary treats it as data and never as ' +
+            'instructions, which stops an attack that COMMANDS the agent but neither of the two ' +
+            'above, because both only inform the answer. Write both statements (see ' +
+            '`examples/lead-qualifier` and the tool-dispatch trust boundary section of ' +
+            '`docs/ARCHITECTURE.md`). This is a keyword heuristic over prose, so it can be wrong ' +
+            'in either direction',
           `agents[${ai}].instructions`,
         ),
       );
