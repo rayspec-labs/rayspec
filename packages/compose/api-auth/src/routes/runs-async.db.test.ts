@@ -470,6 +470,36 @@ describe('the enqueue-time run header is advisory (best-effort)', () => {
       await allowRunHeaderWrites();
     }
   });
+
+  it('what the failure costs: the 202 runId then answers 404 on GET /v1/runs/{id} AND on the advertised events path', async () => {
+    h.deps.durableExecutor = stub;
+    const { token } = await principal('asynchdrcost@example.com', 'AsyncHdrCost');
+    await rejectRunHeaderWrites();
+    let accepted: { runId: string; events: string };
+    try {
+      const res = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+        body: { input: 'header write will fail', async: true },
+        headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+      });
+      expect(res.status).toBe(202);
+      accepted = (await res.json()) as { runId: string; events: string };
+      // The stub RECORDS the job but never executes it, so the run is genuinely in flight below.
+      expect(stub.enqueued).toHaveLength(1);
+    } finally {
+      // Writes are allowed again BEFORE the reads, so a 404 can only mean "no header row".
+      await allowRunHeaderWrites();
+    }
+
+    const got = await jsonRequest(h.app, 'GET', `/v1/runs/${accepted.runId}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(got.status).toBe(404);
+
+    const events = await h.app.request(accepted.events, {
+      headers: { authorization: `Bearer ${token}`, accept: 'text/event-stream' },
+    });
+    expect(events.status).toBe(404);
+  });
 });
 
 describe('an in-flight async run is observable through the API', () => {

@@ -14,7 +14,9 @@
  *  - RECOVERY re-dispatch onto a non-terminal header (a crashed run left `running`) still runs and
  *    reconciles to the healed terminal outcome.
  *  - A run that RETURNS `status:'error'` lands at `error`; a run that THROWS reaches no completing
- *    write at all and leaves its header at `running` (the documented non-terminal residual).
+ *    write at all and leaves its header at `running` (the documented non-terminal residual) — and on
+ *    the durable path that write rolls back with the run's transaction, so a run whose enqueue-time
+ *    header is missing leaves no header at all.
  *  - The completing write records the identity the RUN resolved — an adapter that reconciles its auth
  *    mode during the run lands the RESULT's value in the header, not the pre-run one.
  *  - The enqueue-time write does NOT wait on a run transaction that holds the header row.
@@ -278,6 +280,34 @@ describe('run-header lifecycle', () => {
     const header = await readHeader(runId);
     expect(header?.status).toBe(RUN_STATUS_RUNNING);
     expect(isTerminalRunStatus(header?.status ?? '')).toBe(false);
+  });
+
+  it('ASYNC: a run that THROWS rolls its own header write back — with an enqueue-time header one survives, without it none does', async () => {
+    // Both runs execute inside the transaction the durable executor wraps `runAgent` in, so every
+    // header write the run makes rolls back with it. The enqueue-time row is written OUTSIDE that
+    // transaction, which is what makes the difference between the two cases.
+    const withHeader = 'async-throw-with-enqueue-header';
+    await insertEnqueuedRunHeader(forTenant(db, TENANT_A), {
+      runId: withHeader,
+      backend: 'openai',
+      agentName: spec.name,
+      model: spec.model,
+    });
+    await expect(
+      forTenant(db, TENANT_A).transaction(async (txTdb) => {
+        await runAgent(txTdb, new ThrowingBackend(), spec, { runId: withHeader });
+      }),
+    ).rejects.toThrow('the backend threw');
+    expect((await readHeader(withHeader))?.status).toBe(RUN_STATUS_ENQUEUED);
+
+    const noHeader = 'async-throw-without-enqueue-header';
+    await expect(
+      forTenant(db, TENANT_A).transaction(async (txTdb) => {
+        await runAgent(txTdb, new ThrowingBackend(), spec, { runId: noHeader });
+      }),
+    ).rejects.toThrow('the backend threw');
+    // No row at all: the runId a 202 handed out never resolves on the run-read routes.
+    expect(await readHeader(noHeader)).toBeUndefined();
   });
 
   it('the completing write records the authMode the RUN resolved, not the pre-run one', async () => {

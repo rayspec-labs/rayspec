@@ -113,28 +113,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GET /v1/runs/{id}` reconstructs the result from it, and `GET /v1/runs/{id}/events` guards on it —
   so for the whole duration of the run, exactly when a caller most needs an answer, both replied
   `404`, indistinguishable from "no such run". The header is now created at ENQUEUE with
-  `status: "enqueued"`, so `GET /v1/runs/{id}` returns the run with a non-terminal status and the
-  advertised events path is reachable throughout. run-core also moves the header to `"running"` when
-  execution starts, but the durable worker runs the agent inside ONE transaction, so an async caller
-  polling the endpoint reads `enqueued` for the whole run and then the terminal status; `"running"`
-  is what a SYNC run publishes, which executes outside a transaction. A consumer that treated that
-  endpoint's `status` as always one of `completed` / `error` now also sees `enqueued` and `running`;
-  the two terminal values are unchanged, and so are the `404`s for an unknown or another tenant's
-  runId — the header read is tenant-scoped, so a foreign run in flight is exactly as invisible as a
-  foreign finished one. Both new writes are strictly additive: the enqueue-time insert is an
-  `ON CONFLICT DO NOTHING`, and the `running` transition applies only to a header that is still
-  `enqueued`, so neither can touch a run that already carries an outcome. The completing upsert,
-  which updates only a header that is not already `completed`, remains the one write that puts a run
-  into a terminal status, and the exactly-once gate that couples it to `persistTo` output persistence
-  is untouched. The enqueue-time header is written BEFORE the job reaches the durable worker — so it
-  can never wait on a worker transaction that holds that row — and is removed again when the engine
-  confirms the job was never created. That write is ADVISORY and best-effort: the run writes its own
-  header when execution starts, so a failure to write it at enqueue is logged and the request still
-  answers `202` with the runId rather than failing.
+  `status: "enqueued"`, so — when that write lands — `GET /v1/runs/{id}` returns the run with a
+  non-terminal status and the advertised events path is reachable throughout. run-core also moves the
+  header to `"running"` when execution starts, but the durable worker runs the agent inside ONE
+  transaction, so an async caller polling the endpoint reads `enqueued` for the whole run and then the
+  terminal status; `"running"` is what a SYNC run publishes, which executes outside a transaction. A
+  consumer that treated that endpoint's `status` as always one of `completed` / `error` now also sees
+  `enqueued` and `running`; the two terminal values are unchanged, and so are the `404`s for an
+  unknown or another tenant's runId — the header read is tenant-scoped, so a foreign run in flight is
+  exactly as invisible as a foreign finished one. Both new writes are strictly additive: the
+  enqueue-time insert is an `ON CONFLICT DO NOTHING`, and the `running` transition applies only to a
+  header that is still `enqueued`, so neither can touch a run that already carries an outcome. The
+  completing upsert, which updates only a header that is not already `completed`, remains the one
+  write that puts a run into a terminal status, and the exactly-once gate that couples it to
+  `persistTo` output persistence is untouched. The enqueue-time header is written BEFORE the job
+  reaches the durable worker — so it can never wait on a worker transaction that holds that row — and
+  is removed again when the engine confirms the job was never created. That write is ADVISORY and
+  best-effort: a failure to write it at enqueue is logged and the request still answers `202` with the
+  runId rather than failing — but that runId then does not resolve, `GET /v1/runs/{id}` and the
+  advertised events path answer `404` for the whole run as they did before this change, and never
+  resolve at all for a run that ends by throwing, because the header such a run writes for itself
+  rolls back with the worker transaction it is written in.
 
   Two consequences worth knowing. First, a run that THROWS (a crash, a timeout, an exception out of
-  the backend) reaches no completing write at all, so its header stays at a non-terminal status and
-  nothing reaps it: `GET /v1/runs/{id}` then answers `200` with `enqueued`/`running` for a run that
+  the backend) reaches no completing write at all, so any header it has stays at a non-terminal status
+  and nothing reaps it: `GET /v1/runs/{id}` then answers `200` with `enqueued`/`running` for a run that
   will never finish, where it used to answer `404`. Second, two places that read a run header now key
   on the status being TERMINAL rather than on the header merely existing: a second `POST` under an
   `Idempotency-Key` whose run is still executing continues to answer `409` "already in progress"
