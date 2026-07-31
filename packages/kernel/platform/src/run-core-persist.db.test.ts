@@ -10,7 +10,9 @@
  *      constraint (the `runs` PK UNIQUE index + the completed-transition `setWhere` gate + the durable
  *      outer transaction), and the target store carries NO unique business column, so a naive persist
  *      would leave TWO rows. The returning-gate (only the call that WINS the completing transition
- *      persists) is the sole thing keeping it at one.
+ *      persists) is the sole thing keeping it at one;
+ *   3. two dispatches of the same runId that are GENUINELY in flight at once (a barrier in the fake
+ *      backend holds both inside `run()` until both have entered) also write the row exactly once.
  *
  * Uses a DEDICATED schema (never `public`, never the shared platform test schema) per the per-suite
  * isolation discipline (false-green hazard). Skips when DATABASE_URL is absent; a ran-guard turns a
@@ -118,6 +120,39 @@ class PersistBackend implements Backend {
       costUsd: 0,
       stepCount: 1,
     };
+  }
+}
+
+/**
+ * A `PersistBackend` whose `run()` does not return until `parties` dispatches have ENTERED it — so a
+ * test that claims two dispatches overlap either genuinely overlaps or FAILS with a clear message,
+ * instead of quietly degenerating into two serial runs.
+ */
+class BarrierPersistBackend extends PersistBackend {
+  #arrived = 0;
+  #open: () => void = () => {};
+  readonly #opened: Promise<void>;
+
+  constructor(private readonly parties: number) {
+    super();
+    this.#opened = new Promise<void>((resolve) => {
+      this.#open = resolve;
+    });
+  }
+
+  override async run(runSpec: AgentSpec, ctx: RunContext): Promise<RunResult> {
+    this.#arrived += 1;
+    if (this.#arrived >= this.parties) this.#open();
+    await Promise.race([
+      this.#opened,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`only ${this.#arrived}/${this.parties} dispatches ran at once`)),
+          4_000,
+        ),
+      ),
+    ]);
+    return super.run(runSpec, ctx);
   }
 }
 
@@ -302,18 +337,25 @@ describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
 
   it('CONCURRENT dispatches of the SAME runId persist the output EXACTLY ONCE', async () => {
     persistTestsRan++;
-    const backend = new PersistBackend();
+    // The barrier makes the overlap REAL: neither dispatch's backend returns until BOTH have entered
+    // it, so the two runs are in flight at the same instant and both reach the completing transition
+    // with the other still unfinished. (Serialized dispatches would fail this test, not pass it.)
+    const backend = new BarrierPersistBackend(2);
     const runId = 'persist-concurrent-run';
 
-    // Two dispatches of the same runId IN FLIGHT AT ONCE — the same shape as the recovery re-dispatch
-    // above, but racing. The `runs` PK serializes them: exactly one wins the completing transition
-    // (non-empty returning) and persists; the loser's returning is empty and it writes nothing.
+    // The SYNC run surface (no outer transaction): the `running` header write commits immediately, so
+    // neither dispatch holds the header row while it executes. The `runs` PK still serializes the
+    // COMPLETING transition: exactly one wins it (non-empty returning) and persists; the loser's
+    // returning is empty and it writes nothing.
     const dispatch = () =>
-      forTenant(db, TENANT_A).transaction((txTdb) =>
-        runAgent(txTdb, backend, spec, { runId, persistTo: 'extracted_facts', productTables }),
-      );
+      runAgent(forTenant(db, TENANT_A), backend, spec, {
+        runId,
+        persistTo: 'extracted_facts',
+        productTables,
+      });
     const results = await Promise.all([dispatch(), dispatch()]);
     expect(results.map((r) => r.status)).toEqual(['completed', 'completed']);
+    expect(backend.runs).toBe(2);
 
     const rows = await readFacts(TENANT_A);
     expect(rows).toHaveLength(1);

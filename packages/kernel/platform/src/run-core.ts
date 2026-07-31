@@ -420,7 +420,9 @@ export async function runAgent(
   // while the run is in flight instead of only once it finishes. Additive: this INSERTS a missing
   // header or performs the `enqueued` → `running` transition and nothing else — it can never move a
   // header that already carries an outcome, so the completing upsert below stays the ONE completion
-  // transition (see run-header.ts).
+  // transition (see run-header.ts). On the durable path `tdb` is the run's transaction, so this write
+  // holds the header row until the run ends: a second dispatch of the SAME runId waits here rather
+  // than executing alongside the first (the enqueue path never waits on it — run-header.ts).
   await markRunHeaderRunning(tdb, {
     runId,
     backend: backend.id,
@@ -530,8 +532,12 @@ export async function runAgent(
   // conflict, refresh the outcome + cost columns ONLY when the existing header is NOT already 'completed'
   // (`setWhere ne(status,'completed')`). A 'completed' header is authoritative and terminal — the
   // setWhere is false for it, so a later spurious re-run that ERRORS can NEVER downgrade a completed run
-  // back to 'error'. The identity columns (backend/authMode/agentName/model) are invariant across re-runs
-  // of the same runId, so they are not refreshed; createdAt (the run's first-seen instant) is preserved.
+  // back to 'error'. The `backend`/`authMode` identity columns are refreshed WITH the outcome, because
+  // the earlier writes recorded a PRE-run guess: the enqueue-time header has no credential resolved at
+  // all, and the `running` transition carries `resolveAuth()`'s answer — which an adapter may RECONCILE
+  // during the run (the RunResult's authMode is the one the run actually executed under, and it is the
+  // one the journal's steps carry). agentName/model are the run's own spec either way; createdAt (the
+  // run's first-seen instant) is preserved.
   const runHeaderValues = {
     runId,
     backend: result.backend,
@@ -548,6 +554,8 @@ export async function runAgent(
     costDrift: rollup.costDrift,
   };
   const runHeaderSet = {
+    backend: result.backend,
+    authMode: result.authMode,
     status: result.status,
     finalText: result.finalText,
     output: result.output ?? null,

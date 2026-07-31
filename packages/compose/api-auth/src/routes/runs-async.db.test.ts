@@ -14,7 +14,8 @@
  *    slot (the async-vs-sync retry does NOT split the idempotency reservation).
  *  - IN-FLIGHT OBSERVABILITY: the runId the 202 hands out resolves on GET /v1/runs/{id} (with the
  *    non-terminal status) and on the advertised GET /v1/runs/{id}/events BEFORE the run finishes,
- *    while a foreign tenant still gets 404 on both.
+ *    while a foreign tenant still gets 404 on both. The header is written BEFORE the job reaches the
+ *    executor, and an enqueue that provably never created a job leaves no header behind.
  */
 import type { NeutralTool } from '@rayspec/core';
 import type {
@@ -79,7 +80,10 @@ class StubExecutor implements DurableExecutor {
   failNext = false;
   /** When set, enqueue RECORDS the job (durably persisted) and THEN throws (post-persist failure). */
   failNextAfterPersist = false;
+  /** Observation seam: invoked at the TOP of enqueue, i.e. before any job for this runId exists. */
+  onEnqueue?: (job: RunJob) => Promise<void>;
   async enqueue(tenantId: string, job: RunJob): Promise<EnqueueResult> {
+    if (this.onEnqueue) await this.onEnqueue(job);
     if (this.failNext) {
       this.failNext = false;
       throw new Error('stub enqueue failure (pre-persist)');
@@ -308,6 +312,45 @@ describe('async enqueue failure releases the reservation (retryable)', () => {
     });
     expect(retry.status).toBe(202);
     expect(stub.enqueued).toHaveLength(1);
+  });
+
+  it('a PRE-persist failed enqueue leaves NO run header behind (the runId never runs)', async () => {
+    h.deps.durableExecutor = stub;
+    stub.failNext = true;
+    const { orgId, token } = await principal('asyncfailhdr@example.com', 'AsyncFailHdr');
+    const failed = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+      body: { input: 'will fail', async: true },
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+    });
+    expect(failed.status).toBe(500);
+    // The header is written BEFORE the enqueue (so it cannot collide with a running worker), and the
+    // failure path removes the row again once the engine confirms the job was never created — a runId
+    // nobody holds does not read back as `enqueued` for ever.
+    const rows = await h.db.$client.unsafe('SELECT run_id FROM runs WHERE tenant_id = $1', [orgId]);
+    expect(rows).toHaveLength(0);
+  });
+
+  it('the run header EXISTS before the job is handed to the durable executor', async () => {
+    h.deps.durableExecutor = stub;
+    const { orgId, token } = await principal('asyncorder@example.com', 'AsyncOrder');
+    // Read the header from INSIDE the executor's enqueue: at that moment no worker can have started
+    // this runId, which is exactly why the write is placed there — it can never wait on a run
+    // transaction that holds the header row.
+    let statusAtEnqueue: string | undefined;
+    stub.onEnqueue = async (job) => {
+      const rows = (await h.db.$client.unsafe(
+        'SELECT status FROM runs WHERE tenant_id = $1 AND run_id = $2',
+        [orgId, job.runId],
+      )) as unknown as Array<{ status: string }>;
+      statusAtEnqueue = rows[0]?.status;
+    };
+    const res = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+      body: { input: 'ordering', async: true },
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+    });
+    stub.onEnqueue = undefined;
+    expect(res.status).toBe(202);
+    expect(statusAtEnqueue).toBe('enqueued');
   });
 
   it('a POST-persist enqueue throw KEEPS the reservation — a same-key retry does NOT double-fire (fix C, fail-the-fix)', async () => {

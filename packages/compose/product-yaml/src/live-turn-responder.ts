@@ -24,6 +24,9 @@
  *     forever and dedupe the retry's events against the failed attempt's seqs (journal mixing) —
  *     a fresh attempt id gives the retry its OWN clean header + journal, and the persisted reply
  *     row records the attempt that SUCCEEDED;
+ *   - NON-TERMINAL ('running' — the header a crashed or thrown run leaves behind, since run-core
+ *     publishes it when the run STARTS) → run under THIS attempt id: the attempt never reached an
+ *     outcome, so it is not spent and must not consume one of the bounded ids;
  *   - ABSENT → run fresh under THIS attempt id.
  * The walk is BOUNDED: at `REPLY_RUN_MAX_ATTEMPTS` consecutive terminally-failed headers the
  * responder returns the TYPED `reply_attempts_exhausted` error (carrying the last attempt id)
@@ -45,7 +48,7 @@ import type {
 } from '@rayspec/conversation-runtime';
 import type { AgentSpec, Backend, EventSink, RunResult } from '@rayspec/core';
 import { schema, type TenantDb } from '@rayspec/db';
-import { runAgent } from '@rayspec/platform';
+import { isTerminalRunStatus, runAgent } from '@rayspec/platform';
 import { eq } from 'drizzle-orm';
 
 /** What the boot bakes into the live responder (constant across a deployment's requests). */
@@ -123,7 +126,7 @@ export function makeLiveTurnResponder(
 
       // ATTACH-OR-ADVANCE (module header): walk the deterministic attempt chain — attach
       // to a COMPLETED header (any attempt, no model call), advance past a terminally-FAILED one
-      // (fresh header + clean journal for the retry), run fresh at the first ABSENT slot.
+      // (fresh header + clean journal for the retry), run at the first ABSENT or NON-TERMINAL slot.
       let runId: string | undefined;
       for (let attempt = 0; attempt < REPLY_RUN_MAX_ATTEMPTS; attempt += 1) {
         const candidate = replyAttemptRunId(turnRef, attempt);
@@ -134,6 +137,14 @@ export function makeLiveTurnResponder(
         }
         if (header.status === 'completed') {
           return { status: 'completed', runId: candidate, text: header.finalText ?? '' };
+        }
+        if (!isTerminalRunStatus(header.status)) {
+          // A NON-terminal header ('enqueued'/'running'): the run under this id started and never
+          // reached an outcome — a crash or a thrown run leaves exactly this. It is not a spent
+          // attempt, so the retry runs in THIS slot (the same id the interrupted attempt used), and a
+          // bounded, deterministic attempt budget is never consumed by an interruption.
+          runId = candidate;
+          break;
         }
         // Terminal non-completed header — this attempt is spent; walk on.
       }
@@ -191,7 +202,8 @@ export function makeLiveTurnResponder(
 /**
  * Read one deterministic reply attempt's run header (tenant-scoped chokepoint): `undefined` when
  * no header exists (the attempt slot is FREE — run fresh there), else the persisted status +
- * final_text (the attempt-id walk attaches on 'completed', advances on a terminal failure). Mirrors
+ * final_text (the attempt-id walk attaches on 'completed', advances ONLY on a terminal failure, and
+ * treats a non-terminal header as this attempt's own interrupted run). Mirrors
  * `loadCompletedSubRun` (live-agent-node.ts) with the free-text column instead of the structured
  * output.
  */

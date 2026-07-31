@@ -43,6 +43,7 @@ import type { AgentSpec, ConvTurn, ErrorClass, RunResult, Usage } from '@rayspec
 import { assertSpecValid, classifyUpstreamError, isErrorClass, NeutralEvent } from '@rayspec/core';
 import { forTenant, schema, type TenantDb } from '@rayspec/db';
 import {
+  deleteEnqueuedRunHeader,
   insertEnqueuedRunHeader,
   isRunTainted,
   isTerminalRunStatus,
@@ -562,10 +563,27 @@ async function enqueueAgentRun(
     // reservation.won === true → runId is reservedRunId; fall through to enqueue.
   }
 
-  // Enqueue the neutral RunJob onto the durable worker (the durable workflowID = runId). The worker
-  // resolves agentId → { backend, spec, tools } at fire time and runs the EXISTING runAgent
-  // off-request inside forTenant(db, tenantId).transaction(). The reservation is KEPT (in-flight).
+  // Create the run header, then enqueue the neutral RunJob onto the durable worker (the durable
+  // workflowID = runId). The worker resolves agentId → { backend, spec, tools } at fire time and runs
+  // the EXISTING runAgent off-request inside forTenant(db, tenantId).transaction(). The reservation is
+  // KEPT (in-flight).
+  //
+  // The header is written BEFORE the enqueue so the runId this call hands back RESOLVES on
+  // GET /v1/runs/{id} and on the GET /v1/runs/{id}/events path the 202 advertises for the WHOLE run,
+  // instead of 404ing until the worker finishes it — and so no worker can already hold this runId's
+  // header row inside its run transaction when the write runs (the job does not exist yet). Tenant-
+  // scoped from the SERVER-DERIVED tenantId through the TenantDb chokepoint — the same tenant the job
+  // runs under. `headerCreated` records whether THIS call created the row, so the failure path below
+  // can remove it again for a job that provably never existed.
+  const headerDb = forTenant(deps.db, inp.tenantId);
+  let headerCreated = false;
   try {
+    headerCreated = await insertEnqueuedRunHeader(headerDb, {
+      runId,
+      backend: entry.backend.id,
+      agentName: entry.spec.name,
+      model: entry.spec.model,
+    });
     await deps.durableExecutor.enqueue(inp.tenantId, {
       runId,
       tenantId: inp.tenantId,
@@ -576,42 +594,34 @@ async function enqueueAgentRun(
       ...(inp.persistTo !== undefined ? { persistTo: inp.persistTo } : {}),
     });
   } catch (err) {
-    // Enqueue THREW — but the throw does NOT prove the job did not start. The durable engine persists
-    // the workflow status BEFORE `enqueue` resolves (DBOS `startWorkflow` writes the row first), so a
-    // throw AFTER that persist means the workflow WILL still run on the worker / via crash recovery.
-    // Blindly releasing the reservation here would let a same-key retry mint a NEW runId and enqueue a
-    // SECOND job → runAgent runs twice → a non-idempotent tool fires twice (the exact hazard this
-    // slice prevents). So: probe the engine for the runId's status and RELEASE the reservation ONLY
-    // when the job is provably ABSENT (status 'unknown' — never durably created); if it EXISTS in any
-    // state, KEEP the reservation (the durable run owns the key; a same-key retry hits the loser path
-    // and returns the existing runId, not a second run). The status read is fail-CLOSED: if it throws,
-    // we do NOT release (treat the job as possibly-live), so a re-fire is never enabled by a release.
-    if (inp.idemKey) {
-      let jobAbsent = false;
-      try {
-        jobAbsent = (await deps.durableExecutor.status(runId)) === 'unknown';
-      } catch {
-        jobAbsent = false; // status unreadable ⇒ assume the job may exist ⇒ KEEP the reservation
-      }
-      if (jobAbsent) {
+    // The header write or the enqueue THREW — but the throw does NOT prove the job did not start. The
+    // durable engine persists the workflow status BEFORE `enqueue` resolves (DBOS `startWorkflow`
+    // writes the row first), so a throw AFTER that persist means the workflow WILL still run on the
+    // worker / via crash recovery. Blindly releasing the reservation here would let a same-key retry
+    // mint a NEW runId and enqueue a SECOND job → runAgent runs twice → a non-idempotent tool fires
+    // twice (the exact hazard this slice prevents). So: probe the engine for the runId's status and
+    // undo ONLY when the job is provably ABSENT (status 'unknown' — never durably created); if it
+    // EXISTS in any state, KEEP the reservation (the durable run owns the key; a same-key retry hits
+    // the loser path and returns the existing runId, not a second run) and KEEP the header (the run it
+    // belongs to is live). The status read is fail-CLOSED: if it throws, we undo nothing (treat the job
+    // as possibly-live), so a re-fire is never enabled by a release.
+    let jobAbsent = false;
+    try {
+      jobAbsent = (await deps.durableExecutor.status(runId)) === 'unknown';
+    } catch {
+      jobAbsent = false; // status unreadable ⇒ assume the job may exist ⇒ KEEP the reservation
+    }
+    if (jobAbsent) {
+      if (inp.idemKey) {
         await deps.idempotency.release(inp.tenantId, RUN_IDEM_SCOPE, inp.idemKey).catch(() => {});
       }
+      // Remove the header THIS call created for a job that provably never existed, so a runId that
+      // will never run does not read back as `enqueued` for ever. Best-effort (like the release
+      // above): a failure here must not mask the original error.
+      if (headerCreated) await deleteEnqueuedRunHeader(headerDb, runId).catch(() => {});
     }
     throw err;
   }
-
-  // Create the run header for the freshly enqueued run, so the runId this call hands back RESOLVES on
-  // GET /v1/runs/{id} and on the GET /v1/runs/{id}/events path the 202 advertises for the WHOLE run,
-  // instead of 404ing until the worker finishes it. Written AFTER a successful enqueue, so an enqueue
-  // that never created a job leaves no header behind; `onConflictDoNothing` inside, because the worker
-  // may already have written its own header by now and that one is authoritative. Tenant-scoped from
-  // the SERVER-DERIVED tenantId through the TenantDb chokepoint — the same tenant the job runs under.
-  await insertEnqueuedRunHeader(forTenant(deps.db, inp.tenantId), {
-    runId,
-    backend: entry.backend.id,
-    agentName: entry.spec.name,
-    model: entry.spec.model,
-  });
 
   return { runId, deduped: false };
 }

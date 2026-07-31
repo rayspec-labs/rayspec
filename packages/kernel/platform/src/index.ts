@@ -143,6 +143,7 @@ export {
 // writes (at enqueue, and when execution starts) that make an in-flight run readable through the
 // run-read routes. Neither is a completion transition — run-core's completing upsert stays that.
 export {
+  deleteEnqueuedRunHeader,
   insertEnqueuedRunHeader,
   isTerminalRunStatus,
   markRunHeaderRunning,

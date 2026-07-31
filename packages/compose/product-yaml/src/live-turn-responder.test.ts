@@ -4,6 +4,9 @@
  *  - the DETERMINISTIC reply run id (same turnRef ⇒ same id; different ⇒ different; UUID-shaped);
  *  - ATTACH-BEFORE-RUN: a completed header reuses the persisted final_text with the model NOT
  *    re-invoked (the crashed-after-model window — the sharpening-2 convergence arm's unit half);
+ *  - the walk keys on TERMINALITY: a terminally-failed header advances to the next attempt id, a
+ *    NON-terminal one ('running' — what an interrupted run leaves) is re-used in place, so an
+ *    interruption never consumes one of the bounded deterministic attempt ids;
  *  - the EXACT AgentSpec shape (tools: [], maxTurns: 1, config model/instructions, input VERBATIM)
  *    and the runId threading (reserve-the-deterministic-id);
  *  - error mapping (a returned error RunResult AND a thrown runAgent both become the typed error
@@ -14,7 +17,12 @@ import type { RunResult } from '@rayspec/core';
 import { describe, expect, it, vi } from 'vitest';
 
 const { runAgentMock } = vi.hoisted(() => ({ runAgentMock: vi.fn() }));
-vi.mock('@rayspec/platform', () => ({ runAgent: runAgentMock }));
+// Only `runAgent` is faked; `isTerminalRunStatus` (the walk's terminality predicate) stays the REAL
+// one, so this suite cannot drift from the status vocabulary run-core writes.
+vi.mock('@rayspec/platform', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@rayspec/platform')>()),
+  runAgent: runAgentMock,
+}));
 
 const { makeLiveTurnResponder, replyAttemptRunId, replyRunId, REPLY_RUN_MAX_ATTEMPTS } =
   await import('./live-turn-responder.js');
@@ -147,6 +155,41 @@ describe('makeLiveTurnResponder', () => {
       runId: replyAttemptRunId(TURN_REF, 1),
     });
     expect(replyAttemptRunId(TURN_REF, 1)).not.toBe(replyRunId(TURN_REF));
+  });
+
+  it('a NON-TERMINAL header runs in THAT slot — an interrupted attempt does not consume one of the bounded ids', async () => {
+    runAgentMock.mockReset();
+    runAgentMock.mockResolvedValue(completedRun('same slot'));
+    // Attempt 0's run started and never finished (a crash / a thrown run leaves the header at
+    // 'running'). That attempt did not FAIL — it was interrupted, so the retry belongs in the SAME
+    // slot. Keying on header PRESENCE instead would burn attempt 0 and run under attempt 1.
+    const responder = makeLiveTurnResponder(cfg([[{ status: 'running', finalText: null }]]))(
+      'tenant-a',
+    );
+    const outcome = await responder.respond({ input: 'retry input', turnRef: TURN_REF });
+    expect(outcome).toMatchObject({ status: 'completed', runId: replyRunId(TURN_REF) });
+    expect(runAgentMock).toHaveBeenCalledTimes(1);
+    expect((runAgentMock.mock.calls[0] as unknown[])[3]).toMatchObject({
+      runId: replyRunId(TURN_REF),
+    });
+  });
+
+  it(`${REPLY_RUN_MAX_ATTEMPTS} NON-TERMINAL headers do NOT exhaust the walk — the turn is still answerable`, async () => {
+    runAgentMock.mockReset();
+    runAgentMock.mockResolvedValue(completedRun('still answerable'));
+    const allRunning = Array.from({ length: REPLY_RUN_MAX_ATTEMPTS }, () => [
+      { status: 'running', finalText: null },
+    ]);
+    const responder = makeLiveTurnResponder(cfg(allRunning))('tenant-a');
+    const outcome = await responder.respond({ input: 'x', turnRef: TURN_REF });
+    // Not `reply_attempts_exhausted`: none of those attempts reached a terminal outcome, so the
+    // bounded budget is untouched and the first slot is re-used.
+    expect(outcome).toMatchObject({
+      status: 'completed',
+      runId: replyRunId(TURN_REF),
+      text: 'still answerable',
+    });
+    expect(runAgentMock).toHaveBeenCalledTimes(1);
   });
 
   it('a COMPLETED header at a LATER attempt ATTACHES (any attempt — never a second model call)', async () => {

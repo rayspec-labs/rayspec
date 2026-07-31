@@ -107,10 +107,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transition applies only to a header that is still `enqueued`, so neither can touch a run that
   already carries an outcome. The completing upsert, which updates only a header that is not already
   `completed`, remains the one write that puts a run into a terminal status, and the exactly-once gate
-  that couples it to `persistTo` output persistence is untouched. One behaviour inside the run surface
-  moves with it: a second `POST` under an `Idempotency-Key` whose run is still executing continues to
-  answer `409` "already in progress" rather than replaying a half-finished run, but that decision now
-  keys on the header being terminal instead of on the header merely existing.
+  that couples it to `persistTo` output persistence is untouched. The enqueue-time header is written
+  BEFORE the job reaches the durable worker — so it can never wait on a worker transaction that holds
+  that row — and is removed again when the engine confirms the job was never created.
+
+  Two consequences worth knowing. First, a run that THROWS (a crash, a timeout, an exception out of
+  the backend) reaches no completing write at all, so its header stays at a non-terminal status and
+  nothing reaps it: `GET /v1/runs/{id}` then answers `200` with `enqueued`/`running` for a run that
+  will never finish, where it used to answer `404`. Second, two places that read a run header now key
+  on the status being TERMINAL rather than on the header merely existing: a second `POST` under an
+  `Idempotency-Key` whose run is still executing continues to answer `409` "already in progress"
+  rather than replaying a half-finished run, and the conversation reply path's bounded attempt walk
+  re-uses the slot of an interrupted attempt instead of spending one of its deterministic attempt ids
+  on it.
 
 - **A document whose handler modules are TypeScript source no longer lints green and then aborts at
   boot.** A backend document declaring a `handlers[].module` with a TypeScript extension (`.ts`,

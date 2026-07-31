@@ -11,7 +11,11 @@
  *    status, keeping its enqueue-time `created_at` and healing its identity to what the run resolved.
  *  - RECOVERY re-dispatch onto a non-terminal header (a crashed run left `running`) still runs and
  *    reconciles to the healed terminal outcome.
- *  - A run that FAILS lands at `error`.
+ *  - A run that RETURNS `status:'error'` lands at `error`; a run that THROWS reaches no completing
+ *    write at all and leaves its header at `running` (the documented non-terminal residual).
+ *  - The completing write records the identity the RUN resolved — an adapter that reconciles its auth
+ *    mode during the run lands the RESULT's value in the header, not the pre-run one.
+ *  - The enqueue-time write does NOT wait on a run transaction that holds the header row.
  *  - EXACTLY-ONCE is untouched: neither non-terminal write can move a `completed` header, and neither
  *    can overwrite a finished `error` header with `running`.
  */
@@ -23,6 +27,7 @@ import { runAgent } from './run-core.js';
 import {
   insertEnqueuedRunHeader,
   isTerminalRunStatus,
+  markRunHeaderRunning,
   RUN_STATUS_ENQUEUED,
   RUN_STATUS_RUNNING,
 } from './run-header.js';
@@ -53,6 +58,10 @@ class GatedBackend implements Backend {
   readonly id = 'openai' as const;
   runs = 0;
   outcome: RunResult['status'] = 'completed';
+  /** What `resolveAuth()` answers BEFORE the run — the pre-run check. */
+  preRunAuthMode: AuthMode = 'api-key';
+  /** What the RunResult carries — an adapter may reconcile the mode during the run. */
+  resultAuthMode: AuthMode = 'api-key';
   /** Resolves once `run()` has been entered (the run is in flight). */
   readonly entered: Promise<void>;
   #entered!: () => void;
@@ -74,7 +83,7 @@ class GatedBackend implements Backend {
   }
 
   async resolveAuth(): Promise<AuthMode> {
-    return 'api-key';
+    return this.preRunAuthMode;
   }
 
   async run(runSpec: AgentSpec, ctx: RunContext): Promise<RunResult> {
@@ -95,7 +104,7 @@ class GatedBackend implements Backend {
     return {
       runId: ctx.runId,
       backend: this.id,
-      authMode: 'api-key',
+      authMode: this.resultAuthMode,
       status: this.outcome,
       finalText: this.outcome === 'completed' ? 'answered' : '',
       output: null,
@@ -106,6 +115,17 @@ class GatedBackend implements Backend {
       costUsd: 0,
       stepCount: 1,
     };
+  }
+}
+
+/** A backend that THROWS instead of returning a RunResult (a timeout / an exception mid-run). */
+class ThrowingBackend implements Backend {
+  readonly id = 'openai' as const;
+  async resolveAuth(): Promise<AuthMode> {
+    return 'api-key';
+  }
+  async run(): Promise<RunResult> {
+    throw new Error('the backend threw');
   }
 }
 
@@ -206,13 +226,119 @@ describe('run-header lifecycle', () => {
     expect(done?.createdAt).toEqual(enqueuedAt);
   });
 
-  it('a run that FAILS leaves the header at error, not at running', async () => {
+  it("a run that RETURNS status:'error' leaves the header at error, not at running", async () => {
     const tdb = forTenant(db, TENANT_A);
     const runId = 'failing-run';
 
     const res = await runAgent(tdb, openGate('error'), spec, { runId });
     expect(res.status).toBe('error');
     expect((await readHeader(runId))?.status).toBe('error');
+  });
+
+  it('a run that THROWS reaches no completing write, so its header stays at running (the non-terminal residual)', async () => {
+    const tdb = forTenant(db, TENANT_A);
+    const runId = 'throwing-run';
+
+    // A backend that throws instead of returning a RunResult (a timeout / an exception) — the class
+    // the run surface names separately from a returned `status:'error'`. runAgent rethrows without
+    // any completing write, and on this (sync) path the `running` header has already COMMITTED.
+    await expect(runAgent(tdb, new ThrowingBackend(), spec, { runId })).rejects.toThrow(
+      'the backend threw',
+    );
+    const header = await readHeader(runId);
+    expect(header?.status).toBe(RUN_STATUS_RUNNING);
+    expect(isTerminalRunStatus(header?.status ?? '')).toBe(false);
+  });
+
+  it('the completing write records the authMode the RUN resolved, not the pre-run one', async () => {
+    const tdb = forTenant(db, TENANT_A);
+    const runId = 'reconciled-authmode-run';
+
+    // An adapter may RECONCILE the auth mode during the run (the Anthropic adapter does, off the live
+    // CLI init message), so `resolveAuth()`'s answer and the RunResult's can differ. The run's own
+    // journal steps carry the reconciled mode; the header must carry it too.
+    const backend = openGate();
+    backend.preRunAuthMode = 'unauthenticated';
+    backend.resultAuthMode = 'api-key';
+
+    const res = await runAgent(tdb, backend, spec, { runId });
+    expect(res.authMode).toBe('api-key');
+    const header = await readHeader(runId);
+    expect(header?.status).toBe('completed');
+    // FAIL-THE-FIX: without the identity refresh on the completing write this reads back the pre-run
+    // 'unauthenticated' the `running` transition wrote.
+    expect(header?.authMode).toBe('api-key');
+  });
+
+  it('the enqueue-time write does NOT wait on the run transaction that holds the header row', async () => {
+    const tdb = forTenant(db, TENANT_A);
+    const runId = 'enqueue-vs-runtx-run';
+
+    // The real order: the enqueue path writes the header BEFORE the job exists, so the row is
+    // COMMITTED by the time a worker starts. The worker then runs inside its own transaction, whose
+    // `running` write holds that row's lock until the run ends.
+    expect(
+      await insertEnqueuedRunHeader(tdb, {
+        runId,
+        backend: 'openai',
+        agentName: spec.name,
+        model: spec.model,
+      }),
+    ).toBe(true);
+
+    const HELD_MS = 1_000;
+    let releaseRunTx: () => void = () => {};
+    const runTxHolding = new Promise<void>((resolve) => {
+      const held = new Promise<void>((r) => {
+        releaseRunTx = r;
+      });
+      void forTenant(db, TENANT_A)
+        .transaction(async (txTdb) => {
+          await markRunHeaderRunning(txTdb, {
+            runId,
+            backend: 'openai',
+            authMode: 'api-key',
+            agentName: spec.name,
+            model: spec.model,
+          });
+          resolve();
+          await held;
+        })
+        .catch(() => {});
+    });
+    await runTxHolding;
+    setTimeout(() => releaseRunTx(), HELD_MS);
+
+    // A second enqueue-time write for the same runId (the PINNED-runId re-enqueue) returns at once:
+    // it READS the committed header first and has nothing to add, so it never issues the INSERT that
+    // would wait on the open run transaction.
+    const t0 = Date.now();
+    const created = await insertEnqueuedRunHeader(tdb, {
+      runId,
+      backend: 'openai',
+      agentName: spec.name,
+      model: spec.model,
+    });
+    const elapsed = Date.now() - t0;
+    expect(created).toBe(false);
+    expect(elapsed).toBeLessThan(HELD_MS / 2);
+
+    // COUNTERPROOF (the same statement WITHOUT the pre-read): an unconditional ON CONFLICT DO NOTHING
+    // insert on that runId waits for the run transaction to end — measured, not asserted from theory.
+    const t1 = Date.now();
+    await db
+      .insert(schema.runs)
+      .values({
+        runId,
+        tenantId: TENANT_A,
+        backend: 'openai',
+        authMode: 'unauthenticated',
+        agentName: spec.name,
+        model: spec.model,
+        status: RUN_STATUS_ENQUEUED,
+      })
+      .onConflictDoNothing();
+    expect(Date.now() - t1).toBeGreaterThan(HELD_MS / 2);
   });
 
   it('RECOVERY: a re-dispatch onto a non-terminal header runs and reconciles it to the terminal outcome', async () => {
