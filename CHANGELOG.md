@@ -30,8 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never an empty array, on a write no bound touched. `validateHoles` fail-closes on a clamp that cannot
   mean what it says: a key that is not a declared column, a key on a column with no `enumValues` (there
   is no order to rank by), a `max` outside that column's `enumValues`, a key that is also pinned by
-  `fixedValues` (the constant is stamped last, so the bound would never reach the store) and a key equal
-  to `fkRevalidate.codeArg` (an identifier is not a ranked classification). The bound is unconditional
+  `fixedValues` (the constant is stamped last, so the bound would never reach the store), a key equal
+  to `fkRevalidate.codeArg` (an identifier is not a ranked classification) and a key equal to
+  `naturalKeyCol` (the upsert key is tenant-namespaced from the value read before the clamp and stamped
+  back on last, so the bound would never reach the store while the result still journaled a record
+  claiming it had). The bound is unconditional
   by design — a rule carrying any key other than `max` is rejected rather than silently ignored. The
   hole is optional and additive: a hole-set that declares none renders byte-for-byte what it always did,
   for both `--emit ts` and `--emit js`. The shipped Expense-Claim example now caps its `policy_flag` at

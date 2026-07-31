@@ -475,6 +475,15 @@ export function validateHoles(holes: unknown): asserts holes is HandlerHoles {
               'never saw. Clamp a classification column instead.',
           );
         }
+        if (col === h.naturalKeyCol) {
+          throw new HolesError(
+            `holes.clampValues key '${col}' is holes.naturalKeyCol — the natural key is ` +
+              'tenant-namespaced server-side from the value read BEFORE the clamp, and that ref is ' +
+              'stamped onto the row as the LAST mutation before the write, so the bound would never ' +
+              'reach the store while the result still journals a clamp record claiming it did. ' +
+              'Clamp a column that is not the natural key.',
+          );
+        }
       }
     }
     return;

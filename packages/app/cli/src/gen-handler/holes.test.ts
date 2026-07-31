@@ -292,6 +292,34 @@ describe('validateHoles — fail-closed on malformed hole-sets', () => {
         }),
       ),
     ).toThrow(/overlaps holes.fkRevalidate.codeArg/);
+    // (f) a clamp key that is the upsert naturalKeyCol. ARM B reads the key BEFORE the clamp block and
+    // stamps the tenant-namespaced ref back onto the row AFTER it, so the bound would never reach the
+    // store — while the result STILL journals a clamp record asserting that it did. That false
+    // attestation is worse than a plain no-op, so fail closed.
+    expect(() =>
+      validateHoles(
+        persist({
+          mode: 'upsert-by-natural-key',
+          idArg: undefined,
+          naturalKeyCol: 'policy_flag',
+          columns,
+          clampValues: { policy_flag: { max: 'review' } },
+        }),
+      ),
+    ).toThrow(/is holes.naturalKeyCol/);
+    // A clamp on a DIFFERENT column of the same upsert hole-set is still ACCEPTED — only the key
+    // column carries the last-mutation problem.
+    expect(() =>
+      validateHoles(
+        persist({
+          mode: 'upsert-by-natural-key',
+          idArg: undefined,
+          naturalKeyCol: 'category_code',
+          columns,
+          clampValues: { policy_flag: { max: 'review' } },
+        }),
+      ),
+    ).not.toThrow();
   });
   it('rejects a CONDITIONAL clamp form (a clamp is an unconditional max bound)', () => {
     // A conditional key would be SILENTLY IGNORED by the renderer, leaving the author believing the
