@@ -154,7 +154,14 @@ introspects a live target.
   gate would block the deploy); `shadowApplied`; `errors`. In update mode it also
   carries `updateMode`, `proposedAllowlist`, and `notes`; for a product-profile
   document it carries `product` section counts and, when a shadow ran,
-  `driftFindings`.
+  `driftFindings`. A backend-profile document that carries **non-fatal
+  advisories** — the same document findings [`doctor`](#doctor) reports in its
+  `warnings` field, such as a handler module that needs a build step before
+  deploy — also carries `specWarnings` (the structured list) and
+  `specWarningSummary` (one readable line each). An advisory never changes `ok`
+  and never blocks a plan; the fields are omitted when there are none. They are
+  document findings, distinct from the operational stderr warning the read-only
+  guard emits for a broken `DATABASE_URL_FILE` mount.
 
 - **Exit:** `0` if the spec validated, the gate did not block, and any shadow
   applied cleanly; `1` otherwise.
