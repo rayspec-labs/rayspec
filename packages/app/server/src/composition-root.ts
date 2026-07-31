@@ -114,7 +114,7 @@ import { type Env, Hono, type MiddlewareHandler } from 'hono';
 import { exportJWK, importPKCS8 } from 'jose';
 import { stringify as stringifyYaml } from 'yaml';
 import { deployProductYamlSpec, makeSchemaProbe, planUpdateBoot } from './product-boot.js';
-import { mountFrontend } from './serve-static.js';
+import { type FrontendReadiness, frontendMountsReadiness, mountFrontend } from './serve-static.js';
 
 /** The default local port (overridable via PORT). Local DX only — not a reserved well-known port. */
 export const DEFAULT_PORT = 8080;
@@ -169,7 +169,7 @@ export function recoveryScopeResponse(
  * the same posture as /health) and product-free: it reports the LIVE durable executor identity (the
  * executor id + the application version the running engine is serving). An operator/automation reads
  * it to learn which executor version is live before a version-changing blue/green redeploy — a
- * freshly-booted process holds no workflow rows and /health reports only DB reachability, so the live
+ * freshly-booted process holds no workflow rows and /health reports no executor identity, so the live
  * identity is only readable from the running engine here. FAIL-CLOSED: a ready 200 requires a wired
  * executor AND both fields non-empty; any incomplete state returns 503, so a consumer requiring
  * "both fields non-empty else fail-closed" is served (a status-only reader also fails closed on the 503).
@@ -181,6 +181,80 @@ export function registerRecoveryScopeRoute<E extends Env>(
 ): void {
   app.get(RECOVERY_SCOPE_PATH, (c) => {
     const { ready, body } = recoveryScopeResponse(identity);
+    return ready ? c.json(body, 200) : c.json(body, 503);
+  });
+}
+
+/** The computed outcome of the `/health` readiness probe. */
+interface HealthOutcome {
+  /** True ⇒ 200; false ⇒ 503. False as soon as ANY covered dependency is not ready. */
+  readonly ready: boolean;
+  /** The response body — a field per covered dependency, each omitted when not covered by this boot. */
+  readonly body: {
+    readonly status: 'ok' | 'degraded';
+    readonly db?: 'ok' | 'unreachable';
+    readonly frontend?: FrontendReadiness;
+  };
+}
+
+/**
+ * Compute the `/health` outcome from the observed state of each covered dependency. `undefined` means
+ * "this boot does not have that dependency" and OMITS the field: a static profile has no database, and
+ * a deployment declaring no frontend mounts has no mounts — such a boot answers exactly as it always
+ * has (`{status,db}` for the full platform, `{status}` for the static profile).
+ *
+ * `ready` is false as soon as one covered dependency is not ready, and the 503 then carries EVERY
+ * field, so one read of the body names which dependency is at fault.
+ */
+function healthResponse(
+  db: 'ok' | 'unreachable' | undefined,
+  frontend: FrontendReadiness | undefined,
+): HealthOutcome {
+  const ready = db !== 'unreachable' && frontend !== 'unavailable';
+  return {
+    ready,
+    body: {
+      status: ready ? 'ok' : 'degraded',
+      ...(db === undefined ? {} : { db }),
+      ...(frontend === undefined ? {} : { frontend }),
+    },
+  };
+}
+
+/**
+ * Register the generic readiness probe `GET /health` on `app` — the SAME registrar both boots use, so
+ * the full platform and the static profile cannot drift in what "ready" means.
+ *
+ * It is PUBLIC (the authenticate middleware does not 401 by itself) and PRODUCT-FREE, and it covers
+ * every part of the application a deploy tool waits on:
+ *
+ *  - `probeDatabase` — a real round-trip per call, so the probe reflects DB reachability rather than
+ *    just process liveness. `undefined` for a boot with no database (the static profile): the `db`
+ *    field is then OMITTED rather than reported `ok`, which would be a lie.
+ *  - `frontend` — the BOOT-TIME readiness of the declared static mounts (`frontendMountsReadiness`),
+ *    computed once by the caller and passed in as a value. It is deliberately NOT recomputed here: a
+ *    load balancer polls this route every second, and a per-call filesystem access would put that load
+ *    on disk. `undefined` for a deployment that declares no mounts ⇒ the field is omitted.
+ *
+ * A non-ready dependency answers 503, so a deploy tool waiting on this signal does not report "ready"
+ * while part of the application cannot serve.
+ */
+export function registerHealthRoute<E extends Env>(
+  app: Hono<E>,
+  probeDatabase: (() => Promise<void>) | undefined,
+  frontend: FrontendReadiness | undefined,
+): void {
+  app.get('/health', async (c) => {
+    let db: 'ok' | 'unreachable' | undefined;
+    if (probeDatabase !== undefined) {
+      try {
+        await probeDatabase();
+        db = 'ok';
+      } catch {
+        db = 'unreachable';
+      }
+    }
+    const { ready, body } = healthResponse(db, frontend);
     return ready ? c.json(body, 200) : c.json(body, 503);
   });
 }
@@ -1182,26 +1256,29 @@ function staticSecurityHeaders(csp: string, permissionsPolicy: string): Middlewa
  * because the spec is empty but because the code that mounts them is never reached. Requires NONE of the
  * three boot secrets.
  *
- * `/health` is LIVENESS-ONLY: `200 {status:'ok'}` with the `db` field OMITTED (a static cell has no
- * database — never `db:'ok'`, a lie, and never the DB-probing 503). Do NOT wire a DB-readiness monitor
- * onto a static cell.
+ * `/health` carries NO `db` field (a static cell has no database — never `db:'ok'`, a lie, and never the
+ * DB-probing 503). Do NOT wire a DB-readiness monitor onto a static cell. It DOES carry `frontend`, the
+ * boot-time readiness of the declared mounts — the assets are this cell's whole reason to exist, so a
+ * `200 {status:'ok'}` while they cannot be served is exactly the false-ready signal a deploy tool waits on.
  */
 export function assembleStaticServer(
   config: StaticServerConfig,
   spec: { specPath: string; frontend: readonly FrontendSpec[] },
 ): StaticBootedServer {
   const app = new Hono();
+  const specDir = dirname(spec.specPath);
   // The static boot's own security chain (registered first so it wraps every response): the CSP +
   // Permissions-Policy the normal path leaves to nginx, plus the four base headers — full parity.
   app.use('*', staticSecurityHeaders(config.frontendCsp, config.permissionsPolicy));
-  // Liveness-only /health — 200 {status:'ok'}, the `db` field OMITTED (see the docstring). Registered
-  // BEFORE the frontend mounts (which decline the reserved `/health` prefix anyway), so a `/` spa
-  // catch-all can never shadow it.
-  app.get('/health', (c) => c.json({ status: 'ok' }, 200));
+  // /health — the `db` field OMITTED (see the docstring), the `frontend` field carrying the BOOT-TIME
+  // readiness of the mounts registered just below (a static profile always declares at least one), so
+  // the probe never reports ready while the assets cannot be served. Registered BEFORE the frontend
+  // mounts (which decline the reserved `/health` prefix anyway), so a `/` spa catch-all cannot shadow it.
+  registerHealthRoute(app, undefined, frontendMountsReadiness(spec.frontend, specDir));
   // Mount the declared static frontend(s) — the ONLY request surface. `mountFrontend` (the SAME hardened
   // module the normal path uses) declines the reserved `/v1`,`/health`,`/oidc` prefixes, so an
   // unregistered auth/OIDC/runs path falls through to a uniform 404 — the surface is simply not there.
-  mountFrontend(app, spec.frontend, dirname(spec.specPath));
+  mountFrontend(app, spec.frontend, specDir);
   return { app, frontendMounts: spec.frontend, close: () => Promise.resolve() };
 }
 
@@ -1471,17 +1548,32 @@ export async function assembleServer(
     app = createAuthApp(baseDeps);
   }
 
+  // The deployed spec's declared static frontend mounts. Only a backend-profile (`rayspec`) doc carries
+  // `frontend`; a product-profile doc has none. Read HERE, before /health, because the probe reports
+  // their BOOT-TIME readiness — the mounts themselves are still registered LAST (step 8, below), so the
+  // registration order a static hit must not disturb is unchanged. The spec value is the SAME `frontend`
+  // a pack merge leaves untouched.
+  const frontend =
+    specParse?.ok && specParse.kind === 'rayspec' ? (specParse.spec.frontend ?? []) : [];
+  const frontendSpecDir = config.specPath ? dirname(config.specPath) : undefined;
+  const frontendReadiness =
+    frontendSpecDir !== undefined && frontend.length > 0
+      ? frontendMountsReadiness(frontend, frontendSpecDir)
+      : undefined;
+
   // 7. A generic readiness probe. Registered AFTER createAuthApp so it sits on the same app; it is
   //    PUBLIC (the authenticate middleware does not 401 by itself) and PRODUCT-FREE. A real GET
-  //    /health round-trips the DB so the probe reflects DB reachability, not just process liveness.
-  app.get('/health', async (c) => {
-    try {
+  //    /health round-trips the DB so the probe reflects DB reachability, not just process liveness,
+  //    and reports the boot-time readiness of the declared frontend mounts as `frontend` (omitted, so
+  //    the response is unchanged, when the deployment declares none) — a deploy tool waiting on this
+  //    signal must not read ready while the declared assets cannot be served.
+  registerHealthRoute(
+    app,
+    async () => {
       await db.$client`select 1`;
-      return c.json({ status: 'ok', db: 'ok' }, 200);
-    } catch {
-      return c.json({ status: 'degraded', db: 'unreachable' }, 503);
-    }
-  });
+    },
+    frontendReadiness,
+  );
 
   // 7b. The live-executor-identity readiness probe — registered right beside /health (same PUBLIC,
   //     product-free posture, before the static catch-all). It reports the LIVE durable executor
@@ -1492,13 +1584,10 @@ export async function assembleServer(
   // 8. Mount the deployed spec's declared static frontend(s) — registered LAST (after every
   //    API/auth/OIDC route + /health) so a static miss never shadows an API path: Hono runs matching
   //    handlers in registration order, a returning handler terminates, and a static miss falls through
-  //    to the uniform 404. Only a backend-profile (`rayspec`) doc carries `frontend`; a product-profile
-  //    doc has none. `deployDeclaredSpec` already fail-closed on a missing/unreadable dir (below), so the
-  //    dirs are readable here. The spec value is the SAME `frontend` a pack merge leaves untouched.
-  const frontend =
-    specParse?.ok && specParse.kind === 'rayspec' ? specParse.spec.frontend : undefined;
-  if (config.specPath && frontend && frontend.length > 0) {
-    mountFrontend(app, frontend, dirname(config.specPath));
+  //    to the uniform 404. `deployDeclaredSpec` already fail-closed on a missing/unreadable dir (below),
+  //    so the dirs are readable here. The mounts themselves were read above, for the /health probe.
+  if (frontendSpecDir !== undefined && frontend.length > 0) {
+    mountFrontend(app, frontend, frontendSpecDir);
   }
 
   return {

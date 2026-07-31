@@ -569,6 +569,13 @@ frontend:
   the mount returns `index.html` (History-API single-page-app routing); when
   `false`, an unmatched path is a `404`.
 
+**Readiness.** Declaring a mount adds a `frontend` field to the `/health` response,
+valued `"ok"` or `"unavailable"`. It reports whether the mounts can be served — the
+directory is readable and traversable, and an `spa: true` mount's `index.html` is a
+readable file — and `/health` answers `503` when one cannot. The check runs once at
+boot and the probe answers from that cached value, so polling it costs no disk access.
+A document declaring no mounts carries no such field and answers exactly as before.
+
 **Precedence and safety.** Static mounts are the last thing served: every API route,
 `/health`, `/v1/*`, and `/oidc/*` always wins over a static mount (a path under a
 reserved platform prefix is never answered by a static mount), and a static miss

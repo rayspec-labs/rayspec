@@ -253,10 +253,11 @@ maybeDescribe(
       expect(res.status).toBe(404);
     });
 
-    it('GET /health is liveness-only (no db field — a static profile has no database)', async () => {
+    it('GET /health carries no db field (a static profile has no database)', async () => {
       const res = await fetch(`${base()}/health`);
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ status: 'ok' });
+      // `frontend` reports the boot-time readiness of the declared mounts; `db` is absent.
+      expect(await res.json()).toEqual({ status: 'ok', frontend: 'ok' });
     });
   },
 );

@@ -99,13 +99,15 @@ describe('static boot — serves the frontend', () => {
   });
 });
 
-describe('static boot — /health is liveness-only (no database)', () => {
-  it('GET /health → 200 {status:"ok"} with the db field OMITTED (never a lie, never a 503)', async () => {
+describe('static boot — /health carries no database field', () => {
+  it('GET /health → 200 with the db field OMITTED (never a lie, never a DB 503)', async () => {
     const { app } = buildStatic();
     const res = await app.request('/health');
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
-    expect(body).toEqual({ status: 'ok' });
+    // `frontend` reports the boot-time readiness of the served mount; `db` is absent — a static cell
+    // has no database. (health-frontend-mounts.test.ts owns the mount-readiness cases.)
+    expect(body).toEqual({ status: 'ok', frontend: 'ok' });
     expect(body).not.toHaveProperty('db');
   });
 });
