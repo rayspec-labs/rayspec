@@ -48,8 +48,8 @@ describe('boot from a plain-env pepper — the trailing newline is trimmed befor
   let dir = '';
   let cleanDbUrl = '';
 
-  // Save EVERY env var the suite mutates (including the ones `assembleServer` mirrors back onto
-  // process.env) so a sibling test file cannot inherit a poisoned environment.
+  // Save EVERY env var the suite mutates so a sibling test file cannot inherit a poisoned
+  // environment.
   const savedEnv: Record<string, string | undefined> = {};
   const ENV_KEYS = [
     'DATABASE_URL',

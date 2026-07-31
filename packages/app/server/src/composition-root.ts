@@ -55,7 +55,7 @@ import {
   type PlannedMigration,
   runScheduledCleanup,
 } from '@rayspec/api-auth';
-import { createSigner, JwksProvider, RateLimiter } from '@rayspec/auth-core';
+import { createSigner, JwksProvider, RateLimiter, setBootSecrets } from '@rayspec/auth-core';
 import type { Backend, BackendId } from '@rayspec/core';
 import {
   buildProductTables,
@@ -350,7 +350,7 @@ export interface ServerConfig {
   databaseUrl: string;
   /** PKCS#8 PEM (RS256) — the JWT signing key AND the OIDC provider signing key. */
   jwtSigningKeyPem: string;
-  /** The api-key pepper (read by assertBootSecrets inside createAuthApp). */
+  /** The api-key pepper (handed to auth-core by `assembleServer` via `setBootSecrets`). */
   apiKeyPepper: string;
   /** The cookie-CSRF allow-list — EXPLICIT; EMPTY default (no cross-origin). Never dev-permissive. */
   allowedOrigins: string[];
@@ -799,9 +799,10 @@ function resolveBootSecret(
  * the single whitespace-trim CONTRACT to the resolved value from BOTH sources, so the values arrive
  * here already normalized — no per-call-site trim is needed (the blank-checks below are CHECKS on the
  * already-normalized value). Resolving them HERE is enough for the whole process: `assembleServer`
- * mirrors the resolved secrets onto `process.env` before anything reads them, and every downstream
- * reader (`assertBootSecrets`, `getApiKeyPepper`) reads env lazily inside a function — none at module
- * scope.
+ * hands the resolved secrets to auth-core with `setBootSecrets` before anything reads them, and every
+ * downstream reader (`assertBootSecrets`, `getApiKeyPepper`) resolves lazily inside a function — none
+ * at module scope. Nothing writes them back to `process.env`, so a secret supplied as a `<VAR>_FILE`
+ * mount stays out of the environment this process hands to its children.
  *
  * `warn` is the boot's one-line WARNING sink, defaulting to `console.warn`; it exists so a test can
  * capture what normalization reported (see `resolveBootSecret`). It is EMIT-ONLY: no returned value,
@@ -1400,11 +1401,20 @@ export async function assembleServer(
     updateMigrations?: PlannedMigration[];
   } = {},
 ): Promise<BootedServer> {
-  // The two boot secrets must be in process.env for assertBootSecrets (inside createAuthApp) +
-  // the api-key pepper module. loadServerConfig already validated them; mirror them onto process.env
-  // in case the caller passed a config not sourced from process.env.
-  process.env.RAYSPEC_JWT_SIGNING_KEY = config.jwtSigningKeyPem;
-  process.env.RAYSPEC_API_KEY_PEPPER = config.apiKeyPepper;
+  // Hand the two boot secrets to auth-core IN-PROCESS. Its lazy readers — assertBootSecrets (inside
+  // createAuthApp) and getApiKeyPepper (the api-key / session-secret / invite-token hashing paths) —
+  // then see exactly what loadServerConfig resolved and normalized, including when the caller passed
+  // a config it did not source from process.env at all.
+  //
+  // Explicitly NOT via process.env. A `<VAR>_FILE` mount exists so an operator can supply a secret as
+  // a mode-600 file INSTEAD of an environment variable; writing the resolved value back onto
+  // process.env would hand it straight back out again — the environment is copied wholesale into
+  // every child process this one spawns (an agent CLI, ffmpeg) and is readable from outside the
+  // process (/proc/<pid>/environ, container inspection).
+  setBootSecrets({
+    jwtSigningKeyPem: config.jwtSigningKeyPem,
+    apiKeyPepper: config.apiKeyPepper,
+  });
 
   // 1. The ONE raw Db handle (composition root — app-context.ts). Production factory, not /testing.
   const db = makeDb(config.databaseUrl);

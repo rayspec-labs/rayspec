@@ -7,8 +7,9 @@
  * failures to the closed ErrorCode envelope with the request id. The OIDC provider (if supplied)
  * is mounted under /oidc via the interop-spike-proven raw-handler bridge.
  *
- * Boot-fails-closed: assertBootSecrets() runs at construction — the app REFUSES to build without
- * RAYSPEC_JWT_SIGNING_KEY AND RAYSPEC_API_KEY_PEPPER.
+ * Boot-fails-closed: assertBootSecrets() runs at construction — the app REFUSES to build unless BOTH
+ * boot secrets are available, whether the boot supplied them in-process (`setBootSecrets`) or they
+ * are in the environment as RAYSPEC_JWT_SIGNING_KEY and RAYSPEC_API_KEY_PEPPER.
  */
 
 import { OpenAPIHono } from '@hono/zod-openapi';

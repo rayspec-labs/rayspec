@@ -59,8 +59,8 @@ describe('boot from mounted secret files — the real composition root on _FILE 
   /** An unrelated key pair — the token must NOT verify under it (proves the check discriminates). */
   let decoyPublicKey: Awaited<ReturnType<typeof generateKeyPair>>['publicKey'] | undefined;
 
-  // Save EVERY env var the suite mutates (including the ones `assembleServer` mirrors back onto
-  // process.env) so a sibling test file cannot inherit a poisoned environment.
+  // Save EVERY env var the suite mutates so a sibling test file cannot inherit a poisoned
+  // environment (this file runs with the plain secret variables deleted).
   const savedEnv: Record<string, string | undefined> = {};
   const ENV_KEYS = [
     'DATABASE_URL',
