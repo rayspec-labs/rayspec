@@ -339,6 +339,27 @@ export const journalSteps = pgTable(
     pricingVersion: text('pricing_version'),
     latencyMs: numeric('latency_ms').notNull().default('0'),
     status: text('status').notNull(),
+    /**
+     * The failing step's error classification + retry advice, promoted OUT of the `output` jsonb
+     * (mirrored by migration 0010; the jsonb keys stay for compatibility — this is additive, not a move).
+     *
+     * error_class: NULL on a successful step. On a failing one it is the neutral `ErrorClass` the
+     * adapter reported for an llm step, and `tool_error` for a tool step — a value the neutral enum
+     * DELIBERATELY does not contain, because a failed tool dispatch is not an upstream model failure
+     * and has no neutral class. The COLUMN vocabulary is therefore WIDER than the API-facing one: the
+     * worst-classified case (a tool error, which carried no class at all) becomes filterable in the
+     * journal without ever becoming reportable as an upstream class — the readers validate through
+     * `isErrorClass`, so `tool_error` can never leave through a run's `errorClass`.
+     *
+     * retry_after_ms: the upstream's Retry-After when it sent one, NULL otherwise (advice is never
+     * invented). MILLISECONDS — the journaled advice is in seconds, so the platform converts on write;
+     * `numeric` is how this table already stores a millisecond quantity (latency_ms). Why a column at
+     * all: answering "why did this run fail" no longer requires reading `output`, which holds raw
+     * model I/O — a column grant cannot exempt a jsonb path, so the classification and the payload
+     * could not be granted apart.
+     */
+    errorClass: text('error_class'),
+    retryAfterMs: numeric('retry_after_ms'),
     authMode: text('auth_mode').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },

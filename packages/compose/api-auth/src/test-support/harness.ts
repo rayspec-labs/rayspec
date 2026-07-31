@@ -182,7 +182,10 @@ function buildFullSchemaSql(SCHEMA: string): string {
     -- cost reconciliation + provenance columns (mirrors migration 0005).
     provider_cost_usd numeric, billed_cost_usd numeric NOT NULL DEFAULT '0',
     cost_drift boolean NOT NULL DEFAULT false, produced_by text, pricing_version text,
-    latency_ms numeric NOT NULL DEFAULT '0', status text NOT NULL, auth_mode text NOT NULL,
+    latency_ms numeric NOT NULL DEFAULT '0', status text NOT NULL,
+    -- error classification + retry advice columns (mirrors migration 0010).
+    error_class text, retry_after_ms numeric,
+    auth_mode text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
   );
   CREATE UNIQUE INDEX journal_idem_idx ON journal_steps (tenant_id, run_id, idempotency_key);

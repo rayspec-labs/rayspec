@@ -267,6 +267,47 @@ assert_eq "1" \
 # Clean up the 0005 cost-row + its org so the journal_steps cascade assertion below starts from 0 rows.
 psql -d "$DRYRUN_DB" -c "DELETE FROM orgs WHERE id='00000000-0000-0000-0000-0000000000f5';" >/dev/null
 
+echo "== ASSERT 0010 end state (journal step error classification + retry advice columns) =="
+# 0010 added the TWO error columns to journal_steps.
+assert_eq "2" \
+  "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='journal_steps' AND column_name IN ('error_class','retry_after_ms');" \
+  "0010 added journal_steps error_class/retry_after_ms"
+# Both are NULLABLE: a successful step classifies as nothing, and a pre-0010 row reads back NULL
+# (unclassified) rather than a fabricated class.
+assert_eq "YES|YES" \
+  "SELECT string_agg(is_nullable, '|' ORDER BY column_name) FROM information_schema.columns WHERE table_schema='public' AND table_name='journal_steps' AND column_name IN ('error_class','retry_after_ms');" \
+  "0010 journal_steps error_class + retry_after_ms are both NULLABLE"
+# retry_after_ms is numeric — the same type this table already uses for a millisecond quantity (latency_ms).
+assert_eq "numeric" \
+  "SELECT data_type FROM information_schema.columns WHERE table_schema='public' AND table_name='journal_steps' AND column_name='retry_after_ms';" \
+  "0010 journal_steps.retry_after_ms is numeric (as latency_ms is)"
+# A REAL write through the new columns: a rate-limited llm step (neutral class + converted advice), a
+# tool step under the WIDER 'tool_error' vocabulary, and an ok step that classifies as nothing.
+psql -d "$DRYRUN_DB" >/dev/null <<'SQL'
+INSERT INTO orgs (id, name, slug) VALUES ('00000000-0000-0000-0000-0000000000e5', 'ErrOrg', 'errorg');
+INSERT INTO journal_steps
+  (run_id, tenant_id, backend, type, idempotency_key, input_hash, status, auth_mode, error_class, retry_after_ms)
+VALUES
+  ('r-err', '00000000-0000-0000-0000-0000000000e5', 'openai', 'llm', 'e0', 'h0', 'error',
+   'api-key', 'rate_limited', '17000'),
+  ('r-err', '00000000-0000-0000-0000-0000000000e5', 'openai', 'tool', 'e1', 'h1', 'error',
+   'api-key', 'tool_error', NULL),
+  ('r-err', '00000000-0000-0000-0000-0000000000e5', 'openai', 'llm', 'e2', 'h2', 'ok',
+   'api-key', NULL, NULL);
+SQL
+assert_eq "1" \
+  "SELECT count(*) FROM journal_steps WHERE run_id='r-err' AND type='llm' AND error_class='rate_limited' AND retry_after_ms='17000';" \
+  "0010 a rate-limited llm step records its class + the retry advice in ms"
+# The point of the wider vocabulary: the tool failure is FILTERABLE without carrying a neutral class.
+assert_eq "1" \
+  "SELECT count(*) FROM journal_steps WHERE run_id='r-err' AND type='tool' AND error_class='tool_error' AND retry_after_ms IS NULL;" \
+  "0010 a tool-error step records the wider 'tool_error' class and no retry advice"
+assert_eq "1" \
+  "SELECT count(*) FROM journal_steps WHERE run_id='r-err' AND status='ok' AND error_class IS NULL AND retry_after_ms IS NULL;" \
+  "0010 a successful step records neither column"
+# Clean up the 0010 rows + their org so the journal_steps cascade assertion below starts from 0 rows.
+psql -d "$DRYRUN_DB" -c "DELETE FROM orgs WHERE id='00000000-0000-0000-0000-0000000000e5';" >/dev/null
+
 echo "== ASSERT run_events FK CASCADE: deleting an org removes its run_events rows =="
 psql -d "$DRYRUN_DB" >/dev/null <<'SQL'
 INSERT INTO orgs (id, name, slug) VALUES ('00000000-0000-0000-0000-0000000000e1', 'EventsOrg', 'eventsorg');
