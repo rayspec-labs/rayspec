@@ -12,8 +12,10 @@
  *      DBOS workflow was registered in the PRE-LAUNCH window (no post-launch-registration throw — a
  *      throw there would abort the boot, so a clean boot IS that assertion).
  *   3. FAIL-CLOSED WHERE IT MOVED TO: with the org still absent a fire through the composition root's
- *      own `fireCronNow` seam dispatches NOTHING; once the org is registered against the RUNNING
- *      application the SAME firing instant fires — no restart, no re-deploy.
+ *      own `fireCronNow` seam dispatches NOTHING, and the boot says so once; then, once the org is
+ *      registered against the RUNNING application, an EXPLICIT re-fire of that same instant dispatches
+ *      — no restart, no re-deploy. (Scheduled firing picks up at the next instant; the skip left no
+ *      marker, which is what keeps the explicit re-fire available.)
  *   4. FAIL-CLOSED: a cron spec WITHOUT a durable worker (deployment.durableWorker omitted) →
  *      boot ABORTS loudly (BootConfigError), never silently leaving the cron unscheduled.
  *   5. FAIL-CLOSED (shape): a malformed (non-UUID) RAYSPEC_CRON_TENANT_ID → boot ABORTS at startup
@@ -44,6 +46,7 @@ import {
   assembleServer,
   BootConfigError,
   type BootedServer,
+  cronTenantAbsentBootNotice,
   loadServerConfig,
 } from './composition-root.js';
 
@@ -180,13 +183,16 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
   }
 
   /** The shared registrar + backend factory for an assembleServer call. */
-  function assembleOpts(): Parameters<typeof assembleServer>[1] {
+  function assembleOpts(
+    bootWarn?: (message: string) => void,
+  ): Parameters<typeof assembleServer>[1] {
     return {
       agentBackendsFactory: (): ReadonlyMap<BackendId, Backend> =>
         new Map<BackendId, Backend>([['openai', new FakeBackend()]]),
       registerProductTables: (tables: ReadonlyMap<string, PgTable>) => {
         registerScopedTables([...tables.values()]);
       },
+      ...(bootWarn ? { bootWarn } : {}),
     };
   }
 
@@ -260,8 +266,20 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
       const config = loadServerConfig();
       // The boot must NOT abort on the absent org. (Before late binding this threw a BootConfigError:
       // "…is a well-formed UUID but no such active org exists".)
-      const server = await assembleServer(config, assembleOpts());
+      const bootWarnings: string[] = [];
+      const server = await assembleServer(
+        config,
+        assembleOpts((m) => bootWarnings.push(m)),
+      );
       created.push(server);
+
+      // It says so ONCE, on the boot an operator is watching — a deployment that came up clean and
+      // then simply never fired would read as a broken scheduler rather than the expected bootstrap
+      // state. Exactly one line, carrying the id, the consequence and the fact that it self-resolves.
+      const notices = bootWarnings.filter((m) => m.includes('RAYSPEC_CRON_TENANT_ID'));
+      expect(notices).toEqual([cronTenantAbsentBootNotice(CRON_TENANT)]);
+      expect(notices[0]).toContain('every firing is SKIPPED');
+      expect(notices[0]).toContain('no restart is needed');
 
       // The composition root wired the scheduler from the deployed trigger registry → the cron name
       // surfaces on the output (the banner feed). A registration throw in the pre-launch window would

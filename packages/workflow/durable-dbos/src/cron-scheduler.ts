@@ -130,8 +130,9 @@
  * claim that the org exists. Instead `#fire` asks the injected `tenantExists` probe BEFORE the reserve,
  * on EVERY firing: a firing under a tenant that does not (yet) exist dispatches NOTHING and emits one
  * line. Fail-closed is unchanged, it just lives at the firing rather than at wiring time — and because
- * the skip runs before the reserve, it consumes no firing instant, so the deployment starts firing the
- * moment the org appears, with no restart.
+ * the skip runs before the reserve, it writes no firing marker, so the deployment starts firing at the
+ * next instant after the org appears, with no restart (the skipped instants themselves are not
+ * replayed while the process stays up — see `cronTenantAbsentLog`).
  *
  * SECURITY NOTE (reserved kinds): when webhook/event are LATER built, their payload is DATA fed to the
  * agent/handler via the opaque path — NEVER instructions. Recorded as a reserved-seam note; not built.
@@ -281,13 +282,22 @@ const CONSOLE_LOGGER: CronSchedulerLogger = {
  * and, on a per-minute crontab, would bury the log. Everything an operator needs to act is on it —
  * which trigger, which instant, which tenant, and what to do — and the tenant id is deployment
  * configuration (an org id), never a secret.
+ *
+ * ON THE RESUMPTION IT PROMISES: the skip writes no reserve marker, so the platform's
+ * at-most-once-per-instant guard for this slot is untouched and an explicit re-fire of that same
+ * instant still dispatches. That is NOT the same as the slot coming back by itself. A SCHEDULED tick
+ * reached this line from inside the engine's per-instant workflow (`sched-cron:<name>-<ISO>`), and
+ * that workflow returns normally here — so the engine records the interval as run and does not replay
+ * it while the process stays up. For a running deployment the resumption is therefore the NEXT
+ * instant, and the line says so: an operator told the skipped instant returns on its own would sit
+ * waiting for a firing that never comes.
  */
 export function cronTenantAbsentLog(triggerName: string, tenantId: string, instant: Date): string {
   return (
     `[cron] SKIPPED trigger '${triggerName}' for ${firingInstantIso(instant)} — the deployment ` +
     `tenant ${tenantId} (RAYSPEC_CRON_TENANT_ID) is not an existing org, so nothing was ` +
-    'dispatched. The firing instant was NOT consumed; firing resumes as soon as the org exists ' +
-    '(no restart needed).'
+    'dispatched. No firing marker was written, so this slot stays fireable on demand; scheduled ' +
+    'firing resumes at the next instant once the org exists (no restart needed).'
   );
 }
 
@@ -330,8 +340,14 @@ export interface CronSchedulerDeps {
    *
    * REQUIRED, not optional: a scheduler that cannot answer this question would dispatch under a tenant
    * it knows nothing about, which is the one thing this runtime must never do.
+   *
+   * It TAKES the tenant id the firing is about to run under. The scheduler holds exactly one
+   * `tenantId` and passes it here, so the question asked is structurally the question the gate exists
+   * to answer. An argument-less probe would answer about whatever tenant the wiring happened to close
+   * over, and the scheduler would have no way to tell the difference — the one guarantee this gate
+   * makes would then rest on the composition root being written correctly rather than on the call.
    */
-  readonly tenantExists: () => Promise<boolean>;
+  readonly tenantExists: (tenantId: string) => Promise<boolean>;
   /** Where the ONE line per skipped firing goes (default `console`). */
   readonly logger?: CronSchedulerLogger;
   /**
@@ -494,8 +510,8 @@ export class DbosCronScheduler {
    * @returns `true` iff THIS call won the reserve and dispatched. `false` covers TWO different
    *   outcomes and is NOT on its own evidence that the work ran: a deduped no-op (this firing key
    *   already fired), OR a skip because the deployment tenant does not exist (yet) — the latter
-   *   dispatched nothing, wrote no marker, and left the firing instant unconsumed, so the same
-   *   instant still fires once the org exists.
+   *   dispatched nothing and wrote no marker, so THIS instant can still be re-fired explicitly once
+   *   the org exists (a scheduled deployment resumes at its next instant either way).
    */
   async fireNow(name: string, instant: Date = new Date()): Promise<boolean> {
     // A cron trigger (scheduled + on-demand) OR a manual trigger (on-demand only) is fireable here.
@@ -524,8 +540,8 @@ export class DbosCronScheduler {
    *
    * @returns `true` iff this call won the reserve and DISPATCHED; `false` if it was a deduped no-op, a
    *   bounded (beyond-look-back) make-up skip, OR a skip because the deployment tenant does not exist
-   *   (yet) — that last one alone leaves the firing instant unconsumed, so it still fires once the org
-   *   exists.
+   *   (yet) — that last one alone writes no marker, so that instant remains explicitly re-fireable
+   *   once the org exists, while scheduled firing picks up at the next instant.
    */
   async fireScheduled(name: string, instant: Date = new Date()): Promise<boolean> {
     const descriptor = this.#crons.get(name);
@@ -562,7 +578,6 @@ export class DbosCronScheduler {
   ): Promise<boolean> {
     const { db, tenantId } = this.#deps;
     const key = firingKey(descriptor.name, instant);
-    const tdb = forTenant(db, tenantId);
 
     // ── Does the deployment tenant exist? (the fail-closed tenant gate — BEFORE the reserve) ──────
     // The deployment's tenant id is configuration; the ORG it names is application data that may be
@@ -574,13 +589,21 @@ export class DbosCronScheduler {
     //     nonexistent org raises a raw FK violation — a stack per skipped firing instead of one line;
     //  2. a skip must not CONSUME the instant. The reserve is the at-most-once marker: writing it would
     //     permanently burn this (trigger, instant), so the slot could never fire even after the org
-    //     appears. Skipping before it leaves the slot untouched, so the very same instant still fires
-    //     (an explicit re-fire, or a catch-up trigger's make-up replay of the interval it was down for).
-    if (!(await this.#deps.tenantExists())) {
+    //     appears. Skipping before it leaves the slot untouched, which is what keeps an explicit
+    //     re-fire of that instant — and a catch-up trigger's make-up replay of an interval missed
+    //     while the process was DOWN — able to dispatch it. It does NOT mean the slot returns on its
+    //     own: a scheduled tick is already inside the engine's per-instant workflow and returns
+    //     normally below, so the engine records that interval as run. While the process stays up the
+    //     resumption is the NEXT instant (`cronTenantAbsentLog` says exactly that).
+    //
+    // The gate is the FIRST thing the fire path does — before the `forTenant` handle below — so a skip
+    // does no work at all beyond asking and logging.
+    if (!(await this.#deps.tenantExists(tenantId))) {
       // ONE line — the skip is an expected bootstrap state, not a fault (see `cronTenantAbsentLog`).
       this.#logger.warn(cronTenantAbsentLog(descriptor.name, tenantId, instant));
       return false;
     }
+    const tdb = forTenant(db, tenantId);
 
     // ── Reserve the firing marker BEFORE dispatch (the idempotency / exactly-once-cap guard) ──────
     // A single INSERT..ON CONFLICT DO NOTHING RETURNING over UNIQUE(tenant, scope, idem_key). The

@@ -306,7 +306,7 @@ export interface BootedServer {
    * the CEO demo (which cannot wait until 2am) all need it. Returns `true` iff THIS call won the
    * exactly-once reserve and dispatched; `false` means it did not dispatch, either as a deduped no-op
    * (this firing key already fired) or as a skip because the deployment tenant does not exist (yet),
-   * which consumes no firing instant and so still fires once the org exists. Undefined for an
+   * which writes no firing marker and so stays explicitly re-fireable once the org exists. Undefined for an
    * auth-only / no-cron / no-worker boot (nothing to fire). NOT an internet-facing endpoint by itself
    * — the entrypoint does not mount it on the public app; a dev wrapper may expose it on a LOCAL
    * control route.
@@ -1360,6 +1360,24 @@ export async function cronTenantExists(db: Db, cronTenantId: string): Promise<bo
 }
 
 /**
+ * The ONE line a boot emits when the configured cron tenant does not name an org yet. Pure + exported
+ * so its wording has a single source of truth and is directly assertable, exactly like the per-firing
+ * `cronTenantAbsentLog` it points at.
+ *
+ * It exists because the boot is the moment an operator is watching. Without it the deployment comes up
+ * clean and then simply never fires, which reads as a broken scheduler rather than as the expected
+ * bootstrap state. It says the state, the consequence, and that it resolves itself — and it is emitted
+ * ONCE, at boot, while the per-firing line carries the recurring detail.
+ */
+export function cronTenantAbsentBootNotice(cronTenantId: string): string {
+  return (
+    `[cron] RAYSPEC_CRON_TENANT_ID='${cronTenantId}' does not name an existing org yet — the ` +
+    'scheduler starts and every firing is SKIPPED (one line each) until that org exists. Firing ' +
+    'resumes automatically at the next instant after it does; no restart is needed.'
+  );
+}
+
+/**
  * Assemble the full platform app from a validated `ServerConfig`. Builds the raw Db, applies the
  * migration chain, derives the signer/JWKS + OIDC provider from the PEM, wires the five stores +
  * AuthService, optionally runs the REAL `deploy()` for an injected spec, and returns the running app
@@ -1415,6 +1433,13 @@ export async function assembleServer(
      * product boot ignores it (a product doc never reaches the local-boot wrapper).
      */
     updateMigrations?: PlannedMigration[];
+    /**
+     * The boot's one-line WARNING sink, defaulting to `console.warn`. Injectable for the same reason
+     * `loadServerConfig` takes one: so a test can capture what the boot reported (today: the configured
+     * cron tenant not naming an org yet). EMIT-ONLY — no returned value, abort decision or control flow
+     * depends on it, so a caller that omits it boots exactly as it did before.
+     */
+    bootWarn?: BootWarnSink;
   } = {},
 ): Promise<BootedServer> {
   // Hand the two boot secrets to auth-core IN-PROCESS. Its lazy readers — assertBootSecrets (inside
@@ -1558,6 +1583,7 @@ export async function assembleServer(
       registerProductTables: opts.registerProductTables,
       ...(opts.updateMigrations ? { updateMigrations: opts.updateMigrations } : {}),
       ...(opts.moduleImporter ? { moduleImporter: opts.moduleImporter } : {}),
+      ...(opts.bootWarn ? { bootWarn: opts.bootWarn } : {}),
     });
     app = deployed.app;
     declaredRoutes = deployed.declaredRoutes;
@@ -1807,6 +1833,13 @@ async function deployDeclaredSpec(
     /** DEV/TEST ONLY — the pack module importer (defaults to the guarded compiled-JavaScript-only
      * importer; production never sets it). See the `assembleServer` opts docstring. */
     moduleImporter?: ModuleImporter;
+    /**
+     * The boot's one-line WARNING sink, defaulting to `console.warn` — the same shape (and the same
+     * reason) as `loadServerConfig`'s: it exists so a test can capture what the boot reported. EMIT-ONLY;
+     * no value, abort decision or control flow here depends on it, so a caller that omits it boots
+     * exactly as before.
+     */
+    bootWarn?: BootWarnSink;
   },
 ): Promise<{
   app: ReturnType<typeof createAuthApp>;
@@ -1832,6 +1865,7 @@ async function deployDeclaredSpec(
   const specPath = config.specPath as string;
   const escapeHatchRoot = config.escapeHatchRoot as string;
   const specSource = readFileSync(specPath, 'utf8');
+  const bootWarn = opts.bootWarn ?? consoleWarn;
 
   // reject a Product-YAML doc up-front with the SAME guidance `deploy()` gives (before any DB work),
   // instead of the RaySpec strict-shape wall below. A classic doc passes through UNCHANGED.
@@ -2372,11 +2406,7 @@ async function deployDeclaredSpec(
     // a restart); the scheduler then re-asks per firing through the SAME probe.
     const cronTenantId = config.cronTenantId;
     if (!(await cronTenantExists(db, cronTenantId))) {
-      console.warn(
-        `[cron] RAYSPEC_CRON_TENANT_ID='${cronTenantId}' does not name an existing org yet — the ` +
-          'scheduler starts and every firing is SKIPPED (one line each) until that org exists. ' +
-          'Firing resumes automatically; no restart is needed.',
-      );
+      bootWarn(cronTenantAbsentBootNotice(cronTenantId));
     }
     const cronScheduler = new DbosCronScheduler(result.triggers.list(), {
       db: workerDbHandle,
@@ -2386,8 +2416,11 @@ async function deployDeclaredSpec(
       invokeTriggerHandler,
       // The per-firing existence probe. Bound to the WORKER pool (the pool the fire itself dispatches
       // off) so the check never borrows an HTTP connection, and re-evaluated on every call — that is
-      // what makes an org created mid-life start firing without a restart.
-      tenantExists: () => cronTenantExists(workerDbHandle as Db, cronTenantId),
+      // what makes an org created mid-life start firing without a restart. The tenant is the one the
+      // SCHEDULER hands over per firing, not one captured here, so the answer is always about the
+      // tenant that is actually about to fire.
+      tenantExists: (firingTenantId: string) =>
+        cronTenantExists(workerDbHandle as Db, firingTenantId),
     });
     // Expose the wired scheduler to the late-bound manual-trigger firer (built above, injected into the
     // app inside deploy()); the firer restricts on-demand fires to its manual triggers.
