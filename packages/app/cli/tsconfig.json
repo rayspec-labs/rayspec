@@ -10,5 +10,11 @@
     { "path": "../../compose/product-yaml" }
   ],
   "include": ["src/**/*.ts"],
-  "exclude": ["dist", "node_modules", "**/*.test.ts"]
+  // `__fixtures__` holds committed RENDER OUTPUT (byte-goldens for gen-handler), not package source.
+  // A rendered handler imports `@rayspec/handler-sdk` type-only and is meant to be compiled in the
+  // CONSUMER's project, where that package is present — it is deliberately not a dependency here, so
+  // compiling the fixture as part of this package would fail on a module that is not ours to resolve.
+  // That the rendered code type-checks against the REAL SDK is proven separately, by the tsc --noEmit
+  // pass templates.test.ts runs over a temp project with the SDK actually installed.
+  "exclude": ["dist", "node_modules", "**/*.test.ts", "src/**/__fixtures__/**"]
 }

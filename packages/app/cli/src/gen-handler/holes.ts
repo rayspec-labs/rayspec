@@ -273,6 +273,18 @@ function assertColumnHole(c: unknown, what: string): asserts c is ColumnHole {
     ) {
       throw new HolesError(`${what}.enumValues must be a non-empty array of strings when present`);
     }
+    // DUPLICATES are rejected because the declared ORDER is what a `clampValues` bound ranks by, and
+    // the rendered comparison ranks with `indexOf` — so a repeated value silently takes its FIRST
+    // position and the later one names a rung the ladder never reaches. While enumValues only fed a
+    // membership check a duplicate was merely redundant; it is load-bearing now, and there is no
+    // reading of a duplicate that the render can honour, so it fails closed rather than picking one.
+    const seen = new Set(o.enumValues as readonly string[]);
+    if (seen.size !== (o.enumValues as readonly string[]).length) {
+      throw new HolesError(
+        `${what}.enumValues must not contain duplicate values — the declared order ranks a ` +
+          'clampValues bound, so a repeated value has no single position',
+      );
+    }
     if (o.jsonType !== 'text') {
       throw new HolesError(`${what}.enumValues is only valid on a 'text' column`);
     }
