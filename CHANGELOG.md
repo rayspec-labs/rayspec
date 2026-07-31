@@ -315,6 +315,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   described the custom page as a plain mount's not-found surface without qualifying it by
   method.
 
+- **A replayed `429` from an agent run now carries the same `Retry-After` the live one did.** A
+  synchronous run that fails with the transient `rate_limited` class answers `429` and, when the
+  backend adapter captured retry advice from the upstream limit, a `Retry-After` header read back from
+  the run's failing journal step. One run can answer that twice. A failed run that fired a
+  non-idempotent tool keeps its `Idempotency-Key` reservation — releasing it would let a retry re-fire
+  the side effect — so a same-key retry replays the stored result, and the replay applies the same
+  status mapping and answered `429` as well. It just answered it bare: for one and the same
+  rate-limited run the first caller was told how long to wait and the second was told nothing, so a
+  client that keys its backoff off the header behaved differently depending on which of the two
+  surfaces it happened to hit. Both now emit the header through one shared path, from the same journal
+  step, so a run's `429` advises every caller identically. Nothing else about either response changes:
+  same status, same body, and a `429` whose upstream sent no retry advice still carries no header, on
+  both surfaces.
+
 ### Security
 
 - Bump the transitive `brace-expansion` dependency to `5.0.8` (pinned via `pnpm.overrides`),

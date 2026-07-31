@@ -180,6 +180,44 @@ describe('in-request transient-retry quarantine (JSON)', () => {
     expect(second.status).not.toBe(200);
   });
 
+  it('the REPLAYED 429 of a quarantined rate-limited run carries the SAME Retry-After as the live one', async () => {
+    const { token } = await principal('taintra@example.com', 'TaintRaOrg');
+    const headers = {
+      authorization: `Bearer ${token}`,
+      accept: 'application/json',
+      'idempotency-key': 'taint-transient-retry-after',
+    };
+    // The ONLY route by which a same-key REPLAY can answer 429: the run is rate_limited (so the
+    // status mapping is 429) AND it fired a NON-idempotent tool (so the quarantine KEEPS its
+    // reservation instead of releasing it, and the retry replays the kept run rather than re-running
+    // it). The adapter journaled a Retry-After on the failing step, exactly as a real 429 does.
+    backend.fireToolBeforeError = true;
+    backend.errorDetail = 'rate limited after charging';
+    backend.errorClass = 'rate_limited';
+    backend.retryAfterSeconds = 17;
+
+    const first = await jsonRequest(h.app, 'POST', '/v1/agents/charge-agent/runs', {
+      body: { input: 'order-retry-after' },
+      headers,
+    });
+    // The LIVE 429 advises the retry delay the adapter captured.
+    expect(first.status).toBe(429);
+    expect(first.headers.get('retry-after')).toBe('17');
+
+    const second = await jsonRequest(h.app, 'POST', '/v1/agents/charge-agent/runs', {
+      body: { input: 'order-retry-after' },
+      headers,
+    });
+    // The retry replayed the quarantined run (no second live run, no second side effect) …
+    expect(backend.liveRuns).toBe(1);
+    expect(sideEffects.count).toBe(1);
+    // … and the REPLAYED 429 must advise the retry delay identically. Pre-fix the replay applied the
+    // status mapping but set no header, so the two 429 surfaces disagreed: the same rate-limited run
+    // told the first caller to wait 17s and the second caller nothing at all.
+    expect(second.status).toBe(429);
+    expect(second.headers.get('retry-after')).toBe('17');
+  });
+
   it('OVER-QUARANTINE GUARD: a transient-failed run with ONLY an IDEMPOTENT tool still RE-RUNS on a same-key retry (it is NOT quarantined)', async () => {
     const { token } = await principal('taintok@example.com', 'TaintOkOrg');
     const headers = {

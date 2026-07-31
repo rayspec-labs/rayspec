@@ -278,10 +278,14 @@ export async function executeAgentRun(
           const prior = await reconstructRun(tdb, priorRunId);
           if (prior && isTerminalRunStatus(prior.status)) {
             // HTTP-1: replay at the SAME HTTP status the LIVE run would have produced for this class
-            // (no 429-vs-200 divergence). Transient classes release their reservation (above) so only
-            // non-transient runs reach here — `statusForErrorClass` returns 200 for those — but applying
-            // the mapping keeps the replay self-consistent with the live mapping regardless.
-            return c.json(prior as unknown as Record<string, unknown>, statusForErrorClass(prior));
+            // (no 429-vs-200 divergence). The transient-class release (below) keeps MOST transient runs
+            // off this path, but NOT all of them: that release is taint-aware, so a transient run that
+            // fired a non-idempotent tool KEEPS its reservation and a same-key retry replays it here —
+            // a rate-limited one then replays at 429. That 429 gets the SAME Retry-After the live 429
+            // carried (same run, same journal step), so the two 429 surfaces advise a caller identically.
+            const replayStatus = statusForErrorClass(prior);
+            await applyRetryAfter(c, tdb, replayStatus, priorRunId);
+            return c.json(prior as unknown as Record<string, unknown>, replayStatus);
           }
         }
       }
@@ -434,10 +438,7 @@ export async function executeAgentRun(
   // surface a Retry-After header when the adapter captured one (read back from the failing journal
   // step — the RunResult stays exactly errorClass-additive, so cross-backend parity is unaffected).
   const httpStatus = statusForErrorClass(result);
-  if (httpStatus === 429) {
-    const retryAfter = await retryAfterForRun(tdb, result.runId);
-    if (retryAfter !== undefined) c.header('Retry-After', String(retryAfter));
-  }
+  await applyRetryAfter(c, tdb, httpStatus, result.runId);
   return c.json(result as unknown as Record<string, unknown>, httpStatus);
 }
 
@@ -768,6 +769,26 @@ async function retryAfterForRun(tdb: TenantDb, runId: string): Promise<number | 
   const out = (failing?.output ?? null) as Record<string, unknown> | null;
   const ra = out?.retryAfter;
   return typeof ra === 'number' && Number.isFinite(ra) && ra >= 0 ? ra : undefined;
+}
+
+/**
+ * set the `Retry-After` advice on a response that answers 429, read back from the failing
+ * journal step the adapter recorded it on.
+ *
+ * BOTH 429 surfaces of one rate-limited run go through here — the LIVE sync response and the same-key
+ * REPLAY of a kept run — so a caller reads the SAME advice whichever of the two it hits; the header can
+ * never be present on one and absent on the other for the same run. A no-op for any other status, and
+ * for a 429 whose adapter captured no Retry-After (the header is advice; a 429 without one is valid).
+ */
+async function applyRetryAfter(
+  c: Context,
+  tdb: TenantDb,
+  status: HttpStatusCode,
+  runId: string,
+): Promise<void> {
+  if (status !== 429) return;
+  const retryAfter = await retryAfterForRun(tdb, runId);
+  if (retryAfter !== undefined) c.header('Retry-After', String(retryAfter));
 }
 
 /**
