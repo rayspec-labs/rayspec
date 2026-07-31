@@ -1,0 +1,36 @@
+-- Journal step error classification + retry advice as columns.
+--
+-- REVIEWED, hand-authored (never blind autogenerate). Purely ADDITIVE — two NULLABLE ADD COLUMNs on
+-- one existing table. No table rebuild, no data migration, no destructive statement (the home-grown
+-- destructive scan therefore has NO findings and needs no allowlist entry — the lowest-risk evolution).
+--
+-- journal_steps (the per-step ledger — the single source of truth):
+--   error_class     text     NULLABLE  — NULL on a successful step. On a failing one: the neutral
+--                                        ErrorClass the adapter reported (rate_limited / upstream_5xx /
+--                                        upstream_4xx / timeout / model_refusal / internal) for an llm
+--                                        step, and 'tool_error' for a tool step. 'tool_error' is
+--                                        DELIBERATELY outside the neutral enum — a failed tool dispatch
+--                                        is not an upstream model failure and has no neutral class — so
+--                                        the COLUMN vocabulary is WIDER than the API-facing one. The
+--                                        readers validate through isErrorClass, so it can never leave
+--                                        through a run's reported errorClass.
+--   retry_after_ms  numeric  NULLABLE  — the upstream's Retry-After when it sent one, NULL otherwise
+--                                        (advice is never invented). MILLISECONDS: the journaled advice
+--                                        is in SECONDS and the platform converts on write; numeric is
+--                                        how this table already stores a millisecond quantity
+--                                        (latency_ms). The HTTP Retry-After header stays whole SECONDS.
+--
+-- WHY COLUMNS: both values previously existed only inside the `output` jsonb, in a shape that differed
+-- per step type (an llm error step carried { error, errorClass, retryAfter }; a tool error step carried
+-- the opaque { kind: 'tool_error', … } and no class at all). Answering "why did this run fail" therefore
+-- meant reading the column that also holds raw model I/O — and a column grant cannot exempt a jsonb
+-- path, so the classification and the payload could not be granted apart. The jsonb keys are left in
+-- place for compatibility: this is additive, not a move.
+--
+-- A NULLABLE ADD COLUMN with no default is a metadata-only operation, so this is cheap even on a
+-- populated table; existing rows read back NULL (unclassified), never a fabricated class. The new
+-- columns are tenant-scoped by virtue of living on an already-tenant-scoped table (journal_steps is in
+-- TENANT_SCOPED_TABLES) — no new tenant predicate surface is introduced.
+
+ALTER TABLE "journal_steps" ADD COLUMN "error_class" text;--> statement-breakpoint
+ALTER TABLE "journal_steps" ADD COLUMN "retry_after_ms" numeric;

@@ -107,6 +107,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documents its `Retry-After` header, and the `200` says which failed runs it also covers. Behaviour is
   untouched by all of this — no status, reservation or replay rule changed.
 
+- **A journal step records its error class and retry advice as columns: `journal_steps.error_class`
+  and `journal_steps.retry_after_ms`.** Both values used to exist only inside the step's `output`
+  jsonb, in a shape that differed per step type — an `llm` error step carried
+  `{ error, errorClass, retryAfter }`, a `tool` error step carried the opaque
+  `{ kind: "tool_error", … }` and no classification at all. So the worst-classified failure was also
+  the most common one: a tool error, which the model usually sees and continues past, ending the run
+  as `completed`, left post-hoc triage nothing to filter on. And reading the classification of ANY
+  failure meant reading the column that also holds raw model I/O — a grant cannot exempt a jsonb path,
+  so the classification and the payload could not be granted apart. Both new columns are nullable and
+  are filled for BOTH step types by the platform's journal sink. `error_class` holds the neutral class
+  the adapter reported for an `llm` step (`rate_limited`, `upstream_5xx`, `upstream_4xx`, `timeout`,
+  `model_refusal`, `internal`) and `tool_error` for a `tool` step — a value the neutral vocabulary
+  deliberately does not contain, so the column carries MORE than the API ever reports:
+  `GET /v1/runs/{id}` validates the class it reports and still answers `internal` for a run whose only
+  failure was a tool error, exactly as before. `retry_after_ms` holds the upstream's Retry-After when
+  it sent one, in MILLISECONDS — the journaled advice is in seconds and is converted on write — and is
+  null otherwise, because advice is never invented. The HTTP `Retry-After` header is unchanged: still
+  whole seconds, still only on a retry-advisable status. Nothing moved out of the jsonb: the existing
+  `output` keys are written exactly as before and every reader still reads them, so a consumer parsing
+  them keeps working untouched. A successful step leaves both columns null, and so does a failed step
+  that a later attempt healed to success. **Migration:** apply `0010_journal_step_error_columns` — two
+  additive nullable `ADD COLUMN`s on `journal_steps`, no table rewrite and no backfill, so a row
+  written before it reads back null (unclassified) rather than a fabricated class.
+
 ### Changed
 
 - **`/health` covers the declared frontend mounts, and its response carries a `frontend` field.** The

@@ -69,6 +69,9 @@ export async function resetRunSchema(db: ReturnType<typeof makeTestDb>): Promise
       pricing_version text,
       latency_ms numeric NOT NULL DEFAULT '0',
       status text NOT NULL,
+      -- error classification + retry advice columns (mirrors migration 0010).
+      error_class text,
+      retry_after_ms numeric,
       auth_mode text NOT NULL,
       created_at timestamptz NOT NULL DEFAULT now()
     );

@@ -85,6 +85,14 @@ export class FakeRunBackend implements Backend {
   trailingToolError = false;
 
   /**
+   * when set with errorDetail, record ONLY the tool-error step — no failing llm step at
+   * all. A tool-only failure is the case where NO step carries a neutral errorClass, so the GET
+   * derivation falls back to `internal`; it is the shape that proves the derivation never reports a
+   * class it did not validate through `isErrorClass`.
+   */
+  toolOnlyError = false;
+
+  /**
    * Arm a leak-proof blocking gate and return `{ release, arrived }`:
    *  - `arrived` resolves when a run REACHES the gate (the deterministic barrier — the test waits on
    *    this instead of sleeping a fixed time, so it provably knows the winner is gated);
@@ -207,33 +215,38 @@ export class FakeRunBackend implements Backend {
     // the adapter-supplied detail does NOT leak. (Distinct from a THROWN run, which releases the
     // reservation — this completed-but-errored run is kept + replayable.)
     if (this.errorDetail) {
-      await ctx.journal.record({
-        type: 'llm',
-        idempotencyKey: `llm:${spec.name}:0`,
-        inputHash: `hash:${spec.input}`,
-        // write { error, errorClass, retryAfter? } into the failing step's output jsonb
-        // (mirrors a real adapter) so GET /v1/runs/{id} can DERIVE the classified error, and the sync
-        // endpoint can read back the Retry-After for a rate_limited run.
-        output: {
-          finalText,
-          error: this.errorDetail,
-          errorClass: this.errorClass,
-          ...(this.retryAfterSeconds !== undefined ? { retryAfter: this.retryAfterSeconds } : {}),
-        },
-        usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
-        costUsd: 0.001,
-        // run-core RE-COMPUTES the authoritative cost from the registry using this model;
-        // the adapter's costUsd above is back-compat only. provider cost is left unreported (OpenAI).
-        model: spec.model,
-        producedBy: 'fake-backend',
-        latencyMs: 1,
-        status: 'error',
-        authMode: 'api-key',
-      });
-      // optionally record a TRAILING tool-error step (NO errorClass) AFTER the llm-error
-      // step — the masking case the GET derivation must be robust to (it must still surface the llm
-      // step's class, not fall back to internal).
-      if (this.trailingToolError) {
+      // `toolOnlyError` SKIPS this step: the run then has NO step carrying a neutral errorClass, which
+      // is the tool-only failure shape (the fail-closed `internal` fallback case).
+      if (!this.toolOnlyError) {
+        await ctx.journal.record({
+          type: 'llm',
+          idempotencyKey: `llm:${spec.name}:0`,
+          inputHash: `hash:${spec.input}`,
+          // write { error, errorClass, retryAfter? } into the failing step's output jsonb
+          // (mirrors a real adapter) so GET /v1/runs/{id} can DERIVE the classified error, and the sync
+          // endpoint can read back the Retry-After for a rate_limited run.
+          output: {
+            finalText,
+            error: this.errorDetail,
+            errorClass: this.errorClass,
+            ...(this.retryAfterSeconds !== undefined ? { retryAfter: this.retryAfterSeconds } : {}),
+          },
+          usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
+          costUsd: 0.001,
+          // run-core RE-COMPUTES the authoritative cost from the registry using this model;
+          // the adapter's costUsd above is back-compat only. provider cost is left unreported (OpenAI).
+          model: spec.model,
+          producedBy: 'fake-backend',
+          latencyMs: 1,
+          status: 'error',
+          authMode: 'api-key',
+        });
+      }
+      // optionally record a tool-error step (NO errorClass): AFTER the llm-error step
+      // (`trailingToolError`) it is the masking case the GET derivation must be robust to — it must
+      // still surface the llm step's class, not fall back to internal — and on its OWN
+      // (`toolOnlyError`) it is the run with no neutral class anywhere.
+      if (this.trailingToolError || this.toolOnlyError) {
         await ctx.journal.record({
           type: 'tool',
           idempotencyKey: `tool:${spec.name}:fail`,

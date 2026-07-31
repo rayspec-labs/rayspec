@@ -115,6 +115,7 @@ beforeEach(async () => {
   backend.liveRuns = 0;
   backend.gate = undefined;
   backend.trailingToolError = false;
+  backend.toolOnlyError = false;
 });
 // Test-isolation guard: NEVER let a test leak a gated/hanging backend.run that holds a pooled DB
 // connection (a leak poisons the shared postgres-js pool → every later test times out at 30s). If a
@@ -392,6 +393,84 @@ describe('sync JSON endpoint maps errorClass → HTTP status', () => {
       const body = await get.json();
       expect(body.status).toBe('error');
       expect(body.errorClass).toBe('rate_limited');
+    });
+  });
+
+  describe('the journal error columns carry more than the API reports', () => {
+    it('the tool step is journaled as `tool_error` while the run still reports rate_limited + the same Retry-After', async () => {
+      const { token } = await principal('errcols@example.com', 'ErrColsOrg');
+      backend.errorDetail = 'HTTP 429 rate limited';
+      backend.errorClass = 'rate_limited';
+      backend.retryAfterSeconds = 33;
+      backend.trailingToolError = true;
+      let runId: string;
+      try {
+        const post = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+          body: { input: 'errcols' },
+          headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+        });
+        expect(post.status).toBe(429);
+        // The advice header is still whole SECONDS, byte-identical to what the adapter journaled —
+        // the millisecond COLUMN is a second recording of the same advice, not a new header unit.
+        expect(post.headers.get('retry-after')).toBe('33');
+        runId = (await post.json()).runId as string;
+      } finally {
+        backend.errorDetail = undefined;
+        backend.errorClass = 'internal';
+        backend.retryAfterSeconds = undefined;
+        backend.trailingToolError = false;
+      }
+      const rows = (await h.db.$client.unsafe(
+        `SELECT type, error_class, retry_after_ms FROM journal_steps WHERE run_id = '${runId}';`,
+      )) as unknown as Array<{
+        type: string;
+        error_class: string | null;
+        retry_after_ms: string | null;
+      }>;
+      const llm = rows.find((r) => r.type === 'llm');
+      const tool = rows.find((r) => r.type === 'tool');
+      // The llm step carries the neutral class + the advice converted into the column's unit.
+      expect(llm?.error_class).toBe('rate_limited');
+      expect(llm?.retry_after_ms).toBe('33000');
+      // The tool step — which the API can say nothing about — is now filterable in the journal.
+      expect(tool?.error_class).toBe('tool_error');
+      // And the run still reports the upstream class, never the tool step's wider column value.
+      const get = await jsonRequest(h.app, 'GET', `/v1/runs/${runId}`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect((await get.json()).errorClass).toBe('rate_limited');
+    });
+
+    it('a run whose ONLY error step is a tool error reports `internal` — `tool_error` never leaks out', async () => {
+      const { token } = await principal('toolonly@example.com', 'ToolOnlyOrg');
+      // No llm error step at all, so the run's ONLY error step is the opaque tool_error. Its COLUMN
+      // now says `tool_error` — a value outside the neutral ErrorClass vocabulary — and the API must
+      // still answer the fail-closed `internal`: the derivation reports only a class it validated.
+      backend.errorDetail = 'the tool failed the run';
+      backend.toolOnlyError = true;
+      let runId: string;
+      try {
+        const post = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+          body: { input: 'toolonly' },
+          headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+        });
+        runId = (await post.json()).runId as string;
+      } finally {
+        backend.errorDetail = undefined;
+        backend.toolOnlyError = false;
+      }
+      const rows = (await h.db.$client.unsafe(
+        `SELECT type, error_class FROM journal_steps WHERE run_id = '${runId}';`,
+      )) as unknown as Array<{ type: string; error_class: string | null }>;
+      expect(rows.map((r) => r.error_class)).toEqual(['tool_error']);
+      const get = await jsonRequest(h.app, 'GET', `/v1/runs/${runId}`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(get.status).toBe(200);
+      const body = await get.json();
+      expect(body.status).toBe('error');
+      expect(body.errorClass).toBe('internal');
+      expect(body.errorClass).not.toBe('tool_error');
     });
   });
 

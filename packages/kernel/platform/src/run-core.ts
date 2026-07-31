@@ -34,6 +34,7 @@ import {
   assertRunResultKeyPresence,
   assertSpecValid,
   computeCost,
+  isErrorClass,
   reconcileCost,
 } from '@rayspec/core';
 import { schema, type TenantDb } from '@rayspec/db';
@@ -146,6 +147,54 @@ export interface CostContext {
 }
 
 /**
+ * The class a FAILED TOOL DISPATCH is journaled under. Deliberately NOT a member of the neutral
+ * `ErrorClass` enum: a tool that fail-closed is not an upstream model failure and has no neutral
+ * class, so forcing it into the enum would either invent one or collapse it onto `internal`. The
+ * journal COLUMN therefore carries a WIDER vocabulary than the API-facing class — which is the point:
+ * a tool error (the case that carried no class at all, and the one that ends the run as `completed`
+ * because the model saw the failure and continued) becomes filterable in the journal, while the
+ * readers' `isErrorClass` validation keeps it from ever leaving as a run's reported `errorClass`.
+ */
+const TOOL_ERROR_CLASS = 'tool_error';
+
+/**
+ * Lift a step's error classification + retry advice OUT of its `output` jsonb and onto the dedicated
+ * `error_class` / `retry_after_ms` columns. This is the ONE place it happens: both step types flow
+ * through `record()`, so neither the adapters (which keep writing `{ error, errorClass, retryAfter }`
+ * into the llm step's output) nor the tool dispatcher (which keeps journaling the opaque
+ * `ToolDispatchResult`) had to learn about the columns.
+ *
+ * UNIT: the journaled `retryAfter` is in SECONDS (ClassifiedError.retryAfter) and the column says
+ * MILLISECONDS, so the conversion happens HERE, on write — the HTTP `Retry-After` header is untouched
+ * and stays whole seconds. Advice is never invented: an absent, negative or non-finite value is NULL.
+ *
+ * A successful step classifies as nothing (both NULL) — which also matters on the error→ok heal below,
+ * where the conditional upsert must CLEAR the columns the superseded attempt set.
+ */
+function errorColumnsFor(step: StepReport): {
+  errorClass: string | null;
+  retryAfterMs: string | null;
+} {
+  if (step.status !== 'error') return { errorClass: null, retryAfterMs: null };
+  const out = (step.output ?? null) as Record<string, unknown> | null;
+  // An llm step's class comes from the adapter, VALIDATED against the neutral enum (an unvalidated
+  // stored value is never trusted); a tool step carries no class at all, only the fail-closed
+  // `{ kind: 'tool_error', … }` wrapper the dispatcher journals — the DISCRIMINANT is what names it
+  // here, so the recorded class stays a separate decision from the wrapper's tag.
+  const errorClass = isErrorClass(out?.errorClass)
+    ? out.errorClass
+    : (out?.kind as ToolDispatchResult['kind'] | undefined) === 'tool_error'
+      ? TOOL_ERROR_CLASS
+      : null;
+  const retryAfter = out?.retryAfter;
+  const retryAfterMs =
+    typeof retryAfter === 'number' && Number.isFinite(retryAfter) && retryAfter >= 0
+      ? String(Math.round(retryAfter * 1000))
+      : null;
+  return { errorClass, retryAfterMs };
+}
+
+/**
  * Postgres-backed journal sink with idempotent replay lookups. Bound to a TenantDb so the
  * lookup predicate (tenant_id) and the record insert (tenant_id auto-stamp) are structural.
  *
@@ -156,6 +205,10 @@ export interface CostContext {
  * provenance (pricing_version: `<model>@<effectiveFrom>` or 'FALLBACK') + the SDK provenance
  * (produced_by) — so a stale/fabricated adapter cost can never become the ledger's authoritative cost,
  * and a fallback-priced step is DISTINGUISHABLE in the ledger (auditability is the point).
+ *
+ * It is ALSO the single place a step's failure is classified onto the error_class / retry_after_ms
+ * columns (errorColumnsFor) — both step types flow through here, so neither the adapters nor the tool
+ * dispatcher need to know the columns exist.
  *
  * Exported for the predicate-presence regression test (run-core lives in packages/platform,
  * outside a routes-only grep, so the tenant predicate is guarded behaviourally here).
@@ -222,6 +275,8 @@ export function makeJournalSink(
       const providerCost = step.providerCostUsd ?? null;
       const recon = reconcileCost(computed.costUsd, providerCost);
       const billed = isSubscriptionBilling(step.authMode) ? 0 : computed.costUsd;
+      // Classify the step's failure ONCE, here, for BOTH step types (see errorColumnsFor).
+      const classified = errorColumnsFor(step);
       const values = {
         stepId,
         runId,
@@ -245,6 +300,8 @@ export function makeJournalSink(
         pricingVersion: computed.pricingVersion,
         latencyMs: String(step.latencyMs),
         status: step.status,
+        errorClass: classified.errorClass,
+        retryAfterMs: classified.retryAfterMs,
         authMode: step.authMode,
       };
       // Heal a previously-FAILED attempt at this step. A step's idempotencyKey occupies exactly one
@@ -284,6 +341,10 @@ export function makeJournalSink(
           pricingVersion: values.pricingVersion,
           latencyMs: values.latencyMs,
           status: values.status,
+          // Refreshed from the winning attempt like every other column — so an error→ok heal CLEARS
+          // the classification the superseded attempt set (a healed row is not a classified failure).
+          errorClass: values.errorClass,
+          retryAfterMs: values.retryAfterMs,
           authMode: values.authMode,
           createdAt: sql`now()`,
         },
