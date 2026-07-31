@@ -508,13 +508,16 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
   // production). Every line is a random alphanumeric run carrying no word of English, so a window
   // of it cannot pass the leak probe below by colliding with ordinary prose in the message.
   //
-  // The two sentinels are drawn from DISJOINT alphabets — this one from the FIRST half of each
-  // case plus the digits 0-4, the control from the SECOND half plus 5-9 — so no character of the
-  // one occurs anywhere in the other. That is what makes the counterproof below a proof: with the
-  // alphabets disjoint, NO excerpt of either value can equal an excerpt of the other, down to a
-  // SINGLE character, at any position. The property is not left to inspection — the arm asserts it
-  // outright before it relies on it, so editing a sentinel into an overlap fails loudly instead of
-  // silently weakening the counterproof.
+  // The two sentinel CORES are drawn from DISJOINT alphabets — this one from the FIRST half of
+  // each case plus the digits 0-4, the control from the SECOND half plus 5-9 — so no character of
+  // the one core occurs anywhere in the other. That is what makes the counterproof below a proof:
+  // with the alphabets disjoint, NO excerpt of either CORE can equal an excerpt of the other, down
+  // to a SINGLE character, at any position. Disjointness is not left to inspection — the arm
+  // asserts it outright before it relies on it, so editing a sentinel into an overlap fails loudly
+  // instead of silently weakening the counterproof. It is a statement about the CORES, not about
+  // the RAW values: both of those are wrapped in edge bytes that include a byte-order mark and end
+  // in a newline, so the raw values do share those two characters — U+FEFF and LF, and nothing
+  // else. The rest of the two wrappers is deliberately DIFFERENT bytes (see the control below).
   //
   // Disjointness alone only separates the VERBATIM shapes. The two sentinels are therefore also
   // made to disagree on the scalar facts a leak could report ABOUT the value instead of quoting it:

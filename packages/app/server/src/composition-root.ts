@@ -533,10 +533,11 @@ const BYTE_ORDER_MARK = '\uFEFF';
  * and this signal are documented together (`.env.example`, `docs/concepts.md`, the CLI reference).
  *
  * The BOM is called out separately from "leading whitespace" because it is the kind an operator
- * cannot see at all, and the one that breaks a PKCS#8 import (the PEM header must sit at offset 0);
- * `trim()` strips it because it counts as whitespace. A BOM at the trailing edge is stripped by the
- * same rule and reported as trailing whitespace — the vocabulary stays closed rather than growing a
- * kind for a case that has no failure mode behind it.
+ * cannot see at all — not because it is the only edge byte that breaks a PKCS#8 import:
+ * `importPKCS8` rejects a PEM prefixed with a space or a newline exactly as it rejects one
+ * prefixed with a BOM. `trim()` strips it because it counts as whitespace. A BOM at the trailing
+ * edge is stripped by the same rule and reported as trailing whitespace — the vocabulary stays
+ * closed rather than growing a kind for a case that has no failure mode behind it.
  */
 function bootSecretNormalizationWarning(sourceVar: string, raw: string): string {
   const leading = raw.slice(0, raw.length - raw.trimStart().length);
