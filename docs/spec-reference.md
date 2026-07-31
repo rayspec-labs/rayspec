@@ -566,13 +566,15 @@ frontend:
   duplicate another mount, equal a declared `api` route path, or target a reserved
   platform prefix (`/v1`, `/health`, `/oidc`) — the linter rejects a collision.
 - `dir` — the directory of built static assets, resolved relative to the spec file.
-  It must exist and be a readable directory at boot, or the deploy fails closed with an
-  actionable error (`doctor` reports a missing/unreadable directory too).
+  It must exist and be a readable directory at boot (`doctor` reports a missing/unreadable
+  directory too). Deploying a document that declares more than a `frontend` fails closed
+  with an actionable error when it does not; a frontend-only document boots as a static
+  profile, which reports it through the readiness check below instead.
 - `spa` — optional boolean (default `false`). When `true`, an unmatched path under
   the mount returns `index.html` (History-API single-page-app routing); when
   `false`, an unmatched path is a `404`. An `spa: true` mount's `index.html` must be
-  a readable file in `dir` at boot, or the deploy fails closed with an actionable
-  error — the same requirement the readiness check below applies.
+  a readable file in `dir` at boot — the same requirement the readiness check below
+  applies, fail-closed at deploy on the same terms as `dir` above.
 
 **Readiness.** Declaring a mount adds a `frontend` field to the `/health` response,
 valued `"ok"` or `"unavailable"`. It reports whether the mounts can be served — the

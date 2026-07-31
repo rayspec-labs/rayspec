@@ -281,10 +281,12 @@ export type MountUnservableReason = 'dir' | 'spa-index';
  *   - for an `spa:true` mount, `dir/index.html` is a readable FILE — the fallback that mount serves
  *     for every unmatched deep link, so without it the SPA answers nothing.
  *
- * THE ONE definition of servable, shared by the two places that must not disagree: the deploy guard
- * in `deployDeclaredSpec`, which fail-closes the boot on an unservable mount, and
+ * THE ONE definition of servable, shared by the two callers that must not disagree: the deploy guard
+ * in `deployDeclaredSpec`, which fail-closes the FULL-PLATFORM boot on an unservable mount, and
  * `frontendMountsReadiness` below, which is what `/health` reports. When they disagreed, a mount that
- * failed only the second check booted into a readiness the process could never recover from.
+ * failed only the second check booted into a readiness the process could never recover from. The
+ * static (frontend-only) boot has no such gate: `assembleStaticServer` reports an unservable mount
+ * through `frontendMountsReadiness` and serves on.
  */
 export function mountUnservableReason(
   mount: FrontendSpec,

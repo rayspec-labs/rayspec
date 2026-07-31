@@ -2022,12 +2022,14 @@ async function deployDeclaredSpec(
   // ── The static FRONTEND deploy guard (fail-closed on a mount that cannot be served) ──
   // A declared frontend mount serves built static assets from `dir` (relative to the spec file). FAIL
   // CLOSED at deploy on the SAME per-mount check `/health` reports — `mountUnservableReason`, the one
-  // definition of servable — so the gate and the probe cannot disagree about a mount. They did: the
+  // definition of servable — so THIS gate and the probe cannot disagree about a mount. They did: the
   // gate tested only the directory, so an `spa:true` mount whose directory existed without an
   // index.html booted, served its API and its real assets, and answered `/health` 503 for the rest of
   // the process's life (readiness is computed once at boot and cached, so nothing could re-evaluate
-  // it). Mirrors the stream/playback guards above; the actual mounting runs in assembleServer AFTER
-  // deployDeclaredSpec returns.
+  // it). SCOPE: the full-platform deploy. A frontend-only document never reaches here — both
+  // entrypoints branch it to `assembleStaticServer`, which carries no such gate and still reports an
+  // unservable mount through `/health` alone. Mirrors the stream/playback guards above; the actual
+  // mounting runs in assembleServer AFTER deployDeclaredSpec returns.
   const frontendSpecDir = dirname(specPath);
   for (const mount of effectiveSpec.frontend ?? []) {
     const unservable = mountUnservableReason(mount, frontendSpecDir);
