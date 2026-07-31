@@ -99,8 +99,10 @@ describe('a read with no declared `order_by` takes the facade default (`id asc`)
   // `read.order_by` is optional and a `single` view's filter carries NO uniqueness requirement
   // (the lint imposes only the absent_state laws on `mode: 'single'`), so a filter CAN match
   // several rows. Which one the view serves used to be whichever the scan reached first; the
-  // facade's default order makes it the lowest-`id` match. Each case seeds OUT of `id` order so
-  // the expectation cannot be satisfied by seed order.
+  // facade's default order makes it the lowest-`id` match. The same holds one level down: a
+  // sub-read declaring no `order_by` is equally unordered, and the lint requires only that its
+  // match is non-empty — so a `lookup` field's single match is subject to the same law. Each case
+  // seeds OUT of `id` order so the expectation cannot be satisfied by seed order.
   it('a `single` view whose filter matches several rows serves the LOWEST-`id` match', async () => {
     const surface = new FakeReadSurface(STORES);
     const row = (id: string, state: string) => ({
@@ -155,6 +157,29 @@ describe('a read with no declared `order_by` takes the facade default (`id asc`)
     } as ProductViewSpec;
     const res = await run(view, surface, { order_id: 'o1' });
     expect((res.body as Record<string, unknown>).kinds).toEqual(['a', 'b', 'c']);
+  });
+
+  it('a `lookup` field whose sub-read matches several rows embeds the LOWEST-`id` match', async () => {
+    const surface = new FakeReadSurface(STORES);
+    surface.seed(TENANT, 'orders', { order_id: 'o1', state: 'open', qty: 1, rush: false });
+    for (const [id, kind] of [
+      ['ev-c', 'third'],
+      ['ev-a', 'first'],
+      ['ev-b', 'second'],
+    ]) {
+      surface.seed(TENANT, 'order_events', { id, order_id: 'o1', kind, hidden: false });
+    }
+    const view = singleView({
+      first_kind: {
+        kind: 'lookup',
+        source: { store: 'order_events', match: { order_id: { column: 'order_id' } } },
+        field: { column: 'kind' },
+        type: 'string',
+        default: 'none',
+      },
+    });
+    const res = await run(view, surface, { order_id: 'o1' });
+    expect((res.body as Record<string, unknown>).first_kind).toBe('first'); // ev-a, not the seeded first
   });
 });
 
