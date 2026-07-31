@@ -69,8 +69,9 @@ view mounts in code. This package produces fragments a deployment composes in co
   the `count` primitive and nothing forces the whole match set into memory; it falls back to a full
   read + in-interpreter slice when `count` is unavailable or the view declares an in-memory `exclude`.
   Either path yields the identical wire output (page rows, `total`, `next_offset`).
-- **Ordering**: rows are ordered by the declared `order_by` columns only — there is no implicit
-  tiebreak, so rows with EQUAL sort keys have a DB-unspecified relative order.
+- **Ordering**: rows are ordered by the declared `order_by` columns, and there is no implicit
+  tiebreak — so rows with EQUAL sort keys have a DB-unspecified relative order. A read or sub-read
+  that declares NO `order_by` comes back in the read surface's default order, `id` ascending.
 - **Absent** (`single`): no row → the DECLARED `read.absent` DTO (`empty_200`) or
   `409 { error: 'not_ready' }` (`not_ready_409`) — never an improvised shape, never a 404.
 - **Sub-reads** (`list`/`lookup`/`counts.of`): keyed equality matches; an unresolved

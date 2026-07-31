@@ -10,10 +10,14 @@
  *   - rows are TENANT-PARTITIONED STRUCTURALLY: a handle is bound to ONE tenant at construction
  *     and physically cannot see another tenant's rows (the TenantDb predicate analog);
  *   - `Date` values serialize to ISO strings on read (same as `serializeValue`);
- *   - equality-only filters (AND-combined), stable multi-key ORDER BY (asc/desc), LIMIT/OFFSET.
+ *   - equality-only filters (AND-combined), stable multi-key ORDER BY (asc/desc), LIMIT/OFFSET;
+ *   - a read with NO `orderBy` comes back in `id` ASCENDING — the facade's default order, not the
+ *     order rows were seeded in (a fake that returned seed order would let a view assert an order
+ *     the real read never promises).
  *
  * Rows are stored per (tenant, store); `seed` stamps the injected `id`/`created_at` when absent
- * (the real insert path stamps them server-side).
+ * (the real insert path stamps them server-side). The stamped id is ZERO-PADDED so its string
+ * order matches its counter order — the default `id asc` sort below is lexicographic.
  */
 import type { SelectOptions, StoreFilter, StoreRow } from '@rayspec/handler-sdk';
 import type { StoreSpec } from '@rayspec/spec';
@@ -71,7 +75,7 @@ export class FakeReadSurface {
       tenant.set(store, rows);
     }
     rows.push({
-      id: `fake-${this.#nextId++}`,
+      id: `fake-${String(this.#nextId++).padStart(6, '0')}`,
       created_at: '2026-07-01T10:00:00.000Z',
       tenant_id: tenantId,
       ...row,
@@ -134,6 +138,14 @@ export class FakeReadSurface {
               if (cmp !== 0) return dir === 'desc' ? -cmp : cmp;
             }
             return 0;
+          });
+        } else {
+          // NO caller ordering ⇒ the facade's DEFAULT `id asc` (store-facade.ts `select`), not the
+          // seed order. `id` is stamped on every seeded row and zero-padded, so this is the counter
+          // order — a fixture that seeds its own ids gets THEIR order, exactly like the real read.
+          rows = [...rows].sort((a, b) => {
+            const [av, bv] = [String(a.id), String(b.id)];
+            return av < bv ? -1 : av > bv ? 1 : 0;
           });
         }
         if (opts?.offset !== undefined) {

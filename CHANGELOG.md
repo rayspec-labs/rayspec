@@ -206,6 +206,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A store read through the handler data facade comes back in a defined order.** `init.db.select`
+  applied an `ORDER BY` only when the caller passed `opts.orderBy`; without one the rows arrived in
+  whatever order Postgres happened to find them, which it is free to change after a `VACUUM`, on a
+  different plan, or under a parallel scan. A handler taking a window of a store — `{ limit: 200 }`
+  with no ordering, sorted afterwards in the client — therefore received *some* 200 rows, neither the
+  newest nor the oldest, and which ones it received shifted as the table churned. A read that declares
+  no ordering is now ordered by `id` ascending: the same default the declarative `list` route has
+  always applied, so both read paths order alike. What a consumer observes: an unordered `select` that
+  used to come back in insertion order — which is what an untouched table tends to give — now comes
+  back in `id` order, and `id` is a server-generated UUID, so that is not insertion order; a bounded
+  unordered read returns the same window on every call rather than an arbitrary one. A caller that
+  passes its own `orderBy` is unaffected — the ordering it declares is emitted verbatim, with no
+  tiebreaker appended, so the statement, the rows and their order are exactly what they were. A
+  declarative view is affected without owning a line of handler code, since the views runtime reads
+  through the same facade: a `single` view that declares no `order_by` and whose filter matches more
+  than one row now serves the lowest-`id` match instead of whichever row the scan reached first, a
+  nested `lookup` field whose sub-read matches more than one row embeds that same lowest-`id` match,
+  and a `collect`, a paged `list`, or a `list`/`counts` sub-read without `order_by` now returns a
+  defined order and a defined window. A handler rendered by `rayspec gen-handler` observes it too: a
+  generated lookup tool reads the store unordered and caps the result in the handler (`maxRows`), so
+  the rows a model receives are now the lowest-`id` matches rather than an arbitrary subset that
+  shifted between runs — the template is unchanged, only what it returns is now defined.
+  The order column is the injected primary key every store table carries, so it always resolves. A
+  generated store has a primary-key index on `id` and a separate index on `tenant_id` but no
+  composite index over the two, so the cost depends on which plan the tenant-scoped read gets: an
+  unbounded one sorts the rows its tenant predicate matched, while a bounded one (`{ limit: n }`)
+  over a tenant holding a large share of the table is answered by walking the primary-key index in
+  `id` order with `tenant_id` as a filter — no sort, but it reads past other tenants' rows, and the
+  smaller a tenant's share the further it reads.
+
 - **A deployment that declares a cron or manual trigger boots before its tenant org exists.**
   `RAYSPEC_CRON_TENANT_ID` names the org a trigger fires under — yet the boot used to verify that org
   existed and abort when it did not (`… is a well-formed UUID but no such active org exists`), which

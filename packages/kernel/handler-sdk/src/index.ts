@@ -114,11 +114,22 @@ export type StoreFilter = Record<string, unknown>;
  * NEVER drop the tenant scope (a 2nd tenant's rows are structurally invisible regardless of opts).
  */
 export interface SelectOptions {
-  /** Order the result by these columns, in order (each a declared column; default direction `asc`). */
+  /**
+   * Order the result by these columns, in order (each a declared column; default direction `asc`).
+   * OMITTED ⇒ the read comes back in `id` ascending order — the same default the HTTP `list` op
+   * applies — so a list is never delivered in an unspecified physical order. An ordering given here
+   * is used VERBATIM: nothing is appended to it.
+   */
   readonly orderBy?: ReadonlyArray<{ readonly column: string; readonly dir?: 'asc' | 'desc' }>;
   /** Max rows to return (server-side LIMIT). */
   readonly limit?: number;
-  /** Rows to skip (server-side OFFSET) — pair with `orderBy` for stable paging. */
+  /**
+   * Rows to skip (server-side OFFSET). With NO `orderBy` the default `id asc` is a UNIQUE key, so
+   * paging over it is stable. With your OWN `orderBy` nothing is appended (see above) — an ordering
+   * on a non-unique column is not a TOTAL order, and Postgres may break the ties differently
+   * between two page queries, so a row can repeat or be skipped. Pair such an ordering with a
+   * unique tiebreaker (e.g. a trailing `{ column: 'id' }`).
+   */
   readonly offset?: number;
 }
 
