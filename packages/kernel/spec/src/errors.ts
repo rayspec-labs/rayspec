@@ -186,12 +186,34 @@ export function specError(code: SpecErrorCode, message: string, path?: string): 
  *                               shape; it does NOT claim the mint route is missing, because the mint
  *                               call lives in handler module source and this pass is pure over the
  *                               parsed document.
+ *  - `agent_untrusted_field_precedence` — an agent whose instructions NAME a `text` column of a
+ *                               declared store (so that free-text field is part of what the model
+ *                               reads) while stating no PRECEDENCE between it and the structured
+ *                               fields. The tool-dispatch boundary treats such content as data and
+ *                               not as instructions, which stops an attack that COMMANDS ("ignore
+ *                               your instructions") — it cannot stop one that instead ASSERTS a
+ *                               different value for a structured field, or INVENTS a policy, because
+ *                               both of those only inform the answer, which is what the boundary
+ *                               permits. Closing them is the author's job in the instructions, and
+ *                               the tool-dispatch trust boundary section of `docs/ARCHITECTURE.md`
+ *                               documents the pattern. THE CHECK IS A KEYWORD HEURISTIC OVER
+ *                               NATURAL LANGUAGE and is wrong in both directions by construction: it
+ *                               looks for a small closed set of precedence words, so instructions
+ *                               that state the rule in other words are flagged anyway (false
+ *                               positive) and instructions that merely use one of those words are
+ *                               not (false negative). It also cannot see whether the agent really
+ *                               receives that row — an agent's `input` is a RUNTIME value and the
+ *                               handler that assembles it lives in module source, which this pass
+ *                               does not read; the instructions naming the column is the only
+ *                               evidence the DOCUMENT carries. Advisory for exactly that reason: a
+ *                               heuristic over prose must never fail a deploy.
  */
 export const SpecWarningCode = z.enum([
   'softdelete_fk_restrict',
   'fk_forward_reference',
   'typescript_handler_module',
   'stream_playback_media_token',
+  'agent_untrusted_field_precedence',
 ]);
 export type SpecWarningCode = z.infer<typeof SpecWarningCode>;
 
