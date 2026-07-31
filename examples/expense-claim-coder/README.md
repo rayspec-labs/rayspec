@@ -32,8 +32,11 @@ claim row) — the agent→store auto-persist loop, generated end-to-end from a 
   catalog with an UNGUESSABLE meals code → create a claim whose description embeds an out-of-catalog
   prompt-injection → `POST /claims/{id}/code` **with the claim data as the run `input`** → **assert the
   WRITTEN row** → **strong lookup proof** (the stored code == the unguessable meals code, so lookup
-  actually fired) → **injection proof** (the untrusted-content trust boundary holds: the stored code is
-  a real catalog code, not the injected value) → idempotency → tenant isolation incl. a cross-tenant
+  actually fired) → **injection proof** (the stored code is a real catalog code, not the injected
+  value — guaranteed by the handler's server-side re-validation of the agent's chosen code against
+  the catalog, not by the prompt: the trust boundary stops the claim text from being *executed*, and
+  the re-check is what makes an out-of-catalog write impossible either way) → idempotency → tenant
+  isolation incl. a cross-tenant
   **write-isolation re-read**). See "Run the live smoke" below.
 
 ## Regenerate the handlers (deterministic)
