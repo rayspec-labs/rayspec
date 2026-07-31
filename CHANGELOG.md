@@ -189,15 +189,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior changes.
 
 - **`doctor` and `plan` report a new non-fatal `agent_untrusted_field_precedence` advisory.** It fires
-  once per agent whose `instructions` name a `text` column of a declared store — the document's own
-  statement that author-uncontrolled text is part of what the model reads — while stating no
-  precedence between that field and the structured ones, pinned to that agent's own
-  `agents[<i>].instructions`. Both halves are keyword matches over natural-language prose, so this
-  advisory is wrong in both directions by construction: instructions that state a precedence in
-  vocabulary outside its small closed list are flagged anyway, and instructions that merely contain
-  one of those words are not. It also cannot confirm that the agent really receives those rows — an
-  agent's `input` is a runtime value, and the handler that assembles it lives in module source this
-  pass never reads. It is advisory for exactly those reasons: a heuristic over prose must never fail a
+  once per agent whose `instructions` name an unconstrained `text` column of a declared store — one
+  that can hold free-form text the author does not control — while stating no precedence between that
+  field and the structured ones, pinned to that agent's own `agents[<i>].instructions`. A `text`
+  column that declares an `enum` whitelist is excluded, since its stored value must be one of the
+  listed literals and so cannot carry an injected sentence. Both halves are keyword matches over
+  natural-language prose, so this advisory is wrong in both directions by construction: instructions
+  that state a precedence in vocabulary outside its small closed list are flagged anyway, and
+  instructions that merely contain one of those words are not. It also cannot confirm that the agent
+  really receives those rows, nor whether it reads a named column or writes it — an agent's `input` is
+  a runtime value, and the handler that assembles it lives in module source this pass never reads, so
+  the message names the columns without asserting they are input. It is advisory for exactly those reasons: a heuristic over prose must never fail a
   deploy, so it never affects `ok` and no document that parsed before stops parsing. Two shipped
   documents report it as things stand — `examples/acme-notes-backend` and
   `examples/expense-claim-coder`, alongside the `typescript_handler_module` advisories they already

@@ -474,6 +474,65 @@ agents:
     expect(warnings[0]?.message).toContain('summarizer');
   });
 
+  it('does NOT count a `text` column that declares an `enum` whitelist', () => {
+    // A `text` column with an `enum` is structurally incapable of holding prose: the stored value
+    // must be one of the listed literals, so it can carry no injected sentence. Naming such a column
+    // is therefore not evidence that free-form text reaches the model, and on its own it must not
+    // raise the advisory. RED while the filter looks at `type` alone.
+    const yaml = `
+version: '1.0'
+metadata:
+  name: enum-column
+stores:
+  - name: claims
+    columns:
+      - { name: category_code, type: text, enum: ['travel', 'meals', 'software'] }
+      - { name: amount_cents, type: integer }
+agents:
+  - id: coder
+    name: coder
+    backend: pi
+    model: pi-model
+    instructions: >
+      Read the claim's \`amount_cents\` and set its \`category_code\`.
+`;
+    expect(lintSpecWarnings(parseOk(yaml))).toEqual([]);
+  });
+
+  it('names the columns without claiming the agent reads them', () => {
+    // The pass sees that the instructions NAME a column; it cannot see whether the agent is fed that
+    // column or writes it (the row reaches the model through handler source this pass never opens).
+    // An agent that only WRITES the named column is a false positive the rule accepts — but the
+    // message must not assert the column is input, because on such a document that is simply untrue.
+    const yaml = `
+version: '1.0'
+metadata:
+  name: verdict-writer
+stores:
+  - name: leads
+    columns:
+      - { name: headcount, type: integer }
+      - { name: rationale, type: text }
+agents:
+  - id: qualifier
+    name: qualifier
+    backend: pi
+    model: pi-model
+    instructions: >
+      Classify the lead from its \`headcount\` and record a one-line \`rationale\`.
+`;
+    const warnings = lintSpecWarnings(parseOk(yaml));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.code).toBe('agent_untrusted_field_precedence');
+    // It still names what it found ...
+    expect(warnings[0]?.message).toContain('leads.rationale');
+    // ... but claims nothing about that column being what the model READS: `rationale` is this
+    // agent's own output, so the removed wording ("so author-uncontrolled text is part of what the
+    // model reads") was false for exactly this shape.
+    expect(warnings[0]?.message).not.toContain('is part of what the model reads');
+    expect(warnings[0]?.message).toContain('not visible here');
+  });
+
   it('does NOT fire for a document that declares no store at all', () => {
     // Nothing declares a free-text column, so nothing in the document says untrusted rows reach the
     // model — the rule reads the document, not the runtime input.

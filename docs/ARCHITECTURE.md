@@ -212,9 +212,12 @@ as an enumerable rule wherever the domain allows it, and to treat a judgment-cal
 agent's verdict as unbounded by the prompt.
 
 `rayspec doctor` and `rayspec plan` report the `agent_untrusted_field_precedence`
-advisory for a document whose agent reads a declared free-text column while
+advisory for a document whose agent names an unconstrained `text` column while
 stating no precedence. It is a keyword heuristic over natural language — wrong in
-both directions by construction, and never fatal. It is a reminder to make the
+both directions by construction, and never fatal. Naming a column is all the
+document proves: whether the agent reads that column or writes it is decided in
+handler source the pass never opens, and a `text` column that declares an `enum`
+is excluded because its value cannot be prose. It is a reminder to make the
 decision, not a verdict that it was made. The shipped worked example is
 `examples/lead-qualifier`, and `examples/lead-qualifier/injection-smoke.sh` is the
 regression that drives all three classes against a live deployment.

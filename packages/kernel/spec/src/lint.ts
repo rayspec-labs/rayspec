@@ -1386,18 +1386,24 @@ export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
   //
   // WHAT IT CAN SEE, HONESTLY: an agent's `input` is a RUNTIME value — the row reaches the model
   // through a route body or a handler that enqueues the run, and that handler is module source this
-  // pass does not read. So "this agent is fed untrusted rows" is not declarable, and the proxy used
-  // here is the document's own words: the instructions NAME a `text` column of a declared store, so
-  // the author has written that this free-text field is part of what the model reads. Both halves are
+  // pass does not read. So "this agent is fed untrusted rows" is not declarable, and neither is the
+  // direction of a named column: instructions that mention `rationale` may be describing what the
+  // agent WRITES, not what it reads. The document carries exactly two facts, and the message states
+  // only those — the column is unconstrained `text`, and the instructions name it. Both halves are
   // then keyword matches over prose — a token-set hit for the column name, and a small closed list of
   // precedence words for the remedy — so this rule is wrong in BOTH directions by construction:
   // instructions stating precedence in words outside the list are flagged anyway, and instructions
   // that merely contain one of those words satisfy it. That is why it is advisory and must stay so;
   // a keyword heuristic over natural language may never fail a deploy. FIRES PER AGENT, pinned to
   // that agent's own `instructions`.
+  //
+  // A `text` column carrying an `enum` whitelist is EXCLUDED, and that exclusion is structural rather
+  // than heuristic: the stored value must be one of the declared literals, so the column cannot hold
+  // an injected sentence at all. It is the one case where the document proves the column is not a
+  // free-text surface, so counting it would be a false positive the grammar already rules out.
   const freeTextColumns = spec.stores.flatMap((store) =>
     store.columns
-      .filter((c) => c.type === 'text')
+      .filter((c) => c.type === 'text' && c.enum === undefined)
       .map((c) => ({ store: store.name, column: c.name })),
   );
   if (freeTextColumns.length > 0) {
@@ -1412,17 +1418,18 @@ export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
       warnings.push(
         specWarning(
           'agent_untrusted_field_precedence',
-          `agent '${agent.id}' names the free-text (\`text\`) column(s) ` +
-            `${fields.map((c) => `'${c.store}.${c.column}'`).join(', ')} in its instructions — so ` +
-            'author-uncontrolled text is part of what the model reads — but the instructions state ' +
-            'no PRECEDENCE between those fields and the structured ones. The tool-dispatch boundary ' +
-            'treats such content as data and never as instructions, which stops an attack that ' +
-            'COMMANDS the agent; it does not stop one that ' +
-            'ASSERTS a different value for a structured field or INVENTS a policy, because both only ' +
-            'inform the answer. State which field wins when they disagree, and that the classification ' +
-            'rule as written is the whole rule (see `examples/lead-qualifier` and the tool-dispatch ' +
-            'trust boundary section of `docs/ARCHITECTURE.md`). This is a keyword heuristic over prose, ' +
-            'so it can be wrong in either direction',
+          `agent '${agent.id}' names the unconstrained (\`text\`, no \`enum\`) column(s) ` +
+            `${fields.map((c) => `'${c.store}.${c.column}'`).join(', ')} in its instructions, but ` +
+            'states no PRECEDENCE between them and the structured fields. Such a column can hold ' +
+            'free-form text the author does not control; whether this agent READS a given one or ' +
+            'only WRITES it is not visible here, because the row is assembled in handler source this ' +
+            'pass does not open. Where one of them is input, the tool-dispatch boundary treats it as ' +
+            'data and never as instructions, which stops an attack that COMMANDS the agent; it does ' +
+            'not stop one that ASSERTS a different value for a structured field or INVENTS a policy, ' +
+            'because both only inform the answer. State which field wins when they disagree, and ' +
+            'that the classification rule as written is the whole rule (see `examples/lead-qualifier` ' +
+            'and the tool-dispatch trust boundary section of `docs/ARCHITECTURE.md`). This is a ' +
+            'keyword heuristic over prose, so it can be wrong in either direction',
           `agents[${ai}].instructions`,
         ),
       );
