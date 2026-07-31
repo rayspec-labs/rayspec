@@ -252,7 +252,10 @@ api:
     declared handler id of `kind: route`).
   - **`stream`** — a raw binary route. Fields: `handler` (a declared
     `kind: route` handler) and `mode`, one of `ingest` (write bytes) or
-    `playback` (range-based media read).
+    `playback` (range-based media read). A `playback` route is authorized by a
+    signed media token passed as `?token=` — minted from a `kind: handler` route
+    through `init.mintPlayToken` — and not by the Bearer chain the other routes
+    mount on.
 
 Routes mount onto the platform's existing authenticated HTTP chain — you do not
 re-implement auth per route.

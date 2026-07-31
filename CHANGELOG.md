@@ -106,6 +106,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A stream `playback` route no longer keeps its second authorization path to itself.** Such a route
+  validated, built and booted without a word, and every read attempt ended `401 UNAUTHENTICATED` —
+  including with a valid Bearer token of the tenant that had uploaded the bytes. The reason is sound
+  but was invisible in the document: a playback route mounts its own middleware tuple and is
+  authorized by a signed `?token=` media token, not by the Bearer chain the other routes mount on,
+  and that token is minted through `init.mintPlayToken`, a capability only a `kind: handler` route's
+  handler receives — so a deployment that declares no route minting one has a playback route nothing
+  can reach. `doctor` and `plan` now report that shape as the new non-fatal
+  `stream_playback_media_token` advisory, once per playback route, pinned to that route's own
+  `api[<i>].action.mode`. It states the authorization shape and what follows if nothing mints a
+  token; it deliberately does not claim the mint route is missing, because the mint call lives in
+  handler module source and the advisory pass is pure over the parsed document. As with every
+  advisory it never affects `ok`, so no document that parsed before stops parsing. The `stream`
+  section of `docs/spec-reference.md` now says the same thing in one sentence.
+
 - **A document whose handler modules are TypeScript source no longer lints green and then aborts at
   boot.** A backend document declaring a `handlers[].module` with a TypeScript extension (`.ts`,
   `.tsx`, `.mts`, `.cts`) validated with `ok: true` and no warnings at all, and the container then
