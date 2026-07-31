@@ -506,10 +506,13 @@ const BYTE_ORDER_MARK = '\uFEFF';
  * truncated, not hashed, not a length, not a count, not a character, not an excerpt of the removed
  * part. The value IS the secret and a warning reaches every log the process writes to; the kinds
  * below are fixed strings chosen by comparing the raw and normalized forms, so none of them can
- * carry a byte of either. The tests pin that by emitting the message for TWO different sentinel
- * secrets that produce the same kinds and asserting the two messages are byte-identical — an
- * excerpt of any length, a length, a digest or an encoding of the value could not survive that —
- * and by asserting outright that no base64 of the value, no hex digest and no digit appear.
+ * carry a byte of either. The tests pin that by emitting the message for TWO sentinel secrets that
+ * produce the same kinds and asserting the two messages are byte-identical. The sentinels are drawn
+ * from DISJOINT alphabets and the test asserts that disjointness before it relies on it, so the two
+ * values share no character at all and differ in length: no excerpt of either — down to a SINGLE
+ * character, at any position — can equal the other's, and neither can a length, a count, a digest or
+ * an encoding. None of those could survive the byte-identity check. The tests also assert outright
+ * that no base64 of the value, no hex digest and no digit appear.
  *
  * WHAT IT DOES NOT SAY: what to do about it. A trailing newline on a secret FILE is the documented
  * normal case, not a misconfiguration — the sanctioned `>`-redirect recipe in `.env.example` leaves

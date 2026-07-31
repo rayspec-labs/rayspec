@@ -505,20 +505,31 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
   // every log the process writes to.
   //
   // A distinctive sentinel with edge whitespace on a MULTI-LINE value (the signing key is a PEM in
-  // production). Every line is a random base62 run carrying no word of English, so a window of it
-  // cannot pass the leak probe below by colliding with ordinary prose in the message.
+  // production). Every line is a random alphanumeric run carrying no word of English, so a window
+  // of it cannot pass the leak probe below by colliding with ordinary prose in the message.
+  //
+  // The two sentinels are drawn from DISJOINT alphabets — this one from the FIRST half of each
+  // case plus the digits 0-4, the control from the SECOND half plus 5-9 — so no character of the
+  // one occurs anywhere in the other. That is what makes the counterproof below a proof: with the
+  // alphabets disjoint, NO excerpt of either value can equal an excerpt of the other, down to a
+  // SINGLE character, at any position. The property is not left to inspection — the arm asserts it
+  // outright before it relies on it, so editing a sentinel into an overlap fails loudly instead of
+  // silently weakening the counterproof.
   const BOM = '\uFEFF'; // U+FEFF, as an escape so the assertions below stay readable
+  const LEAK_ALPHABET = 'ABCDEFGHIJKLMabcdefghijklm01234';
+  const OTHER_ALPHABET = 'NOPQRSTUVWXYZnopqrstuvwxyz56789';
   const LEAK_CLEAN = [
-    'Xq7vNb2ZpL9wKd4RtY6sHc3JmF8gQa5eUi0oPzVn',
-    'Tg1xJw8kSr5nBv3yMd7uCe2qZh6pAf4jLo9iXt0b',
-    'Kz5mWu2cRi8dNe6tGv1hYb4sQp7lXa3fOj0nDr9k',
+    'iCiiJlcAgf0Mli2hjab4MKLgGc1bajJCBaBiEcHf',
+    'HkcBeM4eGbgBDd4hml4fjkGe4KlEhEL0C33EJaHi',
+    'EJddjgAmE24MhJmJ3j01BiA1JhIBgkkjILCddGjE',
   ].join('\n');
   // Edge whitespace on BOTH sides plus a leading byte-order mark — every kind at once. The removed
   // bytes are exactly: U+FEFF, spaces, CR, LF.
   const LEAK_RAW = `  ${BOM}${LEAK_CLEAN}  \r\n`;
-  // A SECOND secret — different in every byte AND in length — wrapped in the SAME edge whitespace,
-  // so it produces the SAME kinds of change. It is the control for the counterproof below.
-  const OTHER_RAW = `  ${BOM}Rj3bHs9wPk1cVy6nEt4mZu8dLq2aXf5g  \r\n`;
+  // A SECOND secret — no shared character and a different length — wrapped in the SAME edge
+  // whitespace, so it produces the SAME kinds of change. It is the control for the counterproof.
+  const OTHER_CLEAN = 'XPzUn6UZtXws6yZUOuZXYuqoqxo9Rouu';
+  const OTHER_RAW = `  ${BOM}${OTHER_CLEAN}  \r\n`;
   /** Every substring of `value` of length `size` — the "any substring long enough to matter" probe. */
   function windows(value: string, size: number): string[] {
     const out: string[] = [];
@@ -623,17 +634,41 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
     expect(warning).not.toContain('\n');
     expect(warning).not.toMatch(/ {2}/);
     // And no verbatim excerpt: every 4-character window of the raw value. Four is the floor at
-    // which a random base62 sentinel cannot collide with the message's fixed English vocabulary,
-    // so the probe stays a leak detector rather than a source of false reds.
+    // which a random sentinel cannot collide with the message's fixed English vocabulary, so the
+    // probe stays a leak detector rather than a source of false reds.
     for (const window of windows(LEAK_RAW, 4)) expect(warning).not.toContain(window);
 
     // THE general counterproof, which closes the space the enumeration above cannot: a SECOND boot,
-    // same variable, same kinds of change, a value that shares no byte and not even a length with
-    // the first — and the SAME message, byte for byte. Nothing derived from the value can survive
-    // that: an excerpt of ANY length (one character is enough), the length itself, a count, a
-    // digest, an encoding — each differs between the two secrets, so each would drive the two
-    // messages apart. This is what makes the arm's claim a proof rather than a probe for the shapes
-    // someone thought to enumerate.
+    // same variable, same kinds of change, and the SAME message, byte for byte.
+    //
+    // First the property the counterproof RESTS on, checked rather than asserted — the two
+    // sentinels are drawn from disjoint alphabets, so they share no character and therefore agree
+    // at no position, and their lengths differ. Without this, a leak whose characters happen to
+    // coincide between the two values would keep the messages identical and pass unseen; a
+    // one-character excerpt taken at a position where the two sentinels agree is exactly such a
+    // leak. Pinning the property here means a future edit to either sentinel cannot silently
+    // reopen that hole.
+    //
+    // The construction: each sentinel stays inside its own alphabet, and the alphabets are disjoint.
+    expect([...LEAK_CLEAN.replaceAll('\n', '')].filter((c) => !LEAK_ALPHABET.includes(c))).toEqual(
+      [],
+    );
+    expect([...OTHER_CLEAN].filter((c) => !OTHER_ALPHABET.includes(c))).toEqual([]);
+    expect([...LEAK_ALPHABET].filter((c) => OTHER_ALPHABET.includes(c))).toEqual([]);
+    // The properties that follow from it, asserted on the sentinels themselves so they hold even if
+    // the alphabets above are ever rewritten: no shared character, no coinciding position, and not
+    // even a shared length.
+    const leakChars = new Set(LEAK_CLEAN);
+    expect([...OTHER_CLEAN].filter((c) => leakChars.has(c))).toEqual([]);
+    expect([...OTHER_CLEAN].filter((c, i) => LEAK_CLEAN[i] === c)).toEqual([]);
+    expect(OTHER_CLEAN.length).not.toBe(LEAK_CLEAN.length);
+
+    // With that, nothing derived from the value can survive the byte-identity check below: an
+    // excerpt of ANY length taken at ANY position (one character is enough — no character of the
+    // one sentinel occurs anywhere in the other), the length itself, a count, a digest, an
+    // encoding — each differs between the two secrets, so each would drive the two messages apart.
+    // This is what makes the arm's claim a proof rather than a probe for the shapes someone
+    // thought to enumerate.
     const { warnings: otherWarnings } = boot({ ...plainEnv, RAYSPEC_JWT_SIGNING_KEY: OTHER_RAW });
     expect(otherWarnings).toHaveLength(1);
     expect(otherWarnings[0]).toBe(warning);
