@@ -336,7 +336,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stops adding to it — so the documented plain-variable path is unchanged. A caller that relied on
   reading either secret back out of `process.env` after `assembleServer` must take it from the
   `ServerConfig` it passed in. Fail-closed is unchanged: a missing or blank secret still aborts the
-  boot with the same error, and no path falls back to an empty pepper or an unsigned token.
+  boot with the same error, and no path falls back to an empty pepper or an unsigned token. A boot
+  owns every secret it hands over, blank ones included — a caller that passes a hand-built
+  `ServerConfig` with an empty secret gets that same abort, never a silent boot on whatever the
+  ambient environment happened to hold for that variable.
 
 - Bump the transitive `brace-expansion` dependency to `5.0.8` (pinned via `pnpm.overrides`),
   resolving GHSA-mh99-v99m-4gvg — a regular-expression denial-of-service (ReDoS) advisory in the

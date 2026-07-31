@@ -15,7 +15,10 @@
  * process with `setBootSecrets()`. Everything else falls back to the ambient environment, which is
  * what a caller that constructs the app directly (an embedder, a test harness) relies on. The
  * supplied values WIN over the environment: they are the ones the boot validated and normalized, and
- * an env variable holding a stale or untrimmed form of the same secret must not override them.
+ * an env variable holding a stale or untrimmed form of the same secret must not override them. That
+ * holds for a BLANK supplied value too — it counts as absent and aborts, it does not re-open the
+ * environment as a fallback, so a caller that hands in a config with an empty secret gets the same
+ * refusal to start it has always got rather than a silent boot on an ambient value it never chose.
  *
  * The supplied values are deliberately NOT written back to `process.env`. `process.env` is copied
  * wholesale into every child process this process spawns and is readable from outside the process,
@@ -72,16 +75,23 @@ function nonBlank(value: string | undefined): string | undefined {
 }
 
 /**
- * The one resolution rule for a boot secret: what the boot supplied, else what `env` carries,
- * else `undefined`. The value is returned AS SUPPLIED (never trimmed) — trimming is the boot's
- * normalization contract, and a reader that trimmed on its own would silently disagree with the
- * value the boot validated.
+ * The one resolution rule for a boot secret: what the boot supplied for this name, else — only if
+ * the boot supplied nothing for it — what `env` carries, else `undefined`. The value is returned AS
+ * SUPPLIED (never trimmed) — trimming is the boot's normalization contract, and a reader that
+ * trimmed on its own would silently disagree with the value the boot validated.
+ *
+ * A boot that supplied a name OWNS it, blank included: a blank supplied secret resolves to
+ * `undefined` (absent ⇒ the readers abort) and `env` is NOT consulted for it. Falling through to the
+ * environment there would let an ambient variable the caller never asked for stand in for the secret
+ * it configured — a different pepper hashing every api key, a different PEM signing every token —
+ * on a path whose whole contract is to refuse to start.
  */
 export function bootSecretValue(
   name: BootSecretName,
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-  return nonBlank(supplied[name]) ?? nonBlank(env[name]);
+  if (Object.hasOwn(supplied, name)) return nonBlank(supplied[name]);
+  return nonBlank(env[name]);
 }
 
 /** Read the JWT signing key PEM; THROWS if neither supplied nor in the env (boot-required). */

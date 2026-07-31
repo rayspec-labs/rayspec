@@ -10,7 +10,9 @@
  *   - a supplied secret WINS over the environment, because the boot's value is the validated,
  *     whitespace-normalized one and a stale/untrimmed env variable must not override it;
  *   - the environment remains the fallback for a caller that constructs the app directly;
- *   - fail-closed is unchanged: nothing supplied AND nothing in the environment still throws.
+ *   - fail-closed is unchanged: nothing supplied AND nothing in the environment still throws, and a
+ *     BLANK supplied secret throws too — the boot owns every name it hands over, so a blank one
+ *     aborts instead of re-opening the environment as a fallback for that name.
  *
  * The suite unsets the two variables itself (the package's vitest setup provisions a dev pepper) and
  * restores them afterwards, and clears the supplied secrets between cases so no case can pass on a
@@ -94,6 +96,20 @@ describe('boot secrets supplied in-process', () => {
     setBootSecrets({ jwtSigningKeyPem: '   ', apiKeyPepper: SUPPLIED_PEPPER });
     expect(() => assertBootSecrets()).toThrow(new RegExp(JWT_SIGNING_KEY_ENV));
     expect(() => getJwtSigningKeyPem()).toThrow(/required at boot/);
+  });
+
+  it('a blank supplied secret still aborts when the environment holds a value for it', () => {
+    // The boot OWNS every name it supplied. A blank one is an absent one, and it must abort rather
+    // than resolve to whatever the ambient environment happens to carry — that would silently run
+    // the deployment on a secret the caller never configured (a different pepper hashes every api
+    // key, a different PEM signs every token), where the boot used to refuse to start.
+    process.env[JWT_SIGNING_KEY_ENV] = 'ambient-pem-the-caller-did-not-configure';
+    process.env[API_KEY_PEPPER_ENV] = 'ambient-pepper-the-caller-did-not-configure';
+    setBootSecrets({ jwtSigningKeyPem: '', apiKeyPepper: '   ' });
+    expect(() => assertBootSecrets()).toThrow(new RegExp(JWT_SIGNING_KEY_ENV));
+    expect(() => assertBootSecrets()).toThrow(new RegExp(API_KEY_PEPPER_ENV));
+    expect(() => getJwtSigningKeyPem()).toThrow(/required at boot/);
+    expect(() => getApiKeyPepper()).toThrow(/required at boot/);
   });
 
   it('clearBootSecrets returns the process to the environment-only path', () => {
