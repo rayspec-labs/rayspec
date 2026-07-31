@@ -482,6 +482,14 @@ deployment sets its configuration through its orchestrator or secret manager.
   **stripped** from a resolved secret regardless of source — a `<VAR>_FILE` mount and the
   plain variable are byte-equivalent — while interior bytes are preserved (a multi-line
   PEM is safe). A secret whose real bytes need edge whitespace must be base64-encoded.
+- When that normalization **actually changes** a resolved secret, the boot prints **one
+  warning per changed secret** on stderr, naming the variable it was resolved from (`<VAR>`,
+  or `<VAR>_FILE` when the mount won) and the kind of change — `a leading byte-order mark
+  removed`, `leading whitespace removed`, `trailing whitespace removed`. It never prints the
+  value or any part of it, and the boot continues with the normalized value. A secret the
+  trim leaves untouched is silent. The stripped trailing newline of a key file created with
+  a `>` redirect is the expected, harmless case; the signal matters when a secret that
+  carried edge whitespace suddenly stops being accepted.
 - On boot it **applies the committed platform migration chain** to the target
   database (idempotent — it bootstraps a clean database and no-ops on an up-to-date
   one), then materializes a spec's declared stores on a clean database or mounts them

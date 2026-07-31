@@ -40,6 +40,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A boot secret that normalization actually changed now says so, once, at boot.** `DATABASE_URL`,
+  `RAYSPEC_JWT_SIGNING_KEY` and `RAYSPEC_API_KEY_PEPPER` are trimmed on read — leading and trailing
+  whitespace and a leading byte-order mark go, interior bytes stay — and until now that happened in
+  silence. The silence is what hurts on an upgrade: a secret carrying stray edge whitespace that
+  worked before is now trimmed, every request starts rejecting, and nothing points at the cause, so
+  the operator searches the auth logic, the database and the proxy while an invisible character is
+  to blame. The boot now emits one warning per changed secret, naming the variable it was resolved
+  from — `<VAR>`, or `<VAR>_FILE` when the mount won — and the kind of change from a closed
+  vocabulary: `a leading byte-order mark removed`, `leading whitespace removed`,
+  `trailing whitespace removed`. It never names the value or any part of it: not truncated, not
+  hashed, not a length, not a count, not an excerpt of what was removed — a warning reaches every
+  log the process writes to, and the value is the secret. It reports the difference rather than
+  prescribing a fix: the trailing newline a `>` redirect leaves in a secret file is the documented,
+  harmless case and needs no action. A clean secret boots exactly as silently as before, a value
+  that normalizes to nothing still just takes the fail-closed missing-variable abort that already
+  names it, and nothing else moves: the resolved values, the `<VAR>_FILE` precedence and every abort
+  are byte-for-byte what they were. The trim contract is documented alongside the signal in the
+  README, the concepts guide, the CLI reference, the getting-started guide and `.env.example`.
+
 - **An agent that declares both `tools` and an `outputSchema` is now a config error.** The
   linter adds `agent_output_schema_shortcircuits_tools`: an `agents[]` entry carrying a
   non-empty `tools` list AND a top-level `outputSchema` is rejected by `doctor`, `plan`, and

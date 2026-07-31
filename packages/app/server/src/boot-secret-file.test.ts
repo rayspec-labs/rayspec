@@ -497,6 +497,287 @@ describe('loadServerConfig — the plain-env source is normalized to the same co
   });
 });
 
+describe('loadServerConfig — normalization that CHANGED a secret warns, naming the variable only', () => {
+  // The operator-visible failure this guards: a secret with edge whitespace that worked before is
+  // now trimmed, every request starts rejecting, and nothing says why — the cause is an invisible
+  // character. The warning is the runtime signal. It names the VARIABLE the secret was resolved
+  // from and the KIND of change, and NOTHING else: the value is the secret, and a warning reaches
+  // every log the process writes to.
+  //
+  // A distinctive sentinel with edge whitespace on a MULTI-LINE value (the signing key is a PEM in
+  // production). Every line is a random alphanumeric run carrying no word of English, so a window
+  // of it cannot pass the leak probe below by colliding with ordinary prose in the message.
+  //
+  // The two sentinels are drawn from DISJOINT alphabets — this one from the FIRST half of each
+  // case plus the digits 0-4, the control from the SECOND half plus 5-9 — so no character of the
+  // one occurs anywhere in the other. That is what makes the counterproof below a proof: with the
+  // alphabets disjoint, NO excerpt of either value can equal an excerpt of the other, down to a
+  // SINGLE character, at any position. The property is not left to inspection — the arm asserts it
+  // outright before it relies on it, so editing a sentinel into an overlap fails loudly instead of
+  // silently weakening the counterproof.
+  //
+  // Disjointness alone only separates the VERBATIM shapes. The two sentinels are therefore also
+  // made to disagree on the scalar facts a leak could report ABOUT the value instead of quoting it:
+  // the raw length, how many edge bytes normalization removed and the parity of that count, the
+  // parity of the core length, and whether the core holds a digit at all. Issue #138: "The warning
+  // names the variable name and the kind of change (...), nothing else." A length or a count is
+  // neither, so it has to be separated as much as an excerpt does. Each disequality is asserted
+  // below. Wrap both sentinels in the SAME edge bytes and every fact about the trimmed-away part
+  // becomes identical by construction, and so invisible to a byte-identity check — which is exactly
+  // the hole these close. Digit-presence is why the control spends only the LETTERS of its
+  // alphabet: its half of the digits stays unused so that one sentinel carries digits and the other
+  // carries none.
+  const BOM = '\uFEFF'; // U+FEFF, as an escape so the assertions below stay readable
+  const LEAK_ALPHABET = 'ABCDEFGHIJKLMabcdefghijklm01234';
+  const OTHER_ALPHABET = 'NOPQRSTUVWXYZnopqrstuvwxyz56789';
+  const LEAK_CLEAN = [
+    'iCiiJlcAgf0Mli2hjab4MKLgGc1bajJCBaBiEcHf',
+    'HkcBeM4eGbgBDd4hml4fjkGe4KlEhEL0C33EJaHi',
+    'EJddjgAmE24MhJmJ3j01BiA1JhIBgkkjILCddGjE',
+  ].join('\n');
+  // Edge whitespace on BOTH sides plus a leading byte-order mark — every kind at once. The removed
+  // bytes are exactly: U+FEFF, spaces, CR, LF — seven of them, wrapped around an even-length core
+  // that carries digits.
+  const LEAK_RAW = `  ${BOM}${LEAK_CLEAN}  \r\n`;
+  // A SECOND secret — the control for the counterproof. No shared character, a different raw
+  // length, an ODD-length core, and no digit anywhere in it (letters only, still inside the
+  // disjoint alphabet above). Its wrapper produces the SAME THREE KINDS of change — a leading
+  // byte-order mark, leading whitespace, trailing whitespace — out of DIFFERENT bytes: U+FEFF, tab,
+  // tab, LF, four of them against seven, so the count differs and so does its PARITY. Same kinds,
+  // so the two messages stay comparable and the byte-identity check keeps its meaning; different in
+  // each of the scalars pinned below, so none of THOSE can come out the same for both. Both halves
+  // are asserted below — a future edit that breaks either one fails.
+  const OTHER_CLEAN = 'yzVqRVqtxYzNtYYuNWqruXpNpzTswvXwN';
+  const OTHER_RAW = `${BOM}\t${OTHER_CLEAN}\t\n`;
+  /** How many bytes normalization removes from the edges of `raw` — a COUNT, never in any message. */
+  const removedEdgeBytes = (raw: string): number => raw.length - raw.trim().length;
+  /** Every substring of `value` of length `size` — the "any substring long enough to matter" probe. */
+  function windows(value: string, size: number): string[] {
+    const out: string[] = [];
+    for (let i = 0; i + size <= value.length; i += 1) out.push(value.slice(i, i + size));
+    return out;
+  }
+  /** Run a boot with a captured warning sink; returns the config (or undefined on abort) + warnings. */
+  function boot(env: NodeJS.ProcessEnv): {
+    config?: ReturnType<typeof loadServerConfig>;
+    warnings: string[];
+  } {
+    const warnings: string[] = [];
+    let config: ReturnType<typeof loadServerConfig> | undefined;
+    try {
+      config = loadServerConfig(env, (m) => warnings.push(m));
+    } catch {
+      // Several arms boot on an aborting env; what is under test is what was warned on the way.
+    }
+    return { config, warnings };
+  }
+
+  it('warns once per changed secret, naming the variable and the kinds of change', () => {
+    const { config, warnings } = boot({ ...plainEnv, RAYSPEC_API_KEY_PEPPER: `  ${PEPPER}\r\n` });
+    expect(config?.apiKeyPepper).toBe(PEPPER);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('RAYSPEC_API_KEY_PEPPER');
+    expect(warnings[0]).toContain('leading whitespace removed');
+    expect(warnings[0]).toContain('trailing whitespace removed');
+  });
+
+  it('warns for EACH of the three boot secrets, under its own variable name', () => {
+    for (const name of ['DATABASE_URL', 'RAYSPEC_JWT_SIGNING_KEY', 'RAYSPEC_API_KEY_PEPPER']) {
+      const { warnings } = boot({ ...plainEnv, [name]: `  ${plainEnv[name]}\n` });
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(name);
+    }
+  });
+
+  it('names a leading byte-order mark as its own kind of change', () => {
+    const { config, warnings } = boot({
+      ...plainEnv,
+      RAYSPEC_JWT_SIGNING_KEY: `${BOM}${SIGNING_KEY}`,
+    });
+    expect(config?.jwtSigningKeyPem).toBe(SIGNING_KEY);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('byte-order mark');
+  });
+
+  it('warns for a _FILE-sourced secret too, naming the _FILE variable it was resolved from', () => {
+    const { config, warnings } = boot({
+      ...plainEnv,
+      RAYSPEC_API_KEY_PEPPER_FILE: secretFile('warn-pepper', `${PEPPER}\n`),
+    });
+    expect(config?.apiKeyPepper).toBe(PEPPER);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('RAYSPEC_API_KEY_PEPPER_FILE');
+    expect(warnings[0]).toContain('trailing whitespace removed');
+    expect(warnings[0]).not.toContain('leading whitespace removed');
+  });
+
+  it('a CLEAN secret boots SILENTLY — from either source', () => {
+    const { config: fromEnv, warnings: envWarnings } = boot({ ...plainEnv });
+    expect(fromEnv?.apiKeyPepper).toBe(plainEnv.RAYSPEC_API_KEY_PEPPER);
+    expect(envWarnings).toEqual([]);
+
+    const { config: fromFile, warnings: fileWarnings } = boot({
+      DATABASE_URL_FILE: secretFile('silent-db', DB_URL),
+      RAYSPEC_JWT_SIGNING_KEY_FILE: secretFile('silent-key', SIGNING_KEY),
+      RAYSPEC_API_KEY_PEPPER_FILE: secretFile('silent-pepper', PEPPER),
+    });
+    expect(fromFile?.apiKeyPepper).toBe(PEPPER);
+    expect(fileWarnings).toEqual([]);
+  });
+
+  it('NO PART of the value reaches the output — the message is IDENTICAL for a different secret', () => {
+    const { config, warnings } = boot({ ...plainEnv, RAYSPEC_JWT_SIGNING_KEY: LEAK_RAW });
+    // The change really happened — otherwise "nothing leaked" would be free.
+    expect(config?.jwtSigningKeyPem).toBe(LEAK_CLEAN);
+    expect(config?.jwtSigningKeyPem).not.toBe(LEAK_RAW);
+    // A multi-line value survives with its INTERIOR bytes untouched.
+    expect(config?.jwtSigningKeyPem.split('\n')).toHaveLength(3);
+    expect(warnings).toHaveLength(1);
+    const warning = warnings[0] ?? '';
+    // It really is the warning for this variable — so the assertions below are about a message that
+    // was actually emitted for the leaking value.
+    expect(warning).toContain('RAYSPEC_JWT_SIGNING_KEY');
+
+    // The named shapes, pinned individually so a leak in one of them reports as itself rather than
+    // as a generic mismatch.
+    expect(warning).not.toContain(Buffer.from(LEAK_RAW).toString('base64')); // not encoded
+    expect(warning).not.toContain(Buffer.from(LEAK_CLEAN).toString('base64'));
+    expect(warning).not.toMatch(/[0-9a-f]{16,}/); // not hashed — no hex digest of any length
+    expect(warning).not.toMatch(/\d/); // no length, no count, no digit at all
+    // Neither the raw value, nor the normalized one, nor a single line of either.
+    expect(warning).not.toContain(LEAK_RAW);
+    expect(warning).not.toContain(LEAK_CLEAN);
+    for (const line of LEAK_CLEAN.split('\n')) expect(warning).not.toContain(line);
+    // The TRIMMED-AWAY part on its own: the removed bytes were exactly U+FEFF, spaces, CR and LF.
+    // A single-line, whitespace-collapsed message carries none of them.
+    expect(warning).not.toContain(BOM);
+    expect(warning).not.toContain('\r');
+    expect(warning).not.toContain('\n');
+    expect(warning).not.toMatch(/ {2}/);
+    // And no verbatim excerpt: every 4-character window of the raw value. Four is the floor at
+    // which a random sentinel cannot collide with the message's fixed English vocabulary, so the
+    // probe stays a leak detector rather than a source of false reds.
+    for (const window of windows(LEAK_RAW, 4)) expect(warning).not.toContain(window);
+
+    // THE general counterproof, which closes the space the enumeration above cannot: a SECOND boot,
+    // same variable, same kinds of change, and the SAME message, byte for byte.
+    //
+    // First the properties the counterproof RESTS on, checked rather than asserted. Without them a
+    // leak whose output happens to COINCIDE between the two values would keep the messages
+    // identical and pass unseen — a one-character excerpt taken at a position where the two
+    // sentinels agree is exactly such a leak, and so is any scalar the two sentinels reduce to the
+    // same way. Pinning them here means a future edit to either sentinel cannot silently reopen
+    // that hole.
+    //
+    // (1) VERBATIM shapes, closed by disjointness. The construction: each sentinel stays inside its
+    // own alphabet, and the alphabets are disjoint.
+    expect([...LEAK_CLEAN.replaceAll('\n', '')].filter((c) => !LEAK_ALPHABET.includes(c))).toEqual(
+      [],
+    );
+    expect([...OTHER_CLEAN].filter((c) => !OTHER_ALPHABET.includes(c))).toEqual([]);
+    expect([...LEAK_ALPHABET].filter((c) => OTHER_ALPHABET.includes(c))).toEqual([]);
+    // The properties that follow from it, asserted on the sentinels themselves so they hold even if
+    // the alphabets above are ever rewritten: no shared character, no coinciding position, and not
+    // even a shared length.
+    const leakChars = new Set(LEAK_CLEAN);
+    expect([...OTHER_CLEAN].filter((c) => leakChars.has(c))).toEqual([]);
+    expect([...OTHER_CLEAN].filter((c, i) => LEAK_CLEAN[i] === c)).toEqual([]);
+    expect(OTHER_CLEAN.length).not.toBe(LEAK_CLEAN.length);
+
+    // (2) The SCALAR facts a leak could report about the value instead of quoting it. Disjointness
+    // says nothing about these: wrap the two sentinels in the same edge bytes and the removed-byte
+    // count is identical by construction, invisible to the byte-identity check no matter how
+    // different the values are. So the two are deliberately built to disagree on each — the raw
+    // length, the count of removed edge bytes AND its parity, the parity of the core length, and
+    // whether the core holds a digit.
+    expect(OTHER_RAW.length).not.toBe(LEAK_RAW.length);
+    expect(removedEdgeBytes(OTHER_RAW)).not.toBe(removedEdgeBytes(LEAK_RAW));
+    expect(removedEdgeBytes(OTHER_RAW) % 2).not.toBe(removedEdgeBytes(LEAK_RAW) % 2);
+    expect(OTHER_CLEAN.length % 2).not.toBe(LEAK_CLEAN.length % 2);
+    expect(/\d/.test(OTHER_CLEAN)).not.toBe(/\d/.test(LEAK_CLEAN));
+
+    // (3) And the property that keeps the check COMPARABLE while (1) and (2) drive the two apart:
+    // both sentinels still trigger the SAME THREE KINDS of change. If they ever diverge, the two
+    // messages differ for a reason that is not a leak and the control silently becomes vacuous. So
+    // it is checked on the two EMITTED messages rather than on a copy of the kind derivation — a
+    // divergence, whatever caused it, fails here naming the kind that went missing, before the
+    // byte-identity check below can report it as a generic mismatch.
+    const { warnings: otherWarnings } = boot({ ...plainEnv, RAYSPEC_JWT_SIGNING_KEY: OTHER_RAW });
+    expect(otherWarnings).toHaveLength(1);
+    const otherWarning = otherWarnings[0] ?? '';
+    for (const kind of ['byte-order mark', 'leading whitespace', 'trailing whitespace']) {
+      expect(warning).toContain(kind);
+      expect(otherWarning).toContain(kind);
+    }
+
+    // WHAT THE CHECK BELOW THEN PROVES, and what it does not. It proves that the message carries no
+    // excerpt of either core — any position, any length, down to a single character — and none of
+    // the scalars pinned above: the raw length, the removed-edge-byte count and its parity, the
+    // core length parity, digit-presence. Together with the enumerated assertions (no base64, no
+    // hex digest, no digit, no verbatim removed bytes) that is the covered surface.
+    //
+    // CONTRACT LIMIT (honest): two sentinels cannot rule out EVERY lossy function of the value. A
+    // derived fact coarse enough to land on the same output for both — a one-bit predicate collides
+    // half the time by chance — would still pass. The disequalities above shrink that residue to
+    // functions that agree on two values built to disagree everywhere it was practical to make them,
+    // and the closed, value-free kind vocabulary in `bootSecretNormalizationWarning` is what
+    // actually rules the rest out by construction. This arm is the check on that construction, not
+    // a substitute for it.
+    expect(otherWarning).toBe(warning);
+  });
+
+  it('emits NOTHING on the abort path — a broken mount aborts without a normalization warning', () => {
+    // `readBootSecretFile` normalizes the raw bytes purely to decide EMPTINESS before its
+    // fail-closed abort. That is not the trim point, so it must not warn: warning there would fire
+    // on the abort path and could double-warn for the same variable.
+    const { config, warnings } = boot({
+      ...plainEnv,
+      RAYSPEC_API_KEY_PEPPER_FILE: secretFile('warn-empty', '  \n'),
+    });
+    expect(config).toBeUndefined();
+    expect(warnings).toEqual([]);
+  });
+
+  it('a whitespace-only PLAIN value aborts as missing, without a normalization warning', () => {
+    // Nothing survives normalization, so there is no secret in use to warn about — and the abort
+    // already names the variable. A second message here would be noise on a failing boot.
+    const { config, warnings } = boot({ ...plainEnv, RAYSPEC_API_KEY_PEPPER: '   ' });
+    expect(config).toBeUndefined();
+    expect(warnings).toEqual([]);
+  });
+
+  it('the warning changes NO returned value — the config is byte-identical either way', () => {
+    // The whole point: this is a warning, not a behaviour change. A boot with a captured sink and
+    // one with none resolve exactly the same config.
+    const env = {
+      ...plainEnv,
+      DATABASE_URL: `  ${DB_URL}\n`,
+      RAYSPEC_JWT_SIGNING_KEY: `${BOM}${SIGNING_KEY}\r\n`,
+      RAYSPEC_API_KEY_PEPPER: `${PEPPER}  `,
+    };
+    const captured = boot(env).config;
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let byDefault: ReturnType<typeof loadServerConfig> | undefined;
+    let defaultSinkCalls: unknown[][] = [];
+    try {
+      byDefault = loadServerConfig(env);
+      // Snapshot the calls BEFORE restoring — `mockRestore` also resets the recorded ones.
+      defaultSinkCalls = spy.mock.calls.map((args) => [...args]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(byDefault).toEqual(captured);
+    expect(byDefault?.databaseUrl).toBe(DB_URL);
+    expect(byDefault?.jwtSigningKeyPem).toBe(SIGNING_KEY);
+    expect(byDefault?.apiKeyPepper).toBe(PEPPER);
+    // The DEFAULT sink is `console.warn` — one call per changed secret, and nothing leaked there
+    // either.
+    expect(defaultSinkCalls).toHaveLength(3);
+    const text = defaultSinkCalls.flat().map(String).join('\n');
+    for (const secret of [DB_URL, SIGNING_KEY, PEPPER]) expect(text).not.toContain(secret);
+  });
+});
+
 describe('loadServerConfig — neither variant set', () => {
   it('throws the aggregated missing-variable abort listing all three PLAIN names', () => {
     let message = '';
