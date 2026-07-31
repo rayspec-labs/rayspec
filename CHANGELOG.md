@@ -178,12 +178,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, so an operator using those still reads the id back before setting the variable, while an id
   chosen up front has to be the id its `orgs` row is created with. Nothing fires under an unknown
   tenant: the existence check moved to the firing itself, where it runs **before** the firing's
-  reserve, so a skipped firing dispatches nothing, writes no marker and therefore does not consume its
-  firing instant. Each skipped firing emits exactly one line naming the trigger, the instant and the
-  tenant; the boot additionally says once that the org is missing and that no restart will be needed.
-  The moment the org exists, firing resumes by itself — the check is re-asked per firing, never cached
-  — and, read the other way round, an org that is soft-deleted while the deployment runs stops firing
-  at the next instant. The on-demand fire of a `manual` trigger runs through that same guard, so such
+  reserve, so a skipped firing dispatches nothing and writes no marker — which leaves that instant
+  explicitly re-fireable instead of burning it. Each skipped firing emits exactly one line naming the
+  trigger, the instant and the tenant; the boot additionally says once that the org is missing and that
+  no restart will be needed. Once the org exists, scheduled firing resumes **at the next instant** —
+  the check is re-asked per firing, never cached. Read that precisely: the instants skipped in the
+  meantime do not come back on their own, because a scheduled tick reached the skip from inside the
+  engine's per-instant workflow and returned normally, so the engine has recorded that interval as run;
+  what the unwritten marker preserves is the ability to re-fire such an instant explicitly. Read the
+  other way round, an org that is soft-deleted while the deployment runs stops firing at the next
+  instant. The on-demand fire of a `manual` trigger runs through that same guard, so such
   a fire dispatches nothing and reports `fired: false` rather than success — which is why every
   contract carrying that value (`fireNow`, `fireScheduled`, `fireCronNow`, the manual-fire seam, the
   `POST /v1/triggers/{name}/fire` 202 and the immutable audit row that fire writes) now documents the
@@ -195,6 +199,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-fatal `cron_tenant_required` advisory on each declared cron/manual trigger — it names the
   variable, says the value is an org id, and says the org may not exist yet. Like every advisory it
   never affects `ok`.
+  **Embedder note:** `CronSchedulerDeps` — the constructor dependencies of `DbosCronScheduler`,
+  exported from `@rayspec/durable-dbos` — gains a REQUIRED `tenantExists(tenantId)` probe. Anything
+  outside this repository that constructs the scheduler itself has to supply one; there is no default,
+  deliberately, because a scheduler that cannot answer whether its tenant exists is exactly the thing
+  that must not dispatch. Every in-tree construction site is updated.
 
 - **`/health` covers the declared frontend mounts, and its response carries a `frontend` field.** The
   probe used to report only database reachability, so a deployment that also serves a `frontend[]`

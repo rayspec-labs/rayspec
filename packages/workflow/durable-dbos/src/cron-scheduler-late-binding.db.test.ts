@@ -120,9 +120,13 @@ async function countFireMarkers(tenant: string, key: string): Promise<number> {
  * The existence probe the deployment injects — the same question the composition root's
  * `cronTenantExists` asks (an org row that is not soft-deleted). Counted so the suite can prove it is
  * asked per firing rather than cached.
+ *
+ * It answers about the tenant the SCHEDULER hands it per firing, exactly as the composition root's
+ * wiring does; closing over a tenant here would let the suite pass while the scheduler asked about
+ * something else entirely.
  */
-function tenantExistsProbe(tenantId: string): () => Promise<boolean> {
-  return async () => {
+function tenantExistsProbe(): (tenantId: string) => Promise<boolean> {
+  return async (tenantId: string) => {
     probeCalls += 1;
     const rows = await db.$client.unsafe(
       'SELECT 1 FROM orgs WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
@@ -142,7 +146,7 @@ function makeScheduler(tenantId: string): DbosCronScheduler {
     // the deps interface requires them.
     productTables: new Map<string, PgTable>(),
     invokeTriggerHandler,
-    tenantExists: tenantExistsProbe(tenantId),
+    tenantExists: tenantExistsProbe(),
     logger: { warn: (m: string) => logged.push(m) },
   });
 }
@@ -215,7 +219,7 @@ describe.skipIf(!hasDb)('cron firing under a LATE-BOUND deployment tenant', () =
     expect(line).toContain(LATE_TENANT);
   });
 
-  it('the SAME instant fires once the org appears — no re-wiring, no restart', async () => {
+  it('an EXPLICIT re-fire of the same instant dispatches once the org appears — no re-wiring, no restart', async () => {
     const scheduler = makeScheduler(LATE_TENANT);
     const instant = new Date('2026-06-24T03:00:00.000Z');
     const key = firingKey('nightly-digest', instant);
@@ -252,6 +256,31 @@ describe.skipIf(!hasDb)('cron firing under a LATE-BOUND deployment tenant', () =
     expect(stub.enqueued).toHaveLength(0);
     expect(await countFireMarkers(LATE_TENANT, firingKey('kick-off', instant))).toBe(0);
     expect(logged).toHaveLength(1);
+  });
+
+  it('an org SOFT-DELETED while the deployment runs stops firing at the next instant', async () => {
+    // The mirror image of late binding, and a claim the changelog makes: `cronTenantExists` treats a
+    // tombstoned org as absent, so the same per-firing gate that lets a new org start firing also
+    // stops a tombstoned one — without a restart, and without the suite ever re-wiring the scheduler.
+    const scheduler = makeScheduler(PRESENT_TENANT);
+    const before = new Date('2026-06-25T03:00:00.000Z');
+    const after = new Date('2026-06-25T04:00:00.000Z');
+
+    // Still live: it fires.
+    expect(await scheduler.fireNow('nightly-digest', before)).toBe(true);
+    expect(stub.enqueued).toHaveLength(1);
+
+    await db.$client.unsafe('UPDATE orgs SET deleted_at = now() WHERE id = $1', [PRESENT_TENANT]);
+
+    // Tombstoned: the very next instant is skipped, dispatches nothing and writes no marker.
+    expect(await scheduler.fireNow('nightly-digest', after)).toBe(false);
+    expect(stub.enqueued).toHaveLength(1);
+    expect(await countFireMarkers(PRESENT_TENANT, firingKey('nightly-digest', after))).toBe(0);
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain(PRESENT_TENANT);
+
+    // Restore, so the ordering of this suite's cases stays irrelevant.
+    await db.$client.unsafe('UPDATE orgs SET deleted_at = NULL WHERE id = $1', [PRESENT_TENANT]);
   });
 
   it('FAIL-THE-FIX CONTROL: with the org present the fire dispatches normally and logs nothing', async () => {
