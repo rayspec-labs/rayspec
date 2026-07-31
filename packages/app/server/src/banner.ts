@@ -61,6 +61,7 @@ export function bootBanner(server: BootedServer, base: string): string {
   lines.push('    POST /v1/auth/register · POST /v1/auth/login · GET /v1/auth/me');
   lines.push('    POST /v1/orgs · POST /v1/orgs/{id}/switch · POST /v1/orgs/{id}/api-keys');
   lines.push('    POST /v1/agents/{id}/runs (JSON or SSE) · GET /v1/runs/{id} · /events');
+  lines.push('    POST /v1/runs/{id}/cancel');
 
   if (server.declaredAgents.length > 0) {
     lines.push('');

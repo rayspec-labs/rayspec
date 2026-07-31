@@ -34,6 +34,13 @@
  * The neutral error class for a failed run. NEUTRAL platform vocabulary — adapters map their SDK
  * error shape into it (no LCD collapse). `internal` is the fail-closed default for a genuinely
  * unclassifiable error (never a mis-tag).
+ *
+ * `cancelled` is the one member NO adapter maps into and `classifyUpstreamError` never produces: it
+ * is a PLATFORM-side outcome (the run was ended on demand through the run surface), not an upstream
+ * classification, so it is set explicitly where the cancellation is recorded — the same way run-core
+ * sets `internal` for a cross-tenant replay miss rather than fabricating an upstream class. It IS a
+ * member of the union because the run read path reports a stored class only when it is one, and a
+ * caller that ends a run must be able to tell that outcome apart from an unclassified failure.
  */
 export type ErrorClass =
   | 'rate_limited' // an upstream 429 / throttle (a Retry-After is captured when present)
@@ -41,6 +48,7 @@ export type ErrorClass =
   | 'upstream_4xx' // an upstream 4xx other than 429 (bad request / not found / unauthorized)
   | 'timeout' // a request/loop timeout (in-request withTimeout, or an SDK tool/loop timeout)
   | 'model_refusal' // the model refused to produce output (a safety/content decline, not an error)
+  | 'cancelled' // the run was ended on demand through the run surface (never an upstream failure)
   | 'internal'; // unclassified / adapter-internal (the fail-closed default)
 
 /** The closed set of neutral error-class values, for runtime validation (parity gate, etc.). */
@@ -50,6 +58,7 @@ export const ERROR_CLASSES: readonly ErrorClass[] = [
   'upstream_4xx',
   'timeout',
   'model_refusal',
+  'cancelled',
   'internal',
 ] as const;
 

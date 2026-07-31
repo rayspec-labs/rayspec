@@ -63,7 +63,7 @@ import type {
   EnqueueResult,
   RunJob,
 } from '@rayspec/platform';
-import { isRunTainted, runAgent } from '@rayspec/platform';
+import { isRunCancelled, isRunTainted, recordRunCancelled, runAgent } from '@rayspec/platform';
 import { eq } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
@@ -242,6 +242,35 @@ export async function readTaintWithBoundedRetry(tdb: TenantDb, runId: string): P
 }
 
 /**
+ * Read whether the run was CANCELLED, retrying a transient DB read error under the SAME bounded-read
+ * policy as {@link readTaintWithBoundedRetry} (the `TAINT_READ_*` constants are that shared policy).
+ * Returns the boolean on a SUCCESSFUL read (true ⇒ do not execute this run at all).
+ *
+ * SAFETY DIRECTION — the same one the taint read takes, for the same reason: it RETHROWS the ORIGINAL
+ * DB error when every attempt fails, so a run is NEVER dispatched off an unresolved cancellation read.
+ * A cancelled run that executed anyway would burn a model call the caller explicitly ended (and, with a
+ * non-idempotent tool, fire a side effect); a momentary DB blip surfacing as a diagnosable terminal step
+ * error is the cheaper failure. The retries are what keep that blip from dead-lettering a healthy run.
+ */
+export async function readCancelledWithBoundedRetry(
+  tdb: TenantDb,
+  runId: string,
+): Promise<boolean> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= TAINT_READ_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await isRunCancelled(tdb, runId);
+    } catch (e) {
+      lastErr = e;
+      if (attempt < TAINT_READ_MAX_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, TAINT_READ_BACKOFF_MS * 2 ** (attempt - 1)));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * The terminal-SUCCESS value of the `runs` header `status` column — the `RunResult.status` success
  * literal ('completed', verified doc-first against `@rayspec/core`'s `RunResult = z.object({ status:
  * z.enum(['completed','error']) … })`), persisted VERBATIM by run-core's header upsert
@@ -343,6 +372,28 @@ export class DbosDurableExecutor implements DurableExecutor {
       async () => {
         const tdb = forTenant(this.#deps.db, job.tenantId);
 
+        // ── Cancellation: a run that was ended is never executed, and never RE-executed ────────
+        // Read FIRST, before anything else this body does. The engine's own cancellation ends a job
+        // it has not dequeued, but it is not the whole guarantee: OUR marker is authoritative for the
+        // same reason the started-once guard is (the engine memoizes step OUTPUTS, not our Drizzle
+        // writes), and it is what a RECOVERY re-dispatch — which re-invokes this body from the start —
+        // consults. A cancelled run completes the step as a NO-OP: its terminal outcome (the neutral
+        // `cancelled` class) is journaled by the cancel surface for a run that had not started, and by
+        // the side that ended for a run that was already executing when it was ended — see the rollback
+        // catch below. Failing the workflow here would add an engine-level error on top of a run that
+        // is already accounted for.
+        if (await readCancelledWithBoundedRetry(tdb, job.runId)) {
+          // Record before returning. `recordRunCancelled` is idempotent and guarded on the run not
+          // already being terminal, so for the ordinary case — a run cancelled before it started, whose
+          // outcome the cancel surface already wrote — this reads the header, sees a terminal status and
+          // writes nothing. It earns its place in the branch a RECOVERY re-dispatch takes: a run
+          // cancelled WHILE EXECUTING whose worker died before it could unwind was recorded by neither
+          // side (the cancel surface gave up on the header row the run was holding), and without this
+          // the header would stay non-terminal for good while the caller had been told the run ended.
+          await recordRunCancelled(tdb, job.runId);
+          return;
+        }
+
         // ── Resolve the run FIRST (before the marker) ─────────────────────────────────────────
         // resolveRun reads the agent definition LIVE (no serialized object graph). It runs BEFORE
         // the started-once reserve on purpose (fix D): a transient resolve failure (e.g. the agent
@@ -427,19 +478,46 @@ export class DbosDurableExecutor implements DurableExecutor {
         // run_events / run header / conversation under this runId, tenant-scoped — UNCHANGED. Build
         // the run's tools from the SAME transactional handle (prefer the tenant-bound factory, like
         // the sync run surface) so a tool handler's HandlerDb shares the GUC transaction.
-        await tdb.transaction(async (txTenant) => {
-          const tools = resolved.toolFactory ? resolved.toolFactory(txTenant) : resolved.tools;
-          await runAgent(txTenant, resolved.backend, effectiveSpec, {
-            runId: job.runId,
-            taintDb,
-            ...(tools ? { tools } : {}),
-            // Output persistence: when the job carries `persistTo`, write the run's validated output
-            // into the resolved store (exactly-once — the header completing-transition gate makes a
-            // recovery re-dispatch of an already-completed run a NO second write).
-            ...(job.persistTo !== undefined ? { persistTo: job.persistTo } : {}),
-            ...(resolved.productTables ? { productTables: resolved.productTables } : {}),
+        try {
+          await tdb.transaction(async (txTenant) => {
+            const tools = resolved.toolFactory ? resolved.toolFactory(txTenant) : resolved.tools;
+            await runAgent(txTenant, resolved.backend, effectiveSpec, {
+              runId: job.runId,
+              taintDb,
+              ...(tools ? { tools } : {}),
+              // Output persistence: when the job carries `persistTo`, write the run's validated output
+              // into the resolved store (exactly-once — the header completing-transition gate makes a
+              // recovery re-dispatch of an already-completed run a NO second write).
+              ...(job.persistTo !== undefined ? { persistTo: job.persistTo } : {}),
+              ...(resolved.productTables ? { productTables: resolved.productTables } : {}),
+            });
           });
-        });
+        } catch (err) {
+          // ── A CANCELLED run that ends by REJECTING is still recorded terminal ──────────────────
+          // A run that produces a result records the cancellation itself, from inside the transaction
+          // it is holding the header row with (run-core consults the marker before its completing
+          // write). A run that ends by THROWING cannot: the rejection rolls this transaction back, so
+          // anything run-core wrote — including that record — is gone with it. And the cancel surface
+          // may well have given up on the header row while the run still held it (it is bounded on
+          // purpose, so a cancel never waits out the run it is ending). Without this, such a run has
+          // no terminal record at all: its header keeps the pre-run status forever and nothing says
+          // it was ended.
+          //
+          // So record it HERE — after the rollback, on the body's own non-transactional handle (the
+          // same autonomy the taint marker relies on), where the row is free. The write is the same
+          // guarded, idempotent transition the cancel surface makes, so a cancellation already
+          // recorded stays as it is. The step then completes as a NO-OP for the same reason a
+          // dispatch of an already-cancelled run does: the run is fully accounted for, and failing
+          // the workflow would add an engine-level error on top of a recorded outcome.
+          //
+          // Only a CANCELLED run takes this path. A run that failed on its own rethrows unchanged,
+          // and so does one whose cancellation read cannot be resolved — an unreadable marker must
+          // never swallow a run's real failure.
+          const cancelled = await readCancelledWithBoundedRetry(tdb, job.runId).catch(() => false);
+          if (!cancelled) throw err;
+          await recordRunCancelled(tdb, job.runId);
+          return;
+        }
       },
       // The step is NOT retried in-step (default retriesAllowed:false) — no in-step auto-retry.
       { name: 'runAgent', retriesAllowed: false },
@@ -513,6 +591,26 @@ export class DbosDurableExecutor implements DurableExecutor {
     if (!this.#started) return 'unknown';
     const status = await DBOS.getWorkflowStatus(jobId);
     return toNeutralStatus(status?.status);
+  }
+
+  /**
+   * End a job through DBOS. `cancelWorkflow` flips an ENQUEUED workflow to CANCELLED so the queue never
+   * dequeues it — the clean, real case: the run is stopped before it starts.
+   *
+   * WHAT IT DOES NOT DO, stated exactly (verified doc-first against the installed 4.21.6: "If the
+   * workflow is currently running, `DBOSWorkflowCancelledError` will be thrown from its next DBOS
+   * call"): DBOS cancellation is COOPERATIVE, and our workflow runs the WHOLE `runAgent` inside ONE
+   * step, so a job already executing has no next DBOS call to raise at until that step ends. Cancelling
+   * it therefore changes its recorded status and nothing more — the run's own AbortSignal is what stops
+   * the work in flight. Mirrors `enqueue` in requiring a launched engine.
+   */
+  async cancel(jobId: string): Promise<void> {
+    if (!this.#started) {
+      throw new Error(
+        'DbosDurableExecutor.cancel called before start() — launch the engine first.',
+      );
+    }
+    await DBOS.cancelWorkflow(jobId);
   }
 
   async shutdown(): Promise<void> {

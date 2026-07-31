@@ -5,7 +5,9 @@
  * against the INSTALLED .d.ts under node_modules, doc-first).
  *
  * Verified API surface used here (file:symbol it was read from):
- *   - `run(agent, input, { stream:false, maxTurns })` -> RunResult            (run.d.ts / index)
+ *   - `run(agent, input, { stream:false, maxTurns, signal? })` -> RunResult   (run.d.ts / index)
+ *       signal: SharedRunOptions.signal?: AbortSignal (run.d.ts) — the run's cancellation reaches the
+ *       model call itself, so ending a run frees the provider work, not only the caller.
  *   - RunResult.finalOutput        result.d.ts: `get finalOutput()`            (string | parsed)
  *   - RunResult.history            result.d.ts: `get history(): AgentInputItem[]`
  *                                  (= "replay-ready next-turn input built from input + newItems")
@@ -73,10 +75,20 @@ import { classifyUpstreamError, costUsd, hashJson } from '@rayspec/core';
 import { Agent, run, setDefaultOpenAIClient, setDefaultOpenAIKey, tool } from '@openai/agents';
 import OpenAI from 'openai';
 
-/** Pin the non-streaming run() overload so the result type is RunResult, not StreamedRunResult. */
+/**
+ * Pin the non-streaming run() overload so the result type is RunResult, not StreamedRunResult.
+ *
+ * `signal` is a real member of the SDK's shared run options (`SharedRunOptions.signal?: AbortSignal`,
+ * @openai/agents-core 0.11.8 run.d.ts) — the SAME overload this pins — so a cancelled run's abort
+ * reaches the model call itself. It is spread CONDITIONALLY so a RunContext carrying NO signal emits
+ * the object it always emitted rather than one with an explicit `signal: undefined`; adapter.integration
+ * .test.ts pins both option bags exactly (the key set as well as the values). Every platform path DOES
+ * supply one — run-core arms a run's controller unconditionally and always sets `ctx.signal` — so on a
+ * real run the bag is `{stream, maxTurns, signal}`; the unset case is a directly-built RunContext.
+ */
 // biome-ignore lint/suspicious/noExplicitAny: matches the SDK's run() signature (Agent<any, any>).
-function runNonStream(agent: Agent<any, any>, input: string, maxTurns: number) {
-  return run(agent, input, { stream: false, maxTurns });
+function runNonStream(agent: Agent<any, any>, input: string, maxTurns: number, signal?: AbortSignal) {
+  return run(agent, input, { stream: false, maxTurns, ...(signal ? { signal } : {}) });
 }
 
 /**
@@ -225,7 +237,9 @@ export class OpenAIAdapter implements Backend {
     const startedAt = Date.now();
     let result: Awaited<ReturnType<typeof runNonStream>>;
     try {
-      result = await runNonStream(agent, spec.input, spec.maxTurns);
+      // The run's cancellation signal (when the platform supplied one) goes straight into the SDK call,
+      // so ending a run aborts the model request rather than leaving it to finish unread.
+      result = await runNonStream(agent, spec.input, spec.maxTurns, ctx.signal);
     } catch (err) {
       // ---- ERROR-PATH RunResult — identical shape, error set ----
       // Classify the upstream cause into the neutral ErrorClass (preserving the real

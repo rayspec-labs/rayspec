@@ -88,6 +88,7 @@ export { migrationsDir } from './migrations.js';
 export {
   foreignKeyViolationConstraintName,
   isForeignKeyViolation,
+  isLockTimeout,
   isUniqueViolation,
   uniqueViolationConstraintName,
 } from './pg-errors.js';

@@ -36,6 +36,20 @@ export function isForeignKeyViolation(err: unknown): boolean {
 }
 
 /**
+ * True if `err` (or a bounded `.cause`-chain ancestor) is a Postgres LOCK TIMEOUT (SQLSTATE 55P03,
+ * `lock_not_available`) — the statement waited longer than the transaction's `lock_timeout` for a row
+ * another transaction holds and was aborted rather than left waiting.
+ *
+ * Detection ONLY, and it is a distinct outcome from a failure: the statement did not run, nothing was
+ * written, and the caller decides what a contended row means for it (typically: leave the row to the
+ * transaction that holds it). Like every other detector here the whole transaction is already aborted,
+ * so the caller issues NO further in-transaction statement.
+ */
+export function isLockTimeout(err: unknown): boolean {
+  return pgErrorNode(err, '55P03') !== undefined;
+}
+
+/**
  * The Postgres constraint name a 23503 names (product FKs are `<table>_<col>_<parent>_<refcol>_fk`), or
  * `undefined` when the error is not a 23503 / carries no constraint name.
  *

@@ -427,6 +427,7 @@ again worth anything?**
 | `timeout`       | `504` | Transient — the request or the agent loop timed out.   |
 | `upstream_4xx`  | `200` | Terminal — upstream rejected the call (e.g. a bad key). |
 | `model_refusal` | `200` | Terminal — the model declined to answer.               |
+| `cancelled`     | `200` | Terminal — the run was ended on demand (see below).    |
 | `internal`      | `200` | Terminal — unclassified; the fail-closed default.      |
 
 A **transient** class may well succeed on the next attempt, so it gets a real
@@ -546,6 +547,85 @@ Only the terminal values mean the run is finished, so test a status for
 terminality rather than for the header merely being there: a run that throws
 reaches no completing write, and nothing reaps the non-terminal header it leaves
 behind.
+
+### Cancelling a run
+
+**`POST /v1/runs/{id}/cancel`** ends a run on demand. It is tenant-scoped like every
+other run route: an id belonging to another tenant, or no run at all, answers
+**`404`** and changes nothing. It requires the same **`agent:run`** permission that
+starting a run does — a caller who may start a run may stop one.
+
+A cancelled run is **terminal as `error`**, with the neutral **`errorClass:
+"cancelled"`** naming why. That outcome is journaled like any other outcome, so
+`GET /v1/runs/{id}` reports it, and it is a *terminal* class: a same-key retry
+**replays** it rather than re-running the agent. Re-running a run someone
+deliberately stopped is never what they asked for — and for a run that already fired
+a non-idempotent tool it would fire that side effect a second time.
+
+The response is `200` with:
+
+```json
+{ "runId": "…", "cancelled": true, "status": "error", "signalled": true }
+```
+
+`cancelled` says whether **this call** made the run terminal. It is `false` when the run
+had **already finished** — its own outcome stands and nothing is overwritten, which also
+makes a repeated cancel harmless rather than an error — and `false` when the run was still
+**holding its own record**: an executing run owns its header row until it ends, so there
+it is the run that writes the cancellation down (see below). `status` is then the status
+the run really has. `signalled` says whether a run executing **in this process** was
+reached.
+
+**What cancelling actually stops, precisely.** Three things happen, and they cover
+different runs:
+
+- a run that has **not started** is recorded cancelled and never dispatched — the
+  record is what a worker consults, so neither a first dispatch nor a recovery
+  re-dispatch can execute it;
+- a run **executing in this process** is handed an abort signal, which the backend
+  adapter passes to its SDK call, child process, or session — this is what frees the
+  work rather than only the caller waiting on it. The signal goes out before anything
+  else is written, so it is never delayed by the run it is ending;
+- a run **executing on another worker process** gets no signal. The durable engine's own
+  cancellation is cooperative and the whole run occupies one engine step, so the model
+  call in flight is not interrupted: the run stops when it stops. A run that reaches its
+  own end writes the cancellation as its outcome rather than its own, and it is never
+  dispatched again.
+
+The cancel request itself never waits for the run it ends. An executing run holds its
+own header row for as long as it runs, so the terminal record is written by whichever
+side can write it: the cancel surface when the run is not holding it, and the run's own
+side when it is — from inside the run when it produces a result, and from the worker
+once the run's transaction has rolled back when it ends by failing instead (a failing
+run takes everything it wrote down with it, including a record made inside it).
+`cancelled: false` with a non-terminal `status` means that second case — the run was
+ended, and its own side records it when it stops: from inside the run when it produces a
+result, from the worker when it ends by failing, and from the next dispatch attempt if
+the process died before either of those could. Should the process running it die after
+the engine has already ended the job, no attempt follows and the header keeps the
+non-terminal status it had; the run is still never executed again, and re-reading it
+reports the status it really has.
+
+**Which runs can you name?** Cancellation is by run id, and the only call that hands
+an id back **before** the run ends is an asynchronous one — `async: true` answers
+`202` with the `runId` immediately. A synchronous run does not return its id until it
+completes, and without an `Idempotency-Key` the run surface never holds it at all
+(the id is minted further in). So in practice this surface cancels **asynchronous**
+runs. A synchronous request that *is* holding a run when it gets cancelled answers
+**`409 CONFLICT`**; the run's terminal outcome is durable and readable at
+`GET /v1/runs/{id}` either way.
+
+How well the work itself stops depends on the backend:
+
+| Backend     | What cancelling does to the work in flight                                  |
+| ----------- | --------------------------------------------------------------------------- |
+| `openai`    | The signal is passed into the SDK run call, so the model request is aborted. |
+| `anthropic` | The signal aborts the controller the SDK already holds; the `claude` child is torn down. |
+| `codex`     | The signal aborts the streamed turn and the spawned child; the tool bridge closes. |
+| `pi`        | Weakest: the prompt call takes no signal, so the session's `abort()` is brought forward — the underlying model request is never handed one. |
+
+In every case the platform stops waiting immediately; the table is about the provider
+side, which is the part no platform can promise on an SDK's behalf.
 
 ## `agents`
 

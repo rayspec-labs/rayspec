@@ -100,7 +100,7 @@ import type {
   ToolDispatchResult,
   Usage,
 } from '@rayspec/core';
-import { classifyUpstreamError, hashJson } from '@rayspec/core';
+import { classifyUpstreamError, hashJson, linkAbort } from '@rayspec/core';
 import { z } from 'zod';
 
 /** The single in-proc MCP server name; tools are exposed to the model as `mcp__<NAME>__<tool>`. */
@@ -336,6 +336,13 @@ export class AnthropicAdapter implements Backend {
     // plain-string prompt, abortController — not Query.interrupt() — is the documented cancellation
     // mechanism.)
     const abortController = new AbortController();
+    // CANCELLATION (best-effort, and this backend can honour it well): the run's signal is LINKED to
+    // the controller the SDK already receives, so ending a run tears the `claude` child down at once
+    // instead of waiting for the run to finish. What "best-effort" means concretely here: the SDK's
+    // documented cancellation for a plain-string prompt IS this controller, so the child is stopped —
+    // but work the child had already committed upstream is not undone, and a link cannot exist before
+    // the controller does, so a run cancelled during setup is caught by the platform race, not here.
+    const unlinkCancel = linkAbort(ctx.signal, abortController);
 
     // ---- in-proc MCP tool bridge (BRIDGED, not fail-closed) -----------------------------------
     // Register the neutral tools as an IN-PROCESS MCP server whose handler runs in THIS Node
@@ -513,6 +520,7 @@ export class AnthropicAdapter implements Backend {
       errorRetryAfter = classified.retryAfter;
     } finally {
       // OWN + ABORT the child no matter what — never leak the spawned `claude` process.
+      unlinkCancel();
       abortController.abort();
     }
 

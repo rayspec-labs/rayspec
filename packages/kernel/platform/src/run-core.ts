@@ -42,6 +42,7 @@ import { and, desc, eq, ne, sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import {
   RunAbandonedError,
+  type RunAbandonReason,
   RunBoundTimeoutError,
   resolveRunMaxMs,
   withRunBound,
@@ -50,6 +51,13 @@ import { makeDispatchTool } from './dispatch.js';
 import { EventPipeline } from './event-pipeline.js';
 import { makeHandlerDb } from './handlers/store-facade.js';
 import { rehydrateConversation } from './rehydrate.js';
+import {
+  armRunCancellation,
+  isRunCancelled,
+  RunCancelledError,
+  recordRunCancelled,
+  withRunCancel,
+} from './run-cancel.js';
 import { markRunHeaderRunning } from './run-header.js';
 import { markRunTainted } from './run-taint.js';
 
@@ -115,6 +123,17 @@ export interface RunOptions {
    * like the api/handler store surface. Absent ⇒ `persistTo` is inert (nothing is persisted).
    */
   productTables?: ReadonlyMap<string, PgTable>;
+  /**
+   * A caller-supplied cancellation signal for this run. Aborting it ends the run: run-core stops
+   * waiting for the backend, the run's seams go inert (exactly as they do when the wall-clock bound
+   * fires), and `runAgent` rejects with a `RunCancelledError`.
+   *
+   * It is LINKED into the run's own controller rather than used directly, so this seam and the run
+   * surface's cancel-by-id are the same one mechanism. Absent ⇒ the run is still cancellable by id
+   * (run-core always arms a controller and threads it onto `ctx.signal`), and a run nobody cancels
+   * behaves exactly as it did before this option existed.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -433,19 +452,20 @@ export async function runAgent(
   const runAt = new Date().toISOString();
 
   // ── ABANDONMENT ────────────────────────────────────────────────────────────────────────────────
-  // Set when the per-run wall-clock bound below fires (RAYSPEC_AGENT_RUN_MAX_MS, off unless set). The
+  // Set when the per-run wall-clock bound below fires (RAYSPEC_AGENT_RUN_MAX_MS, off unless set), and
+  // when the run is CANCELLED — the two ways run-core gives up on a run it is still waiting for. The
   // backend call is then STILL IN FLIGHT while runAgent has already rejected, so every seam the
   // RunContext handed it stays callable: the event sink, the journal sink, the tool dispatcher and
   // the transcript rehydrate. All of them go through THIS run's `tdb`, and on the durable path that
   // handle is the run's transaction, which is rolled back the moment runAgent rejects — a statement
   // issued through it afterwards runs on a connection that has already gone back to the pool. So a
   // call that arrives once the flag is set is refused: the sink drops the event, the journal and the
-  // rehydrate reject, and a tool dispatch is refused CLOSED (the handler does not run). Without the
-  // bound configured the flag is never set and every seam behaves as it did before it existed.
-  let abandoned = false;
-  /** Refuse a seam the abandoned call reaches for after the bound fired (never on a live run). */
+  // rehydrate reject, and a tool dispatch is refused CLOSED (the handler does not run). With neither
+  // the bound configured nor a cancellation the flag is never set and every seam behaves as before.
+  let abandoned: RunAbandonReason | undefined;
+  /** Refuse a seam the abandoned call reaches for after we gave up (never on a live run). */
   const refuseIfAbandoned = (seam: string): void => {
-    if (abandoned) throw new RunAbandonedError(runId, seam);
+    if (abandoned) throw new RunAbandonedError(runId, seam, abandoned);
   };
 
   const journalSink = makeJournalSink(tdb, runId, backend.id, replay, {
@@ -510,7 +530,7 @@ export async function runAgent(
   // pipeline (persist-before-flush). We AWAIT emit so the producer feels back-pressure when the queue
   // is full of non-droppable frames (the back-pressure contract).
   const wrappedOnEvent = (event: NeutralEventInput | NeutralEvent): Promise<void> =>
-    abandoned ? Promise.resolve() : pipeline.emit(stampSeq(event));
+    abandoned !== undefined ? Promise.resolve() : pipeline.emit(stampSeq(event));
 
   // Resolve the run's REAL authMode ONCE, here, and attribute BOTH
   // the central dispatchTool's `tool` steps AND (via ctx.authMode) the adapter's `llm` steps to it
@@ -572,15 +592,21 @@ export async function runAgent(
     dispatch === undefined
       ? undefined
       : (name: string, rawArgs: unknown, toolCallId?: string): Promise<ToolDispatchResult> => {
-          if (!abandoned) return dispatch(name, rawArgs, toolCallId);
+          if (abandoned === undefined) return dispatch(name, rawArgs, toolCallId);
           return Promise.resolve({
             kind: 'tool_error',
             name,
             // Same per-call id rule the dispatcher uses: never collide two calls onto one id.
             toolCallId: toolCallId && toolCallId.length > 0 ? toolCallId : randomUUID(),
-            message: new RunAbandonedError(runId, `tool '${name}'`).message,
+            message: new RunAbandonedError(runId, `tool '${name}'`, abandoned).message,
           });
         };
+  // ── CANCELLATION ───────────────────────────────────────────────────────────────────────────────
+  // Arm this run's AbortController and REGISTER it under `runId`, so the run surface can end this run
+  // by naming it. A caller-supplied `opts.signal` is LINKED into the same controller, so the two ways
+  // in (by id, and by a signal the caller already holds) are one mechanism. Released the moment the
+  // wait for the backend ends, below — a run that has finished is no longer cancellable.
+  const cancellation = armRunCancellation(runId, opts.signal);
   const ctx: RunContext = {
     runId,
     tenantId: tdb.tenantId,
@@ -597,11 +623,16 @@ export async function runAgent(
     // transcript from the ConversationStore via the trust-boundary read-path (tenant-scoped, per-part
     // re-validation) WITHOUT calling the model — never from the SDK RunState. Refused once the run is
     // abandoned: it reads through the same `tdb`, and nothing bound to that handle may issue a
-    // statement after the bound fired.
+    // statement after the run was given up on.
     rehydrate: async () => {
       refuseIfAbandoned('rehydrate');
       return rehydrateConversation(tdb, runId);
     },
+    // The run's cancellation signal: an adapter that can hand a signal to its SDK (or abort the child
+    // process / session it owns) wires this one to it, so ending a run frees the provider work and not
+    // only the caller waiting on it. run-core races the same signal below, so a backend that cannot
+    // honour it still stops holding this call.
+    signal: cancellation.signal,
   };
   // The run's wall-clock bound, read once per run. Undefined (the default, and what an unset or
   // unusable RAYSPEC_AGENT_RUN_MAX_MS yields) means run-core waits for the backend as long as it
@@ -619,6 +650,9 @@ export async function runAgent(
   // any drain rejection is swallowed (we never mask the real failure, but we DO wait for quiescence).
   let result: RunResult;
   try {
+    // A run whose signal has ALREADY aborted (a caller that passed a spent signal, or a cancellation
+    // that landed while this run was being set up) never calls the backend at all.
+    if (cancellation.signal.aborted) throw new RunCancelledError(runId);
     // The EFFECTIVE run spec must carry the run's RESOLVED per-run tool specs so a REAL model is
     // OFFERED the tools. A declared agent's `baseAgentSpec` sets `spec.tools: []` (its per-run tools
     // live only in the separate toolFactory → `opts.tools` → the RunContext above), so the spec the
@@ -633,21 +667,31 @@ export async function runAgent(
     // request and never answers keeps this call pending for the model client's whole retry window; on
     // the durable path that occupies a worker slot for all of it. The bound caps how long we WAIT: it
     // rejects with a RunBoundTimeoutError, which reaches the callers through the same path a backend
-    // that throws mid-run already takes. It does NOT cancel the call — run-core has no cancellation
-    // path — so the model request runs on until it settles by itself. With the variable unset this
-    // is the same bare `await` as before.
+    // that throws mid-run already takes. It is NOT a cancellation — nothing is asked to stop — so the
+    // model request runs on until it settles by itself. With the variable unset this is the same bare
+    // await of the backend call as before.
+    //
+    // CANCELLATION, by contrast, DOES ask: the run's signal is on `ctx.signal` (an adapter that can
+    // abort its SDK call does), and the race below stops run-core waiting the moment it fires. A run
+    // nobody cancels never aborts that signal, so this resolves with the backend's own answer exactly
+    // as it did before.
     const runCall = backend.run({ ...spec, tools: tools.map((t) => t.spec) }, ctx);
-    result = runMaxMs === undefined ? await runCall : await withRunBound(runCall, runMaxMs, runId);
+    const bounded = runMaxMs === undefined ? runCall : withRunBound(runCall, runMaxMs, runId);
+    result = await withRunCancel(bounded, cancellation.signal, runId);
   } catch (runErr) {
-    // The bound fired: the backend call is still in flight, so make the run's seams inert BEFORE
+    // We gave up while the backend call is still in flight, so make the run's seams inert BEFORE
     // draining — an abandoned call must not write run_events, must not journal a step and must not
     // fire a tool for a run we have given up on (see the ABANDONMENT block above for what each seam
-    // then does). `withRunBound` already subscribed to the call, so its eventual rejection is handled
-    // and cannot surface as an unhandled rejection.
-    if (runErr instanceof RunBoundTimeoutError) abandoned = true;
+    // then does). `withRunBound` / `withRunCancel` already subscribed to the call, so its eventual
+    // rejection is handled and cannot surface as an unhandled rejection.
+    if (runErr instanceof RunBoundTimeoutError) abandoned = 'bound';
+    else if (runErr instanceof RunCancelledError) abandoned = 'cancelled';
     await pipeline.drain().catch(() => {});
+    cancellation.dispose();
     throw runErr;
   }
+  // The wait is over — the run can no longer be stopped, so release its registration.
+  cancellation.dispose();
   // Flush the tail so EVERY emitted event is durably in run_events BEFORE we return the RunResult.
   // Rejects (fail-closed) if a persist failed — the caller learns the durable log is incomplete.
   await pipeline.drain();
@@ -656,6 +700,25 @@ export async function runAgent(
   // backend that forgets to set `output`/`error` fails LOUDLY here (presence, not truthiness —
   // null is a valid value) rather than silently weakening the "identical RunResult shape" claim.
   assertRunResultKeyPresence(result);
+
+  // ── A RECORDED CANCELLATION IS AUTHORITATIVE ──────────────────────────────────────────────────
+  // A run can be ended on demand WHILE it executes, and this run got far enough to produce a result
+  // anyway: the signal reached it too late (the post-backend tail), or it is executing in a process the
+  // signal cannot reach at all. Its completing upsert would then overwrite the cancellation with its own
+  // outcome — `setWhere ne(status,'completed')` is true for the `error` header a cancellation leaves —
+  // so the run would read back as if nobody had ended it, and with `persistTo` configured it would
+  // commit its output as well. So the completing write consults the cancellation record FIRST: a
+  // cancelled run records THE CANCELLATION as its outcome and commits nothing else. It is also how a
+  // cancellation the cancel surface could not write gets written for a run that PRODUCED a result: this
+  // is the only path that can reach a header the durable path's own transaction holds (a run that ends
+  // by THROWING rolls this transaction back instead, so the durable worker records it after the
+  // rollback — see run-cancel.ts). The write is the same guarded, idempotent transition the cancel
+  // surface makes — `lockWaitMs: 0` because THIS call already holds the row's lock and can never wait
+  // on it — so exactly one of them ever counts.
+  if (await isRunCancelled(tdb, runId)) {
+    await recordRunCancelled(tdb, runId, { lockWaitMs: 0 });
+    return result;
+  }
 
   // RUN→tenant cost roll-up: aggregate the run's per-step ledger
   // (tenant-scoped via TenantDb, not the adapter's RunResult.costUsd) so the run header's cost is the

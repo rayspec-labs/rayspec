@@ -3,7 +3,7 @@
  *
  * Mirrors packages/platform/src/test-support/test-db.ts but in an ISOLATED schema so the two
  * suites do not collide when turbo runs them in parallel against the same DATABASE_URL. Recreates
- * the three run tables in their CURRENT shape (tenant_id uuid + orgs FK + the UNIQUE
+ * the run tables in their CURRENT shape (tenant_id uuid + orgs FK + the UNIQUE
  * (tenant_id, run_id, idempotency_key) replay index + the ConvPart columns).
  *
  * Excluded from the package build (test support, not shipped code). The canonical schema is
@@ -69,6 +69,17 @@ export async function resetRunSchema(db: ReturnType<typeof makeTestDb>): Promise
     CREATE INDEX journal_run_idx ON journal_steps (run_id);
     CREATE INDEX journal_tenant_idx ON journal_steps (tenant_id);
     CREATE UNIQUE INDEX journal_idem_idx ON journal_steps (tenant_id, run_id, idempotency_key);
+
+    -- idempotency_keys: the tenant-scoped replay/dedup store (mirrors schema.ts). run-core reads the
+    -- per-run cancellation marker here before it writes a run's completing header, so this core table
+    -- must exist for a run to complete — a real deployment always has it.
+    CREATE TABLE idempotency_keys (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+      scope text NOT NULL, idem_key text NOT NULL, body_hash text NOT NULL, snapshot jsonb NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE UNIQUE INDEX idem_tenant_scope_key_idx ON idempotency_keys (tenant_id, scope, idem_key);
 
     CREATE TABLE conversation_items (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

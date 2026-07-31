@@ -69,6 +69,8 @@ class CapturingExecutor implements DurableExecutor {
   async status(): Promise<'unknown'> {
     return 'unknown';
   }
+  /** The neutral cancel seam — inert here (this stub has no engine to end a job on). */
+  async cancel(): Promise<void> {}
   async start(): Promise<void> {}
   async shutdown(): Promise<void> {}
   identity(): DurableExecutorIdentity {

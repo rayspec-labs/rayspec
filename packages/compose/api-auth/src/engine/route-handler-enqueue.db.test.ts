@@ -58,6 +58,8 @@ class StubExecutor implements DurableExecutor {
   async status(jobId: string): Promise<'enqueued' | 'unknown'> {
     return this.enqueued.some((e) => e.job.runId === jobId) ? 'enqueued' : 'unknown';
   }
+  /** The neutral cancel seam — inert here (this stub has no engine to end a job on). */
+  async cancel(): Promise<void> {}
   async start(): Promise<void> {}
   async shutdown(): Promise<void> {}
   identity(): DurableExecutorIdentity {
