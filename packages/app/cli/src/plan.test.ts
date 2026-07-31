@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { scanMigrationSql } from '@rayspec/db';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { runDoctor } from './doctor.js';
 import { resolveGuardComparisonUrl, runPlan } from './plan.js';
 
 /** Repo root, relative to this test file (packages/cli/src → rayspec). */
@@ -1154,6 +1155,87 @@ contracts:
     const r = await runPlan(['boot-ok.yaml'], { shadowDatabaseUrl: undefined });
     expect(r.ok).toBe(true);
     expect(r.stores.map((s) => s.name)).toEqual(['notes']);
+  });
+});
+
+describe('plan — spec advisories (non-fatal document findings)', () => {
+  /**
+   * A backend doc whose `handlers[].module` is TypeScript source: it VALIDATES, but the production
+   * handler loader refuses it at boot, so the advisory pass flags "needs a build step before deploy".
+   * `plan` is the pre-deploy command — it must not certify such a document silently.
+   */
+  const TS_HANDLER_SPEC = `
+version: '1.0'
+metadata:
+  name: plan-advisory-handler
+handlers:
+  - { id: catalog_sync, module: handlers/lookup.ts, export: run, kind: tool }
+`;
+
+  /** A backend doc carrying a DIFFERENT advisory code, so the wiring is not one code's special case. */
+  const SOFT_DELETE_SPEC = `
+version: '1.0'
+metadata:
+  name: plan-advisory-softdelete
+stores:
+  - name: projects
+    softDelete: true
+    columns:
+      - { name: title, type: text }
+  - name: tasks
+    columns:
+      - { name: project_id, type: uuid }
+    foreignKeys:
+      - { column: project_id, references: projects, onDelete: restrict }
+`;
+
+  it('a TypeScript-handler document is planned ok AND its advisory is surfaced', async () => {
+    writeFileSync(join(dir, 'adv-handler.yaml'), TS_HANDLER_SPEC, 'utf8');
+    const r = await runPlan(['adv-handler.yaml'], { shadowDatabaseUrl: undefined });
+    // An advisory NEVER fails a plan — `ok` and `phase` are untouched by it.
+    expect(r.ok).toBe(true);
+    expect(r.phase).toBeUndefined();
+    expect(r.errors).toEqual([]);
+    expect(r.specWarnings?.map((w) => w.code)).toEqual(['typescript_handler_module']);
+    expect(r.specWarnings?.[0]?.path).toBe('handlers[0].module');
+  });
+
+  it('reports EXACTLY the advisories `doctor` reports for the same document', async () => {
+    writeFileSync(join(dir, 'adv-handler.yaml'), TS_HANDLER_SPEC, 'utf8');
+    const planned = await runPlan(['adv-handler.yaml'], { shadowDatabaseUrl: undefined });
+    const doctored = await runDoctor(['adv-handler.yaml']);
+    expect(doctored.warnings).toHaveLength(1); // the fixture is non-vacuous on doctor's side too
+    expect(planned.specWarnings).toEqual(doctored.warnings);
+  });
+
+  it('surfaces a store-level advisory too (not one warning code special-cased)', async () => {
+    writeFileSync(join(dir, 'adv-softdelete.yaml'), SOFT_DELETE_SPEC, 'utf8');
+    const r = await runPlan(['adv-softdelete.yaml'], { shadowDatabaseUrl: undefined });
+    expect(r.ok).toBe(true);
+    expect(r.specWarnings?.map((w) => w.code)).toContain('softdelete_fk_restrict');
+  });
+
+  it('carries a human-readable advisory summary beside the structured list', async () => {
+    writeFileSync(join(dir, 'adv-handler.yaml'), TS_HANDLER_SPEC, 'utf8');
+    const r = await runPlan(['adv-handler.yaml'], { shadowDatabaseUrl: undefined });
+    expect(r.specWarningSummary).toContain('typescript_handler_module');
+    expect(r.specWarningSummary).toContain('handlers[0].module');
+    expect(r.specWarningSummary).toContain('catalog_sync');
+  });
+
+  it('a clean document carries NO advisory — the additive field stays absent', async () => {
+    const r = await runPlan(['rayspec.yaml'], { shadowDatabaseUrl: undefined });
+    expect(r.ok).toBe(true);
+    expect(r.specWarnings).toBeUndefined();
+    expect(r.specWarningSummary).toBeUndefined();
+    expect(JSON.stringify(r)).not.toContain('"specWarnings"');
+  });
+
+  it('a product-profile document carries no advisory field (the pass is backend-profile only)', async () => {
+    writeFileSync(join(dir, 'adv-product.yaml'), SUPPORT_TRIAGE_YAML, 'utf8');
+    const r = await runPlan(['adv-product.yaml'], { shadowDatabaseUrl: undefined });
+    expect(r.ok).toBe(true);
+    expect(r.specWarnings).toBeUndefined();
   });
 });
 
