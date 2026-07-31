@@ -174,6 +174,47 @@ describe('buildDeclaredRoutesOpenApi — product-agnostic emission', () => {
     expect(Object.keys(props)).toContain('id');
   });
 
+  it('documents the declared-route throttle 429 on every route that mounts the Bearer chain', () => {
+    const doc = buildDeclaredRoutesOpenApi(richSpec());
+    // store (list + create), handler, stream ingest — all four kinds that mount the shared chain.
+    const throttled = [
+      doc.paths['/widgets'].get,
+      doc.paths['/widgets'].post,
+      doc.paths['/custom'].post,
+      doc.paths['/uploads/{key}'].post,
+    ];
+    for (const op of throttled) {
+      const throttle = op.responses['429'];
+      expect(throttle, `${op.operationId} documents no 429`).toBeDefined();
+      expect(throttle?.headers?.['Retry-After']).toBeDefined();
+      // It is the REQUEST throttle, not a run outcome: it fires before the route body.
+      expect(throttle?.description).toContain('BEFORE the route runs');
+    }
+    // The agent arm already documented a richer 429 covering the run-outcome meaning as well; the
+    // cross-cutting one must not overwrite it.
+    const agent = doc.paths['/widgets/{id}/run'].post.responses['429'];
+    expect(agent?.description).toContain('Idempotency-Key');
+  });
+
+  it('does NOT document the throttle 429 on a stream playback route (media-token chain, not the Bearer one)', () => {
+    const spec = specFromObject({
+      version: '1.0',
+      metadata: { name: 'playback-backend' },
+      handlers: [{ id: 'play_h', module: 'h.ts', export: 'play', kind: 'route' }],
+      api: [
+        {
+          method: 'GET',
+          path: '/media/{key}',
+          action: { kind: 'stream', handler: 'play_h', mode: 'playback' },
+        },
+      ],
+    });
+    const op = buildDeclaredRoutesOpenApi(spec).paths['/media/{key}'].get;
+    expect(op).toBeDefined();
+    // It never reaches the throttle — it is bounded by the per-user concurrent-stream limit instead.
+    expect(op.responses['429']).toBeUndefined();
+  });
+
   it('a {store} CREATE body is derived from the StoreSpec — business cols present, injected cols absent', () => {
     const doc = buildDeclaredRoutesOpenApi(richSpec());
     const schema = doc.paths['/widgets'].post.requestBody?.content['application/json'].schema as {

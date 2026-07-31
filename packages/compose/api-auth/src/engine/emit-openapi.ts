@@ -210,8 +210,45 @@ function operationId(method: string, path: string): string {
 /** A generic opaque-object schema for `{handler}`/`{stream}` routes (body is arbitrary product logic). */
 const OPAQUE_OBJECT: Record<string, unknown> = { type: 'object', additionalProperties: true };
 
+/**
+ * The declared-route request throttle's `429`. Every declared route that mounts the Bearer chain can
+ * answer it, so it is attached centrally rather than restated per action arm. It fires BEFORE the
+ * route runs, which is what distinguishes it from an `{agent}` route's run-outcome `429`; that arm
+ * documents its own richer `429` covering both meanings and keeps it.
+ */
+const THROTTLE_429: OpenApiResponse = {
+  description:
+    'Rate limited by the declared-route request throttle, which fires BEFORE the route runs (so ' +
+    'nothing was executed). The tier is chosen after the credential has been validated: a validated ' +
+    'principal is counted against a generous per-principal budget, an absent or invalid credential ' +
+    'against a strict one keyed on the client source. Each allowance is ONE budget for the whole ' +
+    'declared surface, not one per route. Retry advice is carried twice — a Retry-After header in ' +
+    'whole seconds and error.details.retryAfterMs in the body.',
+  headers: {
+    'Retry-After': {
+      description: 'Seconds to wait before retrying. Always present on a throttle 429.',
+      schema: { type: 'string' },
+    },
+  },
+};
+
 /** Build the operation for ONE declared route. Returns undefined for a kind we cannot resolve. */
 function operationForRoute(
+  route: ApiRouteSpec,
+  storeByName: ReadonlyMap<string, StoreSpec>,
+): OpenApiOperation | undefined {
+  const op = buildOperation(route, storeByName);
+  if (!op) return undefined;
+  // A stream `playback` route is authorized by a signed media token and mounts its own middleware, so
+  // it never reaches this throttle — it is bounded by the per-user concurrent-stream limit instead.
+  if (route.action.kind === 'stream' && route.action.mode === 'playback') return op;
+  // An arm that already documents a 429 (the `{agent}` run-outcome one) keeps its own description.
+  if (op.responses['429']) return op;
+  return { ...op, responses: { ...op.responses, '429': THROTTLE_429 } };
+}
+
+/** The per-kind operation shape, before the cross-cutting throttle response is attached. */
+function buildOperation(
   route: ApiRouteSpec,
   storeByName: ReadonlyMap<string, StoreSpec>,
 ): OpenApiOperation | undefined {
