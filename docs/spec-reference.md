@@ -642,8 +642,21 @@ an id back **before** the run ends is an asynchronous one — `async: true` answ
 completes, and without an `Idempotency-Key` the run surface never holds it at all
 (the id is minted further in). So in practice this surface cancels **asynchronous**
 runs. A synchronous request that *is* holding a run when it gets cancelled answers
-**`409 CONFLICT`**; the run's terminal outcome is durable and readable at
-`GET /v1/runs/{id}` either way.
+**`409 CONFLICT`** — reachable when the id is known by other means, since the surface
+itself does not hand it out early — and the SSE variant of the same request ends its
+stream with a terminal `error` frame carrying `errorClass: "cancelled"` rather than a
+409, because the response has already begun. The run's terminal outcome is durable and
+readable at `GET /v1/runs/{id}` in every case.
+
+Two consequences of ending a run by id are worth knowing. **The cancellation record is
+permanent**, like the run-started and taint markers beside it: it is written before
+anything else, and it is written even when the run had already finished, so a run id
+that was ever cancelled can never be dispatched again. That matters only if you pin or
+reuse run ids. And **a tool call already in flight is not interrupted**: the run-level
+signal is not composed into the per-tool abort, so a handler that had already started
+runs to its own tool timeout. Its result is discarded — the run is already terminal —
+and if the tool was non-idempotent its taint marker was written before it fired, so the
+run stays quarantined rather than becoming silently re-runnable.
 
 How well the work itself stops depends on the backend:
 

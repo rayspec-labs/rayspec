@@ -265,6 +265,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Embedders implementing the neutral `DurableExecutor` must add a `cancel` method.** The cancel
+  route needs an engine-agnostic way to end a job that has not been dequeued, so `DurableExecutor`
+  — exported from `@rayspec/platform`'s public surface — gained `cancel(jobId: string):
+  Promise<void>` as a **required** member. Every implementation in this repository was updated with
+  it, but an out-of-repo implementation of that interface will not typecheck until it grows the
+  method. It is the whole of the breaking surface: no existing member changed name, shape or
+  meaning, and the neutral `DurableJobStatus` union already contained `cancelled` — this release is
+  simply the first thing that produces it.
+
 - **The neutral run error class has a seventh value, `cancelled`.** A consumer that enumerated the six
   and treated anything else as unrecognised will now see it on a run that was ended through the cancel
   route. It is the one class no backend adapter produces and the upstream classifier never returns:
