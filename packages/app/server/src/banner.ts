@@ -92,8 +92,8 @@ export function bootBanner(server: BootedServer, base: string): string {
 /**
  * Build the boot banner for a STATIC-PROFILE (frontend-only) server. Distinct from `bootBanner`: this
  * boot mounts NO auth/OIDC/runs/API route and opens no database, so the banner honestly advertises ONLY
- * the served static frontend(s) + the liveness `/health` — it never claims the platform auth/run routes
- * a static boot does not have.
+ * the served static frontend(s) + the mount-readiness `/health` — it never claims the platform
+ * auth/run routes a static boot does not have.
  */
 export function staticBootBanner(server: StaticBootedServer, base: string): string {
   const lines: string[] = [];
@@ -108,10 +108,9 @@ export function staticBootBanner(server: StaticBootedServer, base: string): stri
   lines.push(RULE);
   lines.push(`  Base URL:     ${base}`);
   lines.push('');
-  lines.push('  Liveness:');
-  lines.push(
-    '    GET  /health   (liveness-only — reports process liveness, not database readiness)',
-  );
+  lines.push('  Readiness:');
+  lines.push("    GET  /health   (no db field — reports the declared mounts' boot-time");
+  lines.push('                    readiness as `frontend`; 503 when a mount cannot be served)');
   lines.push('');
   lines.push('  Served static frontend mounts:');
   for (const m of server.frontendMounts) {

@@ -252,7 +252,10 @@ api:
     declared handler id of `kind: route`).
   - **`stream`** — a raw binary route. Fields: `handler` (a declared
     `kind: route` handler) and `mode`, one of `ingest` (write bytes) or
-    `playback` (range-based media read).
+    `playback` (range-based media read). A `playback` route is authorized by a
+    signed media token passed as `?token=` — minted from a `kind: handler` route
+    through `init.mintPlayToken` — and not by the Bearer chain the other routes
+    mount on.
 
 Routes mount onto the platform's existing authenticated HTTP chain — you do not
 re-implement auth per route.
@@ -568,6 +571,13 @@ frontend:
 - `spa` — optional boolean (default `false`). When `true`, an unmatched path under
   the mount returns `index.html` (History-API single-page-app routing); when
   `false`, an unmatched path is a `404`.
+
+**Readiness.** Declaring a mount adds a `frontend` field to the `/health` response,
+valued `"ok"` or `"unavailable"`. It reports whether the mounts can be served — the
+directory is readable and traversable, and an `spa: true` mount's `index.html` is a
+readable file — and `/health` answers `503` when one cannot. The check runs once at
+boot and the probe answers from that cached value, so polling it costs no disk access.
+A document declaring no mounts carries no such field and answers exactly as before.
 
 **Precedence and safety.** Static mounts are the last thing served: every API route,
 `/health`, `/v1/*`, and `/oidc/*` always wins over a static mount (a path under a

@@ -416,7 +416,8 @@ change is applied by the explicit `--apply-migration` flag below.
   boots the **static profile**, the same branch
   [`rayspec-serve`](#rayspec-serve--the-boot-server) takes and entered **before** any
   secret is read: no database, none of the three boot secrets, and **no** auth / OIDC /
-  run route mounted (`/health` is liveness-only), with the `Content-Security-Policy`
+  run route mounted (`/health` carries no `db` field — it reports the mounts' readiness
+  as `frontend`), with the `Content-Security-Policy`
   and `Permissions-Policy` defaults emitted by the app itself. Because it touches no
   database it applies no migration, so `--apply-migration` / `--allowlist` against such a
   document are **refused** as a usage error (exit `2`) rather than silently ignored.
@@ -522,8 +523,9 @@ deployment sets its configuration through its orchestrator or secret manager.
 - A **frontend-only** spec — one that declares only a `frontend` (no `stores`,
   `api`, `agents`, `tooling`, `triggers`, `handlers`, or `extensions`, and no
   durable worker) — boots as a **static profile**: it requires **none** of the
-  three boot secrets and mounts **no** auth / OIDC / run route (`/health` is
-  liveness-only, with no database probe). It emits its own `Content-Security-Policy`
+  three boot secrets and mounts **no** auth / OIDC / run route (`/health` runs no
+  database probe; it reports the declared mounts' readiness as `frontend`). It emits
+  its own `Content-Security-Policy`
   and `Permissions-Policy` response headers, read from `RAYSPEC_FRONTEND_CSP` and
   `RAYSPEC_PERMISSIONS_POLICY` (each with a secure default when unset), so a built
   single-page app can be served directly with no reverse proxy in front — see

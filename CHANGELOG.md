@@ -52,6 +52,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`/health` covers the declared frontend mounts, and its response carries a `frontend` field.** The
+  probe used to report only database reachability, so a deployment that also serves a `frontend[]`
+  mount could answer `200 {"status":"ok","db":"ok"}` while every static asset was still 503 — a deploy
+  tool waiting on that signal reported "ready" while users saw 503. The response is now extended by one
+  additive field, `frontend`, valued `"ok"` or `"unavailable"`, and a mount that cannot be served
+  answers `503` instead of `200`. A mount is servable when its resolved directory is a readable,
+  traversable directory and — for an `spa: true` mount — its `index.html` is a readable file. Both
+  profiles are covered: the full platform (`{"status","db","frontend"}`) and the static profile
+  (`{"status","frontend"}`, still no `db` field). The readiness is computed ONCE at boot and cached, so
+  the probe performs no filesystem access per call no matter how often a load balancer polls it. The
+  existing fields are untouched: same names, same values, and the reachable / unreachable database
+  cases keep their exact `200` / `503`. A deployment that declares no frontend mounts omits the new
+  field entirely and answers byte-for-byte as before. The static profile's boot banner, printed by both
+  `rayspec-serve` and `rayspec deploy`, describes the endpoint accordingly: its `Liveness:` block is now
+  a `Readiness:` one naming the `frontend` field and the `503`.
+
 - **A boot secret that normalization actually changed now says so, once, at boot.** `DATABASE_URL`,
   `RAYSPEC_JWT_SIGNING_KEY` and `RAYSPEC_API_KEY_PEPPER` are trimmed on read — leading and trailing
   whitespace and a leading byte-order mark go, interior bytes stay — and until now that happened in
@@ -120,6 +136,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than replaying a half-finished run, and the conversation reply path's bounded attempt walk
   re-uses the slot of an interrupted attempt instead of spending one of its deterministic attempt ids
   on it.
+
+- **A stream `playback` route no longer keeps its second authorization path to itself.** Such a route
+  validated, built and booted without a word, and every read attempt ended `401 UNAUTHENTICATED` —
+  including with a valid Bearer token of the tenant that had uploaded the bytes. The reason is sound
+  but was invisible in the document: a playback route mounts its own middleware tuple and is
+  authorized by a signed `?token=` media token, not by the Bearer chain the other routes mount on,
+  and that token is minted through `init.mintPlayToken`, a capability only a `kind: handler` route's
+  handler receives — so a deployment that declares no route minting one has a playback route nothing
+  can reach. `doctor` and `plan` now report that shape as the new non-fatal
+  `stream_playback_media_token` advisory, once per playback route, pinned to that route's own
+  `api[<i>].action.mode`. It states the authorization shape and what follows if nothing mints a
+  token; it deliberately does not claim the mint route is missing, because the mint call lives in
+  handler module source and the advisory pass is pure over the parsed document. As with every
+  advisory it never affects `ok`, so no document that parsed before stops parsing. The `stream`
+  section of `docs/spec-reference.md` now says the same thing in one sentence.
 
 - **A document whose handler modules are TypeScript source no longer lints green and then aborts at
   boot.** A backend document declaring a `handlers[].module` with a TypeScript extension (`.ts`,

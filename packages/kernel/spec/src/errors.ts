@@ -173,11 +173,22 @@ export function specError(code: SpecErrorCode, message: string, path?: string): 
  *                               source is the documented loop: the dev loader takes un-built source
  *                               through an explicit opt-in, and a build step compiles the modules and
  *                               rewrites these `module:` paths on the way to a deploy.
+ *  - `stream_playback_media_token` — an `api[]` route whose action is `{kind:'stream', mode:'playback'}`.
+ *                               Such a route mounts its OWN middleware tuple and is authenticated by a
+ *                               signed `?token=` media JWT, NOT by the Bearer/tenant chain every other
+ *                               route mounts on — so a Bearer token alone reads nothing there. The media
+ *                               token is minted through `init.mintPlayToken`, a capability only a
+ *                               `{kind:'handler'}` route's handler receives, so a deployment declaring no
+ *                               route that mints one leaves the playback route unreachable. The advisory
+ *                               states that authorization shape; it does NOT claim the mint route is
+ *                               missing, because the mint call lives in handler module source and this
+ *                               pass is pure over the parsed document.
  */
 export const SpecWarningCode = z.enum([
   'softdelete_fk_restrict',
   'fk_forward_reference',
   'typescript_handler_module',
+  'stream_playback_media_token',
 ]);
 export type SpecWarningCode = z.infer<typeof SpecWarningCode>;
 

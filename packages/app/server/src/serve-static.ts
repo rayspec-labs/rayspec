@@ -63,7 +63,15 @@
  * and the range guard (each keeps its exact response for every verb) and BEFORE the file server, so it
  * covers the served files, the SPA fallback and the `404.html` page alike.
  */
-import { existsSync, readFileSync, realpathSync, type Stats, statSync } from 'node:fs';
+import {
+  accessSync,
+  constants,
+  existsSync,
+  readFileSync,
+  realpathSync,
+  type Stats,
+  statSync,
+} from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { errorEnvelope } from '@rayspec/auth-core';
@@ -246,6 +254,48 @@ function serveNotFoundPage(
     });
   }
   return new Response(readFileSync(file), { status: 404, headers });
+}
+
+/**
+ * Whether the declared frontend mounts can be served: `'ok'` when every mount is servable, else
+ * `'unavailable'`. This is what `/health` reports as its `frontend` field.
+ */
+export type FrontendReadiness = 'ok' | 'unavailable';
+
+/**
+ * Can every declared mount in `mounts` be served from disk? `specDir` is the spec file's directory,
+ * against which each mount's `dir` is resolved — the SAME resolution `mountFrontend` performs.
+ *
+ * "Servable" is what `mountFrontend` needs from disk for the mount to answer anything:
+ *   - the resolved `dir` is a directory, readable AND traversable (`statSync().isDirectory()` alone
+ *     passes a mode-0000 directory, from which every asset then EACCES-misses — so `R_OK|X_OK` too);
+ *   - for an `spa:true` mount, `dir/index.html` is a readable FILE — the fallback that mount serves
+ *     for every unmatched deep link, so without it the SPA answers nothing.
+ * An empty `mounts` list is `'ok'`: nothing is declared, so nothing can be unservable.
+ *
+ * CALL THIS ONCE AT BOOT and cache the result. `/health` is polled by load balancers every second; the
+ * probe must answer from the cached value and touch no filesystem per call.
+ */
+export function frontendMountsReadiness(
+  mounts: readonly FrontendSpec[],
+  specDir: string,
+): FrontendReadiness {
+  for (const mount of mounts) {
+    const baseDir = resolve(specDir, mount.dir);
+    try {
+      if (!statSync(baseDir).isDirectory()) return 'unavailable';
+      accessSync(baseDir, constants.R_OK | constants.X_OK);
+      if (mount.spa) {
+        const index = join(baseDir, 'index.html');
+        if (!statSync(index).isFile()) return 'unavailable';
+        accessSync(index, constants.R_OK);
+      }
+    } catch {
+      // Missing, unreadable, or not the expected kind — all the same answer: it cannot be served.
+      return 'unavailable';
+    }
+  }
+  return 'ok';
 }
 
 /**
