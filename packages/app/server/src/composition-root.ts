@@ -504,15 +504,31 @@ const BYTE_ORDER_MARK = '\uFEFF';
  * mount won — operator-supplied configuration, and the name they have to go fix) and the KIND of
  * change, drawn from a CLOSED, VALUE-FREE vocabulary. NEVER the value or any part of it — not
  * truncated, not hashed, not a length, not a count, not a character, not an excerpt of the removed
- * part. The value IS the secret and a warning reaches every log the process writes to; the kinds
- * below are fixed strings chosen by comparing the raw and normalized forms, so none of them can
- * carry a byte of either. The tests pin that by emitting the message for TWO sentinel secrets that
- * produce the same kinds and asserting the two messages are byte-identical. The sentinels are drawn
- * from DISJOINT alphabets and the test asserts that disjointness before it relies on it, so the two
- * values share no character at all and differ in length: no excerpt of either — down to a SINGLE
- * character, at any position — can equal the other's, and neither can a length, a count, a digest or
- * an encoding. None of those could survive the byte-identity check. The tests also assert outright
- * that no base64 of the value, no hex digest and no digit appear.
+ * part. The value IS the secret and a warning reaches every log the process writes to.
+ *
+ * WHY THAT HOLDS: the kinds below are fixed strings chosen by comparing the raw and normalized
+ * forms. The message is a fixed template plus `sourceVar` plus a closed vocabulary of those fixed
+ * strings — the value is never an operand of any expression that reaches the return, so no byte of
+ * it can arrive. That is the guarantee; keep it by adding kinds to the vocabulary, never by
+ * interpolating anything computed from `raw`.
+ *
+ * WHAT THE TESTS PROVE ABOUT IT (`boot-secret-file.test.ts`): the message is emitted for TWO
+ * sentinel secrets that produce the same three kinds, and the two messages are asserted
+ * byte-identical. The sentinels are built to disagree everywhere the assertions rely on, and the
+ * arm checks each disagreement before it uses it — disjoint alphabets (no shared character, so no
+ * excerpt of either, at ANY position and ANY length down to a SINGLE character, can equal the
+ * other's), different lengths, a different count of removed edge bytes, opposite core-length
+ * parity, and a digit in one core but not the other. So an excerpt, the length, the removed-byte
+ * count, the parity or digit-presence would each drive the two messages apart. Enumerated on top:
+ * no base64 of the value, no hex digest, no digit at all, no verbatim removed byte, no 4-character
+ * window of the raw value.
+ *
+ * CONTRACT LIMIT (honest): that is a proof about those shapes, not about every conceivable one. Two
+ * sentinels cannot separate an arbitrary LOSSY function of the value — a predicate coarse enough to
+ * return the same answer for both would survive the byte-identity check, as a one-bit function of
+ * the value does half the time by chance. The test arm is the check on the construction above, not
+ * a replacement for it: what actually rules the rest out is that no expression here takes `raw` as
+ * an operand.
  *
  * WHAT IT DOES NOT SAY: what to do about it. A trailing newline on a secret FILE is the documented
  * normal case, not a misconfiguration — the sanctioned `>`-redirect recipe in `.env.example` leaves

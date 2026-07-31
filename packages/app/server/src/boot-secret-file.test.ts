@@ -515,6 +515,16 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
   // SINGLE character, at any position. The property is not left to inspection — the arm asserts it
   // outright before it relies on it, so editing a sentinel into an overlap fails loudly instead of
   // silently weakening the counterproof.
+  //
+  // Disjointness alone only separates the VERBATIM shapes. The two sentinels are therefore also
+  // made to disagree on the scalar facts a leak could report ABOUT the value instead of quoting it:
+  // how many edge bytes normalization removed, the parity of the core length, and whether the core
+  // holds a digit at all. Those are the shapes issue #138's constraint names outright ("not a
+  // length, not a count"), and each disequality is asserted below. Wrap both sentinels in the SAME
+  // edge bytes and every fact about the trimmed-away part becomes identical by construction, and so
+  // invisible to a byte-identity check — which is exactly the hole these three close. Digit-presence
+  // is why the control spends only the LETTERS of its alphabet: its half of the digits stays unused
+  // so that one sentinel carries digits and the other carries none.
   const BOM = '\uFEFF'; // U+FEFF, as an escape so the assertions below stay readable
   const LEAK_ALPHABET = 'ABCDEFGHIJKLMabcdefghijklm01234';
   const OTHER_ALPHABET = 'NOPQRSTUVWXYZnopqrstuvwxyz56789';
@@ -524,12 +534,29 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
     'EJddjgAmE24MhJmJ3j01BiA1JhIBgkkjILCddGjE',
   ].join('\n');
   // Edge whitespace on BOTH sides plus a leading byte-order mark — every kind at once. The removed
-  // bytes are exactly: U+FEFF, spaces, CR, LF.
+  // bytes are exactly: U+FEFF, spaces, CR, LF — seven of them, wrapped around an even-length core
+  // that carries digits.
   const LEAK_RAW = `  ${BOM}${LEAK_CLEAN}  \r\n`;
-  // A SECOND secret — no shared character and a different length — wrapped in the SAME edge
-  // whitespace, so it produces the SAME kinds of change. It is the control for the counterproof.
-  const OTHER_CLEAN = 'XPzUn6UZtXws6yZUOuZXYuqoqxo9Rouu';
-  const OTHER_RAW = `  ${BOM}${OTHER_CLEAN}  \r\n`;
+  // A SECOND secret — the control for the counterproof. No shared character, a different length, an
+  // ODD-length core, and no digit anywhere in it (letters only, still inside the disjoint alphabet
+  // above). Its wrapper produces the SAME THREE KINDS of change — a leading byte-order mark, leading
+  // whitespace, trailing whitespace — out of DIFFERENT bytes: three removed instead of seven. Same
+  // kinds, so the two messages stay comparable and the byte-identity check keeps its meaning;
+  // different in every scalar the value could be reduced to, so a derived fact cannot come out the
+  // same for both. Both halves are asserted below — a future edit that breaks either one fails.
+  const OTHER_CLEAN = 'yzVqRVqtxYzNtYYuNWqruXpNpzTswvXwN';
+  const OTHER_RAW = `${BOM}\t${OTHER_CLEAN}\n`;
+  /** The change KINDS a raw value triggers, derived the way `bootSecretNormalizationWarning` does. */
+  function changeKinds(raw: string): string[] {
+    const leading = raw.slice(0, raw.length - raw.trimStart().length);
+    const kinds: string[] = [];
+    if (leading.includes(BOM)) kinds.push('byte-order mark');
+    if (leading.replaceAll(BOM, '').length > 0) kinds.push('leading whitespace');
+    if (raw.trimEnd().length < raw.length) kinds.push('trailing whitespace');
+    return kinds;
+  }
+  /** How many bytes normalization removes from the edges of `raw` — a COUNT, never in any message. */
+  const removedEdgeBytes = (raw: string): number => raw.length - raw.trim().length;
   /** Every substring of `value` of length `size` — the "any substring long enough to matter" probe. */
   function windows(value: string, size: number): string[] {
     const out: string[] = [];
@@ -641,15 +668,15 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
     // THE general counterproof, which closes the space the enumeration above cannot: a SECOND boot,
     // same variable, same kinds of change, and the SAME message, byte for byte.
     //
-    // First the property the counterproof RESTS on, checked rather than asserted — the two
-    // sentinels are drawn from disjoint alphabets, so they share no character and therefore agree
-    // at no position, and their lengths differ. Without this, a leak whose characters happen to
-    // coincide between the two values would keep the messages identical and pass unseen; a
-    // one-character excerpt taken at a position where the two sentinels agree is exactly such a
-    // leak. Pinning the property here means a future edit to either sentinel cannot silently
-    // reopen that hole.
+    // First the properties the counterproof RESTS on, checked rather than asserted. Without them a
+    // leak whose output happens to COINCIDE between the two values would keep the messages
+    // identical and pass unseen — a one-character excerpt taken at a position where the two
+    // sentinels agree is exactly such a leak, and so is any scalar the two sentinels reduce to the
+    // same way. Pinning them here means a future edit to either sentinel cannot silently reopen
+    // that hole.
     //
-    // The construction: each sentinel stays inside its own alphabet, and the alphabets are disjoint.
+    // (1) VERBATIM shapes, closed by disjointness. The construction: each sentinel stays inside its
+    // own alphabet, and the alphabets are disjoint.
     expect([...LEAK_CLEAN.replaceAll('\n', '')].filter((c) => !LEAK_ALPHABET.includes(c))).toEqual(
       [],
     );
@@ -663,12 +690,36 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
     expect([...OTHER_CLEAN].filter((c, i) => LEAK_CLEAN[i] === c)).toEqual([]);
     expect(OTHER_CLEAN.length).not.toBe(LEAK_CLEAN.length);
 
-    // With that, nothing derived from the value can survive the byte-identity check below: an
-    // excerpt of ANY length taken at ANY position (one character is enough — no character of the
-    // one sentinel occurs anywhere in the other), the length itself, a count, a digest, an
-    // encoding — each differs between the two secrets, so each would drive the two messages apart.
-    // This is what makes the arm's claim a proof rather than a probe for the shapes someone
-    // thought to enumerate.
+    // (2) The SCALAR facts a leak could report about the value instead of quoting it. Disjointness
+    // says nothing about these: wrap the two sentinels in the same edge bytes and the removed-byte
+    // count is identical by construction, invisible to the byte-identity check no matter how
+    // different the values are. So the two are deliberately built to disagree on each — the count
+    // of removed edge bytes, the parity of the core length, and whether the core holds a digit.
+    expect(removedEdgeBytes(OTHER_RAW)).not.toBe(removedEdgeBytes(LEAK_RAW));
+    expect(OTHER_CLEAN.length % 2).not.toBe(LEAK_CLEAN.length % 2);
+    expect(/\d/.test(OTHER_CLEAN)).not.toBe(/\d/.test(LEAK_CLEAN));
+
+    // (3) And the property that keeps the check COMPARABLE while (1) and (2) drive the two apart:
+    // the two raw sentinels still trigger the SAME THREE KINDS of change. If they ever diverge the
+    // two messages differ for a reason that is not a leak, and the control silently becomes
+    // vacuous — so the divergence has to fail here, loudly, and as itself.
+    const allThreeKinds = ['byte-order mark', 'leading whitespace', 'trailing whitespace'];
+    expect(changeKinds(LEAK_RAW)).toEqual(allThreeKinds);
+    expect(changeKinds(OTHER_RAW)).toEqual(allThreeKinds);
+
+    // WHAT THE CHECK BELOW THEN PROVES, and what it does not. It proves that the message carries no
+    // excerpt of either core — any position, any length, down to a single character — and none of
+    // the scalars pinned above: the raw length, the removed-edge-byte count, the core length parity,
+    // digit-presence. Together with the enumerated assertions (no base64, no hex digest, no digit,
+    // no verbatim removed bytes) that is the covered surface.
+    //
+    // CONTRACT LIMIT (honest): two sentinels cannot rule out EVERY lossy function of the value. A
+    // derived fact coarse enough to land on the same output for both — a one-bit predicate collides
+    // half the time by chance — would still pass. The disequalities above shrink that residue to
+    // functions that agree on two values built to disagree everywhere it was practical to make them,
+    // and the closed, value-free kind vocabulary in `bootSecretNormalizationWarning` is what
+    // actually rules the rest out by construction. This arm is the check on that construction, not
+    // a substitute for it.
     const { warnings: otherWarnings } = boot({ ...plainEnv, RAYSPEC_JWT_SIGNING_KEY: OTHER_RAW });
     expect(otherWarnings).toHaveLength(1);
     expect(otherWarnings[0]).toBe(warning);
