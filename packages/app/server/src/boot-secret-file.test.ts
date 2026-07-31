@@ -512,11 +512,12 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
   // each case plus the digits 0-4, the control from the SECOND half plus 5-9 — so no character of
   // the one core occurs anywhere in the other. That is what makes the counterproof below a proof:
   // with the alphabets disjoint, NO excerpt of either CORE can equal an excerpt of the other, down
-  // to a SINGLE character, at any position. It is a statement about the cores, not about the RAW
-  // values: those carry the same wrapper bytes — a byte-order mark and whitespace — and so share
-  // those characters by construction. The property is not left to inspection — the arm asserts it
-  // outright before it relies on it, so editing a sentinel into an overlap fails loudly instead of
-  // silently weakening the counterproof.
+  // to a SINGLE character, at any position. Disjointness is not left to inspection — the arm
+  // asserts it outright before it relies on it, so editing a sentinel into an overlap fails loudly
+  // instead of silently weakening the counterproof. It is a statement about the CORES, not about
+  // the RAW values: both of those are wrapped in edge bytes that include a byte-order mark and end
+  // in a newline, so the raw values do share those two characters — U+FEFF and LF, and nothing
+  // else. The rest of the two wrappers is deliberately DIFFERENT bytes (see the control below).
   //
   // Disjointness alone only separates the VERBATIM shapes. The two sentinels are therefore also
   // made to disagree on the scalar facts a leak could report ABOUT the value instead of quoting it:
