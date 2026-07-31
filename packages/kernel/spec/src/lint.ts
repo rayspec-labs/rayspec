@@ -1220,8 +1220,9 @@ export function lintSpec(spec: RaySpec): SpecError[] {
  * (`referencesColumn`). Both carry the identical footgun: soft-deleting such a parent is an
  * `UPDATE(deleted_at)` that does NOT fire the database ON DELETE restrict, so the referencing rows keep
  * pointing at the (tombstoned) parent — the restrict guarantee only binds on a HARD delete. This is a
- * permitted, documented interaction, so it is a WARNING, not a fail-closed error. The other two —
- * `fk_forward_reference` and `typescript_handler_module` — are documented at their own blocks below.
+ * permitted, documented interaction, so it is a WARNING, not a fail-closed error. The other three —
+ * `fk_forward_reference`, `typescript_handler_module` and `stream_playback_media_token` — are
+ * documented at their own blocks below.
  */
 export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
   const warnings: SpecWarning[] = [];
@@ -1309,6 +1310,36 @@ export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
           "the spec's `module:` paths) or re-render it as deployable ESM with `rayspec gen-handler " +
           '--emit js`',
         `handlers[${hi}].module`,
+      ),
+    );
+  });
+
+  // STREAM PLAYBACK — the SECOND auth path. A `{kind:'stream', mode:'playback'}` route is registered
+  // behind its OWN middleware tuple (the media-JWT verifier + the per-user streaming semaphore) and
+  // NOT behind requireAuth/resolveTenant/requirePermission, so a Bearer token does not authorize it:
+  // the request needs a signed `?token=` media JWT, and the tenant comes from that token's verified
+  // claim. The one minting capability the platform hands a handler is `init.mintPlayToken`, built for a
+  // `{kind:'handler'}` route's handler (a stream handler's init carries no such field). A deployment
+  // that declares no route minting a token therefore has an unreachable playback route.
+  //
+  // WORDED CONDITIONALLY ON PURPOSE: nothing in the grammar marks a handler as minting — the mint call
+  // is inside handler MODULE SOURCE, and this pass is pure over the parsed document (it opens no
+  // module). So the advisory states the authorization shape and what follows IF nothing mints, which is
+  // true of every document it fires on; it never asserts that no mint path exists, which it could not
+  // check. FIRES PER PLAYBACK ROUTE, pinned to that route's own `mode` — a document may declare several.
+  spec.api.forEach((route, ri) => {
+    if (route.action.kind !== 'stream' || route.action.mode !== 'playback') return;
+    warnings.push(
+      specWarning(
+        'stream_playback_media_token',
+        `route ${route.method} ${route.path} is a stream route with mode 'playback' — a SECOND auth ` +
+          'path: it is authorized by a signed media token passed as `?token=` on its own middleware ' +
+          'tuple, NOT by the Bearer/tenant chain the other routes mount on (a Bearer ' +
+          'token alone yields 401). Such a token is minted through `init.mintPlayToken`, a capability ' +
+          "only a `kind: handler` route's handler receives, so a deployment that declares no route " +
+          'minting one leaves this route unreachable. Whether one is declared is not visible here — ' +
+          'the mint call lives in handler module source, which this pass does not read',
+        `api[${ri}].action.mode`,
       ),
     );
   });
