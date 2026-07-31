@@ -48,6 +48,13 @@ export class FakeSpineBackend implements Backend {
   peakConcurrency = 0;
   #gateWaiters: Array<() => void> = [];
 
+  /**
+   * When true, a GATED run THROWS the moment its gate opens instead of completing — a run that was
+   * held in flight and then FAILED. Combined with the gate it makes "the run was ended while it
+   * executed, and then ended by failing" a deterministic sequence rather than a race.
+   */
+  throwOnGateRelease = false;
+
   /** Arm a manual gate: every run blocks until `releaseGate()` is called. */
   armGate(): void {
     this.gate = () =>
@@ -160,6 +167,9 @@ export class FakeSpineBackend implements Backend {
     // SAFE-half seam: hold the run open here (in flight, holding work) until the gate releases — lets a
     // test pin N runs concurrently (the worker-concurrency cap) or one across a shutdown (graceful drain).
     if (this.gate) await this.gate();
+    if (this.throwOnGateRelease) {
+      throw new Error('FakeSpineBackend: simulated failure after the run was held in flight');
+    }
 
     await ctx.onEvent?.({
       type: 'run_completed',

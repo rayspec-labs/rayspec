@@ -325,9 +325,17 @@ describe('OpenAI adapter: the run’s cancellation signal reaches the SDK call',
     await adapter.run({ ...baseSpec, tools: [] }, makeCtx(journal, [], { signal: controller.signal }));
 
     // The SDK's own run option (SharedRunOptions.signal) — so aborting the run aborts the model call
-    // itself, not merely whatever was waiting on it.
-    const options = runSpy.mock.calls[0]?.[2] as { signal?: AbortSignal };
+    // itself, not merely whatever was waiting on it. This is the bag EVERY platform run emits (run-core
+    // always sets ctx.signal), so it is pinned EXACTLY — key set and values — not just for the signal:
+    // a key silently added to it here would ship on every run.
+    const options = runSpy.mock.calls[0]?.[2] as Record<string, unknown>;
     expect(options.signal).toBe(controller.signal);
+    expect(Object.keys(options).sort()).toEqual(['maxTurns', 'signal', 'stream']);
+    expect(options).toEqual({
+      stream: false,
+      maxTurns: baseSpec.maxTurns,
+      signal: controller.signal,
+    });
   });
 
   it('UNSET: with no signal the option bag is EXACTLY the one it always was — no `signal` key at all', async () => {

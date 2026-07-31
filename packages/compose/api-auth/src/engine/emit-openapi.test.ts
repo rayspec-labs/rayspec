@@ -361,8 +361,12 @@ describe('buildDeclaredRoutesOpenApi — product-agnostic emission', () => {
     // way), so a generated client reads the complete rule rather than a stale subset of it.
     expect(responses['200'].description).toContain('model_refusal');
     expect(responses['200'].description).toContain('cancelled');
-    // The 409 is the run-was-ended-on-demand conflict a HOLDING request answers: it is part of the
-    // documented status set, not something discoverable only by provoking a cancellation.
+    // The 409 answers for TWO reasons on this operation, and the document must describe both or a
+    // client reads the wrong rule for the one it actually got: the Idempotency-Key conflicts (which
+    // never replay) and the run-was-ended-on-demand conflict a HOLDING request answers (which does).
+    expect(responses['409'].description).toContain('IDEMPOTENCY_CONFLICT');
+    expect(responses['409'].description).toContain('reused with a different');
+    expect(responses['409'].description).toContain('already in progress');
     expect(responses['409'].description).toContain('ENDED ON DEMAND');
   });
 });

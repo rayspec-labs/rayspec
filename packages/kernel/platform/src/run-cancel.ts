@@ -18,14 +18,17 @@
  *     not by itself interrupt an in-flight model call.
  *  3. A JOURNALED TERMINAL OUTCOME — a cancelled run ends like any other run ends: one journal step
  *     carrying the neutral `cancelled` class plus a terminal run header, so `GET /v1/runs/{id}` reports
- *     the outcome instead of a run that simply stopped moving. The CANCEL surface writes it: the durable
- *     worker runs `runAgent` inside one transaction that a cancelled run's rejection rolls back, so a
- *     write made there would not survive — and the not-yet-started case has no `runAgent` to write it at
- *     all. The one case the cancel surface cannot write is a run still EXECUTING inside that
- *     transaction, which holds the header row: it does not wait for it (see
- *     {@link RUN_CANCEL_LOCK_WAIT_MS}), and run-core, which does hold the lock, records the same
- *     outcome from inside the run when it consults the marker before its completing write. The write is
- *     idempotent and guarded either way, so the two can never both count.
+ *     the outcome instead of a run that simply stopped moving. The CANCEL surface writes it whenever it
+ *     can: a run that has not started has no `runAgent` to write it at all, and a run that has already
+ *     finished holds nothing. The one case it cannot write is a run still EXECUTING, which holds its
+ *     header row inside its own transaction — it does not wait for it (see
+ *     {@link RUN_CANCEL_LOCK_WAIT_MS}), because waiting there is waiting out the very run being ended.
+ *     That run's own side writes it instead, and which part depends on how the run ends: one that
+ *     produces a result records it from INSIDE the run (run-core consults the marker before its
+ *     completing write), while one that ends by THROWING rolls that transaction back — taking any write
+ *     made inside it — so the durable worker records it after the rollback, on its own non-transactional
+ *     handle. Every one of those writes is the same idempotent, guarded transition, so however many
+ *     sides try, exactly one ever counts.
  */
 
 import type { AuthMode, ErrorClass } from '@rayspec/core';
@@ -271,7 +274,9 @@ export interface RunCancellationOutcome {
  * pool connection for the run's remaining lifetime. The cancel surface delivers the in-process signal
  * BEFORE this write, so a run this process can reach has already been told to stop and unwinds its
  * transaction in milliseconds; this bound is the margin for that, and the honest give-up for a run no
- * signal reached (one executing in another process), whose own completion writes its outcome.
+ * signal reached (one executing in another process). Giving up never loses the outcome: the run's own
+ * side records it when it ends — from inside the run when it produces a result, from the durable worker
+ * once the run's transaction has rolled back when it ends by throwing.
  */
 export const RUN_CANCEL_LOCK_WAIT_MS = 2000;
 

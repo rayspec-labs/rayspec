@@ -63,7 +63,7 @@ import type {
   EnqueueResult,
   RunJob,
 } from '@rayspec/platform';
-import { isRunCancelled, isRunTainted, runAgent } from '@rayspec/platform';
+import { isRunCancelled, isRunTainted, recordRunCancelled, runAgent } from '@rayspec/platform';
 import { eq } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
@@ -377,9 +377,11 @@ export class DbosDurableExecutor implements DurableExecutor {
         // it has not dequeued, but it is not the whole guarantee: OUR marker is authoritative for the
         // same reason the started-once guard is (the engine memoizes step OUTPUTS, not our Drizzle
         // writes), and it is what a RECOVERY re-dispatch — which re-invokes this body from the start —
-        // consults. A cancelled run completes the step as a NO-OP: its terminal outcome was already
-        // journaled by the cancel surface (with the neutral `cancelled` class), so failing the
-        // workflow here would add an engine-level error on top of a run that is already accounted for.
+        // consults. A cancelled run completes the step as a NO-OP: its terminal outcome (the neutral
+        // `cancelled` class) is journaled by the cancel surface for a run that had not started, and by
+        // the side that ended for a run that was already executing when it was ended — see the rollback
+        // catch below. Failing the workflow here would add an engine-level error on top of a run that
+        // is already accounted for.
         if (await readCancelledWithBoundedRetry(tdb, job.runId)) return;
 
         // ── Resolve the run FIRST (before the marker) ─────────────────────────────────────────
@@ -466,19 +468,46 @@ export class DbosDurableExecutor implements DurableExecutor {
         // run_events / run header / conversation under this runId, tenant-scoped — UNCHANGED. Build
         // the run's tools from the SAME transactional handle (prefer the tenant-bound factory, like
         // the sync run surface) so a tool handler's HandlerDb shares the GUC transaction.
-        await tdb.transaction(async (txTenant) => {
-          const tools = resolved.toolFactory ? resolved.toolFactory(txTenant) : resolved.tools;
-          await runAgent(txTenant, resolved.backend, effectiveSpec, {
-            runId: job.runId,
-            taintDb,
-            ...(tools ? { tools } : {}),
-            // Output persistence: when the job carries `persistTo`, write the run's validated output
-            // into the resolved store (exactly-once — the header completing-transition gate makes a
-            // recovery re-dispatch of an already-completed run a NO second write).
-            ...(job.persistTo !== undefined ? { persistTo: job.persistTo } : {}),
-            ...(resolved.productTables ? { productTables: resolved.productTables } : {}),
+        try {
+          await tdb.transaction(async (txTenant) => {
+            const tools = resolved.toolFactory ? resolved.toolFactory(txTenant) : resolved.tools;
+            await runAgent(txTenant, resolved.backend, effectiveSpec, {
+              runId: job.runId,
+              taintDb,
+              ...(tools ? { tools } : {}),
+              // Output persistence: when the job carries `persistTo`, write the run's validated output
+              // into the resolved store (exactly-once — the header completing-transition gate makes a
+              // recovery re-dispatch of an already-completed run a NO second write).
+              ...(job.persistTo !== undefined ? { persistTo: job.persistTo } : {}),
+              ...(resolved.productTables ? { productTables: resolved.productTables } : {}),
+            });
           });
-        });
+        } catch (err) {
+          // ── A CANCELLED run that ends by REJECTING is still recorded terminal ──────────────────
+          // A run that produces a result records the cancellation itself, from inside the transaction
+          // it is holding the header row with (run-core consults the marker before its completing
+          // write). A run that ends by THROWING cannot: the rejection rolls this transaction back, so
+          // anything run-core wrote — including that record — is gone with it. And the cancel surface
+          // may well have given up on the header row while the run still held it (it is bounded on
+          // purpose, so a cancel never waits out the run it is ending). Without this, such a run has
+          // no terminal record at all: its header keeps the pre-run status forever and nothing says
+          // it was ended.
+          //
+          // So record it HERE — after the rollback, on the body's own non-transactional handle (the
+          // same autonomy the taint marker relies on), where the row is free. The write is the same
+          // guarded, idempotent transition the cancel surface makes, so a cancellation already
+          // recorded stays as it is. The step then completes as a NO-OP for the same reason a
+          // dispatch of an already-cancelled run does: the run is fully accounted for, and failing
+          // the workflow would add an engine-level error on top of a recorded outcome.
+          //
+          // Only a CANCELLED run takes this path. A run that failed on its own rethrows unchanged,
+          // and so does one whose cancellation read cannot be resolved — an unreadable marker must
+          // never swallow a run's real failure.
+          const cancelled = await readCancelledWithBoundedRetry(tdb, job.runId).catch(() => false);
+          if (!cancelled) throw err;
+          await recordRunCancelled(tdb, job.runId);
+          return;
+        }
       },
       // The step is NOT retried in-step (default retriesAllowed:false) — no in-step auto-retry.
       { name: 'runAgent', retriesAllowed: false },

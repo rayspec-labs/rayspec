@@ -21,6 +21,12 @@
  * recovery branch produces — so the seeding is load-bearing rather than decorative. The other
  * fail-the-fix guards prove the gate does not blunt anything else: an uncancelled run still runs, and a
  * cancelled run's marker is tenant-scoped.
+ *
+ * The harder case is a run ALREADY EXECUTING when it is ended: it holds its header row inside its own
+ * transaction, so the cancel surface gives up on the terminal record rather than waiting the run out,
+ * and a run that then ends by FAILING rolls back everything that transaction wrote — including any
+ * record the run itself made. The executor is what records the outcome once that rollback has happened,
+ * and the last two tests are that contract plus the guard that an UNCANCELLED failure still fails.
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -29,7 +35,14 @@ import { fileURLToPath } from 'node:url';
 import type { AgentSpec } from '@rayspec/core';
 import { forTenant, schema } from '@rayspec/db';
 import { makeDbWithSchema } from '@rayspec/db/testing';
-import { isRunCancelled, markRunCancelled, RUN_TAINT_SCOPE, type RunJob } from '@rayspec/platform';
+import {
+  insertEnqueuedRunHeader,
+  isRunCancelled,
+  markRunCancelled,
+  RUN_TAINT_SCOPE,
+  type RunJob,
+  recordRunCancelled,
+} from '@rayspec/platform';
 import { config as loadDotenv } from 'dotenv';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -128,6 +141,34 @@ async function seedRunTaint(runId: string): Promise<void> {
     .onConflictDoNothing();
 }
 
+/** The `runs` header status for `runId` (undefined when there is no header at all). */
+async function runHeaderStatus(runId: string): Promise<string | undefined> {
+  const rows = (await db.$client.unsafe('SELECT status FROM runs WHERE run_id = $1', [
+    runId,
+  ])) as unknown as { status: string }[];
+  return rows[0]?.status;
+}
+
+/** Every journal step recorded for `runId`, in write order. */
+async function journalSteps(
+  runId: string,
+): Promise<Array<{ type: string; status: string; error_class: string | null }>> {
+  return (await db.$client.unsafe(
+    'SELECT type, status, error_class FROM journal_steps WHERE run_id = $1 ORDER BY created_at',
+    [runId],
+  )) as unknown as Array<{ type: string; status: string; error_class: string | null }>;
+}
+
+/** Poll `predicate` until it holds (bounded) — a deterministic barrier, never a fixed sleep. */
+async function waitFor(predicate: () => boolean, capMs = 20_000): Promise<void> {
+  const deadline = Date.now() + capMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error(`condition did not hold within ${capMs}ms`);
+}
+
 async function waitForTerminal(jobId: string, ms = 30_000): Promise<string> {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -171,6 +212,8 @@ beforeEach(async () => {
   backend.liveRuns = 0;
   backend.throwMidRunTimes = 0;
   backend.fireToolBeforeProceeding = false;
+  backend.releaseGate();
+  backend.throwOnGateRelease = false;
   await db.$client.unsafe(
     'TRUNCATE run_events, journal_steps, conversation_items, runs, idempotency_keys CASCADE',
   );
@@ -258,6 +301,80 @@ describe('DBOS worker cancellation', () => {
     expect(backend.liveRuns).toBe(1);
   });
 
+  it('a cancelled run that ends by FAILING is still recorded terminal, after its transaction rolled back', async () => {
+    testsRan += 1;
+    const runId = randomUUID();
+    // The enqueue-time header the run surface commits before the job is handed to the worker.
+    await insertEnqueuedRunHeader(forTenant(db, TENANT), {
+      runId,
+      backend: 'openai',
+      agentName: baseSpec.name,
+      model: baseSpec.model,
+    });
+    // The run is held in flight and will FAIL when it is released — the run that has no result to
+    // record its own outcome with.
+    backend.armGate();
+    backend.throwOnGateRelease = true;
+    const job: RunJob = {
+      runId,
+      tenantId: TENANT,
+      agentId: 'echo-agent',
+      input: 'cancel-then-fail',
+    };
+    const handle = await executor.enqueue(TENANT, job);
+    await waitFor(() => backend.liveRuns === 1);
+
+    // The cancel surface's sequence for a run its SIGNAL cannot reach (one executing on another worker
+    // process): the marker, then the bounded terminal write — which gives up, because the run holds its
+    // own header row for as long as it runs and a cancel never waits out the run it is ending.
+    const tdb = forTenant(db, TENANT);
+    await markRunCancelled(tdb, runId);
+    expect(await recordRunCancelled(tdb, runId, { lockWaitMs: 200 })).toEqual({
+      cancelled: false,
+      status: 'enqueued',
+    });
+
+    // The run now ends by FAILING. Its transaction rolls back, so nothing it wrote survives — the
+    // `running` header transition and the step it journaled are both gone. RED-FIRST tell: without the
+    // executor recording the outcome after that rollback, the header stays 'enqueued' forever and the
+    // run reads as if nobody had ended it, for a caller who was told it was.
+    backend.releaseGate();
+    expect(await waitForTerminal(handle.jobId)).toBe('succeeded');
+    expect(await runHeaderStatus(runId)).toBe('error');
+    const steps = await journalSteps(runId);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({ type: 'cancel', status: 'error', error_class: 'cancelled' });
+  });
+
+  it('FAIL-THE-FIX GUARD: an UNCANCELLED run that fails still fails, and gains no cancellation record', async () => {
+    testsRan += 1;
+    const runId = randomUUID();
+    await insertEnqueuedRunHeader(forTenant(db, TENANT), {
+      runId,
+      backend: 'openai',
+      agentName: baseSpec.name,
+      model: baseSpec.model,
+    });
+    // The SAME shape as the test above with the one difference that matters: nobody ends this run. The
+    // recording must be reached by a cancellation and by nothing else — a run's own failure is still
+    // the failure it was, never absorbed into a cancellation it never had.
+    backend.armGate();
+    backend.throwOnGateRelease = true;
+    const job: RunJob = {
+      runId,
+      tenantId: TENANT,
+      agentId: 'echo-agent',
+      input: 'fail-uncancelled',
+    };
+    const handle = await executor.enqueue(TENANT, job);
+    await waitFor(() => backend.liveRuns === 1);
+    backend.releaseGate();
+
+    expect(await waitForTerminal(handle.jobId)).toBe('failed');
+    expect(await runHeaderStatus(runId)).toBe('enqueued');
+    expect(await journalSteps(runId)).toEqual([]);
+  });
+
   it('the engine cancel ends an enqueued workflow (the neutral `cancel` seam reaches the engine)', async () => {
     testsRan += 1;
     const runId = randomUUID();
@@ -276,7 +393,7 @@ describe('DBOS worker cancellation', () => {
 // The ran-guard: registered LAST + no beforeAll dependency, so a beforeAll throw that skipped the
 // tests above can never read as a passing (green) file.
 describe('DBOS worker cancellation — ran-guard (not skippable-as-green)', () => {
-  it('the cancellation tests ACTUALLY RAN (all six)', () => {
-    expect(testsRan).toBe(6);
+  it('the cancellation tests ACTUALLY RAN (all eight)', () => {
+    expect(testsRan).toBe(8);
   });
 });

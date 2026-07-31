@@ -36,9 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cancellation is cooperative and the whole run occupies a single engine step, so the model call already
   in flight is not interrupted and the run stops when it stops. It is still recorded cancelled — a run
   that finishes under a cancellation records the cancellation instead of its own outcome, and persists
-  no output — and it is never dispatched again. The cancel request never waits for the run it is ending:
-  an executing run holds its header row for as long as it runs, so the terminal record is written by
-  whichever side can write it, the cancel surface or the run itself.
+  no output; a run that ends by *failing* has no result to record with and rolls back everything it
+  wrote, so the worker records the cancellation once that rollback has happened — and it is never
+  dispatched again. The cancel request never waits for the run it is ending: an executing run holds its
+  header row for as long as it runs, so the terminal record is written by whichever side can write it —
+  the cancel surface when the run is not holding it, the run's own side when it is.
 
   **Which runs you can name.** Cancellation is by run id, and the only call that returns an id *before*
   the run ends is an asynchronous one (`async: true` answers `202` with the `runId`). A synchronous run
@@ -60,8 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and without a signal, by that adapter's own tests.)
 
   The generated OpenAPI document for a declared `{agent}` route follows the same rule: its `200` names
-  `cancelled` among the terminal classes it also covers, and it documents the `409` a request holding a
-  cancelled run answers.
+  `cancelled` among the terminal classes it also covers, and its `409` describes both conflicts that
+  status carries — the `Idempotency-Key` ones, which never replay a result, and the run a request was
+  holding being ended on demand, whose outcome a same-key retry does replay.
 
 - **A persist handler can cap a model-chosen enum column server-side: the `clampValues` hole.** The
   persist templates already re-checked a model-chosen IDENTIFIER against a store before writing it

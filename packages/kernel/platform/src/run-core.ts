@@ -708,11 +708,13 @@ export async function runAgent(
   // outcome — `setWhere ne(status,'completed')` is true for the `error` header a cancellation leaves —
   // so the run would read back as if nobody had ended it, and with `persistTo` configured it would
   // commit its output as well. So the completing write consults the cancellation record FIRST: a
-  // cancelled run records THE CANCELLATION as its outcome and commits nothing else. This is also the
-  // only write path that can reach a header the durable path's own transaction holds, so it is what
-  // completes a cancellation the cancel surface could not (see run-cancel.ts). The write is the same
-  // guarded, idempotent transition the cancel surface makes — `lockWaitMs: 0` because THIS call already
-  // holds the row's lock and can never wait on it — so exactly one of the two ever counts.
+  // cancelled run records THE CANCELLATION as its outcome and commits nothing else. It is also how a
+  // cancellation the cancel surface could not write gets written for a run that PRODUCED a result: this
+  // is the only path that can reach a header the durable path's own transaction holds (a run that ends
+  // by THROWING rolls this transaction back instead, so the durable worker records it after the
+  // rollback — see run-cancel.ts). The write is the same guarded, idempotent transition the cancel
+  // surface makes — `lockWaitMs: 0` because THIS call already holds the row's lock and can never wait
+  // on it — so exactly one of them ever counts.
   if (await isRunCancelled(tdb, runId)) {
     await recordRunCancelled(tdb, runId, { lockWaitMs: 0 });
     return result;
