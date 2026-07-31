@@ -1320,7 +1320,11 @@ export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
   // the request needs a signed `?token=` media JWT, and the tenant comes from that token's verified
   // claim. The one minting capability the platform hands a handler is `init.mintPlayToken`, built for a
   // `{kind:'handler'}` route's handler (a stream handler's init carries no such field). A deployment
-  // that declares no route minting a token therefore has an unreachable playback route.
+  // that declares no route minting a token therefore leaves that playback route unreachable WITHOUT
+  // AN EXTERNALLY ISSUED TOKEN — the qualifier is load-bearing, not hedging: the verifier
+  // authenticates a token on its signature under the media signing key plus the pinned issuer,
+  // audience and exp, and binds it to nothing else, so a deployment that shares that key with
+  // another signer reaches the route with no mint route declared at all.
   //
   // WORDED CONDITIONALLY ON PURPOSE: nothing in the grammar marks a handler as minting — the mint call
   // is inside handler MODULE SOURCE, and this pass is pure over the parsed document (it opens no
@@ -1337,8 +1341,9 @@ export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
           'tuple, NOT by the Bearer/tenant chain the other routes mount on (a Bearer ' +
           'token alone yields 401). Such a token is minted through `init.mintPlayToken`, a capability ' +
           "only a `kind: handler` route's handler receives, so a deployment that declares no route " +
-          'minting one leaves this route unreachable. Whether one is declared is not visible here — ' +
-          'the mint call lives in handler module source, which this pass does not read',
+          'minting one leaves this route unreachable without an externally issued token. Whether ' +
+          'one is declared is not visible here — the mint call lives in handler module source, ' +
+          'which this pass does not read',
         `api[${ri}].action.mode`,
       ),
     );
