@@ -258,7 +258,8 @@ api:
     mount on.
 
 Routes mount onto the platform's existing authenticated HTTP chain — you do not
-re-implement auth per route.
+re-implement auth per route. A stream `playback` route is the exception: it
+mounts on the media-token path described above, not on that chain.
 
 ## Store route runtime semantics
 
