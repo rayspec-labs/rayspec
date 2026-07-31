@@ -8,19 +8,28 @@
  * WHAT THE BOUND DOES NOT DO: it does not cancel the in-flight SDK call. There is no cancellation
  * path in run-core, so the model call keeps running until it settles on its own — the bound frees the
  * caller (and, on the durable path, the worker slot), it does not abort the provider request. What it
- * DOES guarantee once it has fired is asserted below, seam by seam: the abandoned call's events are
- * dropped, its journal calls are refused, its tool dispatches are refused closed (no handler run, no
- * step, no taint marker), and none of those refusals raises back into it.
+ * DOES guarantee once it has fired is asserted below, seam by seam: an event the abandoned call emits
+ * is dropped, a journal read or write it makes is refused, a transcript rehydrate is refused, and a
+ * tool dispatch it STARTS after that point is refused closed (no handler run, no step, no taint
+ * marker). A dispatch already inside the dispatcher is the separate case asserted alongside them: it
+ * is not stopped, so its handler runs and its journal step is then refused.
  *
  * Both product callers reach the model through this one `runAgent`, and they differ only in the
  * handle they pass: the sync HTTP path calls it OUTSIDE any transaction; the durable worker calls it
  * INSIDE `forTenant(db, tenantId).transaction(...)` with a separate autonomous-commit `taintDb`. Both
  * invocation shapes are exercised here.
  */
-import type { AgentSpec, Backend, NeutralTool, RunContext, RunResult } from '@rayspec/core';
+import type {
+  AgentSpec,
+  Backend,
+  NeutralTool,
+  RunContext,
+  RunResult,
+  ToolDispatchResult,
+} from '@rayspec/core';
 import { classifyUpstreamError } from '@rayspec/core';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { RunBoundTimeoutError } from './agent-bounds.js';
+import { RunAbandonedError, RunBoundTimeoutError } from './agent-bounds.js';
 import { runAgent } from './run-core.js';
 import { insertEnqueuedRunHeader } from './run-header.js';
 import { isRunTainted } from './run-taint.js';
@@ -90,6 +99,34 @@ class SilentBackend implements Backend {
   }
 }
 
+/**
+ * A provider that dispatches ONE tool call and then never settles: the shape where a dispatch is
+ * ALREADY INSIDE the dispatcher at the instant the bound fires (as opposed to one the abandoned call
+ * makes afterwards).
+ */
+class InFlightDispatchBackend implements Backend {
+  readonly id = 'openai' as const;
+  dispatched?: Promise<ToolDispatchResult>;
+  private release?: () => void;
+
+  async resolveAuth() {
+    return 'api-key' as const;
+  }
+
+  run(_spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
+    this.dispatched = ctx.dispatchTool?.('charge_card', { amount: 42 }, 'call-in-flight');
+    return new Promise<RunResult>((resolve) => {
+      this.release = () => resolve(completedResult(ctx));
+    });
+  }
+
+  /** Let the abandoned call finish, so no promise is left pending when the suite ends. */
+  finish(): void {
+    this.release?.();
+    this.release = undefined;
+  }
+}
+
 /** A backend that takes `delayMs` to answer — slower than any bound the unbounded tests set. */
 class SlowBackend implements Backend {
   readonly id = 'openai' as const;
@@ -131,8 +168,12 @@ async function runHeaderStatus(runId: string): Promise<string | undefined> {
 /** How many times the side-effecting handler ACTUALLY fired (the real effect counter). */
 let sideEffectFires = 0;
 
-/** A NON-IDEMPOTENT tool: firing it once more for an abandoned run is a real double-effect. */
-function nonIdempotentTool(): NeutralTool {
+/**
+ * A NON-IDEMPOTENT tool: firing it once more for an abandoned run is a real double-effect.
+ * `handlerDelayMs` holds the handler inside the dispatcher, so a test can have a dispatch still in
+ * flight when the bound fires.
+ */
+function nonIdempotentTool(handlerDelayMs = 0): NeutralTool {
   return {
     spec: {
       name: 'charge_card',
@@ -144,12 +185,13 @@ function nonIdempotentTool(): NeutralTool {
         additionalProperties: false,
       },
     },
-    handler: (args: unknown) => {
+    handler: async (args: unknown) => {
+      if (handlerDelayMs > 0) await new Promise((r) => setTimeout(r, handlerDelayMs));
       sideEffectFires += 1; // the real, irreversible effect
       const { amount } = (args ?? {}) as { amount?: number };
       return { charged: amount ?? 0 };
     },
-    timeoutMs: 1000,
+    timeoutMs: 5000,
     idempotent: false,
   };
 }
@@ -160,7 +202,7 @@ function setBound(value: string | undefined): void {
 }
 
 const savedBound = process.env.RAYSPEC_AGENT_RUN_MAX_MS;
-const open: SilentBackend[] = [];
+const open: { finish(): void }[] = [];
 
 beforeAll(async () => {
   await resetRunSchema(db);
@@ -307,11 +349,40 @@ describe('per-run wall-clock bound', () => {
     expect(await isRunTainted(forTenant(db, TENANT_A), 'bound-tool')).toBe(false);
   });
 
-  it('DURABLE invocation shape: the bound leaves the header where the enqueue put it', async () => {
+  it('a dispatch ALREADY IN FLIGHT when the bound fires is NOT stopped: the handler runs, its journal step is refused', async () => {
+    setBound('120');
+    const backend = new InFlightDispatchBackend();
+    open.push(backend);
+    // The handler is held for 600ms — five times the bound — so the dispatch is provably still inside
+    // the dispatcher when the bound fires.
+    await expect(
+      runAgent(forTenant(db, TENANT_A), backend, spec, {
+        runId: 'bound-in-flight',
+        tools: [nonIdempotentTool(600)],
+      }),
+    ).rejects.toBeInstanceOf(RunBoundTimeoutError);
+    // The run-core gate covers a dispatch that ARRIVES once the flag is set. This one was already
+    // past it, so nothing refuses it: the side effect had not fired when the run rejected, and it
+    // fires afterwards.
+    expect(sideEffectFires).toBe(0);
+    const dispatched = backend.dispatched;
+    expect(dispatched).toBeDefined();
+    // What the dispatch returns to the abandoned call is the journal seam's refusal, NOT the neutral
+    // `tool_error` a dispatch arriving after the flag gets: recordToolStep runs before emitResult.
+    await expect(dispatched).rejects.toBeInstanceOf(RunAbandonedError);
+    expect(sideEffectFires).toBe(1);
+    // The taint marker was committed BEFORE the handler (the dispatcher's fail-closed ordering), so it
+    // is on record even though the run had been given up on. The step is not: the journal refused it,
+    // so an effect that really happened is unjournaled.
+    expect(await isRunTainted(forTenant(db, TENANT_A), 'bound-in-flight')).toBe(true);
+    expect(await countJournalSteps('bound-in-flight')).toBe(0);
+  });
+
+  it('DURABLE shape, header PRE-WRITTEN by the enqueue: the bound leaves it at `enqueued`', async () => {
     setBound('120');
     const backend = new SilentBackend();
     open.push(backend);
-    // The enqueue path writes the `enqueued` header BEFORE the job is handed to the worker (#164).
+    // The API enqueue path writes the `enqueued` header BEFORE the job is handed to the worker (#164).
     await insertEnqueuedRunHeader(forTenant(db, TENANT_A), {
       runId: 'bound-durable-header',
       backend: 'openai',
@@ -330,6 +401,25 @@ describe('per-run wall-clock bound', () => {
     // rejection, and no completing write is reached. So a bounded durable run leaves NO terminal
     // header: the row reads exactly as the enqueue wrote it. This is what the CHANGELOG states.
     expect(await runHeaderStatus('bound-durable-header')).toBe('enqueued');
+  });
+
+  it('DURABLE shape, NO header pre-written: the bound leaves no `runs` row at all', async () => {
+    setBound('120');
+    const backend = new SilentBackend();
+    open.push(backend);
+    // The other way a job reaches the durable executor: the cron scheduler's agent action enqueues
+    // straight onto the executor without writing a header first (cron-scheduler.ts, `AGENT action`).
+    // run-core's own header write is inside the run transaction, so the rejection rolls it back and
+    // nothing about this run is left in `runs` — there is no header to test for terminality.
+    await expect(
+      forTenant(db, TENANT_A).transaction((txTdb) =>
+        runAgent(txTdb, backend, spec, {
+          runId: 'bound-durable-no-header',
+          taintDb: forTenant(db, TENANT_A),
+        }),
+      ),
+    ).rejects.toBeInstanceOf(RunBoundTimeoutError);
+    expect(await runHeaderStatus('bound-durable-no-header')).toBeUndefined();
   });
 
   it('UNSET: a run slower than any bound still completes (today’s unbounded behaviour)', async () => {

@@ -10,17 +10,26 @@
  *   RAYSPEC_AGENT_RUN_MAX_MS          wall clock run-core waits for one whole run
  *
  * The parsing rule is the one `resolveBootTimeoutMs` uses for RAYSPEC_BOOT_TIMEOUT_MS: trim, parse,
- * and fall back to the default on anything unusable. Here the default is "no bound", so an absent,
- * non-numeric, or non-positive value leaves the run exactly as unbounded as it is today.
+ * and fall back to the default on anything unusable. Here the default is "no bound", so an absent or
+ * non-numeric value — and any value that does not floor to 1 or more — leaves the run exactly as
+ * unbounded as it is today.
  */
 
-/** Parse a positive-integer millisecond/count value; anything else (including 0) is "not set". */
+/**
+ * Parse a positive-integer millisecond/count value; anything else (including 0) is "not set".
+ *
+ * The floor runs BEFORE the range check, so the number that is range-checked is exactly the number
+ * the caller gets. Checking first would let any 0 < v < 1 (`0.5`, `0.001`) pass the check and then
+ * floor to 0 — the sentinel this contract calls "not set", but as a NUMBER, so every consumer would
+ * take it as a live bound of zero: a run ceiling of 0ms, or an attempt count of 0 that maps to a
+ * negative retry count.
+ */
 function positiveInt(raw: string | undefined): number | undefined {
   const trimmed = raw?.trim();
   if (!trimmed) return undefined;
-  const n = Number(trimmed);
+  const n = Math.floor(Number(trimmed));
   if (!Number.isFinite(n) || n <= 0) return undefined;
-  return Math.floor(n);
+  return n;
 }
 
 /**

@@ -67,6 +67,18 @@ describe('OpenAIAdapter.resolveAuth registration', () => {
     expect(registeredClient().maxRetries).toBe(0);
   });
 
+  it('never registers a NEGATIVE maxRetries: a non-positive maxAttempts clamps to 0', async () => {
+    // openai@6.44.0 decides whether to retry with a truthiness test on the remaining count
+    // (client.mjs:372, :422) and decrements it per attempt (:563), so a negative count never reaches
+    // 0 and the client retries without end. The environment resolver cannot produce a non-positive
+    // attempt count, but OpenAIAdapterOptions is exported, so a caller can pass one.
+    await new OpenAIAdapter({ apiKey: 'sk-bounded', maxAttempts: 0 }).resolveAuth();
+    expect(registeredClient().maxRetries).toBe(0);
+    setDefaultOpenAIClientSpy.mockClear();
+    await new OpenAIAdapter({ apiKey: 'sk-bounded', maxAttempts: -5 }).resolveAuth();
+    expect(registeredClient().maxRetries).toBe(0);
+  });
+
   it('carries both bounds on the one registered client when both are set', async () => {
     await new OpenAIAdapter({
       apiKey: 'sk-bounded',

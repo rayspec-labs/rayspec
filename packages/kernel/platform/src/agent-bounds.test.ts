@@ -37,8 +37,33 @@ describe('resolveAgentRequestTimeoutMs (RAYSPEC_AGENT_REQUEST_TIMEOUT_MS)', () =
     );
   });
 
-  it('is undefined for an empty, non-numeric, zero, or negative value', () => {
-    for (const v of ['', '   ', 'abc', '10s', 'NaN', 'Infinity', '0', '-1']) {
+  it('never resolves to 0 — a fractional value below 1 floors to the "not set" sentinel', () => {
+    // The floor is applied BEFORE the range check, so a value that would floor to 0 is unset, not a
+    // live bound of zero. All three resolvers share the parser, so this pins the rule for all of
+    // them: 0 would be a 0ms run ceiling, a 0ms request timeout, and 0 attempts.
+    for (const v of ['0.5', '0.9', '0.001']) {
+      expect(resolveAgentRequestTimeoutMs(env({ RAYSPEC_AGENT_REQUEST_TIMEOUT_MS: v }))).not.toBe(
+        0,
+      );
+      expect(resolveAgentMaxAttempts(env({ RAYSPEC_AGENT_MAX_ATTEMPTS: v }))).not.toBe(0);
+      expect(resolveRunMaxMs(env({ RAYSPEC_AGENT_RUN_MAX_MS: v }))).not.toBe(0);
+    }
+  });
+
+  it('is undefined for an empty, non-numeric, zero, sub-1, or negative value', () => {
+    for (const v of [
+      '',
+      '   ',
+      'abc',
+      '10s',
+      'NaN',
+      'Infinity',
+      '0',
+      '0.5',
+      '0.9',
+      '0.001',
+      '-1',
+    ]) {
       expect(
         resolveAgentRequestTimeoutMs(env({ RAYSPEC_AGENT_REQUEST_TIMEOUT_MS: v })),
       ).toBeUndefined();
@@ -59,8 +84,8 @@ describe('resolveAgentMaxAttempts (RAYSPEC_AGENT_MAX_ATTEMPTS)', () => {
     expect(resolveAgentMaxAttempts(env({ RAYSPEC_AGENT_MAX_ATTEMPTS: '1' }))).toBe(1);
   });
 
-  it('is undefined for an empty, non-numeric, zero, or negative value', () => {
-    for (const v of ['', '   ', 'abc', 'NaN', 'Infinity', '0', '-3']) {
+  it('is undefined for an empty, non-numeric, zero, sub-1, or negative value', () => {
+    for (const v of ['', '   ', 'abc', 'NaN', 'Infinity', '0', '0.5', '0.9', '0.001', '-3']) {
       expect(resolveAgentMaxAttempts(env({ RAYSPEC_AGENT_MAX_ATTEMPTS: v }))).toBeUndefined();
     }
   });
@@ -75,8 +100,8 @@ describe('resolveRunMaxMs (RAYSPEC_AGENT_RUN_MAX_MS)', () => {
     expect(resolveRunMaxMs(env({ RAYSPEC_AGENT_RUN_MAX_MS: '300000' }))).toBe(300_000);
   });
 
-  it('is undefined for an empty, non-numeric, zero, or negative value', () => {
-    for (const v of ['', '   ', 'abc', 'NaN', 'Infinity', '0', '-1']) {
+  it('is undefined for an empty, non-numeric, zero, sub-1, or negative value', () => {
+    for (const v of ['', '   ', 'abc', 'NaN', 'Infinity', '0', '0.5', '0.9', '0.001', '-1']) {
       expect(resolveRunMaxMs(env({ RAYSPEC_AGENT_RUN_MAX_MS: v }))).toBeUndefined();
     }
   });

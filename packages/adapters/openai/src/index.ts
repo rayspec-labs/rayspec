@@ -155,7 +155,13 @@ export class OpenAIAdapter implements Backend {
       const client = new OpenAI({
         apiKey: this.apiKey,
         timeout: this.timeoutMs,
-        maxRetries: this.maxAttempts === undefined ? undefined : this.maxAttempts - 1,
+        // Clamped at 0 so the retry count can never go NEGATIVE. `openai@6.44.0` decides whether to
+        // retry with a truthiness test on the remaining count (`if (retriesRemaining)`,
+        // openai/client.mjs:372 and :422) and decrements it per attempt (:563), so a negative count
+        // never reaches 0 and the client retries without end — the opposite of the bound this option
+        // names. `OpenAIAdapterOptions` is exported, so a caller can pass 0 directly even though the
+        // environment resolver never yields it.
+        maxRetries: this.maxAttempts === undefined ? undefined : Math.max(0, this.maxAttempts - 1),
       });
       // `openai` ships a dual build with one CommonJS-mode .d.ts, so the class this ESM module
       // constructs and the class the CJS-typed SDK declares are nominally distinct to TypeScript
