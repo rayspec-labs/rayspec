@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Declared routes are rate limited, and the tier is decided after the credential has been
+  validated.** Spec-declared `api[]` routes carried no throttle at all, so the only place a
+  deployment could bound their load was a front proxy — and a proxy cannot validate a Bearer token.
+  All it can see is *whether* an `Authorization` header was sent, which makes a tier decided there
+  forgeable: junk in the header buys the generous allowance and switches the protection off. The
+  throttle now sits on the declared-route chain itself, behind the middleware that validates the
+  credential and in front of the one that demands a principal, so the question it asks is whether the
+  credential actually validated. A call with no credential, or with one that failed to validate — an
+  expired or forged token, an unknown API key — is counted in a **strict** bucket keyed on the client
+  source (the socket peer, or the forwarded address when a **configured** trusted proxy set the
+  forwarding header), at 30 requests per minute. Every unvalidated shape from one source shares that
+  one budget, so alternating a junk JWT, a junk API key, and no header at all does not multiply an
+  anonymous caller's allowance. A call carrying a **validated** credential is counted in a
+  **generous** bucket keyed on the tenant *and* the principal — the user or the API key, each with
+  its own budget, the same principal in two organizations counted separately — at 600 requests per
+  minute, sized so first-party automation calling in bursts is not locked out. **What a consumer
+  observes:** a declared route can now answer **`429 RATE_LIMITED`**, in the standard error envelope,
+  carrying a **`Retry-After`** header in **seconds** (how much of the window is left, never below
+  `1`). Nothing changes under budget — an unauthenticated call still gets its usual `401`, because
+  the throttle bounds load and does not authorize — and the media `playback` route, which mounts on
+  its own token path with its own per-user stream cap, is untouched. The counters are the existing
+  in-process limiter, not a new one and not a shared store, so **each instance counts on its own**: a
+  multi-instance deployment gives a caller one budget per instance it reaches. Treat both numbers as
+  a per-instance floor rather than a cluster-wide ceiling, and keep a shared front-line limit if you
+  need the latter.
+
 - **A persist handler can cap a model-chosen enum column server-side: the `clampValues` hole.** The
   persist templates already re-checked a model-chosen IDENTIFIER against a store before writing it
   (`fkRevalidate`) — the guarantee that makes "never trust the model's choice" structural rather than a

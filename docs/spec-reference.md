@@ -264,6 +264,39 @@ Routes mount onto the platform's existing authenticated HTTP chain — you do no
 re-implement auth per route. A stream `playback` route is the exception: it
 mounts on the media-token path described above, not on that chain.
 
+## Declared route throttling
+
+Every route on that chain is rate limited, and the tier a call gets is decided
+**after** the credential has been validated — not from the presence of an
+`Authorization` header. That ordering is the whole point: a front proxy can only
+see *whether* a header was sent, so tiering there is forgeable, and junk in the
+header would buy the generous allowance.
+
+- A call whose credential is **absent or does not validate** — no header, an
+  expired or forged token, an unknown API key — is counted in a **strict** bucket
+  keyed on the client source: the socket peer, or the forwarded client address
+  when a **configured** trusted proxy set the forwarding header. A caller cannot
+  move itself between buckets by varying what it puts in the header; every
+  unvalidated shape from one source shares one budget. The default allowance is
+  **30 requests per minute**.
+- A call carrying a **validated** credential is counted in a **generous** bucket
+  keyed on the tenant *and* the principal — the user or the API key, each with its
+  own budget, and the same principal in two organizations counted separately. The
+  default allowance is **600 requests per minute**, sized so first-party
+  automation calling in bursts is not throttled.
+
+Over budget the call answers **`429 RATE_LIMITED`** with the standard error
+envelope and a **`Retry-After`** header in **seconds** — how long the window still
+has to run, never below `1`. Under budget nothing changes, so an unauthenticated
+call still gets its usual `401`: the throttle bounds the load, it does not
+authorize.
+
+One limitation to plan around: the counters live **in the process**, so each
+instance of a multi-instance deployment counts on its own and a caller
+effectively gets one budget per instance it reaches. Treat these numbers as a
+per-instance floor rather than a cluster-wide guarantee, and keep a shared
+front-line limit if you need a hard cluster-wide ceiling.
+
 ## Store route runtime semantics
 
 Beyond the grammar, a declared `store` route has a few runtime behaviours worth
