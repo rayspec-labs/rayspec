@@ -512,23 +512,17 @@ const BYTE_ORDER_MARK = '\uFEFF';
  * it can arrive. That is the guarantee; keep it by adding kinds to the vocabulary, never by
  * interpolating anything computed from `raw`.
  *
- * WHAT THE TESTS PROVE ABOUT IT (`boot-secret-file.test.ts`): the message is emitted for TWO
- * sentinel secrets that produce the same three kinds, and the two messages are asserted
- * byte-identical. The sentinels are built to disagree everywhere the assertions rely on, and the
- * arm checks each disagreement before it uses it — disjoint alphabets (no shared character, so no
- * excerpt of either, at ANY position and ANY length down to a SINGLE character, can equal the
- * other's), different lengths, a different count of removed edge bytes, opposite core-length
- * parity, and a digit in one core but not the other. So an excerpt, the length, the removed-byte
- * count, the parity or digit-presence would each drive the two messages apart. Enumerated on top:
- * no base64 of the value, no hex digest, no digit at all, no verbatim removed byte, no 4-character
- * window of the raw value.
+ * WHERE IT IS CHECKED: `boot-secret-file.test.ts`, in the arm that emits this message for two
+ * different secrets with the same kinds of change and asserts the two messages byte-identical.
+ * What that arm does and does not establish is stated there, next to its own assertions.
  *
- * CONTRACT LIMIT (honest): that is a proof about those shapes, not about every conceivable one. Two
- * sentinels cannot separate an arbitrary LOSSY function of the value — a predicate coarse enough to
- * return the same answer for both would survive the byte-identity check, as a one-bit function of
- * the value does half the time by chance. The test arm is the check on the construction above, not
- * a replacement for it: what actually rules the rest out is that no expression here takes `raw` as
- * an operand.
+ * CONTRACT LIMIT (honest): a check against two secrets is a proof about the shapes those two
+ * separate, not about every conceivable one. Two sentinels cannot separate an arbitrary LOSSY
+ * function of the value — a predicate coarse enough to return the same answer for both would
+ * survive the byte-identity check, as a one-bit function of the value does half the time by chance.
+ * The test arm is the check on the construction above, not a replacement for it: what actually
+ * rules the rest out is that the value is never an operand of any expression that reaches the
+ * return.
  *
  * WHAT IT DOES NOT SAY: what to do about it. A trailing newline on a secret FILE is the documented
  * normal case, not a misconfiguration — the sanctioned `>`-redirect recipe in `.env.example` leaves

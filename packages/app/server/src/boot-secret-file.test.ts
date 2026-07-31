@@ -518,13 +518,15 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
   //
   // Disjointness alone only separates the VERBATIM shapes. The two sentinels are therefore also
   // made to disagree on the scalar facts a leak could report ABOUT the value instead of quoting it:
-  // how many edge bytes normalization removed, the parity of the core length, and whether the core
-  // holds a digit at all. Those are the shapes issue #138's constraint names outright ("not a
-  // length, not a count"), and each disequality is asserted below. Wrap both sentinels in the SAME
-  // edge bytes and every fact about the trimmed-away part becomes identical by construction, and so
-  // invisible to a byte-identity check — which is exactly the hole these three close. Digit-presence
-  // is why the control spends only the LETTERS of its alphabet: its half of the digits stays unused
-  // so that one sentinel carries digits and the other carries none.
+  // the raw length, how many edge bytes normalization removed and the parity of that count, the
+  // parity of the core length, and whether the core holds a digit at all. Issue #138: "The warning
+  // names the variable name and the kind of change (...), nothing else." A length or a count is
+  // neither, so it has to be separated as much as an excerpt does. Each disequality is asserted
+  // below. Wrap both sentinels in the SAME edge bytes and every fact about the trimmed-away part
+  // becomes identical by construction, and so invisible to a byte-identity check — which is exactly
+  // the hole these close. Digit-presence is why the control spends only the LETTERS of its
+  // alphabet: its half of the digits stays unused so that one sentinel carries digits and the other
+  // carries none.
   const BOM = '\uFEFF'; // U+FEFF, as an escape so the assertions below stay readable
   const LEAK_ALPHABET = 'ABCDEFGHIJKLMabcdefghijklm01234';
   const OTHER_ALPHABET = 'NOPQRSTUVWXYZnopqrstuvwxyz56789';
@@ -537,24 +539,16 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
   // bytes are exactly: U+FEFF, spaces, CR, LF — seven of them, wrapped around an even-length core
   // that carries digits.
   const LEAK_RAW = `  ${BOM}${LEAK_CLEAN}  \r\n`;
-  // A SECOND secret — the control for the counterproof. No shared character, a different length, an
-  // ODD-length core, and no digit anywhere in it (letters only, still inside the disjoint alphabet
-  // above). Its wrapper produces the SAME THREE KINDS of change — a leading byte-order mark, leading
-  // whitespace, trailing whitespace — out of DIFFERENT bytes: three removed instead of seven. Same
-  // kinds, so the two messages stay comparable and the byte-identity check keeps its meaning;
-  // different in each of the scalars pinned below, so none of THOSE can come out the same for both.
-  // Both halves are asserted below — a future edit that breaks either one fails.
+  // A SECOND secret — the control for the counterproof. No shared character, a different raw
+  // length, an ODD-length core, and no digit anywhere in it (letters only, still inside the
+  // disjoint alphabet above). Its wrapper produces the SAME THREE KINDS of change — a leading
+  // byte-order mark, leading whitespace, trailing whitespace — out of DIFFERENT bytes: U+FEFF, tab,
+  // tab, LF, four of them against seven, so the count differs and so does its PARITY. Same kinds,
+  // so the two messages stay comparable and the byte-identity check keeps its meaning; different in
+  // each of the scalars pinned below, so none of THOSE can come out the same for both. Both halves
+  // are asserted below — a future edit that breaks either one fails.
   const OTHER_CLEAN = 'yzVqRVqtxYzNtYYuNWqruXpNpzTswvXwN';
-  const OTHER_RAW = `${BOM}\t${OTHER_CLEAN}\n`;
-  /** The change KINDS a raw value triggers, derived the way `bootSecretNormalizationWarning` does. */
-  function changeKinds(raw: string): string[] {
-    const leading = raw.slice(0, raw.length - raw.trimStart().length);
-    const kinds: string[] = [];
-    if (leading.includes(BOM)) kinds.push('byte-order mark');
-    if (leading.replaceAll(BOM, '').length > 0) kinds.push('leading whitespace');
-    if (raw.trimEnd().length < raw.length) kinds.push('trailing whitespace');
-    return kinds;
-  }
+  const OTHER_RAW = `${BOM}\t${OTHER_CLEAN}\t\n`;
   /** How many bytes normalization removes from the edges of `raw` — a COUNT, never in any message. */
   const removedEdgeBytes = (raw: string): number => raw.length - raw.trim().length;
   /** Every substring of `value` of length `size` — the "any substring long enough to matter" probe. */
@@ -693,25 +687,34 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
     // (2) The SCALAR facts a leak could report about the value instead of quoting it. Disjointness
     // says nothing about these: wrap the two sentinels in the same edge bytes and the removed-byte
     // count is identical by construction, invisible to the byte-identity check no matter how
-    // different the values are. So the two are deliberately built to disagree on each — the count
-    // of removed edge bytes, the parity of the core length, and whether the core holds a digit.
+    // different the values are. So the two are deliberately built to disagree on each — the raw
+    // length, the count of removed edge bytes AND its parity, the parity of the core length, and
+    // whether the core holds a digit.
+    expect(OTHER_RAW.length).not.toBe(LEAK_RAW.length);
     expect(removedEdgeBytes(OTHER_RAW)).not.toBe(removedEdgeBytes(LEAK_RAW));
+    expect(removedEdgeBytes(OTHER_RAW) % 2).not.toBe(removedEdgeBytes(LEAK_RAW) % 2);
     expect(OTHER_CLEAN.length % 2).not.toBe(LEAK_CLEAN.length % 2);
     expect(/\d/.test(OTHER_CLEAN)).not.toBe(/\d/.test(LEAK_CLEAN));
 
     // (3) And the property that keeps the check COMPARABLE while (1) and (2) drive the two apart:
-    // the two raw sentinels still trigger the SAME THREE KINDS of change. If they ever diverge the
-    // two messages differ for a reason that is not a leak, and the control silently becomes
-    // vacuous — so the divergence has to fail here, loudly, and as itself.
-    const allThreeKinds = ['byte-order mark', 'leading whitespace', 'trailing whitespace'];
-    expect(changeKinds(LEAK_RAW)).toEqual(allThreeKinds);
-    expect(changeKinds(OTHER_RAW)).toEqual(allThreeKinds);
+    // both sentinels still trigger the SAME THREE KINDS of change. If they ever diverge, the two
+    // messages differ for a reason that is not a leak and the control silently becomes vacuous. So
+    // it is checked on the two EMITTED messages rather than on a copy of the kind derivation — a
+    // divergence, whatever caused it, fails here naming the kind that went missing, before the
+    // byte-identity check below can report it as a generic mismatch.
+    const { warnings: otherWarnings } = boot({ ...plainEnv, RAYSPEC_JWT_SIGNING_KEY: OTHER_RAW });
+    expect(otherWarnings).toHaveLength(1);
+    const otherWarning = otherWarnings[0] ?? '';
+    for (const kind of ['byte-order mark', 'leading whitespace', 'trailing whitespace']) {
+      expect(warning).toContain(kind);
+      expect(otherWarning).toContain(kind);
+    }
 
     // WHAT THE CHECK BELOW THEN PROVES, and what it does not. It proves that the message carries no
     // excerpt of either core — any position, any length, down to a single character — and none of
-    // the scalars pinned above: the raw length, the removed-edge-byte count, the core length parity,
-    // digit-presence. Together with the enumerated assertions (no base64, no hex digest, no digit,
-    // no verbatim removed bytes) that is the covered surface.
+    // the scalars pinned above: the raw length, the removed-edge-byte count and its parity, the
+    // core length parity, digit-presence. Together with the enumerated assertions (no base64, no
+    // hex digest, no digit, no verbatim removed bytes) that is the covered surface.
     //
     // CONTRACT LIMIT (honest): two sentinels cannot rule out EVERY lossy function of the value. A
     // derived fact coarse enough to land on the same output for both — a one-bit predicate collides
@@ -720,9 +723,7 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
     // and the closed, value-free kind vocabulary in `bootSecretNormalizationWarning` is what
     // actually rules the rest out by construction. This arm is the check on that construction, not
     // a substitute for it.
-    const { warnings: otherWarnings } = boot({ ...plainEnv, RAYSPEC_JWT_SIGNING_KEY: OTHER_RAW });
-    expect(otherWarnings).toHaveLength(1);
-    expect(otherWarnings[0]).toBe(warning);
+    expect(otherWarning).toBe(warning);
   });
 
   it('emits NOTHING on the abort path — a broken mount aborts without a normalization warning', () => {
