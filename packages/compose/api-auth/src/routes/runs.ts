@@ -755,9 +755,10 @@ async function releaseIfUntainted(
 }
 
 /**
- * read the Retry-After (seconds) the adapter recorded on the failing journal step for a
- * rate-limited run (the adapter wrote `{ error, errorClass, retryAfter }` into the step output). The
- * read is tenant-scoped via the supplied TenantDb. Returns undefined when none was captured.
+ * read the Retry-After (seconds) the adapter recorded on the failing journal step (the adapter wrote
+ * `{ error, errorClass, retryAfter }` into the step output). Both a rate-limited run and an upstream
+ * 5xx can carry one. The read is tenant-scoped via the supplied TenantDb. Returns undefined when none
+ * was captured.
  */
 async function retryAfterForRun(tdb: TenantDb, runId: string): Promise<number | undefined> {
   const steps = (await tdb
@@ -772,13 +773,24 @@ async function retryAfterForRun(tdb: TenantDb, runId: string): Promise<number | 
 }
 
 /**
- * set the `Retry-After` advice on a response that answers 429, read back from the failing
+ * the statuses `statusForErrorClass` produces for a TRANSIENT class — the ones whose reservation is
+ * released so a same-key retry re-runs, and therefore the only ones on which advising WHEN to retry
+ * means anything. A terminal class answers 200 and there is nothing to advise.
+ */
+const RETRY_ADVISABLE_STATUSES: ReadonlySet<number> = new Set([429, 502, 504]);
+
+/**
+ * set the `Retry-After` advice on a response whose status invites a retry, read back from the failing
  * journal step the adapter recorded it on.
  *
- * BOTH 429 surfaces of one rate-limited run go through here — the LIVE sync response and the same-key
- * REPLAY of a kept run — so a caller reads the SAME advice whichever of the two it hits; the header can
- * never be present on one and absent on the other for the same run. A no-op for any other status, and
- * for a 429 whose adapter captured no Retry-After (the header is advice; a 429 without one is valid).
+ * EVERY retry-advisable surface of one run goes through here — the LIVE sync response and the same-key
+ * REPLAY of a kept run — so a caller reads the SAME advice whichever it hits; the header can never be
+ * present on one and absent on the other for the same run. It follows the ADVICE, not one status:
+ * `classifyUpstreamError` captures a Retry-After for an upstream 5xx exactly as it does for a 429
+ * (`withRetry('upstream_5xx')`), so gating on 429 alone journaled that advice and then dropped it.
+ *
+ * A no-op for a terminal status, and for a retry-advisable one whose adapter captured nothing — the
+ * header is ADVICE and is never invented: a 429 or 502 without one is valid.
  */
 async function applyRetryAfter(
   c: Context,
@@ -786,7 +798,7 @@ async function applyRetryAfter(
   status: HttpStatusCode,
   runId: string,
 ): Promise<void> {
-  if (status !== 429) return;
+  if (!RETRY_ADVISABLE_STATUSES.has(status)) return;
   const retryAfter = await retryAfterForRun(tdb, runId);
   if (retryAfter !== undefined) c.header('Retry-After', String(retryAfter));
 }

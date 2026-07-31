@@ -394,6 +394,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same status, same body, and a `429` whose upstream sent no retry advice still carries no header, on
   both surfaces.
 
+- **A `502` from an agent run carries its `Retry-After` too.** The header followed the status rather
+  than the advice: it was emitted only for a `429`, although an upstream `5xx` is classified with
+  whatever retry advice came back exactly as a rate limit is, and `upstream_5xx` is a transient class
+  whose `Idempotency-Key` reservation is released precisely so a retry re-runs. So a provider that
+  answered `503` with a `Retry-After` had that advice written to the run's journal step and then
+  dropped on the way out. It is now emitted for every retry-advisable status, on the live response and
+  the same-key replay alike, and the generated OpenAPI documents the header on the `502` as it already
+  did on the `429`. A `504` still carries none — nothing upstream advises a delay for a deadline this
+  platform imposed — and a `502` whose upstream sent no advice still carries no header.
+
 ### Security
 
 - **The boot no longer writes the two auth secrets into `process.env`, so a spawned child does not
