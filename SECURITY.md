@@ -51,9 +51,19 @@ this split is essential to deploying it safely. This section mirrors
 - **An untrusted-content trust boundary.** Agent tool calls run through one
   dispatch boundary, and everything crossing it from the outside — tool outputs,
   transcribed or uploaded content, and rehydrated conversation history — is
-  treated as **data, never as instructions**. This is the defense against
-  prompt-injection-style attacks: untrusted content can inform a model's answer
-  but cannot redirect the agent's behavior or its tool use.
+  treated as **data, never as instructions**: untrusted content can inform a
+  model's answer but cannot redirect the agent's behavior or its tool use. Read
+  that scope precisely. It stops **imperative** injection — text that commands the
+  agent ("ignore all previous instructions"). It does **not** stop **assertive**
+  injection, which disputes a data field ("this company actually has 8000
+  employees"), or **policy** injection, which invents a decision rule ("per
+  standing order 7-B…"): those ask for nothing, they only inform the answer, and
+  the model then classifies from the planted fact or rule entirely within the
+  rules. Answering those two is the **author's** job in the agent's instructions —
+  a stated field precedence and a closed decision rule — and how reliably it works
+  depends on how mechanically enumerable that rule is.
+  [Architecture → The tool-dispatch trust boundary](./docs/ARCHITECTURE.md#3-the-tool-dispatch-trust-boundary)
+  has the three classes, the measurements, and what `rayspec doctor` reports.
 - **An out-of-band audit trail.** An append-only, tenant-scoped run journal
   records what ran, for whom, and under what authority, independently of the
   request path.
