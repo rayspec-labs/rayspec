@@ -85,6 +85,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rayspec-serve` entrypoint and `rayspec deploy` now share this one detection instead of carrying a
   copy each; both boot exactly as before.
 
+- **The rule that decides an agent run's HTTP status is written down.** A run that fails does not
+  usually fail the request: it completes and returns a result carrying the neutral `errorClass`, and
+  the synchronous JSON response maps that class onto the status. The mapping has always been
+  deliberate, and it has never been anywhere a caller could read: an invalid provider key
+  (`upstream_4xx`) came back `200` and a rate limit (`rate_limited`) came back `429`, two same-shaped
+  failed runs treated differently with no discoverable reason. The spec reference now carries it under
+  *Agent route runtime semantics*, as the rule it is — a **transient** class (`rate_limited` → `429`,
+  `upstream_5xx` → `502`, `timeout` → `504`) gets a real error status and releases the
+  `Idempotency-Key` reservation, so a same-key retry re-runs; a **terminal** class (`upstream_4xx`,
+  `model_refusal`, `internal`) is a real, repeatable outcome, so it stays `200` with the class in the
+  body and a same-key retry replays it — together with the one exception (a run that fired a
+  non-idempotent tool keeps its reservation whatever its class, so a transient one replays at its
+  transient status), when a `429` carries a `Retry-After`, why a streamed run reports its class in the
+  terminal event instead of the status line, and the fact that `GET /v1/runs/{id}` is a durable
+  re-read that answers `200` whatever the run's outcome. The section also states the run `status`
+  vocabulary in full: a run header now exists from enqueue on, so that endpoint answers `enqueued` and
+  `running` besides the two terminal values, and only `completed` and `error` mean a run is finished.
+  The generated OpenAPI document for a declared `agent` route describes the same mapping: the `429`,
+  `502` and `504` responses are documented alongside the `200`/`202` it already carried, the `429`
+  documents its `Retry-After` header, and the `200` says which failed runs it also covers. Behaviour is
+  untouched by all of this — no status, reservation or replay rule changed.
+
 ### Changed
 
 - **`/health` covers the declared frontend mounts, and its response carries a `frontend` field.** The
@@ -314,6 +336,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answered `405` before the page is consulted. This **narrows the `1.6.2` note** that
   described the custom page as a plain mount's not-found surface without qualifying it by
   method.
+
+- **A replayed `429` from an agent run now carries the same `Retry-After` the live one did.** A
+  synchronous run that fails with the transient `rate_limited` class answers `429` and, when the
+  backend adapter captured retry advice from the upstream limit, a `Retry-After` header read back from
+  the run's failing journal step. One run can answer that twice. A failed run that fired a
+  non-idempotent tool keeps its `Idempotency-Key` reservation — releasing it would let a retry re-fire
+  the side effect — so a same-key retry replays the stored result, and the replay applies the same
+  status mapping and answered `429` as well. It just answered it bare: for one and the same
+  rate-limited run the first caller was told how long to wait and the second was told nothing, so a
+  client that keys its backoff off the header behaved differently depending on which of the two
+  surfaces it happened to hit. Both now emit the header through one shared path, from the same journal
+  step, so a run's `429` advises every caller identically. Nothing else about either response changes:
+  same status, same body, and a `429` whose upstream sent no retry advice still carries no header, on
+  both surfaces.
 
 ### Security
 

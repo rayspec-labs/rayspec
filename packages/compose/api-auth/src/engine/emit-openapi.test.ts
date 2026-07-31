@@ -340,6 +340,20 @@ describe('buildDeclaredRoutesOpenApi — product-agnostic emission', () => {
     expect(handlerBody.additionalProperties).toBe(true);
     expect(doc.paths['/uploads/{key}'].post.requestBody).toBeUndefined();
   });
+
+  it('an {agent} route documents the errorClass → HTTP status mapping, incl. the 429 Retry-After', () => {
+    // The mapping is the run surface's own rule (runs.ts statusForErrorClass): a transient class gets a
+    // real error status, a terminal one stays 200. A generated client must be able to READ that rule off
+    // the document — before this, only the 200/202 pair was documented and the error statuses were
+    // discoverable solely by provoking one.
+    const doc = buildDeclaredRoutesOpenApi(richSpec());
+    const responses = doc.paths['/widgets/{id}/run'].post.responses;
+    expect(Object.keys(responses).sort()).toEqual(['200', '202', '429', '502', '504']);
+    // The Retry-After the 429 carries is a documented response header, not folklore.
+    expect(responses['429'].headers?.['Retry-After']).toBeDefined();
+    // The 200 names the terminal classes it also covers, so it is not read as "the run succeeded".
+    expect(responses['200'].description).toContain('model_refusal');
+  });
 });
 
 /**
