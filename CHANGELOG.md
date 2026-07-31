@@ -78,6 +78,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A document whose handler modules are TypeScript source no longer lints green and then aborts at
+  boot.** A backend document declaring a `handlers[].module` with a TypeScript extension (`.ts`,
+  `.tsx`, `.mts`, `.cts`) validated with `ok: true` and no warnings at all, and the container then
+  entered a restart loop: the production handler loader refuses TypeScript source fail-closed,
+  because it loads compiled JavaScript only. Nothing about that needs a running system to see — the
+  extension is written in the document — so `doctor` now reports the new `typescript_handler_module`
+  advisory at `handlers[<i>].module`, naming the handler, the offending path, and the same two ways
+  out a `gen-handler` render already recommends: compile the module to `.js` with a build step (the
+  bundled `examples/acme-notes-backend/build.mjs` wrapper transpiles the handlers and rewrites the
+  spec's `module:` paths), or re-render it as deployable ESM with `rayspec gen-handler --emit js`.
+  It is an advisory, never an error: authoring against TypeScript source is the documented loop —
+  the development loader takes un-built source through an explicit opt-in, and the shipped example
+  documents declare such modules on purpose — so `doctor` still answers `ok: true` and no document
+  that parsed before stops parsing. `extensions[].module` is deliberately not flagged, because that
+  field is a pack root DIRECTORY reference rather than a module file path — the extension loader
+  jails it as the pack root and appends its own entry file inside it — so there is no authored
+  module extension there for the advisory to read. The extension set behind all three decisions —
+  the loader's fail-closed guard, the pack resolver's sibling preference, and the new advisory — is
+  now one exported constant rather than two module-private copies that could drift; both loaders
+  make byte-for-byte the decisions they made before.
+
 - **`rayspec deploy --dry-run` reports a frontend-only document truthfully instead of `ok: false`.**
   Such a document is not a product document, so composing it against the product runtime was never
   the question — yet that is what the check did, and it answered with three schema violations and

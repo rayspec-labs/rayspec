@@ -16,6 +16,7 @@ export * from './errors.js';
 export * from './export.js';
 export * from './grammar.js';
 export * from './lint.js';
+export * from './module-extensions.js';
 export * from './parse.js';
 export * from './product-events.js';
 export * from './product-grammar.js';
