@@ -230,7 +230,10 @@ api:
     tenant-scoped). The error message names the violated column but never echoes
     the offending value; a non-conflict failure is unaffected.
   - **`agent`** — invoke a declared agent over the run surface. Fields: `agent`
-    (a declared agent id) and an optional `persistTo` (a declared store name). When
+    (a declared agent id) and an optional `persistTo` (a declared store name). How a
+    failed run's `errorClass` becomes an HTTP status, when a same-key retry re-runs
+    rather than replays, and what the run `status` field can say are documented under
+    [Agent route runtime semantics](#agent-route-runtime-semantics) below. When
     `persistTo` is set, a successful run's validated `outputSchema` output is written
     as one row into that store — exactly once, atomically with the run header's
     completing transition, on both the in-request (synchronous) and off-request
@@ -354,6 +357,107 @@ This is distinct from an author-modeled uniqueness constraint. Declaring a colum
 (tenant-scoped uniqueness) rather than a replay. Use `Idempotency-Key` for
 safe-retry semantics on a create, and `unique: true` when a duplicate value should
 be refused.
+
+## Agent route runtime semantics
+
+An `agent` route executes the run **inside the request** and answers with the
+neutral run result. Two parts of that answer deserve a rule you can code a client
+against: the HTTP status a **failed** run gets, and the `status` vocabulary a run
+reports.
+
+### `errorClass` → HTTP status
+
+A failed run usually does not fail the *request*. The run completes and returns a
+result whose `status` is `"error"` and whose `errorClass` names the neutral cause;
+the synchronous JSON response then maps that class onto the HTTP status. The
+mapping splits the classes in two, along one question — **is making the same call
+again worth anything?**
+
+| `errorClass`    | HTTP  | What it means                                          |
+| --------------- | ----- | ------------------------------------------------------ |
+| `rate_limited`  | `429` | Transient — upstream throttled the call.               |
+| `upstream_5xx`  | `502` | Transient — upstream server error.                     |
+| `timeout`       | `504` | Transient — the request or the agent loop timed out.   |
+| `upstream_4xx`  | `200` | Terminal — upstream rejected the call (e.g. a bad key). |
+| `model_refusal` | `200` | Terminal — the model declined to answer.               |
+| `internal`      | `200` | Terminal — unclassified; the fail-closed default.      |
+
+A **transient** class may well succeed on the next attempt, so it gets a real
+error status *and* — when the request carried an `Idempotency-Key` — **releases**
+that key's reservation: a retry under the same key **re-runs** the agent rather
+than handing back the failure.
+
+A **terminal** class is a real, repeatable outcome: the run executed, and running
+it again would produce the same thing. So the response stays `200` carrying the
+whole result — `status: "error"` and the `errorClass` in the body — and the run is
+**kept** under the key. A same-key retry **replays** that stored result, at the
+same status, without executing the agent a second time.
+
+Read the body, not only the status line: a `200` from an `agent` route is not by
+itself a successful run. On every status above, the body's `status` and
+`errorClass` are the authoritative outcome.
+
+One exception to the release rule, and it is deliberate: a run that fired a
+non-idempotent tool (one declared [`idempotent: false`](#tooling)) keeps its
+reservation whatever its class, because re-running it would fire that side effect
+a second time. A same-key retry therefore replays it — and a transient one replays
+at its transient status, `429` / `502` / `504`, not at `200`.
+
+### `Retry-After`
+
+A `429` carries a `Retry-After` header, in seconds, whenever the backend adapter
+captured retry advice from the upstream rate limit; the value is recorded on the
+run's failing journal step and read back from there. Both of a run's `429`
+surfaces answer identically — the live response, and the same-key replay of a run
+that kept its reservation. When the upstream sent no advice there is no header:
+it is advice, not a guarantee, and a `429` without it is well-formed.
+
+### Streaming, and a run that throws
+
+The status mapping describes the **JSON** response. Under
+`Accept: text/event-stream` the `200` status line is flushed long before the run
+can fail, so the status line cannot carry the outcome: the neutral `errorClass`
+rides the terminal event instead, and the durable re-read below reports that same
+classified outcome afterwards.
+
+A run that does not merely fail but **throws** — the held request hitting its
+timeout, or a configured per-run wall-clock ceiling — produces no run result at
+all. That answers `504 GATEWAY_TIMEOUT` with the platform's standard error
+envelope, carrying the neutral `timeout` class in `details.errorClass`.
+
+### Run status vocabulary
+
+`GET /v1/runs/{id}` is the durable re-read of a run, and it answers **`200`
+whatever the run's outcome** — a failed run is still a successfully read one. It
+answers `404` only for a run id that does not exist in the calling tenant. The
+status mapping above belongs to the live run call and never to this one.
+
+The `status` it returns is one of four values, and a run moves through them in one
+direction:
+
+```
+enqueued → running → completed | error
+```
+
+- `enqueued` — the run has a header row but has not started executing. An
+  `async: true` run is written this way at enqueue, before its job reaches the
+  durable worker, which is what makes the `runId` that call's `202` hands back
+  resolvable straight away instead of a `404` until the run ends. That write is
+  best-effort: a run whose enqueue-time write did not land still answers `202`,
+  its id then reads `404` for the whole run as it did before — and never resolves
+  at all if that run ends by throwing, because the header it writes for itself
+  rolls back with the worker transaction it is written in.
+- `running` — execution has started. This is what a **synchronous** run publishes,
+  because it executes outside a transaction; the durable worker runs the agent
+  inside one transaction, so a caller polling an async run reads `enqueued` for
+  the whole run and then the terminal status.
+- `completed` and `error` — the two **terminal** values, and the only two a run
+  result carries.
+
+Only the terminal values mean the run is finished, so test a status for
+terminality rather than for the header merely being there: a run that throws
+reaches no completing write, and nothing reaps the non-terminal header it leaves
+behind.
 
 ## `agents`
 

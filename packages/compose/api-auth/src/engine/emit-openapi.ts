@@ -236,14 +236,52 @@ function operationForRoute(
         required: true,
         content: { 'application/json': { schema: toJsonSchema(StartRunRequest) } },
       },
+      // The failed-run statuses ARE the run surface's errorClass → HTTP mapping (runs.ts
+      // `statusForErrorClass`), described here so a generated client reads the same rule the spec
+      // reference states instead of having to infer it from a live 429: a TERMINAL class is a real,
+      // repeatable outcome that stays 200 and is replayed under the Idempotency-Key, a TRANSIENT one
+      // gets a real error status and releases the key so a same-key retry re-runs.
       responses: {
         '200': {
           description:
-            'The neutral RunResult (sync) — Accept: text/event-stream streams it as SSE.',
+            'The neutral RunResult (sync) — Accept: text/event-stream streams it as SSE. Also the ' +
+            'response for a run that FAILED with a TERMINAL errorClass (upstream_4xx, model_refusal, ' +
+            'internal): the run executed and produced a repeatable outcome, so the body carries it as ' +
+            "status:'error' + errorClass, and a same-key retry replays this result rather than re-running.",
           content: { 'application/json': { schema: OPAQUE_OBJECT } },
         },
         '202': {
           description: 'Accepted — an async run was enqueued (async:true on a durable worker).',
+        },
+        '429': {
+          description:
+            "The run failed with the TRANSIENT errorClass rate_limited; the body is the RunResult (status:'error'). " +
+            'A same-key retry RE-RUNS the agent (the Idempotency-Key reservation is released) — unless the run ' +
+            'fired a non-idempotent tool, in which case the reservation is kept and the retry replays this 429.',
+          headers: {
+            'Retry-After': {
+              description:
+                'Seconds to wait before retrying — present when the backend adapter captured retry advice ' +
+                'from the upstream rate limit. Identical on a live 429 and on a replayed one.',
+              schema: { type: 'string' },
+            },
+          },
+          content: { 'application/json': { schema: OPAQUE_OBJECT } },
+        },
+        '502': {
+          description:
+            "The run failed with the TRANSIENT errorClass upstream_5xx; the body is the RunResult (status:'error'). " +
+            'A same-key retry RE-RUNS the agent (the reservation is released), unless the run fired a ' +
+            'non-idempotent tool.',
+          content: { 'application/json': { schema: OPAQUE_OBJECT } },
+        },
+        '504': {
+          description:
+            "The run failed with the TRANSIENT errorClass timeout; the body is the RunResult (status:'error') " +
+            'and a same-key retry RE-RUNS the agent, unless the run fired a non-idempotent tool. A run that ' +
+            'THREW instead — the held request hitting its timeout — answers the same status with the standard ' +
+            'error envelope (GATEWAY_TIMEOUT), carrying the neutral class in details.errorClass.',
+          content: { 'application/json': { schema: OPAQUE_OBJECT } },
         },
       },
     };

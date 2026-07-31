@@ -85,6 +85,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rayspec-serve` entrypoint and `rayspec deploy` now share this one detection instead of carrying a
   copy each; both boot exactly as before.
 
+- **The rule that decides an agent run's HTTP status is written down.** A run that fails does not
+  usually fail the request: it completes and returns a result carrying the neutral `errorClass`, and
+  the synchronous JSON response maps that class onto the status. The mapping has always been
+  deliberate, and it has never been anywhere a caller could read: an invalid provider key
+  (`upstream_4xx`) came back `200` and a rate limit (`rate_limited`) came back `429`, two same-shaped
+  failed runs treated differently with no discoverable reason. The spec reference now carries it under
+  *Agent route runtime semantics*, as the rule it is — a **transient** class (`rate_limited` → `429`,
+  `upstream_5xx` → `502`, `timeout` → `504`) gets a real error status and releases the
+  `Idempotency-Key` reservation, so a same-key retry re-runs; a **terminal** class (`upstream_4xx`,
+  `model_refusal`, `internal`) is a real, repeatable outcome, so it stays `200` with the class in the
+  body and a same-key retry replays it — together with the one exception (a run that fired a
+  non-idempotent tool keeps its reservation whatever its class, so a transient one replays at its
+  transient status), when a `429` carries a `Retry-After`, why a streamed run reports its class in the
+  terminal event instead of the status line, and the fact that `GET /v1/runs/{id}` is a durable
+  re-read that answers `200` whatever the run's outcome. The section also states the run `status`
+  vocabulary in full: a run header now exists from enqueue on, so that endpoint answers `enqueued` and
+  `running` besides the two terminal values, and only `completed` and `error` mean a run is finished.
+  The generated OpenAPI document for a declared `agent` route describes the same mapping: the `429`,
+  `502` and `504` responses are documented alongside the `200`/`202` it already carried, the `429`
+  documents its `Retry-After` header, and the `200` says which failed runs it also covers. Behaviour is
+  untouched by all of this — no status, reservation or replay rule changed.
+
 ### Changed
 
 - **`/health` covers the declared frontend mounts, and its response carries a `frontend` field.** The
