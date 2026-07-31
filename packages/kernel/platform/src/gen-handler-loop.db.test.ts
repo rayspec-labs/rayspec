@@ -20,6 +20,9 @@
  *     coercion (accept any arg) and the malformed-arg case would WRITE the bad value → RED;
  *   - the FK re-validation is load-bearing: a category_code NOT in the catalog returns `failed`, no
  *     write. Remove the rendered FK re-check and that case would persist an invalid code → RED;
+ *   - the server-side CLAMP is load-bearing: a policy_flag proposed ABOVE the declared bound is
+ *     written AS the bound and the journaled step keeps both values. Remove the rendered clamp and the
+ *     proposal would reach the store → RED;
  *   - tenant isolation: a second tenant's coder cannot read/write the first tenant's rows.
  *
  * Skips when DATABASE_URL is absent (turbo passes it in CI; a credential-free run self-skips). Uses a
@@ -162,6 +165,9 @@ function it2Spec(): RaySpec {
             status: { type: 'string' },
             id: { type: 'string' },
             detail: { type: 'string' },
+            // The clamp record the handler returns when a declared bound fires. Undeclared, the FIRST
+            // clamped write would be rejected by validate-out (additionalProperties:false).
+            clamped: { type: 'array', items: { type: 'object' } },
           },
           required: ['status'],
         },
@@ -513,6 +519,71 @@ describe.skipIf(!hasDb)(
       expect(claim?.category_code).toBeNull();
     });
 
+    it('the server-side CLAMP is load-bearing: a proposed value above the bound is written AS the bound, and the journal keeps both', async () => {
+      securityTestsRan++;
+      const claimId = await seedClaim(TENANT_A);
+      const tdb = forTenant(db, TENANT_A);
+      const tools = buildToolFactory(it2Spec(), handlers, productTables, [
+        'lookup_categories',
+        'code_claim',
+      ])(tdb);
+      // The model proposes the TOP of the declared policy_flag order; the holes cap it at `review`.
+      const backend = new LoopBackend({
+        claim_id: claimId,
+        category_code: 'TRAVEL',
+        gl_code: '6000',
+        coding_summary: 'x',
+        policy_flag: 'violation',
+      });
+      const run = await runAgent(tdb, backend, agentSpec(), { tools });
+      expect(backend.codeStatus).toBe('coded'); // the write SUCCEEDS — a clamp bounds, it does not fail.
+
+      // (1) THE STORE holds the bound, never the proposal. Remove the rendered clamp and this is
+      // 'violation' → RED.
+      const claim = await getClaim(TENANT_A, claimId);
+      expect(claim?.status).toBe('coded');
+      expect(claim?.policy_flag).toBe('review');
+
+      // (2) THE JOURNAL keeps BOTH sides of the decision. The handler's result IS what dispatchTool
+      // opaque-wraps and records as the tool step's `output`, so the clamp record survives the run:
+      // the model's original choice is recoverable next to the bound that replaced it.
+      const steps = (await db.$client.unsafe(
+        `SELECT output FROM journal_steps WHERE run_id = $1 AND type = 'tool' AND status = 'ok'`,
+        [run.runId],
+      )) as unknown as Array<{ output: { data?: { clamped?: unknown[] } } }>;
+      const records = steps.flatMap((s) => s.output?.data?.clamped ?? []);
+      expect(records).toEqual([
+        { column: 'policy_flag', proposed: 'violation', applied: 'review' },
+      ]);
+    });
+
+    it('a proposal AT or BELOW the bound is written unchanged and journals no clamp record', async () => {
+      securityTestsRan++;
+      const claimId = await seedClaim(TENANT_A);
+      const tdb = forTenant(db, TENANT_A);
+      const tools = buildToolFactory(it2Spec(), handlers, productTables, [
+        'lookup_categories',
+        'code_claim',
+      ])(tdb);
+      const backend = new LoopBackend({
+        claim_id: claimId,
+        category_code: 'TRAVEL',
+        gl_code: '6000',
+        coding_summary: 'x',
+        policy_flag: 'review', // exactly AT the bound — the clamp must not fire.
+      });
+      const run = await runAgent(tdb, backend, agentSpec(), { tools });
+      const claim = await getClaim(TENANT_A, claimId);
+      expect(claim?.policy_flag).toBe('review');
+      const steps = (await db.$client.unsafe(
+        `SELECT output FROM journal_steps WHERE run_id = $1 AND type = 'tool' AND status = 'ok'`,
+        [run.runId],
+      )) as unknown as Array<{ output: { data?: Record<string, unknown> } }>;
+      // The key is ABSENT (not an empty array) on a write no bound touched — the clamp record is
+      // signal, so a run that produced none must not carry one.
+      for (const step of steps) expect(step.output?.data).not.toHaveProperty('clamped');
+    });
+
     it("tenant isolation: tenant B cannot read/code tenant A's claim through the generated handlers", async () => {
       securityTestsRan++;
       const aClaimId = await seedClaim(TENANT_A);
@@ -557,14 +628,14 @@ describe.skipIf(!hasDb)(
  * A local dev with no DB and no CI/opt-in still skips ergonomically (the assertion is a no-op there).
  *
  * RED/GREEN: simulate CI-without-DATABASE_URL (CI=true, DATABASE_URL unset) and this test goes RED
- * (securityTestsRan===0 while dbRequired===true); with DATABASE_URL present it runs all 5 and stays GREEN.
+ * (securityTestsRan===0 while dbRequired===true); with DATABASE_URL present it runs all 7 and stays GREEN.
  */
 describe('auto-persist LOOP — ran-guard (the security proof must not silently skip in CI)', () => {
   it('the loop runtime-safety tests ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (dbRequired) {
-      // DB-required context: all five loop safety tests MUST have run. A 0 here means the DB-backed
+      // DB-required context: all seven loop safety tests MUST have run. A 0 here means the DB-backed
       // suite was skipped (lost DATABASE_URL) — fail loudly rather than false-green.
-      expect(securityTestsRan).toBe(5);
+      expect(securityTestsRan).toBe(7);
     } else {
       // Local dev without CI/opt-in: an ergonomic skip is allowed. Nothing to assert; document it.
       expect(dbRequired).toBe(false);

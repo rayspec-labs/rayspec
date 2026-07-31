@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A persist handler can cap a model-chosen enum column server-side: the `clampValues` hole.** The
+  persist templates already re-checked a model-chosen IDENTIFIER against a store before writing it
+  (`fkRevalidate`) — the guarantee that makes "never trust the model's choice" structural rather than a
+  matter of prompt wording. There was no counterpart for a model-chosen CLASSIFICATION, because there is
+  no store to re-check a judgment call against: a severity, a risk level, a policy verdict was whatever
+  the model returned, and the only thing standing between untrusted input and the value that got
+  persisted was how the instructions happened to be phrased. `clampValues` is that counterpart. An
+  author declares, next to `fixedValues`, an upper bound per enum column —
+  `"clampValues": { "policy_flag": { "max": "review" } }` — and the renderer emits a deterministic cap
+  applied after the untrusted-arg coercion and before the write. Rank is the column's declared
+  `enumValues` order and nothing else defines it, so a proposal ranked above the bound is written AS the
+  bound. The model still chooses: unlike a `fixedValues` constant, everything at or below the bound
+  persists exactly as proposed, so the judgment stays the model's and only the ceiling is the author's.
+  A bound that FIRES is reported on the handler's result as `clamped: [{ column, proposed, applied }]` —
+  the model's original choice next to the value actually written — and since that result is what the
+  central tool dispatch opaque-wraps and journals, both survive in the run journal and in the tool
+  result the transcript carries. **A tool whose handler declares a clamp must declare `clamped` in its
+  `outputSchema`**, or dispatch rejects the tool result the first time a bound fires. The key is absent,
+  never an empty array, on a write no bound touched. `validateHoles` fail-closes on a clamp that cannot
+  mean what it says: a key that is not a declared column, a key on a column with no `enumValues` (there
+  is no order to rank by), a `max` outside that column's `enumValues`, a key that is also pinned by
+  `fixedValues` (the constant is stamped last, so the bound would never reach the store), a key equal
+  to `fkRevalidate.codeArg` (an identifier is not a ranked classification) and a key equal to
+  `naturalKeyCol` (the upsert key is tenant-namespaced from the value read before the clamp and stamped
+  back on last, so the bound would never reach the store while the result still journaled a record
+  claiming it had). The bound is unconditional
+  by design — a rule carrying any key other than `max` is rejected rather than silently ignored. The
+  hole is optional and additive: a hole-set that declares none renders byte-for-byte what it always did,
+  for both `--emit ts` and `--emit js`. The shipped Expense-Claim example now caps its `policy_flag` at
+  `review` — an agent may raise "a human should look at this" but may not declare a `violation` on its
+  own — and its smoke asserts that a claim description demanding one cannot push the stored value past
+  the bound.
+
 - **Optional upper bounds on an agent run: `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`,
   `RAYSPEC_AGENT_MAX_ATTEMPTS` and `RAYSPEC_AGENT_RUN_MAX_MS`.** A provider that accepts a request and
   never answers used to keep a run alive for as long as the model client's own retry window lasted —
@@ -132,6 +165,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written before it reads back null (unclassified) rather than a fabricated class.
 
 ### Changed
+
+- **A deployment that declares a cron or manual trigger boots before its tenant org exists.**
+  `RAYSPEC_CRON_TENANT_ID` names the org a trigger fires under — yet the boot used to verify that org
+  existed and abort when it did not (`… is a well-formed UUID but no such active org exists`), which
+  is a state a cron deployment legitimately passes through: an org is registered against a *running*
+  application, so a deployment restarting before its org row is there could not come back up at all,
+  and the only way in was to deploy without the trigger first. The boot no longer asks that question.
+  A well-formed id naming an org that does not exist yet starts the scheduler, and firing begins the
+  moment an `orgs` row with that id exists. Which id that is remains the row's to decide: `POST
+  /v1/orgs`, `POST /v1/auth/register` and `rayspec dev bootstrap-tenant` all let the database generate
+  it, so an operator using those still reads the id back before setting the variable, while an id
+  chosen up front has to be the id its `orgs` row is created with. Nothing fires under an unknown
+  tenant: the existence check moved to the firing itself, where it runs **before** the firing's
+  reserve, so a skipped firing dispatches nothing, writes no marker and therefore does not consume its
+  firing instant. Each skipped firing emits exactly one line naming the trigger, the instant and the
+  tenant; the boot additionally says once that the org is missing and that no restart will be needed.
+  The moment the org exists, firing resumes by itself — the check is re-asked per firing, never cached
+  — and, read the other way round, an org that is soft-deleted while the deployment runs stops firing
+  at the next instant. The on-demand fire of a `manual` trigger runs through that same guard, so such
+  a fire dispatches nothing and reports `fired: false` rather than success — which is why every
+  contract carrying that value (`fireNow`, `fireScheduled`, `fireCronNow`, the manual-fire seam, the
+  `POST /v1/triggers/{name}/fire` 202 and the immutable audit row that fire writes) now documents the
+  absent-tenant skip alongside the deduped no-op it used to name exhaustively: `fired: false` is not
+  by itself evidence that the work has run.
+  Two boot refusals are unchanged, both with their exact previous message: a malformed (non-UUID)
+  value, which no waiting could make valid, and an unset `RAYSPEC_CRON_TENANT_ID` on a spec that
+  declares a cron/manual trigger. `doctor` and `plan` now also state the requirement up front, as the new
+  non-fatal `cron_tenant_required` advisory on each declared cron/manual trigger — it names the
+  variable, says the value is an org id, and says the org may not exist yet. Like every advisory it
+  never affects `ok`.
 
 - **`/health` covers the declared frontend mounts, and its response carries a `frontend` field.** The
   probe used to report only database reachability, so a deployment that also serves a `frontend[]`

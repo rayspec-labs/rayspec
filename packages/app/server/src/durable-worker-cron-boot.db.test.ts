@@ -5,17 +5,22 @@
  * declares a `cron` trigger + `RAYSPEC_CRON_TENANT_ID`, and asserts the WHOLE composition-root OUTPUT
  * + the fail-closed boot guards on GROUND TRUTH (fail-the-fix, not pass-the-shape):
  *
- *   1. BOOT: `assembleServer` boots with a cron spec + a valid, EXISTING cron tenant.
+ *   1. BOOT (late binding): `assembleServer` boots with a cron spec whose `RAYSPEC_CRON_TENANT_ID`
+ *      names an org that does NOT exist yet — the deployment comes up before its tenant is registered.
  *   2. OUTPUT: `server.declaredCronTriggers` surfaces the declared cron name (the banner feed) — the
  *      composition root actually wired the scheduler from the deployed trigger registry. The scheduled
  *      DBOS workflow was registered in the PRE-LAUNCH window (no post-launch-registration throw — a
  *      throw there would abort the boot, so a clean boot IS that assertion).
- *   3. FAIL-CLOSED: a cron spec WITHOUT a durable worker (deployment.durableWorker omitted) →
+ *   3. FAIL-CLOSED WHERE IT MOVED TO: with the org still absent a fire through the composition root's
+ *      own `fireCronNow` seam dispatches NOTHING; once the org is registered against the RUNNING
+ *      application the SAME firing instant fires — no restart, no re-deploy.
+ *   4. FAIL-CLOSED: a cron spec WITHOUT a durable worker (deployment.durableWorker omitted) →
  *      boot ABORTS loudly (BootConfigError), never silently leaving the cron unscheduled.
- *   4. FAIL-CLOSED #3 (shape): a malformed (non-UUID) RAYSPEC_CRON_TENANT_ID → boot ABORTS at startup
- *      (not lazily at fire time).
- *   5. FAIL-CLOSED #3 (existence): a well-formed-but-NONEXISTENT cron tenant → boot ABORTS at startup
- *      (the org-existence probe), not via the orgs FK at 2am.
+ *   5. FAIL-CLOSED (shape): a malformed (non-UUID) RAYSPEC_CRON_TENANT_ID → boot ABORTS at startup
+ *      (an unusable value is a config error, not something to bind later).
+ *   6. FAIL-CLOSED (unset): a cron spec with NO RAYSPEC_CRON_TENANT_ID at all → boot ABORTS with the
+ *      exact, unchanged message. Pinned VERBATIM: "the org may not exist yet" must never erode into
+ *      "the deployment may not name a tenant at all".
  *
  * The actual fire→dispatch→tenant-tx behavior (the GUC-populated handler run + exactly-once) is proven
  * on ground truth in @rayspec/durable-dbos's cron-scheduler.db.test.ts (which drives the SAME
@@ -112,6 +117,18 @@ triggers:
 const CRON_NO_WORKER_YAML = CRON_SPEC_YAML.replace('deployment:\n  durableWorker: true\n', '');
 
 const CRON_TENANT = '00000000-0000-0000-0000-0000000000cc';
+
+/**
+ * The EXACT abort a cron/manual-declaring spec with an UNSET RAYSPEC_CRON_TENANT_ID must produce.
+ * Pinned verbatim (not by substring) because this message is the one boot gate the late-binding change
+ * deliberately LEFT in place: an unnamed tenant is unresolvable at any later moment, so it stays a
+ * refusal to boot.
+ */
+const UNSET_TENANT_ABORT =
+  'Boot aborted — the spec declares 1 cron/manual trigger(s) but RAYSPEC_CRON_TENANT_ID is not ' +
+  'set. A cron/manual trigger fires under a known deployment tenant (single-deployment LOCAL ' +
+  'posture; multi-tenant fan-out is reserved). Set RAYSPEC_CRON_TENANT_ID to the org id the ' +
+  'trigger should fire under. Fail-closed.';
 
 function adminUrl(url: string): string {
   const u = new URL(url);
@@ -233,29 +250,16 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
   }, 60_000);
 
   maybe(
-    'boots a cron spec + surfaces the cron name on the composition-root output (declaredCronTriggers)',
+    'LATE BINDING: boots a cron spec whose tenant org does NOT exist yet, fires nothing until it does, then fires without a restart',
     async () => {
       process.env.RAYSPEC_SPEC_PATH = writeSpec(CRON_SPEC_YAML);
+      // A well-formed org id that NOTHING has created — the state a cron deployment legitimately
+      // passes through while its tenant org is not there (yet). The boot must come up on it.
       process.env.RAYSPEC_CRON_TENANT_ID = CRON_TENANT;
 
-      // The cron tenant must EXIST before boot (the #3 existence probe runs inside assembleServer). The
-      // org table only exists after the migration chain, so we apply migrations (idempotent —
-      // assembleServer re-applies them as a no-op) and seed the cron org FIRST — exactly the pattern
-      // the dev-server uses. Then assembleServer's boot probe finds the org and proceeds.
-      const { makeDb } = await import('@rayspec/db');
-      const { applyMigrations } = await import('./composition-root.js');
-      const seedDb = makeDb(appDbUrl);
-      try {
-        await applyMigrations(seedDb);
-        await seedDb.$client.unsafe(
-          `INSERT INTO orgs (id, name, slug) VALUES ($1, 'cron-tenant', 'cron-tenant') ON CONFLICT (id) DO NOTHING`,
-          [CRON_TENANT],
-        );
-      } finally {
-        await seedDb.$client.end();
-      }
-
       const config = loadServerConfig();
+      // The boot must NOT abort on the absent org. (Before late binding this threw a BootConfigError:
+      // "…is a well-formed UUID but no such active org exists".)
       const server = await assembleServer(config, assembleOpts());
       created.push(server);
 
@@ -266,6 +270,29 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
       // The /health probe round-trips the DB — proves the booted app is live.
       const health = await server.app.request('/health');
       expect(health.status).toBe(200);
+
+      // FAIL-CLOSED, MOVED: the scheduler is running, but the tenant is still unknown, so a fire
+      // through the composition root's own seam dispatches nothing and reports that it did not fire.
+      const instant = new Date('2026-06-24T02:00:00.000Z');
+      expect(await server.fireCronNow?.('nightly-digest', instant)).toBe(false);
+
+      // The `orgs` row for THAT id appears while the application RUNS (assembleServer already applied
+      // the migration chain, so `orgs` exists) — no restart, no re-deploy. Inserted directly with the
+      // configured id, because that is what makes the id name a real org: `POST /v1/orgs` and register
+      // let the database generate the id, so they cannot be pointed at a pre-chosen one.
+      const seedDb = postgres(appDbUrl, { max: 1 });
+      try {
+        await seedDb.unsafe(
+          `INSERT INTO orgs (id, name, slug) VALUES ($1, 'cron-tenant', 'cron-tenant') ON CONFLICT (id) DO NOTHING`,
+          [CRON_TENANT],
+        );
+      } finally {
+        await seedDb.end();
+      }
+
+      // The SAME live server now fires — and for the SAME firing instant, because the skipped firing
+      // never consumed the instant's reserve.
+      expect(await server.fireCronNow?.('nightly-digest', instant)).toBe(true);
     },
     120_000,
   );
@@ -309,21 +336,33 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
     120_000,
   );
 
-  maybe('#3 fail-closed (shape): a non-UUID RAYSPEC_CRON_TENANT_ID aborts the boot', async () => {
+  maybe('fail-closed (shape): a non-UUID RAYSPEC_CRON_TENANT_ID aborts the boot', async () => {
     process.env.RAYSPEC_SPEC_PATH = writeSpec(CRON_SPEC_YAML, 'bad-tenant.yaml');
+    // Late binding resolves an org that does not exist YET; it cannot resolve a value that could
+    // never name an org at all, so a malformed id stays a boot abort with its message unchanged.
     process.env.RAYSPEC_CRON_TENANT_ID = 'not-a-uuid';
     const config = loadServerConfig();
     await expect(assembleServer(config, assembleOpts())).rejects.toBeInstanceOf(BootConfigError);
+    await expect(assembleServer(config, assembleOpts())).rejects.toThrow(/is not a valid org UUID/);
   });
 
   maybe(
-    '#3 fail-closed (existence): a well-formed-but-NONEXISTENT cron tenant aborts the boot',
+    'fail-closed (unset): a cron spec with NO RAYSPEC_CRON_TENANT_ID aborts with the EXACT unchanged message',
     async () => {
-      process.env.RAYSPEC_SPEC_PATH = writeSpec(CRON_SPEC_YAML, 'ghost-tenant.yaml');
-      // A valid UUID that no org row matches → the existence probe must abort the boot.
-      process.env.RAYSPEC_CRON_TENANT_ID = '00000000-0000-0000-0000-0000000000ff';
+      process.env.RAYSPEC_SPEC_PATH = writeSpec(CRON_SPEC_YAML, 'unset-tenant.yaml');
+      delete process.env.RAYSPEC_CRON_TENANT_ID;
       const config = loadServerConfig();
-      await expect(assembleServer(config, assembleOpts())).rejects.toBeInstanceOf(BootConfigError);
+      // Verbatim, not a substring: this is the gate late binding deliberately did NOT relax, and its
+      // wording is what an operator reads.
+      const err = await assembleServer(config, assembleOpts()).then(
+        (s) => {
+          created.push(s);
+          return null;
+        },
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(BootConfigError);
+      expect((err as BootConfigError).message).toBe(UNSET_TENANT_ABORT);
     },
     120_000,
   );

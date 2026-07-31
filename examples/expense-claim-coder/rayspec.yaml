@@ -97,6 +97,14 @@ tooling:
         status: { type: string, description: 'coded | failed' }
         id:     { type: string }
         detail: { type: string }
+        # The server-side clamp record — present ONLY on a write where a bound actually fired. The
+        # handler declares `clampValues` on policy_flag, so this key MUST be declared here or the
+        # first clamped write would be rejected by dispatchTool (additionalProperties:false).
+        clamped:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
       required: [status]
     handler: ec_code_claim
     idempotent: true

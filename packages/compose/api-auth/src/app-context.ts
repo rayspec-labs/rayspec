@@ -235,9 +235,12 @@ export interface SessionReprocessor {
  *  - `{ notFound: true }` — no fireable MANUAL trigger for this (tenant, name): an unknown name, a
  *    RESERVED webhook/event/cron kind (not manually fireable via this seam), OR a request tenant that
  *    is not the deployment tenant. The route maps it to a uniform 404 (no existence leak).
- *  - `{ notFound: false; fired }` — the manual trigger was fired through the durable worker's
- *    exactly-once reserve→dispatch machinery: `fired:true` = THIS call won the reserve and dispatched;
- *    `fired:false` = a deduped no-op (already fired for this firing key).
+ *  - `{ notFound: false; fired }` — the manual trigger reached the durable worker's exactly-once
+ *    reserve→dispatch machinery: `fired:true` = THIS call won the reserve and dispatched.
+ *    `fired:false` is NOT on its own evidence that the work ran — it covers BOTH a deduped no-op
+ *    (already fired for this firing key) AND a skip because the deployment tenant does not exist
+ *    (yet), where nothing has ever been dispatched for this trigger and nothing will be until an
+ *    org with that id exists.
  */
 export type ManualTriggerFireResult =
   | { readonly notFound: true }

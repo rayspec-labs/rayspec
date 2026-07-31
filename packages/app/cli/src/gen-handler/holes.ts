@@ -92,6 +92,25 @@ export interface FkRevalidateHole {
   readonly lookupFixedFilter?: Readonly<Record<string, string | number | boolean>>;
 }
 
+/**
+ * An OPTIONAL server-side CLAMP on ONE model-chosen enum column: the highest value a run may write to
+ * it. This is `fkRevalidate` generalized from IDENTIFIERS to CLASSIFICATIONS — a lookup code can be
+ * re-checked against a store, but a judgment call has no store to re-check against, so the author
+ * declares the bound instead and the platform enforces it.
+ *
+ * RANK is the column's DECLARED `enumValues` ORDER and nothing else defines it: `max` caps at its
+ * position in that list, and a coerced value ranked ABOVE it is rewritten DOWN to `max` after the
+ * coercion and before the write. The bound is therefore indifferent to how the untrusted input is
+ * worded — no instruction phrasing can raise the persisted classification past it.
+ *
+ * A clamp that FIRES is reported on the handler's result, so the model's original choice AND the
+ * applied bound both land in the journaled dispatch output.
+ */
+export interface ClampHole {
+  /** The highest value a write may carry — MUST be one of that column's declared `enumValues`. */
+  readonly max: string;
+}
+
 /** The persist mode (T1): an UPDATE of an existing row by its id, OR an upsert by a natural key. */
 export type PersistMode = 'update-by-id' | 'upsert-by-natural-key';
 
@@ -128,6 +147,15 @@ export interface PersistHandlerHoles {
    * business columns (never injected); values are scalars. (The golden stamps `status: 'coded'`.)
    */
   readonly fixedValues?: Readonly<Record<string, string | number | boolean>>;
+  /**
+   * OPTIONAL server-side CLAMPS keyed by enum column: `{ policy_flag: { max: 'review' } }` caps that
+   * column at `review` in its DECLARED `enumValues` order. Unlike `fixedValues` the model still
+   * CHOOSES — the bound only refuses to let the choice go higher — so the judgment stays the model's
+   * and the ceiling stays the author's. Each key must be one of `columns`, must declare `enumValues`,
+   * and must NOT also be pinned by `fixedValues` or re-checked as `fkRevalidate.codeArg`
+   * (`validateHoles` fail-closes on each). (The golden caps `policy_flag` at `review`.)
+   */
+  readonly clampValues?: Readonly<Record<string, ClampHole>>;
   /** The status string returned on a successful persist (e.g. `coded` / `persisted`). */
   readonly successStatus: string;
 }
@@ -369,6 +397,93 @@ export function validateHoles(holes: unknown): asserts holes is HandlerHoles {
             'no-op-ing the FK safety. Remove it from fixedValues (let the FK-validated arg persist) or ' +
             'pick a different FK code column.',
         );
+      }
+    }
+    if (h.clampValues !== undefined) {
+      // A clamp RANKS a model-chosen classification by its column's DECLARED enumValues order and caps
+      // it server-side. Every rule below rejects a hole-set whose bound could never do that — and each
+      // of them fails SILENTLY when let through (no bound emitted, an unreachable bound, or a bound
+      // overwritten before the write), which is the worst failure mode a safety hole can have. Same
+      // fail-closed idiom as the fkRevalidate / fixedValues incoherence rejections above.
+      if (
+        typeof h.clampValues !== 'object' ||
+        h.clampValues === null ||
+        Array.isArray(h.clampValues)
+      ) {
+        throw new HolesError(
+          'holes.clampValues must be a plain object of column → { max: <value> }',
+        );
+      }
+      const byCol = new Map<string, ColumnHole>((h.columns as ColumnHole[]).map((c) => [c.col, c]));
+      const clampFixedKeys =
+        h.fixedValues !== undefined ? Object.keys(h.fixedValues as Record<string, unknown>) : [];
+      const clampFkCodeArg =
+        h.fkRevalidate !== undefined
+          ? (h.fkRevalidate as Record<string, unknown>).codeArg
+          : undefined;
+      for (const [col, rule] of Object.entries(h.clampValues as Record<string, unknown>)) {
+        assertSnake(col, 'holes.clampValues key');
+        const column = byCol.get(col);
+        if (column === undefined) {
+          throw new HolesError(
+            `holes.clampValues key '${col}' must be one of holes.columns (a clamp bounds a column ` +
+              'this handler actually writes).',
+          );
+        }
+        if (column.enumValues === undefined) {
+          throw new HolesError(
+            `holes.clampValues key '${col}' is not an enum column — a clamp ranks values by the ` +
+              "column's declared enumValues order, so a column without enumValues has no order to cap.",
+          );
+        }
+        if (typeof rule !== 'object' || rule === null || Array.isArray(rule)) {
+          throw new HolesError(`holes.clampValues.${col} must be an object of the form { max: … }`);
+        }
+        // A clamp is an UNCONDITIONAL bound. An unrecognized key (a conditional/predicate form) would
+        // be silently dropped by the renderer, leaving the author believing the bound is narrower than
+        // what actually ships — so name it rather than ignore it.
+        const unsupported = Object.keys(rule as Record<string, unknown>).filter((k) => k !== 'max');
+        if (unsupported.length > 0) {
+          throw new HolesError(
+            `holes.clampValues.${col} carries the unsupported key(s) ` +
+              `${unsupported.map((k) => `'${k}'`).join(', ')} — a clamp is an UNCONDITIONAL max bound; ` +
+              'anything else would be silently ignored by the renderer.',
+          );
+        }
+        const max = (rule as Record<string, unknown>).max;
+        if (typeof max !== 'string' || !column.enumValues.includes(max)) {
+          throw new HolesError(
+            `holes.clampValues.${col}.max must be one of that column's declared enumValues ` +
+              `(${column.enumValues.map((v) => JSON.stringify(v)).join(', ')}), got ` +
+              JSON.stringify(max),
+          );
+        }
+        if (clampFixedKeys.includes(col)) {
+          throw new HolesError(
+            `holes.clampValues key '${col}' overlaps holes.fixedValues — the author constant is ` +
+              'stamped as the LAST mutation before the write, so it would overwrite the clamped value ' +
+              'and the bound would never reach the store. Pin the column with ONE of the two: a ' +
+              'fixedValues constant if the model may not choose it at all, a clamp if it may choose ' +
+              'up to a ceiling.',
+          );
+        }
+        if (col === clampFkCodeArg) {
+          throw new HolesError(
+            `holes.clampValues key '${col}' overlaps holes.fkRevalidate.codeArg — that column is a ` +
+              'model-chosen IDENTIFIER re-checked against a lookup store, not a ranked ' +
+              'classification, so rewriting it to a bound would persist a value the FK re-check ' +
+              'never saw. Clamp a classification column instead.',
+          );
+        }
+        if (col === h.naturalKeyCol) {
+          throw new HolesError(
+            `holes.clampValues key '${col}' is holes.naturalKeyCol — the natural key is ` +
+              'tenant-namespaced server-side from the value read BEFORE the clamp, and that ref is ' +
+              'stamped onto the row as the LAST mutation before the write, so the bound would never ' +
+              'reach the store while the result still journals a clamp record claiming it did. ' +
+              'Clamp a column that is not the natural key.',
+          );
+        }
       }
     }
     return;

@@ -281,6 +281,20 @@ async function waitForTerminal(jobId: string, ms = 30_000): Promise<string> {
   throw new Error(`workflow ${jobId} did not reach a terminal status within ${ms}ms`);
 }
 
+/**
+ * The deployment-tenant existence probe every scheduler is wired with — the SAME question the
+ * composition root's `cronTenantExists` asks (an org row that is not soft-deleted). Answered on ground
+ * truth rather than stubbed, since this suite seeds the org itself. The absent-org behaviour it gates
+ * (skip, one log line, no reserve consumed) is proven in cron-scheduler-late-binding.db.test.ts.
+ */
+async function tenantExists(): Promise<boolean> {
+  const rows = await db.$client.unsafe(
+    'SELECT 1 FROM orgs WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
+    [TENANT],
+  );
+  return rows.length > 0;
+}
+
 /** Count the firing-marker rows for (tenant, trigger, instant) — the whole-invariant reserve assertion. */
 async function countFireMarkers(tenant: string, key: string): Promise<number> {
   const rows = await db.$client.unsafe(
@@ -366,7 +380,14 @@ describe.skipIf(!hasDb)(
           webhookDescriptor('inbound-hook'),
           eventDescriptor('on-thing'),
         ],
-        { db: wrapDb(db), tenantId: TENANT, executor, productTables, invokeTriggerHandler },
+        {
+          db: wrapDb(db),
+          tenantId: TENANT,
+          executor,
+          productTables,
+          invokeTriggerHandler,
+          tenantExists,
+        },
       );
       // Register the scheduled workflows in the executor's pre-launch window (exercises the boot ordering).
       executor.attachPreLaunchHook(() => scheduler.registerScheduledWorkflows());
@@ -641,7 +662,7 @@ describe.skipIf(!hasDb)(
     it('CATCH-UP: a make-up replay of a DOWNTIME-missed interval fires once; a re-replay reuses the reserve → no-op (at-least-once + at-most-once)', async () => {
       const catchUpScheduler = new DbosCronScheduler(
         [handlerCatchUpDescriptor('nightly-digest-catchup')],
-        { db, tenantId: TENANT, executor, productTables, invokeTriggerHandler },
+        { db, tenantId: TENANT, executor, productTables, invokeTriggerHandler, tenantExists },
       );
       // An interval that SHOULD have fired 30 min ago but did not (the app was down) — no reserve exists.
       const missed = new Date(Date.now() - 30 * 60_000);
@@ -669,6 +690,7 @@ describe.skipIf(!hasDb)(
           executor,
           productTables,
           invokeTriggerHandler,
+          tenantExists,
           catchUpLookbackMs: 60_000,
         },
       );
@@ -705,6 +727,7 @@ describe.skipIf(!hasDb)(
           executor,
           productTables,
           invokeTriggerHandler,
+          tenantExists,
           catchUpLookbackMs: 60_000,
         },
       );

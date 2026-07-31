@@ -18,8 +18,10 @@
  *  - POST /v1/triggers/{name}/fire — fire the named manual trigger. `store:write` (the SENSITIVE
  *    product-write permission — a fire dispatches a declared action that writes the tenant's product
  *    stores; live-membership rechecked for JWT principals, api-key-grantable with scope). Returns 202 +
- *    `{ name, fired }` (`fired:false` = a deduped no-op for this firing key). An unknown / non-manual
- *    trigger, or a foreign tenant → uniform 404 (no existence leak). No wired firer → clean 501.
+ *    `{ name, fired }`. `fired:false` does NOT by itself mean the work already ran: it is EITHER a
+ *    deduped no-op for this firing key OR a skip because the deployment tenant does not exist (yet),
+ *    in which case nothing has been dispatched at all. An unknown / non-manual trigger, or a foreign
+ *    tenant → uniform 404 (no existence leak). No wired firer → clean 501.
  */
 
 import type { OpenAPIHono } from '@hono/zod-openapi';
@@ -68,8 +70,9 @@ export function registerTriggerRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): 
       if (result.notFound) throw new ApiError('NOT_FOUND', 'Not found.');
 
       // IMMUTABLE AUDIT (out-of-band, best-effort): a fire dispatches durable work, so record the actor,
-      // the server-derived tenant, the trigger, and whether THIS call dispatched (fired) or was a
-      // deduped no-op. Emitted ONLY on the successful path (never on 404/501/429 — those returned
+      // the server-derived tenant, the trigger, and whether THIS call dispatched (`fired`) or did not
+      // (a deduped no-op, or a skip for a deployment tenant that does not exist yet — the seam does
+      // not distinguish them). Emitted ONLY on the successful path (never on 404/501/429 — those returned
       // above). The api-key/user actor tag mirrors the reprocess/store-route convention.
       const principal = c.get('principal');
       const actor =

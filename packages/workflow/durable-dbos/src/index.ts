@@ -11,9 +11,11 @@
 export {
   assertCronOnly,
   type CronSchedulerDeps,
+  type CronSchedulerLogger,
   catchUpSchedulerMode,
   cronAgentInput,
   cronRunId,
+  cronTenantAbsentLog,
   DbosCronScheduler,
   DEFAULT_CATCHUP_LOOKBACK_MS,
   FIRING_INSTANT_GRANULARITY_MS,

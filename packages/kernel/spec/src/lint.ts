@@ -1263,9 +1263,10 @@ const CLOSED_RULE_MARKERS: readonly RegExp[] = [
  * (`referencesColumn`). Both carry the identical footgun: soft-deleting such a parent is an
  * `UPDATE(deleted_at)` that does NOT fire the database ON DELETE restrict, so the referencing rows keep
  * pointing at the (tombstoned) parent — the restrict guarantee only binds on a HARD delete. This is a
- * permitted, documented interaction, so it is a WARNING, not a fail-closed error. The other four —
- * `fk_forward_reference`, `typescript_handler_module`, `stream_playback_media_token` and
- * `agent_untrusted_field_precedence` — are documented at their own blocks below.
+ * permitted, documented interaction, so it is a WARNING, not a fail-closed error. The other five —
+ * `fk_forward_reference`, `typescript_handler_module`, `stream_playback_media_token`,
+ * `agent_untrusted_field_precedence` and `cron_tenant_required` — are documented at their own blocks
+ * below.
  */
 export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
   const warnings: SpecWarning[] = [];
@@ -1473,6 +1474,26 @@ export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
       );
     });
   }
+
+  // CRON/MANUAL TENANT — a declared `cron` or `manual` trigger is fired by the durable worker under
+  // ONE deployment tenant, which the boot reads from `RAYSPEC_CRON_TENANT_ID`. That variable is not a
+  // document field, so the requirement is invisible in the spec and an author previously met it as a
+  // refused boot. State it here instead. ADVISORY, not fail-closed, and necessarily so: whether the
+  // variable is set is a property of the ENVIRONMENT, which this pass (pure over the document) cannot
+  // read — erroring would fail every valid cron document, including the ones that set it correctly.
+  spec.triggers.forEach((trigger, ti) => {
+    if (trigger.kind !== 'cron' && trigger.kind !== 'manual') return; // webhook/event have no fire path
+    warnings.push(
+      specWarning(
+        'cron_tenant_required',
+        `${trigger.kind} trigger '${trigger.name}' is fired by the durable worker under the ` +
+          "deployment's tenant, so this document needs RAYSPEC_CRON_TENANT_ID set to an org id at " +
+          'boot — an unset variable refuses the boot. The org does not have to exist yet: the ' +
+          'scheduler starts and every firing is skipped (one log line each) until it does',
+        `triggers[${ti}].kind`,
+      ),
+    );
+  });
 
   return warnings;
 }
