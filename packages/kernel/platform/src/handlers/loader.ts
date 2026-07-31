@@ -37,9 +37,9 @@
  * per-tenant isolate (see handler-runtime.ts). The before-external-exposure gate is absolute.
  */
 import { realpathSync } from 'node:fs';
-import { dirname, extname, isAbsolute, normalize, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, normalize, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { type HandlerKind, type HandlerSpec, TYPESCRIPT_SOURCE_EXTENSIONS } from '@rayspec/spec';
+import { type HandlerKind, type HandlerSpec, typeScriptSourceExtensionOf } from '@rayspec/spec';
 import type { ResolvedHandler } from './handler-runtime.js';
 
 /** A fail-closed loader error — every message names the offending handler id + module for the deploy log. */
@@ -72,8 +72,8 @@ export type ModuleImporter = (absolutePath: string) => Promise<Record<string, un
  * (the explicit opt-in seam below) — production always uses the guarded `defaultImporter`.
  */
 export function assertCompiledJavaScriptModule(absolutePath: string): void {
-  const ext = extname(absolutePath).toLowerCase();
-  if (TYPESCRIPT_SOURCE_EXTENSIONS.has(ext)) {
+  const ext = typeScriptSourceExtensionOf(absolutePath);
+  if (ext !== undefined) {
     throw new HandlerLoadError(
       `module '${absolutePath}' is TypeScript source ('${ext}') — production loads compiled ` +
         'JavaScript only. Compile it to JavaScript first and deploy the built module: the bundled ' +

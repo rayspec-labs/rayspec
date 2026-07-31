@@ -37,7 +37,6 @@
  * Returns the FULL list of violations (closed `SpecError` codes) — never the first. Pure function
  * over an already-shape-valid `RaySpec` (the parser calls it after the Zod parse succeeds).
  */
-import { extname } from 'node:path';
 import { type AgentSpec, type BackendId, validateSpec } from '@rayspec/core';
 // ajv ships CJS with no `exports` map; under NodeNext + verbatimModuleSyntax the default import
 // types as the module NAMESPACE even though at runtime it IS the class (ajv sets
@@ -47,7 +46,7 @@ import type { Ajv2020 as Ajv2020Class } from 'ajv/dist/2020.js';
 import * as Ajv2020Module from 'ajv/dist/2020.js';
 import { type SpecError, type SpecWarning, specError, specWarning } from './errors.js';
 import { type ColumnType, MAX_IDENTIFIER_LENGTH, type RaySpec } from './grammar.js';
-import { TYPESCRIPT_SOURCE_EXTENSIONS } from './module-extensions.js';
+import { typeScriptSourceExtensionOf } from './module-extensions.js';
 
 type AjvInstance = Ajv2020Class;
 const Ajv2020Ctor = ((Ajv2020Module as { default?: unknown }).default ?? Ajv2020Module) as new (
@@ -1292,8 +1291,8 @@ export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
   // field. A path that ends in `.ts` here is a mis-declared DIRECTORY, which the loader rejects
   // fail-closed at boot with its own message — a different defect, not this rule's.
   spec.handlers.forEach((handler, hi) => {
-    const ext = extname(handler.module).toLowerCase();
-    if (!TYPESCRIPT_SOURCE_EXTENSIONS.has(ext)) return;
+    const ext = typeScriptSourceExtensionOf(handler.module);
+    if (ext === undefined) return;
     warnings.push(
       specWarning(
         'typescript_handler_module',

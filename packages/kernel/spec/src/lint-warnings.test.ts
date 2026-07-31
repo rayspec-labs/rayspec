@@ -210,6 +210,20 @@ handlers:
     expect(warnings[0]?.message).toContain('rayspec gen-handler --emit js');
   });
 
+  it('FIRES for an UPPERCASE TypeScript extension — the match is case-INSENSITIVE', () => {
+    // The same pin the loader's reject-set carries for `X.TS`: the deploy loader refuses the module
+    // on a case-insensitive extension match, so an advisory that only recognised lowercase would let
+    // `handlers/lookup.TS` lint green and abort at boot — the exact dead end this rule exists to
+    // close. FAIL-THE-FIX: drop the case fold from the advisory's extension match and this arm flips.
+    const warnings = lintSpecWarnings(parseOk(handlerSpec('handlers/lookup.TS')));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.code).toBe('typescript_handler_module');
+    expect(warnings[0]?.path).toBe('handlers[0].module');
+    // The message quotes the module path AS AUTHORED and reports the extension case-folded.
+    expect(warnings[0]?.message).toContain('handlers/lookup.TS');
+    expect(warnings[0]?.message).toContain("('.ts')");
+  });
+
   it.each([
     'handlers/lookup.js',
     'handlers/lookup.mjs',

@@ -32,7 +32,7 @@
  * neither `deploy.ts` nor `loadHandlers`'s single-root signature changes.
  */
 import { existsSync } from 'node:fs';
-import { basename, extname, isAbsolute, normalize } from 'node:path';
+import { basename, isAbsolute, normalize } from 'node:path';
 import {
   type AgentSpecConfig,
   AgentSpecConfig as AgentSpecConfigSchema,
@@ -44,7 +44,7 @@ import {
   StoreSpec as StoreSpecSchema,
   type ToolSpecConfig,
   ToolSpecConfig as ToolSpecConfigSchema,
-  TYPESCRIPT_SOURCE_EXTENSIONS,
+  typeScriptSourceExtensionOf,
 } from '@rayspec/spec';
 import {
   defaultImporter,
@@ -386,8 +386,8 @@ function isUnderHandlersDir(moduleSpec: string): boolean {
  * authored `.ts` module paths) while the production compiled-JavaScript boundary still holds.
  */
 function resolvePackModule(packRoot: string, moduleSpec: string, id: string): string {
-  const ext = extname(moduleSpec).toLowerCase();
-  if (TYPESCRIPT_SOURCE_EXTENSIONS.has(ext)) {
+  const ext = typeScriptSourceExtensionOf(moduleSpec);
+  if (ext !== undefined) {
     const compiledSpec = `${moduleSpec.slice(0, -ext.length)}.js`;
     // Re-jail the compiled sibling spec with the FULL discipline (traversal/containment/symlink), then
     // prefer it only when it actually exists on disk (a built pack); otherwise fall through to the source.
