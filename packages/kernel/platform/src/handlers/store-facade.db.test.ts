@@ -282,6 +282,11 @@ describe('store-facade schema — injected-column drift guard', () => {
  * The statements Drizzle actually SENT for the calls made inside `fn`. The session logger is the
  * driver-level seam, so this is the EMITTED SQL — not a re-render of a builder the facade holds
  * privately — which is what lets a test pin the exact `ORDER BY` a facade read compiles to.
+ *
+ * `db.session.logger` is INTERNAL to Drizzle (TS-private), written against drizzle-orm 0.45.2. It
+ * fails closed rather than silently: if a version bump moves the seam, no statement is captured and
+ * the assertions below fail on an empty string instead of quietly passing. If that happens, this
+ * helper — not the facade — is what needs updating.
  */
 async function capturedSql(
   db: ReturnType<typeof makeDbWithSchema>,

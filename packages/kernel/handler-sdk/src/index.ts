@@ -119,6 +119,10 @@ export interface SelectOptions {
    * OMITTED ⇒ the read comes back in `id` ascending order — the same default the HTTP `list` op
    * applies — so a list is never delivered in an unspecified physical order. An ordering given here
    * is used VERBATIM: nothing is appended to it.
+   *
+   * NOTE what that default is and is not: `id` is the injected RANDOM uuid, so `id asc` is a STABLE
+   * order, not a chronological one. The same rows always come back in the same sequence, but that
+   * sequence has nothing to do with insertion time — order by `created_at` for oldest/newest first.
    */
   readonly orderBy?: ReadonlyArray<{ readonly column: string; readonly dir?: 'asc' | 'desc' }>;
   /** Max rows to return (server-side LIMIT). */
