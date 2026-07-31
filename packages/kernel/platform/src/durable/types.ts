@@ -111,6 +111,20 @@ export interface DurableExecutor {
   enqueue(tenantId: string, job: RunJob): Promise<EnqueueResult>;
   /** Read the neutral status of a previously-enqueued job (by its jobId == runId). */
   status(jobId: string): Promise<DurableJobStatus>;
+  /**
+   * Ask the engine to END a previously-enqueued job (by its jobId == runId). A job that has not been
+   * dequeued yet is ended BEFORE it starts — the clean case, and the one this method really delivers.
+   *
+   * HONEST LIMIT, because the neutral seam must not promise more than an engine gives: a job already
+   * EXECUTING runs the whole `runAgent` inside ONE engine step, and engine cancellation is
+   * COOPERATIVE — it surfaces at the workflow's next engine call — so cancelling such a job flips its
+   * status but does NOT by itself interrupt the model call in flight. The run's own AbortSignal is
+   * what addresses that half; this method addresses the not-yet-started half.
+   *
+   * Cancelling an unknown / already-terminal job is not an error: the caller's own durable
+   * cancellation record is what makes a run un-dispatchable, and this is the engine half of it.
+   */
+  cancel(jobId: string): Promise<void>;
   /** Start the engine (launch the worker) BEFORE the server accepts requests. */
   start(): Promise<void>;
   /** Drain + stop the engine (graceful shutdown). */

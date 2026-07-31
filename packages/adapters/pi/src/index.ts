@@ -32,6 +32,8 @@
  *         ToolCall: { type:'toolCall', id, name, arguments }            (pi-ai:182)
  *         Usage: { input, output, cacheRead, cacheWrite, totalTokens, cost:{total,...} } (pi-ai:189)
  *   - session.abort(): Promise<void>; session.dispose()                (core/agent-session.d.ts:404,258)
+ *       `prompt()` takes NO AbortSignal, so `abort()` is the ONLY stop this SDK offers. Cancelling a
+ *       run brings that call forward; the model request under it is never handed a signal of its own.
  *
  * COMPLIANCE: Pi runs on the OpenAI API key ONLY (founder decision). Never
  * against an Anthropic subscription — the exact pattern Anthropic banned. We only inject the OpenAI key.
@@ -66,7 +68,7 @@ import type {
   ToolSpec,
   Usage,
 } from '@rayspec/core';
-import { classifyUpstreamError, costUsd, hashJson } from '@rayspec/core';
+import { classifyUpstreamError, costUsd, hashJson, onAbortSignal } from '@rayspec/core';
 import type { TSchema } from 'typebox';
 import { Type } from 'typebox';
 
@@ -478,6 +480,17 @@ export class PiAdapter implements Backend {
     let errorRetryAfter: number | undefined;
     let messages: PiMessage[] = [];
     let latencyMs = 0;
+    // CANCELLATION (best-effort, and the WEAKEST of the four backends — stated plainly): `prompt()`
+    // takes NO signal, so there is nothing to hand the call itself. What the session DOES expose is
+    // `abort()`, which the teardown below already uses; ending a run brings that call FORWARD instead
+    // of waiting for the prompt to settle. So a cancelled Pi run stops the session early, but the
+    // in-flight model request underneath it is not handed an abort — it ends when the session's own
+    // teardown reaches it. The platform race is what frees the caller either way.
+    const unlinkCancel = onAbortSignal(ctx.signal, () => {
+      void session.abort().catch(() => {
+        /* best effort — a teardown must not surface a new failure */
+      });
+    });
     // Own the session in a try/finally so a THROWING onEvent (during prompt OR the tail
     // drain) NEVER leaks the Pi session — the teardown (unsubscribe/abort/dispose) always runs,
     // mirroring the Anthropic adapter's finally-abort.
@@ -518,6 +531,7 @@ export class PiAdapter implements Backend {
       }
     } finally {
       // Own + tear down the session no matter what (never leak it) — even on a throwing emit.
+      unlinkCancel();
       unsubscribe();
       try {
         await session.abort();

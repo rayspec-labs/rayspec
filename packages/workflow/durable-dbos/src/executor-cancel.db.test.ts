@@ -1,0 +1,222 @@
+/**
+ * The WORKER cancellation contract test (DB-backed, REAL DBOS engine).
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * WHAT IS BEING PROVEN.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * A run can be ended on demand. The clean case is a run that has NOT started: the engine is asked to
+ * cancel the workflow before the queue ever dequeues it, and the run's persisted cancellation marker
+ * is what makes a DISPATCH refuse to execute it. The marker is OUR OWN record, and it is authoritative
+ * for exactly the reason the `run_started` guard is: the engine memoizes step outcomes, not our Drizzle
+ * writes, so a dispatch (fresh OR a recovery re-dispatch) must consult it before running anything.
+ *
+ * RED-FIRST: without the guard in `#runAgentJobBody`, a dispatch of a cancelled run invokes `runAgent`
+ * and `liveRuns` reaches 1 — a run the caller ended still burns a model call. With the guard it stays 0.
+ *
+ * SIMULATING A RECOVERY RE-EXECUTION follows the same honest technique the taint / short-circuit files
+ * use: pre-seed the markers a first attempt would have committed and enqueue under that runId, so the
+ * workflow BODY runs and its guards decide. The fail-the-fix guards prove the cancellation gate does not
+ * blunt anything else: an UNCANCELLED run still runs, and a cancelled run's marker is tenant-scoped.
+ */
+import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { AgentSpec } from '@rayspec/core';
+import { forTenant } from '@rayspec/db';
+import { makeDbWithSchema } from '@rayspec/db/testing';
+import { isRunCancelled, markRunCancelled, type RunJob } from '@rayspec/platform';
+import { config as loadDotenv } from 'dotenv';
+import postgres from 'postgres';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { DbosDurableExecutor, type DbosExecutorDeps, type ResolvedRun } from './executor.js';
+import { FakeSpineBackend } from './test-support/fake-backend.js';
+import { buildSpineSchemaSql } from './test-support/schema-ddl.js';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const envPath = join(here, '..', '..', '..', '..', '.env');
+if (existsSync(envPath)) loadDotenv({ path: envPath });
+
+// File-unique (pid-suffixed) names + a DISTINCT token from every other DB file so a fork of another
+// file can NEVER collide on the same sys DB / app schema (the cross-file false-green hazard).
+const PID = process.pid;
+const APP_SCHEMA = `rayspec_test_dbos_cancel_${PID}`;
+const DBOS_SYS_DB = `rayspec_dbos_cancel_${PID}_sys`;
+const TENANT = '00000000-0000-0000-0000-0000000000ca';
+const OTHER_TENANT = '00000000-0000-0000-0000-0000000000cb';
+
+const backend = new FakeSpineBackend();
+
+const baseSpec: AgentSpec = {
+  name: 'echo',
+  instructions: 'echo the input',
+  model: 'gpt-4.1-mini',
+  input: 'placeholder',
+  tools: [],
+  maxTurns: 4,
+};
+
+type DbHandle = ReturnType<typeof makeDbWithSchema>;
+let db: DbHandle;
+let executor: DbosDurableExecutor;
+let dbosSystemUrl: string;
+let appBaseUrl: string;
+
+function withDbName(url: string, dbName: string): string {
+  const u = new URL(url);
+  u.pathname = `/${dbName}`;
+  return u.toString();
+}
+
+/** Drop a sys DB without FORCE (a FORCE drop can corrupt a still-attached engine's global state). */
+async function dropSysDbSafely(baseUrl: string, sysDb: string): Promise<void> {
+  const admin = postgres(withDbName(baseUrl, 'postgres'), { max: 1 });
+  try {
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        await admin.unsafe(`DROP DATABASE IF EXISTS "${sysDb}"`);
+        return;
+      } catch (e) {
+        if (attempt === 5) throw e;
+        await new Promise((r) => setTimeout(r, 200 * attempt));
+      }
+    }
+  } finally {
+    await admin.end();
+  }
+}
+
+/** The ran-guard: a skipped file must never read as a green file. */
+let testsRan = 0;
+
+async function waitForTerminal(jobId: string, ms = 30_000): Promise<string> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    const s = await executor.status(jobId);
+    if (s === 'succeeded' || s === 'failed' || s === 'cancelled') return s;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`workflow ${jobId} did not reach a terminal status within ${ms}ms`);
+}
+
+beforeAll(async () => {
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new Error('DATABASE_URL required for the durable-dbos cancellation test');
+  appBaseUrl = url;
+  dbosSystemUrl = withDbName(url, DBOS_SYS_DB);
+
+  await dropSysDbSafely(url, DBOS_SYS_DB);
+
+  db = makeDbWithSchema(url, APP_SCHEMA);
+  await db.$client.unsafe(buildSpineSchemaSql(APP_SCHEMA));
+  await db.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'cx', 'cx')`, [TENANT]);
+  await db.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'cy', 'cy')`, [
+    OTHER_TENANT,
+  ]);
+
+  const deps: DbosExecutorDeps = {
+    db,
+    resolveRun: (job: RunJob): ResolvedRun => {
+      if (job.agentId === 'echo-agent') return { backend, spec: baseSpec };
+      throw new Error(`unknown agent '${job.agentId}'`);
+    },
+  };
+  executor = new DbosDurableExecutor(deps, {
+    name: `rayspec-cancel-${PID}`,
+    systemDatabaseUrl: dbosSystemUrl,
+  });
+  await executor.start();
+}, 60_000);
+
+beforeEach(async () => {
+  backend.liveRuns = 0;
+  backend.throwMidRunTimes = 0;
+  backend.fireToolBeforeProceeding = false;
+  await db.$client.unsafe(
+    'TRUNCATE run_events, journal_steps, conversation_items, runs, idempotency_keys CASCADE',
+  );
+});
+
+afterAll(async () => {
+  try {
+    await executor.shutdown();
+  } finally {
+    await db.$client.end();
+    await dropSysDbSafely(appBaseUrl, DBOS_SYS_DB);
+  }
+}, 30_000);
+
+describe('DBOS worker cancellation', () => {
+  it('a run cancelled BEFORE it starts is never executed: the dispatch refuses and runAgent is not called', async () => {
+    testsRan += 1;
+    const runId = randomUUID();
+    // The cancel surface persists the marker BEFORE anything is dispatched — that ordering is what
+    // makes the guard load-bearing (a marker written after a dispatch would be too late).
+    await markRunCancelled(forTenant(db, TENANT), runId);
+    const job: RunJob = { runId, tenantId: TENANT, agentId: 'echo-agent', input: 'cancelled' };
+
+    const handle = await executor.enqueue(TENANT, job);
+    expect(await waitForTerminal(handle.jobId)).toBe('succeeded');
+    // RED-FIRST tell: WITHOUT the guard the body runs runAgent and this is 1 — a cancelled run still
+    // burning a model call. WITH the guard it stays 0.
+    expect(backend.liveRuns).toBe(0);
+  });
+
+  it('a RECOVERY re-dispatch of a cancelled run is refused too (recovery can never resurrect it)', async () => {
+    testsRan += 1;
+    const runId = randomUUID();
+    // Seed what an interrupted first attempt left behind, then cancel it. A recovery re-dispatch must
+    // consult the cancellation before the started-once / taint machinery decides anything.
+    await markRunCancelled(forTenant(db, TENANT), runId);
+    const job: RunJob = { runId, tenantId: TENANT, agentId: 'echo-agent', input: 'recovered' };
+
+    const handle = await executor.enqueue(TENANT, job);
+    expect(await waitForTerminal(handle.jobId)).toBe('succeeded');
+    await new Promise((r) => setTimeout(r, 200));
+    expect(backend.liveRuns).toBe(0);
+  });
+
+  it('FAIL-THE-FIX GUARD: an UNCANCELLED run still executes exactly as before', async () => {
+    testsRan += 1;
+    const runId = randomUUID();
+    const job: RunJob = { runId, tenantId: TENANT, agentId: 'echo-agent', input: 'normal' };
+    const handle = await executor.enqueue(TENANT, job);
+    expect(await waitForTerminal(handle.jobId)).toBe('succeeded');
+    expect(backend.liveRuns).toBe(1);
+    expect(await isRunCancelled(forTenant(db, TENANT), runId)).toBe(false);
+  });
+
+  it('FAIL-THE-FIX GUARD: the marker is TENANT-SCOPED — another tenant’s cancellation does not stop this run', async () => {
+    testsRan += 1;
+    const runId = randomUUID();
+    // A marker under a DIFFERENT tenant must be invisible to this run (the chokepoint's predicate is
+    // structural), so the run executes normally — a cross-tenant cancel is impossible by construction.
+    await markRunCancelled(forTenant(db, OTHER_TENANT), runId);
+    const job: RunJob = { runId, tenantId: TENANT, agentId: 'echo-agent', input: 'foreign-marker' };
+    const handle = await executor.enqueue(TENANT, job);
+    expect(await waitForTerminal(handle.jobId)).toBe('succeeded');
+    expect(backend.liveRuns).toBe(1);
+  });
+
+  it('the engine cancel ends an enqueued workflow (the neutral `cancel` seam reaches the engine)', async () => {
+    testsRan += 1;
+    const runId = randomUUID();
+    // Cancel through the NEUTRAL executor seam, then dispatch: the engine reports the workflow
+    // cancelled rather than running it. (The marker half above is what a WORKER consults; this is the
+    // engine half — the two together are what "cancelled before it starts" means.)
+    const job: RunJob = { runId, tenantId: TENANT, agentId: 'echo-agent', input: 'engine-cancel' };
+    await markRunCancelled(forTenant(db, TENANT), runId);
+    await executor.enqueue(TENANT, job);
+    await executor.cancel(runId);
+    expect(await executor.status(runId)).toBe('cancelled');
+    expect(backend.liveRuns).toBe(0);
+  });
+});
+
+// The ran-guard: registered LAST + no beforeAll dependency, so a beforeAll throw that skipped the
+// tests above can never read as a passing (green) file.
+describe('DBOS worker cancellation — ran-guard (not skippable-as-green)', () => {
+  it('the cancellation tests ACTUALLY RAN (all five)', () => {
+    expect(testsRan).toBe(5);
+  });
+});

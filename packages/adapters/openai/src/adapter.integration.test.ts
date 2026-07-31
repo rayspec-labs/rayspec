@@ -121,7 +121,7 @@ const baseSpec = {
 function makeCtx(
   journal: FakeJournal,
   tools: NeutralTool[],
-  opts: { replay?: boolean; rehydrate?: () => Promise<ConvTurn[]> } = {},
+  opts: { replay?: boolean; rehydrate?: () => Promise<ConvTurn[]>; signal?: AbortSignal } = {},
 ): RunContext {
   const runId = 'run-1';
   const authMode: AuthMode = 'api-key';
@@ -145,6 +145,7 @@ function makeCtx(
     tools,
     dispatchTool,
     rehydrate: opts.rehydrate,
+    ...(opts.signal ? { signal: opts.signal } : {}),
   };
 }
 
@@ -311,5 +312,36 @@ describe('OpenAI adapter: error-path RunResult shape', () => {
     expect(journal.records).toHaveLength(1);
     expect(journal.records[0]?.status).toBe('error');
     expect(journal.records[0]?.type).toBe('llm');
+  });
+});
+
+describe('OpenAI adapter: the run’s cancellation signal reaches the SDK call', () => {
+  it('passes ctx.signal into the run() option bag when the platform supplied one', async () => {
+    const journal = new FakeJournal();
+    runSpy.mockImplementation(fakeRunImpl());
+    const controller = new AbortController();
+    const adapter = new OpenAIAdapter({ apiKey: 'sk-test' });
+
+    await adapter.run({ ...baseSpec, tools: [] }, makeCtx(journal, [], { signal: controller.signal }));
+
+    // The SDK's own run option (SharedRunOptions.signal) — so aborting the run aborts the model call
+    // itself, not merely whatever was waiting on it.
+    const options = runSpy.mock.calls[0]?.[2] as { signal?: AbortSignal };
+    expect(options.signal).toBe(controller.signal);
+  });
+
+  it('UNSET: with no signal the option bag is EXACTLY the one it always was — no `signal` key at all', async () => {
+    const journal = new FakeJournal();
+    runSpy.mockImplementation(fakeRunImpl());
+    const adapter = new OpenAIAdapter({ apiKey: 'sk-test' });
+
+    await adapter.run({ ...baseSpec, tools: [] }, makeCtx(journal, []));
+
+    // The conditional spread is load-bearing: an explicit `signal: undefined` would still be a key,
+    // and the emitted option object is compared exactly. `toEqual` treats an undefined-valued key as
+    // absent, so the key set is asserted directly.
+    const options = runSpy.mock.calls[0]?.[2] as Record<string, unknown>;
+    expect(Object.keys(options).sort()).toEqual(['maxTurns', 'stream']);
+    expect(options).toEqual({ stream: false, maxTurns: baseSpec.maxTurns });
   });
 });

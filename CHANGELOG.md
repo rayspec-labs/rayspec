@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A run can be ended on demand: `POST /v1/runs/{id}/cancel`.** Until now nothing could stop an agent
+  run. A synchronous request could give up waiting — that is what the held-request timeout does — but
+  giving up on a request never asked the run to stop, so the model call kept going; and a run enqueued
+  on the durable worker could not be stopped at all, so a provider that had accepted a request and gone
+  quiet held a worker slot until its own retry window ran out. The new route ends a specific run. It is
+  tenant-scoped like every other run route (a foreign or unknown id answers `404` and changes nothing)
+  and requires the same `agent:run` permission that starting a run does. A cancelled run is terminal as
+  `error` with the neutral error class **`cancelled`**, journaled exactly like every other outcome, so
+  `GET /v1/runs/{id}` reports it. `cancelled` is a *terminal* class, so a same-key retry **replays** it
+  rather than re-running the agent — cancelling is never a silent re-run, least of all for a run that
+  already fired a non-idempotent tool, which stays quarantined under its key with the taint marker as
+  the record that it needs review. The response is `200` with
+  `{ runId, cancelled, status, signalled }`; `cancelled` is `false` when the run had already finished,
+  whose own outcome is never overwritten — which also makes a repeated cancel harmless.
+
+  **What it stops, precisely, because the three cases genuinely differ.** A run that has not started is
+  recorded cancelled and never dispatched: the record is what a worker consults, so neither a first
+  dispatch nor a recovery re-dispatch can execute it. A run executing **in the same process** is handed
+  an abort signal, which run-core races the backend call against and puts on the run context, so the
+  backend adapter can stop the work — this is the half that frees the run rather than only the caller
+  waiting on it. A run executing on **another worker process** gets neither: the durable engine's own
+  cancellation is cooperative and the whole run occupies a single engine step, so cancelling it changes
+  what is recorded about the run without interrupting the model call already in flight.
+
+  **Which runs you can name.** Cancellation is by run id, and the only call that returns an id *before*
+  the run ends is an asynchronous one (`async: true` answers `202` with the `runId`). A synchronous run
+  does not return its id until it completes, and without an `Idempotency-Key` the run surface never
+  holds it at all — so in practice this cancels asynchronous runs. A synchronous request that is
+  holding a run when it gets cancelled answers `409 CONFLICT`, and the run's terminal outcome is
+  readable at `GET /v1/runs/{id}` either way.
+
+  **Backend support is uneven and the documentation says so.** `openai` passes the signal into the SDK
+  run call, so the model request itself is aborted. `anthropic` and `codex` link it to the
+  `AbortController` each already owns, so the streamed turn and the spawned child are torn down at once
+  instead of at the end of the run. `pi` is the weakest: its prompt call takes no signal at all, so
+  cancelling brings the session's own `abort()` forward and the model request underneath is never
+  handed one. In every case the platform stops waiting immediately; that table is about the provider
+  side, which no platform can promise on an SDK's behalf. A run nobody cancels is unaffected throughout
+  — the signal is never aborted, the emitted SDK options are byte-for-byte the ones they always were,
+  and the pinned adapter fixtures are untouched.
+
 - **A persist handler can cap a model-chosen enum column server-side: the `clampValues` hole.** The
   persist templates already re-checked a model-chosen IDENTIFIER against a store before writing it
   (`fkRevalidate`) — the guarantee that makes "never trust the model's choice" structural rather than a
@@ -172,6 +213,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written before it reads back null (unclassified) rather than a fabricated class.
 
 ### Changed
+
+- **The neutral run error class has a seventh value, `cancelled`.** A consumer that enumerated the six
+  and treated anything else as unrecognised will now see it on a run that was ended through the cancel
+  route. It is the one class no backend adapter produces and the upstream classifier never returns:
+  nothing upstream failed, so it is set where the cancellation is recorded rather than inferred from an
+  error shape. It behaves like the other terminal classes everywhere the platform already distinguishes
+  them — `200` on the synchronous status mapping, no `Retry-After`, and an `Idempotency-Key`
+  reservation that is kept and replayed rather than released. No existing run's reported class changes.
 
 - **A deployment that declares a cron or manual trigger boots before its tenant org exists.**
   `RAYSPEC_CRON_TENANT_ID` names the org a trigger fires under — yet the boot used to verify that org

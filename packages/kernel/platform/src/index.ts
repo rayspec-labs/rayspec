@@ -47,6 +47,8 @@ export { httpResponse, isHttpResponse } from '@rayspec/handler-sdk';
 // The optional agent-run bounds resolved from the environment. run-core consumes the run-level one
 // itself; the composition root reads the two request-level ones and hands them to the adapter.
 export {
+  RunAbandonedError,
+  type RunAbandonReason,
   RunBoundTimeoutError,
   resolveAgentMaxAttempts,
   resolveAgentRequestTimeoutMs,
@@ -140,6 +142,26 @@ export {
   typeStrippingImporter,
 } from './handlers/index.js';
 export { rehydrateConversation } from './rehydrate.js';
+// Run cancellation: the persisted marker every dispatch consults before executing, the process-local
+// signal run-core threads onto `ctx.signal` and races the backend call against, and the journaled
+// terminal outcome (`errorClass: 'cancelled'`) the cancel surface records for both the not-yet-started
+// and the executing case.
+export {
+  armRunCancellation,
+  isRunCancelled,
+  markRunCancelled,
+  RUN_CANCELLED_BODY_HASH,
+  RUN_CANCELLED_SCOPE,
+  RUN_CANCELLED_STEP_KEY,
+  RUN_CANCELLED_STEP_TYPE,
+  type RunCancellation,
+  type RunCancellationOutcome,
+  RunCancelledError,
+  recordRunCancelled,
+  runCancelledMessage,
+  signalRunCancelled,
+  withRunCancel,
+} from './run-cancel.js';
 export type { CostContext, CostRollup, RunOptions } from './run-core.js';
 export {
   isSubscriptionBilling,

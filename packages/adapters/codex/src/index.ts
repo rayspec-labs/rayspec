@@ -115,7 +115,7 @@ import type {
   ToolDispatchResult,
   Usage,
 } from '@rayspec/core';
-import { classifyUpstreamError, costUsd, hashJson } from '@rayspec/core';
+import { classifyUpstreamError, costUsd, hashJson, linkAbort } from '@rayspec/core';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { Codex } from '@openai/codex-sdk';
@@ -318,6 +318,13 @@ export class CodexAdapter implements Backend {
     let emittedText = false;
 
     const abort = new AbortController();
+    // CANCELLATION (best-effort): LINK the run's signal to the controller this adapter already owns and
+    // already hands to `runStreamed`, so ending a run aborts the streamed turn and tears the spawned
+    // child down at once instead of at the end of the run. HONEST LIMIT: the abort stops OUR side —
+    // the stream and the child — and the MCP bridge is closed in the same teardown; work the codex
+    // subprocess had already committed upstream is not undone, and there is no per-turn "cancel" the
+    // SDK exposes beyond this signal.
+    const unlinkCancel = linkAbort(ctx.signal, abort);
     try {
       // The sandbox confinement + tool bridge are allocated HERE (inside try) so a setup throw yields a
       // neutral error RunResult and the finally tears everything down.
@@ -428,6 +435,7 @@ export class CodexAdapter implements Backend {
       // STILL be cleaned (no leak) if partially allocated. The scratch cwd is NOT torn down: it is the
       // SINGLE fixed dir shared across (concurrent) runs and read-only-confined (codex cannot write
       // into it — it stays empty + no state accumulates), so removing it would break concurrent runs.
+      unlinkCancel();
       abort.abort();
       if (bridge) await bridge.close();
     }

@@ -382,6 +382,7 @@ again worth anything?**
 | `timeout`       | `504` | Transient — the request or the agent loop timed out.   |
 | `upstream_4xx`  | `200` | Terminal — upstream rejected the call (e.g. a bad key). |
 | `model_refusal` | `200` | Terminal — the model declined to answer.               |
+| `cancelled`     | `200` | Terminal — the run was ended on demand (see below).    |
 | `internal`      | `200` | Terminal — unclassified; the fail-closed default.      |
 
 A **transient** class may well succeed on the next attempt, so it gets a real
@@ -486,6 +487,65 @@ Only the terminal values mean the run is finished, so test a status for
 terminality rather than for the header merely being there: a run that throws
 reaches no completing write, and nothing reaps the non-terminal header it leaves
 behind.
+
+### Cancelling a run
+
+**`POST /v1/runs/{id}/cancel`** ends a run on demand. It is tenant-scoped like every
+other run route: an id belonging to another tenant, or no run at all, answers
+**`404`** and changes nothing. It requires the same **`agent:run`** permission that
+starting a run does — a caller who may start a run may stop one.
+
+A cancelled run is **terminal as `error`**, with the neutral **`errorClass:
+"cancelled"`** naming why. That outcome is journaled like any other outcome, so
+`GET /v1/runs/{id}` reports it, and it is a *terminal* class: a same-key retry
+**replays** it rather than re-running the agent. Re-running a run someone
+deliberately stopped is never what they asked for — and for a run that already fired
+a non-idempotent tool it would fire that side effect a second time.
+
+The response is `200` with:
+
+```json
+{ "runId": "…", "cancelled": true, "status": "error", "signalled": true }
+```
+
+`cancelled` is `false` when the run had **already finished** — its own outcome stands
+and nothing is overwritten, which also makes a repeated cancel harmless rather than an
+error. `signalled` says whether a run executing **in this process** was reached.
+
+**What cancelling actually stops, precisely.** Three things happen, and they cover
+different runs:
+
+- a run that has **not started** is recorded cancelled and never dispatched — the
+  record is what a worker consults, so neither a first dispatch nor a recovery
+  re-dispatch can execute it;
+- a run **executing in this process** is handed an abort signal, which the backend
+  adapter passes to its SDK call, child process, or session — this is what frees the
+  work rather than only the caller waiting on it;
+- a run **executing on another worker process** gets neither. The durable engine's own
+  cancellation is cooperative and the whole run occupies one engine step, so cancelling
+  such a run changes its recorded state without interrupting the model call in flight.
+  It stops when it stops; the run is already accounted for as cancelled.
+
+**Which runs can you name?** Cancellation is by run id, and the only call that hands
+an id back **before** the run ends is an asynchronous one — `async: true` answers
+`202` with the `runId` immediately. A synchronous run does not return its id until it
+completes, and without an `Idempotency-Key` the run surface never holds it at all
+(the id is minted further in). So in practice this surface cancels **asynchronous**
+runs. A synchronous request that *is* holding a run when it gets cancelled answers
+**`409 CONFLICT`**; the run's terminal outcome is durable and readable at
+`GET /v1/runs/{id}` either way.
+
+How well the work itself stops depends on the backend:
+
+| Backend     | What cancelling does to the work in flight                                  |
+| ----------- | --------------------------------------------------------------------------- |
+| `openai`    | The signal is passed into the SDK run call, so the model request is aborted. |
+| `anthropic` | The signal aborts the controller the SDK already holds; the `claude` child is torn down. |
+| `codex`     | The signal aborts the streamed turn and the spawned child; the tool bridge closes. |
+| `pi`        | Weakest: the prompt call takes no signal, so the session's `abort()` is brought forward — the underlying model request is never handed one. |
+
+In every case the platform stops waiting immediately; the table is about the provider
+side, which is the part no platform can promise on an SDK's behalf.
 
 ## `agents`
 

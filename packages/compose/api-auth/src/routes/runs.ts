@@ -25,6 +25,19 @@
  *                                         an in-flight async run by RE-REQUESTING from Last-Event-ID /
  *                                         lastEventId (reconnect-and-replay; a live server-push tail
  * is not built).
+ *  - POST   /v1/runs/{id}/cancel        — END a run on demand (404 on foreign/absent, zero effect). It
+ *                                         records the run's terminal outcome with the neutral
+ *                                         `errorClass: 'cancelled'`, persists the marker that makes a
+ *                                         dispatch (or a recovery re-dispatch) refuse to run it, asks
+ *                                         the durable engine to end a job that has not started, and
+ *                                         signals a run executing IN THIS PROCESS through its
+ *                                         AbortSignal. WHICH RUNS ARE REACHABLE: cancellation names a
+ *                                         run by id, and the only call that hands an id back BEFORE the
+ *                                         run ends is `async:true` (its 202). A synchronous run does not
+ *                                         return its id until it completes — and without an
+ *                                         Idempotency-Key the HTTP layer never holds it at all (run-core
+ *                                         mints it) — so a synchronous run is not cancellable through
+ *                                         this surface in practice.
  *
  * the SYNC run executes in-request; an `async:true` run is ENQUEUED onto the durable
  * worker (the neutral `deps.durableExecutor`) and returns 202 + the runId — the client streams
@@ -48,10 +61,14 @@ import {
   insertEnqueuedRunHeader,
   isRunTainted,
   isTerminalRunStatus,
+  markRunCancelled,
   RunBoundTimeoutError,
+  RunCancelledError,
   type RunHeaderStatus,
+  recordRunCancelled,
   rehydrateConversation,
   runAgent,
+  signalRunCancelled,
 } from '@rayspec/platform';
 import { and, asc, eq, gt } from 'drizzle-orm';
 import type { Context } from 'hono';
@@ -112,6 +129,9 @@ export function registerRunsRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
 
   // GET /v1/runs/:id — reconstruct the neutral RunResult from the journal + conversation store.
   registerRunReadRoutes(app, deps);
+
+  // POST /v1/runs/:id/cancel — end a run on demand. The FIRST mutating route under /v1/runs.
+  registerRunCancelRoute(app, deps);
 }
 
 /**
@@ -302,11 +322,11 @@ export async function executeAgentRun(
   // CONCURRENCY / TIMEOUT TRADE-OFF (risk, documented honestly): the SDK call is held
   // open inside this request, so concurrency is capped at the HTTP-worker count and the run is
   // exposed to proxy/idle timeouts. `withTimeout` bounds the WALL-CLOCK of the held request/stream
-  // (a slow/stuck SDK call rejects after DEFAULT_RUN_TIMEOUT_MS) — but note that run-core does NOT
-  // yet propagate cancellation INTO the SDK call, so the server-side run may continue until it
-  // finishes naturally; the timeout frees the REQUEST, not necessarily the SDK work. The
-  // async worker/queue that decouples the SDK call from the request is the valve — the
-  // run_events table + run-core are the reserved seam it attaches to. Not built here.
+  // (a slow/stuck SDK call rejects after DEFAULT_RUN_TIMEOUT_MS): it frees the REQUEST and leaves the
+  // run to settle on its own — it is a deadline, not a cancellation. Ending the run itself is a
+  // separate, explicit act (`POST /v1/runs/{id}/cancel`), which aborts the run's signal so run-core
+  // stops waiting AND the adapter is told. The async worker/queue that decouples the SDK call from the
+  // request is the valve — the run_events table + run-core are the reserved seam it attaches to.
   const timeoutMs = deps.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
   // build the run's tools. A DECLARED agent (engine-built registry entry) sets
   // `toolFactory` — its tools are per-RUN, TENANT-bound (each escape-hatch handler gets a HandlerInit
@@ -365,20 +385,27 @@ export async function executeAgentRun(
         // Otherwise: the reservation snapshot already holds { runId } (set at reserve time) — the run
         // is reconstructable + replayable. No record() needed (reserve-before-execute owns it).
       } catch (err) {
-        // The run THREW (failed / timed out mid-stream). Surface a terminal error frame carrying the
-        // neutral errorClass (the status line cannot change mid-stream — see the note above). The
-        // durable run_events log holds whatever was persisted before the failure. RELEASE the
-        // reservation so a retry can re-run (a thrown run produced no completed RunResult) — but
+        // The run THREW (failed / timed out / was cancelled mid-stream). Surface a terminal error frame
+        // carrying the neutral errorClass (the status line cannot change mid-stream — see the note
+        // above). The durable run_events log holds whatever was persisted before the failure. RELEASE
+        // the reservation so a retry can re-run (a thrown run produced no completed RunResult) — but
         // TAINT-AWARE: a run that fired a non-idempotent tool then threw (e.g. from the post-completion
         // persist write) must NOT be released, or a same-key retry re-fires the side effect.
-        if (idemKey) {
+        //
+        // A CANCELLED run is never released, taint or not: the caller deliberately ended it, so freeing
+        // the key would let a same-key retry silently re-run exactly the run that was stopped.
+        if (idemKey && !(err instanceof RunCancelledError)) {
           await releaseIfUntainted(deps, tdb, tenantId, idemKey, freshRunId);
         }
-        // A held-request timeout is the neutral `timeout` class; any other throw → classify it.
+        // A held-request timeout is the neutral `timeout` class; a cancellation is the platform-side
+        // `cancelled` class (never routed through the upstream classifier — nothing upstream failed);
+        // any other throw → classify it.
         const { errorClass, message } =
           err instanceof RunTimeoutError
             ? { errorClass: 'timeout' as ErrorClass, message: err.message }
-            : classifyUpstreamError(err);
+            : err instanceof RunCancelledError
+              ? { errorClass: 'cancelled' as ErrorClass, message: err.message }
+              : classifyUpstreamError(err);
         await stream
           .writeSSE({ event: 'error', data: JSON.stringify({ message, errorClass }) })
           .catch(() => {});
@@ -398,8 +425,20 @@ export async function executeAgentRun(
     // RELEASE the reservation so a retry can re-run (a thrown run produced no completed RunResult) —
     // but TAINT-AWARE: a run that fired a non-idempotent tool then threw (e.g. from the post-completion
     // persist write) must NOT be released, or a same-key retry re-fires the side effect.
-    if (idemKey) {
+    //
+    // A CANCELLED run is never released, taint or not: the caller deliberately ended it, so freeing the
+    // key would let a same-key retry silently re-run exactly the run that was stopped. Cancelling is
+    // never a re-run — least of all for a run that already fired a side effect, which stays quarantined
+    // under its key with the taint marker as the record that it needs manual review.
+    if (idemKey && !(err instanceof RunCancelledError)) {
       await releaseIfUntainted(deps, tdb, tenantId, idemKey, freshRunId);
+    }
+    // A run that was CANCELLED is a state conflict, not a failure of this request: the run was ended
+    // on demand while this call held it. It answers 409 with the standard closed-code envelope, and the
+    // run's own terminal outcome — `status:'error'` with the neutral `cancelled` class — is durable and
+    // re-readable on GET /v1/runs/{id}, which is where a caller reads what happened.
+    if (err instanceof RunCancelledError) {
+      return c.json(errorEnvelope('CONFLICT', err.message, c.get('requestId') ?? 'unknown'), 409);
     }
     // (HTTP-2): a held-request TIMEOUT is honestly a 504 Gateway Timeout (not the
     // generic 500 the global onError gives a bare Error). HTTP-2: emit the STANDARD closed-ErrorCode
@@ -697,7 +736,8 @@ function loserBody(runId: string): Record<string, unknown> {
 /**
  * HTTP-1: the TRANSIENT error classes — an upstream throttle / 5xx / timeout that a same-key retry
  * SHOULD be allowed to re-run (the Retry-After advises it). A non-transient class (model_refusal /
- * upstream_4xx / internal / null) is a stable, repeatable outcome that stays cached under the key.
+ * upstream_4xx / cancelled / internal / null) is a stable, repeatable outcome that stays cached under
+ * the key — for `cancelled` because re-running a run someone ended is never what they asked for.
  */
 function isTransientErrorClass(errorClass: ErrorClass | null): boolean {
   return errorClass === 'rate_limited' || errorClass === 'upstream_5xx' || errorClass === 'timeout';
@@ -929,6 +969,74 @@ function registerRunReadRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
   );
 }
 
+/**
+ * Register the run-CANCEL route — the one mutating route under `/v1/runs`.
+ *
+ * PERMISSION: `agent:run`, the existing mutating run permission, deliberately reused rather than a new
+ * `agent:cancel`. A principal that may START a run is exactly the principal that may STOP one — stopping
+ * is strictly the less dangerous of the two, so a separate permission would gate nothing that
+ * `agent:run` does not already gate, while rippling through the permission union, the role map, the
+ * sensitive set, the api-key-grantable set and the api-key scope grammar derived from it. `agent:read`
+ * would be wrong for the opposite reason: a read permission must never authorize a mutation.
+ *
+ * ORDER OF OPERATIONS, and why it is this order:
+ *  1. tenant-scoped OWNERSHIP probe — a foreign or absent runId is a uniform 404 with ZERO effect;
+ *  2. the DURABLE marker + the journaled terminal outcome — written BEFORE anything is signalled, so a
+ *     process that dies mid-cancel still leaves a run that no dispatch will execute;
+ *  3. the ENGINE cancel (best-effort) — ends a durable job that has not started;
+ *  4. the in-process SIGNAL — what actually frees an executing run's work.
+ */
+function registerRunCancelRoute(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
+  app.post(
+    '/v1/runs/:id/cancel',
+    requireAuth(),
+    resolveTenant(deps),
+    requirePermission(deps, 'agent:run'),
+    async (c) => {
+      const tenantId = c.get('tenantId');
+      if (!tenantId) throw new ApiError('NOT_FOUND', 'Not found.');
+      const runId = c.req.param('id');
+      const tdb = forTenant(deps.db, tenantId);
+
+      // Tenant-scoped ownership check FIRST: a foreign/absent runId → 404 (no leak) and nothing is
+      // written, signalled or asked of the engine. Cancelling is a mutation, so this must precede it.
+      const ownership = await tdb.runHeaderOwnership(runId);
+      if (ownership !== 'owned') throw new ApiError('NOT_FOUND', 'Not found.');
+
+      // The DURABLE half. The marker is what a dispatch (fresh or a recovery re-dispatch) consults, so
+      // it is written before any signal goes out; the outcome record makes the run terminal with the
+      // neutral `cancelled` class, exactly the way every other outcome reaches GET /v1/runs/{id}. A run
+      // that had ALREADY finished keeps its own outcome — `cancelled:false` says so.
+      await markRunCancelled(tdb, runId);
+      const outcome = await recordRunCancelled(tdb, runId);
+
+      // The ENGINE half — ends a durable job that has not been dequeued. BEST-EFFORT on purpose: the
+      // persisted marker above is the authoritative record (a worker refuses to execute a marked run
+      // regardless), so an engine that is unwired, unlaunched or momentarily unreachable must not turn
+      // a cancellation the caller has already been given into a 5xx. Logged in the operational style so
+      // an operator sees it happened.
+      if (deps.durableExecutor) {
+        try {
+          await deps.durableExecutor.cancel(runId);
+        } catch (err) {
+          console.error(`[api-auth] durable cancel failed runId=${runId}`, err);
+        }
+      }
+
+      // The IN-PROCESS half — the AbortSignal run-core handed the adapter. This is what frees the WORK
+      // rather than only the caller waiting on it. It reaches runs executing in THIS process; a run on
+      // a separate worker process is governed by the marker + the engine's cooperative cancellation
+      // above, neither of which interrupts a model call already in flight.
+      const signalled = signalRunCancelled(runId);
+
+      return c.json(
+        { runId, cancelled: outcome.cancelled, status: outcome.status, signalled },
+        200,
+      );
+    },
+  );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------------------------
@@ -953,9 +1061,13 @@ class RunTimeoutError extends Error {
 
 /**
  * Bound a held in-request promise by a wall-clock deadline. Rejects with a RunTimeoutError if `p` does
- * not settle within `ms` (the request/stream is freed). NOTE: this does NOT cancel the underlying
- * SDK work (run-core does not yet propagate cancellation) — it bounds the REQUEST, the documented
- * limitation whose proper fix is the async worker.
+ * not settle within `ms` (the request/stream is freed).
+ *
+ * WHAT IT DOES AND DOES NOT DO: this is a REQUEST bound, not a cancellation — it frees the caller and
+ * asks nothing of the run, so the run continues until it settles. Ending the run itself is what
+ * `POST /v1/runs/{id}/cancel` is for: that path aborts the run's signal, which run-core races the
+ * backend call against and threads onto `ctx.signal`. The two are deliberately separate: a deadline
+ * this platform imposes on ONE request must not silently destroy a run other callers can still read.
  */
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -968,9 +1080,15 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 /**
  * map a completed-but-errored RunResult's neutral errorClass → an HTTP status for the
  * LIVE (non-streamed) sync run endpoint. `rate_limited`→429, `upstream_5xx`→502, `timeout`→504; every
- * other class (`model_refusal`, `upstream_4xx`, `internal`) AND a completed run stay 200 — the run
- * executed and the body carries `status`/`errorClass`. (GET /v1/runs/{id} is a durable re-read and is
- * ALWAYS 200 — this mapping is only for the live run.)
+ * other class (`model_refusal`, `upstream_4xx`, `cancelled`, `internal`) AND a completed run stay 200 —
+ * the run executed and the body carries `status`/`errorClass`. (GET /v1/runs/{id} is a durable re-read
+ * and is ALWAYS 200 — this mapping is only for the live run.)
+ *
+ * `cancelled` sits with the terminal classes deliberately: retrying a run someone ended would re-run
+ * exactly what was stopped, so it is neither transient (it never releases an Idempotency-Key
+ * reservation) nor retry-advisable (it carries no Retry-After). It reaches this mapping only when a run
+ * RETURNED a cancelled outcome; the request that was HOLDING a cancelled run answers 409 instead, from
+ * the throw path above — the run did not produce a result for it to carry.
  */
 function statusForErrorClass(
   result: Pick<ReconstructedRun, 'status' | 'errorClass'>,
@@ -984,7 +1102,8 @@ function statusForErrorClass(
     case 'timeout':
       return 504;
     default:
-      // model_refusal / upstream_4xx / internal / null: the run executed; 200 with the body's class.
+      // model_refusal / upstream_4xx / cancelled / internal / null: the run executed (or was ended);
+      // 200 with the body's class.
       return 200;
   }
 }

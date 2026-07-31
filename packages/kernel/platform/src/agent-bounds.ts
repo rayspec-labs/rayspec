@@ -95,24 +95,38 @@ export class RunBoundTimeoutError extends Error {
 }
 
 /**
- * Raised when a seam of an ABANDONED run is used: the wall-clock bound has fired, `runAgent` has
- * rejected, and the backend call it stopped waiting for is still in flight and still holding the
- * RunContext. Every seam on that context is bound to the run's `TenantDb` — on the durable path the
- * run's transaction, which is rolled back the moment `runAgent` rejects — so run-core refuses the
- * call rather than issuing a statement through a handle the run no longer owns.
+ * Why a run was given up on. Both reasons leave the SAME situation — `runAgent` has rejected while the
+ * backend call it stopped waiting for is still in flight and still holding the RunContext — so both
+ * make the run's seams inert; they differ only in what the refusal says happened.
+ */
+export type RunAbandonReason = 'bound' | 'cancelled';
+
+/**
+ * Raised when a seam of an ABANDONED run is used: `runAgent` has rejected — because the wall-clock
+ * bound fired, or because the run was cancelled — and the backend call it stopped waiting for is still
+ * in flight and still holding the RunContext. Every seam on that context is bound to the run's
+ * `TenantDb` — on the durable path the run's transaction, which is rolled back the moment `runAgent`
+ * rejects — so run-core refuses the call rather than issuing a statement through a handle the run no
+ * longer owns.
  */
 export class RunAbandonedError extends Error {
   readonly runId: string;
   /** The seam that was called, e.g. `journal.record` — named so the refusal is diagnosable. */
   readonly seam: string;
-  constructor(runId: string, seam: string) {
+  /** Why the run was given up on — so the refusal names the real cause, not a presumed one. */
+  readonly reason: RunAbandonReason;
+  constructor(runId: string, seam: string, reason: RunAbandonReason = 'bound') {
     super(
-      `${seam} was called for run ${runId} after the RAYSPEC_AGENT_RUN_MAX_MS bound fired and the ` +
-        'run was given up on. The call is refused: an abandoned run writes nothing further.',
+      reason === 'cancelled'
+        ? `${seam} was called for run ${runId} after the run was cancelled and given up on. The ` +
+            'call is refused: a cancelled run writes nothing further.'
+        : `${seam} was called for run ${runId} after the RAYSPEC_AGENT_RUN_MAX_MS bound fired and ` +
+            'the run was given up on. The call is refused: an abandoned run writes nothing further.',
     );
     this.name = 'RunAbandonedError';
     this.runId = runId;
     this.seam = seam;
+    this.reason = reason;
   }
 }
 

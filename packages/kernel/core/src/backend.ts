@@ -114,6 +114,15 @@ export interface RunContext {
    */
   tools?: NeutralTool[];
   /**
+   * The run's cancellation signal. Aborts when the run is ended on demand (the run surface's cancel
+   * endpoint) or when the caller that started it supplied a signal of its own. An adapter that can
+   * hand a signal to its SDK — or abort the child process / session it owns — SHOULD wire this one to
+   * it, so a cancelled run frees the provider work rather than only the caller waiting on it. Optional
+   * and additive: an adapter that ignores it behaves exactly as it did before, and run-core stops
+   * waiting either way.
+   */
+  signal?: AbortSignal;
+  /**
    * Central tool dispatch (the ONLY sanctioned tool path — adapters never hold handlers).
    * Owns: validate-in -> idempotency -> timeout -> handler -> validate-out -> opaque-wrap ->
    * one journaled step. Returns opaque `tool_data` on success or a fail-closed `tool_error`

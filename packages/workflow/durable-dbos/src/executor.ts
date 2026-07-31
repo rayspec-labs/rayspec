@@ -63,7 +63,7 @@ import type {
   EnqueueResult,
   RunJob,
 } from '@rayspec/platform';
-import { isRunTainted, runAgent } from '@rayspec/platform';
+import { isRunCancelled, isRunTainted, runAgent } from '@rayspec/platform';
 import { eq } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
@@ -242,6 +242,35 @@ export async function readTaintWithBoundedRetry(tdb: TenantDb, runId: string): P
 }
 
 /**
+ * Read whether the run was CANCELLED, retrying a transient DB read error under the SAME bounded-read
+ * policy as {@link readTaintWithBoundedRetry} (the `TAINT_READ_*` constants are that shared policy).
+ * Returns the boolean on a SUCCESSFUL read (true ⇒ do not execute this run at all).
+ *
+ * SAFETY DIRECTION — the same one the taint read takes, for the same reason: it RETHROWS the ORIGINAL
+ * DB error when every attempt fails, so a run is NEVER dispatched off an unresolved cancellation read.
+ * A cancelled run that executed anyway would burn a model call the caller explicitly ended (and, with a
+ * non-idempotent tool, fire a side effect); a momentary DB blip surfacing as a diagnosable terminal step
+ * error is the cheaper failure. The retries are what keep that blip from dead-lettering a healthy run.
+ */
+export async function readCancelledWithBoundedRetry(
+  tdb: TenantDb,
+  runId: string,
+): Promise<boolean> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= TAINT_READ_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await isRunCancelled(tdb, runId);
+    } catch (e) {
+      lastErr = e;
+      if (attempt < TAINT_READ_MAX_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, TAINT_READ_BACKOFF_MS * 2 ** (attempt - 1)));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * The terminal-SUCCESS value of the `runs` header `status` column — the `RunResult.status` success
  * literal ('completed', verified doc-first against `@rayspec/core`'s `RunResult = z.object({ status:
  * z.enum(['completed','error']) … })`), persisted VERBATIM by run-core's header upsert
@@ -342,6 +371,16 @@ export class DbosDurableExecutor implements DurableExecutor {
     await DBOS.runStep(
       async () => {
         const tdb = forTenant(this.#deps.db, job.tenantId);
+
+        // ── Cancellation: a run that was ended is never executed, and never RE-executed ────────
+        // Read FIRST, before anything else this body does. The engine's own cancellation ends a job
+        // it has not dequeued, but it is not the whole guarantee: OUR marker is authoritative for the
+        // same reason the started-once guard is (the engine memoizes step OUTPUTS, not our Drizzle
+        // writes), and it is what a RECOVERY re-dispatch — which re-invokes this body from the start —
+        // consults. A cancelled run completes the step as a NO-OP: its terminal outcome was already
+        // journaled by the cancel surface (with the neutral `cancelled` class), so failing the
+        // workflow here would add an engine-level error on top of a run that is already accounted for.
+        if (await readCancelledWithBoundedRetry(tdb, job.runId)) return;
 
         // ── Resolve the run FIRST (before the marker) ─────────────────────────────────────────
         // resolveRun reads the agent definition LIVE (no serialized object graph). It runs BEFORE
@@ -513,6 +552,26 @@ export class DbosDurableExecutor implements DurableExecutor {
     if (!this.#started) return 'unknown';
     const status = await DBOS.getWorkflowStatus(jobId);
     return toNeutralStatus(status?.status);
+  }
+
+  /**
+   * End a job through DBOS. `cancelWorkflow` flips an ENQUEUED workflow to CANCELLED so the queue never
+   * dequeues it — the clean, real case: the run is stopped before it starts.
+   *
+   * WHAT IT DOES NOT DO, stated exactly (verified doc-first against the installed 4.21.6: "If the
+   * workflow is currently running, `DBOSWorkflowCancelledError` will be thrown from its next DBOS
+   * call"): DBOS cancellation is COOPERATIVE, and our workflow runs the WHOLE `runAgent` inside ONE
+   * step, so a job already executing has no next DBOS call to raise at until that step ends. Cancelling
+   * it therefore changes its recorded status and nothing more — the run's own AbortSignal is what stops
+   * the work in flight. Mirrors `enqueue` in requiring a launched engine.
+   */
+  async cancel(jobId: string): Promise<void> {
+    if (!this.#started) {
+      throw new Error(
+        'DbosDurableExecutor.cancel called before start() — launch the engine first.',
+      );
+    }
+    await DBOS.cancelWorkflow(jobId);
   }
 
   async shutdown(): Promise<void> {
