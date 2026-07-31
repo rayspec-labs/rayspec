@@ -74,7 +74,7 @@ interface OpenApiParameter {
   schema: Record<string, unknown>;
 }
 
-/** A documented response header (X-Next-Cursor/X-Result-Truncated/Idempotency-Replay). */
+/** A documented response header (X-Next-Cursor/X-Result-Truncated/Idempotency-Replay/Retry-After). */
 interface OpenApiHeader {
   description: string;
   schema: { type: 'string' };
@@ -273,6 +273,14 @@ function operationForRoute(
             "The run failed with the TRANSIENT errorClass upstream_5xx; the body is the RunResult (status:'error'). " +
             'A same-key retry RE-RUNS the agent (the reservation is released), unless the run fired a ' +
             'non-idempotent tool.',
+          headers: {
+            'Retry-After': {
+              description:
+                'Seconds to wait before retrying — present when the backend adapter captured retry advice ' +
+                'from the upstream 5xx. Identical on a live 502 and on a replayed one.',
+              schema: { type: 'string' },
+            },
+          },
           content: { 'application/json': { schema: OPAQUE_OBJECT } },
         },
         '504': {

@@ -218,6 +218,38 @@ describe('in-request transient-retry quarantine (JSON)', () => {
     expect(second.headers.get('retry-after')).toBe('17');
   });
 
+  it('a 502 advises Retry-After too when the upstream sent one — the header follows the advice, not the status', async () => {
+    const { token } = await principal('u5xx@example.com', 'U5xxOrg');
+    // `classifyUpstreamError` captures a Retry-After for an upstream 5xx exactly as it does for a 429
+    // (`withRetry('upstream_5xx')`), and 502 is a transient class whose reservation is released, so a
+    // retry is precisely what the caller is meant to do. Pre-fix `applyRetryAfter` returned early for
+    // any status other than 429, so that advice was journaled and then silently dropped.
+    backend.errorDetail = 'the upstream is unavailable';
+    backend.errorClass = 'upstream_5xx';
+    backend.retryAfterSeconds = 31;
+
+    const res = await jsonRequest(h.app, 'POST', '/v1/agents/charge-agent/runs', {
+      body: { input: 'order-upstream-5xx' },
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+    });
+    expect(res.status).toBe(502);
+    expect(res.headers.get('retry-after')).toBe('31');
+  });
+
+  it('a 502 whose upstream sent no advice carries no Retry-After (the header is advice, never invented)', async () => {
+    const { token } = await principal('u5xxbare@example.com', 'U5xxBareOrg');
+    backend.errorDetail = 'the upstream is unavailable';
+    backend.errorClass = 'upstream_5xx';
+    backend.retryAfterSeconds = undefined;
+
+    const res = await jsonRequest(h.app, 'POST', '/v1/agents/charge-agent/runs', {
+      body: { input: 'order-upstream-5xx-bare' },
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+    });
+    expect(res.status).toBe(502);
+    expect(res.headers.get('retry-after')).toBeNull();
+  });
+
   it('OVER-QUARANTINE GUARD: a transient-failed run with ONLY an IDEMPOTENT tool still RE-RUNS on a same-key retry (it is NOT quarantined)', async () => {
     const { token } = await principal('taintok@example.com', 'TaintOkOrg');
     const headers = {

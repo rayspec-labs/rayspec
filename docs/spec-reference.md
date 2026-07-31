@@ -405,12 +405,15 @@ at its transient status, `429` / `502` / `504`, not at `200`.
 
 ### `Retry-After`
 
-A `429` carries a `Retry-After` header, in seconds, whenever the backend adapter
-captured retry advice from the upstream rate limit; the value is recorded on the
-run's failing journal step and read back from there. Both of a run's `429`
-surfaces answer identically — the live response, and the same-key replay of a run
-that kept its reservation. When the upstream sent no advice there is no header:
-it is advice, not a guarantee, and a `429` without it is well-formed.
+A `429` or a `502` carries a `Retry-After` header, in seconds, whenever the backend
+adapter captured retry advice from the upstream — a rate limit and a `5xx` are
+both classified with whatever advice came back; the value is recorded on the run's
+failing journal step and read back from there. Both of a run's surfaces answer
+identically — the live response, and the same-key replay of a run that kept its
+reservation. The header follows the advice rather than one status, so a `504` does
+not carry one: nothing upstream advises a delay for a deadline this platform
+imposed. When the upstream sent no advice there is no header: it is advice, not a
+guarantee, and a `429` or `502` without it is well-formed.
 
 ### Streaming, and a run that throws
 
@@ -422,15 +425,21 @@ classified outcome afterwards.
 
 A run that does not merely fail but **throws** — the held request hitting its
 timeout, or a configured per-run wall-clock ceiling — produces no run result at
-all. That answers `504 GATEWAY_TIMEOUT` with the platform's standard error
-envelope, carrying the neutral `timeout` class in `details.errorClass`.
+all. On the JSON path that answers `504 GATEWAY_TIMEOUT` with the platform's
+standard error envelope, carrying the neutral `timeout` class in
+`details.errorClass`. Under `Accept: text/event-stream` the same throw cannot
+change a status line already sent, so it ends the stream with a terminal `error`
+event carrying that same class — which is the split described just above, not an
+exception to it.
 
 ### Run status vocabulary
 
 `GET /v1/runs/{id}` is the durable re-read of a run, and it answers **`200`
 whatever the run's outcome** — a failed run is still a successfully read one. It
-answers `404` only for a run id that does not exist in the calling tenant. The
-status mapping above belongs to the live run call and never to this one.
+answers `404` for any id it finds no header row for in the calling tenant, which
+covers an id that was never issued and — as the `enqueued` note below sets out —
+one whose header write did not land. The status mapping above belongs to the live
+run call and never to this one.
 
 The `status` it returns is one of four values, and a run moves through them in one
 direction:
