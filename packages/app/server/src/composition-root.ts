@@ -303,8 +303,10 @@ export interface BootedServer {
    * reserve→dispatch path the scheduler fires on (a thin delegate to the already-wired
    * `DbosCronScheduler.fireNow`). It is generic platform CONTROL surface (it names no product
    * trigger/agent): an operator who must fire a nightly job now, the deterministic test harness, and
-   * the CEO demo (which cannot wait until 2am) all need it. Returns whether THIS call won the
-   * exactly-once reserve and dispatched (`true`) or was a deduped no-op (`false`). Undefined for an
+   * the CEO demo (which cannot wait until 2am) all need it. Returns `true` iff THIS call won the
+   * exactly-once reserve and dispatched; `false` means it did not dispatch, either as a deduped no-op
+   * (this firing key already fired) or as a skip because the deployment tenant does not exist (yet),
+   * which consumes no firing instant and so still fires once the org exists. Undefined for an
    * auth-only / no-cron / no-worker boot (nothing to fire). NOT an internet-facing endpoint by itself
    * — the entrypoint does not mount it on the public app; a dev wrapper may expose it on a LOCAL
    * control route.
@@ -396,8 +398,10 @@ export interface ServerConfig {
    * The tenant (org id) the deployment's CRON triggers fire under (single-deployment
    * LOCAL posture — multi-tenant cron fan-out is RESERVED, out of scope). Set via
    * RAYSPEC_CRON_TENANT_ID. REQUIRED iff the deployed spec declares cron triggers AND
-   * `deployment.durableWorker:true` (a cron must fire under a known tenant — firing under an unknown
-   * tenant is fail-closed-refused at boot). Absent for an auth-only / no-cron / no-worker boot.
+   * `deployment.durableWorker:true`: an unset or malformed (non-UUID) value is fail-closed-refused at
+   * BOOT. Whether the org it names EXISTS is not a boot question — a well-formed id naming an org that
+   * does not exist yet boots, and each firing is skipped instead (see `cronTenantExists`), so nothing
+   * ever fires under an unknown tenant either way. Absent for an auth-only / no-cron / no-worker boot.
    */
   cronTenantId?: string;
   /**
@@ -1308,20 +1312,24 @@ export async function applyMigrations(db: Db): Promise<void> {
 }
 
 /**
- * Validate the cron tenant at BOOT — fail loud at startup, NOT lazily at the first
- * fire (2am). Two checks, both fail-closed:
- *   1. SHAPE — `forTenant(db, tenantId)` constructs a `TenantDb`, which THROWS the identical
- *      "tenantId must be a UUID (fail-closed)" for a malformed (non-UUID) id. We reuse it so the shape
- *      rule has a single source of truth (the TenantDb chokepoint) rather than re-deriving the regex.
- *   2. EXISTENCE — a well-formed-but-NONEXISTENT org id would otherwise pass the shape check and only
- *      explode at fire time on the `idempotency_keys.tenant_id` FK (orgs). Probe `SELECT 1 FROM orgs`
- *      so a bogus-but-valid-UUID tenant aborts the boot loudly. `deleted_at IS NULL` so a soft-deleted
- *      org is treated as absent (a cron must not fire under a tombstoned tenant).
- * Throws `BootConfigError` (the entrypoint surfaces it) — never returns a bad tenant into the scheduler.
+ * Validate the SHAPE of the cron tenant at BOOT — a value that could never name an org is a config
+ * error, and a config error must be loud at startup rather than at 2am. `forTenant(db, tenantId)`
+ * constructs a `TenantDb`, which THROWS the identical "tenantId must be a UUID (fail-closed)" for a
+ * malformed (non-UUID) id; we reuse it so the shape rule has a single source of truth (the TenantDb
+ * chokepoint) rather than re-deriving the regex. Throws `BootConfigError` (the entrypoint surfaces it).
+ *
+ * EXISTENCE is deliberately NOT checked here. It used to be: a well-formed id with no matching org
+ * aborted the boot — but an org is registered against a RUNNING application, so a cron deployment
+ * whose org row is not there yet (a first bring-up, or a restart that races it) could not come up at
+ * all, and the org it was waiting for could not be created through it. The check therefore moved to
+ * the FIRING (see
+ * `cronTenantExists`, injected into `DbosCronScheduler` as its per-firing `tenantExists` probe), where
+ * it is answered fail-closed and — unlike a boot gate — picks the org up the moment it appears.
+ * Nothing fires under an unknown tenant either way; only the moment of the check changed.
  */
 export async function assertCronTenantBootable(db: Db, cronTenantId: string): Promise<void> {
-  // (1) SHAPE — TenantDb's constructor throws on a non-UUID; wrap it as a BootConfigError so the boot
-  // abort is uniform + actionable.
+  // TenantDb's constructor throws on a non-UUID; wrap it as a BootConfigError so the boot abort is
+  // uniform + actionable.
   try {
     forTenant(db, cronTenantId);
   } catch {
@@ -1330,19 +1338,25 @@ export async function assertCronTenantBootable(db: Db, cronTenantId: string): Pr
         'under a known deployment tenant (org id, 8-4-4-4-12 UUID). Fail-closed.',
     );
   }
-  // (2) EXISTENCE — the org must actually exist (and not be soft-deleted), else the cron's tenant-scoped
-  // reserve INSERT would fail at fire time on the orgs FK. Probe at boot so it fails loud now.
+}
+
+/**
+ * Does the configured cron tenant currently exist as a USABLE org? The single source of truth for that
+ * question — the composition root owns it because `orgs` is a global/platform table the durable-worker
+ * package must not query itself; the scheduler receives this as its injected `tenantExists` probe and
+ * calls it before EVERY firing.
+ *
+ * `deleted_at IS NULL` so a soft-deleted org counts as absent: a cron must not fire under a tombstoned
+ * tenant, and a tenant that is tombstoned WHILE the deployment runs stops firing at the next instant
+ * without any restart — the same property, read the other way round, that lets a not-yet-created org
+ * start firing.
+ */
+export async function cronTenantExists(db: Db, cronTenantId: string): Promise<boolean> {
   const rows = (await db.$client.unsafe(
     'SELECT 1 FROM orgs WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
     [cronTenantId],
   )) as unknown as unknown[];
-  if (rows.length === 0) {
-    throw new BootConfigError(
-      `Boot aborted — RAYSPEC_CRON_TENANT_ID='${cronTenantId}' is a well-formed UUID but no such ` +
-        'active org exists. A cron fires under an existing deployment tenant; provision the org (or ' +
-        'point RAYSPEC_CRON_TENANT_ID at an existing org id) before deploying a cron. Fail-closed.',
-    );
-  }
+  return rows.length > 0;
 }
 
 /**
@@ -2349,16 +2363,31 @@ async function deployDeclaredSpec(
           'RAYSPEC_CRON_TENANT_ID to the org id the trigger should fire under. Fail-closed.',
       );
     }
-    // Validate the tenant at BOOT, not lazily at fire time. `forTenant` throws the fail-closed
-    // "tenantId must be a UUID" for a malformed id; the existence probe below catches a
-    // well-formed-but-nonexistent org so a bogus tenant fails loud at boot, not via the FK at fire time.
+    // Validate the tenant SHAPE at BOOT: `forTenant` throws the fail-closed "tenantId must be a UUID"
+    // for a malformed id, which no amount of waiting could ever make valid.
     await assertCronTenantBootable(db, config.cronTenantId);
+    // Whether that org EXISTS is a per-firing question, not a boot gate — it is normal for a cron
+    // deployment to come up BEFORE its tenant org has been registered against it. Announce the state
+    // once here so an operator watching the boot knows why nothing fires yet (and that it will, without
+    // a restart); the scheduler then re-asks per firing through the SAME probe.
+    const cronTenantId = config.cronTenantId;
+    if (!(await cronTenantExists(db, cronTenantId))) {
+      console.warn(
+        `[cron] RAYSPEC_CRON_TENANT_ID='${cronTenantId}' does not name an existing org yet — the ` +
+          'scheduler starts and every firing is SKIPPED (one line each) until that org exists. ' +
+          'Firing resumes automatically; no restart is needed.',
+      );
+    }
     const cronScheduler = new DbosCronScheduler(result.triggers.list(), {
       db: workerDbHandle,
-      tenantId: config.cronTenantId,
+      tenantId: cronTenantId,
       executor: durableExecutorInstance,
       productTables,
       invokeTriggerHandler,
+      // The per-firing existence probe. Bound to the WORKER pool (the pool the fire itself dispatches
+      // off) so the check never borrows an HTTP connection, and re-evaluated on every call — that is
+      // what makes an org created mid-life start firing without a restart.
+      tenantExists: () => cronTenantExists(workerDbHandle as Db, cronTenantId),
     });
     // Expose the wired scheduler to the late-bound manual-trigger firer (built above, injected into the
     // app inside deploy()); the firer restricts on-demand fires to its manual triggers.

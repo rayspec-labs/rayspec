@@ -121,6 +121,9 @@ describe('registerScheduledWorkflows — hands the catch-up mode to DBOS', () =>
       executor: {} as never,
       productTables: new Map<string, PgTable>(),
       invokeTriggerHandler,
+      // Registration never fires anything, so the tenant probe is never consulted here (the firing-time
+      // behaviour is proven in cron-scheduler-late-binding.db.test.ts) — but the deps require it.
+      tenantExists: async () => true,
     });
     scheduler.registerScheduledWorkflows();
 

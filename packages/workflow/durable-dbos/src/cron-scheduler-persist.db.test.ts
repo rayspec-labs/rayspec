@@ -129,6 +129,16 @@ describe.skipIf(!hasDb)(
           // for the handler-action path), but the deps interface requires them.
           productTables: new Map<string, PgTable>(),
           invokeTriggerHandler,
+          // The deployment-tenant existence probe (the composition root injects `cronTenantExists`).
+          // Answered on ground truth — the org is seeded above, so the persist wiring is exercised on
+          // the firing path a real deployment takes.
+          tenantExists: async () => {
+            const rows = await db.$client.unsafe(
+              'SELECT 1 FROM orgs WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
+              [TENANT],
+            );
+            return rows.length > 0;
+          },
         },
       );
     });

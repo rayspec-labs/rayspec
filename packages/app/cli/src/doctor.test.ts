@@ -291,3 +291,37 @@ describe('doctor — no secret leak', () => {
     }
   });
 });
+
+describe('doctor — cron/manual triggers surface the deployment-tenant requirement', () => {
+  it('reports the RAYSPEC_CRON_TENANT_ID advisory without failing the document', async () => {
+    // The requirement is a BOOT requirement the document alone cannot satisfy, so it is advisory:
+    // `doctor` states it so an operator learns it here rather than from a boot error.
+    writeFileSync(
+      join(dir, 'cron.yaml'),
+      `version: '1.0'
+metadata:
+  name: cron-doc
+deployment:
+  durableWorker: true
+agents:
+  - id: digester
+    name: digester
+    backend: pi
+    model: pi-model
+    instructions: Summarize.
+triggers:
+  - name: nightly-digest
+    kind: cron
+    schedule: '0 2 * * *'
+    action: { kind: agent, agent: digester }
+`,
+      'utf8',
+    );
+    const r = await runDoctor(['cron.yaml']);
+    // An advisory never affects `ok` — the document is valid.
+    expect(r.ok).toBe(true);
+    expect(r.errors).toEqual([]);
+    expect(r.warnings.map((w) => w.code)).toEqual(['cron_tenant_required']);
+    expect(r.warnings[0]?.message).toContain('RAYSPEC_CRON_TENANT_ID');
+  });
+});

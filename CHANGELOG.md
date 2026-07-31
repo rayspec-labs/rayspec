@@ -142,6 +142,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A deployment that declares a cron or manual trigger boots before its tenant org exists.**
+  `RAYSPEC_CRON_TENANT_ID` names the org a trigger fires under — yet the boot used to verify that org
+  existed and abort when it did not (`… is a well-formed UUID but no such active org exists`), which
+  is a state a cron deployment legitimately passes through: an org is registered against a *running*
+  application, so a deployment restarting before its org row is there could not come back up at all,
+  and the only way in was to deploy without the trigger first. The boot no longer asks that question.
+  A well-formed id naming an org that does not exist yet starts the scheduler, and firing begins the
+  moment an `orgs` row with that id exists. Which id that is remains the row's to decide: `POST
+  /v1/orgs`, `POST /v1/auth/register` and `rayspec dev bootstrap-tenant` all let the database generate
+  it, so an operator using those still reads the id back before setting the variable, while an id
+  chosen up front has to be the id its `orgs` row is created with. Nothing fires under an unknown
+  tenant: the existence check moved to the firing itself, where it runs **before** the firing's
+  reserve, so a skipped firing dispatches nothing, writes no marker and therefore does not consume its
+  firing instant. Each skipped firing emits exactly one line naming the trigger, the instant and the
+  tenant; the boot additionally says once that the org is missing and that no restart will be needed.
+  The moment the org exists, firing resumes by itself — the check is re-asked per firing, never cached
+  — and, read the other way round, an org that is soft-deleted while the deployment runs stops firing
+  at the next instant. The on-demand fire of a `manual` trigger runs through that same guard, so such
+  a fire dispatches nothing and reports `fired: false` rather than success — which is why every
+  contract carrying that value (`fireNow`, `fireScheduled`, `fireCronNow`, the manual-fire seam, the
+  `POST /v1/triggers/{name}/fire` 202 and the immutable audit row that fire writes) now documents the
+  absent-tenant skip alongside the deduped no-op it used to name exhaustively: `fired: false` is not
+  by itself evidence that the work has run.
+  Two boot refusals are unchanged, both with their exact previous message: a malformed (non-UUID)
+  value, which no waiting could make valid, and an unset `RAYSPEC_CRON_TENANT_ID` on a spec that
+  declares a cron/manual trigger. `doctor` and `plan` now also state the requirement up front, as the new
+  non-fatal `cron_tenant_required` advisory on each declared cron/manual trigger — it names the
+  variable, says the value is an org id, and says the org may not exist yet. Like every advisory it
+  never affects `ok`.
+
 - **`/health` covers the declared frontend mounts, and its response carries a `frontend` field.** The
   probe used to report only database reachability, so a deployment that also serves a `frontend[]`
   mount could answer `200 {"status":"ok","db":"ok"}` while every static asset was still 503 — a deploy
