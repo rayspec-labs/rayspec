@@ -120,10 +120,13 @@ export class AuditStore {
    * append ONE out-of-band manual-trigger-fire record (its own committed insert). An explicit manual
    * trigger fire dispatches a declared action (agent run / handler) through the durable worker — a
    * cost-sensitive operational action — so it leaves an immutable trail: the acting principal, the
-   * tenant scope, the trigger name, and whether THIS call actually dispatched (`fired`) or was a
-   * deduped no-op. Like {@link appendReprocess} it is BEST-EFFORT and swallows a write failure — the
-   * fire has ALREADY happened when this is called, so a failed audit must not turn a successful fire
-   * into a 500 a client would retry into MORE fires (the same availability posture).
+   * tenant scope, the trigger name, and whether THIS call actually dispatched (`fired`). A recorded
+   * `fired:false` says only that THIS call did not dispatch — EITHER a deduped no-op for the firing
+   * key OR a skip because the deployment tenant does not exist (yet), which dispatched nothing at all
+   * — so a `false` in the trail is NOT on its own evidence that the work ran. Like
+   * {@link appendReprocess} it is BEST-EFFORT and swallows a write failure — the fire attempt has
+   * ALREADY resolved when this is called, so a failed audit must not turn a successful fire into a
+   * 500 a client would retry into MORE fires (the same availability posture).
    *
    * The event name is a fixed literal — NOT an `AuthEventName` (a trigger fire is a platform
    * operational action, not an auth-surface event), mirroring {@link appendReprocess}. `actorOrgId` is

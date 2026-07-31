@@ -128,9 +128,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — and, read the other way round, an org that is soft-deleted while the deployment runs stops firing
   at the next instant. The on-demand fire of a `manual` trigger runs through that same guard, so such
   a fire dispatches nothing and reports `fired: false` rather than success — which is why every
-  contract carrying that value (`fireNow`, `fireScheduled`, `fireCronNow`, the manual-fire seam and
-  the `POST /v1/triggers/{name}/fire` 202) now documents the absent-tenant skip alongside the deduped
-  no-op it used to name exhaustively: `fired: false` is not by itself evidence that the work has run.
+  contract carrying that value (`fireNow`, `fireScheduled`, `fireCronNow`, the manual-fire seam, the
+  `POST /v1/triggers/{name}/fire` 202 and the immutable audit row that fire writes) now documents the
+  absent-tenant skip alongside the deduped no-op it used to name exhaustively: `fired: false` is not
+  by itself evidence that the work has run.
   Two boot refusals are unchanged, both with their exact previous message: a malformed (non-UUID)
   value, which no waiting could make valid, and an unset `RAYSPEC_CRON_TENANT_ID` on a spec that
   declares a cron/manual trigger. `doctor` and `plan` now also state the requirement up front, as the new
