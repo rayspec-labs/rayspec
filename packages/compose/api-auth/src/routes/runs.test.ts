@@ -306,6 +306,37 @@ describe('sync JSON endpoint maps errorClass → HTTP status', () => {
     }
   });
 
+  it('the per-run wall-clock bound (RAYSPEC_AGENT_RUN_MAX_MS) → the SAME 504 + `timeout` envelope', async () => {
+    const { token } = await principal('runbound@example.com', 'RunBoundOrg');
+    // The OTHER ceiling: RAYSPEC_AGENT_RUN_MAX_MS is applied by run-core (not by this route's own
+    // withTimeout), so it rejects with a RunBoundTimeoutError rather than the route's RunTimeoutError.
+    // Both are "a run outlived a configured ceiling", so the caller must read the SAME thing: a 504
+    // carrying the neutral `timeout` class. Before the mapping existed this fell through to the global
+    // handler and the caller got an unclassified 500 INTERNAL. The run is parked at the PRE-gate so the
+    // bound fires with ZERO durable work in flight (same determinism as the test above).
+    const { release, arrived } = backend.armPre();
+    process.env.RAYSPEC_AGENT_RUN_MAX_MS = '40';
+    try {
+      const res = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+        body: { input: 'bounded' },
+        headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+      });
+      expect(res.status).toBe(504);
+      const body = await res.json();
+      expect(body.error.code).toBe('GATEWAY_TIMEOUT');
+      expect(body.error.details.errorClass).toBe('timeout');
+      // The operator-facing message names the variable that expired.
+      expect(body.error.message).toContain('RAYSPEC_AGENT_RUN_MAX_MS');
+      await arrived; // the run is provably parked at the pre-gate (no durable work yet)
+    } finally {
+      delete process.env.RAYSPEC_AGENT_RUN_MAX_MS;
+      release();
+      // The abandoned run keeps going to its natural end; every seam run-core handed it is inert, so
+      // it writes nothing further — settle() just awaits it out of flight before the next TRUNCATE.
+      await backend.settle();
+    }
+  });
+
   it('HTTP-2: a RETURNED timeout-class RunResult → 504 with the RunResult body (the run executed)', async () => {
     const { token } = await principal('to504r@example.com', 'To504ROrg');
     backend.errorDetail = 'upstream timeout';

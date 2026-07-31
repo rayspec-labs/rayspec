@@ -8,19 +8,22 @@
  * WHAT THE BOUND DOES NOT DO: it does not cancel the in-flight SDK call. There is no cancellation
  * path in run-core, so the model call keeps running until it settles on its own — the bound frees the
  * caller (and, on the durable path, the worker slot), it does not abort the provider request. What it
- * DOES guarantee once it has fired is asserted below: no further event from the abandoned call is
- * persisted, and the abandoned call's own settlement raises nothing.
+ * DOES guarantee once it has fired is asserted below, seam by seam: the abandoned call's events are
+ * dropped, its journal calls are refused, its tool dispatches are refused closed (no handler run, no
+ * step, no taint marker), and none of those refusals raises back into it.
  *
  * Both product callers reach the model through this one `runAgent`, and they differ only in the
  * handle they pass: the sync HTTP path calls it OUTSIDE any transaction; the durable worker calls it
  * INSIDE `forTenant(db, tenantId).transaction(...)` with a separate autonomous-commit `taintDb`. Both
  * invocation shapes are exercised here.
  */
-import type { AgentSpec, Backend, RunContext, RunResult } from '@rayspec/core';
+import type { AgentSpec, Backend, NeutralTool, RunContext, RunResult } from '@rayspec/core';
 import { classifyUpstreamError } from '@rayspec/core';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { RunBoundTimeoutError } from './agent-bounds.js';
 import { runAgent } from './run-core.js';
+import { insertEnqueuedRunHeader } from './run-header.js';
+import { isRunTainted } from './run-taint.js';
 import {
   forTenant,
   makeTestDb,
@@ -108,6 +111,49 @@ async function countRunEvents(runId: string): Promise<number> {
   return rows[0]?.n ?? 0;
 }
 
+/** journal_steps rows for a run, read on the pool (so only COMMITTED rows are counted). */
+async function countJournalSteps(runId: string): Promise<number> {
+  const rows = (await db.$client.unsafe(
+    'SELECT count(*)::int AS n FROM journal_steps WHERE run_id = $1',
+    [runId],
+  )) as unknown as { n: number }[];
+  return rows[0]?.n ?? 0;
+}
+
+/** The run's header status, or undefined when no header row exists. */
+async function runHeaderStatus(runId: string): Promise<string | undefined> {
+  const rows = (await db.$client.unsafe('SELECT status FROM runs WHERE run_id = $1', [
+    runId,
+  ])) as unknown as { status: string }[];
+  return rows[0]?.status;
+}
+
+/** How many times the side-effecting handler ACTUALLY fired (the real effect counter). */
+let sideEffectFires = 0;
+
+/** A NON-IDEMPOTENT tool: firing it once more for an abandoned run is a real double-effect. */
+function nonIdempotentTool(): NeutralTool {
+  return {
+    spec: {
+      name: 'charge_card',
+      description: 'Charge the customer (SIDE EFFECT — moves money).',
+      parameters: {
+        type: 'object',
+        properties: { amount: { type: 'number' } },
+        required: ['amount'],
+        additionalProperties: false,
+      },
+    },
+    handler: (args: unknown) => {
+      sideEffectFires += 1; // the real, irreversible effect
+      const { amount } = (args ?? {}) as { amount?: number };
+      return { charged: amount ?? 0 };
+    },
+    timeoutMs: 1000,
+    idempotent: false,
+  };
+}
+
 function setBound(value: string | undefined): void {
   if (value === undefined) delete process.env.RAYSPEC_AGENT_RUN_MAX_MS;
   else process.env.RAYSPEC_AGENT_RUN_MAX_MS = value;
@@ -126,6 +172,7 @@ beforeEach(async () => {
   );
   await seedOrgs(db, TENANT_A);
   setBound(undefined);
+  sideEffectFires = 0;
 });
 
 afterEach(() => {
@@ -181,8 +228,9 @@ describe('per-run wall-clock bound', () => {
     expect(message).toContain('RAYSPEC_AGENT_RUN_MAX_MS');
     expect(message).toContain('80');
     expect(message).toContain('bound-message');
-    // Run the REAL neutral classifier over it: a bounded run must surface as `timeout`, the class
-    // the callers already map (504 on the sync path), not as a generic internal error.
+    // Run the REAL neutral classifier over it: a bounded run classifies as `timeout`, not as a
+    // generic internal error. What each CALLER does with the rejection is asserted where that caller
+    // lives — the sync JSON/SSE surface in the api-auth run-route tests, not here.
     expect(classifyUpstreamError(err).errorClass).toBe('timeout');
   });
 
@@ -200,6 +248,88 @@ describe('per-run wall-clock bound', () => {
       backend.ctx?.onEvent?.({ type: 'run_started', runId: 'bound-abandoned', seq: 0 }),
     ).resolves.toBeUndefined();
     expect(await countRunEvents('bound-abandoned')).toBe(before);
+  });
+
+  it('a journal call from the ABANDONED call after the bound fired is refused, and writes nothing', async () => {
+    setBound('100');
+    const backend = new SilentBackend();
+    open.push(backend);
+    await expect(
+      runAgent(forTenant(db, TENANT_A), backend, spec, { runId: 'bound-journal' }),
+    ).rejects.toBeInstanceOf(RunBoundTimeoutError);
+    // The abandoned SDK call settles LATER and journals its step then — that is the normal shape of
+    // an adapter's error/success branch. The journal is bound to the run's tdb (on the durable path a
+    // transaction that has already rolled back), so the call is refused rather than issued.
+    await expect(
+      backend.ctx?.journal.record({
+        type: 'llm',
+        idempotencyKey: 'llm:after-the-bound',
+        inputHash: 'hash:after-the-bound',
+        output: { finalText: 'late' },
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        costUsd: 0,
+        model: spec.model,
+        producedBy: 'silent-backend',
+        latencyMs: 1,
+        status: 'ok',
+        authMode: 'api-key',
+      }),
+    ).rejects.toThrow(/RAYSPEC_AGENT_RUN_MAX_MS/);
+    expect(await countJournalSteps('bound-journal')).toBe(0);
+    // The READS are on the same handle, so they are refused too — the containment is "no statement
+    // through this run's handle once the bound fired", not "no write".
+    await expect(backend.ctx?.journal.lookup('llm:after-the-bound')).rejects.toThrow(
+      /RAYSPEC_AGENT_RUN_MAX_MS/,
+    );
+    await expect(backend.ctx?.rehydrate()).rejects.toThrow(/RAYSPEC_AGENT_RUN_MAX_MS/);
+  });
+
+  it('a tool dispatch from the ABANDONED call is refused CLOSED: no handler, no step, no taint', async () => {
+    setBound('100');
+    const backend = new SilentBackend();
+    open.push(backend);
+    await expect(
+      runAgent(forTenant(db, TENANT_A), backend, spec, {
+        runId: 'bound-tool',
+        tools: [nonIdempotentTool()],
+      }),
+    ).rejects.toBeInstanceOf(RunBoundTimeoutError);
+    // The abandoned call marshals a tool call the way an adapter does when the model finally answers.
+    const dispatched = await backend.ctx?.dispatchTool?.(
+      'charge_card',
+      { amount: 42 },
+      'call-late',
+    );
+    expect(dispatched?.kind).toBe('tool_error');
+    // The handler did NOT run: no side effect for a run that was already given up on.
+    expect(sideEffectFires).toBe(0);
+    expect(await countJournalSteps('bound-tool')).toBe(0);
+    expect(await isRunTainted(forTenant(db, TENANT_A), 'bound-tool')).toBe(false);
+  });
+
+  it('DURABLE invocation shape: the bound leaves the header where the enqueue put it', async () => {
+    setBound('120');
+    const backend = new SilentBackend();
+    open.push(backend);
+    // The enqueue path writes the `enqueued` header BEFORE the job is handed to the worker (#164).
+    await insertEnqueuedRunHeader(forTenant(db, TENANT_A), {
+      runId: 'bound-durable-header',
+      backend: 'openai',
+      agentName: spec.name,
+      model: spec.model,
+    });
+    await expect(
+      forTenant(db, TENANT_A).transaction((txTdb) =>
+        runAgent(txTdb, backend, spec, {
+          runId: 'bound-durable-header',
+          taintDb: forTenant(db, TENANT_A),
+        }),
+      ),
+    ).rejects.toBeInstanceOf(RunBoundTimeoutError);
+    // run-core's `enqueued` → `running` write is inside the run transaction, which rolls back with the
+    // rejection, and no completing write is reached. So a bounded durable run leaves NO terminal
+    // header: the row reads exactly as the enqueue wrote it. This is what the CHANGELOG states.
+    expect(await runHeaderStatus('bound-durable-header')).toBe('enqueued');
   });
 
   it('UNSET: a run slower than any bound still completes (today’s unbounded behaviour)', async () => {

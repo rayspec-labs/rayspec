@@ -28,6 +28,7 @@ import type {
   RunContext,
   RunResult,
   StepReport,
+  ToolDispatchResult,
 } from '@rayspec/core';
 import {
   assertRunResultKeyPresence,
@@ -38,7 +39,12 @@ import {
 import { schema, type TenantDb } from '@rayspec/db';
 import { and, desc, eq, ne, sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
-import { RunBoundTimeoutError, resolveRunMaxMs, withRunBound } from './agent-bounds.js';
+import {
+  RunAbandonedError,
+  RunBoundTimeoutError,
+  resolveRunMaxMs,
+  withRunBound,
+} from './agent-bounds.js';
 import { makeDispatchTool } from './dispatch.js';
 import { EventPipeline } from './event-pipeline.js';
 import { makeHandlerDb } from './handlers/store-facade.js';
@@ -364,7 +370,43 @@ export async function runAgent(
   // and the live registry is single-entry per model, so as-of-now and as-of-creation coincide. If a
   // historical re-cost is ever needed it would read runs.created_at here instead. spec.model is the key.
   const runAt = new Date().toISOString();
-  const journal = makeJournalSink(tdb, runId, backend.id, replay, { model: spec.model, at: runAt });
+
+  // ── ABANDONMENT ────────────────────────────────────────────────────────────────────────────────
+  // Set when the per-run wall-clock bound below fires (RAYSPEC_AGENT_RUN_MAX_MS, off unless set). The
+  // backend call is then STILL IN FLIGHT while runAgent has already rejected, so every seam the
+  // RunContext handed it stays callable: the event sink, the journal sink, the tool dispatcher and
+  // the transcript rehydrate. All of them go through THIS run's `tdb`, and on the durable path that
+  // handle is the run's transaction, which is rolled back the moment runAgent rejects — a statement
+  // issued through it afterwards runs on a connection that has already gone back to the pool. So a
+  // call that arrives once the flag is set is refused: the sink drops the event, the journal and the
+  // rehydrate reject, and a tool dispatch is refused CLOSED (the handler does not run). Without the
+  // bound configured the flag is never set and every seam behaves as it did before it existed.
+  let abandoned = false;
+  /** Refuse a seam the abandoned call reaches for after the bound fired (never on a live run). */
+  const refuseIfAbandoned = (seam: string): void => {
+    if (abandoned) throw new RunAbandonedError(runId, seam);
+  };
+
+  const journalSink = makeJournalSink(tdb, runId, backend.id, replay, {
+    model: spec.model,
+    at: runAt,
+  });
+  // The journal the RunContext carries: the sink above, refusing every call once the run has been
+  // abandoned, so no journal_steps row and no replay read can be issued on `tdb` after that point.
+  const journal: JournalSink = {
+    lookup: async (idempotencyKey: string) => {
+      refuseIfAbandoned('journal.lookup');
+      return journalSink.lookup(idempotencyKey);
+    },
+    lookupToolCache: async (inputHash: string) => {
+      refuseIfAbandoned('journal.lookupToolCache');
+      return (await journalSink.lookupToolCache?.(inputHash)) ?? null;
+    },
+    record: async (step: StepReport & { authMode: AuthMode }) => {
+      refuseIfAbandoned('journal.record');
+      return journalSink.record(step);
+    },
+  };
 
   // THE SINGLE PER-RUN SEQ AUTHORITY. One monotonic counter for the whole run: every event
   // that passes through ctx.onEvent (from the adapter AND from dispatchTool) is re-stamped with a
@@ -403,13 +445,6 @@ export async function runAgent(
     maxQueue: opts.maxEventQueue,
   });
 
-  // Set when the per-run bound below fires: the backend call is then still in flight, and anything
-  // it emits from here on belongs to a run this function has already given up on. Routing those
-  // frames into the pipeline would write run_events rows after the run ended — on the durable path,
-  // through a transaction handle that is being rolled back. So the sink goes inert instead. Without
-  // the bound configured this is never set and the sink is the same one as before.
-  let abandoned = false;
-
   // The adapter + dispatchTool emit through this wrapped sink: stamp the single seq, then hand to the
   // pipeline (persist-before-flush). We AWAIT emit so the producer feels back-pressure when the queue
   // is full of non-droppable frames (the back-pressure contract).
@@ -445,7 +480,7 @@ export async function runAgent(
   // authMode resolved above. dispatchTool's events flow through the SAME wrapped (seq-stamping)
   // sink as the adapter's, so tool events share the run's single seq order.
   const tools = opts.tools ?? [];
-  const dispatchTool =
+  const dispatch =
     tools.length > 0
       ? makeDispatchTool({
           runId,
@@ -467,6 +502,24 @@ export async function runAgent(
           markRunTainted: () => markRunTainted(opts.taintDb ?? tdb, runId),
         })
       : undefined;
+  // The tool path the RunContext carries. A dispatch that arrives once the run has been ABANDONED is
+  // refused CLOSED — the handler is not run, no journal step is written and no taint marker is
+  // committed — because the call making it belongs to a run this function has already given up on.
+  // The refusal is the dispatcher's own neutral `tool_error` shape, so an adapter marshals it back to
+  // the model exactly like any other refused call.
+  const dispatchTool =
+    dispatch === undefined
+      ? undefined
+      : (name: string, rawArgs: unknown, toolCallId?: string): Promise<ToolDispatchResult> => {
+          if (!abandoned) return dispatch(name, rawArgs, toolCallId);
+          return Promise.resolve({
+            kind: 'tool_error',
+            name,
+            // Same per-call id rule the dispatcher uses: never collide two calls onto one id.
+            toolCallId: toolCallId && toolCallId.length > 0 ? toolCallId : randomUUID(),
+            message: new RunAbandonedError(runId, `tool '${name}'`).message,
+          });
+        };
   const ctx: RunContext = {
     runId,
     tenantId: tdb.tenantId,
@@ -481,8 +534,13 @@ export async function runAgent(
     dispatchTool,
     // Replay reconstruction source: on replay, the adapter rebuilds the neutral
     // transcript from the ConversationStore via the trust-boundary read-path (tenant-scoped, per-part
-    // re-validation) WITHOUT calling the model — never from the SDK RunState.
-    rehydrate: () => rehydrateConversation(tdb, runId),
+    // re-validation) WITHOUT calling the model — never from the SDK RunState. Refused once the run is
+    // abandoned: it reads through the same `tdb`, and nothing bound to that handle may issue a
+    // statement after the bound fired.
+    rehydrate: async () => {
+      refuseIfAbandoned('rehydrate');
+      return rehydrateConversation(tdb, runId);
+    },
   };
   // The run's wall-clock bound, read once per run. Undefined (the default, and what an unset or
   // unusable RAYSPEC_AGENT_RUN_MAX_MS yields) means run-core waits for the backend as long as it
@@ -520,10 +578,11 @@ export async function runAgent(
     const runCall = backend.run({ ...spec, tools: tools.map((t) => t.spec) }, ctx);
     result = runMaxMs === undefined ? await runCall : await withRunBound(runCall, runMaxMs, runId);
   } catch (runErr) {
-    // The bound fired: the backend call is still in flight, so stop routing its later events into
-    // the pipeline before draining (an abandoned call must not write run_events for a run we have
-    // given up on). `withRunBound` already subscribed to the call, so its eventual rejection is
-    // handled and cannot surface as an unhandled rejection.
+    // The bound fired: the backend call is still in flight, so make the run's seams inert BEFORE
+    // draining — an abandoned call must not write run_events, must not journal a step and must not
+    // fire a tool for a run we have given up on (see the ABANDONMENT block above for what each seam
+    // then does). `withRunBound` already subscribed to the call, so its eventual rejection is handled
+    // and cannot surface as an unhandled rejection.
     if (runErr instanceof RunBoundTimeoutError) abandoned = true;
     await pipeline.drain().catch(() => {});
     throw runErr;

@@ -47,6 +47,7 @@ import {
   insertEnqueuedRunHeader,
   isRunTainted,
   isTerminalRunStatus,
+  RunBoundTimeoutError,
   type RunHeaderStatus,
   rehydrateConversation,
   runAgent,
@@ -401,7 +402,13 @@ export async function executeAgentRun(
     // response — the closed enum was extended ADDITIVELY (auth-core/errors.ts) rather than leaving a
     // contract-breaking ad-hoc body. The neutral 'timeout' class rides in `details.errorClass` so no
     // information is lost. Other throws propagate unchanged → onError → 500.
-    if (err instanceof RunTimeoutError) {
+    //
+    // The per-run wall-clock bound (RAYSPEC_AGENT_RUN_MAX_MS, applied inside run-core) is the SAME
+    // condition seen one layer down: a run that outlived a configured ceiling. It gets the SAME 504 +
+    // `timeout` envelope, so which of the two ceilings expired first does not change what the caller
+    // reads — without this it fell through to the global handler and a configured, expected condition
+    // was reported as an unclassified 500 INTERNAL.
+    if (err instanceof RunTimeoutError || err instanceof RunBoundTimeoutError) {
       return c.json(
         errorEnvelope('GATEWAY_TIMEOUT', err.message, c.get('requestId') ?? 'unknown', {
           errorClass: 'timeout' as ErrorClass,

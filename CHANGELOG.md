@@ -17,16 +17,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-request timeout, and how many attempts it makes for one request — the first try plus its
   retries, so `1` is a single attempt with no retry (the client's own knob counts retries, one fewer,
   and the mapping is pinned by a test). The third is a wall-clock ceiling `run-core` applies to one
-  whole run, on the synchronous request path and the durable worker alike; when it expires the run
-  fails with the neutral `timeout` class. Be precise about what that ceiling does: it stops run-core
-  waiting, it does **not** cancel the model call — there is no cancellation path, so the provider
-  request continues until it settles by itself. What it does give you is the caller and the worker
-  slot back, and no event emitted by the abandoned call afterwards is persisted. All three are off
-  unless set, and an unusable value (not a number, or not greater than zero) is treated as unset, so
-  a deployment that sets none behaves exactly as it did before. The OpenAI adapter gained the
-  matching optional `timeoutMs` / `maxAttempts` options, and `openai` — until now in the tree only
-  through the agents SDK — is a direct pinned dependency of that package. All three variables are
-  documented in `.env.example`.
+  whole run, on the synchronous request path and the durable worker alike. What each caller then
+  reports differs, so read it exactly: a synchronous JSON request ends as a `504 GATEWAY_TIMEOUT`
+  carrying the neutral `timeout` class — the same envelope the pre-existing held-request timeout
+  returns, so which of the two ceilings expired first does not change what the client reads — and a
+  streaming request, whose `200` status line has already been sent, ends with the terminal `error`
+  frame carrying that same class. On the durable worker there is no such envelope: run-core runs
+  inside the executor's transaction, so the ceiling rolls that transaction back and no terminal run
+  header is written — the run's header stays as the enqueue wrote it (`enqueued`). Reading a run's
+  outcome therefore has to test the header for TERMINALITY, which is what `isTerminalRunStatus` is
+  for. Be precise about what the ceiling does: it stops run-core waiting, it does **not** cancel the
+  model call — there is no cancellation path, so the provider request continues until it settles by
+  itself. What it does give you is the caller and the worker slot back, and a run-core that accepts
+  nothing further from the call it abandoned: every seam the run handed that call goes inert, so an
+  event it emits is dropped, a journal read or write is refused, a transcript rehydrate is refused,
+  and a tool dispatch is refused closed — the handler does not run, no step is journaled and no taint
+  marker is written. All three variables are off unless set, and an unusable value (not a number, or
+  not greater than zero) is treated as unset, so a deployment that sets none behaves exactly as it
+  did before. The OpenAI adapter gained the matching optional `timeoutMs` / `maxAttempts` options,
+  and `openai` — until now in the tree only through the agents SDK — is a direct pinned dependency of
+  that package. All three variables are documented in `.env.example`.
 
 - **`rayspec plan` surfaces the non-fatal spec advisories.** A backend-profile document that carries
   a finding from the advisory lint pass — the same findings `doctor` has always reported in its
