@@ -50,6 +50,12 @@
  * The output is a stable JSON envelope (see `PlanResult`). Update/product fields are ADDITIVE and
  * omitted on the backend first-materialization path, so that output stays byte-identical. NO
  * secrets: the DB URL / credentials are NEVER echoed (only a throwaway DB NAME, which is non-sensitive).
+ *
+ * NON-FATAL DOCUMENT ADVISORIES: a valid backend-profile doc is additionally run through
+ * `lintSpecWarnings` — the same advisory pass `doctor` reports — and any finding is carried in the
+ * additive `specWarnings` / `specWarningSummary` fields. `plan` is a PRE-DEPLOY command, so an
+ * advisory like "this document needs a build step before deploy" must not go unmentioned by the
+ * command that certifies the document. An advisory NEVER affects `ok` (it is not a gate).
  */
 import { readFileSync } from 'node:fs';
 import {
@@ -65,11 +71,13 @@ import {
 } from '@rayspec/db';
 import {
   detectSpecKind,
+  lintSpecWarnings,
   type ProductSpec,
   parseProductSpec,
   parseSpec,
   type RaySpec,
   type SpecError,
+  type SpecWarning,
   type StoreSpec,
 } from '@rayspec/spec';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
@@ -163,6 +171,21 @@ export interface PlanResult {
   readonly product?: PlanProduct;
   /** The baseline-seeded shadow's drift findings vs the NEW spec (empty = the delta produced the target). */
   readonly driftFindings?: DriftFinding[];
+  /**
+   * NON-FATAL ADVISORIES about the DOCUMENT itself (`lintSpecWarnings`) — a permitted-but-footgunny
+   * declaration such as a handler module the deploy loader will refuse, surfaced so a pre-deploy plan
+   * never certifies it silently. Same entries `doctor` reports in its own `warnings` field.
+   *
+   * These are DOCUMENT findings, NOT the operational stderr diagnostics the read-only shadow guard
+   * emits (a broken `DATABASE_URL_FILE` mount) — those stay on stderr and never enter this envelope.
+   *
+   * NEVER affects `ok`: an advisory-carrying document plans exactly as it did before. The backend
+   * profile is the only one linted (the product profile derives its stores elsewhere), mirroring
+   * `doctor`. ADDITIVE and omitted when empty, so an advisory-free plan stays byte-identical.
+   */
+  readonly specWarnings?: SpecWarning[];
+  /** A human-readable one-line-per-advisory summary of `specWarnings` (its text surface, as `gateSummary` is the gate's). */
+  readonly specWarningSummary?: string;
 }
 
 /** The read-only guard's refusal message (kept identical across first-materialize + update mode; secret-free). */
@@ -208,6 +231,28 @@ function projectProduct(spec: ProductSpec): PlanProduct {
 /** Project a `ScanResult` into the plan-output gate findings. */
 function projectGate(scan: ScanResult): PlanGateFinding[] {
   return scan.findings.map((f) => ({ kind: f.kind, line: f.line, allowed: f.allowed }));
+}
+
+/** Pretty one-line summary per document advisory (mirrors `formatFindings`' shape for the gate). */
+function formatSpecWarnings(warnings: readonly SpecWarning[]): string {
+  return warnings
+    .map((w) => `  [ADVISORY] ${w.code}${w.path !== undefined ? ` @ ${w.path}` : ''}: ${w.message}`)
+    .join('\n');
+}
+
+/**
+ * Weave the document advisories onto a finished result. PURELY ADDITIVE: an empty advisory list
+ * returns the result UNTOUCHED (so an advisory-free envelope keeps its exact byte-stable key set),
+ * and a non-empty one only APPENDS `specWarnings` + `specWarningSummary`. `ok`, `phase` and every
+ * existing field are left exactly as the front-half computed them — an advisory never fails a plan.
+ */
+function withSpecWarnings(result: PlanResult, warnings: readonly SpecWarning[]): PlanResult {
+  if (warnings.length === 0) return result;
+  return {
+    ...result,
+    specWarnings: [...warnings],
+    specWarningSummary: formatSpecWarnings(warnings),
+  };
 }
 
 /** The empty projection carried by every validate-abort return (shape-stable). */
@@ -619,28 +664,40 @@ async function planRaySpec(
   }
   const spec = parsed.value;
   const { routes, agents } = projectRoutesAgents(spec);
+  // NON-FATAL document advisories for the doc being planned. Gated exactly like `doctor`'s: only a
+  // VALID backend-profile (rayspec) doc is linted — the product profile derives its stores elsewhere
+  // and takes the `planProduct` path, which never reaches here. Advisories about the `--against`
+  // BASELINE are deliberately not collected: `plan` certifies the NEW document, and the baseline is
+  // already deployed. Never affects `ok`.
+  const specWarnings = lintSpecWarnings(spec);
 
   let oldStores: StoreSpec[] | undefined;
   if (oldText !== undefined) {
     const parsedOld = parseSpec(oldText);
     if (!parsedOld.ok) {
-      return { ok: false, phase: 'validate', ...emptyProjection(), errors: parsedOld.errors };
+      return withSpecWarnings(
+        { ok: false, phase: 'validate', ...emptyProjection(), errors: parsedOld.errors },
+        specWarnings,
+      );
     }
     oldStores = parsedOld.value.stores;
   }
 
-  return planStores({
-    newStores: spec.stores,
-    oldStores,
-    allowlist,
-    opts,
-    routes,
-    agents,
-    // The generator is injectable so a test can drive the gate-BLOCKED branch through runPlan's
-    // OWN code with a destructive first-materialization. Production default: generateProductSql(stores).
-    firstMaterializeSql: () =>
-      (opts.generateSql ?? ((s: RaySpec) => generateProductSql(s.stores)))(spec),
-  });
+  return withSpecWarnings(
+    await planStores({
+      newStores: spec.stores,
+      oldStores,
+      allowlist,
+      opts,
+      routes,
+      agents,
+      // The generator is injectable so a test can drive the gate-BLOCKED branch through runPlan's
+      // OWN code with a destructive first-materialization. Production default: generateProductSql(stores).
+      firstMaterializeSql: () =>
+        (opts.generateSql ?? ((s: RaySpec) => generateProductSql(s.stores)))(spec),
+    }),
+    specWarnings,
+  );
 }
 
 /** The product-profile plan: derive Tier-A stores + project section counts; update mode diffs derived. */

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`rayspec plan` surfaces the non-fatal spec advisories.** A backend-profile document that carries
+  a finding from the advisory lint pass — the same findings `doctor` has always reported in its
+  `warnings` field, such as a `handlers[].module` that is TypeScript source and so needs a build step
+  before the production loader will accept it — now has them in the plan envelope too, as the
+  additive `specWarnings` (the structured list, identical to `doctor`'s entries) and
+  `specWarningSummary` (one readable line each). `plan` is the pre-deploy command, so a document it
+  certifies no longer hides an advisory that only `doctor` would have shown. An advisory never
+  affects `ok`, never blocks, and changes no phase or gate finding; both fields are omitted when
+  there are none, so an advisory-free plan is byte-identical to before. They are document findings,
+  distinct from the operational stderr warning the read-only shadow guard emits for a broken
+  `DATABASE_URL_FILE` mount.
+
 - **`rayspec gen-handler --emit js` renders a handler that deploys as it stands.** The new
   `--emit <ts|js>` flag picks the emit target; `ts` stays the default and its output is
   byte-for-byte what it has always been, so nothing changes for an existing invocation. With
