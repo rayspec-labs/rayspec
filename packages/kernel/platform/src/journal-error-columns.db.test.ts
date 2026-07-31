@@ -68,6 +68,13 @@ class ErrorShapeBackend implements Backend {
   constructor(
     private readonly opts: {
       errorClass?: ErrorClass;
+      /**
+       * An errorClass written into the step output that is NOT a member of the neutral vocabulary —
+       * what a newer adapter, an older row or a hand-edited journal would leave behind. Deliberately
+       * typed `string` (not `ErrorClass`), because the whole point is a value the type system would
+       * have refused; the sink has to refuse it at runtime instead.
+       */
+      rawErrorClass?: string;
       retryAfterSeconds?: number;
       fireFailingTool?: boolean;
       healToOk?: boolean;
@@ -80,7 +87,7 @@ class ErrorShapeBackend implements Backend {
     if (this.opts.fireFailingTool && ctx.dispatchTool) {
       await ctx.dispatchTool('boom', { q: spec.input }, 'boom-call-1');
     }
-    const failing = this.opts.errorClass !== undefined;
+    const failing = this.opts.errorClass !== undefined || this.opts.rawErrorClass !== undefined;
     const key = `llm:${spec.name}:0`;
     await ctx.journal.record({
       type: 'llm',
@@ -89,7 +96,7 @@ class ErrorShapeBackend implements Backend {
       output: failing
         ? {
             error: 'the upstream rejected the call',
-            errorClass: this.opts.errorClass,
+            errorClass: this.opts.errorClass ?? this.opts.rawErrorClass,
             ...(this.opts.retryAfterSeconds !== undefined
               ? { retryAfter: this.opts.retryAfterSeconds }
               : {}),
@@ -223,6 +230,31 @@ describe('the failing step records its class + retry advice as columns, for BOTH
     expect((tool?.output as Record<string, unknown>).errorClass).toBeUndefined();
     // The llm step alongside it keeps its OWN class — the two are classified independently.
     expect(rows.find((r) => r.type === 'llm')?.errorClass).toBe('internal');
+  });
+
+  it('an UNRECOGNISED stored class records NULL — the column never asserts a class the platform cannot vouch for', async () => {
+    // The sink promotes the adapter's class only through `isErrorClass`. Without that guard the column
+    // would carry whatever a step output happened to hold — a newer adapter's class, an older row, a
+    // hand-edited journal — and every consumer filtering on `error_class` would be reading a value the
+    // platform never validated. Nothing else in the suite fails if the guard is replaced by a
+    // truthiness check, which is why this case exists.
+    const tdb = forTenant(db, TENANT_A);
+    const res = await runAgent(
+      tdb,
+      new ErrorShapeBackend({ rawErrorClass: 'not_a_class', retryAfterSeconds: 30 }),
+      spec('bogus-class'),
+      {},
+    );
+    const [step] = await stepRows(res.runId);
+    expect(step?.status).toBe('error');
+    // Refused: null, not the unvalidated string.
+    expect(step?.errorClass).toBeNull();
+    // The advice alongside it is still recorded — the two reads are independent, so refusing the class
+    // must not also discard a perfectly good Retry-After.
+    expect(step?.retryAfterMs).toBe('30000');
+    // And the jsonb is untouched: the raw value stays verbatim for whoever wrote it. The column
+    // declines to promote it; it does not rewrite history.
+    expect((step?.output as Record<string, unknown>).errorClass).toBe('not_a_class');
   });
 
   it('a SUCCESSFUL step records neither column', async () => {
