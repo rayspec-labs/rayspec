@@ -1217,7 +1217,7 @@ export function loadStaticServerConfig(env: NodeJS.ProcessEnv = process.env): St
  */
 export interface StaticBootedServer {
   /**
-   * The bare static Hono app — the static security chain + a liveness `/health` + the frontend
+   * The bare static Hono app — the static security chain + a mount-readiness `/health` + the frontend
    * mounts, and NO auth/OIDC/runs/API route (the surface is never constructed).
    */
   app: Hono;
@@ -1250,9 +1250,9 @@ function staticSecurityHeaders(csp: string, permissionsPolicy: string): Middlewa
 
 /**
  * Assemble the STATIC boot — a fresh bare Hono app that serves ONLY the declared static frontend(s)
- * behind the static security chain, plus a liveness-only `/health`. It NEVER imports or calls
- * `createAuthApp`, `makeDb`, `applyMigrations`, `createSigner`, `createOidcProvider`, `AuthService`, the
- * stores, or the durable worker — so there is provably NO auth/OIDC/runs/API route in the app, not
+ * behind the static security chain, plus a readiness `/health` over the declared mounts. It NEVER
+ * imports or calls `createAuthApp`, `makeDb`, `applyMigrations`, `createSigner`, `createOidcProvider`,
+ * `AuthService`, the stores, or the durable worker — so there is provably NO auth/OIDC/runs/API route, not
  * because the spec is empty but because the code that mounts them is never reached. Requires NONE of the
  * three boot secrets.
  *

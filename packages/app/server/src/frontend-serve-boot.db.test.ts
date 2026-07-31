@@ -163,8 +163,11 @@ describe('static frontend serving — composition root mounts declared frontend[
     if (!server) throw new Error('server did not boot');
     const res = await server.app.request('/health');
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { status?: string };
-    expect(body.status).toBe('ok'); // the platform readiness JSON, not the SPA shell
+    // The platform readiness JSON, not the SPA shell — and the WHOLE body: this boot declares a
+    // servable `frontend` mount (tests (a)/(b) serve it), so `assembleServer` must derive the
+    // mounts' readiness from the deployed spec and report it. A boot that dropped that wiring
+    // would answer `{status:'ok',db:'ok'}` here.
+    expect(await res.json()).toEqual({ status: 'ok', db: 'ok', frontend: 'ok' });
   });
 
   maybe(

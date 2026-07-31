@@ -64,7 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the probe performs no filesystem access per call no matter how often a load balancer polls it. The
   existing fields are untouched: same names, same values, and the reachable / unreachable database
   cases keep their exact `200` / `503`. A deployment that declares no frontend mounts omits the new
-  field entirely and answers byte-for-byte as before.
+  field entirely and answers byte-for-byte as before. The static profile's boot banner, printed by both
+  `rayspec-serve` and `rayspec deploy`, describes the endpoint accordingly: its `Liveness:` block is now
+  a `Readiness:` one naming the `frontend` field and the `503`.
 
 - **A boot secret that normalization actually changed now says so, once, at boot.** `DATABASE_URL`,
   `RAYSPEC_JWT_SIGNING_KEY` and `RAYSPEC_API_KEY_PEPPER` are trimmed on read — leading and trailing

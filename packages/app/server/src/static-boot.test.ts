@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FrontendSpec } from '@rayspec/spec';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { staticBootBanner } from './banner.js';
 import {
   assembleStaticServer,
   DEFAULT_FRONTEND_CSP,
@@ -109,6 +110,19 @@ describe('static boot — /health carries no database field', () => {
     // has no database. (health-frontend-mounts.test.ts owns the mount-readiness cases.)
     expect(body).toEqual({ status: 'ok', frontend: 'ok' });
     expect(body).not.toHaveProperty('db');
+  });
+});
+
+describe('static boot — the banner agrees with what /health answers', () => {
+  it('the boot banner describes /health as readiness — the string an operator wires from', () => {
+    // `staticBootBanner` is printed at every static boot (serve.ts and the CLI's deploy), and it is
+    // the only place the endpoint's meaning is stated at runtime. Pinned so a later change to what
+    // /health reports cannot leave the banner describing the old behaviour.
+    const banner = staticBootBanner(buildStatic(), 'http://localhost:8080');
+    expect(banner).toContain('  Readiness:');
+    expect(banner).toContain("reports the declared mounts' boot-time");
+    expect(banner).toContain('503 when a mount cannot be served');
+    expect(banner).not.toMatch(/liveness/i);
   });
 });
 
