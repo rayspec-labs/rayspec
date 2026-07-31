@@ -161,7 +161,7 @@ describeDb('declared-route throttling tiers on the validated credential', () => 
     const body = await throttled.json();
     expect(body.error.code).toBe('RATE_LIMITED');
     // The retry advice reaches the caller on BOTH channels. In the body: `details.retryAfterMs`, the
-    // same field the thrown-ApiError throttles emit, so one 429 shape covers every throttled endpoint.
+    // same field every other request-budget throttle emits through the thrown-ApiError path.
     expect(typeof body.error.details.retryAfterMs).toBe('number');
     expect(body.error.details.retryAfterMs).toBeGreaterThan(0);
     // And in the header — Retry-After is SECONDS, and a spent 60s window always advises at least one.

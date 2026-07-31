@@ -98,12 +98,16 @@ export function retryAfterSeconds(retryAfterMs: number): number {
  *
  * The body is built through the SHARED `errorEnvelope` — the one chokepoint that structurally strips
  * `details` for codes outside `DETAILS_ALLOWED` — so this hand-mounted 429 is not an exception to that
- * invariant, and it carries the SAME `details.retryAfterMs` the thrown-`ApiError` throttles already emit
- * (`enforceRate`, routes/auth.ts), so one 429 body shape covers every throttled endpoint. The header is
- * set explicitly because the thrown-`ApiError` path builds its body in `app.onError` and emits no
- * headers; it is listed in the app's CORS `exposeHeaders` so a cross-origin `fetch` client can read it
- * (`Retry-After` is not CORS-safelisted), and the body detail keeps the advice reachable even for a
- * client that never sees the header.
+ * invariant, and it carries the SAME `details.retryAfterMs` every other REQUEST-BUDGET throttle emits
+ * through the thrown-`ApiError` path (`enforceRate` in routes/auth.ts, and the inline throws in app.ts,
+ * invites.ts, triggers.ts and reprocess.ts). The media playback CONCURRENCY cap is the one 429 that
+ * carries no `details` — it bounds simultaneous streams, not a time window, so it has no limiter
+ * remainder to report.
+ *
+ * The header is set explicitly because the thrown-`ApiError` path builds its body in `app.onError` and
+ * emits no headers; it is listed in the app's CORS `exposeHeaders` so a cross-origin `fetch` client can
+ * read it (`Retry-After` is not CORS-safelisted), and the body detail keeps the advice reachable even
+ * for a client that never sees the header.
  */
 export function routeRateLimit(
   deps: AppDeps,
