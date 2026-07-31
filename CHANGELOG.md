@@ -72,12 +72,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It is an advisory, never an error: authoring against TypeScript source is the documented loop —
   the development loader takes un-built source through an explicit opt-in, and the shipped example
   documents declare such modules on purpose — so `doctor` still answers `ok: true` and no document
-  that parsed before stops parsing. `extensions[].module` is deliberately not flagged, because a
-  built extension pack keeps its authored TypeScript paths in its manifest and the pack resolver
-  prefers the compiled `.js` sibling whenever one exists on disk. The extension set behind all three
-  decisions — the loader's fail-closed guard, the pack resolver's sibling preference, and the new
-  advisory — is now one exported constant rather than two module-private copies that could drift;
-  both loaders make byte-for-byte the decisions they made before.
+  that parsed before stops parsing. `extensions[].module` is deliberately not flagged, because that
+  field is a pack root DIRECTORY reference rather than a module file path — the extension loader
+  jails it as the pack root and appends its own entry file inside it — so there is no authored
+  module extension there for the advisory to read. The extension set behind all three decisions —
+  the loader's fail-closed guard, the pack resolver's sibling preference, and the new advisory — is
+  now one exported constant rather than two module-private copies that could drift; both loaders
+  make byte-for-byte the decisions they made before.
 
 - **`rayspec deploy --dry-run` reports a frontend-only document truthfully instead of `ok: false`.**
   Such a document is not a product document, so composing it against the product runtime was never

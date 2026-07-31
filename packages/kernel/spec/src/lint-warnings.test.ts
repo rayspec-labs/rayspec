@@ -218,9 +218,13 @@ handlers:
     expect(lintSpecWarnings(parseOk(handlerSpec(modulePath)))).toEqual([]);
   });
 
-  it('does NOT fire for an EXTENSION pack module with a `.ts` path (a built pack keeps its authored path)', () => {
-    // `resolvePackModule` PREFERS the compiled `.js` sibling when the pack is built, so a `.ts` entry
-    // in `extensions[].module` is NOT the same dead end — warning on it would over-fire.
+  it('does NOT fire for an `extensions[].module` path — that field is a pack DIRECTORY, out of scope', () => {
+    // The rule is scoped to `handlers[]`. `extensions[].module` is a pack ROOT DIRECTORY reference (the
+    // extension loader jails it as the root and appends its own entry file inside it), so it carries no
+    // authored module extension for this rule to read. A `.ts` there is a mis-declared directory the
+    // loader rejects fail-closed at boot with its own message — a different defect, not this advisory's.
+    // The fixture keeps the `.ts` shape on purpose: it is the one that would fire if the rule ever
+    // widened past `handlers[]`, so this arm stays the scope guard rather than a tautology.
     const yaml = `
 version: '1.0'
 metadata:
@@ -250,9 +254,12 @@ handlers:
     expect(warnings[0]?.path).toBe('handlers[1].module');
     expect(warnings[1]?.code).toBe('typescript_handler_module');
     expect(warnings[1]?.path).toBe('handlers[2].module');
-    // Each warning names ITS OWN handler (ids disjoint from the paths) — the advisory's whole job on
-    // a multi-handler document is saying which one is the dead end.
+    // Each warning names ITS OWN handler AND ITS OWN module path (ids disjoint from the paths) — the
+    // advisory's whole job on a multi-handler document is saying which one is the dead end and which
+    // file to fix, so a message built from the FIRST handler must not satisfy either half.
     expect(warnings[0]?.message).toContain('catalog_reindex');
+    expect(warnings[0]?.message).toContain('handlers/source.gen.ts');
     expect(warnings[1]?.message).toContain('digest_rollup');
+    expect(warnings[1]?.message).toContain('handlers/other.mts');
   });
 });

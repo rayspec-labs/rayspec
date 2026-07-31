@@ -1284,9 +1284,13 @@ export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
   // the build step compiles the modules and rewrites these `module:` paths on the way to a deploy), so
   // erroring would break the authoring flow the shipped examples themselves use.
   //
-  // SCOPE: `handlers[]` ONLY. `extensions[].module` is deliberately NOT flagged — a BUILT pack keeps its
-  // authored TypeScript module paths in its manifest and the pack resolver PREFERS the compiled `.js`
-  // sibling when it exists on disk, so a `.ts` there is not the same dead end.
+  // SCOPE: `handlers[]` ONLY. `extensions[].module` is deliberately NOT flagged because it is not a
+  // module FILE path at all: the extension loader jails it as the pack ROOT DIRECTORY and then appends
+  // its OWN entry file (`index.ts` by default) inside that root. So there is no authored module
+  // extension there for this rule to inspect, and the `.js`-sibling preference the pack resolver
+  // applies to the pack's entry and to the handler paths in the pack's own manifest never sees this
+  // field. A path that ends in `.ts` here is a mis-declared DIRECTORY, which the loader rejects
+  // fail-closed at boot with its own message — a different defect, not this rule's.
   spec.handlers.forEach((handler, hi) => {
     const ext = extname(handler.module).toLowerCase();
     if (!TYPESCRIPT_SOURCE_EXTENSIONS.has(ext)) return;
