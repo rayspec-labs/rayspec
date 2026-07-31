@@ -508,11 +508,13 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
   // production). Every line is a random alphanumeric run carrying no word of English, so a window
   // of it cannot pass the leak probe below by colliding with ordinary prose in the message.
   //
-  // The two sentinels are drawn from DISJOINT alphabets — this one from the FIRST half of each
-  // case plus the digits 0-4, the control from the SECOND half plus 5-9 — so no character of the
-  // one occurs anywhere in the other. That is what makes the counterproof below a proof: with the
-  // alphabets disjoint, NO excerpt of either value can equal an excerpt of the other, down to a
-  // SINGLE character, at any position. The property is not left to inspection — the arm asserts it
+  // The two sentinel CORES are drawn from DISJOINT alphabets — this one from the FIRST half of
+  // each case plus the digits 0-4, the control from the SECOND half plus 5-9 — so no character of
+  // the one core occurs anywhere in the other. That is what makes the counterproof below a proof:
+  // with the alphabets disjoint, NO excerpt of either CORE can equal an excerpt of the other, down
+  // to a SINGLE character, at any position. It is a statement about the cores, not about the RAW
+  // values: those carry the same wrapper bytes — a byte-order mark and whitespace — and so share
+  // those characters by construction. The property is not left to inspection — the arm asserts it
   // outright before it relies on it, so editing a sentinel into an overlap fails loudly instead of
   // silently weakening the counterproof.
   //
