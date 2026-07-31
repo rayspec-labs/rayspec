@@ -67,7 +67,12 @@ in the platform — everything comes from the spec you inject.
   than being altered on its own.
 - **Security by construction, not by convention.** No plaintext secrets, a
   fail-closed tenant chokepoint, an explicit trust boundary around untrusted
-  content, and an append-only audit log — from the first boot.
+  content, and an append-only audit log — from the first boot. That boundary is
+  structural against injection that **commands** the agent; injection that instead
+  disputes a data field or invents a policy is the author's job in the
+  instructions, and
+  [ARCHITECTURE](./docs/ARCHITECTURE.md#3-the-tool-dispatch-trust-boundary) says so
+  plainly rather than leaving you to find out.
 
 ---
 

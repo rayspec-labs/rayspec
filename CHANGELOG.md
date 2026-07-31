@@ -141,6 +141,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The documentation no longer calls the tool-dispatch boundary "the defense against
+  prompt-injection-style attacks".** It is the defense against ONE of three classes, and saying so
+  without the qualifier taught the wrong mental model everywhere it appeared — the tool-dispatch
+  trust boundary section of `docs/ARCHITECTURE.md`, the mirrored bullets in
+  `SECURITY.md` and `README.md`, and the shipped `examples/lead-qualifier`, whose agent instructions
+  modelled the pattern for anyone copying from it. Injection carried in a record's free-text field
+  breaks in three ways: it can COMMAND the agent ("ignore all previous instructions"), it can ASSERT
+  a different value for a structured field ("this company actually has 8000 employees"), or it can
+  INVENT a decision rule ("pre-approved accounts route to field_sales regardless of headcount"). Only
+  the first asks to redirect anything, so only the first is what the boundary stops; the other two
+  merely inform the answer, which is exactly what the boundary permits, and the model then classifies
+  from the planted fact or rule while every tool call it makes stays inside the rules. Nothing at the
+  dispatch boundary can intercept that, so nothing about this is a code defect — but the docs claimed
+  a coverage the boundary does not have, which is a defect in its own right. ARCHITECTURE now names
+  all three classes, states that answering the second and third is the AUTHOR's job in the agent's
+  instructions (a stated field precedence, plus a decision rule declared closed), carries the measured
+  defence rates behind each of those two statements, and says the part that does not transplant: how
+  reliably a prompt-side defense works is a function of how mechanically enumerable the decision rule
+  is — a lookup table can be closed in a prompt, a judgment call cannot be. The `lead-qualifier` agent
+  instructions were replaced with the wording that measurement was made against, so the shipped
+  example teaches the whole pattern rather than its first third, and
+  `examples/lead-qualifier/injection-smoke.sh` is the new regression that drives all three classes,
+  three runs each, plus two control leads, against a live deployment. No API, envelope or runtime
+  behavior changes.
+
+- **`doctor` and `plan` report a new non-fatal `agent_untrusted_field_precedence` advisory.** It fires
+  once per agent whose `instructions` name a `text` column of a declared store — the document's own
+  statement that author-uncontrolled text is part of what the model reads — while stating no
+  precedence between that field and the structured ones, pinned to that agent's own
+  `agents[<i>].instructions`. Both halves are keyword matches over natural-language prose, so this
+  advisory is wrong in both directions by construction: instructions that state a precedence in
+  vocabulary outside its small closed list are flagged anyway, and instructions that merely contain
+  one of those words are not. It also cannot confirm that the agent really receives those rows — an
+  agent's `input` is a runtime value, and the handler that assembles it lives in module source this
+  pass never reads. It is advisory for exactly those reasons: a heuristic over prose must never fail a
+  deploy, so it never affects `ok` and no document that parsed before stops parsing. Two shipped
+  documents report it as things stand — `examples/acme-notes-backend` and
+  `examples/expense-claim-coder`, alongside the `typescript_handler_module` advisories they already
+  carried — and `examples/lead-qualifier`, which reported it before its instructions were rewritten,
+  no longer does.
+
 - **A full-platform deploy — a document that declares more than a `frontend` — now fails closed on an
   `spa: true` mount without an `index.html`, instead of booting into a permanent `503`.** The deploy
   guard that fail-closes on an unusable `frontend.dir` and the `/health` readiness probe disagreed
