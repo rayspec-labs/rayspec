@@ -998,9 +998,11 @@ Notes that matter:
 > decision, never as a verdict that it was made. Where the guarantee must be structural rather than
 > prompt-side, bound the model's choice in code — the way `examples/expense-claim-coder` re-validates
 > the agent's chosen category against the catalog server-side (`fkRevalidate`) and caps its
-> `policy_flag` at `review` (`clampValues`). The first answers the assertive class where the decision
-> rule is a lookup table; the second answers the policy class where it is a judgment call, which is
-> exactly the case no instruction wording holds for.
+> `policy_flag` at `review` (`clampValues`). The first answers the policy class where the decision
+> rule is a lookup table — the re-check makes "the catalog is the whole rule" mechanically true rather
+> than merely stated; the second answers the policy class where it is a judgment call, which is
+> exactly the case no instruction wording holds for. Neither closes the assertive class: text asserting
+> a different but VALID catalog code passes the re-check untouched.
 
 ### `tooling[]` — `ToolSpec` (IT.2 ONLY)
 
@@ -1213,10 +1215,12 @@ What the persist renderer GUARANTEES (the safety baked in — you do not write a
   - `validateHoles` fail-closes on a clamp that cannot mean what it says: a key that is not one of
     `columns`, a key on a column with no `enumValues` (no order to rank by), a `max` outside that
     column's `enumValues`, a key that also carries a `fixedValues` constant (the stamp is the LAST
-    mutation before the write, so the bound would never reach the store), and a key equal to
+    mutation before the write, so the bound would never reach the store), a key equal to
     `fkRevalidate.codeArg` (that column is an identifier re-checked against a store, not a ranked
-    classification). A clamp is an **unconditional** `max` — any other key in the rule is rejected
-    rather than silently ignored.
+    classification), and a key equal to `naturalKeyCol` (the key is tenant-namespaced from the value
+    read BEFORE the clamp and stamped back on as the last mutation, so the bound would never reach the
+    store while the result still journals a record claiming it did). A clamp is an **unconditional**
+    `max` — any other key in the rule is rejected rather than silently ignored.
 
 ### Template T2 — LOOKUP handler holes (`template: "lookup"`)
 

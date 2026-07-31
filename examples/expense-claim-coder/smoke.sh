@@ -307,18 +307,26 @@ case "$POST_FLAG" in
 esac
 
 # …and when the bound actually FIRED, the tool result carries what the model wanted next to what was
-# written, so the run journal keeps both. We read ONLY that part out of the run body (never the raw
+# written, so the run journal keeps both. A tool_result part's `.result` is the dispatcher's OPAQUE
+# WRAPPER (`{kind:'tool_data', name, toolCallId, data}`) — the handler's own payload, and so the
+# `clamped` record, lives under `.data`. We read ONLY that part out of the run body (never the raw
 # input, which embeds the untrusted claim text).
 CLAMP_RECORD="$(printf '%s' "$RUN_BODY" | jq -c '
   [ (.conversation // [])[].parts[]?
     | select(.kind == "tool_result" and .name == "code_claim")
-    | (.result.clamped // [])[] ] | .[0] // empty')"
+    | (.result.data.clamped // [])[] ] | .[0] // empty')"
 if [ -n "$CLAMP_RECORD" ]; then
   ok "clamp FIRED and is journaled on the tool result: $CLAMP_RECORD"
+  # BOTH sides must be recoverable — the bound that was written AND the choice it replaced.
   printf '%s' "$CLAMP_RECORD" | jq -e '.applied == "review"' >/dev/null \
     || fail "CLAMP FAIL: the applied bound is not 'review': $CLAMP_RECORD"
+  printf '%s' "$CLAMP_RECORD" | jq -e '(.proposed // "") | length > 0' >/dev/null \
+    || fail "CLAMP FAIL: the record does not carry the model's original choice: $CLAMP_RECORD"
 else
-  note "(no clamp record — the model proposed at or below the bound on this run; the cap above still holds)"
+  # No record means the handler never rewrote anything: the model's own proposal was already at or
+  # below the bound (a stored 'review' here is the model's own call, not a capped 'violation'). The
+  # cap asserted above holds either way.
+  note "(no clamp record — the model proposed at or below the bound on this run: '$POST_FLAG')"
 fi
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
