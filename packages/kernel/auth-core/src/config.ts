@@ -61,11 +61,15 @@ export function setBootSecrets(secrets: BootSecrets): void {
 }
 
 /**
- * Forget the process-scoped boot secrets, returning the readers to the environment-only path. The
- * counterpart to `setBootSecrets` — a suite that must exercise the fail-closed arm (nothing supplied
- * AND nothing in the environment) needs a way back to a pristine process.
+ * TEST-ONLY. Forget the process-scoped boot secrets, returning the readers to the environment-only
+ * path. The counterpart to `setBootSecrets` — a suite that must exercise the fail-closed arm
+ * (nothing supplied AND nothing in the environment) needs a way back to a pristine process.
+ *
+ * Named for what it is so no production call site can be written by accident: `setBootSecrets` is
+ * the boot's one-way hand-off, and there is no operational reason to undo it inside a running
+ * process. Unsetting the secrets a live server is using would leave every reader failing closed.
  */
-export function clearBootSecrets(): void {
+export function resetBootSecretsForTests(): void {
   supplied = {};
 }
 

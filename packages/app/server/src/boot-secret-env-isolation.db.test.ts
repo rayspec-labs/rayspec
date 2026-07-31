@@ -4,9 +4,12 @@
  * `<VAR>_FILE` exists so an operator can hand the platform a secret as a mode-600 file INSTEAD of an
  * environment variable. That gain is only real if the boot leaves it there: `process.env` is copied
  * wholesale into every child this process spawns (the anthropic adapter passes `{ ...process.env }`
- * to the agent CLI; `ffmpeg` is spawned with the ambient environment), and it is readable from
- * outside the process (`/proc/<pid>/environ`, container inspection). A boot that writes the resolved
- * secrets back onto `process.env` hands them to all of that.
+ * to the agent CLI; `ffmpeg` is spawned with the ambient environment). The exposure a mirror creates
+ * is the CHILDREN, exactly: this process's own `/proc/<pid>/environ` keeps reporting the environment
+ * it was exec'd with, so a value written into `process.env` afterwards never shows up there — it
+ * shows up in the environ entry of every child exec'd after the write, where it is readable by
+ * anything that can see that child. A boot that writes the resolved secrets back onto `process.env`
+ * hands them to all of that.
  *
  * So this suite boots the REAL composition root from mounted files ONLY — all three plain variables
  * deleted first — and then proves three things:
@@ -232,9 +235,10 @@ describe('boot secrets stay in-process — process.env and spawned children neve
       // The pepper reached the HMAC without ever passing through the environment…
       const sql = postgres(cleanDbUrl, { max: 1 });
       try {
-        const rows = (await sql.unsafe(
-          `SELECT key_hash FROM public.api_keys WHERE id = '${minted.id}'`,
-        )) as unknown as { key_hash: string }[];
+        const rows =
+          (await sql`SELECT key_hash FROM public.api_keys WHERE id = ${minted.id}`) as unknown as {
+            key_hash: string;
+          }[];
         expect(rows).toHaveLength(1);
         const stored = rows[0]?.key_hash as string;
         expect(stored).toBe(createHmac('sha256', FILE_PEPPER).update(secret).digest('hex'));

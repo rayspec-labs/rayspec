@@ -1410,9 +1410,11 @@ export async function assembleServer(
   //
   // Explicitly NOT via process.env. A `<VAR>_FILE` mount exists so an operator can supply a secret as
   // a mode-600 file INSTEAD of an environment variable; writing the resolved value back onto
-  // process.env would hand it straight back out again — the environment is copied wholesale into
-  // every child process this one spawns (an agent CLI, ffmpeg) and is readable from outside the
-  // process (/proc/<pid>/environ, container inspection).
+  // process.env would hand it straight back out again, because the environment is copied wholesale
+  // into every child process this one spawns (an agent CLI, ffmpeg). The exposure is the CHILDREN,
+  // precisely: this process's own /proc/<pid>/environ keeps showing what it was exec'd with, so a
+  // value written into process.env afterwards never appears there — it appears in the environ entry
+  // of every child exec'd after the write, and in anything that dumps process.env.
   setBootSecrets({
     jwtSigningKeyPem: config.jwtSigningKeyPem,
     apiKeyPepper: config.apiKeyPepper,
