@@ -14,7 +14,8 @@
  * run the round-trip, and DROP the DB on teardown. This proves the chain-based boot path for real.
  *
  * The boot secrets are a freshly generated RS256 key + a test pepper (NOT the repo's real key); they
- * are set on process.env for the duration of the suite (assertBootSecrets reads them) and restored.
+ * are set on process.env for the duration of the suite (that is where `loadServerConfig` reads them)
+ * and restored afterwards.
  */
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';

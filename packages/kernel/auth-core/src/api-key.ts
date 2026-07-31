@@ -3,28 +3,31 @@
  * choice: fast on the hot per-request auth path, sound for ≥128-bit machine secrets;
  * argon2id is reserved for low-entropy passwords). Uses node:crypto (stdlib) only.
  *
- * The pepper is REQUIRED-AT-BOOT: `getApiKeyPepper()` throws if RAYSPEC_API_KEY_PEPPER is
- * unset/blank, so a misconfigured deploy fails closed instead of silently hashing keys with
- * an empty pepper. (RAYSPEC_API_KEY_PEPPER is wired into ci.yml + the boot-fails-closed
- * test; here the primitive is the boot-required seam.)
+ * The pepper is REQUIRED-AT-BOOT: `getApiKeyPepper()` throws if the pepper is neither supplied by
+ * the boot nor present in RAYSPEC_API_KEY_PEPPER, so a misconfigured deploy fails closed instead of
+ * silently hashing keys with an empty pepper. (RAYSPEC_API_KEY_PEPPER is wired into ci.yml + the
+ * boot-fails-closed test; here the primitive is the boot-required seam.)
  *
  * Storage model: plaintext shown ONCE at mint; only the public `keyPrefix` (indexed for O(1)
  * lookup) + the HMAC `keyHash` are persisted. Verification recomputes the HMAC and compares
  * in constant time (timingSafeEqual) so a stored-hash comparison cannot be timed.
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-
-const PEPPER_ENV = 'RAYSPEC_API_KEY_PEPPER';
+import { API_KEY_PEPPER_ENV, bootSecretValue } from './config.js';
 
 /**
- * Read the api-key pepper from the environment. THROWS if missing/blank — the boot-required
- * contract (the pepper is in the boot-fails-closed set alongside the JWT signing key).
+ * Read the api-key pepper — what the boot supplied (`setBootSecrets`), else RAYSPEC_API_KEY_PEPPER.
+ * THROWS if neither has it — the boot-required contract (the pepper is in the boot-fails-closed set
+ * alongside the JWT signing key).
+ *
+ * Read LAZILY, inside the function, so the pepper is never captured at module scope: a module read
+ * would freeze whatever the environment held at import time, before the boot resolved anything.
  */
 export function getApiKeyPepper(): string {
-  const pepper = process.env[PEPPER_ENV];
-  if (!pepper || pepper.trim().length === 0) {
+  const pepper = bootSecretValue(API_KEY_PEPPER_ENV);
+  if (pepper === undefined) {
     throw new Error(
-      `${PEPPER_ENV} is required at boot (the api-key HMAC pepper). Refusing to start without it.`,
+      `${API_KEY_PEPPER_ENV} is required at boot (the api-key HMAC pepper). Refusing to start without it.`,
     );
   }
   return pepper;

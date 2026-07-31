@@ -394,6 +394,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The boot no longer writes the two auth secrets into `process.env`, so a spawned child does not
+  inherit them.** `assembleServer` used to mirror the resolved `RAYSPEC_JWT_SIGNING_KEY` and
+  `RAYSPEC_API_KEY_PEPPER` onto `process.env` at the top of the boot, because the readers that need
+  them — `assertBootSecrets` inside `createAuthApp`, and `getApiKeyPepper` on the api-key,
+  session-secret and invite-token hashing paths — resolve lazily and looked only at the environment.
+  That undid the gain the `<VAR>_FILE` secret mounts exist for: an operator who supplies a key as a
+  mode-600 file precisely so it is **not** in the process environment found it there anyway once the
+  server was up, every child process the server spawns received a copy of it for free, and it was
+  readable from outside the process (`/proc/<pid>/environ`, container inspection of the children).
+  The boot now hands the resolved secrets to `@rayspec/auth-core` in-process through the new
+  `setBootSecrets`, and the readers take what the boot supplied first, falling back to the
+  environment variables exactly as before for a caller that constructs the app directly.
+  **What a deployment observes:** after a boot from `<VAR>_FILE` mounts, neither
+  `RAYSPEC_JWT_SIGNING_KEY` nor `RAYSPEC_API_KEY_PEPPER` is present in `process.env`, nor in the
+  environment of any child spawned afterwards. A value an operator sets as a plain environment
+  variable is left exactly where they put it — the boot does not scrub the environment, it only
+  stops adding to it — so the documented plain-variable path is unchanged. A caller that relied on
+  reading either secret back out of `process.env` after `assembleServer` must take it from the
+  `ServerConfig` it passed in. Fail-closed is unchanged: a missing or blank secret still aborts the
+  boot with the same error, and no path falls back to an empty pepper or an unsigned token. A boot
+  owns every secret it hands over, blank ones included — a caller that passes a hand-built
+  `ServerConfig` with an empty secret gets that same abort, never a silent boot on whatever the
+  ambient environment happened to hold for that variable.
+
 - Bump the transitive `brace-expansion` dependency to `5.0.8` (pinned via `pnpm.overrides`),
   resolving GHSA-mh99-v99m-4gvg — a regular-expression denial-of-service (ReDoS) advisory in the
   affected versions. Transitive-only; no API or behavior change.
