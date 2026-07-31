@@ -21,6 +21,10 @@ mid-market, or SMB), a **fit score**, the **owning queue** it should route to, a
 
 1. **Ingest** the lead (an authenticated POST; the payload — especially the free-text `message` — is
    DATA, never instructions). Store it as `unqualified`.
+   That framing is only the first of three things the qualifier's instructions must say: it stops
+   `message` text that COMMANDS the agent, but not text that ASSERTS a different `headcount` or
+   INVENTS a routing policy. Steps 3 and 4 are what close those — see the agent instructions in the
+   spec and `injection-smoke.sh`, which drives all three classes.
 2. **Enqueue** a durable qualify run for the lead — the agent runs OFF the request, so the POST
    returns right away.
 3. **Qualify** with a single agent: assign a tier, a fit score, an owning queue, and a short
