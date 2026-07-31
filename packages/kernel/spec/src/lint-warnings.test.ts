@@ -4,7 +4,9 @@
  * of a `restrict` foreign key — id-target OR business-key (`referencesColumn`) — since soft-deleting
  * such a parent is an `UPDATE(deleted_at)` that does NOT fire the database ON DELETE restrict, so
  * children keep pointing at the tombstoned row; a foreign key onto a store declared LATER in the
- * array; and a `handlers[].module` that is TypeScript source, which the production loader refuses.
+ * array; a `handlers[].module` that is TypeScript source, which the production loader refuses; and a
+ * `{kind:'stream', mode:'playback'}` route, whose authorization is a signed media token rather than
+ * the Bearer chain the other routes mount on.
  *
  * Fail-the-fix: the positive case asserts the warning FIRES (RED if `lintSpecWarnings` misses it) AND
  * that the spec still parses `ok:true` (a warning is not an error); the negative cases assert NO warning
@@ -275,5 +277,90 @@ handlers:
     expect(warnings[0]?.message).toContain('handlers/source.gen.ts');
     expect(warnings[1]?.message).toContain('digest_rollup');
     expect(warnings[1]?.message).toContain('handlers/other.mts');
+  });
+});
+
+describe('lintSpecWarnings — stream_playback_media_token (playback is a second auth path)', () => {
+  /**
+   * A backend doc with ONE stream route at the given mode. The handler module is compiled JavaScript
+   * so the only advisory this document can carry is the one under test (a `.ts` module would add a
+   * `typescript_handler_module` warning and make the counts below meaningless).
+   */
+  const streamSpec = (mode: string) => `
+version: '1.0'
+metadata:
+  name: stream-mode
+handlers:
+  - { id: media_bytes, module: handlers/media.js, export: run, kind: route }
+api:
+  - { method: GET, path: '/recordings/{id}/media', action: { kind: stream, handler: media_bytes, mode: ${mode} } }
+`;
+
+  it('FIRES for a playback stream route — and the doc still parses ok', () => {
+    const value = parseOk(streamSpec('playback')); // still valid — a warning is not an error
+    const warnings = lintSpecWarnings(value);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.code).toBe('stream_playback_media_token');
+    expect(warnings[0]?.path).toBe('api[0].action.mode');
+    // Names the route it is about, the token that authorizes it, and the capability that mints one.
+    expect(warnings[0]?.message).toContain('GET /recordings/{id}/media');
+    expect(warnings[0]?.message).toContain('?token=');
+    expect(warnings[0]?.message).toContain('init.mintPlayToken');
+  });
+
+  it('does NOT fire for an INGEST stream route (it is on the Bearer chain, not the token path)', () => {
+    expect(lintSpecWarnings(parseOk(streamSpec('ingest')))).toEqual([]);
+  });
+
+  it('does NOT fire for a non-stream route action', () => {
+    // `handler`, `store` and `agent` route actions all mount on the standard auth chain — none of
+    // them carries a `mode`, so an advisory reaching past the stream arm would be a false positive.
+    const yaml = `
+version: '1.0'
+metadata:
+  name: no-stream
+stores:
+  - name: recordings
+    columns:
+      - { name: title, type: text }
+handlers:
+  - { id: media_bytes, module: handlers/media.js, export: run, kind: route }
+agents:
+  - { id: summarizer, name: summarizer, backend: pi, model: pi-model, instructions: summarize }
+api:
+  - { method: GET, path: '/recordings/{id}/detail', action: { kind: handler, handler: media_bytes } }
+  - { method: GET, path: '/recordings', action: { kind: store, store: recordings, op: list } }
+  - { method: POST, path: '/summaries', action: { kind: agent, agent: summarizer } }
+`;
+    expect(lintSpecWarnings(parseOk(yaml))).toEqual([]);
+  });
+
+  it('fires ONCE PER playback route, pinning each route index', () => {
+    // TWO playback routes around an ingest one: an advisory that fired once per DOCUMENT would report
+    // only the first and leave the second unreachable route invisible, so the count is asserted as
+    // well as both indices.
+    const yaml = `
+version: '1.0'
+metadata:
+  name: stream-modes
+handlers:
+  - { id: chunk_write, module: handlers/ingest.js, export: run, kind: route }
+  - { id: audio_bytes, module: handlers/audio.js, export: run, kind: route }
+  - { id: video_bytes, module: handlers/video.js, export: run, kind: route }
+api:
+  - { method: PUT, path: '/recordings/{id}/chunks', action: { kind: stream, handler: chunk_write, mode: ingest } }
+  - { method: GET, path: '/recordings/{id}/audio', action: { kind: stream, handler: audio_bytes, mode: playback } }
+  - { method: GET, path: '/recordings/{id}/video', action: { kind: stream, handler: video_bytes, mode: playback } }
+`;
+    const warnings = lintSpecWarnings(parseOk(yaml));
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]?.code).toBe('stream_playback_media_token');
+    expect(warnings[0]?.path).toBe('api[1].action.mode');
+    expect(warnings[1]?.code).toBe('stream_playback_media_token');
+    expect(warnings[1]?.path).toBe('api[2].action.mode');
+    // Each warning names ITS OWN route — a message built from the FIRST playback route must not
+    // satisfy both, since the advisory's job on a multi-route document is saying WHICH route it is.
+    expect(warnings[0]?.message).toContain('GET /recordings/{id}/audio');
+    expect(warnings[1]?.message).toContain('GET /recordings/{id}/video');
   });
 });
