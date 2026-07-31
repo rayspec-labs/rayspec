@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that kind leaves no `runs` row at all. Be precise about what the ceiling does: it stops run-core
   waiting, it does **not** cancel the model call — there is no cancellation path, so the provider
   request continues until it settles by itself. What it does give you is the caller and the worker
-  slot back, and a run-core that accepts nothing further from the call it abandoned: an event it
+  slot back, and a run-core that refuses what the abandoned call reaches for afterwards: an event it
   emits is dropped, a journal read or write is refused, a transcript rehydrate is refused, and a tool
   dispatch it starts after that point is refused closed — the handler does not run, no step is
   journaled and no taint marker is written. A dispatch already in flight when the ceiling fires is
