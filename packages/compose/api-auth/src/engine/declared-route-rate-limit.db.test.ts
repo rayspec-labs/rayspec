@@ -31,9 +31,18 @@
  */
 import { createServer, type Server } from 'node:http';
 import { serve } from '@hono/node-server';
+import { DEFAULT_POLICIES } from '@rayspec/auth-core';
 import { parseSpec, type RaySpec } from '@rayspec/spec';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
+import { DEFAULT_ROUTE_RATE_TIERS } from './route-rate-limit.js';
+
+/** The registered allowance for a tier — fail loudly rather than silently testing nothing. */
+function policyMax(bucket: string): number {
+  const policy = DEFAULT_POLICIES[bucket];
+  if (!policy) throw new Error(`bucket '${bucket}' has no registered policy`);
+  return policy.max;
+}
 
 const hasDb = Boolean(process.env.DATABASE_URL);
 const requireDb = process.env.CI === 'true' || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -47,9 +56,11 @@ const describeDb = hasDb ? describe : describe.skip;
 
 const SCHEMA = 'rayspec_test_declared_route_throttle';
 
-// The declared-route policies (auth-core rate-limit.ts DEFAULT_POLICIES): the strict client-source
-// bucket allows 30 hits per minute; the per-principal bucket allows 600.
-const SOURCE_MAX = 30;
+// Read the budgets off the SAME registered policy table the middleware consults, rather than
+// restating them. A retune there then retunes this suite with it; a hardcoded copy would instead go
+// red in a way that reads like a throttle bug.
+const SOURCE_MAX = policyMax(DEFAULT_ROUTE_RATE_TIERS.source);
+const PRINCIPAL_MAX = policyMax(DEFAULT_ROUTE_RATE_TIERS.principal);
 
 // A self-contained throwaway backend-profile spec (product-free platform): one store and one
 // declared read route, which is all the throttle needs to be observable.
@@ -149,6 +160,31 @@ describeDb('declared-route throttling tiers on the validated credential', () => 
     return (await sw.json()).accessToken as string;
   }
 
+  /** Register → org → switch → mint: a real org-scoped API key secret (`key:<id>` principal). */
+  async function ownerApiKey(email: string, orgName: string): Promise<string> {
+    const reg = await jsonRequest(h.app, 'POST', '/v1/auth/register', {
+      body: { email, password: 'a-long-enough-password' },
+    });
+    const t0 = (await reg.json()).accessToken as string;
+    const orgRes = await jsonRequest(h.app, 'POST', '/v1/orgs', {
+      body: { name: orgName },
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    const orgId = (await orgRes.json()).id as string;
+    const sw = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/switch`, {
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    const token = (await sw.json()).accessToken as string;
+    const mint = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/api-keys`, {
+      body: { scopes: ['store:read'] },
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const body = (await mint.json()) as { plaintext?: string };
+    // The plaintext is shown exactly once, on the original mint.
+    if (!body.plaintext) throw new Error('api-key mint returned no plaintext secret');
+    return body.plaintext;
+  }
+
   it('throttles an unauthenticated caller per client source once the strict budget is spent', async () => {
     testsRan++;
     const ip = '203.0.113.10';
@@ -212,10 +248,12 @@ describeDb('declared-route throttling tiers on the validated credential', () => 
     // The anti-regression arm: if a forged header bought its own bucket, alternating the three
     // shapes would give this source three budgets instead of one, and nothing below would refuse.
     const ip = '203.0.113.40';
-    for (let i = 0; i < SOURCE_MAX / 3; i++) {
-      expect((await ping({ ip })).status).toBe(401);
-      expect((await ping({ ip, bearer: FORGED_JWT })).status).toBe(401);
-      expect((await ping({ ip, bearer: FORGED_API_KEY })).status).toBe(401);
+    // Cycle the three shapes across exactly SOURCE_MAX calls without assuming the budget divides by
+    // three — the count is what matters, not that it splits evenly.
+    const shapes = [undefined, FORGED_JWT, FORGED_API_KEY];
+    for (let i = 0; i < SOURCE_MAX; i++) {
+      const bearer = shapes[i % shapes.length];
+      expect((await ping(bearer === undefined ? { ip } : { ip, bearer })).status).toBe(401);
     }
     // SOURCE_MAX hits from one source, whatever shape the junk took ⇒ the next one is refused,
     // in every shape.
@@ -236,8 +274,29 @@ describeDb('declared-route throttling tiers on the validated credential', () => 
 
     // The VALID credential from the SAME source is keyed on the principal, not the source, so it is
     // unaffected — and it survives well past the strict budget an unauthenticated caller gets.
+    // The series has to stay inside the generous budget, or this arm would be proving the wrong thing.
+    expect(SOURCE_MAX + 10).toBeLessThan(PRINCIPAL_MAX);
     for (let i = 0; i < SOURCE_MAX + 10; i++) {
       expect((await ping({ ip, bearer: token })).status).toBe(200);
+    }
+  });
+
+  it('reaches the generous tier with a real API KEY, not only a user token', async () => {
+    testsRan++;
+    // The issue is worded around "a valid key". A user token and an api key resolve to DIFFERENT
+    // principal shapes (`user:<id>` vs `key:<id>`), and only the token shape was driven end to end —
+    // so this arm presents an actually-issued key over the wire and requires the same outcome.
+    const secret = await ownerApiKey('throttle-key@example.test', 'Throttle Key Org');
+    const ip = '203.0.113.60';
+    for (let i = 0; i < SOURCE_MAX; i++) {
+      expect((await ping({ ip, bearer: FORGED_API_KEY })).status).toBe(401);
+    }
+    expect((await ping({ ip, bearer: FORGED_API_KEY })).status).toBe(429);
+
+    // Same source, same bearer SHAPE — the only difference is that this credential validates.
+    expect(SOURCE_MAX + 10).toBeLessThan(PRINCIPAL_MAX);
+    for (let i = 0; i < SOURCE_MAX + 10; i++) {
+      expect((await ping({ ip, bearer: secret })).status).toBe(200);
     }
   });
 });

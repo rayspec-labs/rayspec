@@ -123,15 +123,23 @@ describe('the default tiers must be REGISTERED policies (the limiter fails open 
     const principal = policyOf(DEFAULT_ROUTE_RATE_TIERS.principal);
     expect(source.max).toBeLessThan(principal.max);
 
-    const limiter = new RateLimiter();
-    for (let i = 0; i < source.max; i++) {
-      expect(limiter.check(DEFAULT_ROUTE_RATE_TIERS.source, 'a').allowed).toBe(true);
+    // BOTH tiers are driven to refusal. The generous one matters as much as the strict one: a tier
+    // that never refuses is not a budget, and a policy retune that silently dropped its ceiling would
+    // otherwise leave the whole declared surface unbounded for any caller holding a valid credential.
+    for (const [name, policy] of [
+      [DEFAULT_ROUTE_RATE_TIERS.source, source],
+      [DEFAULT_ROUTE_RATE_TIERS.principal, principal],
+    ] as const) {
+      const limiter = new RateLimiter();
+      for (let i = 0; i < policy.max; i++) {
+        expect(limiter.check(name, 'a').allowed).toBe(true);
+      }
+      const refused = limiter.check(name, 'a');
+      expect(refused.allowed).toBe(false);
+      expect(refused.retryAfterMs).toBeGreaterThan(0);
+      // A different id under the same tier is untouched.
+      expect(limiter.check(name, 'b').allowed).toBe(true);
     }
-    const refused = limiter.check(DEFAULT_ROUTE_RATE_TIERS.source, 'a');
-    expect(refused.allowed).toBe(false);
-    expect(refused.retryAfterMs).toBeGreaterThan(0);
-    // A different id under the same tier is untouched.
-    expect(limiter.check(DEFAULT_ROUTE_RATE_TIERS.source, 'b').allowed).toBe(true);
   });
 
   it('shows what an UNREGISTERED bucket name would do — allow everything', () => {
