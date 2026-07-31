@@ -9,6 +9,8 @@
  *    is still executing — and reads `completed` afterwards.
  *  - ASYNC: an enqueue-time `enqueued` header transitions to `running` and then to the terminal
  *    status, keeping its enqueue-time `created_at` and healing its identity to what the run resolved.
+ *  - ASYNC VISIBILITY: with the run inside the transaction the durable executor wraps it in, a reader
+ *    outside that transaction sees the enqueue-time status for the whole run and then the terminal one.
  *  - RECOVERY re-dispatch onto a non-terminal header (a crashed run left `running`) still runs and
  *    reconciles to the healed terminal outcome.
  *  - A run that RETURNS `status:'error'` lands at `error`; a run that THROWS reaches no completing
@@ -224,6 +226,34 @@ describe('run-header lifecycle', () => {
     const done = await readHeader(runId);
     expect(done?.status).toBe('completed');
     expect(done?.createdAt).toEqual(enqueuedAt);
+  });
+
+  it('ASYNC: while the run holds its transaction an outside reader still sees enqueued, then the terminal status', async () => {
+    const runId = 'async-visibility-run';
+    const tdb = forTenant(db, TENANT_A);
+
+    await insertEnqueuedRunHeader(tdb, {
+      runId,
+      backend: 'openai',
+      agentName: spec.name,
+      model: spec.model,
+    });
+
+    // The durable path runs `runAgent` INSIDE forTenant(db, tenantId).transaction() — the executor's
+    // one durable step. Every header write the run makes therefore commits with the run, so the
+    // `running` transition is not observable from outside it.
+    const backend = new GatedBackend();
+    const pending = forTenant(db, TENANT_A).transaction(async (txTdb) => {
+      await runAgent(txTdb, backend, spec, { runId });
+    });
+    await backend.entered;
+
+    // `readHeader` reads on a SEPARATE connection — what an API read of GET /v1/runs/{id} sees.
+    expect((await readHeader(runId))?.status).toBe(RUN_STATUS_ENQUEUED);
+
+    backend.release();
+    await pending;
+    expect((await readHeader(runId))?.status).toBe('completed');
   });
 
   it("a run that RETURNS status:'error' leaves the header at error, not at running", async () => {

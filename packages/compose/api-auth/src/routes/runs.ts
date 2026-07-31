@@ -575,6 +575,13 @@ async function enqueueAgentRun(
   // scoped from the SERVER-DERIVED tenantId through the TenantDb chokepoint — the same tenant the job
   // runs under. `headerCreated` records whether THIS call created the row, so the failure path below
   // can remove it again for a job that provably never existed.
+  //
+  // BEST-EFFORT: this write is ADVISORY — run-core writes the header again when execution starts
+  // (`markRunHeaderRunning` INSERTs when none exists), so the run persists its header either way and
+  // the only thing a failure here costs is the in-flight readability this write adds. It therefore
+  // gets its OWN try/catch: a failing header write must not turn an enqueue the caller could have had
+  // into a 5xx. The failure is LOGGED in the operational `console.error('[api-auth] …')` style rather
+  // than swallowed, so an operator sees that it happened.
   const headerDb = forTenant(deps.db, inp.tenantId);
   let headerCreated = false;
   try {
@@ -584,6 +591,10 @@ async function enqueueAgentRun(
       agentName: entry.spec.name,
       model: entry.spec.model,
     });
+  } catch (err) {
+    console.error(`[api-auth] enqueue-time run header write failed runId=${runId}`, err);
+  }
+  try {
     await deps.durableExecutor.enqueue(inp.tenantId, {
       runId,
       tenantId: inp.tenantId,
@@ -594,7 +605,7 @@ async function enqueueAgentRun(
       ...(inp.persistTo !== undefined ? { persistTo: inp.persistTo } : {}),
     });
   } catch (err) {
-    // The header write or the enqueue THREW — but the throw does NOT prove the job did not start. The
+    // The enqueue THREW — but the throw does NOT prove the job did not start. The
     // durable engine persists the workflow status BEFORE `enqueue` resolves (DBOS `startWorkflow`
     // writes the row first), so a throw AFTER that persist means the workflow WILL still run on the
     // worker / via crash recovery. Blindly releasing the reservation here would let a same-key retry
