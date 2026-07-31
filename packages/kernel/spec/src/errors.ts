@@ -186,10 +186,13 @@ export function specError(code: SpecErrorCode, message: string, path?: string): 
  *                               shape; it does NOT claim the mint route is missing, because the mint
  *                               call lives in handler module source and this pass is pure over the
  *                               parsed document.
- *  - `agent_untrusted_field_precedence` — an agent whose instructions NAME a `text` column of a
- *                               declared store (so that free-text field is part of what the model
- *                               reads) while stating no PRECEDENCE between it and the structured
- *                               fields. The tool-dispatch boundary treats such content as data and
+ *  - `agent_untrusted_field_precedence` — an agent whose instructions NAME an unconstrained `text`
+ *                               column of a declared store while stating no PRECEDENCE between it
+ *                               and the structured fields. A `text` column declaring an `enum`
+ *                               whitelist is excluded: its stored value must be one of the listed
+ *                               literals, so it cannot carry an injected sentence — the one case
+ *                               where the document itself rules the column out as a free-text
+ *                               surface. The tool-dispatch boundary treats such content as data and
  *                               not as instructions, which stops an attack that COMMANDS ("ignore
  *                               your instructions") — it cannot stop one that instead ASSERTS a
  *                               different value for a structured field, or INVENTS a policy, because
@@ -202,11 +205,14 @@ export function specError(code: SpecErrorCode, message: string, path?: string): 
  *                               that state the rule in other words are flagged anyway (false
  *                               positive) and instructions that merely use one of those words are
  *                               not (false negative). It also cannot see whether the agent really
- *                               receives that row — an agent's `input` is a RUNTIME value and the
- *                               handler that assembles it lives in module source, which this pass
- *                               does not read; the instructions naming the column is the only
- *                               evidence the DOCUMENT carries. Advisory for exactly that reason: a
- *                               heuristic over prose must never fail a deploy.
+ *                               receives that row, nor in which DIRECTION it uses a named column —
+ *                               an agent's `input` is a RUNTIME value and the handler that assembles
+ *                               it lives in module source, which this pass does not read, so
+ *                               instructions naming a column may equally describe what the agent
+ *                               WRITES. The message therefore states only the two facts the DOCUMENT
+ *                               carries — the column is unconstrained `text`, and the instructions
+ *                               name it — and asserts nothing about it being input. Advisory for
+ *                               exactly that reason: a heuristic over prose must never fail a deploy.
  */
 export const SpecWarningCode = z.enum([
   'softdelete_fk_restrict',
