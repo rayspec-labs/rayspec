@@ -525,6 +525,17 @@ export function makeHandlerDb(
           return dir === 'desc' ? desc(col) : asc(col);
         });
         q = q.orderBy(...order);
+      } else {
+        // NO caller ordering ⇒ a DETERMINISTIC DEFAULT, never an unspecified physical order.
+        // Without ORDER BY Postgres may return rows in ANY order and does in practice (after a
+        // VACUUM, on a changed plan, under a parallel scan), so a bounded read (`{ limit: n }`)
+        // would silently return SOME n rows — neither the newest nor the oldest, and a DIFFERENT
+        // set of them as the table churns. `id` is the INJECTED uuid PRIMARY KEY every store table
+        // carries (build-product-tables / the generator), so it always resolves; `id asc` is also
+        // the HTTP `list` default (store-query.ts parseOrder), so BOTH read paths order alike.
+        // Resolved through the SAME fail-closed helper the caller-supplied branch uses.
+        // A caller that DOES pass an ordering keeps it verbatim — nothing is appended to it.
+        q = q.orderBy(asc(resolveColumn(table, 'id')));
       }
       // guard limit/offset fail-closed — a negative/NaN limit would SILENTLY drop the LIMIT clause
       // (return ALL tenant rows), a negative offset would raise a raw DB error. (limit:0 stays valid.)

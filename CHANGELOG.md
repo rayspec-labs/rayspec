@@ -173,6 +173,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A store read through the handler data facade comes back in a defined order.** `init.db.select`
+  applied an `ORDER BY` only when the caller passed `opts.orderBy`; without one the rows arrived in
+  whatever order Postgres happened to find them, which it is free to change after a `VACUUM`, on a
+  different plan, or under a parallel scan. A handler taking a window of a store — `{ limit: 200 }`
+  with no ordering, sorted afterwards in the client — therefore received *some* 200 rows, neither the
+  newest nor the oldest, and which ones it received shifted as the table churned. A read that declares
+  no ordering is now ordered by `id` ascending: the same default the declarative `list` route has
+  always applied, so both read paths order alike. What a consumer observes: an unordered `select` that
+  used to come back in insertion order — which is what an untouched table tends to give — now comes
+  back in `id` order, and `id` is a server-generated UUID, so that is not insertion order; a bounded
+  unordered read returns the same window on every call rather than an arbitrary one. A caller that
+  passes its own `orderBy` is unaffected — the ordering it declares is emitted verbatim, with no
+  tiebreaker appended, so the statement, the rows and their order are exactly what they were. The
+  order column is the injected primary key every store table carries, so it always resolves; the cost
+  is that a tenant-scoped read sorts the rows its tenant predicate matched, since a generated store
+  carries a primary-key index on `id` and a separate index on `tenant_id` but no composite index over
+  the two.
+
 - **A deployment that declares a cron or manual trigger boots before its tenant org exists.**
   `RAYSPEC_CRON_TENANT_ID` names the org a trigger fires under — yet the boot used to verify that org
   existed and abort when it did not (`… is a well-formed UUID but no such active org exists`), which
