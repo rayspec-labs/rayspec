@@ -171,7 +171,10 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
         // Response headers a cross-origin browser client must be able to READ. `X-Request-Id` (the
         // request-id echo) plus the store surface: `X-Next-Cursor` + `X-Result-Truncated`
         // (keyset pagination — unusable cross-origin without exposure) and `Idempotency-Replay`
-        // (the idempotent-replay signal). None of these is a CORS-safelisted response header (which are only
+        // (the idempotent-replay signal); plus `Retry-After`, the retry advice a throttled `429` (and a
+        // transient run `502`) carries — a documented part of the response contract, so a browser client
+        // must be able to back off on it rather than guess. None of these is a CORS-safelisted response
+        // header (which are only
         // Cache-Control/Content-Language/Content-Length/Content-Type/Expires/Last-Modified/Pragma), so
         // each must be listed here or the browser hides it from `fetch`-based clients.
         exposeHeaders: [
@@ -179,6 +182,7 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
           'X-Next-Cursor',
           'X-Result-Truncated',
           'Idempotency-Replay',
+          'Retry-After',
         ],
         maxAge: 600,
       }),

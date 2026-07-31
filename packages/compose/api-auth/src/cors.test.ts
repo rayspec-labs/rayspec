@@ -48,7 +48,8 @@ const BASE_ALLOW_HEADERS = [
 
 /**
  * The `exposeHeaders` set `app.ts` mounts: the request-id echo plus the store surface —
- * `X-Next-Cursor` + `X-Result-Truncated` (keyset pagination) and `Idempotency-Replay` (idempotent replay).
+ * `X-Next-Cursor` + `X-Result-Truncated` (keyset pagination) and `Idempotency-Replay` (idempotent replay) —
+ * plus `Retry-After`, the retry advice a throttled `429` and a transient run `502` carry.
  * None is a CORS-safelisted response header, so each must be exposed or a `fetch` client cannot read it.
  * The suite below asserts these are ACTUALLY present in `Access-Control-Expose-Headers` on the REAL app —
  * dropping any one from app.ts turns it RED.
@@ -58,6 +59,7 @@ const EXPECTED_EXPOSE_HEADERS = [
   'x-next-cursor',
   'x-result-truncated',
   'idempotency-replay',
+  'retry-after',
 ];
 
 /** Parse an `Access-Control-Allow-Headers` value into a lowercased Set of header names. */
@@ -245,8 +247,8 @@ describe('— security headers still applied (inv.8)', () => {
   });
 });
 
-describe('— expose-headers: the pagination/replay response headers are readable cross-origin', () => {
-  it('an allowlisted response exposes X-Request-Id + X-Next-Cursor + X-Result-Truncated + Idempotency-Replay (fail-the-fix)', async () => {
+describe('— expose-headers: the pagination/replay/retry response headers are readable cross-origin', () => {
+  it('an allowlisted response exposes X-Request-Id + X-Next-Cursor + X-Result-Truncated + Idempotency-Replay + Retry-After (fail-the-fix)', async () => {
     // Drive the REAL createAuthApp (not the synthetic mirror), so this pins app.ts directly: dropping any
     // one of the exposed headers from app.ts's `exposeHeaders` makes the set assertion below RED.
     // hono/cors sets `Access-Control-Expose-Headers` on the actual response (before the OPTIONS branch),
@@ -259,6 +261,9 @@ describe('— expose-headers: the pagination/replay response headers are readabl
     expect(exposed.has('x-next-cursor')).toBe(true);
     expect(exposed.has('x-result-truncated')).toBe(true);
     expect(exposed.has('idempotency-replay')).toBe(true);
+    // And the retry advice: a throttled declared route answers 429 with `Retry-After`, which a
+    // cross-origin `fetch` client cannot read unless it is exposed here.
+    expect(exposed.has('retry-after')).toBe(true);
   });
 
   it('the preflight (OPTIONS) response ALSO carries the exposed headers (hono sets them before the OPTIONS branch)', async () => {
@@ -289,7 +294,7 @@ describe('— CORS grant carries on a real 200 + on SSE (TV-3 / TV-4 / inv.9)', 
     const app = new Hono();
     // The SAME cors options app.ts mounts (array origin → echo-on-match; bearer-only; no credentials).
     // Mirrors app.ts's platform BASE `allowHeaders` set (no product-specific header — deployer headers
-    // are injected) AND its `exposeHeaders` set (X-Request-Id + the pagination headers +
+    // are injected) AND its `exposeHeaders` set (X-Request-Id + the pagination headers + Retry-After +
     // the replay signal). KEEP the exposeHeaders list in parity with app.ts; the real fail-the-fix
     // for app.ts's exposeHeaders lives in the `— expose-headers` suite below, which drives the
     // REAL createAuthApp.
@@ -310,6 +315,7 @@ describe('— CORS grant carries on a real 200 + on SSE (TV-3 / TV-4 / inv.9)', 
           'X-Next-Cursor',
           'X-Result-Truncated',
           'Idempotency-Replay',
+          'Retry-After',
         ],
         maxAge: 600,
       }),

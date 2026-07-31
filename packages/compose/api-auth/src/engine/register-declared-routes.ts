@@ -5,7 +5,9 @@
  * Iterates a validated `RaySpec.api[]` and registers each declared route on the SAME
  * `OpenAPIHono<AppEnv>` app, behind the SAME ordered middleware chain every other route uses —
  * `requireAuth()` → `resolveTenant(deps)` → `requirePermission(deps, perm)` — REUSED VERBATIM (the
- * server-derived tenant + live-membership recheck, NOT a parallel authz). Routes are 100% interpreted
+ * server-derived tenant + live-membership recheck, NOT a parallel authz), fronted by the
+ * `routeRateLimit(deps)` throttle (route-rate-limit.ts) whose tier is chosen on whether the global
+ * `authenticate` actually VALIDATED the credential. Routes are 100% interpreted
  * at runtime: a route change is a safe redeploy, no codegen (the cleanest application of 's
  * "interpret" half).
  *
@@ -50,6 +52,7 @@ import type { MediaTokenService } from '../media/media-token.js';
 import { mediaAuth, perUserStreamSemaphore } from '../media/playback-middleware.js';
 import { executeAgentRun } from '../routes/runs.js';
 import { makeRouteHandler } from './route-handlers.js';
+import { routeRateLimit } from './route-rate-limit.js';
 import { makeStoreHandler } from './store-routes.js';
 import { makeStreamIngestHandler, makeStreamPlaybackHandler } from './stream-routes.js';
 
@@ -75,11 +78,12 @@ function storePermission(op: StoreOp): Permission {
 
 /**
  * Register a route for any HttpMethod behind the EXACT auth chain (Hono `app.on`). The handler list
- * is always the fixed 3-middleware + handler tuple every auth route uses (requireAuth → resolveTenant
- * → requirePermission → handler), passed POSITIONALLY (not as a spread array) so it matches Hono's
- * tuple-typed `on` overload rather than the `(method[], path[], handler)` overload. The
- * MiddlewareHandler casts bridge the api-auth `{ Variables }` middleware env to Hono's default env —
- * the SAME middleware objects the typed `app.post(...)` calls in runs.ts/orgs.ts already accept.
+ * is always the declared-route throttle in front of the fixed 3-middleware + handler tuple every auth
+ * route uses (routeRateLimit → requireAuth → resolveTenant → requirePermission → handler), passed
+ * POSITIONALLY (not as a spread array) so it matches Hono's tuple-typed `on` overload rather than the
+ * `(method[], path[], handler)` overload. The MiddlewareHandler casts bridge the api-auth
+ * `{ Variables }` middleware env to Hono's default env — the SAME middleware objects the typed
+ * `app.post(...)` calls in runs.ts/orgs.ts already accept.
  */
 function registerOn(
   app: OpenAPIHono<AppEnv>,
@@ -88,9 +92,10 @@ function registerOn(
   m1: MiddlewareHandler,
   m2: MiddlewareHandler,
   m3: MiddlewareHandler,
+  m4: MiddlewareHandler,
   handler: (c: Context<AppEnv>) => Promise<Response>,
 ): void {
-  app.on(method, path, m1, m2, m3, handler as MiddlewareHandler);
+  app.on(method, path, m1, m2, m3, m4, handler as MiddlewareHandler);
 }
 
 /**
@@ -192,6 +197,10 @@ export function registerDeclaredRoutes(
   const storeByName = new Map(spec.stores.map((s) => [s.name, s]));
   // The shared front of the chain — IDENTICAL to every auth/run route (server-derived tenant +
   // live-membership recheck), only the trailing requirePermission(perm) differs per route.
+  // The throttle leads it, BEFORE requireAuth: the global `authenticate` has already run, so the tier
+  // is chosen on whether the credential VALIDATED (a forged header lands in the strict per-source
+  // bucket, never the generous per-principal one), and a caller collecting 401s is still bounded.
+  const throttle = routeRateLimit(deps);
   const auth = requireAuth();
   const tenant = resolveTenant(deps);
 
@@ -236,7 +245,16 @@ export function registerDeclaredRoutes(
         deps,
         ...(storeConflictKeys ? { conflictKeys: storeConflictKeys } : {}),
       });
-      registerOn(app, route.method, honoPath, auth, tenant, requirePermission(deps, perm), handler);
+      registerOn(
+        app,
+        route.method,
+        honoPath,
+        throttle,
+        auth,
+        tenant,
+        requirePermission(deps, perm),
+        handler,
+      );
       continue;
     }
 
@@ -274,6 +292,7 @@ export function registerDeclaredRoutes(
         app,
         route.method,
         honoPath,
+        throttle,
         auth,
         tenant,
         requirePermission(deps, 'agent:run'),
@@ -331,6 +350,7 @@ export function registerDeclaredRoutes(
         app,
         route.method,
         honoPath,
+        throttle,
         auth,
         tenant,
         requirePermission(deps, perm),
@@ -395,6 +415,7 @@ export function registerDeclaredRoutes(
           app,
           route.method,
           honoPath,
+          throttle,
           auth,
           tenant,
           requirePermission(deps, 'store:write'),
