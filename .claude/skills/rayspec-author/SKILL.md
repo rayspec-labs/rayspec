@@ -1221,6 +1221,10 @@ What the persist renderer GUARANTEES (the safety baked in — you do not write a
     read BEFORE the clamp and stamped back on as the last mutation, so the bound would never reach the
     store while the result still journals a record claiming it did). A clamp is an **unconditional**
     `max` — any other key in the rule is rejected rather than silently ignored.
+  - Because that order is what ranks a bound, a column's `enumValues` **must not repeat a value**.
+    The rendered comparison ranks by first occurrence, so a duplicate names a rung the ladder never
+    reaches — `validateHoles` rejects it rather than pick one of the readings for you. (Harmless
+    before clamps existed, when `enumValues` only decided membership.)
 
 ### Template T2 — LOOKUP handler holes (`template: "lookup"`)
 

@@ -86,6 +86,24 @@ function readJsGolden(): string {
   return readFileSync(join(here, '__fixtures__/code-claim.gen.js'), 'utf8');
 }
 
+/**
+ * The committed byte-golden for the persist template with NO clamp declared.
+ *
+ * It exists because the shipped `code-claim.gen.ts` now declares one, so the repository lost its only
+ * byte-gated reference for the unclamped T1 render — the shape every hole-set that does not opt in
+ * still gets. `code-claim.holes.json` minus `clampValues` is deliberately the source, so the fixture
+ * differs from the shipped golden in exactly the clamp and nothing else.
+ */
+const unclampedPersistHoles: PersistHandlerHoles = (() => {
+  const { clampValues: _none, ...rest } = persistHoles as PersistHandlerHoles & {
+    clampValues?: unknown;
+  };
+  return rest as PersistHandlerHoles;
+})();
+function readUnclampedGolden(): string {
+  return readFileSync(join(here, '__fixtures__/code-claim-unclamped.gen.ts'), 'utf8');
+}
+
 describe('server-side clamp — a clamp-bearing hole-set renders its bound deterministically', () => {
   it('caps the declared enum column, ranked by that column’s declared enumValues order', () => {
     const code = genHandler(persistHoles);
@@ -114,14 +132,19 @@ describe('server-side clamp — a clamp-bearing hole-set renders its bound deter
   it('BACK-COMPAT: the same holes WITHOUT clampValues carry no clamp machinery at all', () => {
     // The clamp is strictly opt-in: a hole-set that declares none renders exactly what it always did,
     // which is what keeps every committed golden of an unclamped hole-set byte-stable.
-    const { clampValues: _none, ...unclamped } = persistHoles as PersistHandlerHoles & {
-      clampValues?: unknown;
-    };
     for (const target of ['ts', 'js'] as const) {
-      const code = genHandler(unclamped, target);
+      const code = genHandler(unclampedPersistHoles, target);
       expect(code).not.toContain('clamp');
       expect(code).not.toContain('ORDER');
     }
+  });
+
+  it('BACK-COMPAT, byte-gated: the unclamped persist render matches its own committed golden', () => {
+    // The two `not.toContain` assertions above say only that the clamp machinery is absent. They would
+    // stay green through any other change to the unclamped T1 render — and since the shipped
+    // `code-claim.gen.ts` now DECLARES a clamp, it is no longer a golden for the unclamped shape.
+    // Without this fixture the persist template's opt-out path has no byte gate at all.
+    expect(genHandler(unclampedPersistHoles, 'ts')).toBe(readUnclampedGolden());
   });
 });
 

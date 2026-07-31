@@ -34,7 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to `fkRevalidate.codeArg` (an identifier is not a ranked classification) and a key equal to
   `naturalKeyCol` (the upsert key is tenant-namespaced from the value read before the clamp and stamped
   back on last, so the bound would never reach the store while the result still journaled a record
-  claiming it had). The bound is unconditional
+  claiming it had). Because that order is now load-bearing, a column's `enumValues` may no longer
+  contain a duplicate: the rendered comparison ranks by first occurrence, so a repeated value names a
+  rung the ladder never reaches, and no reading of it is one the render could honour. The bound is
+  unconditional
   by design — a rule carrying any key other than `max` is rejected rather than silently ignored. The
   hole is optional and additive: a hole-set that declares none renders byte-for-byte what it always did,
   for both `--emit ts` and `--emit js`. The shipped Expense-Claim example now caps its `policy_flag` at

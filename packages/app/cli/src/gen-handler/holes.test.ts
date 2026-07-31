@@ -171,6 +171,29 @@ describe('validateHoles — fail-closed on malformed hole-sets', () => {
       ),
     ).toThrow(/enumValues/);
   });
+  it('rejects DUPLICATE enumValues — the declared order is what a clamp ranks by', () => {
+    // Duplicates were harmless while enumValues only fed a membership check: `['ok','review','ok']`
+    // admits exactly the same values as `['ok','review']`. A clamp made the ORDER load-bearing, and it
+    // ranks with `indexOf`, so the FIRST occurrence silently wins and the later one is a position the
+    // ladder never reaches. An author who writes a duplicate has some ordering in mind; whichever it
+    // is, the rendered bound will not be it. There is no safe interpretation to pick, so fail closed.
+    expect(() =>
+      validateHoles(
+        persist({
+          columns: [
+            {
+              col: 'policy_flag',
+              jsonType: 'text',
+              required: true,
+              nullable: false,
+              enumValues: ['ok', 'review', 'ok'],
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/duplicate/i);
+  });
+
   it('rejects update-by-id without idArg, upsert without naturalKeyCol', () => {
     expect(() => validateHoles(persist({ idArg: undefined }))).toThrow(/idArg/);
     expect(() =>
