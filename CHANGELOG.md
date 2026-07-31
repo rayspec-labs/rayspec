@@ -26,14 +26,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its own budget, the same principal in two organizations counted separately — at 600 requests per
   minute, sized so first-party automation calling in bursts is not locked out. **What a consumer
   observes:** a declared route can now answer **`429 RATE_LIMITED`**, in the standard error envelope,
-  carrying a **`Retry-After`** header in **seconds** (how much of the window is left, never below
-  `1`). Nothing changes under budget — an unauthenticated call still gets its usual `401`, because
-  the throttle bounds load and does not authorize — and the media `playback` route, which mounts on
-  its own token path with its own per-user stream cap, is untouched. The counters are the existing
-  in-process limiter, not a new one and not a shared store, so **each instance counts on its own**: a
-  multi-instance deployment gives a caller one budget per instance it reaches. Treat both numbers as
-  a per-instance floor rather than a cluster-wide ceiling, and keep a shared front-line limit if you
-  need the latter.
+  carrying the retry advice twice — a **`Retry-After`** header in **seconds** (how much of the window
+  is left, never below `1`) and `error.details.retryAfterMs` in the body, the same field the auth
+  routes' throttle already emits. `Retry-After` is not a CORS-safelisted response header, so it has
+  been added to the response headers the platform exposes to cross-origin browser clients (alongside
+  the request-id echo, the pagination pair and the idempotent-replay signal) — a `fetch` client can
+  now read the back-off it is given, on this `429` and on a transient run's `502` alike. On an
+  `agent` route the throttle's `429` is distinguishable from a run-outcome `429`: it fires before the
+  route runs, so it answers the error envelope rather than a `RunResult`, no agent executed, and no
+  `Idempotency-Key` reservation was taken or released. Nothing changes under budget — an
+  unauthenticated call still gets its usual `401`, because the throttle bounds load and does not
+  authorize — and the media `playback` route, which mounts on its own token path with its own
+  per-user stream cap, is untouched. The counters are the existing in-process limiter, not a new one
+  and not a shared store, so **each instance counts on its own**: a multi-instance deployment gives
+  a caller one budget per instance it reaches. Treat both numbers as a per-instance floor rather
+  than a cluster-wide ceiling, and keep a shared front-line limit if you need the latter.
 
 - **A persist handler can cap a model-chosen enum column server-side: the `clampValues` hole.** The
   persist templates already re-checked a model-chosen IDENTIFIER against a store before writing it

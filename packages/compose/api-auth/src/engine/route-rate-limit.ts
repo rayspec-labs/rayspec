@@ -93,12 +93,17 @@ export function retryAfterSeconds(retryAfterMs: number): number {
 }
 
 /**
- * The declared-route throttle middleware. Over budget ⇒ `429` with a `Retry-After` header in seconds.
+ * The declared-route throttle middleware. Over budget ⇒ `429` with the retry advice on BOTH channels:
+ * a `Retry-After` header in whole seconds, and `error.details.retryAfterMs` in the body.
  *
- * The body is built through the SHARED `errorEnvelope` (the one chokepoint that structurally strips
- * `details` for non-allowlisted codes), so this hand-mounted 429 is byte-uniform with every other error
- * on the surface; the header is set explicitly because the thrown-`ApiError` path builds its body in
- * `app.onError` and emits no headers.
+ * The body is built through the SHARED `errorEnvelope` — the one chokepoint that structurally strips
+ * `details` for codes outside `DETAILS_ALLOWED` — so this hand-mounted 429 is not an exception to that
+ * invariant, and it carries the SAME `details.retryAfterMs` the thrown-`ApiError` throttles already emit
+ * (`enforceRate`, routes/auth.ts), so one 429 body shape covers every throttled endpoint. The header is
+ * set explicitly because the thrown-`ApiError` path builds its body in `app.onError` and emits no
+ * headers; it is listed in the app's CORS `exposeHeaders` so a cross-origin `fetch` client can read it
+ * (`Retry-After` is not CORS-safelisted), and the body detail keeps the advice reachable even for a
+ * client that never sees the header.
  */
 export function routeRateLimit(
   deps: AppDeps,
@@ -109,7 +114,9 @@ export function routeRateLimit(
     const { allowed, retryAfterMs } = deps.rateLimiter.check(bucket, id);
     if (!allowed) {
       return c.json(
-        errorEnvelope('RATE_LIMITED', 'Too many requests.', c.get('requestId') ?? 'unknown'),
+        errorEnvelope('RATE_LIMITED', 'Too many requests.', c.get('requestId') ?? 'unknown', {
+          retryAfterMs,
+        }),
         429,
         { 'Retry-After': String(retryAfterSeconds(retryAfterMs)) },
       );

@@ -16,7 +16,10 @@
  *  3. unauthenticated callers stay strictly throttled, per anti-spoof client source, and one
  *     source's exhaustion never touches another's;
  *  4. the tiering does not weaken the strict bucket: absent and forged credentials from one source
- *     share ONE budget, so alternating credential shapes cannot multiply an anonymous allowance.
+ *     share ONE budget, so alternating credential shapes cannot multiply an anonymous allowance;
+ *  5. the `429` hands the caller its retry advice on BOTH channels — `Retry-After` in seconds and
+ *     `error.details.retryAfterMs` in the body — and the header is listed in the app's CORS
+ *     `Access-Control-Expose-Headers`, so a cross-origin `fetch` client can actually read it.
  *
  * MECHANICS. An in-process `app.request()` has no socket peer, so `clientIpFromContext` collapses
  * every caller to `'unknown'` and a per-source assertion would be vacuous. This suite therefore boots
@@ -121,10 +124,11 @@ describeDb('declared-route throttling tiers on the validated credential', () => 
     await h.close();
   });
 
-  /** GET the declared route over HTTP from `ip`, optionally presenting `bearer`. */
-  async function ping(opts: { ip: string; bearer?: string }): Promise<Response> {
+  /** GET the declared route over HTTP from `ip`, optionally presenting `bearer` / an `Origin`. */
+  async function ping(opts: { ip: string; bearer?: string; origin?: string }): Promise<Response> {
     const headers: Record<string, string> = { 'x-forwarded-for': opts.ip };
     if (opts.bearer !== undefined) headers.authorization = `Bearer ${opts.bearer}`;
+    if (opts.origin !== undefined) headers.origin = opts.origin;
     return fetch(`${base}/pings`, { method: 'GET', headers });
   }
 
@@ -154,12 +158,28 @@ describeDb('declared-route throttling tiers on the validated credential', () => 
     }
     const throttled = await ping({ ip });
     expect(throttled.status).toBe(429);
-    expect((await throttled.json()).error.code).toBe('RATE_LIMITED');
-    // Retry-After is SECONDS, and a spent 60s window always advises at least one.
+    const body = await throttled.json();
+    expect(body.error.code).toBe('RATE_LIMITED');
+    // The retry advice reaches the caller on BOTH channels. In the body: `details.retryAfterMs`, the
+    // same field the thrown-ApiError throttles emit, so one 429 shape covers every throttled endpoint.
+    expect(typeof body.error.details.retryAfterMs).toBe('number');
+    expect(body.error.details.retryAfterMs).toBeGreaterThan(0);
+    // And in the header — Retry-After is SECONDS, and a spent 60s window always advises at least one.
     const retryAfter = Number(throttled.headers.get('retry-after'));
     expect(Number.isInteger(retryAfter)).toBe(true);
     expect(retryAfter).toBeGreaterThan(0);
     expect(retryAfter).toBeLessThanOrEqual(60);
+
+    // The advice is READABLE by a cross-origin browser client. `Retry-After` is not a CORS-safelisted
+    // response header, so a `fetch` client sees it only if the app exposes it; the budget is already
+    // spent, so this allowlisted-origin call is another 429 and carries the grant.
+    const crossOrigin = await ping({ ip, origin: 'https://app.rayspec.test' });
+    expect(crossOrigin.status).toBe(429);
+    const exposed = (crossOrigin.headers.get('access-control-expose-headers') ?? '')
+      .split(',')
+      .map((h) => h.trim().toLowerCase());
+    expect(exposed).toContain('retry-after');
+    expect(crossOrigin.headers.get('retry-after')).not.toBeNull();
 
     // A DIFFERENT source is untouched — a real per-source throttle, not a global outage.
     expect((await ping({ ip: '203.0.113.11' })).status).toBe(401);
