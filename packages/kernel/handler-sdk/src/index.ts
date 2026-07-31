@@ -123,7 +123,13 @@ export interface SelectOptions {
   readonly orderBy?: ReadonlyArray<{ readonly column: string; readonly dir?: 'asc' | 'desc' }>;
   /** Max rows to return (server-side LIMIT). */
   readonly limit?: number;
-  /** Rows to skip (server-side OFFSET) — the default `id` order already makes paging stable. */
+  /**
+   * Rows to skip (server-side OFFSET). With NO `orderBy` the default `id asc` is a UNIQUE key, so
+   * paging over it is stable. With your OWN `orderBy` nothing is appended (see above) — an ordering
+   * on a non-unique column is not a TOTAL order, and Postgres may break the ties differently
+   * between two page queries, so a row can repeat or be skipped. Pair such an ordering with a
+   * unique tiebreaker (e.g. a trailing `{ column: 'id' }`).
+   */
   readonly offset?: number;
 }
 
