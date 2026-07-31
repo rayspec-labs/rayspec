@@ -506,7 +506,18 @@ const BYTE_ORDER_MARK = '\uFEFF';
  * truncated, not hashed, not a length, not a count, not a character, not an excerpt of the removed
  * part. The value IS the secret and a warning reaches every log the process writes to; the kinds
  * below are fixed strings chosen by comparing the raw and normalized forms, so none of them can
- * carry a byte of either. The tests assert that no substring of a sentinel value survives here.
+ * carry a byte of either. The tests pin that by emitting the message for TWO different sentinel
+ * secrets that produce the same kinds and asserting the two messages are byte-identical — an
+ * excerpt of any length, a length, a digest or an encoding of the value could not survive that —
+ * and by asserting outright that no base64 of the value, no hex digest and no digit appear.
+ *
+ * WHAT IT DOES NOT SAY: what to do about it. A trailing newline on a secret FILE is the documented
+ * normal case, not a misconfiguration — the sanctioned `>`-redirect recipe in `.env.example` leaves
+ * one, and the trim exists precisely so it stays harmless — so an instruction to strip it would
+ * contradict the operator documentation. It would not be a recovery path either: re-supplying a
+ * pepper "without edge whitespace" yields the same normalized bytes and restores no api-key hash.
+ * The message reports the DIFFERENCE and leaves the judgement to the operator; the trim contract
+ * and this signal are documented together (`.env.example`, `docs/concepts.md`, the CLI reference).
  *
  * The BOM is called out separately from "leading whitespace" because it is the kind an operator
  * cannot see at all, and the one that breaks a PKCS#8 import (the PEM header must sit at offset 0);
@@ -523,9 +534,8 @@ function bootSecretNormalizationWarning(sourceVar: string, raw: string): string 
   return (
     `warning: the boot secret resolved from ${sourceVar} was changed by normalization — ` +
     `${kinds.join(', ')}. The normalized value is the one in use, so it differs from the bytes ` +
-    'supplied; if this secret stopped being accepted, that difference is the cause. Supply it ' +
-    'without edge whitespace (base64-encode a value that genuinely needs it). The value itself is ' +
-    'never logged.'
+    'supplied; if this secret stopped being accepted, that difference is the cause. The value ' +
+    'itself is never logged.'
   );
 }
 

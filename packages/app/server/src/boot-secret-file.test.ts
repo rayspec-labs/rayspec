@@ -505,14 +505,20 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
   // every log the process writes to.
   //
   // A distinctive sentinel with edge whitespace on a MULTI-LINE value (the signing key is a PEM in
-  // production). Deliberately random-looking, so "no part of it appears in the output" cannot pass
-  // by colliding with ordinary English in the message.
+  // production). Every line is a random base62 run carrying no word of English, so a window of it
+  // cannot pass the leak probe below by colliding with ordinary prose in the message.
   const BOM = '\uFEFF'; // U+FEFF, as an escape so the assertions below stay readable
-  const LEAK = 'Xq7vNb2ZpL9wKd4RtY6sHc3JmF8gQa5eUi0oPzVn';
-  const LEAK_CLEAN = `${LEAK}\nsecond-${LEAK}\nthird-${LEAK}`;
+  const LEAK_CLEAN = [
+    'Xq7vNb2ZpL9wKd4RtY6sHc3JmF8gQa5eUi0oPzVn',
+    'Tg1xJw8kSr5nBv3yMd7uCe2qZh6pAf4jLo9iXt0b',
+    'Kz5mWu2cRi8dNe6tGv1hYb4sQp7lXa3fOj0nDr9k',
+  ].join('\n');
   // Edge whitespace on BOTH sides plus a leading byte-order mark — every kind at once. The removed
   // bytes are exactly: U+FEFF, spaces, CR, LF.
   const LEAK_RAW = `  ${BOM}${LEAK_CLEAN}  \r\n`;
+  // A SECOND secret — different in every byte AND in length — wrapped in the SAME edge whitespace,
+  // so it produces the SAME kinds of change. It is the control for the counterproof below.
+  const OTHER_RAW = `  ${BOM}Rj3bHs9wPk1cVy6nEt4mZu8dLq2aXf5g  \r\n`;
   /** Every substring of `value` of length `size` — the "any substring long enough to matter" probe. */
   function windows(value: string, size: number): string[] {
     const out: string[] = [];
@@ -587,7 +593,7 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
     expect(fileWarnings).toEqual([]);
   });
 
-  it('NO PART of the value reaches the output — not the trimmed-away part, not any substring', () => {
+  it('NO PART of the value reaches the output — the message is IDENTICAL for a different secret', () => {
     const { config, warnings } = boot({ ...plainEnv, RAYSPEC_JWT_SIGNING_KEY: LEAK_RAW });
     // The change really happened — otherwise "nothing leaked" would be free.
     expect(config?.jwtSigningKeyPem).toBe(LEAK_CLEAN);
@@ -599,18 +605,36 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
     // It really is the warning for this variable — so the assertions below are about a message that
     // was actually emitted for the leaking value.
     expect(warning).toContain('RAYSPEC_JWT_SIGNING_KEY');
-    // Neither the raw value, nor the normalized one, nor the distinctive core of either.
+
+    // THE general counterproof: a SECOND boot, same variable, same kinds of change, a value that
+    // shares no byte and not even a length with the first — and the SAME message, byte for byte.
+    // Nothing derived from the value can survive that: an excerpt of ANY length (one character is
+    // enough), the length itself, a count, a digest, an encoding — each differs between the two
+    // secrets, so each would drive the two messages apart. This is what makes the arm's claim a
+    // proof rather than a probe for the shapes someone thought to enumerate.
+    const { warnings: otherWarnings } = boot({ ...plainEnv, RAYSPEC_JWT_SIGNING_KEY: OTHER_RAW });
+    expect(otherWarnings).toHaveLength(1);
+    expect(otherWarnings[0]).toBe(warning);
+
+    // The shapes the issue names outright, pinned by name rather than inferred from the control.
+    expect(warning).not.toContain(Buffer.from(LEAK_RAW).toString('base64')); // not encoded
+    expect(warning).not.toContain(Buffer.from(LEAK_CLEAN).toString('base64'));
+    expect(warning).not.toMatch(/[0-9a-f]{16,}/); // not hashed — no hex digest of any length
+    expect(warning).not.toMatch(/\d/); // no length, no count, no digit at all
+    // Neither the raw value, nor the normalized one, nor a single line of either.
     expect(warning).not.toContain(LEAK_RAW);
     expect(warning).not.toContain(LEAK_CLEAN);
-    expect(warning).not.toContain(LEAK);
+    for (const line of LEAK_CLEAN.split('\n')) expect(warning).not.toContain(line);
     // The TRIMMED-AWAY part on its own: the removed bytes were exactly U+FEFF, spaces, CR and LF.
     // A single-line, whitespace-collapsed message carries none of them.
     expect(warning).not.toContain(BOM);
     expect(warning).not.toContain('\r');
     expect(warning).not.toContain('\n');
     expect(warning).not.toMatch(/ {2}/);
-    // And no substring long enough to matter — every 6-character window of the raw value.
-    for (const window of windows(LEAK_RAW, 6)) expect(warning).not.toContain(window);
+    // And no verbatim excerpt: every 4-character window of the raw value. Four is the floor at
+    // which a random base62 sentinel cannot collide with the message's fixed English vocabulary,
+    // so the probe stays a leak detector rather than a source of false reds.
+    for (const window of windows(LEAK_RAW, 4)) expect(warning).not.toContain(window);
   });
 
   it('emits NOTHING on the abort path — a broken mount aborts without a normalization warning', () => {

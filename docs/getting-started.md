@@ -146,7 +146,9 @@ spec grows.
 > fails the boot closed (it never falls back to the plain variable). Whichever source a
 > secret comes from, leading and trailing whitespace (a trailing newline, a leading BOM)
 > is stripped from the resolved value while interior bytes are preserved — so a value that
-> needs edge whitespace must be base64-encoded. See the
+> needs edge whitespace must be base64-encoded. If that strip actually changes a secret,
+> the boot warns once, naming the variable and the kind of change but never the value; an
+> untouched secret boots silently. See the
 > [CLI reference](./cli-reference.md#rayspec-serve--the-boot-server) and
 > [`.env.example`](../.env.example) for the full precedence and per-command scope.
 

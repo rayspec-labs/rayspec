@@ -264,6 +264,17 @@ change every key hash. The one limit of the contract: a secret whose real bytes 
 begin or end with whitespace cannot be expressed directly (it would be stripped) — encode
 such a value (for example, base64).
 
+The trim is not silent when it **changes** something. If normalization actually altered a
+resolved secret, the boot emits one warning per changed secret naming the variable it was
+resolved from (`<VAR>`, or `<VAR>_FILE` when the mount won) and the kind of change —
+`a leading byte-order mark removed`, `leading whitespace removed`,
+`trailing whitespace removed` — and never the value or any part of it. A secret the trim
+left untouched boots silently. The warning reports a difference, it does not demand a fix:
+on a secret file created with a `>` redirect the stripped trailing newline is the normal
+case and the resolved value is the same either way. What it is there for is the upgrade in
+which a secret that carried edge whitespace stops being accepted — the runtime signal that
+names an otherwise invisible character, instead of a silent wave of rejected requests.
+
 A [frontend-only static profile](#serving-a-frontend) needs none of these three
 secrets — it boots with no database and no auth surface at all.
 

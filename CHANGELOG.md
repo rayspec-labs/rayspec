@@ -51,10 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vocabulary: `a leading byte-order mark removed`, `leading whitespace removed`,
   `trailing whitespace removed`. It never names the value or any part of it: not truncated, not
   hashed, not a length, not a count, not an excerpt of what was removed — a warning reaches every
-  log the process writes to, and the value is the secret. A clean secret boots exactly as silently
-  as before, a value that normalizes to nothing still just takes the fail-closed missing-variable
-  abort that already names it, and nothing else moves: the resolved values, the `<VAR>_FILE`
-  precedence and every abort are byte-for-byte what they were.
+  log the process writes to, and the value is the secret. It reports the difference rather than
+  prescribing a fix: the trailing newline a `>` redirect leaves in a secret file is the documented,
+  harmless case and needs no action. A clean secret boots exactly as silently as before, a value
+  that normalizes to nothing still just takes the fail-closed missing-variable abort that already
+  names it, and nothing else moves: the resolved values, the `<VAR>_FILE` precedence and every abort
+  are byte-for-byte what they were. The trim contract is documented alongside the signal in the
+  README, the concepts guide, the CLI reference, the getting-started guide and `.env.example`.
 
 - **An agent that declares both `tools` and an `outputSchema` is now a config error.** The
   linter adds `agent_output_schema_shortcircuits_tools`: an `agents[]` entry carrying a
