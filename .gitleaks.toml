@@ -49,4 +49,13 @@ regexes = [
   # too long to stay on a single line with an inline `gitleaks:allow`. Anchored to its EXACT value so it
   # is waved only here; any OTHER JWT in the same file is still caught.
   '''^eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiJmYWtlIn0\.c2lnbmF0dXJlLXBsYWNlaG9sZGVy$''',
+  # The TWO planted junk bearers the declared-route throttling test sends to prove that a credential
+  # which FAILS validation lands in the strict tier rather than the generous one. Both are deliberately
+  # unusable: the JWT's payload is `{"sub":"nobody"}` and its signature segment decodes to the literal
+  # "not-a-real-signature", so JWKS verification throws; the opaque one carries the api-key shape with a
+  # prefix decoding to "deadbeef" and a repeating-hex tail, so the api-key store resolves nothing. They
+  # are the test's subject matter — a credential that does NOT authenticate — and there is nothing to
+  # rotate. Anchored to their EXACT values, so any OTHER bearer in the same file is still caught.
+  '''^eyJhbGciOiJSUzI1NiJ9\.eyJzdWIiOiJub2JvZHkifQ\.bm90LWEtcmVhbC1zaWduYXR1cmU$''',
+  '''^rk_ZGVhZGJlZWY\.0123456789abcdef0123456789abcdef0123456789abcdef$''',
 ]

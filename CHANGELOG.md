@@ -68,6 +68,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   status carries — the `Idempotency-Key` ones, which never replay a result, and the run a request was
   holding being ended on demand, whose outcome a same-key retry does replay.
 
+- **Declared routes are rate limited, and the tier is decided after the credential has been
+  validated.** Spec-declared `api[]` routes carried no throttle at all, so the only place a
+  deployment could bound their load was a front proxy — and a proxy cannot validate a Bearer token.
+  All it can see is *whether* an `Authorization` header was sent, which makes a tier decided there
+  forgeable: junk in the header buys the generous allowance and switches the protection off. The
+  throttle now sits on the declared-route chain itself, behind the middleware that validates the
+  credential and in front of the one that demands a principal, so the question it asks is whether the
+  credential actually validated. A call with no credential, or with one that failed to validate — an
+  expired or forged token, an unknown API key — is counted in a **strict** bucket keyed on the client
+  source (the socket peer, or the forwarded address when a **configured** trusted proxy set the
+  forwarding header), at 30 requests per minute. Every unvalidated shape from one source shares that
+  one budget, so alternating a junk JWT, a junk API key, and no header at all does not multiply an
+  anonymous caller's allowance. A call carrying a **validated** credential is counted in a
+  **generous** bucket keyed on the tenant *and* the principal — the user or the API key, each with
+  its own budget, the same principal in two organizations counted separately — at 600 requests per
+  minute, sized so first-party automation calling in bursts is not locked out. **What a consumer
+  observes:** a declared route can now answer **`429 RATE_LIMITED`**, in the standard error envelope,
+  carrying the retry advice twice — a **`Retry-After`** header in **seconds** (how much of the window
+  is left, never below `1`) and `error.details.retryAfterMs` in the body, the same field the auth
+  routes' throttle already emits. `Retry-After` is not a CORS-safelisted response header, so it has
+  been added to the response headers the platform exposes to cross-origin browser clients (alongside
+  the request-id echo, the pagination pair and the idempotent-replay signal) — a `fetch` client can
+  now read the back-off it is given, on this `429` and on a transient run's `502` alike. On an
+  `agent` route the throttle's `429` is distinguishable from a run-outcome `429`: it fires before the
+  route runs, so it answers the error envelope rather than a `RunResult`, no agent executed, and no
+  `Idempotency-Key` reservation was taken or released. Nothing changes under budget — an
+  unauthenticated call still gets its usual `401`, because the throttle bounds load and does not
+  authorize — and the media `playback` route, which mounts on its own token path with its own
+  per-user stream cap, is untouched. The counters are the existing in-process limiter, not a new one
+  and not a shared store, so **each instance counts on its own**: a multi-instance deployment gives
+  a caller one budget per instance it reaches. Treat both numbers as a per-instance floor rather
+  than a cluster-wide ceiling, and keep a shared front-line limit if you need the latter.
+
 - **A persist handler can cap a model-chosen enum column server-side: the `clampValues` hole.** The
   persist templates already re-checked a model-chosen IDENTIFIER against a store before writing it
   (`fkRevalidate`) — the guarantee that makes "never trust the model's choice" structural rather than a
@@ -239,6 +272,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error shape. It behaves like the other terminal classes everywhere the platform already distinguishes
   them — `200` on the synchronous status mapping, no `Retry-After`, and an `Idempotency-Key`
   reservation that is kept and replayed rather than released. No existing run's reported class changes.
+
+- **A store read through the handler data facade comes back in a defined order.** `init.db.select`
+  applied an `ORDER BY` only when the caller passed `opts.orderBy`; without one the rows arrived in
+  whatever order Postgres happened to find them, which it is free to change after a `VACUUM`, on a
+  different plan, or under a parallel scan. A handler taking a window of a store — `{ limit: 200 }`
+  with no ordering, sorted afterwards in the client — therefore received *some* 200 rows, neither the
+  newest nor the oldest, and which ones it received shifted as the table churned. A read that declares
+  no ordering is now ordered by `id` ascending: the same default the declarative `list` route has
+  always applied, so both read paths order alike. What a consumer observes: an unordered `select` that
+  used to come back in insertion order — which is what an untouched table tends to give — now comes
+  back in `id` order, and `id` is a server-generated UUID, so that is not insertion order; a bounded
+  unordered read returns the same window on every call rather than an arbitrary one. A caller that
+  passes its own `orderBy` is unaffected — the ordering it declares is emitted verbatim, with no
+  tiebreaker appended, so the statement, the rows and their order are exactly what they were. A
+  declarative view is affected without owning a line of handler code, since the views runtime reads
+  through the same facade: a `single` view that declares no `order_by` and whose filter matches more
+  than one row now serves the lowest-`id` match instead of whichever row the scan reached first, a
+  nested `lookup` field whose sub-read matches more than one row embeds that same lowest-`id` match,
+  and a `collect`, a paged `list`, or a `list`/`counts` sub-read without `order_by` now returns a
+  defined order and a defined window. A handler rendered by `rayspec gen-handler` observes it too: a
+  generated lookup tool reads the store unordered and caps the result in the handler (`maxRows`), so
+  the rows a model receives are now the lowest-`id` matches rather than an arbitrary subset that
+  shifted between runs — the template is unchanged, only what it returns is now defined.
+  The order column is the injected primary key every store table carries, so it always resolves. A
+  generated store has a primary-key index on `id` and a separate index on `tenant_id` but no
+  composite index over the two, so the cost depends on which plan the tenant-scoped read gets: an
+  unbounded one sorts the rows its tenant predicate matched, while a bounded one (`{ limit: n }`)
+  over a tenant holding a large share of the table is answered by walking the primary-key index in
+  `id` order with `tenant_id` as a filter — no sort, but it reads past other tenants' rows, and the
+  smaller a tenant's share the further it reads.
 
 - **A deployment that declares a cron or manual trigger boots before its tenant org exists.**
   `RAYSPEC_CRON_TENANT_ID` names the org a trigger fires under — yet the boot used to verify that org

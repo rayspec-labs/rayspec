@@ -275,12 +275,17 @@ function operationForRoute(
           description:
             "The run failed with the TRANSIENT errorClass rate_limited; the body is the RunResult (status:'error'). " +
             'A same-key retry RE-RUNS the agent (the Idempotency-Key reservation is released) — unless the run ' +
-            'fired a non-idempotent tool, in which case the reservation is kept and the retry replays this 429.',
+            'fired a non-idempotent tool, in which case the reservation is kept and the retry replays this 429. ' +
+            'A 429 can ALSO come from the declared-route request throttle, which fires BEFORE the route runs: ' +
+            "that one carries the standard error envelope (error.code 'RATE_LIMITED', no status/errorClass field) " +
+            'plus error.details.retryAfterMs, always sets Retry-After, and means no agent executed and no ' +
+            'Idempotency-Key reservation was taken or released. The body shape is what distinguishes them.',
           headers: {
             'Retry-After': {
               description:
-                'Seconds to wait before retrying — present when the backend adapter captured retry advice ' +
-                'from the upstream rate limit. Identical on a live 429 and on a replayed one.',
+                'Seconds to wait before retrying. On a run-produced 429 it is present when the backend adapter ' +
+                'captured retry advice from the upstream rate limit, and is identical on a live 429 and on a ' +
+                'replayed one; on a request-throttle 429 it is always present.',
               schema: { type: 'string' },
             },
           },

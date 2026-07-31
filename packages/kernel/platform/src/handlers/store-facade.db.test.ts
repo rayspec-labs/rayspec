@@ -278,6 +278,39 @@ describe('store-facade schema — injected-column drift guard', () => {
   }
 });
 
+/**
+ * The statements Drizzle actually SENT for the calls made inside `fn`. The session logger is the
+ * driver-level seam, so this is the EMITTED SQL — not a re-render of a builder the facade holds
+ * privately — which is what lets a test pin the exact `ORDER BY` a facade read compiles to.
+ */
+async function capturedSql(
+  db: ReturnType<typeof makeDbWithSchema>,
+  fn: () => Promise<unknown>,
+): Promise<string[]> {
+  const session = db as unknown as {
+    session: { logger: { logQuery(query: string, params: unknown[]): void } };
+  };
+  const previous = session.session.logger;
+  const statements: string[] = [];
+  session.session.logger = {
+    logQuery: (query) => {
+      statements.push(query);
+    },
+  };
+  try {
+    await fn();
+  } finally {
+    session.session.logger = previous;
+  }
+  return statements;
+}
+
+/** The `order by …` tail of an emitted statement (empty when the statement carries none). */
+function orderByClause(statement: string): string {
+  const at = statement.indexOf('order by ');
+  return at === -1 ? '' : statement.slice(at);
+}
+
 describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', () => {
   let db: ReturnType<typeof makeDbWithSchema>;
   let productTables: Map<string, PgTable>;
@@ -920,6 +953,96 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
       { orderBy: [{ column: 'title', dir: 'desc' }], limit: 1 },
     );
     expect(top.map((r) => r.title)).toEqual(['c']);
+  });
+
+  it('NO orderBy: the read comes back in `id` asc, not in physical row order', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    const bDb = makeHandlerDb(forTenant(db, TENANT_B), productTables);
+    const titles = ['t1', 't2', 't3', 't4', 't5'];
+    for (const title of titles) await aDb.insert('meetings', { title, completed: false });
+    // A B row that would sort FIRST under the default order (its id is rewritten below to the
+    // lowest of all) — the default must never widen the read past the tenant predicate.
+    await bDb.insert('meetings', { title: 'b-first', completed: false });
+
+    // Make the PHYSICAL order provably differ from `id` order, so the expectation below cannot come
+    // out right by coincidence. First rewrite the ids so `id` asc is the REVERSE of the insert order
+    // (`id` is server-controlled — a handler may never set one, so this goes around the facade) …
+    for (const [i, title] of titles.entries()) {
+      await db.$client.unsafe(`UPDATE ${SCHEMA}.meetings SET id = $1 WHERE title = $2`, [
+        `00000000-0000-0000-0000-00000000000${titles.length - i}`,
+        title,
+      ]);
+    }
+    await db.$client.unsafe(`UPDATE ${SCHEMA}.meetings SET id = $1 WHERE title = 'b-first'`, [
+      '00000000-0000-0000-0000-000000000000',
+    ]);
+    // … then move the row that must come LAST under `id` asc to the END of the heap: an UPDATE
+    // writes a NEW tuple version, so a plain scan returns that row last. Physical order is now
+    // t2,t3,t4,t5,t1 — neither the insert order nor the `id` order.
+    await db.$client.unsafe(`UPDATE ${SCHEMA}.meetings SET completed = true WHERE title = 't1'`);
+
+    const rows = await aDb.select('meetings');
+    expect(rows.map((r) => r.title)).toEqual(['t5', 't4', 't3', 't2', 't1']);
+    for (const r of rows) expect(r.tenant_id).toBe(TENANT_A); // B's lower-id row stays invisible
+    // The same default makes a BOUNDED read deterministic — a `{ limit }`/`{ offset }` caller that
+    // declares no ordering now gets a DEFINED window instead of an arbitrary one.
+    const page = await aDb.select('meetings', {}, { limit: 2, offset: 1 });
+    expect(page.map((r) => r.title)).toEqual(['t4', 't3']);
+  });
+
+  it('a caller-supplied orderBy is emitted UNCHANGED (both directions, multi-column, no tiebreaker)', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    await aDb.insert('meetings', { title: 'b', completed: true });
+    await aDb.insert('meetings', { title: 'a', completed: false });
+    await aDb.insert('meetings', { title: 'b', completed: false });
+
+    // ROWS — asc, desc, and the multi-column shape, each still exactly the caller's order.
+    const up = await aDb.select('meetings', {}, { orderBy: [{ column: 'title', dir: 'asc' }] });
+    expect(up.map((r) => r.title)).toEqual(['a', 'b', 'b']);
+    const down = await aDb.select(
+      'meetings',
+      {},
+      { orderBy: [{ column: 'title', dir: 'desc' }], limit: 1 },
+    );
+    expect(down.map((r) => r.title)).toEqual(['b']);
+    const twoKeys = await aDb.select(
+      'meetings',
+      {},
+      {
+        orderBy: [
+          { column: 'title', dir: 'desc' },
+          { column: 'completed', dir: 'asc' },
+        ],
+      },
+    );
+    expect(twoKeys.map((r) => [r.title, r.completed])).toEqual([
+      ['b', false],
+      ['b', true],
+      ['a', false],
+    ]);
+
+    // SQL — the compiled ORDER BY is EXACTLY the caller's columns: the default appends NOTHING to a
+    // caller's ordering (no `id` tiebreaker), so a pre-existing ordered read is byte-identical.
+    const [ordered] = await capturedSql(db, () =>
+      aDb.select(
+        'meetings',
+        {},
+        {
+          orderBy: [
+            { column: 'title', dir: 'desc' },
+            { column: 'completed', dir: 'asc' },
+          ],
+        },
+      ),
+    );
+    expect(orderByClause(ordered ?? '')).toBe(
+      'order by "meetings"."title" desc, "meetings"."completed" asc',
+    );
+    // … and the default itself is a single `id asc` — the same ordering the HTTP `list` op applies.
+    const [unordered] = await capturedSql(db, () => aDb.select('meetings'));
+    expect(orderByClause(unordered ?? '')).toBe('order by "meetings"."id" asc');
   });
 
   it('orderBy FAILS CLOSED on an unknown column (resolveColumn)', async () => {
