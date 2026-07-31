@@ -44,6 +44,7 @@ import {
   StoreSpec as StoreSpecSchema,
   type ToolSpecConfig,
   ToolSpecConfig as ToolSpecConfigSchema,
+  TYPESCRIPT_SOURCE_EXTENSIONS,
 } from '@rayspec/spec';
 import {
   defaultImporter,
@@ -371,9 +372,6 @@ function isUnderHandlersDir(moduleSpec: string): boolean {
   // Require at least `handlers/<file>` (a bare `handlers` dir or empty is not a handler module).
   return segments.length >= 2 && segments[0] === 'handlers';
 }
-
-/** The TypeScript-source extensions whose compiled `.js` sibling `resolvePackModule` prefers when built. */
-const TYPESCRIPT_SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts']);
 
 /**
  * Resolve a pack module (the pack entry or a pack handler) against the pack root, path-jailed, PREFERRING

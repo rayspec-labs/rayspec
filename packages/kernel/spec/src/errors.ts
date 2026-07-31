@@ -165,8 +165,20 @@ export function specError(code: SpecErrorCode, message: string, path?: string): 
  *                               relies on that reordering (declaring the parent first makes it explicit).
  *                               Acyclic by construction — a true cycle is the fail-closed `fk_cycle`
  *                               error, never a warning.
+ *  - `typescript_handler_module` — a `handlers[].module` path whose extension is TypeScript source
+ *                               (`.ts`/`.tsx`/`.mts`/`.cts`). The production handler loader refuses
+ *                               such a module fail-closed at boot (it loads compiled JavaScript only),
+ *                               so the document needs a build step before it is deployed. It is
+ *                               ADVISORY rather than fail-closed because authoring against TypeScript
+ *                               source is the documented loop: the dev loader takes un-built source
+ *                               through an explicit opt-in, and a build step compiles the modules and
+ *                               rewrites these `module:` paths on the way to a deploy.
  */
-export const SpecWarningCode = z.enum(['softdelete_fk_restrict', 'fk_forward_reference']);
+export const SpecWarningCode = z.enum([
+  'softdelete_fk_restrict',
+  'fk_forward_reference',
+  'typescript_handler_module',
+]);
 export type SpecWarningCode = z.infer<typeof SpecWarningCode>;
 
 /** A single NON-FATAL spec warning (closed code + message + optional JSON path). Never fails a parse. */

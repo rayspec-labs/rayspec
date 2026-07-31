@@ -39,7 +39,7 @@
 import { realpathSync } from 'node:fs';
 import { dirname, extname, isAbsolute, normalize, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import type { HandlerKind, HandlerSpec } from '@rayspec/spec';
+import { type HandlerKind, type HandlerSpec, TYPESCRIPT_SOURCE_EXTENSIONS } from '@rayspec/spec';
 import type { ResolvedHandler } from './handler-runtime.js';
 
 /** A fail-closed loader error — every message names the offending handler id + module for the deploy log. */
@@ -58,13 +58,6 @@ export class HandlerLoadError extends Error {
  * here, the importer only ever sees a vetted absolute path inside the root.
  */
 export type ModuleImporter = (absolutePath: string) => Promise<Record<string, unknown>>;
-
-/**
- * The TypeScript-source file extensions production refuses to load. The set is CLOSED and matched by a
- * plain `extname` comparison — so the guard is DETERMINISTIC and independent of the Node runtime's
- * behavior (whether or not a given Node version transparently type-strips `.ts` on import).
- */
-const TYPESCRIPT_SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts']);
 
 /**
  * The COMPILED-JAVASCRIPT contract (fail-closed). Production loads escape-hatch handler + extension-pack
