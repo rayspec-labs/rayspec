@@ -487,9 +487,17 @@ export class PiAdapter implements Backend {
     // in-flight model request underneath it is not handed an abort — it ends when the session's own
     // teardown reaches it. The platform race is what frees the caller either way.
     const unlinkCancel = onAbortSignal(ctx.signal, () => {
-      void session.abort().catch(() => {
-        /* best effort — a teardown must not surface a new failure */
-      });
+      // `onAbortSignal`'s contract is that this callback does not throw — it runs inside the abort
+      // event dispatch, where an exception is uncatchable by the caller and surfaces as an unhandled
+      // error. `.catch()` alone only covers a REJECTED promise; a synchronous throw from `abort()`
+      // would escape it, so the call itself is guarded too.
+      try {
+        void session.abort().catch(() => {
+          /* best effort — a teardown must not surface a new failure */
+        });
+      } catch {
+        /* best effort — same reason, for a stop that fails synchronously */
+      }
     });
     // Own the session in a try/finally so a THROWING onEvent (during prompt OR the tail
     // drain) NEVER leaks the Pi session — the teardown (unsubscribe/abort/dispose) always runs,
