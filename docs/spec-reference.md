@@ -264,6 +264,51 @@ Routes mount onto the platform's existing authenticated HTTP chain — you do no
 re-implement auth per route. A stream `playback` route is the exception: it
 mounts on the media-token path described above, not on that chain.
 
+## Declared route throttling
+
+Every declared route is rate limited, and the tier a call gets is decided
+**after** the credential has been validated — not from the presence of an
+`Authorization` header. That ordering is the whole point: a front proxy can only
+see *whether* a header was sent, so tiering there is forgeable, and junk in the
+header would buy the generous allowance.
+
+- A call whose credential is **absent or does not validate** — no header, an
+  expired or forged token, an unknown API key — is counted in a **strict** bucket
+  keyed on the client source: the socket peer, or the forwarded client address
+  when a **configured** trusted proxy set the forwarding header. A caller cannot
+  move itself between buckets by varying what it puts in the header; every
+  unvalidated shape from one source shares one budget. The default allowance is
+  **30 requests per minute**.
+- A call carrying a **validated** credential is counted in a **generous** bucket
+  keyed on the tenant *and* the principal — the user or the API key, each with its
+  own budget, and the same principal in two organizations counted separately. The
+  default allowance is **600 requests per minute**, sized so first-party
+  automation calling in bursts is not throttled.
+
+Over budget the call answers **`429 RATE_LIMITED`** with the standard error
+envelope, carrying the retry advice twice: a **`Retry-After`** header in
+**seconds** and `error.details.retryAfterMs` in the body — both saying how long
+the window still has to run, the header never below `1`. Both channels are
+readable by a cross-origin browser client: `Retry-After` is not a CORS-safelisted
+response header, so the platform lists it among the response headers it exposes.
+Under budget nothing changes, so an unauthenticated call still gets its usual
+`401`: the throttle bounds the load, it does not authorize.
+
+On an `agent` route this `429` is **not** the run-outcome `429` described under
+[`errorClass` → HTTP status](#errorclass--http-status), and the two are easy to
+tell apart: the throttle answers the standard error envelope
+(`error.code: "RATE_LIMITED"`, no `status` and no `errorClass`) and always carries
+`Retry-After`, whereas a run-outcome `429` answers the `RunResult` body. The
+throttle fires *before* the route runs, so no agent executed, and no
+`Idempotency-Key` reservation was taken or released — a same-key retry after the
+window is a first attempt, not a re-run.
+
+One limitation to plan around: the counters live **in the process**, so each
+instance of a multi-instance deployment counts on its own and a caller
+effectively gets one budget per instance it reaches. Treat these numbers as a
+per-instance floor rather than a cluster-wide guarantee, and keep a shared
+front-line limit if you need a hard cluster-wide ceiling.
+
 ## Store route runtime semantics
 
 Beyond the grammar, a declared `store` route has a few runtime behaviours worth
@@ -399,6 +444,15 @@ Read the body, not only the status line: a `200` from an `agent` route is not by
 itself a successful run. On every status above, the body's `status` and
 `errorClass` are the authoritative outcome.
 
+Everything in this subsection describes a `429` that a **run** produced. An
+`agent` route can also answer `429` without running at all, when the caller is
+over its own request budget — see
+[Declared route throttling](#declared-route-throttling). That one carries the
+standard error envelope (`error.code: "RATE_LIMITED"`, no `status` and no
+`errorClass`), so the presence of a `RunResult` body is what tells the two apart;
+and because no run started, no `Idempotency-Key` reservation was taken, so the
+release rule below does not apply to it.
+
 One exception to the release rule, and it is deliberate: a run that fired a
 non-idempotent tool (one declared [`idempotent: false`](#tooling)) keeps its
 reservation whatever its class, because re-running it would fire that side effect
@@ -424,15 +478,21 @@ replayable — terminality is what separates them.
 
 ### `Retry-After`
 
-A `429` or a `502` carries a `Retry-After` header, in seconds, whenever the backend
-adapter captured retry advice from the upstream — a rate limit and a `5xx` are
-both classified with whatever advice came back; the value is recorded on the run's
-failing journal step and read back from there. Both of a run's surfaces answer
-identically — the live response, and the same-key replay of a run that kept its
-reservation. The header follows the advice rather than one status, so a `504` does
-not carry one: nothing upstream advises a delay for a deadline this platform
-imposed. When the upstream sent no advice there is no header: it is advice, not a
-guarantee, and a `429` or `502` without it is well-formed.
+A `429` or a `502` **produced by a run** carries a `Retry-After` header, in
+seconds, whenever the backend adapter captured retry advice from the upstream — a
+rate limit and a `5xx` are both classified with whatever advice came back; the
+value is recorded on the run's failing journal step and read back from there.
+Both of a run's surfaces answer identically — the live response, and the same-key
+replay of a run that kept its reservation. The header follows the advice rather
+than one status, so a `504` does not carry one: nothing upstream advises a delay
+for a deadline this platform imposed. When the upstream sent no advice there is
+no header: it is advice, not a guarantee, and a `429` or `502` without it is
+well-formed.
+
+The conditional part is what makes it advice. The request-budget `429` from
+[Declared route throttling](#declared-route-throttling) is a different response —
+the platform knows exactly when its own window reopens, so that one **always**
+carries `Retry-After`, and repeats it as `error.details.retryAfterMs`.
 
 ### Streaming, and a run that throws
 
