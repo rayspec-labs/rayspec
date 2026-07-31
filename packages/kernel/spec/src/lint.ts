@@ -1291,6 +1291,12 @@ export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
   // applies to the pack's entry and to the handler paths in the pack's own manifest never sees this
   // field. A path that ends in `.ts` here is a mis-declared DIRECTORY, which the loader rejects
   // fail-closed at boot with its own message — a different defect, not this rule's.
+  //
+  // The recommendation this message carries also exists as the exported constant
+  // `TYPESCRIPT_OUTPUT_NEEDS_A_BUILD_STEP` in `packages/app/cli/src/gen-handler.ts` (the `--emit ts`
+  // next step). It is DELIBERATELY re-stated here rather than imported: `@rayspec/cli` depends on
+  // `@rayspec/spec`, so the import would run the dependency backwards. The two wordings are kept in
+  // step BY HAND — change one, change the other.
   spec.handlers.forEach((handler, hi) => {
     const ext = extname(handler.module).toLowerCase();
     if (!TYPESCRIPT_SOURCE_EXTENSIONS.has(ext)) return;

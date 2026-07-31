@@ -343,6 +343,8 @@ Phase 2.5 codegen:**
 
 For each detected tool, add:
 - a **`handlers[]`** entry — `{ id, module: handlers/<name>.gen.ts, export: <camelCaseExport>, kind: tool }`.
+  (A generated `.ts` module path raises a non-fatal `doctor` advisory — see the `handlers[]` grammar
+  reference below for what it says and the two ways out at deploy time.)
 - a **`tooling[]`** entry — the model-facing `parameters` (a JSON-Schema `type:object`,
   `additionalProperties:false`). For the **persist** tool this `parameters` IS the structured-output
   contract (the model emits the structured coding shape as the tool ARG — OpenAI enforces native strict
@@ -1011,6 +1013,14 @@ Notes that matter:
 > The `.gen.ts` files are produced by `rayspec gen-handler` from the derived holes (Phase 2.5) — you
 > NEVER hand-author them. They import `@rayspec/handler-sdk` TYPE-ONLY, take ZERO npm deps, and reach
 > the DB ONLY through the injected tenant-bound `init.db`.
+
+> **A generated `.ts` module raises a doctor ADVISORY, not an error.** Each `handlers[].module` that is
+> TypeScript source is reported as a `typescript_handler_module` warning; `ok` stays `true`, so the
+> authoring loop above is unchanged (this is the shape the shipped It.2 golden declares). It is a
+> DEPLOY reminder: `rayspec deploy` loads compiled JavaScript only. Take one of the two documented ways
+> out before deploying — compile the handlers with a build step (`examples/acme-notes-backend/build.mjs`
+> transpiles them and rewrites the spec's `module:` paths to `.js`), or render deployable ESM directly
+> with `rayspec gen-handler --emit js`.
 
 > **`readonly` (grammar affordance — `kind: 'route'` handlers only, out of scope for this skill).** The
 > `HandlerSpec` grammar also accepts an optional **`readonly: true`**. It is meaningful ONLY for a
