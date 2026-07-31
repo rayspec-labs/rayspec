@@ -52,6 +52,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`/health` covers the declared frontend mounts, and its response carries a `frontend` field.** The
+  probe used to report only database reachability, so a deployment that also serves a `frontend[]`
+  mount could answer `200 {"status":"ok","db":"ok"}` while every static asset was still 503 — a deploy
+  tool waiting on that signal reported "ready" while users saw 503. The response is now extended by one
+  additive field, `frontend`, valued `"ok"` or `"unavailable"`, and a mount that cannot be served
+  answers `503` instead of `200`. A mount is servable when its resolved directory is a readable,
+  traversable directory and — for an `spa: true` mount — its `index.html` is a readable file. Both
+  profiles are covered: the full platform (`{"status","db","frontend"}`) and the static profile
+  (`{"status","frontend"}`, still no `db` field). The readiness is computed ONCE at boot and cached, so
+  the probe performs no filesystem access per call no matter how often a load balancer polls it. The
+  existing fields are untouched: same names, same values, and the reachable / unreachable database
+  cases keep their exact `200` / `503`. A deployment that declares no frontend mounts omits the new
+  field entirely and answers byte-for-byte as before. The static profile's boot banner, printed by both
+  `rayspec-serve` and `rayspec deploy`, describes the endpoint accordingly: its `Liveness:` block is now
+  a `Readiness:` one naming the `frontend` field and the `503`.
+
 - **A boot secret that normalization actually changed now says so, once, at boot.** `DATABASE_URL`,
   `RAYSPEC_JWT_SIGNING_KEY` and `RAYSPEC_API_KEY_PEPPER` are trimmed on read — leading and trailing
   whitespace and a leading byte-order mark go, interior bytes stay — and until now that happened in

@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FrontendSpec } from '@rayspec/spec';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { staticBootBanner } from './banner.js';
 import {
   assembleStaticServer,
   DEFAULT_FRONTEND_CSP,
@@ -99,14 +100,29 @@ describe('static boot — serves the frontend', () => {
   });
 });
 
-describe('static boot — /health is liveness-only (no database)', () => {
-  it('GET /health → 200 {status:"ok"} with the db field OMITTED (never a lie, never a 503)', async () => {
+describe('static boot — /health carries no database field', () => {
+  it('GET /health → 200 with the db field OMITTED (never a lie, never a DB 503)', async () => {
     const { app } = buildStatic();
     const res = await app.request('/health');
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
-    expect(body).toEqual({ status: 'ok' });
+    // `frontend` reports the boot-time readiness of the served mount; `db` is absent — a static cell
+    // has no database. (health-frontend-mounts.test.ts owns the mount-readiness cases.)
+    expect(body).toEqual({ status: 'ok', frontend: 'ok' });
     expect(body).not.toHaveProperty('db');
+  });
+});
+
+describe('static boot — the banner agrees with what /health answers', () => {
+  it('the boot banner describes /health as readiness — the string an operator wires from', () => {
+    // `staticBootBanner` is printed at every static boot (serve.ts and the CLI's deploy), and it is
+    // the only place the endpoint's meaning is stated at runtime. Pinned so a later change to what
+    // /health reports cannot leave the banner describing the old behaviour.
+    const banner = staticBootBanner(buildStatic(), 'http://localhost:8080');
+    expect(banner).toContain('  Readiness:');
+    expect(banner).toContain("reports the declared mounts' boot-time");
+    expect(banner).toContain('503 when a mount cannot be served');
+    expect(banner).not.toMatch(/liveness/i);
   });
 });
 

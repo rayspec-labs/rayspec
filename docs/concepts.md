@@ -151,9 +151,10 @@ A backend-profile document can serve a built web UI itself, in one of two forms.
   no JWT signing key, no API-key pepper, and **no auth / OIDC / run route mounted at
   all**. The auth-and-database composition is not merely left empty — the boot
   branches away from it entirely, so there is provably no authenticated surface
-  behind the assets. `/health` is liveness-only (`200 {"status":"ok"}`, with no
-  database probe). This is the form for serving a built single-page app directly,
-  with no reverse proxy in front.
+  behind the assets. `/health` runs no database probe; it reports whether the declared
+  mounts can be served — `200 {"status":"ok","frontend":"ok"}`, or `503` with
+  `"frontend":"unavailable"`. This is the form for serving a built single-page app
+  directly, with no reverse proxy in front.
 
 Because a static profile runs with no proxy in front, the app emits the two response
 security headers a proxy would normally add — `Content-Security-Policy` and
