@@ -179,10 +179,13 @@ export function specError(code: SpecErrorCode, message: string, path?: string): 
  *                               route mounts on — so a Bearer token alone reads nothing there. The media
  *                               token is minted through `init.mintPlayToken`, a capability only a
  *                               `{kind:'handler'}` route's handler receives, so a deployment declaring no
- *                               route that mints one leaves the playback route unreachable. The advisory
- *                               states that authorization shape; it does NOT claim the mint route is
- *                               missing, because the mint call lives in handler module source and this
- *                               pass is pure over the parsed document.
+ *                               route that mints one leaves the playback route unreachable WITHOUT an
+ *                               externally issued token (the verifier authenticates a token on its
+ *                               signature under the media signing key plus the pinned issuer/audience,
+ *                               not on where it was minted). The advisory states that authorization
+ *                               shape; it does NOT claim the mint route is missing, because the mint
+ *                               call lives in handler module source and this pass is pure over the
+ *                               parsed document.
  */
 export const SpecWarningCode = z.enum([
   'softdelete_fk_restrict',

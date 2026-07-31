@@ -308,6 +308,17 @@ api:
     expect(warnings[0]?.message).toContain('init.mintPlayToken');
   });
 
+  it('QUALIFIES the unreachability — "without an externally issued token", not unreachable outright', () => {
+    // The media-token verifier authenticates a token on its signature under the media signing key
+    // plus the pinned issuer/audience/exp (`createMediaTokenService().verify`, packages/compose/
+    // api-auth/src/media/media-token.ts) — nothing ties a token to a mint that happened in this
+    // process. A deployment that shares that key with another signer therefore reaches the route
+    // while declaring no mint route at all, so the advisory must not claim the route is unreachable
+    // outright. Pinned here so the qualifier cannot be dropped again without a test going red.
+    const warnings = lintSpecWarnings(parseOk(streamSpec('playback')));
+    expect(warnings[0]?.message).toContain('unreachable without an externally issued token');
+  });
+
   it('does NOT fire for an INGEST stream route (it is on the Bearer chain, not the token path)', () => {
     expect(lintSpecWarnings(parseOk(streamSpec('ingest')))).toEqual([]);
   });
