@@ -344,7 +344,8 @@ Phase 2.5 codegen:**
 For each detected tool, add:
 - a **`handlers[]`** entry — `{ id, module: handlers/<name>.gen.ts, export: <camelCaseExport>, kind: tool }`.
   (A generated `.ts` module path raises a non-fatal `doctor` advisory — see the `handlers[]` grammar
-  reference below for what it says and the two ways out at deploy time.)
+  reference below for what it says and the two ways out, which you must take **before the Phase-5
+  boot**, not just before a deploy: both boot paths refuse an un-built `.ts` module.)
 - a **`tooling[]`** entry — the model-facing `parameters` (a JSON-Schema `type:object`,
   `additionalProperties:false`). For the **persist** tool this `parameters` IS the structured-output
   contract (the model emits the structured coding shape as the tool ARG — OpenAI enforces native strict
@@ -571,7 +572,9 @@ Either path runs the same boot the composition root runs, registers the product 
 backend, and — for It.2 — resolves the `kind:'tool'` handlers via the path-jailed loader + builds the
 tenant-bound `HandlerDb` facade. It serves (default `http://127.0.0.1:8788`) and prints a banner with the
 base URL. (The local-boot wrapper's `RAYSPEC_HANDLER_ROOT` defaults to the spec's directory, so the
-relative `handlers/<name>.gen.ts` module paths resolve.)
+relative `handlers/<name>` module paths RESOLVE against it. Resolving is not loading: both paths then
+import through the guarded importer, which refuses a TypeScript-source module fail-closed — so build the
+generated handlers BEFORE this phase, see the `handlers[]` grammar reference.)
 
 **LOCAL / pre-hardening / not internet-facing** — the boot is local-only by design (the hardening gate guards external
 exposure). Make this clear to the user; never put it behind a public address.
@@ -1015,12 +1018,18 @@ Notes that matter:
 > the DB ONLY through the injected tenant-bound `init.db`.
 
 > **A generated `.ts` module raises a doctor ADVISORY, not an error.** Each `handlers[].module` that is
-> TypeScript source is reported as a `typescript_handler_module` warning; `ok` stays `true`, so the
-> authoring loop above is unchanged (this is the shape the shipped It.2 golden declares). It is a
-> DEPLOY reminder: `rayspec deploy` loads compiled JavaScript only. Take one of the two documented ways
-> out before deploying — compile the handlers with a build step (`examples/acme-notes-backend/build.mjs`
-> transpiles them and rewrites the spec's `module:` paths to `.js`), or render deployable ESM directly
-> with `rayspec gen-handler --emit js`.
+> TypeScript source is reported as a `typescript_handler_module` warning; `ok` stays `true`, so spec
+> validation and the Phase-2/2.5 authoring loop above are unchanged (this is the shape the shipped It.2
+> golden declares). It is a **BOOT** reminder, and it bites at the FIRST boot — not only at a deploy.
+> Handlers are loaded through the guarded importer, which refuses a TypeScript-source module fail-closed
+> ("production loads compiled JavaScript only"), and BOTH Phase-5 paths use it: the `@rayspec/local-boot`
+> wrapper (Path A) injects no dev/test importer, so `pnpm --filter @rayspec/local-boot serve` aborts on a
+> `.ts` module exactly like `rayspec deploy` (Path B) — `deploy aborted at [roll out]: handler load
+> failed`. So take one of the two documented ways out **before the Phase-5 boot**, not merely before a
+> deploy: compile the handlers with a build step (`examples/acme-notes-backend/build.mjs` transpiles them
+> and rewrites the spec's `module:` paths to `.js`), or render deployable ESM directly with
+> `rayspec gen-handler --emit js`. (The advisory's own text says "before deploying" — read it as *before
+> booting*; the un-built `.ts` shape is currently deploy-AND-local-boot-blocked.)
 
 > **`readonly` (grammar affordance — `kind: 'route'` handlers only, out of scope for this skill).** The
 > `HandlerSpec` grammar also accepts an optional **`readonly: true`**. It is meaningful ONLY for a
