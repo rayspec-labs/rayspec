@@ -586,3 +586,58 @@ agents:
     expect(lintSpecWarnings(parseOk(yaml))).toEqual([]);
   });
 });
+
+describe('lintSpecWarnings — a declared cron/manual trigger needs a deployment tenant at boot', () => {
+  /** A durable-worker spec with one fireable trigger of the given kind (+ a schedule for cron). */
+  const triggerSpec = (kind: 'cron' | 'manual' | 'webhook') => `
+version: '1.0'
+metadata:
+  name: fireable
+deployment:
+  durableWorker: true
+agents:
+  - id: digester
+    name: digester
+    backend: pi
+    model: pi-model
+    instructions: Summarize.
+triggers:
+  - name: nightly-digest
+    kind: ${kind}
+${kind === 'cron' ? "    schedule: '0 2 * * *'\n" : ''}    action: { kind: agent, agent: digester }
+`;
+
+  it('FIRES for a cron trigger, naming the variable and what it must hold (and the spec still parses ok)', () => {
+    const warnings = lintSpecWarnings(parseOk(triggerSpec('cron')));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.code).toBe('cron_tenant_required');
+    expect(warnings[0]?.path).toBe('triggers[0].kind');
+    // The whole point of the advisory: the operator learns the requirement from the tooling instead
+    // of from a boot error, so the message must name the variable AND what a valid value is.
+    expect(warnings[0]?.message).toContain('RAYSPEC_CRON_TENANT_ID');
+    expect(warnings[0]?.message).toContain('org id');
+    expect(warnings[0]?.message).toContain('nightly-digest');
+  });
+
+  it('FIRES for a manual trigger too — it is fired by the same worker under the same tenant', () => {
+    const warnings = lintSpecWarnings(parseOk(triggerSpec('manual')));
+    expect(warnings.map((w) => w.code)).toEqual(['cron_tenant_required']);
+  });
+
+  it('does NOT fire for a RESERVED webhook trigger (no fire path, so no deployment tenant)', () => {
+    expect(lintSpecWarnings(parseOk(triggerSpec('webhook')))).toEqual([]);
+  });
+
+  it('does NOT fire for a document that declares no trigger at all', () => {
+    const yaml = `
+version: '1.0'
+metadata:
+  name: no-triggers
+stores:
+  - name: notes
+    columns:
+      - { name: title, type: text }
+`;
+    expect(lintSpecWarnings(parseOk(yaml))).toEqual([]);
+  });
+});

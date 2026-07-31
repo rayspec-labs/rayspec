@@ -217,6 +217,17 @@ export function specError(code: SpecErrorCode, message: string, path?: string): 
  *                               carries — the column is unconstrained `text`, and the instructions
  *                               name it — and asserts nothing about it being input. Advisory for
  *                               exactly that reason: a heuristic over prose must never fail a deploy.
+ *  - `cron_tenant_required`   — the document declares a `cron` or `manual` trigger. Both are fired by
+ *                               the durable worker under ONE deployment tenant, read at boot from
+ *                               `RAYSPEC_CRON_TENANT_ID` (an org id). That variable is not a document
+ *                               field, so the requirement is invisible in the spec and an author who
+ *                               does not know it meets it as a refused boot — this advisory states it
+ *                               at authoring time instead. It is ADVISORY and necessarily so: whether
+ *                               the variable is set belongs to the ENVIRONMENT, which this pass (pure
+ *                               over the document) cannot read, so erroring would fail every valid
+ *                               cron document including the ones that set it correctly. The org the
+ *                               id names does NOT have to exist at boot — the scheduler starts and
+ *                               skips each firing until it does — but the variable itself must be set.
  */
 export const SpecWarningCode = z.enum([
   'softdelete_fk_restrict',
@@ -224,6 +235,7 @@ export const SpecWarningCode = z.enum([
   'typescript_handler_module',
   'stream_playback_media_token',
   'agent_untrusted_field_precedence',
+  'cron_tenant_required',
 ]);
 export type SpecWarningCode = z.infer<typeof SpecWarningCode>;
 

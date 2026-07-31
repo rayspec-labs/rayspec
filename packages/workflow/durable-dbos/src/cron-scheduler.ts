@@ -125,6 +125,14 @@
  * dispatch are tenant-scoped structurally). Multi-tenant cron fan-out (one schedule fanning across
  * tenants) is a hosted-SaaS concern, NOT built here.
  *
+ * THE TENANT IS LATE-BOUND. The id is deployment CONFIGURATION, but the org it names is application
+ * DATA that is often created only after the deployment is up — so this scheduler is wired without any
+ * claim that the org exists. Instead `#fire` asks the injected `tenantExists` probe BEFORE the reserve,
+ * on EVERY firing: a firing under a tenant that does not (yet) exist dispatches NOTHING and emits one
+ * line. Fail-closed is unchanged, it just lives at the firing rather than at wiring time — and because
+ * the skip runs before the reserve, it consumes no firing instant, so the deployment starts firing the
+ * moment the org appears, with no restart.
+ *
  * SECURITY NOTE (reserved kinds): when webhook/event are LATER built, their payload is DATA fed to the
  * agent/handler via the opaque path — NEVER instructions. Recorded as a reserved-seam note; not built.
  */
@@ -254,6 +262,35 @@ export function cronRunId(triggerName: string, instant: Date): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
+/** A minimal logger sink for the skipped-firing line (the deployment can inject; defaults to `console`). */
+export interface CronSchedulerLogger {
+  warn(message: string): void;
+}
+
+/** The default sink — one `console.warn` per skipped firing. */
+const CONSOLE_LOGGER: CronSchedulerLogger = {
+  warn: (m) => console.warn(m),
+};
+
+/**
+ * The ONE line a firing skipped for an absent deployment tenant emits. Pure + exported so it is
+ * directly testable and so its wording has a single source of truth.
+ *
+ * It is deliberately ONE line and not an error: an absent tenant is an EXPECTED, transient state
+ * during bootstrap, not a fault. A stack trace per skipped firing would read as a broken deployment
+ * and, on a per-minute crontab, would bury the log. Everything an operator needs to act is on it —
+ * which trigger, which instant, which tenant, and what to do — and the tenant id is deployment
+ * configuration (an org id), never a secret.
+ */
+export function cronTenantAbsentLog(triggerName: string, tenantId: string, instant: Date): string {
+  return (
+    `[cron] SKIPPED trigger '${triggerName}' for ${firingInstantIso(instant)} — the deployment ` +
+    `tenant ${tenantId} (RAYSPEC_CRON_TENANT_ID) is not an existing org, so nothing was ` +
+    'dispatched. The firing instant was NOT consumed; firing resumes as soon as the org exists ' +
+    '(no restart needed).'
+  );
+}
+
 /**
  * The DEPENDENCIES the cron scheduler dispatches with. The scheduler is engine-aware (it owns the DBOS
  * scheduled-workflow registration) but its dispatch deps are NEUTRAL — the executor for agent runs,
@@ -281,6 +318,22 @@ export interface CronSchedulerDeps {
    * GUC-tx handler-invocation seam — it stays the single source of truth in `@rayspec/platform`).
    */
   readonly invokeTriggerHandler: typeof InvokeTriggerHandlerFn;
+  /**
+   * Does the deployment tenant currently EXIST as a usable org? Asked BEFORE every firing (see
+   * `#fire`), never cached — the whole point is that the answer may flip from false to true while this
+   * process runs, and the very next firing must observe it without a restart.
+   *
+   * INJECTED rather than implemented here: `orgs` is a platform/global table this engine package has no
+   * business querying (it holds a `TenantDb` and dispatches through the chokepoint), so the composition
+   * root supplies the probe (`cronTenantExists`) and stays the single source of truth for what "usable"
+   * means — currently an org row that is not soft-deleted.
+   *
+   * REQUIRED, not optional: a scheduler that cannot answer this question would dispatch under a tenant
+   * it knows nothing about, which is the one thing this runtime must never do.
+   */
+  readonly tenantExists: () => Promise<boolean>;
+  /** Where the ONE line per skipped firing goes (default `console`). */
+  readonly logger?: CronSchedulerLogger;
   /**
    * The look-back window (ms) a CATCH-UP trigger makes up missed intervals within (default
    * {@link DEFAULT_CATCHUP_LOOKBACK_MS}). A scheduled REPLAY of a catch-up interval older than this is
@@ -346,6 +399,8 @@ export class DbosCronScheduler {
    * scheduling loop never touches them and the cron boot banner (`cronTriggerNames`) stays cron-only.
    */
   readonly #manual: Map<string, TriggerDescriptor & { kind: 'manual' }>;
+  /** Where the one-line skipped-firing notice goes (the injected sink, or `console`). */
+  readonly #logger: CronSchedulerLogger;
   #registered = false;
 
   /**
@@ -358,6 +413,7 @@ export class DbosCronScheduler {
   constructor(descriptors: readonly TriggerDescriptor[], deps: CronSchedulerDeps) {
     this.#deps = deps;
     this.#catchUpLookbackMs = deps.catchUpLookbackMs ?? DEFAULT_CATCHUP_LOOKBACK_MS;
+    this.#logger = deps.logger ?? CONSOLE_LOGGER;
     this.#crons = new Map();
     this.#manual = new Map();
     for (const d of descriptors) {
@@ -477,8 +533,9 @@ export class DbosCronScheduler {
   }
 
   /**
-   * The shared fire path — reserve the tenant-scoped firing marker, then (iff we won, and — for a
-   * catch-up make-up replay — within the look-back window) dispatch by action kind. The
+   * The shared fire path — confirm the deployment tenant exists, reserve the tenant-scoped firing
+   * marker, then (iff we won, and — for a catch-up make-up replay — within the look-back window)
+   * dispatch by action kind. The
    * reserve-BEFORE-dispatch ordering is the IDEMPOTENCY / at-MOST-once-per-instant guarantee (it can
    * never DOUBLE-fire). By DEFAULT it is NOT at-least-once: a crash/throw in the window between the
    * reserve commit and the dispatch completing DROPS that one occurrence (on recovery the body re-runs,
@@ -489,8 +546,8 @@ export class DbosCronScheduler {
    * @param opts.fromSchedule whether this fire came from the DBOS scheduled-workflow body (an active
    *   tick, a crash-recovery replay, or a catch-up make-up replay). Only a `fromSchedule` fire of a
    *   `catchUp` trigger applies the bounded look-back; a `fireNow` (opts absent) never does.
-   * @returns `true` iff this call won the reserve and dispatched; `false` if it was a deduped no-op OR a
-   *   bounded make-up skip.
+   * @returns `true` iff this call won the reserve and dispatched; `false` if it was a deduped no-op, a
+   *   bounded make-up skip, OR a skip for a deployment tenant that does not exist (yet).
    */
   async #fire(
     descriptor: TriggerDescriptor & { kind: 'cron' | 'manual' },
@@ -500,6 +557,24 @@ export class DbosCronScheduler {
     const { db, tenantId } = this.#deps;
     const key = firingKey(descriptor.name, instant);
     const tdb = forTenant(db, tenantId);
+
+    // ── Does the deployment tenant exist? (the fail-closed tenant gate — BEFORE the reserve) ──────
+    // The deployment's tenant id is configuration; the ORG it names is application data that may be
+    // created after this process booted. So the existence question is asked HERE, per firing, and a
+    // firing under a tenant this deployment cannot resolve DISPATCHES NOTHING.
+    //
+    // BEFORE the reserve, for two reasons, and the order is load-bearing:
+    //  1. the reserve INSERT carries the `idempotency_keys.tenant_id → orgs` FK, so attempting it for a
+    //     nonexistent org raises a raw FK violation — a stack per skipped firing instead of one line;
+    //  2. a skip must not CONSUME the instant. The reserve is the at-most-once marker: writing it would
+    //     permanently burn this (trigger, instant), so the slot could never fire even after the org
+    //     appears. Skipping before it leaves the slot untouched, so the very same instant still fires
+    //     (an explicit re-fire, or a catch-up trigger's make-up replay of the interval it was down for).
+    if (!(await this.#deps.tenantExists())) {
+      // ONE line — the skip is an expected bootstrap state, not a fault (see `cronTenantAbsentLog`).
+      this.#logger.warn(cronTenantAbsentLog(descriptor.name, tenantId, instant));
+      return false;
+    }
 
     // ── Reserve the firing marker BEFORE dispatch (the idempotency / exactly-once-cap guard) ──────
     // A single INSERT..ON CONFLICT DO NOTHING RETURNING over UNIQUE(tenant, scope, idem_key). The

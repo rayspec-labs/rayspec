@@ -602,6 +602,12 @@ triggers:
 Firing a scheduled trigger requires a durable worker (see `deployment`); the run
 surface refuses an off-request fire when no worker is configured.
 
+A `cron` or `manual` trigger fires under one deployment tenant, named by the
+`RAYSPEC_CRON_TENANT_ID` environment variable (an org id). Declaring either kind
+makes that variable required at boot — `doctor` and `plan` say so. The org it
+names does not have to exist yet: the deployment boots, skips each firing with one
+log line while the org is missing, and starts firing once it exists.
+
 ## `handlers`
 
 A **handler** is the escape hatch: when a route, tool, or trigger needs logic the
