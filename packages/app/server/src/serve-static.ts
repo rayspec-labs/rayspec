@@ -263,15 +263,58 @@ function serveNotFoundPage(
 export type FrontendReadiness = 'ok' | 'unavailable';
 
 /**
- * Can every declared mount in `mounts` be served from disk? `specDir` is the spec file's directory,
- * against which each mount's `dir` is resolved — the SAME resolution `mountFrontend` performs.
+ * Which requirement a declared mount fails when it cannot be served:
+ *   - `'dir'`       — the resolved `dir` is not a readable, traversable directory;
+ *   - `'spa-index'` — the directory is fine, but an `spa:true` mount has no readable `index.html`.
+ * The two are reported apart because the boot guard names the offending file in its abort message.
+ */
+export type MountUnservableReason = 'dir' | 'spa-index';
+
+/**
+ * Can ONE declared mount be served from disk? `undefined` when it can, else which requirement it
+ * fails. `specDir` is the spec file's directory, against which `mount.dir` is resolved — the SAME
+ * resolution `mountFrontend` performs.
  *
  * "Servable" is what `mountFrontend` needs from disk for the mount to answer anything:
  *   - the resolved `dir` is a directory, readable AND traversable (`statSync().isDirectory()` alone
  *     passes a mode-0000 directory, from which every asset then EACCES-misses — so `R_OK|X_OK` too);
  *   - for an `spa:true` mount, `dir/index.html` is a readable FILE — the fallback that mount serves
  *     for every unmatched deep link, so without it the SPA answers nothing.
- * An empty `mounts` list is `'ok'`: nothing is declared, so nothing can be unservable.
+ *
+ * THE ONE definition of servable, shared by the two callers that must not disagree: the deploy guard
+ * in `deployDeclaredSpec`, which fail-closes the FULL-PLATFORM boot on an unservable mount, and
+ * `frontendMountsReadiness` below, which is what `/health` reports. When they disagreed, a mount that
+ * failed only the second check booted into a readiness the process could never recover from. The
+ * static (frontend-only) boot has no such gate: `assembleStaticServer` reports an unservable mount
+ * through `frontendMountsReadiness` and serves on.
+ */
+export function mountUnservableReason(
+  mount: FrontendSpec,
+  specDir: string,
+): MountUnservableReason | undefined {
+  const baseDir = resolve(specDir, mount.dir);
+  try {
+    if (!statSync(baseDir).isDirectory()) return 'dir';
+    accessSync(baseDir, constants.R_OK | constants.X_OK);
+  } catch {
+    // Missing, unreadable, or not the expected kind — all the same answer: it cannot be served.
+    return 'dir';
+  }
+  if (!mount.spa) return undefined;
+  const index = join(baseDir, 'index.html');
+  try {
+    if (!statSync(index).isFile()) return 'spa-index';
+    accessSync(index, constants.R_OK);
+  } catch {
+    return 'spa-index';
+  }
+  return undefined;
+}
+
+/**
+ * Can every declared mount in `mounts` be served from disk? `'ok'` when `mountUnservableReason` clears
+ * every one of them, else `'unavailable'`. An empty `mounts` list is `'ok'`: nothing is declared, so
+ * nothing can be unservable.
  *
  * CALL THIS ONCE AT BOOT and cache the result. `/health` is polled by load balancers every second; the
  * probe must answer from the cached value and touch no filesystem per call.
@@ -281,19 +324,7 @@ export function frontendMountsReadiness(
   specDir: string,
 ): FrontendReadiness {
   for (const mount of mounts) {
-    const baseDir = resolve(specDir, mount.dir);
-    try {
-      if (!statSync(baseDir).isDirectory()) return 'unavailable';
-      accessSync(baseDir, constants.R_OK | constants.X_OK);
-      if (mount.spa) {
-        const index = join(baseDir, 'index.html');
-        if (!statSync(index).isFile()) return 'unavailable';
-        accessSync(index, constants.R_OK);
-      }
-    } catch {
-      // Missing, unreadable, or not the expected kind — all the same answer: it cannot be served.
-      return 'unavailable';
-    }
+    if (mountUnservableReason(mount, specDir) !== undefined) return 'unavailable';
   }
   return 'ok';
 }
