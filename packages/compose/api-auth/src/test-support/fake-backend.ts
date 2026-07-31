@@ -101,7 +101,7 @@ export class FakeRunBackend implements Backend {
    *    leak its pooled DB connection (the cascade-timeout failure mode). `pendingRelease` is tracked
    *    so an afterEach can free a run that an assertion failure left blocked.
    */
-  arm(): { release: () => void; arrived: Promise<void> } {
+  arm(): { release: () => void; arrived: Promise<void>; released: () => boolean } {
     let signalArrived!: () => void;
     this.gateArrived = new Promise<void>((r) => {
       signalArrived = r;
@@ -125,7 +125,10 @@ export class FakeRunBackend implements Backend {
       if (typeof cap.unref === 'function') cap.unref();
       return blockP.finally(() => clearTimeout(cap));
     };
-    return { release, arrived: this.gateArrived };
+    // `released()` reports whether the gate was ever opened — by the test or by the hard cap. A test
+    // that claims a held run ended for some OTHER reason (it was aborted) can assert on it instead of
+    // on the mere existence of the releaser, which is true whatever happened.
+    return { release, arrived: this.gateArrived, released: () => released };
   }
 
   /**
