@@ -422,6 +422,12 @@ describe('DBOS worker cancellation', () => {
     const job: RunJob = { runId, tenantId: TENANT, agentId: 'echo-agent', input: 'engine-cancel' };
     await markRunCancelled(forTenant(db, TENANT), runId);
     await executor.enqueue(TENANT, job);
+    // PREMISE, asserted rather than assumed: the queue has not dequeued this job yet. The marker makes
+    // the body a fast no-op, so a poller that fired between the enqueue and the cancel would carry the
+    // workflow to `succeeded` — a correct outcome, but produced by the WORKER's marker gate (covered
+    // above) rather than by the engine seam this test is about. Asserting the premise turns that
+    // ordering into a one-line diagnosis instead of a confusing failure on the line below.
+    expect(await executor.status(runId)).toBe('enqueued');
     await executor.cancel(runId);
     expect(await executor.status(runId)).toBe('cancelled');
     expect(backend.liveRuns).toBe(0);

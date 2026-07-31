@@ -18,12 +18,14 @@
  */
 
 import type { NeutralTool } from '@rayspec/core';
+import { forTenant } from '@rayspec/db';
 import type {
   DurableExecutor,
   DurableExecutorIdentity,
   EnqueueResult,
   RunJob,
 } from '@rayspec/platform';
+import { isRunTainted } from '@rayspec/platform';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentRegistry, AgentRegistryEntry } from '../app-context.js';
 import { FakeRunBackend } from '../test-support/fake-backend.js';
@@ -333,7 +335,10 @@ describe('POST /v1/runs/:id/cancel — an EXECUTING run receives the signal', ()
     // The held request settles WITHOUT the gate ever being released: the run itself was aborted.
     const heldRes = await held;
     expect(heldRes.status).toBe(409);
-    expect(armed.release).toBeTypeOf('function');
+    // This is the load-bearing half of that claim. The gate was never opened — not by this test and
+    // not by the leak-proof hard cap — so the only thing that could have ended the held run is the
+    // abort. (Asserting that `release` is a function proves nothing: it is one either way.)
+    expect(armed.released()).toBe(false);
 
     // The run's terminal outcome is the cancellation.
     const read = await jsonRequest(h.app, 'GET', `/v1/runs/${runId}`, {
@@ -387,6 +392,46 @@ describe('POST /v1/runs/:id/cancel — the non-idempotent-taint quarantine', () 
     const replayed = (await retry.json()) as { runId: string; errorClass: string | null };
     expect(replayed.runId).toBe(runId);
     expect(replayed.errorClass).toBe('cancelled');
+  });
+
+  it('an UNTAINTED cancelled run keeps its reservation too — it is the cancellation, not the taint', async () => {
+    const { token, orgId } = await principal('cancelkeep@example.com', 'CancelKeepOrg');
+    const headers = {
+      authorization: `Bearer ${token}`,
+      accept: 'application/json',
+      'idempotency-key': 'cancel-keep-1',
+    };
+    // The discriminator. The test above fires a non-idempotent tool, so its quarantine is explained by
+    // the TAINT marker on its own — it would hold with no cancellation rule at all. This run fires
+    // nothing and is left untainted, so the ONLY reason its key must not be released is that the run
+    // was cancelled: `cancelled` is a terminal class, and a terminal run's reservation is kept and
+    // replayed rather than freed the way a transient failure's is.
+    backend.fireToolBeforeError = false;
+    const armed = backend.arm();
+    const runsBefore = backend.liveRuns;
+
+    const held = jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+      body: { input: 'keep-the-key' },
+      headers,
+    });
+    await armed.arrived;
+    const runId = await waitForHeader(orgId, 'running');
+    expect(await isRunTainted(forTenant(h.deps.db, orgId), runId)).toBe(false);
+
+    await jsonRequest(h.app, 'POST', `/v1/runs/${runId}/cancel`, {
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+    });
+    await held;
+
+    const retry = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+      body: { input: 'keep-the-key' },
+      headers,
+    });
+    // Replayed, not re-executed: same runId, the cancelled class, and no second run() invocation.
+    const replayed = (await retry.json()) as { runId: string; errorClass: string | null };
+    expect(replayed.runId).toBe(runId);
+    expect(replayed.errorClass).toBe('cancelled');
+    expect(backend.liveRuns).toBe(runsBefore + 1);
   });
 });
 

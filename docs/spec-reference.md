@@ -825,7 +825,12 @@ pagination — see [Store route runtime semantics](#store-route-runtime-semantic
 The injected data facade a route handler receives supports **equality filters,
 `orderBy`, `limit`/`offset` paging, and a filtered `count`** over the tenant-scoped
 store (still tenant-predicated beneath, and still equality-only — no `>`/`<`/`like`
-operators). One authorization consequence to know: **a `handler`-kind route is gated
+operators). A read that passes **no** `orderBy` comes back in `id` ascending order —
+the same default the `list` op applies — so a handler never receives rows in an
+unspecified physical order. That default is the injected `id`, a random UUID, so it
+is a **stable** order and not a chronological one: order by `created_at` if you want
+oldest or newest first. An `orderBy` you do pass is used verbatim, with nothing
+appended to it. One authorization consequence to know: **a `handler`-kind route is gated
 on the `store:write` permission by default**, not `store:read`. The platform cannot
 statically prove a handler is read-only, so it fail-closes to the stronger gate — a
 handler that only reads is over-protected, never under. An author who knows a handler

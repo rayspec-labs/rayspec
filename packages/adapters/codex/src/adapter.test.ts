@@ -142,6 +142,7 @@ function makeCtx(opts: {
   replay?: boolean;
   rehydrate?: () => Promise<ConvTurn[]>;
   authMode?: AuthMode;
+  signal?: AbortSignal;
 }): { ctx: RunContext; events: NeutralEvent[] } {
   const events: NeutralEvent[] = [];
   let seq = 0;
@@ -173,6 +174,7 @@ function makeCtx(opts: {
     tools,
     dispatchTool,
     ...(opts.rehydrate ? { rehydrate: opts.rehydrate } : {}),
+    ...(opts.signal ? { signal: opts.signal } : {}),
   };
   return { ctx, events };
 }
@@ -806,5 +808,58 @@ describe('run — replay reconstructs from the journal WITHOUT spawning codex', 
     expect(res.finalText).toBe('cached answer');
     // The trusted system turn is re-prepended on replay (untrusted-content boundary: first turn role='system').
     expect(res.conversation[0]?.role).toBe('system');
+  });
+});
+
+describe('Codex adapter: the run’s cancellation signal reaches the streamed turn', () => {
+  const okEvents = async function* () {
+    yield { type: 'turn.started' };
+    yield { type: 'item.completed', item: { type: 'agent_message', text: 'ok' } };
+    yield {
+      type: 'turn.completed',
+      usage: {
+        input_tokens: 1,
+        cached_input_tokens: 0,
+        output_tokens: 1,
+        reasoning_output_tokens: 0,
+      },
+    };
+  };
+
+  it('links ctx.signal to the AbortController it passes as turnOptions.signal', async () => {
+    const journal = new FakeJournal();
+    const controller = new AbortController();
+    let abortedWhileRunning: boolean | undefined;
+    codexBehavior = (call: CodexCall) => {
+      const handed = (call.turnOptions as { signal?: AbortSignal }).signal;
+      // MID-CALL: the adapter aborts its own controller in the teardown either way, so asserting
+      // after the run would pass with no link at all.
+      controller.abort();
+      abortedWhileRunning = handed?.aborted;
+      return okEvents();
+    };
+
+    const { ctx } = makeCtx({ journal, signal: controller.signal });
+    const adapter = new CodexAdapter();
+    await adapter.run({ ...baseSpec }, ctx);
+
+    expect(abortedWhileRunning).toBe(true);
+  });
+
+  it('an already-aborted signal is honoured (the run was cancelled before the turn started)', async () => {
+    const journal = new FakeJournal();
+    const controller = new AbortController();
+    controller.abort();
+    let abortedAtCallTime: boolean | undefined;
+    codexBehavior = (call: CodexCall) => {
+      abortedAtCallTime = (call.turnOptions as { signal?: AbortSignal }).signal?.aborted;
+      return okEvents();
+    };
+
+    const { ctx } = makeCtx({ journal, signal: controller.signal });
+    const adapter = new CodexAdapter();
+    await adapter.run({ ...baseSpec }, ctx);
+
+    expect(abortedAtCallTime).toBe(true);
   });
 });
