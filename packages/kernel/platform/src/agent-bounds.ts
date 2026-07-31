@@ -11,24 +11,42 @@
  *
  * The parsing rule is the one `resolveBootTimeoutMs` uses for RAYSPEC_BOOT_TIMEOUT_MS: trim, parse,
  * and fall back to the default on anything unusable. Here the default is "no bound", so an absent or
- * non-numeric value — and any value that does not floor to 1 or more — leaves the run exactly as
- * unbounded as it is today.
+ * non-numeric value — and any value outside 1 … {@link MAX_BOUND} after flooring — leaves the run
+ * exactly as unbounded as it is today.
  */
 
 /**
- * Parse a positive-integer millisecond/count value; anything else (including 0) is "not set".
+ * The largest value any of these variables may carry: the largest delay a timer can hold.
+ *
+ * A timer given a longer delay does not wait longer — it fires after 1ms (Node warns
+ * `TimeoutOverflowWarning: … does not fit into a 32-bit signed integer. Timeout duration was set to
+ * 1.`). Accepting such a value would therefore INVERT the bound it configures: a ceiling meant to be
+ * generous would abandon every run after a millisecond. The same ceiling is applied to the attempt
+ * COUNT, which no timer holds, so that one rule covers all three variables — and a request-attempt
+ * count above two billion is not a configuration anyone means.
+ */
+const MAX_BOUND = 2_147_483_647;
+
+/**
+ * Parse a bound value: a positive integer no greater than {@link MAX_BOUND}. Anything else — absent,
+ * non-numeric, 0, negative, or too large — is "not set", which every consumer reads as NO bound.
  *
  * The floor runs BEFORE the range check, so the number that is range-checked is exactly the number
  * the caller gets. Checking first would let any 0 < v < 1 (`0.5`, `0.001`) pass the check and then
  * floor to 0 — the sentinel this contract calls "not set", but as a NUMBER, so every consumer would
  * take it as a live bound of zero: a run ceiling of 0ms, or an attempt count of 0 that maps to a
  * negative retry count.
+ *
+ * Out-of-range collapses to "not set" rather than clamping to {@link MAX_BOUND}: a ceiling above
+ * 24.8 days and no ceiling at all express the same intent, so treating them alike keeps the contract
+ * to one sentence, and silently substituting a different number than the operator wrote is the kind
+ * of surprise these variables exist to remove.
  */
 function positiveInt(raw: string | undefined): number | undefined {
   const trimmed = raw?.trim();
   if (!trimmed) return undefined;
   const n = Math.floor(Number(trimmed));
-  if (!Number.isFinite(n) || n <= 0) return undefined;
+  if (!Number.isFinite(n) || n <= 0 || n > MAX_BOUND) return undefined;
   return n;
 }
 

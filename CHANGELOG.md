@@ -37,8 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   journaled and no taint marker is written. A dispatch already in flight when the ceiling fires is
   not stopped: its taint marker is written before the handler, the handler runs to completion, and
   its journal step is then refused, so a side effect it performs happens without a journal row. All
-  three variables are off unless set, and an unusable value (not a number, or less than 1 after
-  flooring) is treated as unset, so a deployment that sets none behaves exactly as it did before. The
+  three variables are off unless set, and an unusable value (not a number, or — after flooring —
+  below 1 or above `2147483647`, the largest delay a timer can hold) is treated as unset, so a
+  deployment that sets none behaves exactly as it did before. The
   OpenAI adapter gained the matching optional `timeoutMs` / `maxAttempts` options,
   and `openai` — until now in the tree only through the agents SDK — is a direct pinned dependency of
   that package. All three variables are documented in `.env.example`.

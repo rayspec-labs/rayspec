@@ -50,6 +50,29 @@ describe('resolveAgentRequestTimeoutMs (RAYSPEC_AGENT_REQUEST_TIMEOUT_MS)', () =
     }
   });
 
+  it('never resolves above 2147483647 — a larger value is "not set", not a live bound', () => {
+    // 2_147_483_647 is the largest delay a timer can hold. Node collapses a larger one to 1ms
+    // (TimeoutOverflowWarning), so accepting it would INVERT the bound: a ceiling meant to be
+    // generous would abandon every run after a millisecond. Out-of-range is therefore treated like
+    // sub-1 — unset, i.e. UNBOUNDED. All three resolvers share the parser, so the rule holds for all
+    // of them, and one rule is the one an operator has to remember.
+    expect(
+      resolveAgentRequestTimeoutMs(env({ RAYSPEC_AGENT_REQUEST_TIMEOUT_MS: '2147483647' })),
+    ).toBe(2_147_483_647);
+    expect(resolveAgentMaxAttempts(env({ RAYSPEC_AGENT_MAX_ATTEMPTS: '2147483647' }))).toBe(
+      2_147_483_647,
+    );
+    expect(resolveRunMaxMs(env({ RAYSPEC_AGENT_RUN_MAX_MS: '2147483647' }))).toBe(2_147_483_647);
+
+    for (const v of ['2147483648', '3000000000', '1e12']) {
+      expect(
+        resolveAgentRequestTimeoutMs(env({ RAYSPEC_AGENT_REQUEST_TIMEOUT_MS: v })),
+      ).toBeUndefined();
+      expect(resolveAgentMaxAttempts(env({ RAYSPEC_AGENT_MAX_ATTEMPTS: v }))).toBeUndefined();
+      expect(resolveRunMaxMs(env({ RAYSPEC_AGENT_RUN_MAX_MS: v }))).toBeUndefined();
+    }
+  });
+
   it('is undefined for an empty, non-numeric, zero, sub-1, or negative value', () => {
     for (const v of [
       '',
