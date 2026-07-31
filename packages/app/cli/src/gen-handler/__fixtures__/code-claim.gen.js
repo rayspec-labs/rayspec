@@ -1,9 +1,8 @@
 // AUTO-GENERATED persist-tool handler (bounded template T1). Do NOT edit by hand —
 // regenerate via `rayspec gen-handler`. TRUSTED-AUTHOR, NOT SANDBOXED: it runs in-process; the two
 // CI gates (handler-imports / extension-capability) are TRIPWIRES, not a sandbox — the real per-tenant
-// isolate is a later hardening milestone (deferred). Imports @rayspec/handler-sdk TYPE-ONLY; ZERO npm deps; reaches
+// isolate is a later hardening milestone (deferred). ZERO imports (the SDK types are compile-time only); ZERO npm deps; reaches
 // the DB ONLY through the injected, tenant-bound, declared-stores-only init.db facade.
-import type { StoreRow, ToolHandler, ToolHandlerInit } from '@rayspec/handler-sdk';
 
 const STORE = "expense_claims"; // a DECLARED store; init.db fail-closes on any other name.
 
@@ -12,9 +11,9 @@ const STORE = "expense_claims"; // a DECLARED store; init.db fail-closes on any 
  * Drops any non-declared key (additionalProperties:false parity with the tool parameters), never
  * throws (returns a failed result on a required/enum violation), and never writes an injected column.
  */
-function coerceRow(args: Record<string, unknown>): { ok: true; row: StoreRow } | { ok: false; status: 'failed'; detail: string } {
-  const o = typeof args === 'object' && args !== null ? (args as Record<string, unknown>) : {};
-  const row: StoreRow = {};
+function coerceRow(args) {
+  const o = typeof args === 'object' && args !== null ? args : {};
+  const row = {};
   // category_code: text — UNTRUSTED arg, must be a string.
   {
     const val = o.category_code;
@@ -36,42 +35,34 @@ function coerceRow(args: Record<string, unknown>): { ok: true; row: StoreRow } |
   // policy_flag: text (closed enum) — UNTRUSTED arg, membership-checked.
   {
     const val = o.policy_flag;
-    if (typeof val === 'string' && (["ok", "review", "violation"] as readonly string[]).includes(val)) {
+    if (typeof val === 'string' && ["ok", "review", "violation"].includes(val)) {
       row.policy_flag = val;
     } else { return { ok: false, status: 'failed', detail: "arg policy_flag missing or invalid." }; }
   }
   return { ok: true, row };
 }
 
-interface ClampRecord {
-  /** The bounded column. */
-  column: string;
-  /** The value the MODEL chose, before the bound was applied. */
-  proposed: string;
-  /** The author-declared bound written in its place. */
-  applied: string;
-}
+/**
+ * @typedef {object} ClampRecord
+ * @property {string} column The bounded column.
+ * @property {string} proposed The value the MODEL chose, before the bound was applied.
+ * @property {string} applied The author-declared bound written in its place.
+ */
 
-interface PersistResult {
-  /** The success status ("coded") or 'failed'. */
-  status: string;
-  /** The affected row id, when known. */
-  id?: string;
-  /** A human-readable detail on failure. */
-  detail?: string;
-  /** The bounds that FIRED on this write (present only when at least one did). */
-  clamped?: ClampRecord[];
-}
+/**
+ * @typedef {object} PersistResult
+ * @property {string} status The success status ("coded") or 'failed'.
+ * @property {string} [id] The affected row id, when known.
+ * @property {string} [detail] A human-readable detail on failure.
+ * @property {ClampRecord[]} [clamped] The bounds that FIRED on this write (present only when at least one did).
+ */
 
-export const codeClaim: ToolHandler<Record<string, unknown>, PersistResult> = async (
-  args: Record<string, unknown>,
-  init: ToolHandlerInit,
-): Promise<PersistResult> => {
+export const codeClaim = async (args, init) => {
   const coerced = coerceRow(args);
   if (!coerced.ok) return { status: 'failed', detail: coerced.detail };
   try {
     // ── ARM A — update-by-id (the existing-row case). The id is a model arg, validated as DATA.
-    const idRaw = (args as Record<string, unknown>)["claim_id"];
+    const idRaw = args["claim_id"];
     const id = typeof idRaw === 'string' ? idRaw : '';
     if (id.length === 0) return { status: 'failed', detail: 'claim_id missing or not a string.' };
     // OPTIONAL server-side FK re-validation: re-check the model-chosen code against the lookup store —
@@ -79,7 +70,7 @@ export const codeClaim: ToolHandler<Record<string, unknown>, PersistResult> = as
     {
       const code = coerced.row.category_code;
       const lookupFilter = { ...{ active: true }, code: code };
-      const matches = await init.db.select("expense_categories", lookupFilter as Record<string, unknown>);
+      const matches = await init.db.select("expense_categories", lookupFilter);
       if (matches.length === 0) {
         return { status: 'failed', detail: 'the chosen category_code is not a valid code in expense_categories.' };
       }
@@ -87,7 +78,7 @@ export const codeClaim: ToolHandler<Record<string, unknown>, PersistResult> = as
     // Server-side CLAMP: the model PROPOSES, the author's declared bound CAPS. Applied after the
     // coercion and before the write, so no wording of the untrusted input can raise what is persisted
     // past the bound. A clamp that fires is reported on the result (and so journaled).
-    const clamped: ClampRecord[] = [];
+    const clamped = [];
     {
       // policy_flag: RANK is the position in ORDER (its DECLARED enumValues). Anything ranked above the
       // bound is rewritten DOWN to it, and the model's original choice is kept for the journal.

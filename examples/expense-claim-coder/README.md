@@ -35,7 +35,9 @@ claim row) — the agent→store auto-persist loop, generated end-to-end from a 
   actually fired) → **injection proof** (the stored code is a real catalog code, not the injected
   value — guaranteed by the handler's server-side re-validation of the agent's chosen code against
   the catalog, not by the prompt: the trust boundary stops the claim text from being *executed*, and
-  the re-check is what makes an out-of-catalog write impossible either way) → idempotency → tenant
+  the re-check is what makes an out-of-catalog write impossible either way) → **clamp proof** (the same
+  description also demands a `violation`; the stored `policy_flag` can never exceed the declared
+  `review` bound) → idempotency → tenant
   isolation incl. a cross-tenant
   **write-isolation re-read**). See "Run the live smoke" below.
 
@@ -62,16 +64,39 @@ The render is a pure function: the output is byte-identical to the committed fil
   tenant predicate auto-injected by the facade.
 - **`code-claim.gen.ts`** — Template **T1** (auto-persist, update-by-id arm): coerces every UNTRUSTED model
   arg (never throws — returns `{status:'failed'}`), re-validates the chosen `category_code` against the
-  catalog server-side (never trusts the model), server-stamps `status:'coded'`, then `init.db.update`s
-  the existing claim row by id. (The upsert-by-natural-key arm — with a tenant-namespaced `*_ref` — is
-  in the template catalog but not exercised by this update-keyed golden.)
+  catalog server-side (never trusts the model), **caps `policy_flag` at `review`**, server-stamps
+  `status:'coded'`, then `init.db.update`s the existing claim row by id. (The upsert-by-natural-key arm
+  — with a tenant-namespaced `*_ref` — is in the template catalog but not exercised by this
+  update-keyed golden.)
+
+## Why `policy_flag` is capped
+
+Picking a category is a lookup: the catalog is the decision rule, so the handler can re-check the
+model's answer against it. Judging whether a claim BREAKS policy is not — there is no store to
+re-check against, and no instruction wording holds reliably when the claim text argues the other way.
+So the holes declare a bound instead:
+
+```jsonc
+"clampValues": { "policy_flag": { "max": "review" } }
+```
+
+`review` is the ceiling because this organization treats a **`violation` as a person's call**: the
+agent may still choose freely between `ok` and `review` (the judgment is genuinely its own), it simply
+cannot be talked into declaring the finding that triggers a rejection. A proposed `violation` is
+written as `review` and the proposal comes back on the tool result as
+`clamped: [{ column, proposed, applied }]` — so the run journal keeps both what the model wanted and
+what the organization allowed. The bound is applied server-side after the arg coercion and before the
+write, so it does not depend on how the claim text is worded. Note that `code_claim.outputSchema` must
+therefore declare `clamped`; a persist tool whose handler can clamp and whose schema cannot say so is
+rejected by `dispatchTool` the first time a bound fires.
 
 ## Where the loop is proven
 
 **Deterministically (no LLM):** `packages/kernel/platform/src/gen-handler-loop.db.test.ts` wires these
 generated handlers through the REAL `dispatchTool` + a fake backend and asserts the coded row LANDED in
 `expense_claims` via the tenant-bound db — plus idempotency (one row on re-code), coercion + FK
-re-validation of the untrusted model arg are load-bearing, and tenant isolation.
+re-validation of the untrusted model arg are load-bearing, the `policy_flag` bound caps a proposed
+`violation` to `review` and journals both, and tenant isolation.
 
 **Live (model-driven, end-to-end):** `smoke.sh` drives a real OpenAI run through the deployed backend
 and asserts the WRITTEN row.
