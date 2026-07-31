@@ -542,8 +542,8 @@ describe('loadServerConfig — normalization that CHANGED a secret warns, naming
   // above). Its wrapper produces the SAME THREE KINDS of change — a leading byte-order mark, leading
   // whitespace, trailing whitespace — out of DIFFERENT bytes: three removed instead of seven. Same
   // kinds, so the two messages stay comparable and the byte-identity check keeps its meaning;
-  // different in every scalar the value could be reduced to, so a derived fact cannot come out the
-  // same for both. Both halves are asserted below — a future edit that breaks either one fails.
+  // different in each of the scalars pinned below, so none of THOSE can come out the same for both.
+  // Both halves are asserted below — a future edit that breaks either one fails.
   const OTHER_CLEAN = 'yzVqRVqtxYzNtYYuNWqruXpNpzTswvXwN';
   const OTHER_RAW = `${BOM}\t${OTHER_CLEAN}\n`;
   /** The change KINDS a raw value triggers, derived the way `bootSecretNormalizationWarning` does. */
