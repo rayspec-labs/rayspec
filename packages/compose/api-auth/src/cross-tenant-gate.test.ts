@@ -22,7 +22,7 @@ import type { AgentSpec, Backend, RunContext, RunResult } from '@rayspec/core';
 import { type Db, forTenant, generateProductSql, schema } from '@rayspec/db';
 // The product-tenancy GATE machinery is gate-only — imported from /testing (off the main surface).
 import { assertProductTenancy, buildProductTables, makeDbWithSchema } from '@rayspec/db/testing';
-import { runAgent } from '@rayspec/platform';
+import { isRunCancelled, runAgent } from '@rayspec/platform';
 import { parseSpec, type StoreSpec } from '@rayspec/spec';
 import { eq } from 'drizzle-orm';
 import { exportJWK, generateKeyPair } from 'jose';
@@ -190,6 +190,34 @@ describe('full-surface cross-tenant isolation (CI-BLOCKING)', () => {
     expect((await tdbB.select(schema.runEvents).all()).length).toBe(0);
     // B's run-header ownership probe of A's runId returns 'foreign' (verdict only, no payload).
     expect(await tdbB.runHeaderOwnership('xt-run-A')).toBe('foreign');
+  });
+
+  it('run cancel: B cannot end A’s run (404, no marker, A’s run untouched)', async () => {
+    const { a, b } = await twoPrincipals();
+    const tdbA = forTenant(h.db, a.orgId);
+    await tdbA.insert(schema.runs, {
+      runId: 'xt-run-cancel-A',
+      backend: 'openai',
+      authMode: 'api-key',
+      agentName: 'x',
+      model: 'm',
+      status: 'running',
+    });
+
+    // The only MUTATING route under /v1/runs. A foreign id must change nothing at all — not the
+    // header, not the cancellation marker — and must not disclose that the run exists.
+    const res = await jsonRequest(h.app, 'POST', '/v1/runs/xt-run-cancel-A/cancel', {
+      headers: { authorization: `Bearer ${b.token}` },
+    });
+    expect(res.status).toBe(404);
+
+    // Zero effect: A's run is still running and carries no cancellation marker.
+    const rows = (await tdbA.select(schema.runs).all()) as unknown as Array<{
+      runId: string;
+      status: string;
+    }>;
+    expect(rows.find((r) => r.runId === 'xt-run-cancel-A')?.status).toBe('running');
+    expect(await isRunCancelled(tdbA, 'xt-run-cancel-A')).toBe(false);
   });
 
   it('sessions: B’s session secret cannot be resolved as A (uniform 401)', async () => {

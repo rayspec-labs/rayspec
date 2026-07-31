@@ -96,6 +96,7 @@ function makeCtx(
     replay?: boolean;
     tools?: NeutralTool[];
     rehydrate?: () => Promise<ConvTurn[]>;
+    signal?: AbortSignal;
   } = {},
 ): RunContext {
   const runId = 'run-1';
@@ -118,6 +119,7 @@ function makeCtx(
     journal,
     replay: Boolean(opts.replay),
     authMode,
+    ...(opts.signal ? { signal: opts.signal } : {}),
     tools,
     dispatchTool,
     rehydrate: opts.rehydrate,
@@ -917,5 +919,44 @@ describe('piToolParameters validate-and-repair (mirrors pi-agent-core validateTo
     };
     const cOpen = Compile(piToolParameters({ name: 't', description: 'd', parameters: open }));
     expect(cOpen.Check({ title: 'x', extra: 'ok' })).toBe(true);
+  });
+});
+
+describe('Pi adapter: the run’s cancellation signal brings the session abort forward', () => {
+  it('calls session.abort() when the run is cancelled, before the teardown would have', async () => {
+    const fake = makeFakeJournal();
+    const controller = new AbortController();
+    const session = fakeSession(defaultMessages);
+    let abortsDuringPrompt: number | undefined;
+    session.prompt = vi.fn().mockImplementation(async () => {
+      // MID-PROMPT. The teardown calls abort() too, so counting after the run would pass with no
+      // link at all — the count taken here can only have come from the run's signal.
+      controller.abort();
+      abortsDuringPrompt = session.abort.mock.calls.length;
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    const adapter = new PiAdapter({ apiKey: 'sk-test' });
+    await adapter.run(spec as never, makeCtx(fake.journal, { signal: controller.signal }));
+
+    expect(abortsDuringPrompt).toBe(1);
+  });
+
+  it('an already-aborted signal stops the session without waiting for the prompt to settle', async () => {
+    const fake = makeFakeJournal();
+    const controller = new AbortController();
+    controller.abort();
+    const session = fakeSession(defaultMessages);
+    let abortsAtPromptTime: number | undefined;
+    session.prompt = vi.fn().mockImplementation(async () => {
+      abortsAtPromptTime = session.abort.mock.calls.length;
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    const adapter = new PiAdapter({ apiKey: 'sk-test' });
+    await adapter.run(spec as never, makeCtx(fake.journal, { signal: controller.signal }));
+
+    // Cancelled before the call started: the stop is issued as the link is established.
+    expect(abortsAtPromptTime).toBe(1);
   });
 });
