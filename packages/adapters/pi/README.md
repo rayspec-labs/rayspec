@@ -18,8 +18,9 @@ than depending on it directly.
 Ending a run (`POST /v1/runs/{id}/cancel`, or a caller-supplied abort signal) reaches this
 backend through the run's signal on the `RunContext`. The adapter links it to the agent
 session's `abort()` and, before issuing the prompt call at all, re-checks it — so a run cancelled
-before the adapter reaches that call never calls the provider. A cancel that lands *after* it is
-carried into the request itself; the one window that is neither is described below.
+before the adapter reaches that call never calls the provider. A cancel that lands *after* the
+agent has registered its run is carried into the request itself. The one window that is neither —
+between that re-check and the agent registering the run — is described below.
 
 The pinned `@earendil-works/pi-coding-agent` 0.79.9 offers exactly one stop: `session.abort()`.
 `prompt()` takes no abort signal of any kind (`PromptOptions`), so there is no request-level or

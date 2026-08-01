@@ -1086,9 +1086,18 @@ async function pinTheNoToolsCall(signal?: AbortSignal): Promise<void> {
 
   // The signal re-check the adapter performs before the SDK call is a BRANCH; these arms are what
   // prove the branch cannot fire on an uncancelled run. The option bag is pinned EXACTLY — key set
-  // AND values, by whole-object equality, not merely "no signal key": a key silently added here
-  // would ship on every pi run, including one added only when a signal is present.
+  // AND values, not merely "no signal key": a key silently added here would ship on every pi run,
+  // including one added only when a signal is present. Both matchers are needed and neither
+  // subsumes the other: `toEqual` treats an undefined-valued key as absent, so the key set is
+  // asserted directly (the same pairing as packages/adapters/openai/src/adapter.integration.test.ts).
   const bag = createAgentSession.mock.calls[0]?.[0] as Record<string, unknown>;
+  expect(Object.keys(bag).sort()).toEqual([
+    'authStorage',
+    'model',
+    'modelRegistry',
+    'noTools',
+    'sessionManager',
+  ]);
   expect(bag).toEqual({
     model: { id: 'gpt-4.1-mini' },
     noTools: 'all',
@@ -1145,7 +1154,16 @@ describe('Pi adapter: with no cancellation in play the call is byte-identical', 
       makeCtx(fake.journal, { tools: [tool] }),
     );
 
+    // Key set AND values, for the same reason as the no-tools arms above.
     const bag = createAgentSession.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(Object.keys(bag).sort()).toEqual([
+      'authStorage',
+      'customTools',
+      'model',
+      'modelRegistry',
+      'sessionManager',
+      'tools',
+    ]);
     expect(bag).toEqual({
       model: { id: 'gpt-4.1-mini' },
       tools: ['get_weather'],
