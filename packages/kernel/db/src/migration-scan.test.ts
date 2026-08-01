@@ -332,6 +332,28 @@ describe('allowlist match is `;`-insensitive via a bounded terminator strip (no 
     }
   });
 
+  it('but INTERNAL whitespace in the match is NOT normalized — it re-blocks a reviewed statement', () => {
+    // The asymmetry the docblocks now name, pinned so it cannot quietly become untrue in either
+    // direction. The STATEMENT side is whitespace-collapsed when `splitStatements` parses it; the
+    // allowlist `match` gets `stripTerminator` alone. So surrounding whitespace is forgiven (the arm
+    // above) while an internal double space or a line break is not — a hand-authored entry that
+    // pretty-prints its SQL silently fails to clear the statement it was written for.
+    for (const match of [
+      'TRUNCATE  TABLE foo', // internal double space
+      'TRUNCATE\nTABLE foo', // internal line break
+      'TRUNCATE\tTABLE foo', // internal tab
+    ]) {
+      const r = scanMigrationSql(STMT, [{ kind: 'truncate', match, reason: 'reviewed' }]);
+      expect(r.pass, match).toBe(false);
+    }
+    // Collapsing that same match by hand clears it — so the failure above is the normalization
+    // asymmetry, not some other property of these strings.
+    const collapsed = scanMigrationSql(STMT, [
+      { kind: 'truncate', match: 'TRUNCATE TABLE foo', reason: 'reviewed' },
+    ]);
+    expect(collapsed.pass).toBe(true);
+  });
+
   it('a huge trailing-whitespace allowlist match does not hang the scan (bounded strip)', () => {
     // FAIL-THE-FIX: the allowlist `match` string is fed to `stripTerminator`; with the old anchored
     // `\s*;\s*$` a 200k-space no-`;` tail was quadratic. The match doesn't equal the statement, so the
