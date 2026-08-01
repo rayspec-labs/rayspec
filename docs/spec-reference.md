@@ -838,7 +838,7 @@ How well the work itself stops depends on the backend:
 | Backend     | What cancelling does to the work in flight                                  |
 | ----------- | --------------------------------------------------------------------------- |
 | `openai`    | The signal is passed into the SDK run call, so the model request is aborted. |
-| `anthropic` | The signal aborts the controller the SDK already holds; the `claude` child is torn down. |
+| `anthropic` | The signal aborts the controller the SDK already holds; the `claude` child is torn down, but not instantly — the SDK closes its input at once, then escalates over roughly two to seven seconds. The adapter's README lists what that window costs. |
 | `codex`     | The signal aborts the streamed turn and the spawned child; the tool bridge closes. |
 | `pi`        | Weakest: the prompt call takes no signal, so the session's `abort()` is brought forward — the underlying model request is never handed one. |
 
