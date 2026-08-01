@@ -21,8 +21,9 @@
  *     identical key-set to the other backends.
  *   - replay reconstructs the run from the journal + rehydrate WITHOUT a startThread call.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { Server as HttpServer } from 'node:http';
+import { connect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -309,6 +310,45 @@ describe('resolveAuth — subscription-ONLY, stray-key stripped', () => {
     expect(check.oauthSessionPresent).toBe(true);
     expect(check.authMode).toBe('codex-subscription-oauth'); // mode unchanged (stray is stripped at run)
     rmSync(home, { recursive: true, force: true });
+  });
+
+  it('resolveCodexHome PRECEDENCE: CODEX_HOME > codexHome > $HOME/.codex — and this suite resolves a credential-free home', () => {
+    const oauth = { auth_mode: 'chatgpt', OPENAI_API_KEY: null, tokens: { access_token: 'tok' } };
+    const ambient = withCodexHome(oauth);
+    const option = mkdtempSync(join(tmpdir(), 'codex-home-opt-'));
+    const fallback = mkdtempSync(join(tmpdir(), 'codex-home-fallback-'));
+    mkdirSync(join(fallback, '.codex'), { recursive: true });
+    writeFileSync(join(fallback, '.codex', 'auth.json'), JSON.stringify(oauth));
+
+    // 1. The ambient variable BEATS the constructor option — the reason vitest.setup.ts deletes it.
+    process.env.CODEX_HOME = ambient;
+    expect(new CodexAdapter({ codexHome: option }).authSelfCheck().oauthSessionPresent).toBe(true);
+
+    // 2. With it gone, the constructor option decides.
+    delete process.env.CODEX_HOME;
+    expect(new CodexAdapter({ codexHome: option }).authSelfCheck().oauthSessionPresent).toBe(false);
+    expect(new CodexAdapter({ codexHome: ambient }).authSelfCheck().oauthSessionPresent).toBe(true);
+
+    // 3. With no option either, resolution falls through to `$HOME/.codex`. That is the read most of
+    //    this file performs — `new CodexAdapter()` with no options, whose `run()` calls
+    //    `authSelfCheck()` on its first line — and on a developer machine `$HOME/.codex/auth.json` is
+    //    the real ChatGPT-OAuth session. Deleting CODEX_HOME alone only redirects the read here.
+    process.env.HOME = fallback;
+    expect(new CodexAdapter().authSelfCheck().oauthSessionPresent).toBe(true);
+
+    // 4. Under this suite's own env, that fallback is the empty temp dir vitest.setup.ts made: no
+    //    `.codex` inside it at all. This is the assertion behind the claim in vitest.config.ts that
+    //    the suite reads no credential file — it fails if either half of the setup file is removed.
+    process.env = { ...savedEnv };
+    expect(process.env.CODEX_HOME).toBeUndefined();
+    // `HOME` is the temp dir the setup file made, not the developer's. That assertion is the
+    // machine-independent one: the emptiness check below reddens only on a machine that actually
+    // HAS a `~/.codex`, which is exactly the machine the whole guard exists for.
+    expect(process.env.HOME?.startsWith(join(tmpdir(), 'codex-suite-home-'))).toBe(true);
+    expect(existsSync(join(process.env.HOME ?? '', '.codex'))).toBe(false);
+    expect(new CodexAdapter().authSelfCheck().oauthSessionPresent).toBe(false);
+
+    for (const dir of [ambient, option, fallback]) rmSync(dir, { recursive: true, force: true });
   });
 });
 
@@ -861,5 +901,243 @@ describe('Codex adapter: the run’s cancellation signal reaches the streamed tu
     await adapter.run({ ...baseSpec }, ctx);
 
     expect(abortedAtCallTime).toBe(true);
+  });
+});
+
+// ===============================================================================================
+// BRIDGE TEARDOWN — it must TERMINATE, not merely stop accepting
+// ===============================================================================================
+
+/** How long run() is given to settle before the test calls it wedged. Well under the 30s file timeout. */
+const SETTLE_BUDGET_MS = 3_000;
+
+/**
+ * Open a raw TCP connection to the run's MCP bridge and leave a request deliberately unfinished on it.
+ *
+ * This stands in for ANY peer that still holds a connection with an incomplete request when the turn
+ * ends. Who that peer is in production is not established here: the likeliest candidate is the codex
+ * child itself, which the teardown only SIGNALS (nothing escalates to a forced kill) and which need
+ * not have exited yet. Be exact about what is modelled: the bad bearer token means the bridge answers
+ * 401 and the request never reaches `transport.handleRequest`, so this is a REJECTED client, not an
+ * authenticated MCP session. That is narrower than the peer set the fix has to survive — but it is
+ * the same server state, and the state is what `server.close()` waits on.
+ *
+ * The 401 read back is the synchronisation point: the bridge only answers a request it has accepted,
+ * so receiving it proves the server counts this connection. The announced-but-unsent body keeps the
+ * request in flight, which is precisely what `server.close()`'s completion callback waits for. Both
+ * are returned so the caller can assert the arrangement actually happened.
+ */
+async function holdBridgeConnection(call: CodexCall): Promise<{ socket: Socket; status: string }> {
+  const cfg = call.options.config as
+    | { mcp_servers?: Record<string, { url?: string }> }
+    | undefined;
+  const url = cfg?.mcp_servers?.rayspec?.url;
+  if (!url) throw new Error('no MCP server url in codex config');
+  const { hostname, port } = new URL(url);
+  const socket = connect(Number(port), hostname);
+  await new Promise<void>((resolve, reject) => {
+    socket.once('connect', resolve);
+    socket.once('error', reject);
+  });
+  socket.write(
+    'POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer not-the-token\r\nContent-Length: 32\r\n\r\n',
+  );
+  const status = await new Promise<string>((resolve, reject) => {
+    socket.once('data', (chunk: Buffer) => resolve(chunk.toString('utf8').split('\r\n')[0] ?? ''));
+    socket.once('error', reject);
+  });
+  return { socket, status };
+}
+
+describe('Codex adapter: the MCP bridge teardown TERMINATES', () => {
+  it('run() SETTLES when a connection to the bridge outlives the turn', async () => {
+    const journal = new FakeJournal();
+    let holder: Socket | undefined;
+    let heldStatus: string | undefined;
+    let openWhenTurnEnded: boolean | undefined;
+    codexBehavior = async function* (call: CodexCall) {
+      const held = await holdBridgeConnection(call);
+      holder = held.socket;
+      heldStatus = held.status;
+      yield { type: 'turn.started' };
+      yield { type: 'item.completed', item: { type: 'agent_message', text: 'ok' } };
+      yield {
+        type: 'turn.completed',
+        usage: {
+          input_tokens: 1,
+          cached_input_tokens: 0,
+          output_tokens: 1,
+          reasoning_output_tokens: 0,
+        },
+      };
+      // Runs when the adapter's `for await` asks for the next value, i.e. as the turn ends and just
+      // before the teardown — so this records whether the connection was still open at the moment
+      // `bridge.close()` was about to run. Without it the test could not tell a held connection from
+      // one the peer had already dropped.
+      openWhenTurnEnded = held.socket.destroyed === false;
+    };
+
+    const { ctx } = makeCtx({ journal, tools: [weatherTool()] });
+    const adapter = new CodexAdapter();
+    // The property under test is that run() SETTLES. Asserting that the port refuses connections
+    // afterwards would prove nothing: `close()` stops ACCEPTING immediately, so that holds in the
+    // wedged state too — while run() never resolves and the bridge plus its async work stay alive
+    // behind a caller the platform has already stopped waiting on.
+    const run = adapter.run({ ...baseSpec, tools: [weatherTool().spec] }, ctx);
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const outcome = await Promise.race([
+        run.then(() => 'settled' as const),
+        new Promise<'still pending'>((resolve) => {
+          timer = setTimeout(() => resolve('still pending'), SETTLE_BUDGET_MS);
+        }),
+      ]);
+      expect(outcome).toBe('settled');
+      // The ARRANGEMENT must have happened. `holdBridgeConnection` runs inside the generator the
+      // adapter consumes, so every way it can fail (the config key drifting, connect erroring, the
+      // bridge no longer answering) throws INTO run(), which catches it, tears the bridge down with
+      // no connection held and settles — leaving `outcome` trivially 'settled'. These four make that
+      // vacuous pass impossible: a connection was opened, the server accepted and answered it, it was
+      // still open when the turn ended, and the run itself completed rather than erroring.
+      expect(holder).toBeDefined();
+      expect(heldStatus).toBe('HTTP/1.1 401 Unauthorized');
+      expect(openWhenTurnEnded).toBe(true);
+      expect((await run).status).toBe('completed');
+    } finally {
+      if (timer) clearTimeout(timer);
+      // Release the holder either way so a failing run cannot leave the suite hanging on it.
+      holder?.destroy();
+      await run;
+    }
+  });
+});
+
+// ===============================================================================================
+// NO SIGNAL ⇒ UNCHANGED (#144)
+// ===============================================================================================
+// Scope, stated plainly: both tests below run a TOOLLESS spec, and the bridge only exists when
+// `spec.tools.length > 0` — so they pin the SDK bags, the neutral result and the journal step on the
+// unsignalled path, and they do NOT reach the changed teardown line at all. The unchanged-teardown
+// evidence on the unsignalled path comes from the pre-existing tooled tests in this file (the MCP
+// handler / dispatch test, the 413 body-cap test and the bridge-init-failure test), each of which
+// runs a real bridge teardown without a signal.
+describe('Codex adapter: with no cancellation signal the run is exactly what it always was', () => {
+  const okEvents = async function* () {
+    yield { type: 'turn.started' };
+    yield { type: 'item.completed', item: { type: 'agent_message', text: 'ok' } };
+    yield {
+      type: 'turn.completed',
+      usage: {
+        input_tokens: 7,
+        cached_input_tokens: 0,
+        output_tokens: 3,
+        reasoning_output_tokens: 0,
+      },
+    };
+  };
+
+  it('UNSET: the bags handed to the SDK are EXACTLY the ones they always were', async () => {
+    const journal = new FakeJournal();
+    let abortedAtCallTime: boolean | undefined;
+    codexBehavior = (call: CodexCall) => {
+      abortedAtCallTime = (call.turnOptions as { signal?: AbortSignal }).signal?.aborted;
+      return okEvents();
+    };
+    const { ctx } = makeCtx({ journal });
+    expect(ctx.signal).toBeUndefined();
+
+    await new CodexAdapter().run({ ...baseSpec }, ctx);
+
+    const call = codexCalls[0];
+    // CodexOptions: a toolless run carries the curated env and NOTHING else — no `config` (there is no
+    // bridge to point codex at) and no `codexPathOverride`.
+    expect(Object.keys(call?.options ?? {}).sort()).toEqual(['env']);
+    // ThreadOptions: the sandbox confinement, unchanged, key set and values.
+    expect(call?.threadOptions).toEqual({
+      model: 'gpt-5.5',
+      sandboxMode: 'read-only',
+      networkAccessEnabled: false,
+      webSearchEnabled: false,
+      approvalPolicy: 'never',
+      workingDirectory: expect.any(String),
+      skipGitRepoCheck: true,
+    });
+    // TurnOptions: `signal` is the adapter's OWN controller and is handed over UNCONDITIONALLY — it
+    // has been on this bag since before cancellation existed, so unlike the openai adapter's
+    // conditional bag no key appears or disappears with ctx.signal. What must hold on the unset path
+    // is that the handed signal is live for the whole turn: nothing links an outside abort into it.
+    expect(Object.keys(call?.turnOptions ?? {}).sort()).toEqual(['signal']);
+    expect(call?.turnOptions.signal).toBeInstanceOf(AbortSignal);
+    expect(abortedAtCallTime).toBe(false);
+    expect((call?.turnOptions.signal as AbortSignal).aborted).toBe(true); // only the teardown aborts it
+  });
+
+  it('UNSET: the RunResult and the neutral event sequence are EXACTLY what they always were', async () => {
+    const journal = new FakeJournal();
+    codexBehavior = () => okEvents();
+    const { ctx, events } = makeCtx({ journal });
+
+    const res = await new CodexAdapter().run({ ...baseSpec }, ctx);
+
+    // The whole neutral result, pinned by value. RunResult carries no wall-clock field, so comparing
+    // it exactly is stable (the llm StepReport's `latencyMs` is why the journal record below is NOT
+    // deep-equalled — that assertion would flake by construction).
+    expect(res).toEqual({
+      runId: 'run-codex-test',
+      backend: 'codex',
+      authMode: 'codex-subscription-oauth',
+      status: 'completed',
+      finalText: 'ok',
+      output: null,
+      error: null,
+      errorClass: null,
+      conversation: [
+        { role: 'system', index: 0, parts: [{ kind: 'text', text: 'You are concise.' }] },
+        { role: 'user', index: 1, parts: [{ kind: 'text', text: 'Say ok.' }] },
+        { role: 'assistant', index: 2, parts: [{ kind: 'text', text: 'ok' }] },
+      ],
+      usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
+      // costUsd(spec.model, 7, 3) against the shared pricing registry.
+      costUsd: 0.00003875,
+      stepCount: 1,
+    });
+
+    // Exactly one llm journal step, with the shape it always had (every field except the wall clock).
+    expect(journal.records).toHaveLength(1);
+    const step = journal.records[0];
+    expect(Object.keys(step ?? {}).sort()).toEqual(
+      [
+        'authMode',
+        'costUsd',
+        'idempotencyKey',
+        'inputHash',
+        'latencyMs',
+        'model',
+        'output',
+        'producedBy',
+        'status',
+        'type',
+        'usage',
+      ].sort(),
+    );
+    expect(step?.type).toBe('llm');
+    expect(step?.status).toBe('ok');
+    expect(step?.model).toBe('gpt-5.5');
+    expect(step?.output).toEqual({ finalText: 'ok', output: null, reasoningCount: 0 });
+    expect(step?.usage).toEqual({ inputTokens: 7, outputTokens: 3, totalTokens: 10 });
+    expect(typeof step?.latencyMs).toBe('number');
+
+    // The neutral event stream, pinned exactly (seq is run-core's single authority, stamped by makeCtx).
+    expect(events).toEqual([
+      { type: 'run_started', runId: 'run-codex-test', seq: 0 },
+      { type: 'text_delta', runId: 'run-codex-test', text: 'ok', seq: 1 },
+      {
+        type: 'run_completed',
+        runId: 'run-codex-test',
+        status: 'ok',
+        usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
+        seq: 2,
+      },
+    ]);
   });
 });

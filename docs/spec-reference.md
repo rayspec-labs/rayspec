@@ -839,7 +839,7 @@ How well the work itself stops depends on the backend:
 | ----------- | --------------------------------------------------------------------------- |
 | `openai`    | The signal is passed into the SDK run call, so the model request is aborted. |
 | `anthropic` | The signal aborts the controller the SDK already holds; the `claude` child is torn down. |
-| `codex`     | The signal aborts the streamed turn and the spawned child; the tool bridge closes. |
+| `codex`     | The signal aborts the streamed turn and signals the spawned child; once the turn ends, the tool-bridge teardown is bounded. Limits: the child gets a `SIGTERM` with no escalation, and processes it spawned itself are not signalled — a child that ignores it keeps the turn (and so the whole run) open, which no teardown can shorten. See the adapter's README. |
 | `pi`        | Weakest: the prompt call takes no signal, so the session's `abort()` is brought forward — the underlying model request is never handed one. |
 
 In every case the platform stops waiting immediately; the table is about the provider

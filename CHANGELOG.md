@@ -614,6 +614,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `codex` adapter's tool-bridge teardown can no longer hang forever, so a cancelled run whose
+  turn ends reaches its end instead of leaving the bridge alive.** The adapter hosts an in-process MCP bridge
+  — a listening HTTP server — alongside the `codex` child, and closed it by awaiting
+  `server.close()`. That call stops accepting new connections immediately, but its completion
+  callback waits for every connection that still has a request in flight, and nothing was dropping
+  those: any peer still holding a connection with an incomplete request wedged the teardown forever.
+  `backend.run()` then never settled, and the listening server plus its async work stayed alive
+  behind a caller the run core had already stopped waiting on. The likeliest such peer is the `codex`
+  child itself — the teardown only *signals* it, so it need not have exited and released its
+  connection yet. The teardown now drops those connections, so it is bounded. This is not specific
+  to cancellation: the teardown runs at the end of every run, and the regression test that pins it is
+  an ordinary uncancelled run — one that used to hang and now finishes, which is precisely the
+  observable change on a run with no cancellation signal. Everything else there is what it was: the
+  SDK call, the sandbox confinement, the neutral result, the event sequence and the journaled step
+  are pinned by value, save the working directory and the step's wall clock, which are not stable
+  across machines and are pinned by shape. The residual limits are stated in the adapter's
+  README and in the per-backend table in `docs/spec-reference.md`, and the sharpest one is that a
+  bounded teardown is only *reached* once the streamed turn ends: the child is signalled rather than
+  force-killed, processes it spawned itself are not signalled, and a child that ignores the signal
+  keeps its stdout — and therefore the whole run — open.
+
 - **A tombstoned organization is now absent on the authorization path too.** Whether an org is a
   usable tenant is asked in four places, and three of them treated `orgs.deleted_at` as decisive: the
   org list does not return such an org, a login never resolves one, and a product deployment refuses
