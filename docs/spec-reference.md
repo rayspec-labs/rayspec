@@ -113,6 +113,21 @@ stores:
   are interpolated verbatim into generated SQL and TypeScript, this rule is
   enforced fail-closed at the source — a name can never smuggle SQL into a
   generated statement.
+
+  A set of names is **reserved**: the tables the platform itself owns. A store
+  named after one of them would emit a `CREATE TABLE` that collides with the
+  platform's own table, so such a store **fails lint** — `doctor` and `plan`
+  reject the document rather than letting the deployment fail at boot. The
+  reserved names are:
+
+  `api_keys`, `auth_audit`, `conversation_items`, `idempotency_keys`, `invites`,
+  `journal_steps`, `memberships`, `oidc_models`, `orgs`, `run_events`, `runs`,
+  `sessions`, `users`, `workflow_artifacts`, `workflow_node_states`,
+  `workflow_runs`.
+
+  Several are names a product would plausibly reach for on its own — `sessions`
+  for a chat application, `invites`, `runs`. The match is exact, so a
+  distinguishing prefix is all it takes: `chat_sessions`, `project_runs`.
 - `columns` — at least one. Each column has:
   - `name` — a safe identifier (same rule as above).
   - `type` — one of the closed column-type vocabulary: `text`, `uuid`,
@@ -1270,7 +1285,11 @@ stores:
     key: [session_id]
 ```
 
-- `name` — required safe identifier.
+- `name` — required safe identifier, and — because a product store materializes
+  into an ordinary tenant-scoped table — subject to the same **reserved** platform
+  table names listed under the backend profile's [`stores`](#stores). The
+  reservation also covers an artifact's `collection`, which derives a store of
+  exactly that name.
 - `description` — optional.
 - `columns` — at least one, using the same `{name, type, nullable, unique}` shape
   and the same closed type vocabulary as the backend profile.
