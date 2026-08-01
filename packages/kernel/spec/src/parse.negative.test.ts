@@ -7,8 +7,12 @@
  *
  * The base spec below is a known-good minimal-but-complete spec; each test builds a variant from it.
  */
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { SpecErrorCode } from './errors.js';
+import { RESERVED_STORE_NAMES } from './lint.js';
 import { parseSpec } from './parse.js';
 
 /** A known-good base spec (every section present, all cross-refs resolve). */
@@ -601,12 +605,34 @@ api:
   }
 
   it('a store named `user_sessions` is NOT rejected — the check is exact-match, not substring', () => {
+    // Asserted unconditionally rather than only on the !ok branch: a version of this test that
+    // checks the code list "if the document happened to fail" would keep passing if the rule ever
+    // became a substring match AND the document started parsing cleanly for some other reason.
     const res = parseSpec(BASE.replaceAll('widgets', 'user_sessions'));
-    if (!res.ok) {
-      expect(res.errors.map((e) => e.code)).not.toContain('reserved_store_name');
-    } else {
-      expect(res.ok).toBe(true);
-    }
+    const codes = res.ok ? [] : res.errors.map((e) => e.code);
+    expect(codes).not.toContain('reserved_store_name');
+    expect(res.ok).toBe(true);
+  });
+});
+
+describe('the documented reserved-store list matches the constant', () => {
+  it('docs/spec-reference.md enumerates exactly RESERVED_STORE_NAMES', () => {
+    // The code side is drift-locked onto the real schema in `@rayspec/db`'s composition suite. The
+    // DOC side had no lock at all: a table added to the platform would be reserved and rejected by
+    // lint while the reference page still listed the old set, so an author would read a list that
+    // does not match the rule they hit. Parse the page's own sentence rather than a copy of it.
+    const page = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), '../../../../docs/spec-reference.md'),
+      'utf8',
+    );
+    const after = page.split('The\n  reserved names are:')[1];
+    expect(after, 'the reserved-names sentence moved or was reworded').toBeDefined();
+    // Exactly the list paragraph: the prose that FOLLOWS it names three of the reserved tables again
+    // as examples, and a window wide enough to catch those would quietly repair a list with a name
+    // missing from it (measured: dropping `sessions` from the list still passed).
+    const listParagraph = (after as string).trimStart().split('\n\n')[0] as string;
+    const listed = new Set([...listParagraph.matchAll(/`([a-z_]+)`/g)].map((m) => m[1] as string));
+    expect(listed).toEqual(RESERVED_STORE_NAMES);
   });
 });
 

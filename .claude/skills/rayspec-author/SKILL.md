@@ -1755,7 +1755,13 @@ declaring `input_normalize` without it fails closed at deploy. A `record_input` 
                                             #   conflict key breaks the upsert identity, so writes duplicate).
 ```
 The tenancy/GDPR columns (`id`/`tenant_id`/`created_at`/`deleted_at`/`retention_days`/`region`) are
-INJECTED — declaring one is a `reserved_column_name` error. **v1 scope (honest):** no composite keys, no
+INJECTED — declaring one is a `reserved_column_name` error. The store NAME is reserved too: the sixteen
+platform tables (`orgs`, `users`, `memberships`, `sessions`, `api_keys`, `auth_audit`, `oidc_models`,
+`journal_steps`, `conversation_items`, `runs`, `run_events`, `idempotency_keys`, `invites`,
+`workflow_runs`, `workflow_node_states`, `workflow_artifacts`) are a `reserved_store_name` error —
+on a declared store, on an `artifacts[].collection`, and on a view `source.ref` that would derive one.
+Several are names a product reaches for on its own (`sessions` for a chat app, `runs`, `invites`); the
+match is exact, so a prefix is the whole fix (`chat_sessions`, `project_runs`). **v1 scope (honest):** no composite keys, no
 product→product foreign keys, no per-column defaults. A reference catalog store is SEEDED by the
 deployment (the workflow only reads it); the workflow's write target is UPSERTed one row per item.
 

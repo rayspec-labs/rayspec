@@ -12,8 +12,8 @@
  */
 
 import { RESERVED_STORE_NAMES, type StoreSpec } from '@rayspec/spec';
-import { getTableName } from 'drizzle-orm';
-import { type PgTable, pgTable, text, uuid } from 'drizzle-orm/pg-core';
+import { getTableName, is } from 'drizzle-orm';
+import { PgTable, pgTable, text, uuid } from 'drizzle-orm/pg-core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { makeDb } from './client.js';
 import {
@@ -22,6 +22,7 @@ import {
   validateProductStore,
 } from './composition.js';
 import { buildProductTables } from './generated/build-product-tables.js';
+import * as schema from './schema.js';
 import {
   apiKeys,
   authAudit,
@@ -288,7 +289,22 @@ describe('RESERVED_STORE_NAMES — the drift lock onto the real schema', () => {
     // four drift directions turn it RED — a table renamed/added/removed in schema.ts, and a name added
     // to or removed from the shared constant. Mirrors the RESERVED_COLUMN_NAMES ↔ INJECTED_COLUMN_NAMES
     // lock in generate-product-schema.test.ts.
-    const derived = new Set(
+    // Derived from EVERY table the schema module exports, not from a hand-written list of the ones we
+    // remembered: a hand-written list closes only the drift directions someone thought of, and the one
+    // it misses is the dangerous one — a NEW global platform table added to schema.ts and not added to
+    // the list would stay unreserved, and a product store could shadow it. Reading the module means a
+    // new table has to be decided about (add it to the constant, or this turns RED). The product half
+    // cannot leak in: `PRODUCT_TENANT_SCOPED_TABLES` is imported as a tuple, never re-exported, and is
+    // empty on the platform line — asserted below so this derivation cannot silently widen.
+    const exported = Object.values(schema).filter((v): v is PgTable => is(v, PgTable));
+    expect(exported.length).toBe(RESERVED_STORE_NAMES.size);
+    const derived = new Set(exported.map((t) => getTableName(t)));
+    expect(derived).toEqual(RESERVED_STORE_NAMES);
+
+    // The hand-written composition of the same set still agrees — so the constant's SHAPE (core
+    // tenant-scoped ⊕ the global identity/auth cluster) is documented by construction, not just by
+    // its comment.
+    const byCluster = new Set(
       [
         ...CORE_TENANT_SCOPED_TABLES,
         orgs,
@@ -300,6 +316,6 @@ describe('RESERVED_STORE_NAMES — the drift lock onto the real schema', () => {
         oidcModels,
       ].map((t) => getTableName(t as PgTable)),
     );
-    expect(derived).toEqual(RESERVED_STORE_NAMES);
+    expect(byCluster).toEqual(derived);
   });
 });
