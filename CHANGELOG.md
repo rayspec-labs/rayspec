@@ -614,6 +614,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tombstoned organization is now absent on the authorization path too.** Whether an org is a
+  usable tenant is asked in four places, and three of them treated `orgs.deleted_at` as decisive: the
+  org list does not return such an org, a login never resolves one, and a product deployment refuses
+  to boot bound to one. The live-membership lookup — the one the org switch and the live re-check for
+  sensitive permissions consult — did not, so a member of an erased tenant could still switch into it
+  and still act in it, in an org the rest of the API behaves as if it had forgotten. It now joins
+  `orgs` like the others; the switch answers the same uniform `404` it gives for an org you are not a
+  member of, so nothing new is learned from the response. No shipped route sets `orgs.deleted_at`, so
+  no reachable flow changes — this closes the disagreement rather than a live hole.
+
 - **`POST /v1/auth/register` with an `orgName` now hands back a token that is actually scoped to the
   org it just created.** The response has always reported `activeOrgId`, but the session was issued
   *before* the org existed, so the row carried `null` and the token carried no org claim: the very
