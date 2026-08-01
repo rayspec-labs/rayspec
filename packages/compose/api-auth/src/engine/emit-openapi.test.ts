@@ -880,7 +880,7 @@ describe('the throttle 429 documents a declared per-route budget without overcla
     expect(description).not.toContain('additionally declares its own budget');
   });
 
-  it('names the route own budget — its numbers, its key, and that it is IN ADDITION to the tier', () => {
+  it("names the route's own budget — its numbers, its key, and that it is IN ADDITION to the tier", () => {
     const doc = buildDeclaredRoutesOpenApi(budgetedSpec());
     const description = doc.paths['/tight'].get.responses['429']?.description ?? '';
     expect(description).toContain('7 request(s) per 30 second(s)');
@@ -890,7 +890,7 @@ describe('the throttle 429 documents a declared per-route budget without overcla
     expect(description).toContain('BEFORE the route runs');
   });
 
-  it('appends the budget sentence to an {agent} route own richer 429 rather than losing it', () => {
+  it("appends the budget sentence to an {agent} route's own richer 429 rather than losing it", () => {
     const doc = buildDeclaredRoutesOpenApi(
       specFromObject({
         version: '1.0',

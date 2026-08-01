@@ -492,7 +492,14 @@ api:
     expect(res.errors.map((e) => e.code)).toContain('schema_violation');
   });
 
-  // ---- the CODE-BUILT path: lintSpec, which the Zod parse never sees ----------------------------
+  // ---- lintSpec called DIRECTLY, over a spec value assembled in code rather than parsed ---------
+  //
+  // These drive `lintSpec` the way an embedder can: on a `RaySpec` value built in code, which never
+  // met the Zod grammar. Inside `parseSpec` the rule is unreachable — the parse rejects all of these
+  // values first (the arms above pin that), so the restatement is defence in depth against the field's
+  // grammar being relaxed, plus the reporting path for a direct `lintSpec` caller. It is deliberately
+  // NOT what protects a code-built spec on its way to the engine: such a spec skips `parseSpec` and
+  // therefore skips `lintSpec` too, and `declaredRouteBudget` is the guard that fails its boot closed.
   const codeBuiltSpec = (rateLimit: { windowSeconds: number; max: number }): RaySpec =>
     ({
       version: '1.0',

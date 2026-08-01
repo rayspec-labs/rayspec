@@ -30,7 +30,8 @@
  * limiter's policy table — an unregistered bucket silently permits everything. There are exactly two
  * safe discharges of that trap, and this module uses both:
  *   - REGISTER the bucket. Both default tiers below are registered in `DEFAULT_POLICIES` (auth-core
- *     `rate-limit.ts`), and a test pins that. Any caller passing its own tier names must do the same.
+ *     `rate-limit.ts`), and a test pins that. A caller passing its OWN tier names must discharge the
+ *     trap too — by this route or by the next one, never by neither.
  *   - CARRY the budget. A per-route budget passes its policy explicitly as the third argument to
  *     `check`, so no table lookup happens for those buckets at all and there is no registration to
  *     forget. The `ROUTE_BUDGET_BUCKET_PREFIX` bucket names are therefore DELIBERATELY ABSENT from
@@ -52,9 +53,13 @@ import { clientIpFromContext } from '../http/client-ip.js';
 import { principalActor } from './principal-actor.js';
 
 /**
- * The two bucket names a declared route throttles through. Each MUST name a registered policy (see
- * the fail-open trap in the module header); overriding them selects a differently-tuned pair, which is
- * how a per-route limit gets its own window/max and its own counter.
+ * The two bucket names a declared route throttles through. Each MUST discharge the fail-open trap in
+ * the module header in ONE of its two safe ways: either the name is REGISTERED in auth-core's
+ * `DEFAULT_POLICIES` (what the two default tiers below do), or the budget is CARRIED on the `check`
+ * call as an explicit policy (what a per-route budget does, which is why the
+ * `ROUTE_BUDGET_BUCKET_PREFIX` names are deliberately absent from that table and must stay absent).
+ * A name that does neither silently permits everything. Overriding these selects a differently-tuned
+ * pair, which is how a per-route limit gets its own window/max and its own counter.
  */
 export interface RouteRateTiers {
   /** Bucket for a request with NO validated principal. Keyed on the anti-spoof client source. */

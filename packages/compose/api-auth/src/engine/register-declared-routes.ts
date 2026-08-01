@@ -234,9 +234,20 @@ export function registerDeclaredRoutes(
   const tenant = resolveTenant(deps);
   // The boot probe below runs LAZILY and at most ONCE, on the first route that declares a `rateLimit`
   // AND has already survived its own playback + numeric validation. Lazily, so a spec that declares no
-  // per-route limit anywhere never touches the limiter at boot at all; after the per-route validation,
-  // so a limiter problem can never mask the more specific message about a wrong declaration; memoized,
-  // because the answer is a property of the injected limiter, not of the route.
+  // per-route limit anywhere never touches the limiter at boot at all; after that first route's own
+  // validation, so the commonest authoring mistake — a single budgeted route with a wrong number —
+  // reports the offending member rather than a limiter complaint; memoized, because the answer is a
+  // property of the injected limiter, not of the route.
+  //
+  // The ordering guarantee reaches exactly that far and no further, which is worth stating precisely
+  // rather than rounding up: because the probe is memoized on the FIRST budgeted route, a VALID
+  // budgeted route ahead of an invalid one arms it, and a limiter that fails the probe is then
+  // reported before the later route's numbers are examined. That is an acceptable trade and not a
+  // hole — a limiter which ignores a carried policy makes EVERY budgeted route unenforceable, so it
+  // has to be fixed before any per-route message is worth acting on, and both refusals abort the same
+  // boot with a message naming what is wrong. What is guaranteed unconditionally is that neither
+  // failure is ever silently swallowed; which of the two names itself first when a spec trips both is
+  // not. Both arms are pinned in register-declared-routes.test.ts.
   let limiterProbed = false;
 
   for (const route of spec.api) {

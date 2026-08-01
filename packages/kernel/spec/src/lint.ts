@@ -849,13 +849,28 @@ export function lintSpec(spec: RaySpec): SpecError[] {
 
   // api[].action.* -> declared store/agent/handler/stream (handler must be kind 'route').
   spec.api.forEach((route, ri) => {
-    // api[].rateLimit — RESTATE the positive-integer rule the Zod grammar already carries. That is not
-    // redundant here: runtime packages in this repository construct `ApiRouteSpec[]` literals directly
-    // and hand them to the engine without ever going through `parseSpec`, so for those documents this
-    // pass is the ONLY place the numbers are checked before they become a live throttle policy. A zero,
-    // a negative, a fraction, a NaN or a value outside the safe integer range is not a budget: it would
-    // either never throttle or never expire. `Number.isSafeInteger` (not `Number.isInteger`, which
-    // accepts 1e300) is the same guard the engine's `declaredRouteBudget` fails closed on.
+    // api[].rateLimit — RESTATE the positive-integer rule the Zod grammar already carries. Be precise
+    // about what this does and does not buy, because the two are easy to confuse.
+    //
+    // On the `parseSpec` path this rule does not fire: `lintSpec` is step 4, reached only after
+    // `RaySpec.safeParse` has succeeded, and the grammar's `z.number().int().positive()` already
+    // rejects every value tested here — zero, negative, fractional, NaN, Infinity and anything outside
+    // the safe integer range (Zod's `.int()` is a safe-integer check). So on that path this is defence
+    // in depth: it is what keeps the rule enforced if the field's grammar is ever relaxed, and it
+    // reports the offending member by its JSON path rather than through a Zod issue.
+    //
+    // Where it can actually report something is a caller that runs the EXPORTED `lintSpec` over a
+    // `RaySpec` value assembled in code rather than parsed from YAML — the linter's contract is
+    // "already shape-valid", not "already Zod-parsed", and nothing enforces the difference.
+    //
+    // What this rule is NOT is the guard standing between a code-built spec and a live throttle
+    // policy. A spec that never goes through `parseSpec` never goes through `lintSpec` either: the
+    // Product-YAML path composes its `ApiRouteSpec[]` in code and hands it straight to the engine.
+    // For those documents the fail-closed guard is `declaredRouteBudget` in @rayspec/api-auth, which
+    // throws at boot on exactly these values. This rule and that one are deliberately the same test —
+    // `Number.isSafeInteger(v) && v > 0`, not `Number.isInteger` (which accepts 1e300) — because a
+    // zero, a negative, a fraction, a NaN or an unsafe integer is not a budget: it would either never
+    // throttle or never expire.
     if (route.rateLimit) {
       (
         [

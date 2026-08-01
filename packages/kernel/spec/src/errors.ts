@@ -20,10 +20,11 @@ import { z } from 'zod';
  *  - `unsupported_version`    — `version` is missing or not the supported literal ('1.0').
  *  - `schema_violation`       — a Zod shape failure that is not a pure unknown-key rejection
  *                               (wrong type, missing required field, bad enum value, …). ALSO emitted
- *                               by the lint pass for a semantic violation of the same class that the
- *                               parse would have caught but a CODE-BUILT spec bypasses: an
- *                               `api[].rateLimit.windowSeconds`/`max` that is not a whole positive
- *                               number (a safe integer greater than zero).
+ *                               by the lint pass, for an `api[].rateLimit.windowSeconds`/`max` that is
+ *                               not a whole positive number (a safe integer greater than zero). Inside
+ *                               `parseSpec` the grammar rejects those first, so that restatement is
+ *                               defence in depth; it reports when `lintSpec` is run directly over a
+ *                               spec value assembled in code rather than parsed.
  *  - `unknown_field`          — a `.strict()` unknown-key rejection (fail-closed: any extra key).
  *  - `dangling_ref`          — a cross-reference points at an id/name that is not declared.
  *  - `duplicate_name`         — two entries in one section share an id/name.

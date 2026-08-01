@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A declared route can declare its own rate limit: the new optional `api[].rateLimit` field.**
+  Declared routes have been throttled for a while, but only by two allowances shared across the whole
+  declared surface — a strict one for callers whose credential does not validate and a generous one
+  for those whose does. Neither of them knows anything about the path, so a route that costs a model
+  call and a route that lists ten rows drew on exactly the same budget, and an author who could
+  declare a route still could not declare what it costs. `rateLimit: { windowSeconds: 60, max: 10 }`
+  on a route now gives that route its own budget of ten calls a minute, counted **per tenant and
+  principal for that route alone**. Both members are whole positive numbers, rejected at parse time by
+  the grammar and again at boot by the engine that turns them into a policy — so a spec assembled in
+  code, which never meets the parser, still cannot start a server on a budget that would never
+  throttle or never expire. The boot names the offending route and member.
+
+  **It is opt-in and additive, which are the two properties that make it safe to ship.** Omitting the
+  field is not a default budget — a route without one behaves exactly as it did before the field
+  existed, and a spec that declares none anywhere does not so much as consult the limiter at boot.
+  Declaring one does not *replace* the shared tier: a call must be inside both, so the effective
+  allowance is the smaller of the two. That has a consequence worth stating in the direction people
+  will actually try it — a declared `max` above the tier ceiling cannot take effect, so the field can
+  make a specific expensive route stricter than the surface it sits on and can never make one more
+  permissive than it is today.
+
+  **What the budget deliberately does not do.** It is enforced after authentication, because a
+  counter keyed on tenant and principal needs a principal to exist. So an unauthenticated call still
+  meets its usual `401` and spends nothing, while a call that authenticates and then fails the
+  permission check **does** spend budget before its `403` — the throttle sits ahead of the permission
+  check on purpose, since both the permission check and the tenant resolution touch the database and
+  an over-budget caller must cost no round trip there. It bounds load; it does not authorize. Over
+  budget the answer is the same `429 RATE_LIMITED` a tier refusal gives, through the same code path:
+  the identical envelope, `Retry-After` in whole seconds and `error.details.retryAfterMs`, fired
+  before the route runs, so nothing executed and no `Idempotency-Key` reservation was taken.
+
+  **The honest limits.** The counters live in the process, exactly like every other throttle here, so
+  a multi-instance deployment grants a caller one budget per instance it reaches; a hard cluster-wide
+  ceiling still belongs in a shared front-line limiter. Per-route buckets also multiply the number of
+  distinct keys the one bounded in-process store tracks, and that store evicts the oldest live window
+  when it is full — which hands that caller a fresh budget. A deployment with very many budgeted
+  routes and very many principals can therefore see a limit reset early under key pressure, and that
+  store is the **single shared one**: it also holds the authentication counters (`login`, `register`,
+  `refresh`, `oauth-token`, `invite-accept`), eviction is by insertion age across all of them, so the
+  window dropped under per-route key pressure may be an authentication throttle rather than a route
+  budget. Size `DEFAULT_MAX_RATE_LIMIT_ENTRIES` against (budgeted routes × principals) accordingly.
+  Both are documented in the spec reference rather than concealed, and neither is changed by this
+  release. A
+  stream `playback` route may not declare a `rateLimit` at all: it is authorized by a signed media
+  token on its own middleware tuple and its media principal carries no API-key identity to count on,
+  so a deployment that declares one refuses to boot with a message pointing at the route that mints
+  the token instead — a silently ignored limit would be the worst available outcome. The served
+  OpenAPI document follows suit: a budgeted route names its own allowance in its `429`, and the
+  document's previous claim that each allowance is one budget for the whole declared surface is now
+  scoped to the two shared tiers, which is the only place it was ever true.
+
 - **A run can be ended on demand: `POST /v1/runs/{id}/cancel`.** Until now nothing could stop an agent
   run. A synchronous request could give up waiting — that is what the held-request timeout does — but
   giving up on a request never asked the run to stop, so the model call kept going; and a run enqueued
@@ -659,8 +710,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `playback` route is authorized by a signed media token, mounts its own middleware and is bounded by
   the per-user concurrent-stream limit instead, and the sentence's earlier form reached the platform's
   own `/v1/auth`, `/v1/orgs` and run routes as well. Three things a deployment has to plan around were
-  also missing. Each allowance is **one budget for the whole declared surface, not one per route**, so
-  a client spends the same 30 or 600 whether it calls one route or twenty. The strict tier is only as
+  also missing. Each of those two **tier** allowances is one budget for the whole declared surface, so
+  a client spends the same 30 or 600 whether it calls one route or twenty — a route may additionally
+  declare its own `rateLimit`, which is counted separately and per route. The strict tier is only as
   precise as `RAYSPEC_TRUSTED_PROXIES`: left unset behind a load balancer every unvalidated request
   presents the balancer as its source and shares ONE bucket, so a first-party client whose token has
   merely expired meets a `429` instead of the `401` it would have refreshed on. And because the tier is
@@ -729,51 +781,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tracks advisory drift against a lockfile that has not moved. Repository infrastructure only:
   no published package, API or runtime behavior changes. The report-to-issue sync ships as
   `scripts/sync-advisory-issues.mjs` and runs locally via `pnpm test:advisory-sync`.
-
-- **A declared route can declare its own rate limit: the new optional `api[].rateLimit` field.**
-  Declared routes have been throttled for a while, but only by two allowances shared across the whole
-  declared surface — a strict one for callers whose credential does not validate and a generous one
-  for those whose does. Neither of them knows anything about the path, so a route that costs a model
-  call and a route that lists ten rows drew on exactly the same budget, and an author who could
-  declare a route still could not declare what it costs. `rateLimit: { windowSeconds: 60, max: 10 }`
-  on a route now gives that route its own budget of ten calls a minute, counted **per tenant and
-  principal for that route alone**. Both members are whole positive numbers; the field is validated
-  at parse time and, for the code-built specs that never pass through the parser, restated in the
-  linter, which reports the offending member by its JSON path.
-
-  **It is opt-in and additive, which are the two properties that make it safe to ship.** Omitting the
-  field is not a default budget — a route without one behaves exactly as it did before the field
-  existed, and a spec that declares none anywhere does not so much as consult the limiter at boot.
-  Declaring one does not *replace* the shared tier: a call must be inside both, so the effective
-  allowance is the smaller of the two. That has a consequence worth stating in the direction people
-  will actually try it — a declared `max` above the tier ceiling cannot take effect, so the field can
-  make a specific expensive route stricter than the surface it sits on and can never make one more
-  permissive than it is today.
-
-  **What the budget deliberately does not do.** It is enforced after authentication, because a
-  counter keyed on tenant and principal needs a principal to exist. So an unauthenticated call still
-  meets its usual `401` and spends nothing, while a call that authenticates and then fails the
-  permission check **does** spend budget before its `403` — the throttle sits ahead of the permission
-  check on purpose, since both the permission check and the tenant resolution touch the database and
-  an over-budget caller must cost no round trip there. It bounds load; it does not authorize. Over
-  budget the answer is the same `429 RATE_LIMITED` a tier refusal gives, through the same code path:
-  the identical envelope, `Retry-After` in whole seconds and `error.details.retryAfterMs`, fired
-  before the route runs, so nothing executed and no `Idempotency-Key` reservation was taken.
-
-  **The honest limits.** The counters live in the process, exactly like every other throttle here, so
-  a multi-instance deployment grants a caller one budget per instance it reaches; a hard cluster-wide
-  ceiling still belongs in a shared front-line limiter. Per-route buckets also multiply the number of
-  distinct keys the one bounded in-process store tracks, and that store evicts the oldest live window
-  when it is full — which hands that caller a fresh budget. A deployment with very many budgeted
-  routes and very many principals can therefore see a limit reset early under key pressure. Both are
-  documented in the spec reference rather than concealed, and neither is changed by this release. A
-  stream `playback` route may not declare a `rateLimit` at all: it is authorized by a signed media
-  token on its own middleware tuple and its media principal carries no API-key identity to count on,
-  so a deployment that declares one refuses to boot with a message pointing at the route that mints
-  the token instead — a silently ignored limit would be the worst available outcome. The served
-  OpenAPI document follows suit: a budgeted route names its own allowance in its `429`, and the
-  document's previous claim that each allowance is one budget for the whole declared surface is now
-  scoped to the two shared tiers, which is the only place it was ever true.
 
 ## [1.6.2] - 2026-07-24
 

@@ -398,8 +398,18 @@ tenant, principal) rather than one per principal — against a store whose size 
 capped. When that cap is reached the store evicts the oldest live window, and
 evicting a live window hands that caller a **fresh budget**. So a deployment with
 very many budgeted routes and very many principals can see a limit reset early
-under key pressure. This is documented rather than fixed here; a hard ceiling
-still belongs in a shared front-line limiter.
+under key pressure. The half of that worth stating plainly is which windows are
+eligible for eviction: there is **one** limiter in the product and therefore one
+bounded store, and it holds every counter in the system — not only declared-route
+budgets but the authentication throttles too (`login`, `register`, `refresh`,
+`oauth-token`, `invite-accept`). Eviction is by insertion age across the whole
+store, so under per-route key pressure the window that gets dropped may be an
+authentication counter rather than a route budget, which would hand a
+credential-stuffing run a fresh `login` allowance. Size
+`DEFAULT_MAX_RATE_LIMIT_ENTRIES` against your real key count — roughly
+(budgeted routes × active principals) plus the authentication counters — so the
+cap is never reached in normal operation. This is documented rather than fixed
+here; a hard ceiling still belongs in a shared front-line limiter.
 
 **The strict tier is only as precise as `RAYSPEC_TRUSTED_PROXIES`.** The client
 source is the socket peer unless that variable lists the peer as a trusted proxy,

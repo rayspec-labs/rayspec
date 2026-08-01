@@ -196,7 +196,7 @@ describe('declaredRouteBudget — the derivation is total, and fail-closed on th
     }
   });
 
-  it('gives two different routes disjoint buckets, so one route cannot spend another route budget', () => {
+  it("gives two different routes disjoint buckets, so one route cannot spend another route's budget", () => {
     const other = declaredRouteBudget({ ...route, path: '/pongs' });
     const mine = declaredRouteBudget(route);
     expect(mine.tiers.principal).not.toBe(other.tiers.principal);
@@ -270,7 +270,7 @@ describe('a per-route budget bucket is DELIBERATELY not a registered policy', ()
     );
   });
 
-  it('registers NEITHER of a declared route budget bucket names', () => {
+  it("registers NEITHER of a declared route budget's bucket names", () => {
     const { tiers } = declaredRouteBudget({
       method: 'GET',
       path: '/pings',
@@ -311,7 +311,7 @@ describe('routeRateLimit carries the budget INTO the limiter rather than looking
     expect(calls[0]?.[2]).toBeUndefined();
   });
 
-  it('passes the derived policy and the route own bucket when the route declares one', async () => {
+  it("passes the derived policy and the route's own bucket when the route declares one", async () => {
     const { limiter, calls } = recordingLimiter();
     const deps = { rateLimiter: limiter, trustedProxies: [] } as unknown as AppDeps;
     const { tiers, policy } = declaredRouteBudget({
