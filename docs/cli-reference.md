@@ -386,16 +386,24 @@ malformed or names no live organization, and — because `deploy` serves the aut
 surface itself — it therefore cannot create its own tenant. Bootstrap first,
 deploy second:
 
-```
+```bash
+# 0. Settle the id first — this one does not exist yet; step 2 creates it.
+ORG_ID=$(uuidgen)
+
 # 1. Boot the auth surface alone, with the bootstrap gate on. No spec, no product.
+#    This runs in the foreground, so give steps 2-3 a second shell.
 RAYSPEC_TENANT_BOOTSTRAP_ENABLED=true rayspec-serve
 
-# 2. Create the tenant under the id you chose (generate one with `uuidgen`).
+# 2. Create the tenant under the id you chose.
 rayspec dev bootstrap-tenant --base-url http://127.0.0.1:8080 --org-id "$ORG_ID"
 
 # 3. Stop that server. Deploy the product against the id — gate off.
 RAYSPEC_PRODUCT_TENANT_ID="$ORG_ID" rayspec deploy path/to/product.yaml
 ```
+
+Step 0 is the one case where generating a fresh UUID is right: the id is created
+in step 2. Everywhere else `RAYSPEC_PRODUCT_TENANT_ID` must name an organization
+that already exists — a random id names none, and the boot check refuses it.
 
 Against an existing organization, skip steps 1–2 entirely and set
 `RAYSPEC_PRODUCT_TENANT_ID` to that organization's id.

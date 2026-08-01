@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other deployment that path does not exist at all — a `404`, not a refusal — so there is no gate to
   probe and no collision reply to read as an org-existence oracle. Turn it on for the bootstrap
   boot; leave it off everywhere else.
+  **Embedder note:** `ServerConfig` — the assembly configuration exported as a type from
+  `@rayspec/server` — gains a REQUIRED `tenantBootstrapEnabled: boolean`. `loadServerConfig` fills it
+  from the environment, so anything that gets its config from there is unaffected; code outside this
+  repository that builds the object literally has to add the field. It carries no default on purpose:
+  the value decides whether an operator route exists at all, and a silent `false` would be a guess
+  about a deployment's posture rather than a statement of it.
 
 - **A 64-bit integer column type: `bigint`, alongside `integer` rather than replacing it.** The
   declared `integer` type maps to PostgreSQL `int4`, whose ceiling is 2 147 483 647 — for a column
