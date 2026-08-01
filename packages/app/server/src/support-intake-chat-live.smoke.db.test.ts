@@ -19,11 +19,17 @@
 import { createHash } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { makeDb } from '@rayspec/db';
 import { registerScopedTables } from '@rayspec/db/testing';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { assembleServer, type BootedServer, loadServerConfig } from './composition-root.js';
+import {
+  applyMigrations,
+  assembleServer,
+  type BootedServer,
+  loadServerConfig,
+} from './composition-root.js';
 import { logRedactedRunFailure } from './live-smoke-diagnostics.js';
 
 const baseUrl = process.env.DATABASE_URL;
@@ -128,6 +134,20 @@ describe.skipIf(!canRun)(
       delete process.env.RAYSPEC_MEDIA_SIGNING_KEY;
       delete process.env.STT_PROVIDER;
 
+      // The deployment tenant must be a LIVE org BEFORE the boot: a product deployment whose
+      // RAYSPEC_PRODUCT_TENANT_ID names none refuses to start. The committed platform chain
+      // bootstraps the clean DB so `orgs` is there to seed; the boot's own migrate then no-ops.
+      const seed = makeDb(appDbUrl);
+      try {
+        await applyMigrations(seed);
+        await seed.$client.unsafe(
+          `INSERT INTO orgs (id, name, slug) VALUES ($1, 'SupportLive', 'support-live')`,
+          [TENANT],
+        );
+      } finally {
+        await seed.$client.end();
+      }
+
       const config = loadServerConfig();
       server = await assembleServer(config, {
         registerProductTables: (tables) => registerScopedTables([...tables.values()]),
@@ -135,10 +155,6 @@ describe.skipIf(!canRun)(
 
       const client = postgres(appDbUrl, { max: 2 });
       try {
-        await client.unsafe(
-          `INSERT INTO orgs (id, name, slug) VALUES ($1, 'SupportLive', 'support-live')`,
-          [TENANT],
-        );
         await client.unsafe(
           `INSERT INTO support_catalog
              (tenant_id, category, keywords, owning_team, default_severity, suggested_routing)

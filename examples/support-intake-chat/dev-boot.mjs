@@ -41,8 +41,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
+import { makeDb } from '@rayspec/db';
 import { registerProductStores } from '@rayspec/db/composition';
-import { assembleServer, bootBaseUrl, loadServerConfig } from '@rayspec/server';
+import { applyMigrations, assembleServer, bootBaseUrl, loadServerConfig } from '@rayspec/server';
 import postgres from 'postgres';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -104,7 +105,24 @@ try {
   await admin.end();
 }
 
-// 4. Boot the composed stack with the LOCAL table-registration stand-in (+ the conversation/agent executor modes).
+// 4. Bring the deployment tenant into existence BEFORE the boot. A product deployment whose
+//    RAYSPEC_PRODUCT_TENANT_ID names no live org refuses to start — it would serve nobody, since every
+//    principal is bound to that tenant. Applying the committed platform chain here creates `orgs`, so
+//    the row can be seeded; the boot's own migrate then no-ops over it. The reference CATALOG below
+//    still waits for the boot, because its table is a product store the boot materializes.
+const tenantSeed = makeDb(DATABASE_URL);
+try {
+  await applyMigrations(tenantSeed);
+  await tenantSeed.$client.unsafe(
+    `INSERT INTO orgs (id, name, slug) VALUES ($1, 'Support Chat Co', 'support-chat-co')
+     ON CONFLICT DO NOTHING`,
+    [TENANT],
+  );
+} finally {
+  await tenantSeed.$client.end();
+}
+
+// 5. Boot the composed stack with the LOCAL table-registration stand-in (+ the conversation/agent executor modes).
 process.env.DATABASE_URL = DATABASE_URL;
 process.env.PORT = PORT;
 process.env.RAYSPEC_PRODUCT_TENANT_ID = TENANT;
@@ -117,15 +135,10 @@ const server = await assembleServer(config, {
   registerProductTables: registerProductStores,
 });
 
-// 5. Seed the deployment tenant + the known-issues/routing catalog (idempotent; the same rows the
-//    merge-gated e2e seeds — a reference catalog is deployment-seeded by design).
+// 6. Seed the known-issues/routing catalog (idempotent; the same rows the merge-gated e2e seeds —
+//    a reference catalog is deployment-seeded by design).
 const seed = postgres(DATABASE_URL, { max: 1 });
 try {
-  await seed.unsafe(
-    `INSERT INTO orgs (id, name, slug) VALUES ($1, 'Support Chat Co', 'support-chat-co')
-     ON CONFLICT DO NOTHING`,
-    [TENANT],
-  );
   await seed.unsafe(
     `INSERT INTO support_catalog (tenant_id, category, keywords, owning_team, default_severity, suggested_routing)
      VALUES
@@ -136,7 +149,7 @@ try {
      ON CONFLICT DO NOTHING`,
     [TENANT],
   );
-  console.log(`[dev-boot] seeded tenant ${TENANT} + support_catalog (4 rows, idempotent)`);
+  console.log(`[dev-boot] tenant ${TENANT} live + support_catalog seeded (4 rows, idempotent)`);
 } finally {
   await seed.end();
 }

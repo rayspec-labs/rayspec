@@ -60,11 +60,17 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { InMemoryAgentHandlerRegistry } from '@rayspec/agent-runtime';
+import { makeDb } from '@rayspec/db';
 import { registerScopedTables } from '@rayspec/db/testing';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { assembleServer, type BootedServer, loadServerConfig } from './composition-root.js';
+import {
+  applyMigrations,
+  assembleServer,
+  type BootedServer,
+  loadServerConfig,
+} from './composition-root.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -258,6 +264,20 @@ describe.skipIf(!baseUrl)('Contract-Intake e2e — real boot + real DBOS + HTTP'
     delete process.env.RAYSPEC_MEDIA_SIGNING_KEY;
     delete process.env.STT_PROVIDER;
 
+    // The deployment tenant must be a LIVE org BEFORE the boot: a product deployment whose
+    // RAYSPEC_PRODUCT_TENANT_ID names none refuses to start. The committed platform chain
+    // bootstraps the clean DB so `orgs` is there to seed; the boot's own migrate then no-ops.
+    const seed = makeDb(appDbUrl);
+    try {
+      await applyMigrations(seed);
+      await seed.$client.unsafe(
+        `INSERT INTO orgs (id, name, slug) VALUES ($1, 'ContractA', 'contract-a'), ($2, 'ContractB', 'contract-b')`,
+        [TENANT, TENANT_B],
+      );
+    } finally {
+      await seed.$client.end();
+    }
+
     const config = loadServerConfig();
     server = await assembleServer(config, {
       registerProductTables: (tables) => registerScopedTables([...tables.values()]),
@@ -266,10 +286,6 @@ describe.skipIf(!baseUrl)('Contract-Intake e2e — real boot + real DBOS + HTTP'
 
     const client = postgres(appDbUrl, { max: 2 });
     try {
-      await client.unsafe(
-        `INSERT INTO orgs (id, name, slug) VALUES ($1, 'ContractA', 'contract-a'), ($2, 'ContractB', 'contract-b')`,
-        [TENANT, TENANT_B],
-      );
       // Seed the contract-type retention catalog the store_read feeds to the agent (one row per
       // contract type, incl. the 'other' suspense fallback row — the product-YAML seed contract).
       await client.unsafe(

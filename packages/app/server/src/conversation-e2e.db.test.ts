@@ -75,11 +75,17 @@ import { createHash } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AgentSpec, Backend, RunContext, RunResult } from '@rayspec/core';
+import { makeDb } from '@rayspec/db';
 import { registerScopedTables } from '@rayspec/db/testing';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { assembleServer, type BootedServer, loadServerConfig } from './composition-root.js';
+import {
+  applyMigrations,
+  assembleServer,
+  type BootedServer,
+  loadServerConfig,
+} from './composition-root.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -285,21 +291,25 @@ describe.skipIf(!baseUrl)('conversation — real boot + real DBOS + HTTP + live 
     // negative-env law is unchanged for them).
     process.env.RAYSPEC_RESPONDER_MODE = 'deterministic';
 
+    // The deployment tenant must be a LIVE org BEFORE the boot: a product deployment whose
+    // RAYSPEC_PRODUCT_TENANT_ID names none refuses to start. The committed platform chain
+    // bootstraps the clean DB so `orgs` is there to seed; the boot's own migrate then no-ops.
+    const seed = makeDb(appDbUrl);
+    try {
+      await applyMigrations(seed);
+      await seed.$client.unsafe(
+        `INSERT INTO orgs (id, name, slug) VALUES ($1, 'ConvA', 'conv-a'), ($2, 'ConvB', 'conv-b')`,
+        [TENANT, TENANT_B],
+      );
+    } finally {
+      await seed.$client.end();
+    }
+
     const config = loadServerConfig();
     server = await assembleServer(config, {
       registerProductTables: (tables) => registerScopedTables([...tables.values()]),
       productDeterministicResponderBackend: replyBackend,
     });
-
-    const client = postgres(appDbUrl, { max: 2 });
-    try {
-      await client.unsafe(
-        `INSERT INTO orgs (id, name, slug) VALUES ($1, 'ConvA', 'conv-a'), ($2, 'ConvB', 'conv-b')`,
-        [TENANT, TENANT_B],
-      );
-    } finally {
-      await client.end();
-    }
     tokenA = await tokenFor(TENANT);
   }, 180_000);
 

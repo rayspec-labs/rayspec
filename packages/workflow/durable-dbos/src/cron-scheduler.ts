@@ -335,7 +335,7 @@ export interface CronSchedulerDeps {
    *
    * INJECTED rather than implemented here: `orgs` is a platform/global table this engine package has no
    * business querying (it holds a `TenantDb` and dispatches through the chokepoint), so the composition
-   * root supplies the probe (`cronTenantExists`) and stays the single source of truth for what "usable"
+   * root supplies the probe (`tenantOrgExists`) and stays the single source of truth for what "usable"
    * means — currently an org row that is not soft-deleted.
    *
    * REQUIRED, not optional: a scheduler that cannot answer this question would dispatch under a tenant

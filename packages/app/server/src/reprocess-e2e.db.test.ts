@@ -26,12 +26,18 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { InMemoryAgentHandlerRegistry } from '@rayspec/agent-runtime';
+import { makeDb } from '@rayspec/db';
 import { registerScopedTables } from '@rayspec/db/testing';
 import { FakeSttAdapter, type SttDualTrackFixture } from '@rayspec/stt-port';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { assembleServer, type BootedServer, loadServerConfig } from './composition-root.js';
+import {
+  applyMigrations,
+  assembleServer,
+  type BootedServer,
+  loadServerConfig,
+} from './composition-root.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -153,22 +159,25 @@ describe.skipIf(!baseUrl)(
       process.env.RAYSPEC_BLOB_ROOT = blobDir;
       process.env.RAYSPEC_MEDIA_SIGNING_KEY = 'reprocess-e2e-media-secret-at-least-32-bytes-x';
 
+      // The deployment tenant must be a LIVE org BEFORE the boot: a product deployment whose
+      // RAYSPEC_PRODUCT_TENANT_ID names none refuses to start. The committed platform chain
+      // bootstraps the clean DB so `orgs` is there to seed; the boot's own migrate then no-ops.
+      const seed = makeDb(appDbUrl);
+      try {
+        await applyMigrations(seed);
+        await seed.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'Acme', 'acme')`, [
+          TENANT,
+        ]);
+      } finally {
+        await seed.$client.end();
+      }
+
       const config = loadServerConfig();
       server = await assembleServer(config, {
         registerProductTables: (tables) => registerScopedTables([...tables.values()]),
         productDeterministicAgents: groundedExtractor(),
         productSttAdapter: new FakeSttAdapter({ fixtures: [STT_FIXTURE] }),
       });
-
-      // The deployment tenant org (the workflow_runs FK + the tenant every dispatched run binds to).
-      const client = postgres(appDbUrl, { max: 2 });
-      try {
-        await client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'Acme', 'acme')`, [
-          TENANT,
-        ]);
-      } finally {
-        await client.end();
-      }
     }, 180_000);
 
     afterAll(async () => {

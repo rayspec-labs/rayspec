@@ -400,7 +400,7 @@ export interface ServerConfig {
    * RAYSPEC_CRON_TENANT_ID. REQUIRED iff the deployed spec declares cron triggers AND
    * `deployment.durableWorker:true`: an unset or malformed (non-UUID) value is fail-closed-refused at
    * BOOT. Whether the org it names EXISTS is not a boot question — a well-formed id naming an org that
-   * does not exist yet boots, and each firing is skipped instead (see `cronTenantExists`), so nothing
+   * does not exist yet boots, and each firing is skipped instead (see `tenantOrgExists`), so nothing
    * ever fires under an unknown tenant either way. Absent for an auth-only / no-cron / no-worker boot.
    */
   cronTenantId?: string;
@@ -470,6 +470,20 @@ export interface ServerConfig {
    * Deliberately NOT a spec flag (mirrors the GDPR/erasure gates). Default DISABLED.
    */
   bodyRefreshEnabled: boolean;
+  /**
+   * The TENANT-BOOTSTRAP OPERATOR gate — the ONLY posture in which an org id may be CHOSEN by an HTTP
+   * caller (`POST /v1/auth/bootstrap-tenant`, which is not registered at all while this is false).
+   * `true` ONLY when RAYSPEC_TENANT_BOOTSTRAP_ENABLED is EXACTLY the string `"true"`; ANYTHING else
+   * (unset, "1", "yes", "TRUE", whitespace) is `false`.
+   *
+   * It is fail-closed for a security reason, not a stylistic one: `POST /v1/auth/register` is PUBLIC
+   * and unauthenticated, so if any public caller could name the org id, someone who learned the id an
+   * operator intends to deploy against could create that org FIRST with themselves as owner — and the
+   * deployment would then bind `RAYSPEC_PRODUCT_TENANT_ID` to an org they control. The gate is meant to
+   * be on for the bootstrap boot and off again for the deployment. Deliberately NOT a spec flag
+   * (mirrors the GDPR/erasure gates). Default DISABLED.
+   */
+  tenantBootstrapEnabled: boolean;
 }
 
 /**
@@ -901,6 +915,11 @@ export function loadServerConfig(
   // refresh secret on the httpOnly cookie ONLY (today's posture byte-for-byte).
   const bodyRefreshEnabled = env.RAYSPEC_BODY_REFRESH_ENABLED === 'true';
 
+  // The tenant-bootstrap OPERATOR gate, fail-closed: STRICTLY the exact string "true" (mirrors the
+  // erasure/GDPR/body-refresh gates) — default DISABLED, so a deployment that never set it has NO
+  // route on which an org id can be chosen at all. See the ServerConfig field for why that matters.
+  const tenantBootstrapEnabled = env.RAYSPEC_TENANT_BOOTSTRAP_ENABLED === 'true';
+
   // Non-null assertions are safe: the missing-list check above already aborted on any unset secret.
   const config: ServerConfig = {
     databaseUrl: databaseUrl as string,
@@ -917,6 +936,7 @@ export function loadServerConfig(
     accessTokenTtlSeconds,
     erasureEnabled,
     bodyRefreshEnabled,
+    tenantBootstrapEnabled,
   };
 
   const specPath = env.RAYSPEC_SPEC_PATH?.trim();
@@ -1323,7 +1343,7 @@ export async function applyMigrations(db: Db): Promise<void> {
  * whose org row is not there yet (a first bring-up, or a restart that races it) could not come up at
  * all, and the org it was waiting for could not be created through it. The check therefore moved to
  * the FIRING (see
- * `cronTenantExists`, injected into `DbosCronScheduler` as its per-firing `tenantExists` probe), where
+ * `tenantOrgExists`, injected into `DbosCronScheduler` as its per-firing `tenantExists` probe), where
  * it is answered fail-closed and — unlike a boot gate — picks the org up the moment it appears.
  * Nothing fires under an unknown tenant either way; only the moment of the check changed.
  */
@@ -1341,20 +1361,25 @@ export async function assertCronTenantBootable(db: Db, cronTenantId: string): Pr
 }
 
 /**
- * Does the configured cron tenant currently exist as a USABLE org? The single source of truth for that
- * question — the composition root owns it because `orgs` is a global/platform table the durable-worker
- * package must not query itself; the scheduler receives this as its injected `tenantExists` probe and
- * calls it before EVERY firing.
+ * Does a configured deployment tenant currently exist as a USABLE org? The single source of truth for
+ * that question — the composition root owns it because `orgs` is a global/platform table the
+ * durable-worker package (and the product boot) must not query themselves.
  *
- * `deleted_at IS NULL` so a soft-deleted org counts as absent: a cron must not fire under a tombstoned
+ * TWO callers share this ONE query, deliberately, so "a usable org" can never mean two different
+ * things: the cron scheduler receives it as its injected `tenantExists` probe and calls it before EVERY
+ * firing, and the Product-YAML boot asks it once, at startup, about `RAYSPEC_PRODUCT_TENANT_ID`. The
+ * MOMENT of the ask differs (per-firing vs. boot) because the two failure profiles differ — see
+ * `assertCronTenantBootable` and the product boot's own tenant gate — but the QUESTION does not.
+ *
+ * `deleted_at IS NULL` so a soft-deleted org counts as absent: nothing must run under a tombstoned
  * tenant, and a tenant that is tombstoned WHILE the deployment runs stops firing at the next instant
  * without any restart — the same property, read the other way round, that lets a not-yet-created org
  * start firing.
  */
-export async function cronTenantExists(db: Db, cronTenantId: string): Promise<boolean> {
+export async function tenantOrgExists(db: Db, tenantId: string): Promise<boolean> {
   const rows = (await db.$client.unsafe(
     'SELECT 1 FROM orgs WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
-    [cronTenantId],
+    [tenantId],
   )) as unknown as unknown[];
   return rows.length > 0;
 }
@@ -1482,7 +1507,10 @@ export async function assembleServer(
 
   // 4. The five global-table stores (deny-by-default predicate-exempt modules) + AuthService.
   const identityStore = new IdentityStore(db);
-  const orgStore = new OrgStore(db);
+  // The org store carries the tenant-bootstrap posture, not just the handle: it is the ONE place that
+  // decides whether an org id may be chosen, so a route that forgot to check could not smuggle one
+  // past it, and the gated route keys its own registration off the same value (one source of truth).
+  const orgStore = new OrgStore(db, { tenantBootstrapEnabled: config.tenantBootstrapEnabled });
   const apiKeyStore = new ApiKeyStore(db);
   const auditStore = new AuditStore(db);
   const idempotency = new IdempotencyStore(db);
@@ -2405,7 +2433,7 @@ async function deployDeclaredSpec(
     // once here so an operator watching the boot knows why nothing fires yet (and that it will, without
     // a restart); the scheduler then re-asks per firing through the SAME probe.
     const cronTenantId = config.cronTenantId;
-    if (!(await cronTenantExists(db, cronTenantId))) {
+    if (!(await tenantOrgExists(db, cronTenantId))) {
       bootWarn(cronTenantAbsentBootNotice(cronTenantId));
     }
     const cronScheduler = new DbosCronScheduler(result.triggers.list(), {
@@ -2420,7 +2448,7 @@ async function deployDeclaredSpec(
       // SCHEDULER hands over per firing, not one captured here, so the answer is always about the
       // tenant that is actually about to fire.
       tenantExists: (firingTenantId: string) =>
-        cronTenantExists(workerDbHandle as Db, firingTenantId),
+        tenantOrgExists(workerDbHandle as Db, firingTenantId),
     });
     // Expose the wired scheduler to the late-bound manual-trigger firer (built above, injected into the
     // app inside deploy()); the firer restricts on-demand fires to its manual triggers.

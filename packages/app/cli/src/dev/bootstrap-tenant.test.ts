@@ -136,3 +136,72 @@ describe('dev bootstrap-tenant — request construction + sequence', () => {
     await expect(runBootstrapTenant([], {})).rejects.toThrow(/--base-url/);
   });
 });
+
+/**
+ * `--org-id` targets a PRE-CHOSEN tenant id — the id an operator wants to put in
+ * `RAYSPEC_PRODUCT_TENANT_ID` before the product deployment exists. It goes to a DIFFERENT route:
+ * `/v1/auth/register` is public and unauthenticated and must never accept a client-chosen org id, so
+ * the chosen-id path is the operator-gated `/v1/auth/bootstrap-tenant`. Without the flag the command
+ * is byte-identical to before (register, no orgId on the wire).
+ */
+describe('dev bootstrap-tenant — --org-id targets the gated bootstrap route', () => {
+  it('posts the chosen id to /v1/auth/bootstrap-tenant, then switches into it', async () => {
+    const chosen = '11111111-1111-4111-8111-111111111111';
+    const { fetchImpl, calls } = mockFetch([
+      { status: 201, body: { accessToken: 'REG_TOKEN', activeOrgId: chosen } },
+      { status: 200, body: { accessToken: 'ORG_TOKEN' } },
+    ]);
+
+    const result = await runBootstrapTenant(
+      [
+        '--base-url',
+        'http://127.0.0.1:8788',
+        '--email',
+        'me@example.test',
+        '--password',
+        'pw-correct-horse',
+        '--org-name',
+        'My Workspace',
+        '--org-id',
+        chosen,
+      ],
+      { fetchImpl },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.orgId).toBe(chosen);
+    expect(result.orgToken).toBe('ORG_TOKEN');
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].url).toBe('http://127.0.0.1:8788/v1/auth/bootstrap-tenant');
+    expect(calls[0].headers['content-type']).toBe('application/json');
+    expect(JSON.parse(calls[0].body ?? '{}')).toEqual({
+      email: 'me@example.test',
+      password: 'pw-correct-horse',
+      orgName: 'My Workspace',
+      orgId: chosen,
+    });
+    expect(calls[1].url).toBe(`http://127.0.0.1:8788/v1/orgs/${chosen}/switch`);
+  });
+
+  it('WITHOUT the flag the wire shape is unchanged: /v1/auth/register and no orgId in the body', async () => {
+    const { fetchImpl, calls } = mockFetch([
+      { status: 201, body: { accessToken: 'T', activeOrgId: 'o1' } },
+      { status: 200, body: { accessToken: 'OT' } },
+    ]);
+    await runBootstrapTenant(['--base-url', 'http://localhost:8788'], { fetchImpl });
+    expect(calls[0].url).toBe('http://localhost:8788/v1/auth/register');
+    expect(JSON.parse(calls[0].body ?? '{}')).not.toHaveProperty('orgId');
+  });
+
+  it('a malformed --org-id is a usage error — refused before any request is made', async () => {
+    const { fetchImpl, calls } = mockFetch([]);
+    await expect(
+      runBootstrapTenant(['--base-url', 'http://localhost:8788', '--org-id', 'not-a-uuid'], {
+        fetchImpl,
+      }),
+    ).rejects.toThrow(/--org-id must be an org UUID/);
+    expect(calls).toHaveLength(0);
+  });
+});

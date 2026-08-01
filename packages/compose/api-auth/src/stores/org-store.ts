@@ -17,24 +17,81 @@ export interface OrgRow {
   slug: string;
 }
 
+/**
+ * A CHOSEN org id that is already taken. Distinct from a slug collision (which the unique lower(slug)
+ * index raises as a driver error) because it is the one collision an operator can act on: the id they
+ * meant to deploy against is not theirs to bind. The bootstrap route maps it to a 409 — never a 500,
+ * and never a silent success under a DIFFERENT id, which is the failure that would send a deployment
+ * at an org it does not own.
+ */
+export class OrgIdInUseError extends Error {
+  constructor(orgId: string) {
+    super(`org id ${orgId} already exists`);
+    this.name = 'OrgIdInUseError';
+  }
+}
+
 export class OrgStore {
-  constructor(private readonly db: Db) {}
+  /**
+   * `tenantBootstrapEnabled` is the deployment's operator posture (RAYSPEC_TENANT_BOOTSTRAP_ENABLED),
+   * carried HERE rather than checked per caller: org creation is this store's capability, so this is
+   * the single point at which a chosen id is admitted or refused. Default `false` — a store built the
+   * one-argument way (the cleanup composition, every existing suite) behaves exactly as before.
+   */
+  readonly tenantBootstrapEnabled: boolean;
+
+  constructor(
+    private readonly db: Db,
+    opts: { tenantBootstrapEnabled?: boolean } = {},
+  ) {
+    this.tenantBootstrapEnabled = opts.tenantBootstrapEnabled ?? false;
+  }
 
   /**
    * Create an org + the caller's OWNER membership in ONE transaction (org.id becomes tenant_id).
    * Throws on a slug collision (the partial unique lower(slug) index). Returns the new org.
+   *
+   * `id` is OPTIONAL and gated. Unset (every path but the operator bootstrap) ⇒ the INSERT names
+   * name+slug only and the database generates the id via `defaultRandom()`, exactly as before. Set ⇒
+   * the org row is created WITH that id — and, because the owner membership is written in the SAME
+   * transaction, a chosen id can never leave a memberless org behind: invites are owner-only and
+   * `invites.tenant_id` is a NOT NULL FK to `orgs(id)`, so an org with no owner is a permanent dead
+   * end, not merely an inconvenience.
+   *
+   * Passing an id WITHOUT the posture is refused here rather than upstream: an org id is normally
+   * server-generated and unguessable, and that unguessability is load-bearing (a deployment binds
+   * `RAYSPEC_PRODUCT_TENANT_ID` to one). The refusal is the backstop under the route gate, so the
+   * capability cannot be reached by a caller that simply forgot to check.
    */
   async createOrgWithOwner(input: {
     name: string;
     slug: string;
     ownerUserId: string;
+    id?: string;
   }): Promise<OrgRow> {
+    const chosenId = input.id;
+    if (chosenId !== undefined && !this.tenantBootstrapEnabled) {
+      throw new Error(
+        'createOrgWithOwner: an explicit org id requires the tenant-bootstrap operator posture ' +
+          '(RAYSPEC_TENANT_BOOTSTRAP_ENABLED). Fail-closed.',
+      );
+    }
     return this.db.transaction(async (tx) => {
-      const orgs = await tx
-        .insert(schema.orgs)
-        .values({ name: input.name, slug: input.slug })
-        .returning();
-      const org = orgs[0] as OrgRow;
+      // The chosen-id INSERT alone carries `ON CONFLICT (id) DO NOTHING`, so a taken id comes back as
+      // an empty RETURNING (→ OrgIdInUseError) instead of a driver 23505 that would poison the tx. The
+      // no-id INSERT is untouched — including the slug collision it has always thrown.
+      const orgs =
+        chosenId === undefined
+          ? await tx.insert(schema.orgs).values({ name: input.name, slug: input.slug }).returning()
+          : await tx
+              .insert(schema.orgs)
+              .values({ id: chosenId, name: input.name, slug: input.slug })
+              .onConflictDoNothing({ target: schema.orgs.id })
+              .returning();
+      const org = orgs[0] as OrgRow | undefined;
+      // Only reachable on the chosen-id path: DO NOTHING swallowed the insert because the id is taken.
+      // The no-id INSERT always returns its row (or throws on the slug index, as it always has).
+      if (!org) throw new OrgIdInUseError(chosenId as string);
       await tx
         .insert(schema.memberships)
         .values({ orgId: org.id, userId: input.ownerUserId, role: 'owner', status: 'active' });
