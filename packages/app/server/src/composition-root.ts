@@ -287,10 +287,14 @@ export interface BootedServer {
    */
   deployMode: 'auth-only' | 'materialized' | 'mounted' | 'updated';
   /**
-   * A product boot: the org id this deployment is bound to, AS THE DATABASE STORES IT (an additive
-   * ops signal; absent on an auth-only boot). It is resolved from `RAYSPEC_PRODUCT_TENANT_ID` rather
-   * than copied from it, because every runtime tenant comparison is a string comparison against a
-   * server-derived tenant — see `resolveLiveTenantOrgId`.
+   * A Product-YAML boot: the org id this deployment is bound to, AS THE DATABASE STORES IT. Absent on
+   * every other boot shape (auth-only, and the classic backend profile, neither of which binds a
+   * product tenant). It is RESOLVED from `RAYSPEC_PRODUCT_TENANT_ID` rather than copied from it — see
+   * `resolveLiveTenantOrgId` for why the stored form is the one that must travel.
+   *
+   * It is an in-process signal: nothing prints it. An embedder that assembles the server itself can
+   * read what the boot resolved, and the tenant-gate suite asserts it; an operator running the CLI
+   * sees the boot abort when the id is wrong, which is the diagnostic this gate is actually for.
    */
   productTenantId?: string;
   /**
@@ -1393,13 +1397,18 @@ export async function tenantOrgExists(db: Db, tenantId: string): Promise<boolean
  *
  * WHY the stored form matters, and not just the answer: `orgs.id` is a `uuid` column, so Postgres
  * compares `$1` in uuid space and an id supplied in any letter case matches. It then hands the value
- * back CANONICALLY (lower-case). Downstream, a bound deployment tenant is compared as a STRING against
- * a tenant the server derived from that same column — `event.tenant_id !== boundTenant` in the
+ * back CANONICALLY (lower-case). Downstream, a bound PRODUCT tenant is compared as a STRING against a
+ * tenant the server derived from that same column — `event.tenant_id !== boundTenant` in the four
  * capability sinks, `reqTenant !== tenantId` on the reprocess seam. A caller that binds the operator's
  * raw spelling would therefore pass every uuid-space check at startup and then mismatch every
  * server-derived tenant at runtime: on macOS/BSD `uuidgen` prints upper case, so the recommended way
  * to mint an id produced exactly that. Binding what this returns keeps the two spaces from drifting —
  * the deployment is bound to the org as the database knows it.
+ *
+ * SCOPE, stated so the guarantee is not read wider than it is: the product boot binds what this
+ * returns; the cron tenant is still carried as configured, and its manual-fire seam still compares
+ * `reqTenant !== config.cronTenantId` as a raw string. That seam is reached only by a caller who
+ * already knows the deployment's own tenant, so it fails closed (not-found) rather than open.
  */
 export async function resolveLiveTenantOrgId(
   db: Db,

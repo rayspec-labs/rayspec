@@ -2579,9 +2579,9 @@ export async function deployProductYamlSpec(
     declaredAgents: [],
     declaredCronTriggers: [],
     deployMode,
-    // The org this deployment is bound to, in the form the database stores — the value every
-    // runtime tenant comparison is made against, so an operator (and a test) can read what the
-    // boot actually resolved rather than what was configured.
+    // The org this deployment is bound to, in the form the database stores — the value the capability
+    // sinks and the reprocess seam compare against. Exposed so an embedder (and the gate suite) can
+    // read what the boot RESOLVED rather than what was configured; nothing prints it.
     productTenantId: tenantId,
     // The report-only post-migrate drift (empty on a successful mount/materialize/update boot;
     // a residual UPDATE drift threw the fail-closed gate above and never reaches here).

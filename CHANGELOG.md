@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other deployment that path does not exist at all — a `404`, not a refusal — so there is no gate to
   probe and no collision reply to read as an org-existence oracle. Turn it on for the bootstrap
   boot; leave it off everywhere else.
+
   **The deployment binds the org as the database stores it, not as the variable spells it.** `orgs.id`
   is a `uuid` column, so Postgres matches an id supplied in any letter case and hands it back
   canonically — while at runtime the bound tenant is compared as a *string* against a tenant the
@@ -40,8 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `cross_tenant`: the same silent misconfiguration one layer down. That is not a thought
   experiment — `uuidgen` prints upper case on macOS and BSD. The boot now resolves the id and binds
   what the database returned, so a differently-cased id is simply the same org. The resolved value is
-  additionally surfaced as `productTenantId` on the boot result, so an operator can read what the
-  deployment bound rather than what was configured.
+  additionally exposed as `productTenantId` on the boot result — an in-process signal for an embedder
+  that assembles the server itself, not something the CLI prints.
 
   **Embedder note:** `ServerConfig` — the assembly configuration exported as a type from
   `@rayspec/server` — gains a REQUIRED `tenantBootstrapEnabled: boolean`. `loadServerConfig` fills it

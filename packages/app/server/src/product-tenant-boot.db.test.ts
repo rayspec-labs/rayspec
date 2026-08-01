@@ -6,18 +6,25 @@
  * authenticated principal of a product deployment binds to. A value that names no live org therefore
  * makes the deployment unusable for EVERYONE — and, before this gate, it still booted green: the
  * failure surfaced later as a bare 404 on the reprocess seam or a `cross_tenant` throw in a capability
- * sink, far from the misconfigured variable. The four arms pin the gate on both sides:
+ * sink, far from the misconfigured variable. The five arms pin the gate on both sides:
  *
  *   1. SHAPE: a malformed (non-UUID) value aborts the boot — the same `forTenant` rule the cron
  *      variable is held to, so the shape law has ONE source of truth (the TenantDb chokepoint).
  *   2. ABSENT: a well-formed id matching no `orgs` row aborts the boot.
  *   3. TOMBSTONED: an org with `deleted_at` set counts as ABSENT and aborts the boot — a deployment
  *      must never bind to a tenant that has been erased.
- *   4. LIVE: the SAME spec + a real org id boots exactly as before (materialized, routes mounted).
+ *   4. CASE: the gate RESOLVES rather than echoes — an id that differs only in letter case comes back
+ *      in the form the database stores. Both gate checks answer in uuid space, while the runtime
+ *      compares the bound tenant as a string, so echoing the configured spelling would boot green and
+ *      then refuse every capability event.
+ *   5. LIVE: the SAME spec + a real org id boots exactly as before (materialized, routes mounted) —
+ *      deliberately booted with the SHOUTED spelling, which is what pins that the deployment binds
+ *      what the gate resolved.
  *
- * Arms 1–3 abort at step 2 of `deployProductYamlSpec`, before the DBOS executor is constructed — so
- * this file performs exactly ONE full launch (arm 4, last). The platform migration chain is applied
- * up front (so `orgs` exists to seed), which the boot's own `applyMigrations` then no-ops over.
+ * Arms 1–3 abort at step 2 of `deployProductYamlSpec`, before the DBOS executor is constructed, and
+ * arm 4 never boots at all — so this file performs exactly ONE full launch (arm 5, last). The
+ * platform migration chain is applied up front (so `orgs` exists to seed), which the boot's own
+ * `applyMigrations` then no-ops over.
  *
  * Skips without DATABASE_URL; the un-skippable ran-guard hard-fails a REQUIRED run that did not run.
  */
