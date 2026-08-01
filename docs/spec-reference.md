@@ -1022,6 +1022,20 @@ extensions:
   never drift silently between deploys.
 - `config` — optional opaque configuration validated by the pack itself.
 
+A pack authored in TypeScript must be **compiled to JavaScript** before deploy (the
+runtime fail-closed-rejects a `.ts` module path), and a compiled pack entry keeps its
+`import { defineExtension } from '@rayspec/platform'` as a **runtime** import. The
+loader imports that entry by the entry's own absolute file URL, so Node resolves the
+bare specifier from the **built file's own location** upward: the pack supplies its own
+`node_modules`, and the deployment's is never consulted. A pack shipped from its own
+repository therefore declares `@rayspec/platform` (and `@rayspec/handler-sdk`, if its
+handlers import the capability types) as a dependency on the **released** version the
+deployment runs, installs it, and ships the pack **directory** — the compiled output
+**and** its `node_modules` — to the deploy target. Shipping the compiled output alone
+fails the boot with `Cannot find package '@rayspec/platform'`.
+[`examples/stream-backend`](../examples/stream-backend/README.md#shipping-this-pack-from-its-own-repo)
+walks that shape end to end and ships a copy-ready manifest for it.
+
 ## `deployment`
 
 Optional deployment-level properties (an object, not a list). Absent means no
