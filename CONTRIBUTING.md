@@ -114,17 +114,20 @@ dependency.
 
 ---
 
-## Developer Certificate of Origin (sign-off)
+## Certificate of origin
 
-Contributions require a **Developer Certificate of Origin** sign-off. By signing
-off you certify that you wrote the contribution (or have the right to submit it)
-under the project's license. Add a `Signed-off-by` line to each commit:
+By opening a pull request you certify that you wrote the contribution, or
+otherwise have the right to submit it under the project's license.
+
+That certification is what matters, and it comes from submitting the
+contribution — a per-commit trailer is **not** required. If you would like to
+record it explicitly, `git commit -s` adds a `Signed-off-by` line:
 
 ```
 Signed-off-by: Your Name <you@example.com>
 ```
 
-`git commit -s` adds it for you.
+Nothing in CI checks for that line, and the history does not carry it.
 
 ## License
 
