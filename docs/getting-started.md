@@ -419,9 +419,10 @@ $RAYSPEC deploy examples/acme-notes/acme-notes.product.yaml --port 8080
 
 `RAYSPEC_PRODUCT_TENANT_ID` is the **one org this deployment binds to** — pass the
 `<ORG_ID>` step 4 printed, not a freshly generated uuid. The workflow dispatcher binds
-to that id at boot, so it is the tenant every started workflow run belongs to; bind the
-deployment to an id no org owns and the finalize below is refused fail-closed instead
-of starting a run.
+to that id at boot, so it is the tenant every started workflow run belongs to. Give it
+an id that is not a UUID, or one no live org owns, and the deployment **refuses to
+boot**, naming the variable: a tenant that does not exist is a misconfiguration the
+boot can see, and it says so there rather than letting the finalize below fail later.
 
 `RAYSPEC_MEDIA_SIGNING_KEY` is also required by this audio product; `dev
 gen-secrets` (step 2) already wrote it into your `.env`, which the CLI loads for

@@ -155,7 +155,8 @@ node packages/app/cli/dist/index.js doctor examples/acme-notes/acme-notes.produc
 # placeholder OpenAI key — the key is inert until a recording is processed.
 # RAYSPEC_PRODUCT_TENANT_ID is the one org the deployment binds to: provision an org
 # first (getting-started) and paste its id — a freshly generated uuid belongs to no
-# org, and every finalize under it is then refused fail-closed as cross-tenant.
+# org, and the deployment refuses to boot rather than come up bound to a tenant that
+# does not exist.
 RAYSPEC_PRODUCT_TENANT_ID="<an existing org uuid>" \
 RAYSPEC_BLOB_ROOT=/tmp/rayspec-blobs \
 STT_PROVIDER=fake \
