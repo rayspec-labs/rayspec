@@ -49,7 +49,8 @@ Copied out of this monorepo, this pack does **not** install as committed: its ma
 `@rayspec/platform` + `@rayspec/handler-sdk` as `workspace:*`, and the pnpm workspace protocol
 resolves only inside this workspace. Installing it elsewhere fails outright (`npm` →
 `EUNSUPPORTEDPROTOCOL`, `pnpm` → `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND`), so `node_modules` stays empty
-and the pack entry aborts the boot fail-closed with
+and — in a deploy tree that carries no `@rayspec` install of its own — the pack entry aborts the boot
+fail-closed with
 
 ```
 extension 'stream_pack': failed to load pack entry 'index.ts' (…/dist/index.js):
@@ -58,9 +59,11 @@ Cannot find package '@rayspec/platform' imported from …/dist/index.js
 
 The **resolution rule** behind that error is the thing to design the delivery around: the loader
 imports the pack entry by the entry's own absolute file URL, so Node resolves the bare
-`@rayspec/platform` specifier from the **built file's own location** upward. The pack brings its own
-dependencies — the deployment's `node_modules` is never consulted. So a pack shipped from its own
-repo needs three things.
+`@rayspec/platform` specifier from the **built file's own location** upward — the pack directory
+first, then every ancestor above it, the deployment root included. The pack's own `node_modules` is
+the first stop on that walk and the only one the pack controls, so a pack that brings its own
+dependencies is the one that gets the version it pinned. A pack shipped from its own repo needs
+three things.
 
 **1 — a manifest pinning a RELEASED platform.**
 [`packs/stream-pack/package.out-of-repo.json`](./packs/stream-pack/package.out-of-repo.json) is this
@@ -93,10 +96,13 @@ transpile-only (`noCheck`), which is why the built entry keeps the bare specifie
 npm install   # -> node_modules/@rayspec/{core,db,handler-sdk,platform,spec}
 ```
 
-**3 — the pack DIRECTORY at the deploy target, `dist/` *and* `node_modules/` together.** Shipping
-`dist/` alone reproduces the error above: `node_modules` has to sit where Node's upward walk from
-`dist/index.js` reaches it — beside `dist/`, in the pack root. The deployment spec then references
-the built directory:
+**3 — the pack DIRECTORY at the deploy target, `dist/` *and* `node_modules/` together.** Put
+`node_modules` where the upward walk from `dist/index.js` reaches it first — beside `dist/`, in the
+pack root. Ship `dist/` alone and the walk continues past the pack into the deploy tree, with two
+outcomes and no third: nothing up there provides `@rayspec/platform` and the boot fails with the
+error above, or something does and the pack quietly runs against a platform build it never pinned —
+exactly the version skew step 1 exists to prevent. The deployment spec then references the built
+directory:
 
 ```yaml
 extensions:

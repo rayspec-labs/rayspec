@@ -449,8 +449,9 @@ change is applied by the explicit `--apply-migration` flag below.
   runtime ships no turnkey `.ts` loader. The bundled examples ship a build step
   (`build.mjs`): `examples/acme-notes-backend` emits a deploy-ready `dist/rayspec.yaml`,
   and `examples/stream-backend` compiles its extension pack. A **pack** additionally
-  resolves `@rayspec/platform` at load from its own compiled entry's location, so the pack
-  directory must reach the deploy target with its installed `node_modules` — see
+  resolves `@rayspec/platform` at load starting from its own compiled entry's location, so
+  ship the pack directory to the deploy target with its installed `node_modules` — that is
+  what pins the platform build it runs against — see
   [spec-reference → `extensions`](./spec-reference.md#extensions). See
   [getting-started → the backend profile](./getting-started.md#the-backend-profile-direct-agent-boot).
   ([`gen-handler`](#gen-handler) scaffolds a handler; [`doctor`](#doctor) validates the spec.)
