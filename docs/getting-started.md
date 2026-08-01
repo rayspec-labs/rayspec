@@ -279,26 +279,35 @@ curl -s -X POST http://localhost:8080/v1/orgs/<ORG_ID>/switch \
 
 `register` **auto-created** the org because the request passed an `orgName`, so its
 response's `activeOrgId` is the new org. A **returning** user who already has an
-account signs in instead — and sign-in never creates an org, so its `activeOrgId`
-is `null`:
+account signs in instead. Sign-in never *creates* an org, but it does resolve one
+when the answer is unambiguous: a user who is an active member of exactly one live
+organization gets that org back, in a token carrying the same `orgId` and live role
+a switch would mint — so the user above, who has just the one org, is org-scoped
+straight out of `login`:
 
 ```bash
-# A returning user logs in — no org is auto-created, so activeOrgId is null
+# A returning user logs in — a member of exactly one live org gets it back
 curl -s -X POST http://localhost:8080/v1/auth/login \
   -H 'content-type: application/json' \
   -d '{"email":"owner@example.com","password":"a-long-passphrase"}'
-# → {"accessToken":"<JWT>","tokenType":"Bearer","expiresIn":480,"activeOrgId":null}
+# → {"accessToken":"<ORG_TOKEN>","tokenType":"Bearer","expiresIn":480,"activeOrgId":"<ORG_ID>"}
+```
 
-# Then switch into one of their orgs to get an org-scoped token (as above)
+A user who belongs to **two or more** organizations gets `activeOrgId: null`
+instead: the server has no basis on which to pick one, and it does not guess. That
+client chooses explicitly, and so does anyone who wants a *different* org than the
+one login resolved:
+
+```bash
+# Switch into one of their orgs to get an org-scoped token (as above)
 curl -s -X POST http://localhost:8080/v1/orgs/<ORG_ID>/switch \
   -H 'authorization: Bearer <JWT>'
 # → {"accessToken":"<ORG_TOKEN>","tokenType":"Bearer","expiresIn":480,"activeOrgId":"<ORG_ID>"}
 ```
 
-Because `login` returns `activeOrgId: null`, a returning client must call
-`POST /v1/orgs/{id}/switch` to obtain an org-scoped token before it can use any
-tenant route. A user can look up their org ids from `GET /v1/auth/me`, which lists
-their memberships.
+A token without an org reaches no tenant route, so a client that receives
+`activeOrgId: null` must switch before it can use one. A user can look up their org
+ids from `GET /v1/auth/me`, which lists their memberships.
 
 ---
 
