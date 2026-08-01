@@ -3,9 +3,10 @@
  *
  * - POST /v1/orgs — create org + owner membership (one tx); Bearer required (mutating).
  * - GET  /v1/orgs — orgs the caller is a member of.
- * - POST /v1/orgs/:orgId/switch — LIVE-recheck membership, re-mint a JWT scoped to orgId. The
- *   privilege-change credential rotation IS the re-minted short-lived JWT (the long-lived refresh
- *   session is org-independent and is NOT rotated here — see the handler comment).
+ * - POST /v1/orgs/:orgId/switch — LIVE-recheck membership, persist the choice on the caller's own
+ *   session row, re-mint a JWT scoped to orgId. The privilege-change credential rotation IS the
+ *   re-minted short-lived JWT (the long-lived refresh session is org-independent and is NOT rotated
+ *   here — see the handler comment).
  * - POST /v1/orgs/:orgId/api-keys — mint (plaintext ONCE, HMAC only); Idempotency-Key tenant-scoped.
  * - GET  /v1/orgs/:orgId/api-keys — list (never plaintext/hash).
  * - DELETE /v1/orgs/:orgId/api-keys/:keyId — revoke.
@@ -38,6 +39,7 @@ import {
 import { isUniqueViolation } from '@rayspec/db';
 import type { AppDeps, AppEnv } from '../app-context.js';
 import { readBoundedJson } from '../http/bounded-body.js';
+import { readRefreshCookie } from '../http/cookies.js';
 import { requireAuth, requirePermission, resolveTenant } from '../http/middleware.js';
 
 export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
@@ -112,6 +114,32 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
         )
         .catch(() => {});
       throw new ApiError('NOT_FOUND', 'Not found.'); // no existence leak
+    }
+
+    // PERSIST the choice on the caller's OWN session row — strictly AFTER the live check, so a
+    // denied switch above writes nothing. `refresh` reports `sessions.current_org_id` back as
+    // `activeOrgId`; without this write the choice would live only inside a token with the access
+    // TTL, and a browser reload would land the user in no tenant at all.
+    //
+    // Identifying the row takes a deliberate step: a switch is a Bearer-required mutation, so
+    // `authenticate` resolved the principal from the JWT and never read the cookie —
+    // `principal.sessionId` is ALWAYS undefined here (the same reason the old cookie-rotation branch
+    // was unreachable). A SAME-ORIGIN browser nonetheless sends the httpOnly refresh cookie ambiently
+    // alongside the Bearer header, so we resolve it here and write only when it names a LIVE session
+    // of THIS user (the store predicate re-asserts the ownership, so the cookie can never select
+    // another user's row). We do NOT rotate that session — see the handler note above.
+    //
+    // LIMIT: nothing is persisted for a client whose switch request carries no cookie — a CLI/desktop
+    // client, and equally a CROSS-ORIGIN browser client, which this API serves bearer-only (app.ts
+    // registers the CORS grant WITHOUT credentials, and the refresh cookie is `__Host-…;
+    // SameSite=Strict`, so such a client cannot attach it). Their selection stays inside the re-minted
+    // token exactly as before. That is a no-op, not an error — the switch must succeed either way.
+    const refreshSecret = readRefreshCookie(c.req.header('cookie'));
+    const session = refreshSecret
+      ? await deps.authService.sessionFromSecret(refreshSecret)
+      : undefined;
+    if (session && session.userId === principal.userId) {
+      await deps.identityStore.setSessionCurrentOrg(session.id, principal.userId, orgId);
     }
 
     const accessToken = await deps.signer.mint(

@@ -178,6 +178,12 @@ export class AuthService {
    * Login: verify password against the stored argon2id hash. On an UNKNOWN email we still run a
    * dummy verify so the response is timing/branch indistinguishable from a wrong password
    * (user-enumeration resistance). Upgrade-on-login rehash when params changed.
+   *
+   * The new session is pre-filled with the user's org IFF they are an active member of EXACTLY ONE
+   * live org — the single-workspace case, where re-deriving the tenant client-side (list orgs, then
+   * switch) is pure ceremony. Two or more is genuinely ambiguous and stays `null`: the server never
+   * guesses which tenant the user meant. The role travels with it so the minted JWT carries the LIVE
+   * role, not a bare org claim that would authorize nothing.
    */
   async login(normalizedEmail: string, password: string, ctx: LoginContext): Promise<AuthResult> {
     const user = await this.store.findUserByEmail(normalizedEmail);
@@ -191,13 +197,20 @@ export class AuthService {
     if (needsRehash(user.passwordHash)) {
       await this.store.updatePasswordHash(user.id, await hashPassword(password));
     }
-    const { accessToken, refreshSecret } = await this.issueSession(user.id, null, undefined, ctx);
+    const sole = await this.store.soleActiveOrgForUser(user.id);
+    const activeOrgId = sole?.orgId ?? null;
+    const { accessToken, refreshSecret } = await this.issueSession(
+      user.id,
+      activeOrgId,
+      sole?.role,
+      ctx,
+    );
     return {
       accessToken,
       refreshSecret,
-      activeOrgId: null,
+      activeOrgId,
       userId: user.id,
-      audit: [{ event: 'login', actorUserId: user.id, actorOrgId: null }],
+      audit: [{ event: 'login', actorUserId: user.id, actorOrgId: activeOrgId }],
     };
   }
 
