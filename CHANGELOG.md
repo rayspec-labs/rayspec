@@ -477,9 +477,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the only way in was to deploy without the trigger first. The boot no longer asks that question.
   A well-formed id naming an org that does not exist yet starts the scheduler, and firing begins the
   moment an `orgs` row with that id exists. Which id that is remains the row's to decide: `POST
-  /v1/orgs`, `POST /v1/auth/register` and `rayspec dev bootstrap-tenant` all let the database generate
-  it, so an operator using those still reads the id back before setting the variable, while an id
-  chosen up front has to be the id its `orgs` row is created with. Nothing fires under an unknown
+  /v1/orgs`, `POST /v1/auth/register` and a plain `rayspec dev bootstrap-tenant` all let the database
+  generate it, so an operator using those still reads the id back before setting the variable, while
+  an id chosen up front has to be the id its `orgs` row is created with — by hand, or with `rayspec
+  dev bootstrap-tenant --org-id <uuid>` against a server in the tenant-bootstrap operator posture
+  (see the **Added** entry on choosing the org id). Nothing fires under an unknown
   tenant: the existence check moved to the firing itself, where it runs **before** the firing's
   reserve, so a skipped firing dispatches nothing and writes no marker — which leaves that instant
   explicitly re-fireable instead of burning it. Each skipped firing emits exactly one line naming the
