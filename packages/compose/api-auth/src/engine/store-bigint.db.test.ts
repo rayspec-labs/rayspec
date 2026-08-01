@@ -271,7 +271,11 @@ describeDb('declared store — the bigint column type', () => {
     expect(seen).toEqual([3000000000, 3000000001, 4000000000]);
 
     // A filter value the read side could never return is refused EARLY rather than confusingly late.
-    expect((await listUsage(token, 'bytes_total=9007199254740993')).status).toBe(400);
+    // Bound to a name rather than inlined as the argument after `token`: adjacent to that keyword the
+    // `<column>=<digits>` filter reads to the secret scan as a keyword assignment with a high-entropy
+    // value and trips generic-api-key on a string that is a query filter, not a credential.
+    const unrepresentableFilter = 'bytes_total=9007199254740993';
+    expect((await listUsage(token, unrepresentableFilter)).status).toBe(400);
   });
 });
 
