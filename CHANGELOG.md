@@ -508,6 +508,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The chosen organization now survives a refresh and a fresh login instead of dying with the access
+  token.** `POST /v1/orgs/{orgId}/switch` re-minted a JWT scoped to the org but recorded the choice
+  nowhere durable: `sessions.current_org_id` — the column `POST /v1/auth/refresh` reads back as
+  `activeOrgId` — was only ever written when a session was created. A browser therefore lost its
+  tenant on every refresh, which at an 8-minute access-token TTL means constantly, and again on every
+  login. The token still authenticated, but carrying no org it reached no tenant-scoped route, so the
+  user was signed in and saw none of their data until the client re-ran `GET /v1/orgs` and switched
+  back to where it already was. The switch now persists the choice on the caller's own session row,
+  strictly after the live-membership recheck — so a denied switch still writes nothing, and the
+  refresh that follows a successful one returns the same `activeOrgId` the switch returned. Session
+  rotation carries it onto the replacement row, as it already did for a session created with one.
+  **`POST /v1/auth/login` additionally pre-fills the org when the user is an active member of exactly
+  one live organization**, the single-workspace case where the list-then-switch round trip was pure
+  ceremony. Two or more memberships still yield `null`: the server has no basis on which to pick one
+  and does not guess. **One limit is worth knowing, because it is observable:** persisting the choice
+  needs the refresh cookie. A switch is a Bearer-required mutation, and a non-browser client
+  (CLI/desktop) sends only the `Authorization` header — there is no session row to write, so its
+  selection stays inside the re-minted token exactly as before and it must still re-switch after a
+  refresh. The switch succeeds either way; nothing about it fails for want of a cookie. A browser
+  sends the httpOnly refresh cookie alongside the Bearer token automatically, which is the flow this
+  fixes.
+
 - **The documentation no longer calls the tool-dispatch boundary "the defense against
   prompt-injection-style attacks".** It is the defense against ONE of three classes, and saying so
   without the qualifier taught the wrong mental model everywhere it appeared — the tool-dispatch
