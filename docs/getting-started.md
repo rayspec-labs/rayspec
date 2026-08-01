@@ -568,6 +568,18 @@ with [`--emit js`](./cli-reference.md#which-target-to-emit) it renders the handl
 as plain ESM JavaScript, deployable without a build step at all — and `doctor` to
 validate any spec before you deploy it.
 
+An **extension pack** needs one thing beyond the transpile. Its compiled entry keeps
+`import { defineExtension } from '@rayspec/platform'` as a runtime import, and the loader
+imports that entry by its own absolute path — so Node resolves the bare specifier from
+the **built pack file's own location** upward, reaching the pack's own `node_modules`
+before any the deployment happens to carry above it. Inside this repo that `node_modules`
+is a pnpm workspace link; a pack shipped from its own repository instead depends on the
+**released** `@rayspec/platform` at the version the deployment runs, installs it, and
+ships the pack **directory** — compiled output **and** `node_modules` — to the deploy
+target, so the pinned version is the one that binds. See
+[`examples/stream-backend`](../examples/stream-backend/README.md#shipping-this-pack-from-its-own-repo),
+which ships a copy-ready manifest for that shape.
+
 For the security boundaries that apply before you expose any of this beyond a
 trusted local machine, read
 [ARCHITECTURE → Security model](./ARCHITECTURE.md#security-model).
