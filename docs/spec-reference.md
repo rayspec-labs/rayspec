@@ -113,6 +113,21 @@ stores:
   are interpolated verbatim into generated SQL and TypeScript, this rule is
   enforced fail-closed at the source — a name can never smuggle SQL into a
   generated statement.
+
+  A set of names is **reserved**: the tables the platform itself owns. A store
+  named after one of them would emit a `CREATE TABLE` that collides with the
+  platform's own table, so such a store **fails lint** — `doctor` and `plan`
+  reject the document rather than letting the deployment fail at boot. The
+  reserved names are:
+
+  `api_keys`, `auth_audit`, `conversation_items`, `idempotency_keys`, `invites`,
+  `journal_steps`, `memberships`, `oidc_models`, `orgs`, `run_events`, `runs`,
+  `sessions`, `users`, `workflow_artifacts`, `workflow_node_states`,
+  `workflow_runs`.
+
+  Several are names a product would plausibly reach for on its own — `sessions`
+  for a chat application, `invites`, `runs`. The match is exact, so a
+  distinguishing prefix is all it takes: `chat_sessions`, `project_runs`.
 - `columns` — at least one. Each column has:
   - `name` — a safe identifier (same rule as above).
   - `type` — one of the closed column-type vocabulary: `text`, `uuid`,
@@ -1022,6 +1037,25 @@ extensions:
   never drift silently between deploys.
 - `config` — optional opaque configuration validated by the pack itself.
 
+A pack authored in TypeScript must be **compiled to JavaScript** before deploy (the
+runtime fail-closed-rejects a `.ts` module path), and a compiled pack entry keeps its
+`import { defineExtension } from '@rayspec/platform'` as a **runtime** import. The
+loader imports that entry by the entry's own absolute file URL, so Node resolves the
+bare specifier from the **built file's own location** upward — through the pack
+directory and then every ancestor above it, the deployment's own tree included (the
+`module` path-jail keeps every pack inside that tree, so it is always on the walk).
+The pack's own `node_modules` is therefore the first one Node reaches, and the only one
+the pack controls. A pack shipped from its own repository declares `@rayspec/platform`
+(and `@rayspec/handler-sdk`, if its handlers import the capability types) as a
+dependency on the **released** version the deployment runs, installs it, and ships the
+pack **directory** — the compiled output **and** its `node_modules` — to the deploy
+target. Ship the compiled output alone and resolution falls through to whatever the
+deploy tree happens to expose above it: either nothing, and the boot fails with
+`Cannot find package '@rayspec/platform'`, or some other install, and the pack silently
+binds to a platform version it was never pinned to.
+[`examples/stream-backend`](../examples/stream-backend/README.md#shipping-this-pack-from-its-own-repo)
+walks that shape end to end and ships a copy-ready manifest for it.
+
 ## `deployment`
 
 Optional deployment-level properties (an object, not a list). Absent means no
@@ -1270,7 +1304,13 @@ stores:
     key: [session_id]
 ```
 
-- `name` — required safe identifier.
+- `name` — required safe identifier, and — because a product store materializes
+  into an ordinary tenant-scoped table — subject to the same **reserved** platform
+  table names listed under the backend profile's [`stores`](#stores). The
+  reservation covers every place a store name comes out of the document, not just
+  this one: an artifact's `collection`, which derives a store of exactly that
+  name, and a view's `source: { kind: store, ref: … }`, which names the transcript
+  sink store when it resolves to neither a declared store nor a collection.
 - `description` — optional.
 - `columns` — at least one, using the same `{name, type, nullable, unique}` shape
   and the same closed type vocabulary as the backend profile.

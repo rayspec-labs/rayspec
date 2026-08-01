@@ -30,14 +30,91 @@ consumer of this exact mechanism, shipped from its own repo.
 
 - The deployment dir is **not** a workspace package (a pure YAML fixture). The PACK
   (`packs/stream-pack`) IS a `@spike/*` workspace member **only** so pnpm links `@rayspec/platform`
-  into its `node_modules` (the pack ENTRY imports `defineExtension` at runtime) — mirroring how a real
-  pack ships in its own repo with the platform as a dependency. It ships **no** build/typecheck/test
-  scripts and is excluded from CI by the `--filter='!@spike/*'` rule (a pure loaded-at-deploy fixture).
+  into its `node_modules` (the pack ENTRY imports `defineExtension` at runtime). That workspace link
+  is the **in-repo** form of the platform dependency: the manifest's `workspace:*` specifiers resolve
+  only inside this workspace, so a real pack in its own repo declares the same two dependencies on a
+  **released** version instead — see
+  [Shipping this pack from its own repo](#shipping-this-pack-from-its-own-repo). It ships **no**
+  build/typecheck/test scripts and is excluded from CI by the `--filter='!@spike/*'` rule (a pure
+  loaded-at-deploy fixture).
 - **Zero product-specific code enters the platform.** The `stream`/`BlobStore`/`extensions[]`
   primitives are strictly product-agnostic (raw `Request`/`Response`, zero audio/media vocabulary in
   core). The pack HANDLER modules import ONLY `@rayspec/handler-sdk` (type-only); the
   manifest-derived `gate:handler-imports` + `gate:extension-capability` discover + scan the pack's
   `handlers/` root.
+
+## Shipping this pack from its own repo
+
+Copied out of this monorepo, this pack does **not** install as committed: its manifest declares
+`@rayspec/platform` + `@rayspec/handler-sdk` as `workspace:*`, and the pnpm workspace protocol
+resolves only inside this workspace. Installing it elsewhere fails outright (`npm` →
+`EUNSUPPORTEDPROTOCOL`, `pnpm` → `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND`), so `node_modules` stays empty
+and — in a deploy tree that carries no `@rayspec` install of its own — the pack entry aborts the boot
+fail-closed with
+
+```
+extension 'stream_pack': failed to load pack entry 'index.ts' (…/dist/index.js):
+Cannot find package '@rayspec/platform' imported from …/dist/index.js
+```
+
+The **resolution rule** behind that error is the thing to design the delivery around: the loader
+imports the pack entry by the entry's own absolute file URL, so Node resolves the bare
+`@rayspec/platform` specifier from the **built file's own location** upward — the pack directory
+first, then every ancestor above it, the deployment root included. The pack's own `node_modules` is
+the first stop on that walk and the only one the pack controls, so a pack that brings its own
+dependencies is the one that gets the version it pinned. A pack shipped from its own repo needs
+three things.
+
+**1 — a manifest pinning a RELEASED platform.**
+[`packs/stream-pack/package.out-of-repo.json`](./packs/stream-pack/package.out-of-repo.json) is this
+pack's manifest in exactly that form; copy it over `package.json` after copying the pack out:
+
+```json
+{
+  "name": "stream-pack",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.ts",
+  "dependencies": {
+    "@rayspec/handler-sdk": "1.6.2",
+    "@rayspec/platform": "1.6.2"
+  }
+}
+```
+
+The pinned version **must equal the platform version the deployment runs** — the entry imports
+`defineExtension` from that exact build, and the `@rayspec` closure (`core`, `db`, `handler-sdk`,
+`platform`, `spec`) is released in lockstep under one version. `1.6.2` is the released version this
+recipe was verified against; check the registry for the current one. Note this is a *runtime*
+dependency of the pack even though the compile step never needs it: `tsconfig.build.json` is
+transpile-only (`noCheck`), which is why the built entry keeps the bare specifier.
+
+**2 — an install, so the pack has a real `node_modules`.**
+
+```bash
+npm install   # -> node_modules/@rayspec/{core,db,handler-sdk,platform,spec}
+```
+
+**3 — the pack DIRECTORY at the deploy target, `dist/` *and* `node_modules/` together.** Put
+`node_modules` where the upward walk from `dist/index.js` reaches it first — beside `dist/`, in the
+pack root. Ship `dist/` alone and the walk continues past the pack into the deploy tree, with two
+outcomes and no third: nothing up there provides `@rayspec/platform` and the boot fails with the
+error above, or something does and the pack quietly runs against a platform build it never pinned —
+exactly the version skew step 1 exists to prevent. The deployment spec then references the built
+directory:
+
+```yaml
+extensions:
+  - id: stream_pack
+    module: ./packs/stream-pack/dist # the BUILT dir; ./packs/stream-pack/node_modules is one level up
+    version: 1.0.0
+```
+
+To walk it with this pack: `node examples/stream-backend/build.mjs`, copy `packs/stream-pack/`
+(without its workspace-linked `node_modules`) anywhere outside the repo, do the three steps above.
+The pack's own `version` (`1.0.0`) is unrelated to the platform pin — it is the value
+`loadExtensions` fail-closed-matches against the deployment's `extensions[].version`.
 
 ## What it exercises
 

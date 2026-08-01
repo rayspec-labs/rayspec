@@ -1,0 +1,12 @@
+{
+  "//": "The OUT-OF-REPO form of this pack's manifest — copy it over `package.json` when you take the pack out of this monorepo, then `npm install`. The committed `package.json` declares @rayspec/platform + @rayspec/handler-sdk as `workspace:*`, which the pnpm workspace protocol resolves ONLY inside this workspace: copied out, no package manager can install that manifest and `node_modules` stays empty, so the pack ENTRY (which imports `defineExtension` from @rayspec/platform) resolves it from wherever the deploy tree happens to expose it above the pack — the boot fails outright, or binds a platform version this pack never pinned. The `@spike/` scope is gone for the same reason — it exists only so the CI `--filter='!@spike/*'` skips this fixture. The two versions below MUST equal the platform version the deployment runs (the whole @rayspec closure releases in lockstep under one version). See ../../README.md — 'Shipping this pack from its own repo'.",
+  "name": "stream-pack",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.ts",
+  "dependencies": {
+    "@rayspec/handler-sdk": "1.6.2",
+    "@rayspec/platform": "1.6.2"
+  }
+}

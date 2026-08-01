@@ -12,11 +12,16 @@
  *   3. copies the pack's generated schema + migrations so the built pack is self-contained.
  *
  * The built pack lives UNDER `packs/stream-pack/`, so its entry resolves `@rayspec/platform` (the pack
- * entry imports `defineExtension` from it) through the pack's own `node_modules` — mirroring how a real
- * pack ships in its own repo with the platform as a dependency. Deploy a spec that references the built
- * pack directory `packs/stream-pack/dist` (the loader resolves the compiled `.js` — the manifest keeps its
- * authored `.ts` module paths, and `.js`-preferred resolution loads the compiled siblings, so no manifest
- * rewrite is needed). Run: `node examples/stream-backend/build.mjs`.
+ * entry imports `defineExtension` from it) through the pack's own `node_modules`: the loader imports the
+ * entry by the ENTRY's own absolute file URL, so Node resolves that bare specifier from the BUILT file's
+ * location upward, hitting the pack's own `node_modules` before anything the deploy tree carries above
+ * it — ship `dist/` alone and the pack gets whatever is up there, or nothing. IN THIS REPO that
+ * `node_modules` is the pnpm workspace link; out of the repo it is a real install of the RELEASED
+ * `@rayspec/platform`, and the pack DIRECTORY (`dist/` + `node_modules/`) is what has to reach the
+ * deploy target — see README.md, 'Shipping this pack from its own repo'. Deploy a spec that references
+ * the built pack directory `packs/stream-pack/dist` (the loader resolves the compiled `.js` — the
+ * manifest keeps its authored `.ts` module paths, and `.js`-preferred resolution loads the compiled
+ * siblings, so no manifest rewrite is needed). Run: `node examples/stream-backend/build.mjs`.
  */
 import { execFileSync } from 'node:child_process';
 import { cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';

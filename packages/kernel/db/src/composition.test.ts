@@ -11,9 +11,9 @@
  * insert IS tenant-scoped) + the validate-all-then-add atomicity guarantee.
  */
 
-import type { StoreSpec } from '@rayspec/spec';
+import { RESERVED_STORE_NAMES, type StoreSpec } from '@rayspec/spec';
 import { getTableName } from 'drizzle-orm';
-import { pgTable, text, uuid } from 'drizzle-orm/pg-core';
+import { type PgTable, pgTable, text, uuid } from 'drizzle-orm/pg-core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { makeDb } from './client.js';
 import {
@@ -22,7 +22,16 @@ import {
   validateProductStore,
 } from './composition.js';
 import { buildProductTables } from './generated/build-product-tables.js';
-import { memberships, orgs, users } from './schema.js';
+import {
+  apiKeys,
+  authAudit,
+  CORE_TENANT_SCOPED_TABLES,
+  memberships,
+  oidcModels,
+  orgs,
+  sessions,
+  users,
+} from './schema.js';
 import { forTenant, registerScopedTables } from './tenant-db.js';
 
 // A never-connected lazy handle: postgres.js only dials on the first QUERY, and we only ever call
@@ -266,5 +275,31 @@ describe('validateProductStore — pure validator is directly callable', () => {
   it('sanity: getTableName agrees with the map key on the positive control', () => {
     const good = goodProductTable('name_check');
     expect(getTableName(good)).toBe('name_check');
+  });
+});
+
+describe('RESERVED_STORE_NAMES — the drift lock onto the real schema', () => {
+  it('equals the core + global platform table names read off the real Drizzle tables', () => {
+    // Check 5 and the `reserved_store_name` lint rule consume ONE constant, and that constant lives in
+    // @rayspec/spec (the lint pass cannot import this package — the dependency edge runs db → spec).
+    // The property the old db-local Set had by construction — derived from the real schema objects,
+    // never hardcoded — is kept HERE instead: this derives the names the same way (`getTableName` over
+    // CORE_TENANT_SCOPED_TABLES + the global identity/auth cluster) and asserts SET EQUALITY, so all
+    // four drift directions turn it RED — a table renamed/added/removed in schema.ts, and a name added
+    // to or removed from the shared constant. Mirrors the RESERVED_COLUMN_NAMES ↔ INJECTED_COLUMN_NAMES
+    // lock in generate-product-schema.test.ts.
+    const derived = new Set(
+      [
+        ...CORE_TENANT_SCOPED_TABLES,
+        orgs,
+        users,
+        memberships,
+        sessions,
+        apiKeys,
+        authAudit,
+        oidcModels,
+      ].map((t) => getTableName(t as PgTable)),
+    );
+    expect(derived).toEqual(RESERVED_STORE_NAMES);
   });
 });

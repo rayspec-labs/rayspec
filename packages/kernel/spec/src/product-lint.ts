@@ -28,9 +28,16 @@
 import { type SpecError, specError } from './errors.js';
 // The RESERVED (injected tenancy/GDPR) column names — the SAME set the backend store lint enforces
 // (lint.ts). A declared product store column may not shadow one: the SQL generator INJECTS them.
+// `RESERVED_STORE_NAMES` is the platform's own TABLE names, reserved for the same reason one step up
+// (a product store materializes a standard tenant-scoped table, so the name must be free).
 // `toJsIdentifier` is the spec-side snake→camel copy (KEEP-IN-SYNC docstring at its definition)
 // used by the column-collision check below.
-import { RESERVED_COLUMN_NAMES, RESERVED_QUERY_KEYWORDS, toJsIdentifier } from './lint.js';
+import {
+  RESERVED_COLUMN_NAMES,
+  RESERVED_QUERY_KEYWORDS,
+  RESERVED_STORE_NAMES,
+  toJsIdentifier,
+} from './lint.js';
 import { normalizeProductTriggerEvent } from './product-events.js';
 import type { ProductSpec } from './product-grammar.js';
 import { lintProductViews } from './product-views-lint.js';
@@ -548,9 +555,60 @@ export function checkProductStores(
   const collectionNames = new Set(
     spec.artifacts.map((a) => a.collection).filter((c): c is string => typeof c === 'string'),
   );
+  // A persisted artifact's `collection` DERIVES a store of exactly that name (deriveProductStores), so
+  // the platform-table reservation binds there as well — otherwise a `collection: runs` would clear
+  // `doctor` and only collide once the boot registrar validated the derived table.
+  spec.artifacts.forEach((artifact, ai) => {
+    if (artifact.collection !== undefined && RESERVED_STORE_NAMES.has(artifact.collection)) {
+      errors.push(
+        specError(
+          'reserved_store_name',
+          `artifact collection '${artifact.collection}' shadows a core/global platform table of the ` +
+            'same name — the collection store derived from it would collide with the platform table, ' +
+            'so the deployment would refuse to boot; rename the collection',
+          `artifacts[${ai}].collection`,
+        ),
+      );
+    }
+  });
   const storeByName = new Map(spec.stores.map((s) => [s.name, s]));
+  // The THIRD document-named store path: the TRANSCRIPT SINK. `deriveProductStores` materializes a
+  // store whose name is taken verbatim from a `source: { kind: store }` view ref that resolves to no
+  // declared store and no artifact collection, so a reserved name there collides at boot exactly like
+  // the two above. A store-sourced view must resolve to a store in the composed read surface either
+  // way (views-runtime refuses an unbacked one), and no reserved platform name can ever legitimately
+  // be in that surface — so the reservation binds to the ref regardless of how the store arises.
+  // Refs that DO name a declared store or a collection are skipped: the same defect is already
+  // reported at its declaration, which is the anchor the author has to edit.
+  spec.views.forEach((view, vi) => {
+    const ref = view.source?.kind === 'store' ? view.source.ref : undefined;
+    if (ref === undefined || storeByName.has(ref) || collectionNames.has(ref)) return;
+    if (RESERVED_STORE_NAMES.has(ref)) {
+      errors.push(
+        specError(
+          'reserved_store_name',
+          `view '${view.id}' sources store '${ref}', which shadows a core/global platform table of ` +
+            'the same name — the transcript sink store derived from this ref would collide with the ' +
+            'platform table, so the deployment would refuse to boot; rename the store',
+          `views[${vi}].source.ref`,
+        ),
+      );
+    }
+  });
   spec.stores.forEach((store, si) => {
     const base = `stores[${si}]`;
+    // Symmetric with the backend store lint: a declared store materializes a standard tenant-scoped
+    // table, so a name the platform already owns is refused fail-closed at boot — say it here first.
+    if (RESERVED_STORE_NAMES.has(store.name)) {
+      errors.push(
+        specError(
+          'reserved_store_name',
+          `store '${store.name}' shadows a core/global platform table of the same name — that table ` +
+            'belongs to the platform, so the deployment would refuse to boot; rename the store',
+          `${base}.name`,
+        ),
+      );
+    }
     if (collectionNames.has(store.name)) {
       inv(
         `store '${store.name}' collides with a derived artifact COLLECTION store of the same name — ` +
