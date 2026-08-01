@@ -54,8 +54,12 @@ fail-closed with
 
 ```
 extension 'stream_pack': failed to load pack entry 'index.ts' (…/dist/index.js):
-Cannot find package '@rayspec/platform' imported from …/dist/index.js
+Cannot find package '@rayspec/platform' imported from …/dist/index.js — a pack's entry
+module must default-export a defineExtension(...) manifest (fail-closed).
 ```
+
+The trailing clause is the loader's standing advice on that error path, not a second diagnosis: the
+entry never ran, so nothing could inspect what it exports.
 
 The **resolution rule** behind that error is the thing to design the delivery around: the loader
 imports the pack entry by the entry's own absolute file URL, so Node resolves the bare
@@ -67,15 +71,17 @@ three things.
 
 **1 — a manifest pinning a RELEASED platform.**
 [`packs/stream-pack/package.out-of-repo.json`](./packs/stream-pack/package.out-of-repo.json) is this
-pack's manifest in exactly that form; copy it over `package.json` after copying the pack out:
+pack's manifest in that form (the file additionally carries a `"//"` note explaining itself); copy it
+over `package.json` after copying the pack out:
 
 ```json
 {
   "name": "stream-pack",
   "version": "1.0.0",
   "private": true,
+  "license": "FSL-1.1-ALv2",
   "type": "module",
-  "main": "./index.ts",
+  "main": "./dist/index.js",
   "dependencies": {
     "@rayspec/handler-sdk": "1.6.2",
     "@rayspec/platform": "1.6.2"
@@ -86,9 +92,15 @@ pack's manifest in exactly that form; copy it over `package.json` after copying 
 The pinned version **must equal the platform version the deployment runs** — the entry imports
 `defineExtension` from that exact build, and the `@rayspec` closure (`core`, `db`, `handler-sdk`,
 `platform`, `spec`) is released in lockstep under one version. `1.6.2` is the released version this
-recipe was verified against; check the registry for the current one. Note this is a *runtime*
-dependency of the pack even though the compile step never needs it: `tsconfig.build.json` is
-transpile-only (`noCheck`), which is why the built entry keeps the bare specifier.
+recipe was verified against; check the registry for the current one.
+
+`@rayspec/platform` is a **runtime** dependency: the entry imports `defineExtension` as a VALUE, and
+`tsc` transpiles rather than bundles, so the bare specifier survives into `dist/index.js` and is
+resolved when the pack is loaded. `@rayspec/handler-sdk` is not in the same position — the handlers
+import only its TYPES (`import type`, erased under `verbatimModuleSyntax`), so nothing asks for it at
+runtime. It is pinned here anyway, and deliberately: a handler that later imports a value from it
+would otherwise fail at boot rather than at build, and it costs one entry in a manifest that has to
+be version-locked to the platform regardless.
 
 **2 — an install, so the pack has a real `node_modules`.**
 
@@ -111,10 +123,17 @@ extensions:
     version: 1.0.0
 ```
 
+Note the difference from the committed `rayspec.yaml` at the top of this page, which points at
+`./packs/stream-pack` — the pack SOURCE. That form works in this repository because the dev/test
+importer strips types on the way in; a deploy runtime loads compiled JavaScript only, so an
+out-of-repo deployment points at the built directory.
+
 To walk it with this pack: `node examples/stream-backend/build.mjs`, copy `packs/stream-pack/`
 (without its workspace-linked `node_modules`) anywhere outside the repo, do the three steps above.
-The pack's own `version` (`1.0.0`) is unrelated to the platform pin — it is the value
-`loadExtensions` fail-closed-matches against the deployment's `extensions[].version`.
+The `version` in this manifest is npm's, and nothing in the platform reads it. The version
+`loadExtensions` fail-closed-matches against the deployment's `extensions[].version` is the one the
+pack ENTRY declares — the `version` field passed to `defineExtension(...)` in `index.ts`. They are
+both `1.0.0` here, which is convenient and not a rule.
 
 ## What it exercises
 

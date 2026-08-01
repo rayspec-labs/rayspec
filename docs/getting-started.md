@@ -457,6 +457,12 @@ curl -s http://localhost:8080/sessions -H 'authorization: Bearer <ORG_TOKEN>'
 #   view only ever reads the calling tenant's own rows.
 ```
 
+> **If a call below suddenly answers `401`, your token expired.** `<ORG_TOKEN>` is the
+> access token from step 4, and step 4 printed its lifetime: `expiresIn: 480` — eight
+> minutes. The rest of this page takes longer than that to read. Mint a fresh one the
+> same way (`dev bootstrap-tenant` again, or `login` + `switch`) and carry on; nothing
+> you have done so far is lost.
+
 ### Record a session and start the workflow
 
 The views above are the read half. The product's other half is the pipeline: a
@@ -483,9 +489,10 @@ curl -s http://localhost:8080/sessions/demo-session/mic/upload-status \
 
 curl -s -X POST http://localhost:8080/sessions/demo-session/mic/finalize \
   -H 'authorization: Bearer <ORG_TOKEN>' \
-  -H 'content-type: application/json' -d '{"total_chunks":1}'
+  -H 'content-type: application/json' -d '{"total_chunks":1}' -w '\n%{http_code}\n'
 # → {"session_id":"demo-session","track":"mic","status":"completed","total_chunks":1,
 #    "committed_byte_len":10,"finalized_event_id":"<ORG_ID>:demo-session"}
+#   200
 ```
 
 That `200` is the whole point of the walkthrough: the seal was accepted by the
@@ -509,8 +516,9 @@ above.
 > step here. `STT_PROVIDER=fake` selects the fixture-driven adapter, and this boot wires
 > it with **no fixtures** — which is what the boot warning means by *no real
 > transcription — recordings will not transcribe*. So `transcribe` fails terminally
-> (`stt_adapter_error: No fake STT fixture for demo-session/mic.`), the steps that
-> depend on it are skipped, and the read views stay empty:
+> (`stt_adapter_error: No fake STT fixture for demo-session/mic.`), and the steps that
+> depend on it are skipped. The session itself was recorded — the seal above returned `200`
+> — so it is the DERIVED views, transcript and notes, that stay empty:
 >
 > ```bash
 > curl -s http://localhost:8080/sessions/demo-session/mic/transcript \
