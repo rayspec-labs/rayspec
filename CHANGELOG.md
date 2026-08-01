@@ -19,7 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   principal for that route alone**. Both members are whole positive numbers, rejected at parse time by
   the grammar and again at boot by the engine that turns them into a policy — so a spec assembled in
   code, which never meets the parser, still cannot start a server on a budget that would never
-  throttle or never expire. The boot names the offending route and member.
+  throttle or never expire. The boot names the offending route and member. `windowSeconds` is
+  additionally capped at **86400 (one day)**, refused by the linter while authoring and by the boot
+  otherwise. That ceiling is not a security limit but a truthfulness one: the counters live in the
+  serving process, so a window longer than the process is voided by the next restart rather than
+  enforced, and a monthly quota declared here would silently reset whenever the fleet moved. A durable
+  long-window quota needs a shared counter store, not a larger number.
 
   **It is opt-in and additive, which are the two properties that make it safe to ship.** Omitting the
   field is not a default budget — a route without one behaves exactly as it did before the field

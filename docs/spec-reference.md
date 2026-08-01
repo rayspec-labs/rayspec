@@ -215,9 +215,10 @@ api:
 - `rateLimit` — **optional**. This route's own request budget:
   `rateLimit: { windowSeconds: 60, max: 10 }` allows ten calls a minute per
   tenant and principal *for this route*. Both members are whole positive
-  numbers. Omit the field and the route has no per-route limit — it keeps only
-  the shared tier every declared route already has. The semantics, and what the
-  budget does *not* buy you, are described under
+  numbers, and `windowSeconds` may not exceed **86400** (one day). Omit the
+  field and the route has no per-route limit — it keeps only the shared tier
+  every declared route already has. The semantics, and what the budget does
+  *not* buy you, are described under
   [A route's own budget](#a-routes-own-budget).
 - `action` — a discriminated union on `kind`:
   - **`store`** — a CRUD operation over a declared store through the
@@ -354,6 +355,16 @@ Two principals of one organization each get their own budget; the same principal
 in two organizations is counted separately in each; and one principal's budget on
 one route never consumes its budget on another. Two routes declaring the same
 numbers are two independent budgets, not one shared one.
+
+**The window may not exceed a day.** `windowSeconds` is capped at `86400`, and a
+longer window is refused — by the linter while you are authoring, and by the boot
+if a document reaches it another way. This is not a security ceiling; it is the
+limit of what the counter can honestly promise. These counters live in the
+serving process (see below), so a window longer than the process itself is voided
+by the next restart, redeploy or eviction rather than enforced, and a monthly
+quota declared here would quietly reset every time the fleet moved. Anything a
+per-instance counter *can* enforce fits inside a day. A durable long-window quota
+is a different feature and needs a shared counter store, not a larger number.
 
 Enforcement happens **after authentication**. An unauthenticated call therefore
 still meets its usual `401` and spends no route budget at all — there is no

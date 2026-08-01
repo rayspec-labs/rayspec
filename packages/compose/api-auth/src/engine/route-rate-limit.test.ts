@@ -16,6 +16,7 @@
 
 import type { RateLimitPolicy } from '@rayspec/auth-core';
 import { DEFAULT_POLICIES, InMemoryRateLimitStore, RateLimiter } from '@rayspec/auth-core';
+import { MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS } from '@rayspec/spec';
 import type { Context, MiddlewareHandler } from 'hono';
 import { describe, expect, it } from 'vitest';
 import type { AppDeps, AppEnv, AuthContext } from '../app-context.js';
@@ -229,19 +230,30 @@ describe('declaredRouteBudget — the derivation is total, and fail-closed on th
     ['Infinity', Number.POSITIVE_INFINITY],
     ['an unsafe integer (Number.isInteger says true)', 1e300],
   ])('THROWS on a %s windowSeconds, naming the route', (_label, windowSeconds) => {
+    // The message is asserted, not just the route: every one of these values also exceeds the window
+    // ceiling below, so matching on the route alone would stay green if the per-field guard regressed
+    // and the ceiling guard answered in its place.
     expect(() => declaredRouteBudget({ ...route, rateLimit: { windowSeconds, max: 5 } })).toThrow(
-      /GET \/pings.*rateLimit\.windowSeconds/s,
+      /GET \/pings.*rateLimit\.windowSeconds.*whole positive number/s,
     );
   });
 
-  it('THROWS on a window whose MILLISECOND form overflows the safe range', () => {
-    // Number.MAX_SAFE_INTEGER is a perfectly good safe integer, so the per-field guard passes it — but
-    // ×1000 it is not, and a resetAt that never arrives is a permanent 429, not a limit.
-    const windowSeconds = Number.MAX_SAFE_INTEGER;
-    expect(Number.isSafeInteger(windowSeconds)).toBe(true);
-    expect(() => declaredRouteBudget({ ...route, rateLimit: { windowSeconds, max: 5 } })).toThrow(
-      /millisecond form leaves the safe integer range/,
-    );
+  it('THROWS on a window longer than a per-instance counter can honour, and admits the ceiling', () => {
+    // A day plus one second is a perfectly good safe integer, so the per-field guard passes it. What
+    // refuses it is the ceiling — the same constant the linter reports at authoring time, imported
+    // rather than repeated, so this arm also pins that the two agree on the number.
+    const overLong = MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS + 1;
+    expect(Number.isSafeInteger(overLong)).toBe(true);
+    expect(() =>
+      declaredRouteBudget({ ...route, rateLimit: { windowSeconds: overLong, max: 5 } }),
+    ).toThrow(/per-instance\s+counter can honour/s);
+    // The boundary is inclusive, and the accepted ceiling still converts cleanly.
+    expect(
+      declaredRouteBudget({
+        ...route,
+        rateLimit: { windowSeconds: MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS, max: 5 },
+      }).policy,
+    ).toEqual({ max: 5, windowMs: MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS * 1000 });
   });
 
   it('rejects 1e300 for the reason Number.isInteger would have missed', () => {

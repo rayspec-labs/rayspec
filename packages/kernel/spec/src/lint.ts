@@ -71,6 +71,24 @@ export const RESERVED_COLUMN_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The longest window a declared `api[].rateLimit` may span, in seconds — one day.
+ *
+ * NOT a security ceiling. It is what the enforcement substrate can honestly honour: the declared-route
+ * counters live in the serving process, so a window longer than the instance itself is a promise the
+ * platform cannot keep. A restart, a redeploy or an eviction from the bounded counter store voids such
+ * a window silently, and the author would be left believing a quota is enforced that in fact resets
+ * whenever the fleet moves. A day sits comfortably inside any plausible uptime while still expressing
+ * every rate a per-instance counter can enforce truthfully. It also keeps the window's millisecond form
+ * far inside the safe integer range, so the counter's reset instant always arrives and a declared limit
+ * can never degrade into a permanent `429`. A longer, durable quota is a DIFFERENT feature: it needs a
+ * shared counter store, not a larger number here.
+ *
+ * Declared here, beside the lint rule that reports it, and imported by the enforcing guard
+ * (`declaredRouteBudget` in @rayspec/api-auth) rather than repeated there — one number, one source.
+ */
+export const MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS = 86_400;
+
+/**
  * The list-query CONTROL keywords — the reserved query-string keys the declarative `list` route
  * uses to steer sorting, keyset pagination, and substring search (mirrors `CONTROL_KEYS` in the compose
  * package's store-query.ts; @rayspec/spec cannot import the compose package, so this is the KEEP-IN-SYNC
@@ -849,15 +867,20 @@ export function lintSpec(spec: RaySpec): SpecError[] {
 
   // api[].action.* -> declared store/agent/handler/stream (handler must be kind 'route').
   spec.api.forEach((route, ri) => {
-    // api[].rateLimit — RESTATE the positive-integer rule the Zod grammar already carries. Be precise
-    // about what this does and does not buy, because the two are easy to confuse.
+    // api[].rateLimit — two rules over the declared budget, and they reach different distances.
     //
-    // On the `parseSpec` path this rule does not fire: `lintSpec` is step 4, reached only after
-    // `RaySpec.safeParse` has succeeded, and the grammar's `z.number().int().positive()` already
-    // rejects every value tested here — zero, negative, fractional, NaN, Infinity and anything outside
-    // the safe integer range (Zod's `.int()` is a safe-integer check). So on that path this is defence
-    // in depth: it is what keeps the rule enforced if the field's grammar is ever relaxed, and it
-    // reports the offending member by its JSON path rather than through a Zod issue.
+    // The POSITIVE-INTEGER rule RESTATES what the Zod grammar already carries, so on the `parseSpec`
+    // path it does not fire: `lintSpec` is step 4, reached only after `RaySpec.safeParse` has
+    // succeeded, and the grammar's `z.number().int().positive()` already rejects every value that rule
+    // tests — zero, negative, fractional, NaN, Infinity and anything outside the safe integer range
+    // (Zod's `.int()` is a safe-integer check). On that path it is defence in depth: it is what keeps
+    // the rule enforced if the field's grammar is ever relaxed, and it reports the offending member by
+    // its JSON path rather than through a Zod issue.
+    //
+    // The WINDOW-CEILING rule is different in kind: the grammar cannot express it, so this is the only
+    // place an authored document is told. A window beyond `MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS` parses
+    // cleanly and would be refused later, at boot, by `declaredRouteBudget`. Reporting it here moves
+    // that refusal to authoring time — this rule DOES fire on the `parseSpec` path, and a test pins it.
     //
     // Where it can actually report something is a caller that runs the EXPORTED `lintSpec` over a
     // `RaySpec` value assembled in code rather than parsed from YAML. The documented contract does say
@@ -875,10 +898,11 @@ export function lintSpec(spec: RaySpec): SpecError[] {
     // zero, a negative, a fraction, a NaN or an unsafe integer is not a budget: it would either never
     // throttle or never expire.
     if (route.rateLimit) {
+      const { windowSeconds, max } = route.rateLimit;
       (
         [
-          ['windowSeconds', route.rateLimit.windowSeconds],
-          ['max', route.rateLimit.max],
+          ['windowSeconds', windowSeconds],
+          ['max', max],
         ] as const
       ).forEach(([field, value]) => {
         if (!(Number.isSafeInteger(value) && value > 0)) {
@@ -892,6 +916,24 @@ export function lintSpec(spec: RaySpec): SpecError[] {
           );
         }
       });
+      // The ceiling is only a meaningful thing to say about a window that is a valid count in the
+      // first place, so it is guarded on the same predicate the rule above uses — one wrong value
+      // yields ONE error, never a count complaint and a ceiling complaint about the same number.
+      if (
+        Number.isSafeInteger(windowSeconds) &&
+        windowSeconds > MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS
+      ) {
+        errors.push(
+          specError(
+            'schema_violation',
+            `route ${route.method} ${route.path} declares rateLimit.windowSeconds = ` +
+              `${String(windowSeconds)}, which is longer than the ${MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS} ` +
+              'seconds (one day) a per-instance counter can honour — the counters live in the serving ' +
+              'process, so a longer window would be voided by a restart rather than enforced',
+            `api[${ri}].rateLimit.windowSeconds`,
+          ),
+        );
+      }
     }
     const action = route.action;
     if (action.kind === 'store') {

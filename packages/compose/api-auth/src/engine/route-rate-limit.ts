@@ -47,6 +47,7 @@
 import type { RateLimiter, RateLimitPolicy } from '@rayspec/auth-core';
 import { errorEnvelope } from '@rayspec/auth-core';
 import type { ApiRouteRateLimit } from '@rayspec/spec';
+import { MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS } from '@rayspec/spec';
 import type { Context, MiddlewareHandler } from 'hono';
 import type { AppDeps, AppEnv } from '../app-context.js';
 import { clientIpFromContext } from '../http/client-ip.js';
@@ -179,11 +180,13 @@ export interface RouteBudget {
  * but runtime packages in this repository build `ApiRouteSpec[]` literals directly and never go through
  * that parse, so the guard is restated here — at the one place the numbers are turned into a policy —
  * rather than trusted. `Number.isSafeInteger` is used, NOT `Number.isInteger`: `Number.isInteger(1e300)`
- * is `true`, and a window that large is not a limit. The millisecond form is checked too, because
- * `windowSeconds * 1000` leaving the safe range would produce a `resetAt` that never arrives — the
- * counter would never reset and the route would answer a permanent `429`, which is a worse outcome than
- * no limit at all. Every refusal names the route, because at boot the author needs to know WHICH
- * declaration is wrong.
+ * is `true`, and a window that large is not a limit. The window is additionally held to
+ * `MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS` — the ceiling the linter reports at authoring time, imported
+ * from @rayspec/spec rather than repeated here so the two can never disagree about the number. That
+ * ceiling is what keeps the window's millisecond form far inside the safe integer range, so the
+ * counter's `resetAt` always arrives and a declared budget can never degrade into a permanent `429`,
+ * which would be a worse outcome than no limit at all. Every refusal names the route, because at boot
+ * the author needs to know WHICH declaration is wrong.
  *
  * TWO bucket names, not one. `routeRateTarget` picks the `principal` arm for a validated principal and
  * the `source` arm otherwise. Behind `requireAuth()` the source arm is only reachable through that
@@ -212,12 +215,13 @@ export function declaredRouteBudget(route: {
       );
     }
   }
-  if (!Number.isSafeInteger(windowSeconds * 1000)) {
+  if (windowSeconds > MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS) {
     throw new Error(
       `declaredRouteBudget: ${where} declares rateLimit.windowSeconds = ${String(windowSeconds)}, ` +
-        'whose millisecond form leaves the safe integer range. Such a window would never expire, so ' +
-        'the route would answer a permanent 429 rather than enforce a limit. Declare a window a ' +
-        'caller can actually wait out.',
+        `longer than the ${MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS} seconds (one day) a per-instance ` +
+        'counter can honour. These counters live in the serving process, so a longer window would be ' +
+        'voided by any restart rather than enforced — and far beyond it the window would not expire ' +
+        'at all, leaving the route answering a permanent 429. Declare a window a caller can wait out.',
     );
   }
   return {

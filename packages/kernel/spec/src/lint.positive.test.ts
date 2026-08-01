@@ -8,7 +8,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { RaySpec } from './grammar.js';
-import { lintSpec } from './lint.js';
+import { lintSpec, MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS } from './lint.js';
 import { parseSpec } from './parse.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -417,13 +417,21 @@ api:
  *
  * Two halves are pinned here. The GRAMMAR half: the field is optional, `.strict()` on both levels, and
  * an absent field leaves NO key on the parsed route — the whole backward-compatibility guarantee rests
- * on that, so it is asserted rather than assumed. The LINT half: the positive-integer rule restated in
- * `lintSpec`, driven the one way it can actually report — by calling the exported `lintSpec` directly
- * over a `RaySpec` value assembled in code rather than parsed from YAML. Inside `parseSpec` the
- * restatement is unreachable, because the grammar rejects every one of these values before the lint
- * pass runs; the arms below pin both facts. It is emphatically NOT what stands between a code-built
- * spec and a live throttle policy — a spec that skips `parseSpec` skips `lintSpec` with it, and the
- * guard that fails that boot closed is `declaredRouteBudget` in @rayspec/api-auth.
+ * on that, so it is asserted rather than assumed.
+ *
+ * The LINT half carries two rules that reach different distances, and the arms below pin the
+ * difference rather than assuming it. The POSITIVE-INTEGER rule restates the grammar, so inside
+ * `parseSpec` it never gets to speak: the parse-time arm asserts the refusal carries the GRAMMAR's
+ * voice and not the restatement's, which is what makes "unreachable there" a pinned fact instead of a
+ * claim — relaxing the grammar turns that arm red. Its own reporting path is a caller running the
+ * exported `lintSpec` over a `RaySpec` value assembled in code rather than parsed from YAML, which is
+ * how the arms further down drive it. The WINDOW-CEILING rule is the opposite: the grammar cannot
+ * express it, so `lintSpec` is what refuses an over-long window, on the ordinary authoring path.
+ *
+ * Neither rule is what stands between a code-built spec and a live throttle policy — a spec that skips
+ * `parseSpec` skips `lintSpec` with it, and the guard that fails that boot closed is
+ * `declaredRouteBudget` in @rayspec/api-auth, which enforces the same two rules against the same
+ * shared ceiling constant.
  */
 describe('api[].rateLimit — the opt-in per-route budget', () => {
   const withLimit = (limit: string) => `
@@ -467,18 +475,48 @@ api:
     expect(Object.hasOwn(route as object, 'rateLimit')).toBe(false);
   });
 
-  it('rejects a non-positive / non-integer member at parse time (schema_violation)', () => {
+  it('rejects a non-positive / non-integer member at parse time — and the GRAMMAR is what rejects it', () => {
     for (const limit of [
       '{ windowSeconds: 0, max: 5 }',
       '{ windowSeconds: 60, max: 0 }',
       '{ windowSeconds: -1, max: 5 }',
       '{ windowSeconds: 1.5, max: 5 }',
+      '{ windowSeconds: .nan, max: 5 }',
+      '{ windowSeconds: .inf, max: 5 }',
+      '{ windowSeconds: 9007199254740993, max: 5 }',
     ]) {
       const res = parseSpec(withLimit(limit));
       expect(res.ok, `expected ${limit} to be rejected`).toBe(false);
       if (res.ok) continue;
       expect(res.errors.map((e) => e.code)).toContain('schema_violation');
+      // WHICH layer refused is the point, not merely THAT something did. Both layers answer with
+      // `schema_violation`, so the code alone cannot tell them apart — the lint restatement's own
+      // wording can. Asserting its ABSENCE pins that the parse never got as far as the lint pass,
+      // which is exactly the claim this block's doc comment makes. Relax the grammar (drop `.int()`)
+      // and the parse starts succeeding, the lint restatement answers instead, and this line goes red.
+      expect(
+        res.errors.some((e) => e.message.includes('which must be a whole positive number')),
+        `${limit} was refused by the lint restatement, so the grammar let it through`,
+      ).toBe(false);
     }
+  });
+
+  it('reports an over-long window at parse time — the one rateLimit rule the grammar cannot carry', () => {
+    // The mirror image of the arm above, and the reason the restatement is not merely defence in
+    // depth: a window of a day plus one second is a perfectly good positive integer, so the grammar
+    // admits it and `lintSpec` is what refuses it — on the ordinary authoring path, before any boot.
+    const res = parseSpec(
+      withLimit(`{ windowSeconds: ${MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS + 1}, max: 5 }`),
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    const violation = res.errors.find((e) => e.path === 'api[0].rateLimit.windowSeconds');
+    expect(violation?.code).toBe('schema_violation');
+    expect(violation?.message).toContain('per-instance counter can honour');
+    // The ceiling itself is admitted — the boundary is inclusive, not off by one.
+    expect(
+      parseSpec(withLimit(`{ windowSeconds: ${MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS}, max: 5 }`)).ok,
+    ).toBe(true);
   });
 
   it('rejects an unknown key inside rateLimit (strict, like every other section)', () => {
@@ -498,11 +536,13 @@ api:
   // ---- lintSpec called DIRECTLY, over a spec value assembled in code rather than parsed ---------
   //
   // These drive `lintSpec` the way an embedder can: on a `RaySpec` value built in code, which never
-  // met the Zod grammar. Inside `parseSpec` the rule is unreachable — the parse rejects all of these
-  // values first (the arms above pin that), so the restatement is defence in depth against the field's
-  // grammar being relaxed, plus the reporting path for a direct `lintSpec` caller. It is deliberately
-  // NOT what protects a code-built spec on its way to the engine: such a spec skips `parseSpec` and
-  // therefore skips `lintSpec` too, and `declaredRouteBudget` is the guard that fails its boot closed.
+  // met the Zod grammar. For the values below the parse refuses first — the arm above pins that by
+  // asserting the grammar's voice rather than this rule's — so on the `parseSpec` path the restatement
+  // is defence in depth against the field's grammar being relaxed, plus the reporting path for a direct
+  // `lintSpec` caller. (The window ceiling is the exception and is pinned separately above: the grammar
+  // admits an over-long window, so there this rule is the only one that speaks.) None of it is what
+  // protects a code-built spec on its way to the engine: such a spec skips `parseSpec` and therefore
+  // skips `lintSpec` too, and `declaredRouteBudget` is the guard that fails its boot closed.
   const codeBuiltSpec = (rateLimit: { windowSeconds: number; max: number }): RaySpec =>
     ({
       version: '1.0',
@@ -542,6 +582,25 @@ api:
     const violation = errors.find((e) => e.path === 'api[0].rateLimit.max');
     expect(violation).toBeDefined();
     expect(violation?.code).toBe('schema_violation');
+  });
+
+  it('reports a window past the ceiling, admits the ceiling itself, and never doubles up', () => {
+    const pathsFor = (windowSeconds: number) =>
+      lintSpec(codeBuiltSpec({ windowSeconds, max: 5 }))
+        .filter((e) => e.path?.startsWith('api[0].rateLimit') === true)
+        .map((e) => e.path);
+    expect(pathsFor(MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS + 1)).toEqual([
+      'api[0].rateLimit.windowSeconds',
+    ]);
+    expect(pathsFor(MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS)).toEqual([]);
+    // A value that is not a valid count at all is ONE complaint about the count, never also a
+    // complaint that it exceeds the ceiling — 1e300 is both unsafe and enormous.
+    expect(pathsFor(1e300)).toEqual(['api[0].rateLimit.windowSeconds']);
+    expect(
+      lintSpec(codeBuiltSpec({ windowSeconds: 1e300, max: 5 })).find(
+        (e) => e.path === 'api[0].rateLimit.windowSeconds',
+      )?.message,
+    ).toContain('whole positive number');
   });
 
   it('reports BOTH members when both are wrong, and NEITHER when both are fine', () => {
