@@ -204,6 +204,25 @@ describe('switch persists the selection on the session row', () => {
   });
 });
 
+describe('a tombstoned org is absent everywhere, including on the authorization path', () => {
+  it('a member of a soft-deleted org cannot switch into it', async () => {
+    // Every other reader of "is this a usable tenant" filters `orgs.deleted_at`: the org list, the
+    // login pre-fill, and the product boot gate. The live-membership lookup did not — and it is the
+    // one the switch and the sensitive-permission re-check consult, so an erased tenant stayed
+    // operable for its members while the API behaved everywhere else as if it had forgotten it.
+    const { token, refresh: r0 } = await register('tombstone@example.com');
+    const orgId = await createOrg(token, 'TombstoneCo');
+    await switchOrg(token, orgId, r0);
+    expect((await refresh(r0)).activeOrgId).toBe(orgId);
+
+    // No shipped route tombstones an org, so the state is reached the only way it can be.
+    await h.db.$client.unsafe('UPDATE orgs SET deleted_at = now() WHERE id = $1', [orgId]);
+
+    const res = await switchOrg(token, orgId, r0);
+    expect(res.status).toBe(404); // uniform not-found — no existence leak, as for a foreign org
+  });
+});
+
 describe('register with an org reports a selection the session actually carries', () => {
   it('register(orgName) → the very next refresh returns that org', async () => {
     // The response advertises `activeOrgId`, so the session row must carry it: otherwise the first

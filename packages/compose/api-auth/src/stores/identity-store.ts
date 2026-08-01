@@ -369,17 +369,36 @@ export class IdentityStore {
   /**
    * The LIVE membership lookup for (userId, orgId) — the authoritative source for sensitive
    * authz (authz.ts MUST NOT trust the JWT claim). Returns undefined if no active membership.
+   *
+   * A TOMBSTONED org counts as no membership, matching every other reader of the same question:
+   * `orgsForUser` (which is why such an org is not listed), `soleActiveOrgForUser` (which is why a
+   * login never resolves one), and the product boot gate (which refuses to bind to one). Without the
+   * join this lookup was the odd one out, and it is the one on the AUTHORIZATION path — a member
+   * could still switch into an erased tenant and still pass the live re-check for the sensitive
+   * permissions, in an org the API otherwise behaves as if it had forgotten.
+   *
+   * No shipped route sets `orgs.deleted_at` today, so this changes nothing an API caller can reach;
+   * it makes the four readers agree about a state the schema can represent and an operator can
+   * create by hand, rather than leaving the authorization path the permissive one.
    */
   async liveMembership(userId: string, orgId: string): Promise<MembershipRow | undefined> {
     const rows = await this.db
-      .select()
+      .select({
+        id: schema.memberships.id,
+        orgId: schema.memberships.orgId,
+        userId: schema.memberships.userId,
+        role: schema.memberships.role,
+        status: schema.memberships.status,
+      })
       .from(schema.memberships)
+      .innerJoin(schema.orgs, eq(schema.memberships.orgId, schema.orgs.id))
       .where(
         and(
           eq(schema.memberships.userId, userId),
           eq(schema.memberships.orgId, orgId),
           eq(schema.memberships.status, 'active'),
           isNull(schema.memberships.deletedAt),
+          isNull(schema.orgs.deletedAt),
         ),
       )
       .limit(1);
