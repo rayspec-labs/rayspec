@@ -511,9 +511,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   platform owns — `api_keys`, `auth_audit`, `conversation_items`, `idempotency_keys`,
   `invites`, `journal_steps`, `memberships`, `oidc_models`, `orgs`, `run_events`, `runs`,
   `sessions`, `users`, `workflow_artifacts`, `workflow_node_states`, `workflow_runs` — is
-  rejected at `stores[<i>].name`, in both profiles, and on a product artifact's `collection`,
-  which derives a store of that name. What an author observes differently: such a document
-  previously returned `{ "ok": true, "errors": [], "warnings": [] }` from `doctor` and
+  rejected at `stores[<i>].name`, in both profiles, and at every other place a store name
+  comes out of a product document: a product artifact's `collection`, which derives a store of
+  that name, and a view's `source: { kind: store, ref: … }`, which names the transcript sink
+  store when it resolves to neither a declared store nor a collection. What an author observes
+  differently: such a document previously returned
+  `{ "ok": true, "errors": [], "warnings": [] }` from `doctor` and
   `ok: true` from `plan` — whose migration then carried the colliding `CREATE TABLE` — and
   failed only when the deployed container booted, in a restart loop whose cause was visible
   solely in container logs, after the build and image had already been paid for. It now fails

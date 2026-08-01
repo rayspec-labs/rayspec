@@ -222,6 +222,38 @@ contracts:
     expectCode(yaml, 'reserved_store_name', /runs/);
   });
 
+  it('a store-sourced VIEW ref that shadows a core/global platform table is rejected', () => {
+    // The third document-named store path: a store-sourced view ref that names no declared store and
+    // no collection derives the TRANSCRIPT SINK store of exactly that name, so the reservation binds
+    // to the ref too. Fail-the-fix: the healthy fixture below (ref `track_transcripts`) lints clean;
+    // renaming only the ref is the one mutation.
+    const withSink = (ref: string) =>
+      FIELDLOG_YAML.replace(
+        '\ncontracts:\n',
+        `
+views:
+  - id: session_transcript
+    route: { method: GET, path: "/sessions/{session_id}/transcript" }
+    auth: bearer_tenant
+    params:
+      session_id: { in: path, shape: safe_id }
+    source: { kind: store, ref: ${ref} }
+    absent_state: not_ready_409
+    read:
+      mode: single
+      filter:
+        session_id: { param: session_id }
+      shape:
+        fields:
+          status: { kind: column, column: status, type: string, default: unknown }
+    response_contract: fieldlog.catalog_rows
+contracts:
+`,
+      );
+    parseOk(withSink('track_transcripts'));
+    expectCode(withSink('conversation_items'), 'reserved_store_name', /conversation_items/);
+  });
+
   it('a reserved (injected tenancy/GDPR) column name is rejected', () => {
     expectCode(
       FIELDLOG_YAML.replace('{ name: label, type: text', '{ name: tenant_id, type: text'),

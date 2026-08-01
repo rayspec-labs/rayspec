@@ -572,6 +572,29 @@ export function checkProductStores(
     }
   });
   const storeByName = new Map(spec.stores.map((s) => [s.name, s]));
+  // The THIRD document-named store path: the TRANSCRIPT SINK. `deriveProductStores` materializes a
+  // store whose name is taken verbatim from a `source: { kind: store }` view ref that resolves to no
+  // declared store and no artifact collection, so a reserved name there collides at boot exactly like
+  // the two above. A store-sourced view must resolve to a store in the composed read surface either
+  // way (views-runtime refuses an unbacked one), and no reserved platform name can ever legitimately
+  // be in that surface — so the reservation binds to the ref regardless of how the store arises.
+  // Refs that DO name a declared store or a collection are skipped: the same defect is already
+  // reported at its declaration, which is the anchor the author has to edit.
+  spec.views.forEach((view, vi) => {
+    const ref = view.source?.kind === 'store' ? view.source.ref : undefined;
+    if (ref === undefined || storeByName.has(ref) || collectionNames.has(ref)) return;
+    if (RESERVED_STORE_NAMES.has(ref)) {
+      errors.push(
+        specError(
+          'reserved_store_name',
+          `view '${view.id}' sources store '${ref}', which shadows a core/global platform table of ` +
+            'the same name — the transcript sink store derived from this ref would collide with the ' +
+            'platform table, so the deployment would refuse to boot; rename the store',
+          `views[${vi}].source.ref`,
+        ),
+      );
+    }
+  });
   spec.stores.forEach((store, si) => {
     const base = `stores[${si}]`;
     // Symmetric with the backend store lint: a declared store materializes a standard tenant-scoped

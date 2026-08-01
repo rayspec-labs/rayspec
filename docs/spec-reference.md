@@ -1288,8 +1288,10 @@ stores:
 - `name` — required safe identifier, and — because a product store materializes
   into an ordinary tenant-scoped table — subject to the same **reserved** platform
   table names listed under the backend profile's [`stores`](#stores). The
-  reservation also covers an artifact's `collection`, which derives a store of
-  exactly that name.
+  reservation covers every place a store name comes out of the document, not just
+  this one: an artifact's `collection`, which derives a store of exactly that
+  name, and a view's `source: { kind: store, ref: … }`, which names the transcript
+  sink store when it resolves to neither a declared store nor a collection.
 - `description` — optional.
 - `columns` — at least one, using the same `{name, type, nullable, unique}` shape
   and the same closed type vocabulary as the backend profile.
