@@ -482,13 +482,18 @@ That `200` is the whole point of the walkthrough: the seal was accepted by the
 tenant-bound dispatcher and a run was started under `<ORG_ID>`.
 `finalized_event_id` is that event's idempotency key and it is **session**-scoped
 (`<tenant>:<session>`), so sealing a second track of the same session converges on the
-same single run rather than starting another. Had you deployed with an id no org owns,
-this call would be a `403` and nothing would have started:
+same single run rather than starting another. Bind the deployment to one org and call it
+with a token from **another**, and this call is a `403` with nothing started — the
+dispatcher compares the event's tenant against the one it is bound to and refuses to
+cross:
 
 ```json
 { "error": "session_event_rejected",
   "detail": "the session_finalized event was rejected fail-closed (cross_tenant) — no workflow was started." }
 ```
+
+An id that names no org at all cannot get you here: that deployment refuses to boot, as
+above.
 
 > **Where the offline recipe stops.** The run starts, but it cannot get past its first
 > step here. `STT_PROVIDER=fake` selects the fixture-driven adapter, and this boot wires
