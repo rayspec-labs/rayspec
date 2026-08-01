@@ -297,6 +297,11 @@ export class IdentityStore {
           eq(schema.sessions.id, sessionId),
           eq(schema.sessions.userId, userId),
           isNull(schema.sessions.revokedAt),
+          // A SUPERSEDED row is not a place to record a choice: the next refresh reads its
+          // replacement, so a write here would be lost silently. The caller resolves the live row
+          // (`liveSessionFromSecret`); this predicate makes the rule structural rather than a
+          // convention a future call site could forget.
+          isNull(schema.sessions.rotatedAt),
         ),
       );
   }

@@ -156,7 +156,23 @@ export class AuthService {
     normalizedEmail: string,
     password: string,
     ctx: LoginContext,
-  ): Promise<{ userId: string; accessToken: string; refreshSecret: string; audit: AuditEvent[] }> {
+    opts: {
+      /**
+       * Create the new user's first org, if the caller asked for one. It runs AFTER the user exists
+       * (it needs an owner) and BEFORE the session is issued, which is the whole point: the session
+       * row, the minted token and the reported `activeOrgId` then say the same thing. Issuing first
+       * and creating the org afterwards reported an org the session did not carry, so the very next
+       * refresh answered `null` — the same defect the org-switch write fixes, one endpoint over.
+       */
+      readonly createFirstOrg?: (userId: string) => Promise<{ orgId: string; role: string }>;
+    } = {},
+  ): Promise<{
+    userId: string;
+    accessToken: string;
+    refreshSecret: string;
+    activeOrgId: string | null;
+    audit: AuditEvent[];
+  }> {
     const existing = await this.store.findUserByEmail(normalizedEmail);
     if (existing) {
       // Do the dummy hash work anyway so register-existing and register-new are timing-similar.
@@ -165,12 +181,30 @@ export class AuthService {
     }
     const passwordHash = await hashPassword(password);
     const user = await this.store.createUser(normalizedEmail, passwordHash);
-    const { accessToken, refreshSecret } = await this.issueSession(user.id, null, undefined, ctx);
+    const org = await opts.createFirstOrg?.(user.id);
+    const { accessToken, refreshSecret } = await this.issueSession(
+      user.id,
+      org?.orgId ?? null,
+      org?.role,
+      ctx,
+    );
     return {
       userId: user.id,
       accessToken,
       refreshSecret,
-      audit: [{ event: 'register', actorUserId: user.id, actorOrgId: null }],
+      activeOrgId: org?.orgId ?? null,
+      audit: [
+        { event: 'register', actorUserId: user.id, actorOrgId: null },
+        ...(org
+          ? [
+              {
+                event: 'org_create' as const,
+                actorUserId: user.id,
+                actorOrgId: org.orgId,
+              },
+            ]
+          : []),
+      ],
     };
   }
 
@@ -347,5 +381,32 @@ export class AuthService {
     if (!session || session.revokedAt || session.expiresAt.getTime() <= this.now())
       return undefined;
     return session;
+  }
+
+  /**
+   * The LIVE session a presented refresh secret belongs to, or `undefined`.
+   *
+   * `sessionFromSecret` answers "which row does this secret hash to", which is the right question for
+   * the cookie principal. It is the wrong question for a WRITE. Inside the refresh grace window a
+   * client still legitimately holds the PRE-rotation secret, and that row has already been superseded:
+   * writing the active org there puts it on a row no later refresh reads, so the choice is silently
+   * lost. This resolves the same hop `refresh` resolves — follow `replacedBy` to the live replacement —
+   * and stops at the same boundary: a rotated row BEYOND the grace window is a replay and resolves to
+   * nothing. Detecting a replay stays the refresh route's job (it revokes the family); this method
+   * merely refuses to write for one.
+   *
+   * The hop is bounded rather than unbounded: two rotations inside one grace window are already
+   * pathological, and a bound keeps a malformed chain from turning a write into a walk.
+   */
+  async liveSessionFromSecret(presentedSecret: string): Promise<SessionRow | undefined> {
+    let row = await this.sessionFromSecret(presentedSecret);
+    for (let hop = 0; row?.rotatedAt && hop < 3; hop++) {
+      if (this.now() - row.rotatedAt.getTime() > this.graceMs) return undefined;
+      if (!row.replacedBy) return undefined;
+      const next = await this.store.findSessionById(row.replacedBy);
+      if (!next || next.revokedAt || next.expiresAt.getTime() <= this.now()) return undefined;
+      row = next;
+    }
+    return row?.rotatedAt ? undefined : row;
   }
 }

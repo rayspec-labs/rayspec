@@ -129,6 +129,10 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
     // of THIS user (the store predicate re-asserts the ownership, so the cookie can never select
     // another user's row). We do NOT rotate that session — see the handler note above.
     //
+    // The cookie is resolved to the LIVE row rather than to whatever it hashes to: inside the refresh
+    // grace window a client still holds the pre-rotation secret, and writing the choice onto that
+    // superseded row would lose it at the very next refresh.
+    //
     // LIMIT: nothing is persisted for a client whose switch request carries no cookie — a CLI/desktop
     // client, and equally a CROSS-ORIGIN browser client, which this API serves bearer-only (app.ts
     // registers the CORS grant WITHOUT credentials, and the refresh cookie is `__Host-…;
@@ -136,7 +140,7 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
     // token exactly as before. That is a no-op, not an error — the switch must succeed either way.
     const refreshSecret = readRefreshCookie(c.req.header('cookie'));
     const session = refreshSecret
-      ? await deps.authService.sessionFromSecret(refreshSecret)
+      ? await deps.authService.liveSessionFromSecret(refreshSecret)
       : undefined;
     if (session && session.userId === principal.userId) {
       await deps.identityStore.setSessionCurrentOrg(session.id, principal.userId, orgId);

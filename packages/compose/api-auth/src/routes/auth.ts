@@ -52,26 +52,36 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
     const rawBody = await readBoundedRequestBytes(c, deps.maxJsonBodyBytes);
     const body = RegisterRequest.parse(JSON.parse(new TextDecoder().decode(rawBody)));
     const email = normalizeEmail(body.email);
-    const reg = await deps.authService.register(email, body.password, {
-      ua: c.req.header('user-agent') ?? null,
-      ip,
-    });
-    // Optional auto-create org + owner membership.
-    let activeOrgId: string | null = null;
-    if (body.orgName) {
-      const slug = await deps.orgStore.deriveUniqueSlug(body.orgName);
-      const org = await deps.orgStore.createOrgWithOwner({
-        name: body.orgName,
-        slug,
-        ownerUserId: reg.userId,
-      });
-      activeOrgId = org.id;
-      reg.audit.push({ event: 'org_create', actorUserId: reg.userId, actorOrgId: org.id });
-    }
+    // The optional auto-created org is handed to `register` rather than created after it, so the
+    // session row, the minted token and the reported `activeOrgId` agree — see its docblock.
+    const orgName = body.orgName;
+    const reg = await deps.authService.register(
+      email,
+      body.password,
+      { ua: c.req.header('user-agent') ?? null, ip },
+      orgName
+        ? {
+            createFirstOrg: async (userId: string) => {
+              const slug = await deps.orgStore.deriveUniqueSlug(orgName);
+              const org = await deps.orgStore.createOrgWithOwner({
+                name: orgName,
+                slug,
+                ownerUserId: userId,
+              });
+              return { orgId: org.id, role: 'owner' };
+            },
+          }
+        : {},
+    );
     await deps.auditStore.appendMany(reg.audit, rid, ipHashOf(c, deps));
     const refreshToken = deliverRefresh(c, deps, reg.refreshSecret, body.deliverRefreshTokenInBody);
     return c.json(
-      tokenResponse(reg.accessToken, activeOrgId, deps.signer.accessTokenTtlSeconds, refreshToken),
+      tokenResponse(
+        reg.accessToken,
+        reg.activeOrgId,
+        deps.signer.accessTokenTtlSeconds,
+        refreshToken,
+      ),
       201,
     );
   });
@@ -96,28 +106,37 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
       const rawBody = await readBoundedRequestBytes(c, deps.maxJsonBodyBytes);
       const body = BootstrapTenantRequest.parse(JSON.parse(new TextDecoder().decode(rawBody)));
       const email = normalizeEmail(body.email);
-      const reg = await deps.authService.register(email, body.password, {
-        ua: c.req.header('user-agent') ?? null,
-        ip,
-      });
-      const slug = await deps.orgStore.deriveUniqueSlug(body.orgName);
-      let org: { id: string };
-      try {
-        org = await deps.orgStore.createOrgWithOwner({
-          name: body.orgName,
-          slug,
-          ownerUserId: reg.userId,
-          id: body.orgId,
-        });
-      } catch (e) {
-        // A taken id is the operator's problem to resolve, not a server fault: say so as a 409 rather
-        // than succeeding under a different id they would then deploy against.
-        if (e instanceof OrgIdInUseError) {
-          throw new ApiError('CONFLICT', 'That org id already exists.');
-        }
-        throw e;
-      }
-      reg.audit.push({ event: 'org_create', actorUserId: reg.userId, actorOrgId: org.id });
+      // Same seam as `register` above: the org is created INSIDE the registration, so the session
+      // this operator call hands back is already bound to the tenant it just made. A taken id still
+      // aborts before a session exists — it leaves the freshly created user behind, which an operator
+      // resolves by retrying with the same email once the id question is settled.
+      const reg = await deps.authService.register(
+        email,
+        body.password,
+        { ua: c.req.header('user-agent') ?? null, ip },
+        {
+          createFirstOrg: async (userId: string) => {
+            const slug = await deps.orgStore.deriveUniqueSlug(body.orgName);
+            try {
+              const created = await deps.orgStore.createOrgWithOwner({
+                name: body.orgName,
+                slug,
+                ownerUserId: userId,
+                id: body.orgId,
+              });
+              return { orgId: created.id, role: 'owner' };
+            } catch (e) {
+              // A taken id is the operator's problem to resolve, not a server fault: say so as a 409
+              // rather than succeeding under a different id they would then deploy against.
+              if (e instanceof OrgIdInUseError) {
+                throw new ApiError('CONFLICT', 'That org id already exists.');
+              }
+              throw e;
+            }
+          },
+        },
+      );
+      const org = { id: reg.activeOrgId as string };
       await deps.auditStore.appendMany(reg.audit, rid, ipHashOf(c, deps));
       const refreshToken = deliverRefresh(
         c,
