@@ -22,24 +22,45 @@
  * external store, so the counters are IN-PROCESS and PER INSTANCE: a deployment running N instances
  * grants each caller N budgets. That is a documented limitation, not an oversight (see the declared-
  * route throttling section of the spec reference), and it is the same posture every other throttle in
- * this codebase already has.
+ * this codebase already has. The per-route budgets built by `declaredRouteBudget` below share that
+ * limiter, that store and therefore that limitation exactly: a declared `rateLimit` is a per-instance
+ * budget too, and it additionally multiplies the number of distinct keys the one bounded store tracks.
  *
  * FAIL-OPEN TRAP. `RateLimiter.check` returns `allowed` for a bucket name that has no entry in the
- * limiter's policy table — an unregistered bucket silently permits everything. Both default buckets
- * below are registered in `DEFAULT_POLICIES` (auth-core `rate-limit.ts`), and a test pins that. Any
- * caller passing its own tier names must register their policies the same way.
+ * limiter's policy table — an unregistered bucket silently permits everything. There are exactly two
+ * safe discharges of that trap, and this module uses both:
+ *   - REGISTER the bucket. Both default tiers below are registered in `DEFAULT_POLICIES` (auth-core
+ *     `rate-limit.ts`), and a test pins that. A caller passing its OWN tier names must discharge the
+ *     trap too — by this route or by the next one, never by neither.
+ *   - CARRY the budget. A per-route budget passes its policy explicitly as the third argument to
+ *     `check`, so no table lookup happens for those buckets at all and there is no registration to
+ *     forget. The `ROUTE_BUDGET_BUCKET_PREFIX` bucket names are therefore DELIBERATELY ABSENT from
+ *     `DEFAULT_POLICIES` and must never be added: a registered entry would become a second, shadowing
+ *     source of truth for a budget the spec already states, and the two would drift apart silently.
+ *     `assertLimiterHonoursExplicitPolicy` closes the remaining hole — see its own doc.
+ *
+ * CHAIN POSITION. The tiered middleware runs BEFORE `requireAuth()` (see above). The per-route budget
+ * middleware runs AFTER it, because a budget keyed on tenant AND principal needs a principal to exist;
+ * see the chain rationale in `register-declared-routes.ts`.
  */
 
+import type { RateLimiter, RateLimitPolicy } from '@rayspec/auth-core';
 import { errorEnvelope } from '@rayspec/auth-core';
+import type { ApiRouteRateLimit } from '@rayspec/spec';
+import { MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS } from '@rayspec/spec';
 import type { Context, MiddlewareHandler } from 'hono';
 import type { AppDeps, AppEnv } from '../app-context.js';
 import { clientIpFromContext } from '../http/client-ip.js';
 import { principalActor } from './principal-actor.js';
 
 /**
- * The two bucket names a declared route throttles through. Each MUST name a registered policy (see
- * the fail-open trap in the module header); overriding them selects a differently-tuned pair, which is
- * how a per-route limit gets its own window/max and its own counter.
+ * The two bucket names a declared route throttles through. Each MUST discharge the fail-open trap in
+ * the module header in ONE of its two safe ways: either the name is REGISTERED in auth-core's
+ * `DEFAULT_POLICIES` (what the two default tiers below do), or the budget is CARRIED on the `check`
+ * call as an explicit policy (what a per-route budget does, which is why the
+ * `ROUTE_BUDGET_BUCKET_PREFIX` names are deliberately absent from that table and must stay absent).
+ * A name that does neither silently permits everything. Overriding these selects a differently-tuned
+ * pair, which is how a per-route limit gets its own window/max and its own counter.
  */
 export interface RouteRateTiers {
   /** Bucket for a request with NO validated principal. Keyed on the anti-spoof client source. */
@@ -108,14 +129,22 @@ export function retryAfterSeconds(retryAfterMs: number): number {
  * emits no headers; it is listed in the app's CORS `exposeHeaders` so a cross-origin `fetch` client can
  * read it (`Retry-After` is not CORS-safelisted), and the body detail keeps the advice reachable even
  * for a client that never sees the header.
+ *
+ * `policy`, when passed, is the budget this middleware carries INTO the limiter for its own buckets
+ * instead of relying on a registered entry (see the fail-open trap in the module header). It is the
+ * only difference between a tiered mount and a per-route one: this function stays THE single refusal
+ * path, so a per-route `429` is byte-identical in shape to a tiered one — same envelope, same
+ * `details.retryAfterMs`, same whole-second `Retry-After` — and there is exactly one place where the
+ * shape of a declared-route throttle refusal is decided.
  */
 export function routeRateLimit(
   deps: AppDeps,
   tiers: RouteRateTiers = DEFAULT_ROUTE_RATE_TIERS,
+  policy?: RateLimitPolicy,
 ): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const { bucket, id } = routeRateTarget(c, deps, tiers);
-    const { allowed, retryAfterMs } = deps.rateLimiter.check(bucket, id);
+    const { allowed, retryAfterMs } = deps.rateLimiter.check(bucket, id, policy);
     if (!allowed) {
       return c.json(
         errorEnvelope('RATE_LIMITED', 'Too many requests.', c.get('requestId') ?? 'unknown', {
@@ -127,4 +156,117 @@ export function routeRateLimit(
     }
     await next();
   };
+}
+
+/**
+ * The bucket-name prefix every DECLARED per-route budget lives under. Disjoint from every key in
+ * auth-core's `DEFAULT_POLICIES`, and deliberately never registered there — a per-route budget carries
+ * its policy on the call (see the fail-open trap in the module header), so a registered entry of the
+ * same name would be a second, shadowing source of truth for a number the spec already states.
+ */
+export const ROUTE_BUDGET_BUCKET_PREFIX = 'declared-route-budget';
+
+/** A derived per-route budget: the two bucket names it counts in, and the policy it carries. */
+export interface RouteBudget {
+  tiers: RouteRateTiers;
+  policy: RateLimitPolicy;
+}
+
+/**
+ * Derive the per-route budget for a route that declares `rateLimit`. PURE and TOTAL: it either returns
+ * a budget or throws — it never returns something that would silently not throttle.
+ *
+ * FAIL-CLOSED on the numbers. The Zod grammar already constrains both members to positive integers,
+ * but runtime packages in this repository build `ApiRouteSpec[]` literals directly and never go through
+ * that parse, so the guard is restated here — at the one place the numbers are turned into a policy —
+ * rather than trusted. `Number.isSafeInteger` is used, NOT `Number.isInteger`: `Number.isInteger(1e300)`
+ * is `true`, and a window that large is not a limit. The window is additionally held to
+ * `MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS` — the ceiling the linter reports at authoring time, imported
+ * from @rayspec/spec rather than repeated here so the two can never disagree about the number. That
+ * ceiling is what keeps the window's millisecond form far inside the safe integer range, so the
+ * counter's `resetAt` always arrives and a declared budget can never degrade into a permanent `429`,
+ * which would be a worse outcome than no limit at all. Every refusal names the route, because at boot
+ * the author needs to know WHICH declaration is wrong.
+ *
+ * TWO bucket names, not one. `routeRateTarget` picks the `principal` arm for a validated principal and
+ * the `source` arm otherwise. Behind `requireAuth()` the source arm is only reachable through that
+ * function's own fail-closed "no canonical actor" fallback, and giving it a separate name keeps that
+ * fallback visible in the key space instead of quietly merging two different populations into one
+ * counter — and keeps the derivation correct if the chain is ever reordered. `${method} ${path}` is
+ * injective over the declared surface (lint already rejects a duplicate method+path pair), so two
+ * routes can never share a counter. Guard and derivation live in ONE function so they cannot drift.
+ */
+export function declaredRouteBudget(route: {
+  method: string;
+  path: string;
+  rateLimit: ApiRouteRateLimit;
+}): RouteBudget {
+  const { windowSeconds, max } = route.rateLimit;
+  const where = `route ${route.method} ${route.path}`;
+  for (const [field, value] of [
+    ['windowSeconds', windowSeconds],
+    ['max', max],
+  ] as const) {
+    if (!(Number.isSafeInteger(value) && value > 0)) {
+      throw new Error(
+        `declaredRouteBudget: ${where} declares rateLimit.${field} = ${String(value)} — it must be a ` +
+          'whole positive number of requests/seconds (a safe integer greater than zero). Fail-closed: ' +
+          'a budget that cannot be expressed is never silently dropped.',
+      );
+    }
+  }
+  if (windowSeconds > MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS) {
+    throw new Error(
+      `declaredRouteBudget: ${where} declares rateLimit.windowSeconds = ${String(windowSeconds)}, ` +
+        `longer than the ${MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS} seconds (one day) a per-instance ` +
+        'counter can honour. These counters live in the serving process, so a longer window would be ' +
+        'voided by any restart rather than enforced — and far beyond it the window would not expire ' +
+        'at all, leaving the route answering a permanent 429. Declare a window a caller can wait out.',
+    );
+  }
+  return {
+    tiers: {
+      principal: `${ROUTE_BUDGET_BUCKET_PREFIX}:${route.method} ${route.path}`,
+      source: `${ROUTE_BUDGET_BUCKET_PREFIX}-src:${route.method} ${route.path}`,
+    },
+    policy: { max, windowMs: windowSeconds * 1000 },
+  };
+}
+
+/** The reserved key the boot probe below counts against — never a real route's bucket. */
+const PROBE_BUCKET = `${ROUTE_BUDGET_BUCKET_PREFIX}-probe`;
+const PROBE_ID = 'boot';
+
+/**
+ * BOOT PROBE — prove that the injected limiter actually honours an explicit policy before any route is
+ * mounted on one.
+ *
+ * This closes the one hole the type system cannot. A per-route budget is unregistered by design, so a
+ * `RateLimiter` subclass, a stub, or a version-skewed `@rayspec/auth-core` whose `check` simply ignores
+ * its third argument still TYPE-CHECKS, falls back to the policy table, finds no entry for these
+ * deliberately-unregistered buckets, and returns `allowed` for everything — making EVERY budgeted route
+ * silently unlimited while the boot and the served OpenAPI document both claim otherwise. So the boot
+ * asks the limiter the question directly, with a budget of one, and refuses to register if the answer
+ * is wrong.
+ *
+ * BOTH halves are asserted. `!second.allowed` alone would be satisfied by a limiter that refuses
+ * everything — including one whose probe key happens to be locked — and the probe would then be
+ * vacuous in exactly the case it exists to catch. The reserved key is `reset` before AND after, so a
+ * probe leaves no counter and no lock behind for a later call to trip over.
+ */
+export function assertLimiterHonoursExplicitPolicy(limiter: RateLimiter): void {
+  const probePolicy: RateLimitPolicy = { max: 1, windowMs: 60_000 };
+  limiter.reset(PROBE_BUCKET, PROBE_ID);
+  const first = limiter.check(PROBE_BUCKET, PROBE_ID, probePolicy);
+  const second = limiter.check(PROBE_BUCKET, PROBE_ID, probePolicy);
+  limiter.reset(PROBE_BUCKET, PROBE_ID);
+  if (!(first.allowed && !second.allowed)) {
+    throw new Error(
+      'assertLimiterHonoursExplicitPolicy: the injected rate limiter does not honour an explicit ' +
+        `per-call policy (a budget of 1 allowed ${String(first.allowed)} then ${String(second.allowed)}, ` +
+        'expected true then false). A declared per-route rateLimit carries its budget on the call ' +
+        'instead of registering a bucket, so a limiter that ignores it would leave every budgeted ' +
+        'route silently unlimited. Fail-closed at boot rather than ship an unenforced limit.',
+    );
+  }
 }

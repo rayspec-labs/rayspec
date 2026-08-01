@@ -840,3 +840,84 @@ describe('bindRouteParams — path-param binding contract', () => {
     expect(out.split('\n')).toEqual(['Route parameters:', '  id: "a\\nb"', '', 'body']);
   });
 });
+
+/**
+ * The served document must not claim something the runtime no longer does. Before the declarative
+ * per-route budget existed, the throttle `429` stated flatly that each allowance is one budget for the
+ * whole declared surface; that sentence is now true only of the two SHARED TIERS, and a route that
+ * declares its own `rateLimit` has a second, per-route budget the document has to name — a client that
+ * plans its call rate off `GET /v1/openapi.json` would otherwise be planning off a false statement.
+ */
+describe('the throttle 429 documents a declared per-route budget without overclaiming', () => {
+  function budgetedSpec(): RaySpec {
+    return specFromObject({
+      version: '1.0',
+      metadata: { name: 'budgeted-backend' },
+      stores: [{ name: 'widgets', columns: [{ name: 'title', type: 'text' }] }],
+      api: [
+        {
+          method: 'GET',
+          path: '/widgets',
+          action: { kind: 'store', store: 'widgets', op: 'list' },
+        },
+        {
+          method: 'GET',
+          path: '/tight',
+          action: { kind: 'store', store: 'widgets', op: 'list' },
+          rateLimit: { windowSeconds: 30, max: 7 },
+        },
+      ],
+    });
+  }
+
+  it('scopes the "one budget for the whole declared surface" claim to the two shared TIERS', () => {
+    const doc = buildDeclaredRoutesOpenApi(budgetedSpec());
+    const description = doc.paths['/widgets'].get.responses['429']?.description ?? '';
+    expect(description).toContain(
+      'two TIER allowances is ONE budget for the whole declared surface',
+    );
+    // A route that declares nothing says nothing more than that.
+    expect(description).not.toContain('additionally declares its own budget');
+  });
+
+  it("names the route's own budget — its numbers, its key, and that it is IN ADDITION to the tier", () => {
+    const doc = buildDeclaredRoutesOpenApi(budgetedSpec());
+    const description = doc.paths['/tight'].get.responses['429']?.description ?? '';
+    expect(description).toContain('7 request(s) per 30 second(s)');
+    expect(description).toContain('per tenant and principal for this route alone');
+    expect(description).toContain('IN ADDITION to the surface-wide tier');
+    // The shared-tier explanation is still there — the per-route sentence is additive, not a swap.
+    expect(description).toContain('BEFORE the route runs');
+  });
+
+  it("appends the budget sentence to an {agent} route's own richer 429 rather than losing it", () => {
+    const doc = buildDeclaredRoutesOpenApi(
+      specFromObject({
+        version: '1.0',
+        metadata: { name: 'budgeted-agent-backend' },
+        agents: [
+          {
+            id: 'helper',
+            name: 'helper-agent',
+            backend: 'openai',
+            model: 'gpt-4o-mini',
+            instructions: 'help',
+          },
+        ],
+        api: [
+          {
+            method: 'POST',
+            path: '/run',
+            action: { kind: 'agent', agent: 'helper' },
+            rateLimit: { windowSeconds: 60, max: 2 },
+          },
+        ],
+      }),
+    );
+    const description = doc.paths['/run'].post.responses['429']?.description ?? '';
+    // The run-outcome meaning is preserved…
+    expect(description).toContain('Idempotency-Key');
+    // …and the declared budget is stated as well, because it is enforced on this route too.
+    expect(description).toContain('2 request(s) per 60 second(s)');
+  });
+});

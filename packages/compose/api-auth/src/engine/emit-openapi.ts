@@ -215,15 +215,19 @@ const OPAQUE_OBJECT: Record<string, unknown> = { type: 'object', additionalPrope
  * answer it, so it is attached centrally rather than restated per action arm. It fires BEFORE the
  * route runs, which is what distinguishes it from an `{agent}` route's run-outcome `429`; that arm
  * documents its own richer `429` covering both meanings and keeps it.
+ *
+ * The "one budget for the whole declared surface" claim is scoped to the two SHARED TIER allowances,
+ * and only to those. A route may additionally declare its own `rateLimit`, whose budget is per route —
+ * `routeBudgetSentence` states it, and a route that declares one gets that sentence appended.
  */
 const THROTTLE_429: OpenApiResponse = {
   description:
     'Rate limited by the declared-route request throttle, which fires BEFORE the route runs (so ' +
     'nothing was executed). The tier is chosen after the credential has been validated: a validated ' +
     'principal is counted against a generous per-principal budget, an absent or invalid credential ' +
-    'against a strict one keyed on the client source. Each allowance is ONE budget for the whole ' +
-    'declared surface, not one per route. Retry advice is carried twice — a Retry-After header in ' +
-    'whole seconds and error.details.retryAfterMs in the body.',
+    'against a strict one keyed on the client source. Each of those two TIER allowances is ONE budget ' +
+    'for the whole declared surface, not one per route. Retry advice is carried twice — a Retry-After ' +
+    'header in whole seconds and error.details.retryAfterMs in the body.',
   headers: {
     'Retry-After': {
       description: 'Seconds to wait before retrying. Always present on a throttle 429.',
@@ -231,6 +235,18 @@ const THROTTLE_429: OpenApiResponse = {
     },
   },
 };
+
+/**
+ * The one sentence that documents a route's OWN declared budget, next to the surface-wide tier. It is
+ * additive: a call must be inside BOTH, so the effective allowance is the smaller of the two.
+ */
+function routeBudgetSentence(rateLimit: NonNullable<ApiRouteSpec['rateLimit']>): string {
+  return (
+    `This route additionally declares its own budget of ${rateLimit.max} request(s) per ` +
+    `${rateLimit.windowSeconds} second(s), counted per tenant and principal for this route alone and ` +
+    'applied IN ADDITION to the surface-wide tier above.'
+  );
+}
 
 /** Build the operation for ONE declared route. Returns undefined for a kind we cannot resolve. */
 function operationForRoute(
@@ -241,10 +257,30 @@ function operationForRoute(
   if (!op) return undefined;
   // A stream `playback` route is authorized by a signed media token and mounts its own middleware, so
   // it never reaches this throttle — it is bounded by the per-user concurrent-stream limit instead.
+  // (Such a route may not declare a `rateLimit` at all; the registrar refuses that at boot.)
   if (route.action.kind === 'stream' && route.action.mode === 'playback') return op;
-  // An arm that already documents a 429 (the `{agent}` run-outcome one) keeps its own description.
-  if (op.responses['429']) return op;
-  return { ...op, responses: { ...op.responses, '429': THROTTLE_429 } };
+  const budget = route.rateLimit ? ` ${routeBudgetSentence(route.rateLimit)}` : '';
+  // An arm that already documents a 429 (the `{agent}` run-outcome one) keeps its own description —
+  // the cross-cutting one must not overwrite it. A declared per-route budget is still APPENDED to it,
+  // because that budget is enforced on this route whichever 429 the arm chose to describe.
+  const existing = op.responses['429'];
+  if (existing) {
+    if (!budget) return op;
+    return {
+      ...op,
+      responses: {
+        ...op.responses,
+        '429': { ...existing, description: `${existing.description}${budget}` },
+      },
+    };
+  }
+  return {
+    ...op,
+    responses: {
+      ...op.responses,
+      '429': { ...THROTTLE_429, description: `${THROTTLE_429.description}${budget}` },
+    },
+  };
 }
 
 /** The per-kind operation shape, before the cross-cutting throttle response is attached. */

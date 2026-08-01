@@ -207,10 +207,19 @@ api:
   - method: POST
     path: /notes/{id}/summarize
     action: { kind: agent, agent: summarizer }
+    rateLimit: { windowSeconds: 60, max: 10 }
 ```
 
 - `method` — one of `GET`, `POST`, `PUT`, `PATCH`, `DELETE`.
 - `path` — a non-empty route path; use `{param}` for path parameters.
+- `rateLimit` — **optional**. This route's own request budget:
+  `rateLimit: { windowSeconds: 60, max: 10 }` allows ten calls a minute per
+  tenant and principal *for this route*. Both members are whole positive
+  numbers, and `windowSeconds` may not exceed **86400** (one day). Omit the
+  field and the route has no per-route limit — it keeps only the shared tier
+  every declared route already has. The semantics, and what the budget does
+  *not* buy you, are described under
+  [A route's own budget](#a-routes-own-budget).
 - `action` — a discriminated union on `kind`:
   - **`store`** — a CRUD operation over a declared store through the
     tenant-scoped data layer. Fields: `store` (a declared store name) and `op`,
@@ -308,10 +317,82 @@ throttle fires *before* the route runs, so no agent executed, and no
 `Idempotency-Key` reservation was taken or released — a same-key retry after the
 window is a first attempt, not a re-run.
 
-**Both allowances are one budget for the whole declared surface, not one per
-route.** A caller spends the same 30 or 600 whether it calls one route or twenty;
-the key is the source or the principal, never the path. Sizing a deployment means
-counting a client's calls across all of its declared routes together.
+**Both of these two TIER allowances are one budget for the whole declared
+surface, not one per route.** A caller spends the same 30 or 600 whether it calls
+one route or twenty; the key of a *tier* is the source or the principal, never the
+path. Sizing a deployment means counting a client's calls across all of its
+declared routes together. A route may additionally declare a budget of its own,
+which *is* per route — that is the next section.
+
+### A route's own budget
+
+A route can declare its own request budget with the optional
+[`rateLimit`](#api) field:
+
+```yaml
+api:
+  - method: POST
+    path: /notes/{id}/summarize
+    action: { kind: agent, agent: summarizer }
+    rateLimit: { windowSeconds: 60, max: 10 }
+```
+
+It is **opt-in**. A route that declares no `rateLimit` behaves exactly as it did
+before the field existed: it is subject to the two shared tiers and to nothing
+else. There is no default budget, and adding the field to one route changes
+nothing about any other.
+
+It is **additive, not a substitute**. A call must be inside its route budget
+*and* inside the shared tier, so the effective allowance is the **smaller of the
+two**. In particular a declared `max` above the tier ceiling cannot take effect:
+declaring `max: 100000` on a route does not make it more permissive than it is
+today, because the caller runs into the tier's 600 per minute first. Use the
+field to make a specific expensive route *stricter* than the surface it sits on —
+that is the only direction it can move.
+
+The counter is keyed on the **tenant and the principal**, for that route alone.
+Two principals of one organization each get their own budget; the same principal
+in two organizations is counted separately in each; and one principal's budget on
+one route never consumes its budget on another. Two routes declaring the same
+numbers are two independent budgets, not one shared one.
+
+**The window may not exceed a day.** `windowSeconds` is capped at `86400`, and a
+longer window is refused — by the linter while you are authoring, and by the boot
+if a document reaches it another way. This is not a security ceiling; it is the
+limit of what the counter can honestly promise. These counters live in the
+serving process (see below), so a window longer than the process itself is voided
+by the next restart, redeploy or eviction rather than enforced, and a monthly
+quota declared here would quietly reset every time the fleet moved. Anything a
+per-instance counter *can* enforce fits inside a day. A durable long-window quota
+is a different feature and needs a shared counter store, not a larger number.
+
+Enforcement happens **after authentication**. An unauthenticated call therefore
+still meets its usual `401` and spends no route budget at all — there is no
+principal to key one on yet, and that traffic is what the strict tier bounds. The
+mirror image of that ordering is worth stating plainly: a call that *does*
+authenticate but lacks the required permission **does** spend budget before
+receiving its `403`. The budget sits ahead of permission checking on purpose,
+because the permission check and the tenant resolution both touch the database
+and an over-budget caller must cost no round trip there. The throttle bounds
+load; it does not authorize.
+
+Over budget the answer is the **same `429 RATE_LIMITED`** described above — the
+identical error envelope, a `Retry-After` header in whole seconds (never below
+`1`), and `error.details.retryAfterMs` in the body. It fires *before* the route
+runs, so no agent executed, no handler ran, and no `Idempotency-Key` reservation
+was taken or released.
+
+A stream `playback` route **may not** declare a `rateLimit`, and a deployment
+that tries refuses to boot with an explanatory error. Such a route is authorized
+by a signed media token on its own middleware tuple rather than by the
+authenticated chain this budget is enforced on, and its media principal carries
+no API-key identity to key a counter on. It is bounded by the per-user
+concurrent-stream limit instead. Declare the limit on the route that *mints* the
+playback token.
+
+The generated OpenAPI document says all of this per operation: a route that
+declares a budget names it in its `429` description, next to the surface-wide
+tier it is applied in addition to.
 
 Three limitations to plan around.
 
@@ -319,7 +400,41 @@ Three limitations to plan around.
 deployment counts on its own, so a caller effectively gets one budget per
 instance it reaches. Treat these numbers as a per-instance floor rather than a
 cluster-wide guarantee, and keep a shared front-line limit if you need a hard
-cluster-wide ceiling.
+cluster-wide ceiling. A declared per-route `rateLimit` is counted in the same
+place and inherits exactly the same boundary: it is a per-instance budget too,
+not a cluster-wide one. It also has a consequence of its own worth knowing
+before you sprinkle the field widely. Per-route buckets **multiply the number of
+distinct keys** the one bounded in-process store tracks — one pair per (route,
+tenant, principal) rather than one per principal — against a store whose size is
+capped. When that cap is reached the store evicts the oldest live window, and
+evicting a live window hands that caller a **fresh budget**. So a deployment with
+very many budgeted routes and very many principals can see a limit reset early
+under key pressure. The half of that worth stating plainly is which windows are
+eligible for eviction: there is **one** limiter in the product and therefore one
+bounded store, and it holds every counter in the system — not only declared-route
+budgets but the authentication throttles too (`login`, `register`, `refresh`,
+`oauth-token`, `invite-accept`). Eviction is by insertion age across the whole
+store, so under per-route key pressure the window that gets dropped may be an
+authentication counter rather than a route budget, which would hand a
+credential-stuffing run a fresh `login` allowance.
+
+Be clear about what you can do with that, because the cap is **not** a
+deployment setting. It is `DEFAULT_MAX_RATE_LIMIT_ENTRIES`, a constant of
+`@rayspec/auth-core` fixed at 100 000 keys, and the server constructs its limiter
+with no arguments — there is no environment variable and no configuration field
+that raises it. So the lever a deployment actually holds is the **numerator**:
+keep your own estimate of the live key count — roughly (budgeted routes × active
+principals) plus the authentication counters — comfortably under 100 000, which
+means declaring `rateLimit` on the routes that are expensive rather than on all
+of them. If your key count cannot fit under that number, a per-route budget in
+this process is the wrong instrument for the job and the ceiling belongs in a
+shared front-line limiter, which is the same answer the per-instance boundary
+above already points at. (The seam for a larger store exists in the library —
+`new RateLimiter(new InMemoryRateLimitStore(n))`, both exported from
+`@rayspec/auth-core` — but nothing in the shipped server reaches it, so treat it
+as a note for an embedder composing its own application rather than as
+operational advice.) This limitation is documented rather than fixed here; the
+store's bound is unchanged by this release.
 
 **The strict tier is only as precise as `RAYSPEC_TRUSTED_PROXIES`.** The client
 source is the socket peer unless that variable lists the peer as a trusted proxy,
