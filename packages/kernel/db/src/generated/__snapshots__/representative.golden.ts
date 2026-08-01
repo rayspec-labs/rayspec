@@ -13,6 +13,7 @@
  */
 
 import {
+  bigint,
   boolean,
   integer,
   jsonb,
@@ -39,6 +40,7 @@ export const projects = pgTable(
     active: boolean('active').notNull(),
     metadata: jsonb('metadata'),
     dueAt: timestamp('due_at', { withTimezone: true }),
+    bytesTotal: bigint('bytes_total', { mode: 'bigint' }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
     retentionDays: integer('retention_days'),

@@ -46,6 +46,9 @@ const REPRESENTATIVE = [
       { name: 'active', type: 'boolean' },
       { name: 'metadata', type: 'jsonb', nullable: true },
       { name: 'due_at', type: 'timestamp', nullable: true },
+      // Appended (not spliced) so every existing column index in the flip tests below still points
+      // at the column its comment names.
+      { name: 'bytes_total', type: 'bigint' },
     ],
   }),
   store({
@@ -83,6 +86,20 @@ describe('generator golden', () => {
     flipped[0].columns[3].type = 'text'; // priority: integer -> text
     expect(generateProductSchema(flipped)).not.toBe(golden);
     expect(generateProductSchema(flipped)).toContain("priority: text('priority')");
+  });
+
+  it('an integer → bigint flip emits the 64-bit builder WITH its mode (the mode is committed source)', () => {
+    const golden = generateProductSchema(REPRESENTATIVE);
+    const flipped = structuredClone(REPRESENTATIVE);
+    flipped[0].columns[3].type = 'bigint'; // priority: integer -> bigint
+    const out = generateProductSchema(flipped);
+    expect(out).not.toBe(golden);
+    // `{ mode: 'bigint' }` is NOT decoration: the `number` mode maps int8 through `Number(value)`
+    // inside the ORM, upstream of every chokepoint this platform owns, so a value past 2^53-1 would
+    // be rounded before any guard could see it. This is the one place that choice is pinned in
+    // COMMITTED generated source rather than only in runtime behaviour.
+    expect(out).toContain("priority: bigint('priority', { mode: 'bigint' })");
+    expect(out).not.toContain("mode: 'number'");
   });
 
   it('a NULLABLE flip changes the output', () => {
@@ -171,11 +188,11 @@ describe('generator injection invariants', () => {
   });
 
   it('imports only the pg-core builders actually used (no unused import)', () => {
-    // REPRESENTATIVE uses text/uuid/timestamp/integer/boolean/jsonb -> all six + pgTable, plus
-    // `uniqueIndex` for the tenant-scoped compound unique on projects.slug. The full set
+    // REPRESENTATIVE uses text/uuid/timestamp/integer/bigint/boolean/jsonb -> all seven + pgTable,
+    // plus `uniqueIndex` for the tenant-scoped compound unique on projects.slug. The full set
     // exceeds printWidth (100) so the generator emits the Biome-canonical MULTILINE import.
     expect(out).toContain(
-      "import {\n  boolean,\n  integer,\n  jsonb,\n  pgTable,\n  text,\n  timestamp,\n  uniqueIndex,\n  uuid,\n} from 'drizzle-orm/pg-core';",
+      "import {\n  bigint,\n  boolean,\n  integer,\n  jsonb,\n  pgTable,\n  text,\n  timestamp,\n  uniqueIndex,\n  uuid,\n} from 'drizzle-orm/pg-core';",
     );
     // No unused import: `uniqueIndex` appears (compound unique) and every used builder is present.
     expect(out).toContain('  uniqueIndex,');

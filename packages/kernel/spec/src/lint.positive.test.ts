@@ -387,6 +387,53 @@ triggers:
     expect(triggerAction.persistTo).toBe('extracted_facts');
   });
 
+  it('persists an integer- OR number-typed output property into a `bigint` column, and refuses a string/object', () => {
+    // PERSIST_COLUMN_COMPAT['bigint'] mirrors what `integer` accepts today: a numeric JSON-Schema
+    // property is a SHAPE match, a string/object is not. Emptying the bigint set turns the two
+    // accepted arms RED; widening it to accept anything turns the two refused arms RED.
+    const yaml = (schemaTypes: { count: string; label: string }) => `
+version: '1.0'
+metadata:
+  name: persist-bigint
+stores:
+  - name: usage_totals
+    columns:
+      - { name: bytes_total, type: bigint }
+      - { name: note, type: bigint }
+api:
+  - method: POST
+    path: '/measure'
+    action: { kind: agent, agent: measurer, persistTo: usage_totals }
+agents:
+  - id: measurer
+    name: measurer
+    backend: openai
+    model: gpt-4o-mini
+    instructions: measure
+    outputSchema:
+      name: Usage
+      schema:
+        type: object
+        required: [bytes_total, note]
+        properties:
+          bytes_total: { type: ${schemaTypes.count} }
+          note: { type: ${schemaTypes.label} }
+`;
+    for (const numeric of ['integer', 'number']) {
+      const res = parseSpec(yaml({ count: numeric, label: numeric }));
+      if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
+    }
+    for (const wrong of ['string', 'object']) {
+      const res = parseSpec(yaml({ count: 'integer', label: wrong }));
+      expect(res.ok).toBe(false);
+      if (res.ok) continue;
+      const violation = res.errors.find(
+        (e) => e.code === 'schema_violation' && /'note'/.test(e.message),
+      );
+      expect(violation?.message).toMatch(/not a compatible type/);
+    }
+  });
+
   it('is ADDITIVE: an agent action WITHOUT persistTo parses to the byte-identical (no-key) shape', () => {
     const yaml = `
 version: '1.0'

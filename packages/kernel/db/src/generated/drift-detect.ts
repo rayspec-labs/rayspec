@@ -78,6 +78,8 @@ const EXPECTED_DATA_TYPE: Record<ColumnType, string> = {
   uuid: 'uuid',
   timestamp: 'timestamp with time zone',
   integer: 'integer',
+  // An int8 column reports `information_schema.columns.data_type = 'bigint'` (not 'int8').
+  bigint: 'bigint',
   boolean: 'boolean',
   jsonb: 'jsonb',
 };

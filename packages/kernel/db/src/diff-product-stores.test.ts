@@ -275,6 +275,77 @@ describe('diffProductStores — golden per-shape deltas', () => {
     expect(scanMigrationSql(r.migrationSql, r.proposedAllowlist).pass).toBe(true);
   });
 
+  it('adding a `bigint` column emits the int8 DDL (nullable additive, NOT NULL flagged) and agrees with the CREATE generator', () => {
+    const nullable = [
+      store({
+        name: 'items',
+        columns: [
+          { name: 'a', type: 'text' },
+          { name: 'b', type: 'bigint', nullable: true },
+        ],
+      }),
+    ];
+    const r = diffProductStores(base, nullable);
+    expect(r.statements).toEqual(['ALTER TABLE "items" ADD COLUMN "b" bigint']);
+    expect(r.destructive).toBe(false);
+    expect(scanMigrationSql(r.migrationSql, []).pass).toBe(true);
+
+    const notNull = [
+      store({
+        name: 'items',
+        columns: [
+          { name: 'a', type: 'text' },
+          { name: 'b', type: 'bigint' },
+        ],
+      }),
+    ];
+    const nn = diffProductStores(base, notNull);
+    expect(nn.statements).toEqual(['ALTER TABLE "items" ADD COLUMN "b" bigint NOT NULL']);
+    expect(nn.findings[0]?.destructiveKinds).toEqual(['add-column-not-null-no-default']);
+
+    // The delta path and the CREATE path hold their OWN `Record<ColumnType, string>` map. Neither can
+    // be MISSING the key (the record type forces it), but nothing stops them holding DIFFERENT
+    // strings — mapping one of them to 'integer' turns this byte-exact equality RED.
+    expect(diffProductStores([], notNull).migrationSql).toBe(generateProductSql(notNull));
+  });
+
+  it('an integer → bigint change is a GATED type-change-no-using: blocked bare, cleared by the proposal', () => {
+    const from = [
+      store({ name: 'usage_totals', columns: [{ name: 'bytes_total', type: 'integer' }] }),
+    ];
+    const to = [
+      store({ name: 'usage_totals', columns: [{ name: 'bytes_total', type: 'bigint' }] }),
+    ];
+    const r = diffProductStores(from, to);
+    const stmt = 'ALTER TABLE "usage_totals" ALTER COLUMN "bytes_total" SET DATA TYPE bigint';
+    expect(r.statements).toEqual([stmt]);
+    expect(r.findings[0]?.destructiveKinds).toEqual(['type-change-no-using']);
+    // The DELIBERATE refusal the acceptance asks for: int4 → int8 preserves every value, but Postgres
+    // rewrites the whole table under an ACCESS EXCLUSIVE lock to do it. That availability cost is an
+    // operator decision, so the change is BLOCKED without a reviewed allowlist entry…
+    expect(scanMigrationSql(r.migrationSql, []).pass).toBe(false);
+    // …and cleared by one. No new destructive kind and no `USING` carve-out: the machine-proposed
+    // entry is byte-faithful to the emitted statement (no trailing `;`, no re-normalization).
+    expect(r.proposedAllowlist).toHaveLength(1);
+    expect(r.proposedAllowlist[0]?.kind).toBe('type-change-no-using');
+    expect(r.proposedAllowlist[0]?.match).toBe(stmt);
+    expect(r.proposedAllowlist[0]?.match).not.toMatch(/;$/);
+    expect(scanMigrationSql(r.migrationSql, r.proposedAllowlist).pass).toBe(true);
+    expect(r.notes.join('\n')).toMatch(/without a USING clause/);
+
+    // Shadow mutation (the file's byte-fidelity discipline): the scan matches the FULL statement by
+    // exact equality, so perturbing the proposed match by a single character re-BLOCKS the change.
+    // That is what makes the arm above a proof of the match invariant rather than a restatement that
+    // a non-empty allowlist exists. A whitespace-only perturbation would NOT flip it — the matcher
+    // collapses whitespace runs and strips a trailing `;` on both sides, which is precisely the
+    // normalization `normalizeStatementForMatch` mirrors.
+    const perturbed = r.proposedAllowlist.map((e) => ({
+      ...e,
+      match: e.match.replace('bytes_total', 'bytes_totals'),
+    }));
+    expect(scanMigrationSql(r.migrationSql, perturbed).pass).toBe(false);
+  });
+
   it('relaxing NOT NULL is additive (DROP NOT NULL); tightening is destructive (SET NOT NULL)', () => {
     const nn = [store({ name: 'items', columns: [{ name: 'a', type: 'text' }] })]; // NOT NULL
     const nullable = [

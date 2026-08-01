@@ -14,6 +14,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   AgentSpecConfig,
+  ColumnType,
   FrontendSpec,
   RaySpec,
   RouteAction,
@@ -129,6 +130,25 @@ describe('FrontendSpec (static frontend mount)', () => {
     const withoutFrontend = RaySpec.safeParse({ version: '1.0', metadata: { name: 'm' } });
     expect(withoutFrontend.success).toBe(true);
     if (withoutFrontend.success) expect('frontend' in withoutFrontend.data).toBe(false);
+  });
+});
+
+describe('ColumnType vocabulary pin', () => {
+  it('is EXACTLY this member list, in this order', () => {
+    // The vocabulary is the guarded surface: three checked-in JSON-Schema artifacts carry it as an
+    // enum array, and seven `Record<ColumnType, …>` maps across the generator/diff/drift/lint/views
+    // paths key off it. Pinning the members AND their order keeps every artifact diff to a single
+    // added array element and makes an accidental reorder (which rewrites all three artifacts for no
+    // semantic reason) fail here instead of in a schema-gate diff nobody reads.
+    expect(ColumnType.options).toEqual([
+      'text',
+      'uuid',
+      'timestamp',
+      'integer',
+      'bigint',
+      'boolean',
+      'jsonb',
+    ]);
   });
 });
 

@@ -16,6 +16,7 @@
  */
 import type { ColumnType, StoreSpec } from '@rayspec/spec';
 import {
+  bigint,
   boolean,
   integer,
   jsonb,
@@ -64,6 +65,11 @@ function businessBuilder(type: ColumnType, snake: string): ChainableBuilder {
       return chain(timestamp(snake, { withTimezone: true }));
     case 'integer':
       return chain(integer(snake));
+    case 'bigint':
+      // The mode is NOT optional here: it must stay byte-identical to generate-product-schema's
+      // DRIZZLE_BUILDER, or the runtime twin and the committed source disagree about the JS type an
+      // int8 column produces (a BigInt vs an already-rounded number). A meta-test pins the two together.
+      return chain(bigint(snake, { mode: 'bigint' }));
     case 'boolean':
       return chain(boolean(snake));
     case 'jsonb':

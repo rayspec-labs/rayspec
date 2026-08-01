@@ -59,6 +59,7 @@ const PG_TYPE: Record<ColumnType, string> = {
   uuid: 'uuid',
   timestamp: 'timestamp with time zone',
   integer: 'integer',
+  bigint: 'bigint',
   boolean: 'boolean',
   jsonb: 'jsonb',
 };

@@ -19,6 +19,7 @@ const STORES: StoreSpec[] = [
       { name: 'thing_id', type: 'text', nullable: false, unique: false },
       { name: 'label', type: 'text', nullable: false, unique: false },
       { name: 'count', type: 'integer', nullable: false, unique: false },
+      { name: 'bytes_total', type: 'bigint', nullable: false, unique: false },
       { name: 'flag', type: 'boolean', nullable: false, unique: false },
       { name: 'payload', type: 'jsonb', nullable: true, unique: false },
     ],
@@ -231,6 +232,45 @@ describe('column-type-awareness (never a blunt check)', () => {
       },
     };
     expect(compileProductViews(config(ok)).interpreted).toHaveLength(1);
+  });
+
+  it('a bigint column PROJECTS as integer/number, and is NOT usable as a param- or const-equality filter', () => {
+    // Projection is correct only because the store facade normalizes a BigInt to a plain number before
+    // the interpreter sees it: `matchesLeafType('integer')` requires `typeof value === 'number'`, so an
+    // un-normalized BigInt would fail the check and `typedLeaf` would substitute the leaf default or
+    // null — a silent data loss with no error anywhere.
+    const ok = goodView();
+    (ok.read as { shape: unknown }).shape = {
+      fields: {
+        a: { kind: 'column', column: 'bytes_total', type: 'integer' },
+        b: { kind: 'column', column: 'bytes_total', type: 'number' },
+      },
+    };
+    expect(compileProductViews(config(ok)).interpreted).toHaveLength(1);
+
+    const wrongLeaf = goodView();
+    (wrongLeaf.read as { shape: unknown }).shape = {
+      fields: { x: { kind: 'column', column: 'bytes_total', type: 'string' } },
+    };
+    expect(compileError(wrongLeaf)).toContain("declares leaf type 'string'");
+
+    // A DELIBERATE limit, stated rather than half-supported: both filter checks end in
+    // `default: return false`, so a bigint filter fails CLOSED at compile time with a specific error.
+    // Widening them would also need a bigint branch in the interpreter's param coercion — out of scope.
+    const byParam = goodView();
+    byParam.params = {
+      thing_id: { in: 'path', shape: 'safe_id' },
+      n: { in: 'query', shape: 'positive_int', required: true },
+    };
+    (byParam.read as { filter: unknown }).filter = {
+      thing_id: { param: 'thing_id' },
+      bytes_total: { param: 'n' },
+    };
+    expect(compileError(byParam)).toContain('not coercible');
+
+    const byConst = goodView();
+    (byConst.read as { filter: unknown }).filter = { bytes_total: { const: 3000000000 } };
+    expect(compileError(byConst)).toContain('does not match the column');
   });
 
   it('REJECTS a non-coercible param filter (string param on an integer/boolean column)', () => {

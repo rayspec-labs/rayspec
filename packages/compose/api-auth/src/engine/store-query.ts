@@ -143,6 +143,16 @@ function ftsRankExpr(term: string): SQL {
   return sql`ts_rank(${sql.identifier(FTS_COLUMN_NAME)}, websearch_to_tsquery('simple', ${term}))`;
 }
 
+/**
+ * The bigint JSON boundary, applied to FILTERS and CURSORS as well as bodies. A query-string or cursor
+ * value is a string and could carry the full int8 range losslessly, so bounding it here is a choice —
+ * and the right one: a row beyond the bound cannot be RETURNED at all (the row serializer refuses it),
+ * so a filter addressing it could only ever select rows the response must then refuse, and a cursor
+ * could only ever be minted from a page that already 400'd. One number is the whole HTTP range.
+ */
+const MAX_SAFE_BIG = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_SAFE_BIG = BigInt(Number.MIN_SAFE_INTEGER);
+
 /** The injected columns that are FILTERABLE in addition to the declared business columns. */
 const INJECTED_FILTERABLE: ReadonlyMap<string, ColumnType> = new Map([['created_by', 'text']]);
 /**
@@ -184,7 +194,14 @@ function drizzleColumn(table: PgTable, snake: string): PgColumn {
   return col as PgColumn;
 }
 
-/** Coerce ONE query-string value to the typed value for an equality/keyset comparison (or 400). */
+/**
+ * Coerce ONE query-string value to the typed value for an equality/keyset comparison (or 400).
+ *
+ * NOT COMPILER-DEFENDED: the return type is `unknown`, so a missing `case` falls off the end of the
+ * switch, returns `undefined`, and compiles clean. One switch covers three surfaces — plain equality
+ * filters, each element of a `<col>__in` set filter, and the keyset predicate — so an omission here is
+ * a hole in all three at once. Treat this as a hand-checked chokepoint when adding a column type.
+ */
 function coerceValue(type: ColumnType, name: string, raw: string): unknown {
   switch (type) {
     case 'text':
@@ -196,6 +213,25 @@ function coerceValue(type: ColumnType, name: string, raw: string): unknown {
       const n = Number(raw);
       if (!Number.isInteger(n)) validationError(`Filter '${name}' must be an integer.`);
       return n;
+    }
+    case 'bigint': {
+      // A BOUNDED digit-only shape check FIRST, then parse from the STRING. Both halves matter:
+      //  - `BigInt('abc')` throws a SyntaxError (an uncaught 500, not a 400), `BigInt('')` is 0n,
+      //    `BigInt('0x10')` is 16n and `BigInt('  12  ')` is 12n — every one of those silently means
+      //    something the caller did not ask for. The 19-digit cap covers the whole int8 range and
+      //    keeps an adversarial digit string away from the parser.
+      //  - parsing from the string, never via `Number(raw)`: `Number('9007199254740993')` is
+      //    `…992`, and `eq(col, …992)` against a table holding `…993` matches ZERO rows with no
+      //    error at all. Rounding here is the genuinely silent failure.
+      // The `integer` arm above deliberately keeps its looser `Number(raw)` rule: changing what an
+      // existing query MEANS to a live deployment is the same silent behaviour change that ruled out
+      // widening `integer` in the first place. The asymmetry is intentional.
+      if (!/^-?\d{1,19}$/.test(raw)) validationError(`Filter '${name}' must be an integer.`);
+      const b = BigInt(raw);
+      if (b > MAX_SAFE_BIG || b < MIN_SAFE_BIG) {
+        validationError(`Filter '${name}' is outside the supported range (±9007199254740991).`);
+      }
+      return b;
     }
     case 'boolean':
       if (raw === 'true') return true;
@@ -264,12 +300,19 @@ export function nextCursor(
   const v =
     rawVal instanceof Date
       ? rawVal.toISOString()
-      : rawVal === null ||
-          typeof rawVal === 'string' ||
-          typeof rawVal === 'number' ||
-          typeof rawVal === 'boolean'
-        ? rawVal
-        : String(rawVal);
+      : typeof rawVal === 'bigint'
+        ? // A decimal string, made EXPLICIT rather than left to the `String(rawVal)` catch-all below:
+          // a BigInt is not JSON-serializable (`encodeCursor` does `JSON.stringify`) and a JS number
+          // would round past 2^53-1. The string form rides in the existing `CursorPayload.v` with no
+          // interface change and carries the full int8 range. A future tidy-up of the fallback to
+          // `Number(rawVal)` would silently corrupt cursors, which is why this arm is not an accident.
+          rawVal.toString()
+        : rawVal === null ||
+            typeof rawVal === 'string' ||
+            typeof rawVal === 'number' ||
+            typeof rawVal === 'boolean'
+          ? rawVal
+          : String(rawVal);
   return encodeCursor({ c: order.column, d: order.direction, v, id });
 }
 

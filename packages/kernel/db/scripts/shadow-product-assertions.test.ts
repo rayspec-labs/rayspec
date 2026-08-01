@@ -10,7 +10,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseSpec } from '@rayspec/spec';
+import { parseSpec, type StoreSpec } from '@rayspec/spec';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateProductSql } from '../src/generated/generate-product-sql.js';
@@ -33,17 +33,27 @@ afterAll(async () => {
   await sql.end();
 });
 
-async function freshSchema(schema: string, withProductSql: boolean): Promise<void> {
+/** Parse an inline spec and hand back its stores (a synthetic spec, no shipped example touched). */
+function parseStores(yaml: string): StoreSpec[] {
+  const parsed = parseSpec(yaml);
+  if (!parsed.ok) throw new Error(`fixture invalid: ${JSON.stringify(parsed.errors)}`);
+  return parsed.value.stores;
+}
+
+/** DROP+CREATE `schema`, seed the `orgs` FK root, and materialize `stores` into it (empty ⇒ orgs only). */
+async function freshSchemaFor(schema: string, stores: StoreSpec[]): Promise<void> {
   await sql.unsafe(`DROP SCHEMA IF EXISTS ${schema} CASCADE; CREATE SCHEMA ${schema};
     SET search_path TO ${schema}; ${ORGS_DDL}`);
-  if (withProductSql) {
-    const parsed = parseSpec(readFileSync(YAML_PATH, 'utf8'));
-    if (!parsed.ok) throw new Error('throwaway invalid');
-    const ddl = generateProductSql(parsed.value.stores)
+  if (stores.length > 0) {
+    const ddl = generateProductSql(stores)
       .replace(/-->\s*statement-breakpoint/g, '')
       .replace(/"public"\./g, `"${schema}".`);
     await sql.unsafe(`SET search_path TO ${schema}; ${ddl}`);
   }
+}
+
+async function freshSchema(schema: string, withProductSql: boolean): Promise<void> {
+  await freshSchemaFor(schema, withProductSql ? parseStores(readFileSync(YAML_PATH, 'utf8')) : []);
 }
 
 describe('shadow product-assertions non-vacuity (deliverable 5 meta-test)', () => {
@@ -58,6 +68,35 @@ describe('shadow product-assertions non-vacuity (deliverable 5 meta-test)', () =
       await expect(runProductAssertions(scoped, [])).rejects.toThrow(
         /ZERO product-table assertions/,
       );
+    } finally {
+      await scoped.end();
+    }
+    await sql.unsafe(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+  });
+
+  it('seeds a NOT-NULL `bigint` column (a missing seed arm is an opaque 23502 in the bash dry-run)', async () => {
+    // `seedValues` ASSIGNS per switch arm rather than returning, and `scripts/` sits outside the
+    // package tsconfig `include`, so a missing `case 'bigint'` is invisible to `pnpm typecheck` AND
+    // to the compiler's exhaustiveness check. The first product spec declaring a NOT-NULL bigint
+    // column would then die on a bare `23502` not-null violation inside the shadow dry-run. This
+    // drives the real helper over exactly that spec; without the seed arm it throws 23502 here.
+    const schema = 'rayspec_test_shadow_bigint';
+    const stores = parseStores(`
+version: '1.0'
+metadata:
+  name: shadow-bigint
+stores:
+  - name: usage_totals
+    columns:
+      - { name: bytes_total, type: bigint }
+`);
+    await freshSchemaFor(schema, stores);
+    const scoped = postgres(process.env.DATABASE_URL as string, {
+      max: 1,
+      connection: { search_path: `${schema}, public` },
+    });
+    try {
+      expect(await runProductAssertions(scoped, stores)).toBe(1);
     } finally {
       await scoped.end();
     }

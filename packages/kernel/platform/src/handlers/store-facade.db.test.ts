@@ -154,6 +154,18 @@ const ticketsStore: StoreSpec = {
   foreignKeys: [],
 };
 
+// BIGINT fixture — a 64-bit column. The facade is the OTHER write chokepoint (beside the HTTP body
+// validator) and the ONLY read chokepoint for handlers, the workflow `store_read` node, and the
+// declarative views interpreter, so the JSON-boundary rule has to hold here too: a value crosses as a
+// plain JS number while |v| <= Number.MAX_SAFE_INTEGER, and beyond that it is refused rather than
+// rounded. On `main` a BigInt write does not even reach the driver — `assertValidValue` classifies it
+// as a forbidden non-data value (SF-1) with a misleading SQL-injection message.
+const usageStore: StoreSpec = {
+  name: 'usage_totals',
+  columns: [{ name: 'bytes_total', type: 'bigint', nullable: false, unique: false }],
+  foreignKeys: [],
+};
+
 /** Every PRODUCT store this suite creates in the isolated schema, paired with its business columns. */
 const productStores = [
   meetingsStore,
@@ -164,6 +176,7 @@ const productStores = [
   notesStore,
   docsStore,
   ticketsStore,
+  usageStore,
 ];
 
 /**
@@ -256,6 +269,13 @@ function buildFacadeSchemaSql(): string {
         priority text,
         ${after}
       );
+      -- BIGINT fixture: a real int8 column, so the driver hands the facade a value the platform must
+      -- either represent exactly or refuse.
+      CREATE TABLE usage_totals (
+        ${before},
+        bytes_total bigint NOT NULL,
+        ${after}
+      );
       INSERT INTO orgs (id, name) VALUES ('${TENANT_A}', 'A'), ('${TENANT_B}', 'B');
     `;
 }
@@ -333,6 +353,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
       notesStore,
       docsStore,
       ticketsStore,
+      usageStore,
     ]);
     unregister = registerScopedTables([...productTables.values()]);
   });
@@ -344,7 +365,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
 
   beforeEach(async () => {
     await db.$client.unsafe(
-      `SET search_path TO ${SCHEMA}; TRUNCATE meetings, tags, gizmos, pairs, scoped, notes, docs, tickets CASCADE;`,
+      `SET search_path TO ${SCHEMA}; TRUNCATE meetings, tags, gizmos, pairs, scoped, notes, docs, tickets, usage_totals CASCADE;`,
     );
   });
 
@@ -1558,6 +1579,49 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     // free-form text value writes exactly as before (proves the check is opt-in, not global).
     const row = await aDb.insert('meetings', { title: 'anything-goes', completed: false });
     expect(row.title).toBe('anything-goes');
+  });
+
+  it('bigint: a BigInt and a safe-integer number both write; a non-safe number is refused', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // On `main` this FIRST line throws: `typeof 1n` is none of string/number/boolean, a BigInt is not
+    // a Date and not `typeof 'object'`, so it lands in the forbidden-non-data (SF-1) arm with a
+    // SQL-injection message — i.e. the facade cannot write the type at all.
+    const asBig = await aDb.insert('usage_totals', { bytes_total: 3000000000n });
+    expect(asBig.bytes_total).toBe(3000000000);
+    // A plain number is the SDK's "plain serializable rows" shape — it must work too, and it is what
+    // a generated handler emits (no generated product source ever contains a BigInt literal).
+    const asNum = await aDb.insert('usage_totals', { bytes_total: 4000000000 });
+    expect(asNum.bytes_total).toBe(4000000000);
+
+    // The write bound is the SAME boundary the HTTP validator applies, at the other write chokepoint:
+    // the platform must never write through one path what a read on another is then obliged to refuse.
+    await expect(
+      aDb.insert('usage_totals', { bytes_total: 9007199254740993n }),
+    ).rejects.toBeInstanceOf(StoreInputError);
+    await expect(aDb.insert('usage_totals', { bytes_total: 1.5 })).rejects.toBeInstanceOf(
+      StoreInputError,
+    );
+  });
+
+  it('bigint: a select hands back a plain NUMBER, and refuses a row seeded past the bound', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    await aDb.insert('usage_totals', { bytes_total: 9007199254740991n });
+    const rows = await aDb.select('usage_totals');
+    // NOT a BigInt: a handler's JSON response and the workflow journal write both throw on one
+    // (`JSON.stringify` cannot serialize a BigInt), and the views interpreter's `matchesLeafType`
+    // ('integer' ⇒ typeof 'number') would reject it and silently substitute the leaf default.
+    expect(typeof rows[0]?.bytes_total).toBe('number');
+    expect(rows[0]?.bytes_total).toBe(9007199254740991);
+
+    // "Arrived by another route": a hand-written migration, a direct SQL write, or a column that was
+    // `integer` before a reviewed type change. The literal stays in the SQL text — putting it through
+    // a JS number would round it before it reached the column.
+    await db.$client.unsafe(
+      `SET search_path TO ${SCHEMA}; UPDATE usage_totals SET bytes_total = 9007199254740993`,
+    );
+    await expect(aDb.select('usage_totals')).rejects.toBeInstanceOf(StoreInputError);
   });
 });
 

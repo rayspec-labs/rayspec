@@ -170,6 +170,24 @@ describe('negative — schema_violation', () => {
     expectRejection(yaml, 'schema_violation');
   });
 
+  it('accepts `bigint` but still rejects the Postgres spellings of it (the set stays closed)', () => {
+    // `bigint` is a MEMBER of the vocabulary; `int8` and `bigserial` are the two names an author who
+    // knows Postgres is most likely to reach for, and they are NOT members. Widening the enum to a
+    // free string would take the two rejections green — this pair is what keeps the surface closed
+    // rather than merely "one more type".
+    const ok = parseSpec(
+      BASE.replace('{ name: label, type: text }', '{ name: label, type: bigint }'),
+    );
+    if (!ok.ok) throw new Error(`expected ok:\n${JSON.stringify(ok.errors, null, 2)}`);
+    expect(ok.value.stores[0]?.columns[0]?.type).toBe('bigint');
+    for (const alias of ['int8', 'bigserial']) {
+      expectRejection(
+        BASE.replace('{ name: label, type: text }', `{ name: label, type: ${alias} }`),
+        'schema_violation',
+      );
+    }
+  });
+
   it('rejects a tool MISSING the required idempotent field (no default — reviewed declaration)', () => {
     const yaml = BASE.replace('    idempotent: true\n', '');
     expectRejection(yaml, 'schema_violation');

@@ -90,7 +90,7 @@ export type DeploymentSpec = z.infer<typeof DeploymentSpec>;
  * `id`, `created_at`, `deleted_at`, `retention_days`, `region` are INJECTED by the generator,
  * never declared here.)
  */
-export const ColumnType = z.enum(['text', 'uuid', 'timestamp', 'integer', 'boolean', 'jsonb']);
+export const ColumnType = z.enum(['text', 'uuid', 'timestamp', 'integer', 'bigint', 'boolean', 'jsonb']);
 export type ColumnType = z.infer<typeof ColumnType>;
 
 /**

@@ -57,6 +57,7 @@
                         "uuid",
                         "timestamp",
                         "integer",
+                        "bigint",
                         "boolean",
                         "jsonb"
                       ]
@@ -878,6 +879,7 @@
                         "uuid",
                         "timestamp",
                         "integer",
+                        "bigint",
                         "boolean",
                         "jsonb"
                       ]
