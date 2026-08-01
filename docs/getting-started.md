@@ -449,11 +449,13 @@ curl -s http://localhost:8080/sessions -H 'authorization: Bearer <ORG_TOKEN>'
 ### Record a session and start the workflow
 
 The views above are the read half. The product's other half is the pipeline: a
-recording is uploaded in chunks, sealing the last open track emits the
+recording is uploaded in chunks, sealing **any** track emits a session-scoped
 `session_finalized` event, and the dispatcher bound to `RAYSPEC_PRODUCT_TENANT_ID`
 turns that event into **exactly one** workflow run (transcribe → extract → ground →
-validate → persist, as the document declares it). Walk it with the same org token —
-any bytes will do, because nothing decodes them in this offline recipe:
+validate → persist, as the document declares it). Processing therefore begins at the
+**first** seal — it does not wait for the session's other tracks. Walk it with the
+same org token — any bytes will do, because nothing decodes them in this offline
+recipe:
 
 ```bash
 printf 'demo-audio' > /tmp/chunk0.bin
