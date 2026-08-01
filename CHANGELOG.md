@@ -49,16 +49,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   store is the **single shared one**: it also holds the authentication counters (`login`, `register`,
   `refresh`, `oauth-token`, `invite-accept`), eviction is by insertion age across all of them, so the
   window dropped under per-route key pressure may be an authentication throttle rather than a route
-  budget. Size `DEFAULT_MAX_RATE_LIMIT_ENTRIES` against (budgeted routes × principals) accordingly.
-  Both are documented in the spec reference rather than concealed, and neither is changed by this
-  release. A
-  stream `playback` route may not declare a `rateLimit` at all: it is authorized by a signed media
-  token on its own middleware tuple and its media principal carries no API-key identity to count on,
-  so a deployment that declares one refuses to boot with a message pointing at the route that mints
-  the token instead — a silently ignored limit would be the worst available outcome. The served
-  OpenAPI document follows suit: a budgeted route names its own allowance in its `429`, and the
-  document's previous claim that each allowance is one budget for the whole declared surface is now
-  scoped to the two shared tiers, which is the only place it was ever true.
+  budget. That cap is not a deployment setting — it is a constant of `@rayspec/auth-core` fixed at
+  100 000 keys and the server constructs its limiter with no arguments, so the lever a deployment
+  holds is the numerator: declare `rateLimit` on the routes that are expensive rather than on all of
+  them, and keep (budgeted routes × active principals) plus the authentication counters well under
+  that number. A key count that cannot fit belongs behind a shared front-line limiter instead. Both
+  limits are documented in the spec reference rather than concealed, and neither is changed by this
+  release, the store's bound included. A stream `playback` route may not declare a `rateLimit` at
+  all: it is authorized by a signed media token on its own middleware tuple and its media
+  principal carries no API-key identity to count on, so a deployment that declares one refuses to
+  boot with a message pointing at the route that mints the token instead — a silently ignored
+  limit would be the worst available outcome. The served OpenAPI document follows suit: a budgeted
+  route names its own allowance in its `429`, and the document's previous claim that each
+  allowance is one budget for the whole declared surface is now scoped to the two shared tiers,
+  which is the only place it was ever true.
 
 - **A run can be ended on demand: `POST /v1/runs/{id}/cancel`.** Until now nothing could stop an agent
   run. A synchronous request could give up waiting — that is what the held-request timeout does — but

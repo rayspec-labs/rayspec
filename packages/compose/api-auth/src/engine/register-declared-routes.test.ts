@@ -502,12 +502,19 @@ describe('registerDeclaredRoutes — a declared rateLimit mounts ONE extra middl
 // The budget is spliced in at FOUR separate `registerOn` call sites, one per action kind. A required
 // parameter makes the compiler prove each site DECIDED about the budget, but `undefined` is a valid
 // decision at every one of them, so the type system cannot prove the decision was the right one. Only
-// a test can. This arm registers a budgeted and an unbudgeted route for every kind that mounts the
+// a test can. This arm registers a budgeted and an unbudgeted route for ALL FOUR kinds that mount the
 // authenticated chain, in ONE call, and asserts the same shape for each: one extra middleware, at
-// index 2, with the shared front identical. Replacing `budget` with `undefined` at any single call
-// site turns this red — which is precisely the regression it exists to catch, because a declared
-// `rateLimit` that mounts nothing is a limit the spec, the boot and the served OpenAPI all promise
-// and none of them delivers.
+// index 2, with the shared front identical. Replacing `budget` with `undefined` at any one of the
+// four call sites turns this red — which is precisely the regression it exists to catch, because a
+// declared `rateLimit` that mounts nothing is a limit the spec, the boot and the served OpenAPI all
+// promise and none of them delivers.
+//
+// The `{store}` arm belongs HERE and not only in the end-to-end acceptance suite, even though that
+// suite drives a budgeted `{store}` route against a real database. That suite is skipped wholesale
+// when no database is configured, so leaving the store call site to it alone means the commonest
+// developer run — no database — pins three of the four sites and lets the fourth regress silently.
+// Registration is a pure wiring step (the store handler closure is built but never invoked), so the
+// arm needs nothing beyond a declared store and a placeholder product table.
 // ---------------------------------------------------------------------------------------
 describe('registerDeclaredRoutes — the per-route budget is mounted on EVERY action arm', () => {
   const declaredHandlers = new Map<string, ResolvedHandler>([
@@ -517,9 +524,13 @@ describe('registerDeclaredRoutes — the per-route budget is mounted on EVERY ac
   const dummyBlobFactory: BlobStoreFactory = () => ({}) as BlobStore;
   const limit = { windowSeconds: 60, max: 3 } as const;
 
-  // One unbudgeted + one budgeted route per action kind that mounts the authenticated chain. The
-  // `{store}` arm is exercised end-to-end against a real database in declared-route-rate-limit.db.test.ts;
-  // the three wired here are the ones no other test mounts with a budget.
+  // The `{store}` arm resolves its store out of `spec.stores` and its table out of `productTables`,
+  // both at wiring time. The table object is only dereferenced inside the request handler, which no
+  // test here runs, so a placeholder is enough to register the route.
+  const stores = [{ name: 'notes', columns: [{ name: 'title', type: 'text' }] }];
+  const storeTables: ReadonlyMap<string, PgTable> = new Map([['notes', {} as PgTable]]);
+
+  // One unbudgeted + one budgeted route per action kind that mounts the authenticated chain.
   const api: ApiRouteSpec[] = [
     { method: 'GET', path: '/h-plain', action: { kind: 'handler', handler: 'h' } },
     {
@@ -542,14 +553,21 @@ describe('registerDeclaredRoutes — the per-route budget is mounted on EVERY ac
       action: { kind: 'stream', handler: 'h', mode: 'ingest' },
       rateLimit: limit,
     },
+    { method: 'GET', path: '/t-plain', action: { kind: 'store', store: 'notes', op: 'list' } },
+    {
+      method: 'GET',
+      path: '/t-budgeted',
+      action: { kind: 'store', store: 'notes', op: 'list' },
+      rateLimit: limit,
+    },
   ];
 
   function registerAll(): OpenAPIHono<AppEnv> {
     const app = new OpenAPIHono<AppEnv>();
     const deps = { rateLimiter: new RateLimiter(), agentRegistry: registry } as unknown as AppDeps;
     registerDeclaredRoutes(app, deps, {
-      spec: makeSpec({ api }),
-      productTables: emptyTables,
+      spec: makeSpec({ api, stores } as Partial<RaySpec>),
+      productTables: storeTables,
       handlers: declaredHandlers,
       blobFactory: dummyBlobFactory,
     });
@@ -564,6 +582,7 @@ describe('registerDeclaredRoutes — the per-route budget is mounted on EVERY ac
     ['{handler}', '/h-plain', '/h-budgeted'],
     ['{agent}', '/a-plain', '/a-budgeted'],
     ["{stream mode:'ingest'}", '/s-plain', '/s-budgeted'],
+    ['{store}', '/t-plain', '/t-budgeted'],
   ])('splices the budget into the %s arm, between auth and tenant', (_kind, plainPath, budgetedPath) => {
     const app = registerAll();
     const withoutLimit = chainFor(app, plainPath);
@@ -586,8 +605,10 @@ describe('registerDeclaredRoutes — the per-route budget is mounted on EVERY ac
 
   it("gives each budgeted arm its OWN middleware — one route can never mount another route's budget", () => {
     const app = registerAll();
-    const spliced = ['/h-budgeted', '/a-budgeted', '/s-budgeted'].map((p) => chainFor(app, p)[2]);
-    expect(new Set(spliced).size).toBe(3);
+    const spliced = ['/h-budgeted', '/a-budgeted', '/s-budgeted', '/t-budgeted'].map(
+      (p) => chainFor(app, p)[2],
+    );
+    expect(new Set(spliced).size).toBe(4);
   });
 });
 

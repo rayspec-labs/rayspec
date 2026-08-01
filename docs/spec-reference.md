@@ -405,11 +405,25 @@ budgets but the authentication throttles too (`login`, `register`, `refresh`,
 `oauth-token`, `invite-accept`). Eviction is by insertion age across the whole
 store, so under per-route key pressure the window that gets dropped may be an
 authentication counter rather than a route budget, which would hand a
-credential-stuffing run a fresh `login` allowance. Size
-`DEFAULT_MAX_RATE_LIMIT_ENTRIES` against your real key count — roughly
-(budgeted routes × active principals) plus the authentication counters — so the
-cap is never reached in normal operation. This is documented rather than fixed
-here; a hard ceiling still belongs in a shared front-line limiter.
+credential-stuffing run a fresh `login` allowance.
+
+Be clear about what you can do with that, because the cap is **not** a
+deployment setting. It is `DEFAULT_MAX_RATE_LIMIT_ENTRIES`, a constant of
+`@rayspec/auth-core` fixed at 100 000 keys, and the server constructs its limiter
+with no arguments — there is no environment variable and no configuration field
+that raises it. So the lever a deployment actually holds is the **numerator**:
+keep your own estimate of the live key count — roughly (budgeted routes × active
+principals) plus the authentication counters — comfortably under 100 000, which
+means declaring `rateLimit` on the routes that are expensive rather than on all
+of them. If your key count cannot fit under that number, a per-route budget in
+this process is the wrong instrument for the job and the ceiling belongs in a
+shared front-line limiter, which is the same answer the per-instance boundary
+above already points at. (The seam for a larger store exists in the library —
+`new RateLimiter(new InMemoryRateLimitStore(n))`, both exported from
+`@rayspec/auth-core` — but nothing in the shipped server reaches it, so treat it
+as a note for an embedder composing its own application rather than as
+operational advice.) This limitation is documented rather than fixed here; the
+store's bound is unchanged by this release.
 
 **The strict tier is only as precise as `RAYSPEC_TRUSTED_PROXIES`.** The client
 source is the socket peer unless that variable lists the peer as a trusted proxy,

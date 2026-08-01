@@ -418,9 +418,12 @@ api:
  * Two halves are pinned here. The GRAMMAR half: the field is optional, `.strict()` on both levels, and
  * an absent field leaves NO key on the parsed route — the whole backward-compatibility guarantee rests
  * on that, so it is asserted rather than assumed. The LINT half: the positive-integer rule restated in
- * `lintSpec` for CODE-BUILT specs, which never pass through the Zod parse at all. Those documents are a
- * real path in this repository, and for them the lint pass is the only check standing between a bad
- * number and a live throttle policy.
+ * `lintSpec`, driven the one way it can actually report — by calling the exported `lintSpec` directly
+ * over a `RaySpec` value assembled in code rather than parsed from YAML. Inside `parseSpec` the
+ * restatement is unreachable, because the grammar rejects every one of these values before the lint
+ * pass runs; the arms below pin both facts. It is emphatically NOT what stands between a code-built
+ * spec and a live throttle policy — a spec that skips `parseSpec` skips `lintSpec` with it, and the
+ * guard that fails that boot closed is `declaredRouteBudget` in @rayspec/api-auth.
  */
 describe('api[].rateLimit — the opt-in per-route budget', () => {
   const withLimit = (limit: string) => `

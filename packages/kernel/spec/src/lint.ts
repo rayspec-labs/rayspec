@@ -860,8 +860,11 @@ export function lintSpec(spec: RaySpec): SpecError[] {
     // reports the offending member by its JSON path rather than through a Zod issue.
     //
     // Where it can actually report something is a caller that runs the EXPORTED `lintSpec` over a
-    // `RaySpec` value assembled in code rather than parsed from YAML — the linter's contract is
-    // "already shape-valid", not "already Zod-parsed", and nothing enforces the difference.
+    // `RaySpec` value assembled in code rather than parsed from YAML. The documented contract does say
+    // the input is already shape-valid, post-Zod-parse; what it cannot do is enforce that. `lintSpec`
+    // is exported from the package entry point and its parameter is the `RaySpec` TYPE, which a
+    // hand-built literal satisfies — `windowSeconds: 0` type-checks. So the restatement is the only
+    // thing that answers such a caller at all.
     //
     // What this rule is NOT is the guard standing between a code-built spec and a live throttle
     // policy. A spec that never goes through `parseSpec` never goes through `lintSpec` either: the
