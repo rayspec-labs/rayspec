@@ -116,7 +116,50 @@ stores:
 - `columns` — at least one. Each column has:
   - `name` — a safe identifier (same rule as above).
   - `type` — one of the closed column-type vocabulary: `text`, `uuid`,
-    `timestamp`, `integer`, `boolean`, `jsonb`.
+    `timestamp`, `integer`, `bigint`, `boolean`, `jsonb`.
+
+    `integer` is a PostgreSQL `integer` (`int4`, up to 2 147 483 647); `bigint`
+    is a PostgreSQL `bigint` (`int8`). They are separate types — `integer` was
+    not widened, because widening it would have re-typed every already-declared
+    column in every existing deployment.
+
+    **The JSON boundary on a `bigint` column.** A value travels every JSON
+    surface as a JSON **number** while its magnitude is at most
+    **9 007 199 254 740 991** (`Number.MAX_SAFE_INTEGER`). Beyond that the
+    request is refused with `400 VALIDATION_ERROR` rather than rounded — on a
+    `create`/`update` body, on a `?<col>=` or `?<col>__in=` filter, on a keyset
+    cursor, **and on the way out**. The outbound refusal is deliberate and can
+    fire on a request the caller did not get wrong: a value can reach the column
+    by a route other than the REST write path (a hand-written migration, a
+    direct SQL write, a low-level handler write, or a column that was `integer`
+    before a reviewed type change). Reading such a row, the platform will either
+    return the true number or refuse; it will never return a rounded one. The
+    operational consequence is worth planning for: **one out-of-range row makes
+    the whole `list` page that contains it fail**, and the same bound on filters
+    means you cannot query for that row either, so recovering it is a SQL-level
+    operation. The error names the column and the row `id` (never the value), so
+    the row is findable. Below the bound a `bigint` column behaves like any
+    other scalar: orderable, filterable, and usable as a keyset pagination
+    column.
+
+    Two honest limits of JSON itself, neither specific to this platform:
+    `JSON.parse` rounds an over-large integer **literal** before any validator
+    runs, so a body carrying `9007199254740993` is seen as `…992` — still
+    refused, because every literal above the bound parses to a value that is
+    itself above the bound. And a fractional literal within range
+    (`9007199254740991.2`) parses to a whole number and is accepted. Exactness
+    on the wire is not achievable for integers beyond 2^53−1; the **bound** is,
+    and the bound is what is enforced.
+
+    **Changing an existing column from `integer` to `bigint`** is emitted as a
+    single `ALTER … SET DATA TYPE bigint` and is classified as a destructive
+    type change: it is **blocked** by the migration gate unless a reviewed
+    allowlist entry covers that exact statement. That is not caution about the
+    data — PostgreSQL's `int4 → int8` cast preserves every value — but about
+    availability: the two types are not binary-coercible, so the `ALTER`
+    rewrites the whole table under an `ACCESS EXCLUSIVE` lock and rebuilds the
+    column's indexes. On a large, hot table that is an outage, and whether to
+    take it is an operator's call, not a generator's.
   - `nullable` — optional boolean, default `false`.
   - `unique` — optional boolean, default `false`. When `true`, the value is
     **unique WITHIN a tenant**: the generated unique index is tenant-scoped (a
