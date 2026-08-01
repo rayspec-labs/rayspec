@@ -487,8 +487,15 @@ export function makeStoreHandler(args: {
         const row = rows[0];
         if (row) {
           // A `(tenant, key)` row EXISTS ⇒ this WAS an idempotent retry — replay the original row.
+          // SERIALIZE FIRST, stamp the header AFTER — the same ordering the list path holds, for the
+          // same reason: `serializeRow` can THROW (a stored value outside the range this API
+          // represents as a JSON number is refused rather than rounded), and Hono replays the
+          // context's prepared headers onto whatever response `onError` builds. Stamping first would
+          // put `Idempotency-Replay: true` on a 400 that replayed nothing, telling a retrying client
+          // its write had already been accepted.
+          const body = serializeRow(store, row);
           c.header('Idempotency-Replay', 'true');
-          return c.json(serializeRow(store, row), 200);
+          return c.json(body, 200);
         }
         // NO `(tenant, key)` row ⇒ the 23505 was a GENUINE business-unique conflict on a NEW key (the
         // insert collided on a declared `unique` column, not on the idempotency index) ⇒ map to a 409,

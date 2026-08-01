@@ -239,6 +239,45 @@ describeDb('declared store — the bigint column type', () => {
     expect(ok.headers.get('X-Result-Truncated')).toBe('true');
   });
 
+  it('READ bound on the idempotent-replay path: the 400 carries no Idempotency-Replay header', async () => {
+    testsRan += 1;
+    const { token } = await principal('bigint-replay@example.com', 'BigintReplayOrg');
+    const key = 'replay-key-bigint-1';
+    const create = (body: Record<string, unknown>) =>
+      jsonRequest(h.app, 'POST', '/usage', {
+        body,
+        headers: { ...auth(token), 'idempotency-key': key },
+      });
+
+    const first = await create({ bytes_total: 1, label: 'replay' });
+    expect(first.status).toBe(201);
+    const id = ((await first.json()) as UsageRow).id;
+
+    // Same "arrived by another route" premise as the arm above: the stored row now holds a value the
+    // API cannot represent as a JSON number.
+    await h.db.execute(
+      drizzleSql`UPDATE usage_totals SET bytes_total = 9007199254740993 WHERE id = ${id}::uuid`,
+    );
+
+    // The retry collides on the idempotency index, so the create takes the REPLAY path: read the
+    // original row, serialize it, hand it back as 200 + Idempotency-Replay. Serializing refuses, so
+    // the request ends as a 400 that replayed nothing — and must not claim otherwise. Hono replays the
+    // context's prepared headers onto whatever response `onError` builds, so a header stamped before
+    // the serializer throws survives onto the error.
+    const retry = await create({ bytes_total: 2, label: 'replay' });
+    expect(retry.status).toBe(400);
+    expect(retry.headers.get('Idempotency-Replay')).toBeNull();
+
+    // The positive control that keeps that assertion from being vacuous: repair the row and the SAME
+    // retry replays normally, header and all. Without this, never stamping the header at all would
+    // leave the arm green.
+    await h.db.execute(drizzleSql`UPDATE usage_totals SET bytes_total = 9 WHERE id = ${id}::uuid`);
+    const replayed = await create({ bytes_total: 2, label: 'replay' });
+    expect(replayed.status).toBe(200);
+    expect(replayed.headers.get('Idempotency-Replay')).toBe('true');
+    expect(((await replayed.json()) as UsageRow).bytes_total).toBe(9);
+  });
+
   it('filters and keyset pagination carry a 64-bit value end to end (equality, __in, order + after)', async () => {
     testsRan += 1;
     const { token } = await principal('bigint-filter@example.com', 'BigintFilterOrg');
@@ -288,7 +327,7 @@ describeDb('declared store — the bigint column type', () => {
 describe('bigint column acceptance — ran-guard (must not silently skip in CI)', () => {
   it('the bigint arms ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (requireDb) {
-      expect(testsRan).toBe(5);
+      expect(testsRan).toBe(6);
     } else {
       expect(requireDb).toBe(false);
     }
