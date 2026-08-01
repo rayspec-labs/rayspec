@@ -222,6 +222,27 @@ contracts:
     expectCode(yaml, 'reserved_store_name', /runs/);
   });
 
+  it('a NON-persisted artifact collection is rejected too — decided, not overlooked', () => {
+    // Only a persisting artifact derives a collection store today, so this arm is stricter than the
+    // derivation strictly requires. It is deliberate (see the rule's comment): the name is one
+    // `persist` flag away from a boot refusal, and a view sourcing that same collection name is
+    // skipped by the sink check, so exempting it here would open the sink path to the collision.
+    const yaml = FIELDLOG_YAML.replace(
+      '\ncontracts:\n',
+      `
+artifacts:
+  - kind: digest
+    contract: fieldlog.log_row
+    scope: session
+    collection: runs
+    lifecycle:
+      persist: false
+contracts:
+`,
+    );
+    expectCode(yaml, 'reserved_store_name', /runs/);
+  });
+
   it('a store-sourced VIEW ref that shadows a core/global platform table is rejected', () => {
     // The third document-named store path: a store-sourced view ref that names no declared store and
     // no collection derives the TRANSCRIPT SINK store of exactly that name, so the reservation binds

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The reserved store names are now drift-locked on both sides, and the authoring skill teaches
+  them.** The lint rule and the boot registrar already shared one constant; what could still rot was
+  everything around it. The lock in `@rayspec/db` derived its expectation from a hand-written list of
+  the platform tables, so a NEW global table added to `schema.ts` and forgotten there would have
+  stayed unreserved — it now reads every table the schema module exports, which makes forgetting
+  impossible rather than unlikely. The list printed in `docs/spec-reference.md` had no lock at all and
+  could have drifted from the rule an author actually hits; a test now parses that very paragraph and
+  compares it to the constant. And the authoring skill, which taught `reserved_column_name` and said
+  nothing about store names, now names all sixteen and the three places the rule binds.
+
 - **The tenant bootstrap can target an org id you chose in advance: `rayspec dev bootstrap-tenant
   --org-id <uuid>`.** Org ids were server-generated without exception, which left the deployment
   variable `RAYSPEC_PRODUCT_TENANT_ID` in an awkward position: it has to name an org that already

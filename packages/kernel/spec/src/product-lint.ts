@@ -558,6 +558,13 @@ export function checkProductStores(
   // A persisted artifact's `collection` DERIVES a store of exactly that name (deriveProductStores), so
   // the platform-table reservation binds there as well — otherwise a `collection: runs` would clear
   // `doctor` and only collide once the boot registrar validated the derived table.
+  //
+  // The check does NOT exempt `lifecycle.persist: false`, although only a persisting artifact derives
+  // that store today. Two reasons, both deliberate. A reserved name on a non-persisted artifact is one
+  // `persist` flag away from a boot refusal, and the rename it asks for costs nothing. And the name
+  // does not stay contained: a view whose `source.ref` names a collection is skipped by the sink check
+  // below, so exempting non-persisted collections here would open the sink path to exactly the
+  // collision this rule exists to catch. Strict, and cheap to satisfy.
   spec.artifacts.forEach((artifact, ai) => {
     if (artifact.collection !== undefined && RESERVED_STORE_NAMES.has(artifact.collection)) {
       errors.push(
