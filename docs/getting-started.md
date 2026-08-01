@@ -409,7 +409,7 @@ no-network run, select the built-in fake STT and pass any placeholder OpenAI key
 (inert until a recording is actually processed):
 
 ```bash
-RAYSPEC_PRODUCT_TENANT_ID=$(uuidgen) \
+RAYSPEC_PRODUCT_TENANT_ID=<ORG_ID> \
 RAYSPEC_BLOB_ROOT=/tmp/rayspec-blobs \
 STT_PROVIDER=fake \
 RAYSPEC_EXTRACTION_MODE=live \
@@ -417,14 +417,21 @@ OPENAI_API_KEY=sk-placeholder \
 $RAYSPEC deploy examples/acme-notes/acme-notes.product.yaml --port 8080
 ```
 
+`RAYSPEC_PRODUCT_TENANT_ID` is the **one org this deployment binds to** — pass the
+`<ORG_ID>` step 4 printed, not a freshly generated uuid. The workflow dispatcher binds
+to that id at boot, so it is the tenant every started workflow run belongs to; bind the
+deployment to an id no org owns and the finalize below is refused fail-closed instead
+of starting a run.
+
 `RAYSPEC_MEDIA_SIGNING_KEY` is also required by this audio product; `dev
 gen-secrets` (step 2) already wrote it into your `.env`, which the CLI loads for
 you. This reuses port `8080`, so stop the step-4 auth-only server first (`Ctrl-C`);
 `deploy` is a superset of it (same auth surface plus the product routes), and the
 tenant you provisioned in step 4 persists in the database, so its token still works.
 
-The boot prints the same not-yet-hardened banner as step 4, then lists the declared
-routes it mounted. In a second terminal:
+The boot first warns that a non-real provider is selected (`STT_PROVIDER=fake`), then
+prints the same not-yet-hardened banner as step 4 and lists the declared routes it
+mounted. In a second terminal:
 
 ```bash
 curl -s http://localhost:8080/health
@@ -433,7 +440,72 @@ curl -s http://localhost:8080/health
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/sessions
 # → 401 — GET /sessions is a declared, bearer-guarded view. Pass
 #   `Authorization: Bearer <ORG_TOKEN>` (from step 4) to read it.
+
+curl -s http://localhost:8080/sessions -H 'authorization: Bearer <ORG_TOKEN>'
+# → {"sessions":[],"total":0,"next_offset":null} — nothing recorded yet, and the
+#   view only ever reads the calling tenant's own rows.
 ```
+
+### Record a session and start the workflow
+
+The views above are the read half. The product's other half is the pipeline: a
+recording is uploaded in chunks, sealing the last open track emits the
+`session_finalized` event, and the dispatcher bound to `RAYSPEC_PRODUCT_TENANT_ID`
+turns that event into **exactly one** workflow run (transcribe → extract → ground →
+validate → persist, as the document declares it). Walk it with the same org token —
+any bytes will do, because nothing decodes them in this offline recipe:
+
+```bash
+printf 'demo-audio' > /tmp/chunk0.bin
+
+curl -s -X POST http://localhost:8080/sessions/demo-session/mic/chunks/0 \
+  -H 'authorization: Bearer <ORG_TOKEN>' \
+  -H 'content-type: audio/ogg' --data-binary @/tmp/chunk0.bin
+# → {"next_expected_index":1}
+
+curl -s http://localhost:8080/sessions/demo-session/mic/upload-status \
+  -H 'authorization: Bearer <ORG_TOKEN>'
+# → {"session_id":"demo-session","track":"mic","next_expected_index":1,
+#    "committed_byte_len":10,"status":"recording"}
+
+curl -s -X POST http://localhost:8080/sessions/demo-session/mic/finalize \
+  -H 'authorization: Bearer <ORG_TOKEN>' \
+  -H 'content-type: application/json' -d '{"total_chunks":1}'
+# → {"session_id":"demo-session","track":"mic","status":"completed","total_chunks":1,
+#    "committed_byte_len":10,"finalized_event_id":"<ORG_ID>:demo-session"}
+```
+
+That `200` is the whole point of the walkthrough: the seal was accepted by the
+tenant-bound dispatcher and a run was started under `<ORG_ID>`.
+`finalized_event_id` is that event's idempotency key and it is **session**-scoped
+(`<tenant>:<session>`), so sealing a second track of the same session converges on the
+same single run rather than starting another. Had you deployed with an id no org owns,
+this call would be a `403` and nothing would have started:
+
+```json
+{ "error": "session_event_rejected",
+  "detail": "the session_finalized event was rejected fail-closed (cross_tenant) — no workflow was started." }
+```
+
+> **Where the offline recipe stops.** The run starts, but it cannot get past its first
+> step here. `STT_PROVIDER=fake` selects the fixture-driven adapter, and this boot wires
+> it with **no fixtures** — which is what the boot warning means by *no real
+> transcription — recordings will not transcribe*. So `transcribe` fails terminally
+> (`stt_adapter_error: No fake STT fixture for demo-session/mic.`), the steps that
+> depend on it are skipped, and the read views stay empty:
+>
+> ```bash
+> curl -s http://localhost:8080/sessions/demo-session/mic/transcript \
+>   -H 'authorization: Bearer <ORG_TOKEN>'
+> # → {"session_id":"demo-session","track":"mic","status":"absent","model":null, …}
+> ```
+>
+> Getting further is not a configuration trick: transcription needs
+> `STT_PROVIDER=deepgram` plus a `DEEPGRAM_API_KEY`, and the extraction step needs a
+> real `OPENAI_API_KEY` — both are calls to a third party, which is why the no-network
+> recipe ends at the enqueue. The full pipeline through to persisted, grounded
+> artifacts is exercised without either key in
+> `packages/compose/api-auth/src/engine/acme-notes-e2e.db.test.ts`.
 
 ### The backend profile: direct agent boot
 
