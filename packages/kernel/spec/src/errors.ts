@@ -43,6 +43,13 @@ import { z } from 'zod';
  *                               emit a DUPLICATE OpenAPI query parameter (control param + per-column
  *                               filter param, same name+location) → an invalid OpenAPI 3.1 document.
  *                               Rename the business column.
+ *  - `reserved_store_name`    — a declared store (or a product artifact `collection`, which derives a
+ *                               store of that name) is named after a core/global PLATFORM table
+ *                               (`runs`, `sessions`, `invites`, `orgs`, … — the tenant-scoped core set
+ *                               plus the identity/auth cluster). Its `CREATE TABLE` would collide with
+ *                               the platform's own table, and the boot registrar refuses to admit it
+ *                               fail-closed (`@rayspec/db` composition, check 5), so the deployment
+ *                               would never come up. Rename the store.
  *  - `frontend_route_collision` — a declared static frontend mount's `route` collides with another
  *                               mount, with a declared `api[].path`, or with a reserved system prefix
  *                               (`/v1`, `/health`, `/oidc`) — the static mount would either shadow or be
@@ -122,6 +129,7 @@ export const SpecErrorCode = z.enum([
   'invalid_embedded_schema',
   'reserved_column_name',
   'reserved_query_keyword',
+  'reserved_store_name',
   'frontend_route_collision',
   'frontend_dir_missing',
   'fk_cycle',

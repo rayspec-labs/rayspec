@@ -41,18 +41,16 @@
  * `.onDelete`). `composition.fk.test.ts` fails loudly if a drizzle bump changes that shape, so a silent
  * FK-introspection regression cannot quietly weaken the check to a no-op.
  */
+// The reserved platform table names check 5 rejects. They live in @rayspec/spec beside the other
+// RESERVED_* sets because the STATIC lint pass needs the same set and the dependency edge runs this
+// package → spec, never back — so spec owns the constant and this boot check CONSUMES it: one runtime
+// source, no second copy to drift. The names stay DERIVED from the real schema by test rather than by
+// construction: composition.test.ts reads them off the real table objects via `getTableName` and
+// asserts set equality, so a rename in schema.ts turns that lock RED instead of silently desyncing.
+import { RESERVED_STORE_NAMES } from '@rayspec/spec';
 import { getTableColumns, getTableName } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
-import {
-  apiKeys,
-  authAudit,
-  CORE_TENANT_SCOPED_TABLES,
-  memberships,
-  oidcModels,
-  orgs,
-  sessions,
-  users,
-} from './schema.js';
+import { orgs } from './schema.js';
 import { registerScopedTables } from './tenant-db.js';
 
 /** A fail-closed product-store registration defect (a table that must not join the chokepoint Set). */
@@ -62,25 +60,6 @@ export class ProductStoreCompositionError extends Error {
     this.name = 'ProductStoreCompositionError';
   }
 }
-
-/**
- * Core + global platform table names a product store must never shadow (check 5). Derived from the real
- * schema objects via `getTableName` (not hardcoded strings) so a rename in schema.ts cannot silently
- * desync this reserved set. The global/auth tables would already fail check 2 (no tenant column), but a
- * product store that DUPLICATES one of their NAMES would still collide at DDL time — so reject the name.
- */
-const RESERVED_PLATFORM_TABLE_NAMES: ReadonlySet<string> = new Set(
-  [
-    ...CORE_TENANT_SCOPED_TABLES,
-    orgs,
-    users,
-    memberships,
-    sessions,
-    apiKeys,
-    authAudit,
-    oidcModels,
-  ].map((t) => getTableName(t as PgTable)),
-);
 
 /**
  * Module-local seal flag. `sealProductStores()` flips it; a subsequent `registerProductStores` throws.
@@ -186,7 +165,9 @@ export function validateProductStore(mapKey: string, table: PgTable): void {
   // 5. the name must not shadow a core/global platform table (a product 'runs' would collide). Checked
   //    LAST — the security-critical tenant-predicate checks (2–4) come first, so a table that both
   //    lacks a tenant column AND shadows a name reports the escalation, not the cosmetic collision.
-  if (RESERVED_PLATFORM_TABLE_NAMES.has(tableName)) {
+  //    The static lint rejects such a name up front (`reserved_store_name`); this stays the fail-closed
+  //    net for a table that never went through the parser (a spec assembled directly in code).
+  if (RESERVED_STORE_NAMES.has(tableName)) {
     throw new ProductStoreCompositionError(
       `product store '${mapKey}' collides with a core/global platform table name — a product store ` +
         'must not shadow a platform table. Rename it. Fail-closed.',

@@ -20,7 +20,8 @@
  *     `event`; a handler referenced by `tooling` must be `kind:'tool'`, by `api` must be `route`,
  *     by `triggers` must be `trigger` (so a handler is wired through the right chokepoint).
  *  6. DDL COHERENCE — a store column may not collide with an injected tenancy/GDPR column
- *     (`reserved_column_name`); an FK `onDelete:'set null'` requires a NULLABLE local column
+ *     (`reserved_column_name`); a store NAME may not shadow a core/global platform table
+ *     (`reserved_store_name`); an FK `onDelete:'set null'` requires a NULLABLE local column
  *     (`schema_violation`).
  *
  * NOTE on `deployment`: the optional `deployment.durableWorker` is a
@@ -68,6 +69,44 @@ export const RESERVED_COLUMN_NAMES: ReadonlySet<string> = new Set([
   // The injected actor + idempotency columns (server-controlled, never author-declarable).
   'created_by',
   'idempotency_key',
+]);
+
+/**
+ * TABLE names the PLATFORM already owns — the core tenant-scoped tables plus the global identity/auth
+ * cluster (see packages/kernel/db/src/schema.ts). A declared store of one of these names emits a
+ * `CREATE TABLE` that collides with the platform's own table, and the boot registrar refuses to admit
+ * it fail-closed (`validateProductStore` check 5, @rayspec/db composition.ts), so the deployment never
+ * comes up — the linter rejects it here instead, at the stage the author actually sees.
+ *
+ * THE ONE SOURCE: @rayspec/db IMPORTS this Set for that boot check rather than keeping its own copy.
+ * It has to live on this side because the edge runs db → spec, never back: the lint pass cannot import
+ * the db package, so a set owned there would be unreadable here.
+ *
+ * Literal names, because the reverse import that would derive them from the Drizzle tables is exactly
+ * the cycle above. The derived-from-the-real-schema property is therefore kept by a TEST instead —
+ * `composition.test.ts` reads the names off the real table objects via `getTableName` and asserts set
+ * equality with this constant, so a rename in schema.ts (or an edit here) turns that lock RED rather
+ * than silently desyncing. Same arrangement as `RESERVED_COLUMN_NAMES` ↔ `INJECTED_COLUMN_NAMES`.
+ */
+export const RESERVED_STORE_NAMES: ReadonlySet<string> = new Set([
+  // The core tenant-scoped platform tables (CORE_TENANT_SCOPED_TABLES).
+  'journal_steps',
+  'conversation_items',
+  'runs',
+  'run_events',
+  'idempotency_keys',
+  'invites',
+  'workflow_runs',
+  'workflow_node_states',
+  'workflow_artifacts',
+  // The global identity/auth cluster (reached through db.unscoped(), never tenant-scoped).
+  'orgs',
+  'users',
+  'memberships',
+  'sessions',
+  'api_keys',
+  'auth_audit',
+  'oidc_models',
 ]);
 
 /**
@@ -550,6 +589,21 @@ export function lintSpec(spec: RaySpec): SpecError[] {
 
   // stores: column uniqueness + reserved-name guard + FK resolution + FK on-delete coherence.
   spec.stores.forEach((store, si) => {
+    // (STORE-NAME) A store may not shadow a table the platform already owns. The generated
+    // `CREATE TABLE` would collide with the platform's own, and the boot registrar refuses such a
+    // table fail-closed — so without this rule the document passes `doctor`/`plan` and then dies in
+    // the deploy's boot, which is the furthest point from the author.
+    if (RESERVED_STORE_NAMES.has(store.name)) {
+      errors.push(
+        specError(
+          'reserved_store_name',
+          `store '${store.name}' shadows a core/global platform table of the same name — that table ` +
+            'belongs to the platform, so the deployment would refuse to boot; rename the store',
+          `stores[${si}].name`,
+        ),
+      );
+    }
+
     // (6) Duplicate column names within this store.
     errors.push(
       ...findDuplicates(
