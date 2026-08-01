@@ -169,7 +169,7 @@ function paramFilterAllowed(colType: ColumnType, shape: ViewParamSpec['shape']):
     case 'integer':
       return shape === 'positive_int' || shape === 'nonnegative_int'; // coerced to a number
     default:
-      return false; // boolean/timestamp/jsonb equality on a request param — not expressible
+      return false; // bigint/boolean/timestamp/jsonb equality on a request param — not expressible
   }
 }
 
@@ -185,7 +185,7 @@ function constFilterAllowed(colType: ColumnType, value: ViewConstValue): boolean
     case 'boolean':
       return typeof value === 'boolean';
     default:
-      return false; // timestamp/jsonb const equality — not expressible declaratively
+      return false; // bigint/timestamp/jsonb const equality — not expressible declaratively
   }
 }
 

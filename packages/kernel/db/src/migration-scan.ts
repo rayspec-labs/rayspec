@@ -63,9 +63,10 @@ export interface ScanResult {
 
 /**
  * A reviewed allowlist entry: clears one destructive finding. Matched by `kind` PLUS a `match`
- * that must equal the ENTIRE (whitespace-collapsed, trailing-`;`-stripped) offending statement —
- * so an entry is tied to the EXACT statement it reviewed, not a brittle line number that shifts
- * when the file is edited.
+ * that must equal the ENTIRE offending statement, which the scanner holds whitespace-collapsed and
+ * trailing-`;`-stripped — so an entry is tied to the EXACT statement it reviewed, not a brittle
+ * line number that shifts when the file is edited. Only the STATEMENT side is collapsed; the
+ * `match` is not (see the field below), so it has to be authored in that same collapsed shape.
  *
  * The exact-equality rule: the match is anchored to the full statement (exact equality), NOT an unanchored
  * `.includes()` substring. A substring match meant a short, reviewed `match` could silently clear
@@ -76,8 +77,15 @@ export interface ScanResult {
 export interface AllowlistEntry {
   kind: DestructiveKind;
   /**
-   * The FULL collapsed statement (trailing `;` optional) this entry clears. Must equal the
-   * offending statement exactly (after collapsing whitespace + stripping a trailing `;`).
+   * The FULL statement this entry clears, authored in ALREADY-COLLAPSED form: every run of
+   * whitespace (including newlines) written as a single space.
+   *
+   * The two sides are normalized DIFFERENTLY, and the asymmetry is the trap. The statement is
+   * collapsed when `splitStatements` parses it; this `match` is only end-trimmed and stripped of at
+   * most one trailing `;`. So a trailing `;` is optional and surrounding whitespace does not matter,
+   * but an internal double space or a line break written HERE does NOT normalize away — it fails the
+   * equality and silently RE-BLOCKS a change that was genuinely reviewed. Machine-proposed entries
+   * (`diffProductStores`) are collapsed at the source; a hand-authored one has to be too.
    */
   match: string;
   /** A human reason recorded in review (required — no silent passes). */
@@ -345,8 +353,11 @@ export function scanMigrationSql(sql: string, allowlist: AllowlistEntry[] = []):
     const detectText = stripStringLiteralBodies(stmt.text);
     for (const det of DETECTORS) {
       if (det.re.test(detectText)) {
-        // The exact-equality rule: the allowlist entry must match the ENTIRE statement (exact equality after
-        // collapsing whitespace + stripping a trailing `;`), not be a contained substring.
+        // The exact-equality rule: the allowlist entry must match the ENTIRE statement, not be a
+        // contained substring. Note which side gets normalized: `collapsedStmt` is ALREADY
+        // whitespace-collapsed (`splitStatements` does that when it parses), while the entry gets
+        // `stripTerminator` alone. An internal whitespace difference in `a.match` is therefore NOT
+        // normalized away here and re-blocks the statement it was written to clear.
         const allowed = allowlist.some(
           (a) => a.kind === det.kind && stripTerminator(a.match) === collapsedStmt,
         );

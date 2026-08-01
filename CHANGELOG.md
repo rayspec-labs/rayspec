@@ -47,7 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly; what is at risk is availability, and on a large hot table that is a real outage. That is a
   judgement about a specific deployment at a specific hour, which is precisely why it belongs to a
   human at review time rather than to a code path. An agent output property typed `integer` or
-  `number` in JSON Schema persists into a `bigint` column exactly as it does into an `integer` one.
+  `number` in JSON Schema is accepted into a `bigint` column by the same deploy-time compatibility
+  check that accepts it into an `integer` one; what differs is the write itself, which enforces the
+  range above and, unlike an `integer` column, refuses a numeric string rather than letting the
+  driver bind it untyped.
 
 - **A declared route can declare its own rate limit: the new optional `api[].rateLimit` field.**
   Declared routes have been throttled for a while, but only by two allowances shared across the whole

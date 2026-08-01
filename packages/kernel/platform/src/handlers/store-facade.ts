@@ -207,8 +207,12 @@ function isPlainObjectOrArray(value: object): boolean {
  *  - a `jsonb` column ALSO accepts a JSON-serializable PLAIN Object/Array (free-form JSON) — matching
  *    the api write path (store-validation.ts `z.unknown()` for jsonb), so the facade is not stricter
  *    than the api path for the same column;
- *  - a NON-jsonb column accepts only a plain scalar (string/number/boolean/null/Date).
+ *  - a NON-jsonb column accepts only a plain scalar (string/number/boolean/null/Date), plus a BigInt
+ *    on a `bigint` column and nowhere else (see the arm below).
  * (`undefined` is "omitted" — it never reaches here from `Object.entries`.)
+ *
+ * WHAT THIS FUNCTION DOES NOT DO: it checks the SHAPE of a value, never its RANGE. Both callers rely
+ * on that split, but only one of them closes it — see the note on the BigInt arm.
  */
 function assertValidValue(col: PgColumn, where: string, name: string, value: unknown): void {
   if (value === null) return;
@@ -218,11 +222,19 @@ function assertValidValue(col: PgColumn, where: string, name: string, value: unk
   // reads back, so a read-modify-write handler naturally produces one). Without this arm it is neither
   // string/number/boolean nor a Date nor `typeof 'object'`, so `isPlain` is false and it lands in the
   // forbidden-non-data (SF-1) arm below with a misleading SQL-injection message — i.e. the facade could
-  // not write the type at all. Its RANGE is then checked in `coerceForColumn`, which runs right after
-  // this. The arm is NARROWED to a bigint column deliberately: that range check fires only for one, so
-  // a BigInt aimed at any OTHER column type would have nothing checking it and would reach the driver —
-  // where a `jsonb` column's mapper is `JSON.stringify`, which throws an unmapped `TypeError: Do not
-  // know how to serialize a BigInt` (a 500) instead of the 400 this SF-1 guard gives it.
+  // not write the type at all. The arm is NARROWED to a bigint column deliberately: the range check
+  // below fires only for one, so a BigInt aimed at any OTHER column type would have nothing checking
+  // it and would reach the driver — where a `jsonb` column's mapper is `JSON.stringify`, which throws
+  // an unmapped `TypeError: Do not know how to serialize a BigInt` (a 500) instead of the 400 this
+  // SF-1 guard gives it.
+  //
+  // WHICH CALLER CHECKS THE RANGE: the write mapper does — it runs `coerceForColumn` on every value
+  // right after this guard, and that is where the ±(2^53−1) bound is enforced. `filterPredicate` does
+  // NOT: it calls this guard and goes straight to `eq`/`inArray`, so a filter VALUE reaches the driver
+  // unbounded. That is deliberate and safe in the direction that matters — a filter only ever narrows
+  // a read, so an out-of-range one selects no row rather than storing something no read could return —
+  // but it does mean the bound is a WRITE bound, not a facade-wide one. Do not restate it as the
+  // latter.
   if (t === 'bigint' && isBigintColumn(col)) return;
   if (value instanceof Date) return;
   // From here `value` is an object/function/etc. A FORBIDDEN NON-DATA value is rejected for EVERY
