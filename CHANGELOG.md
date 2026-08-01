@@ -568,6 +568,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is unaffected, as is a tool-using agent without one. The `examples/acme-notes-backend`
   reference document carried the combination and has been corrected the same way.
 
+- **A store named after a platform table is now a config error, not a boot failure.** The
+  linter adds `reserved_store_name`: a `stores[]` entry whose name is one of the tables the
+  platform owns — `api_keys`, `auth_audit`, `conversation_items`, `idempotency_keys`,
+  `invites`, `journal_steps`, `memberships`, `oidc_models`, `orgs`, `run_events`, `runs`,
+  `sessions`, `users`, `workflow_artifacts`, `workflow_node_states`, `workflow_runs` — is
+  rejected at `stores[<i>].name`, in both profiles, and at every other place a store name
+  comes out of a product document: a product artifact's `collection`, which derives a store of
+  that name, and a view's `source: { kind: store, ref: … }`, which names the transcript sink
+  store when it resolves to neither a declared store nor a collection. What an author observes
+  differently: such a document previously returned
+  `{ "ok": true, "errors": [], "warnings": [] }` from `doctor` and
+  `ok: true` from `plan` — whose migration then carried the colliding `CREATE TABLE` — and
+  failed only when the deployed container booted, in a restart loop whose cause was visible
+  solely in container logs, after the build and image had already been paid for. It now fails
+  `doctor` and `plan` with a message naming the store and asking for a rename, before anything
+  is deployed. `sessions` for a chat application, `invites` and `runs` are the names most
+  likely to be hit; the match is exact, so a distinguishing prefix (`chat_sessions`) is the
+  whole fix, and a store renamed that way boots unchanged. The boot registrar's own refusal is
+  untouched and stays the fail-closed net for a spec assembled in code that never meets the
+  parser — it is simply no longer the first thing that says it. The reserved names are
+  documented under `stores` in the spec reference.
+
 ### Fixed
 
 - **The documentation no longer calls the tool-dispatch boundary "the defense against

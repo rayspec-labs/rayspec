@@ -560,6 +560,56 @@ describe('negative — reserved list-query control keyword as a column name', ()
   });
 });
 
+describe('negative — reserved STORE name (a store that shadows a platform table)', () => {
+  // A store whose name is a core/global platform table name collides at DDL time and is refused by the
+  // boot registrar (@rayspec/db composition, check 5). Fail-the-fix: without the RESERVED_STORE_NAMES
+  // rule this document parses+lints CLEAN — every reserved name is a valid safe-identifier — so
+  // `doctor` and `plan` both report ok and only the deployment's boot says no.
+  const MINIMAL = `
+version: '1.0'
+metadata:
+  name: reserved-probe
+stores:
+  - name: sessions
+    columns:
+      - { name: label, type: text }
+api:
+  - { method: GET, path: '/api/sessions', action: { kind: store, store: sessions, op: list } }
+`;
+
+  it('rejects the minimal document whose only store is named `sessions`', () => {
+    expectRejection(MINIMAL, 'reserved_store_name');
+  });
+
+  it('the violation names the offending store, asks for a rename, and points at the name node', () => {
+    const res = parseSpec(MINIMAL);
+    expect(res.ok).toBe(false);
+    if (res.ok) return; // narrow
+    const hit = res.errors.find((e) => e.code === 'reserved_store_name');
+    expect(hit?.message).toContain("store 'sessions'");
+    expect(hit?.message).toMatch(/rename/i);
+    expect(hit?.path).toBe('stores[0].name');
+  });
+
+  // One per family: a core tenant-scoped table, a global identity table, and the two names the
+  // reporter called out as ones a domain product would plausibly pick on its own.
+  for (const name of ['runs', 'invites', 'conversation_items', 'orgs', 'api_keys'] as const) {
+    it(`rejects a store named '${name}'`, () => {
+      // Rename the store AND its route reference, so the renamed document carries exactly one defect.
+      expectRejection(BASE.replaceAll('widgets', name), 'reserved_store_name');
+    });
+  }
+
+  it('a store named `user_sessions` is NOT rejected — the check is exact-match, not substring', () => {
+    const res = parseSpec(BASE.replaceAll('widgets', 'user_sessions'));
+    if (!res.ok) {
+      expect(res.errors.map((e) => e.code)).not.toContain('reserved_store_name');
+    } else {
+      expect(res.ok).toBe(true);
+    }
+  });
+});
+
 describe('negative — fullTextSearch coherence', () => {
   // A store that opts into full-text search needs at least one text column to build the tsvector over,
   // and may not declare the reserved generated `search_vector` column. Fail-the-fix: without the FTS

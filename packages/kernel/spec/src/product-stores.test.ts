@@ -194,6 +194,66 @@ contracts:
     expectCode(yaml, 'invalid_store', /collides with .*collection/i);
   });
 
+  it('a store name that shadows a core/global platform table is rejected', () => {
+    // Symmetric with the backend store lint: a declared product store materializes a standard
+    // tenant-scoped table, so a name the platform already owns collides at DDL time and is refused by
+    // the boot registrar. Fail-the-fix: without the RESERVED_STORE_NAMES check the doc lints clean.
+    expectCode(
+      FIELDLOG_YAML.replaceAll('session_log', 'sessions'),
+      'reserved_store_name',
+      /sessions/,
+    );
+  });
+
+  it('an artifact COLLECTION that shadows a core/global platform table is rejected', () => {
+    // A persisted artifact's `collection` derives a store of exactly that name, so the reservation
+    // binds there too — otherwise the collision would only surface at boot.
+    const yaml = FIELDLOG_YAML.replace(
+      '\ncontracts:\n',
+      `
+artifacts:
+  - kind: digest
+    contract: fieldlog.log_row
+    scope: session
+    collection: runs
+contracts:
+`,
+    );
+    expectCode(yaml, 'reserved_store_name', /runs/);
+  });
+
+  it('a store-sourced VIEW ref that shadows a core/global platform table is rejected', () => {
+    // The third document-named store path: a store-sourced view ref that names no declared store and
+    // no collection derives the TRANSCRIPT SINK store of exactly that name, so the reservation binds
+    // to the ref too. Fail-the-fix: the healthy fixture below (ref `track_transcripts`) lints clean;
+    // renaming only the ref is the one mutation.
+    const withSink = (ref: string) =>
+      FIELDLOG_YAML.replace(
+        '\ncontracts:\n',
+        `
+views:
+  - id: session_transcript
+    route: { method: GET, path: "/sessions/{session_id}/transcript" }
+    auth: bearer_tenant
+    params:
+      session_id: { in: path, shape: safe_id }
+    source: { kind: store, ref: ${ref} }
+    absent_state: not_ready_409
+    read:
+      mode: single
+      filter:
+        session_id: { param: session_id }
+      shape:
+        fields:
+          status: { kind: column, column: status, type: string, default: unknown }
+    response_contract: fieldlog.catalog_rows
+contracts:
+`,
+      );
+    parseOk(withSink('track_transcripts'));
+    expectCode(withSink('conversation_items'), 'reserved_store_name', /conversation_items/);
+  });
+
   it('a reserved (injected tenancy/GDPR) column name is rejected', () => {
     expectCode(
       FIELDLOG_YAML.replace('{ name: label, type: text', '{ name: tenant_id, type: text'),
