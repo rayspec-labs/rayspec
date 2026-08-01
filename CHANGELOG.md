@@ -524,16 +524,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ceremony. Two or more memberships still yield `null`: the server has no basis on which to pick one
   and does not guess.
 
-  **Two limits are worth stating, because a consumer observes both.** First, what a refreshed token
-  can do is unchanged: `POST /v1/auth/refresh` mints an access token carrying the remembered org but,
-  as it always has, no role claim, so the routes gated on a claim-trusted permission (`org:read`,
-  `apikey:read`, `store:read`, `agent:read`, `agent:run`) still answer `403` on it. What this change
-  removes for a returning browser is the `GET /v1/orgs` discovery step, not the subsequent
-  `POST /v1/orgs/{orgId}/switch` — the client now knows the org id it should switch into. The login
-  path has no such caveat: a sole-org user's login token carries the live role and is usable against
-  tenant routes immediately. Second, persisting the choice requires the switch request to carry the
-  refresh cookie, and a switch is a Bearer-required mutation. A **same-origin** browser sends the
-  httpOnly refresh cookie alongside the Bearer header automatically — that is the flow this fixes.
+  **Two limits are worth stating, because a consumer observes both.** First, a refreshed token is
+  now tenant-scoped but still roleless. `POST /v1/auth/refresh` mints an access token carrying the
+  remembered org — that half is new — but, as it always has, no role claim. So the routes gated on
+  a claim-trusted permission (`org:read`, `apikey:read`, `store:read`, `agent:read`, `agent:run`)
+  answer `403` on it, while the permissions that are re-resolved live instead of trusted from the
+  claim (`store:write` on the declared store routes, `apikey:mint`, `apikey:revoke`,
+  `org:member:add`, `org:member:change`) now succeed on it in the remembered org — before this
+  change a refreshed token carried no org at all, so every tenant-scoped route answered `404` for
+  want of a tenant. That is a shorter path to those routes rather than new authority: the same
+  refresh cookie already reached them by calling `POST /v1/orgs/{orgId}/switch` first, which carries
+  no permission gate of its own and re-checks membership live exactly as those routes do. What this
+  change removes for a returning browser is therefore the `GET /v1/orgs` discovery step, not the
+  subsequent `POST /v1/orgs/{orgId}/switch` — the client now knows the org id it should switch into,
+  and still has to switch before it can READ its tenant data. The login path has no such caveat: a
+  sole-org user's login token carries the live role and is usable against tenant routes immediately.
+  Second, persisting the choice requires the switch request to carry the refresh cookie, and a
+  switch is a Bearer-required mutation. A **same-origin** browser sends the httpOnly refresh cookie
+  alongside the Bearer header automatically — that is the flow this fixes.
   Any client that sends no cookie has no session row to write, so its selection stays inside the
   re-minted token exactly as before: a CLI or desktop client, and equally a **cross-origin** browser
   client, which this API serves bearer-only (the CORS grant never enables credentials, and the
