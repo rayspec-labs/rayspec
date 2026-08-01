@@ -148,6 +148,14 @@ const COLUMN_PRODUCES: Readonly<Record<ColumnType, ReadonlySet<ViewLeafType>>> =
   uuid: new Set(['string']),
   timestamp: new Set(['string']), // the store facade serializes Date → ISO string
   integer: new Set(['integer', 'number']),
+  // A bigint column is PROJECTABLE, which is sound only because the store facade normalizes the
+  // driver's BigInt to a plain number before a leaf ever sees it: `matchesLeafType('integer')` tests
+  // `typeof value === 'number'`, so an un-normalized BigInt would fail the check and `typedLeaf` would
+  // substitute the declared default (or null) — a silent data loss with no error raised anywhere.
+  // Filtering is a separate question: `paramFilterAllowed`/`constFilterAllowed` both end in
+  // `default: return false`, so a bigint column is projectable but NOT usable as a param- or
+  // const-equality filter, and each fails closed at compile time with a specific message.
+  bigint: new Set(['integer', 'number']),
   boolean: new Set(['boolean']),
   jsonb: new Set(['string', 'number', 'integer', 'boolean', 'object', 'array']),
 };

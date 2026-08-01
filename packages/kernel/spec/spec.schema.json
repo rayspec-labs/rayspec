@@ -53,6 +53,7 @@
                     "uuid",
                     "timestamp",
                     "integer",
+                    "bigint",
                     "boolean",
                     "jsonb"
                   ]

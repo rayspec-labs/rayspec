@@ -111,6 +111,15 @@ function responseSchemaForColumnType(type: ColumnType): Record<string, unknown> 
       return { type: 'string', format: 'date-time' };
     case 'integer':
       return { type: 'integer' };
+    case 'bigint':
+      // Bounded, because the RUNTIME is bounded: a bigint row value outside ±(2^53-1) is refused with
+      // a 400 rather than serialized. An unbounded `{type:'integer'}` would document a 64-bit response
+      // range this API does not actually serve.
+      return {
+        type: 'integer',
+        minimum: Number.MIN_SAFE_INTEGER,
+        maximum: Number.MAX_SAFE_INTEGER,
+      };
     case 'boolean':
       return { type: 'boolean' };
     case 'jsonb':
@@ -451,6 +460,15 @@ function filterParamSchema(type: ColumnType): Record<string, unknown> {
   switch (type) {
     case 'integer':
       return { type: 'integer' };
+    case 'bigint':
+      // A bigint column IS filterable (only jsonb is excluded downstream), and the filter coercion
+      // applies the SAME ±(2^53-1) bound the body validator and the row serializer apply — one range
+      // end to end: body in, body out, equality filter, `__in` element, keyset cursor.
+      return {
+        type: 'integer',
+        minimum: Number.MIN_SAFE_INTEGER,
+        maximum: Number.MAX_SAFE_INTEGER,
+      };
     case 'boolean':
       return { type: 'boolean' };
     case 'uuid':

@@ -121,6 +121,19 @@ function emitCoerceColumn(c: ColumnHole, target: EmitTarget): string {
     if (typeof val === 'number' && Number.isInteger(val)) { ${rowCol} = val; }
     else { ${onBad} }
   }`;
+    case 'bigint':
+      // `Number.isSafeInteger` is the `integer` arm's `Number.isInteger` plus the JSON boundary — one
+      // identifier changed, the smallest possible expression of the rule here. It is also the only
+      // place this path can still tell the difference: the model arg arrived as a JSON number that
+      // `JSON.parse` has already rounded if it exceeded 2^53-1. The handler assigns a plain JS number
+      // and writes through the HandlerDb facade, which performs the number → BigInt conversion — so no
+      // generated product source ever carries a BigInt literal.
+      return `  // ${col}: bigint — UNTRUSTED arg, must be a safe integer (values beyond 2^53-1 are refused).
+  {
+    const val = ${v};
+    if (typeof val === 'number' && Number.isSafeInteger(val)) { ${rowCol} = val; }
+    else { ${onBad} }
+  }`;
     case 'boolean':
       return `  // ${col}: boolean — UNTRUSTED arg, strict true/false (anything else is invalid).
   {

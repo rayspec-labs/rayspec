@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A 64-bit integer column type: `bigint`, alongside `integer` rather than replacing it.** The
+  declared `integer` type maps to PostgreSQL `int4`, whose ceiling is 2 147 483 647 — for a column
+  counting bytes, 2048 MiB. A store that measures anything real in bytes reaches that ceiling on a
+  perfectly ordinary day, and because status rows are usually written in one transaction, the one
+  value that overflowed fails the **whole** row. The failure reads like a dead writer rather than an
+  arithmetic limit, which is what makes it expensive to diagnose. `bigint` maps to PostgreSQL
+  `bigint` (`int8`) and is a **new** member of the column vocabulary: `integer` is untouched.
+  Widening it would have silently re-typed every already-materialized column in every existing
+  deployment, and, as below, that re-typing is not free — nobody who declared an `integer` column
+  asked for it.
+
+  **A `bigint` value crosses every JSON surface as a JSON number, and is refused rather than rounded
+  when it cannot.** JavaScript numbers hold integers exactly only up to 9 007 199 254 740 991, so
+  that is the range this API serves, end to end: request body, response body, equality filter,
+  `<col>__in` element, keyset cursor. A value beyond it is a `400 VALIDATION_ERROR` — on the way in,
+  and equally on the way **out**. The outbound half is the one worth stating plainly, because it can
+  refuse a request the caller did not get wrong: a row can reach an `int8` column by a route that is
+  not the HTTP write path — a hand-written migration, a direct SQL write, a low-level handler write,
+  or a column that was `integer` before a reviewed type change. When such a row is read, the platform
+  can either report the true number or refuse; it will never report a rounded one. The cost is
+  concrete and deliberate: **one out-of-range row makes the whole list page containing it fail**, and
+  the same bound on filters means you cannot query for that row either, so recovering it is a
+  SQL-level operation. The error names the column and the row id — never the value — so the row is
+  findable, and a page that failed this way carries no pagination cursor, so a client that pages by
+  following one cannot skip silently past the page it never received. Below the bound nothing
+  changes: values are exact, and the column is orderable, filterable, and usable as a keyset
+  pagination column like any other.
+
+  **Changing an existing column from `integer` to `bigint` is gated, not automatic.** The diff
+  generator emits a single `ALTER … SET DATA TYPE bigint` and the destructive-migration scanner
+  classifies it exactly as it already classifies any other type change without a `USING` clause:
+  **blocked** unless a reviewed allowlist entry covers that exact statement, applied once one does.
+  There is no "safe widening" carve-out, and the reason is what PostgreSQL actually does. `int4` and
+  `int8` are not binary-coercible, so this `ALTER` performs a **full table rewrite while holding an
+  `ACCESS EXCLUSIVE` lock**, rebuilding the column's indexes along the way. Every value survives
+  exactly; what is at risk is availability, and on a large hot table that is a real outage. That is a
+  judgement about a specific deployment at a specific hour, which is precisely why it belongs to a
+  human at review time rather than to a code path. An agent output property typed `integer` or
+  `number` in JSON Schema persists into a `bigint` column exactly as it does into an `integer` one.
+
 - **A declared route can declare its own rate limit: the new optional `api[].rateLimit` field.**
   Declared routes have been throttled for a while, but only by two allowances shared across the whole
   declared surface — a strict one for callers whose credential does not validate and a generous one

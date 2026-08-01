@@ -64,6 +64,7 @@ const COLUMN_TYPE_TO_SYMBOL: Record<ColumnType, string> = {
   uuid: 'uuid',
   timestamp: 'timestamp',
   integer: 'integer',
+  bigint: 'bigint',
   boolean: 'boolean',
   jsonb: 'jsonb',
 };
@@ -75,6 +76,15 @@ const DRIZZLE_BUILDER: Record<ColumnType, (snake: string) => string> = {
   // timestamptz everywhere (mirrors schema.ts `timestamp(..., { withTimezone: true })`).
   timestamp: (s) => `timestamp('${s}', { withTimezone: true })`,
   integer: (s) => `integer('${s}')`,
+  // `{ mode: 'bigint' }` (drizzle's PgBigInt64), never `{ mode: 'number' }`. The `number` mode maps an
+  // int8 through `Number(value)` INSIDE the ORM — upstream of every chokepoint this platform owns — so
+  // a stored value past 2^53-1 would arrive already rounded, indistinguishable from a value that was
+  // legitimately stored rounded, and the read-side range guard would have nothing left to detect. The
+  // `bigint` mode maps through `BigInt(value)`, which is exact across the whole int8 range, so the
+  // platform can either show the true number or refuse. Both modes emit the same DDL; the choice is
+  // purely about read fidelity, and it is baked into COMMITTED product source here — it must stay
+  // byte-identical to the runtime twin in build-product-tables.ts.
+  bigint: (s) => `bigint('${s}', { mode: 'bigint' })`,
   boolean: (s) => `boolean('${s}')`,
   jsonb: (s) => `jsonb('${s}')`,
 };

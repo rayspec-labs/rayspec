@@ -97,8 +97,37 @@ function snakeToCamel(snake: string): string {
   return snake.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
 }
 
-/** A `Date` → ISO string; everything else passes through (rows are plain serializable values). */
-function serializeValue(value: unknown): unknown {
+/** The bigint JSON boundary: the widest magnitude a JS number carries without losing an integer. */
+const MAX_SAFE_BIG = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_SAFE_BIG = BigInt(Number.MIN_SAFE_INTEGER);
+
+/**
+ * A `Date` → ISO string; a `BigInt` → a plain number, or a refusal when it cannot be one; everything
+ * else passes through (rows are plain serializable values).
+ *
+ * THE BIGINT ARM IS LOAD-BEARING and nothing in the compiler defends it. This one value mapper has
+ * exactly one call site (`serializeRow`) behind all four row-returning facade ops, so it serves three
+ * consumers at once: escape-hatch TypeScript handlers, the workflow `store_read` node, and the
+ * declarative views interpreter. A bigint column is built with drizzle's `{ mode: 'bigint' }`, so the
+ * driver hands the platform an EXACT BigInt — which means the platform can show the true number or
+ * refuse, but can never show a wrong one. Without this arm a BigInt escapes to a handler, whose JSON
+ * response and journal write both throw (`JSON.stringify` cannot serialize a BigInt), and the views
+ * interpreter's `matchesLeafType('integer')` rejects it and silently substitutes the leaf default.
+ * The refusal is keyed on the VALUE SHAPE, not a per-column type table, so a BigInt from any source
+ * is caught. The detailed text (column + bound) stays on the internal `message`; the client sees only
+ * the generic `publicMessage`, following this file's convention.
+ */
+function serializeValue(value: unknown, name: string): unknown {
+  if (typeof value === 'bigint') {
+    if (value > MAX_SAFE_BIG || value < MIN_SAFE_BIG) {
+      throw new StoreInputError(
+        `HandlerDb: column '${name}' holds a value outside the range this platform represents as a ` +
+          'JS number (±9007199254740991) — refused rather than rounded (fail-closed).',
+        'A stored value is outside the range this API can represent.',
+      );
+    }
+    return Number(value);
+  }
   return value instanceof Date ? value.toISOString() : value;
 }
 
@@ -185,6 +214,16 @@ function assertValidValue(col: PgColumn, where: string, name: string, value: unk
   if (value === null) return;
   const t = typeof value;
   if (t === 'string' || t === 'number' || t === 'boolean') return;
+  // A BigInt is a plain SCALAR data value ON A BIGINT COLUMN (it is what a `{ mode: 'bigint' }` column
+  // reads back, so a read-modify-write handler naturally produces one). Without this arm it is neither
+  // string/number/boolean nor a Date nor `typeof 'object'`, so `isPlain` is false and it lands in the
+  // forbidden-non-data (SF-1) arm below with a misleading SQL-injection message — i.e. the facade could
+  // not write the type at all. Its RANGE is then checked in `coerceForColumn`, which runs right after
+  // this. The arm is NARROWED to a bigint column deliberately: that range check fires only for one, so
+  // a BigInt aimed at any OTHER column type would have nothing checking it and would reach the driver —
+  // where a `jsonb` column's mapper is `JSON.stringify`, which throws an unmapped `TypeError: Do not
+  // know how to serialize a BigInt` (a 500) instead of the 400 this SF-1 guard gives it.
+  if (t === 'bigint' && isBigintColumn(col)) return;
   if (value instanceof Date) return;
   // From here `value` is an object/function/etc. A FORBIDDEN NON-DATA value is rejected for EVERY
   // column type (the SF-1 injection block): a function, a Drizzle SQL object, OR any non-plain value —
@@ -283,6 +322,14 @@ function isTimestampColumn(col: PgColumn): boolean {
   return c.columnType === 'PgTimestamp' || c.dataType === 'date';
 }
 
+/** True if a runtime PgColumn is a 64-bit column (so a number value is coerced to BigInt). */
+function isBigintColumn(col: PgColumn): boolean {
+  // Drizzle's `{ mode: 'bigint' }` column reports columnType 'PgBigInt64' (+ dataType 'bigint').
+  // Mirrors `isTimestampColumn`: check both for resilience across minor drizzle versions.
+  const c = col as unknown as { columnType?: string; dataType?: string };
+  return c.columnType === 'PgBigInt64' || c.dataType === 'bigint';
+}
+
 /** The injected/server-controlled columns (camelCase) a handler may never SET (platform-managed). */
 const SERVER_CONTROLLED_CAMEL: ReadonlySet<string> = new Set(
   INJECTED_COLUMN_NAMES.map((snake) => snakeToCamel(snake)),
@@ -365,9 +412,57 @@ function toDbValues(
   return out;
 }
 
-/** Coerce a write value for its column: a timestamp column accepts an ISO string → Date (SF-2). */
+/**
+ * Coerce a write value for its column: a timestamp column accepts an ISO string → Date (SF-2), and a
+ * bigint column accepts a BigInt or a safe-integer number → BigInt, bounded.
+ *
+ * The bigint bound is not decoration: it is the SAME boundary the HTTP body validator applies, at the
+ * OTHER write chokepoint. The platform must never write through one path what a read on another path
+ * is then obliged to refuse. This also covers the `persistTo` run-output writer, which reuses the
+ * facade insert path, and the generated handlers, which assign a plain number and convert here (so no
+ * generated product source ever contains a BigInt literal and the SDK's plain-serializable-row
+ * contract is preserved).
+ *
+ * The bigint arm is therefore TOTAL — every other value shape is refused HERE rather than left to the
+ * driver, which for this column type would not refuse it. postgres.js `inferType` returns OID 0 (an
+ * UNTYPED parameter) for a string, PostgreSQL resolves that to the target column and parses it with
+ * `int8in`, and drizzle's `PgBigInt64` declares no `mapToDriverValue` — so a numeric STRING would be
+ * stored EXACTLY, past this bound and un-refused. `integer` is not a precedent for letting that
+ * through: an int4 column is NARROWER than the platform bound, so PostgreSQL itself raises 22003,
+ * whereas an int8 column is WIDER and the platform is the only thing that can hold the ±2^53-1 line.
+ * The facade insert is auto-commit, so a value that slipped through would COMMIT and only then fail
+ * when the RETURNING row is serialized — leaving a committed row that no read on any path can return.
+ */
 function coerceForColumn(col: PgColumn, name: string, value: unknown, op: string): unknown {
   if (value === null) return null;
+  if (isBigintColumn(col)) {
+    if (typeof value === 'bigint') {
+      if (value > MAX_SAFE_BIG || value < MIN_SAFE_BIG) {
+        throw new StoreInputError(
+          `HandlerDb: ${op} value for bigint column '${name}' is outside the range this platform ` +
+            'represents as a JS number (±9007199254740991) — a read could not return it (fail-closed).',
+          'A supplied value is outside the range this API can represent.',
+        );
+      }
+      return value;
+    }
+    if (typeof value === 'number') {
+      if (!Number.isSafeInteger(value)) {
+        throw new StoreInputError(
+          `HandlerDb: ${op} value for bigint column '${name}' is not a safe integer: ` +
+            `${JSON.stringify(value)} (fail-closed).`,
+          'A supplied value is not a valid integer.',
+        );
+      }
+      return BigInt(value);
+    }
+    throw new StoreInputError(
+      `HandlerDb: ${op} value for bigint column '${name}' must be a number or a BigInt — got ` +
+        `${typeof value}. A string is deliberately NOT parsed here: the driver would bind it as an ` +
+        'untyped parameter and PostgreSQL would store it past this bound (fail-closed).',
+      'A supplied value is not a valid integer.',
+    );
+  }
   if (isTimestampColumn(col) && typeof value === 'string') {
     const d = new Date(value);
     if (Number.isNaN(d.getTime())) {
@@ -464,7 +559,8 @@ function serializeRow(table: PgTable, row: Record<string, unknown>): StoreRow {
   for (const [camel, col] of Object.entries(cols)) camelToSnake.set(camel, col.name);
   const out: StoreRow = {};
   for (const [key, value] of Object.entries(row)) {
-    out[camelToSnake.get(key) ?? key] = serializeValue(value);
+    const snake = camelToSnake.get(key) ?? key;
+    out[snake] = serializeValue(value, snake);
   }
   return out;
 }

@@ -20,7 +20,9 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RESERVED_COLUMN_NAMES, StoreSpec } from '@rayspec/spec';
+import { getTableColumns } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
+import { buildProductTables } from './build-product-tables.js';
 import { generateProductSchema, INJECTED_COLUMN_NAMES } from './generate-product-schema.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -46,6 +48,9 @@ const REPRESENTATIVE = [
       { name: 'active', type: 'boolean' },
       { name: 'metadata', type: 'jsonb', nullable: true },
       { name: 'due_at', type: 'timestamp', nullable: true },
+      // Appended (not spliced) so every existing column index in the flip tests below still points
+      // at the column its comment names.
+      { name: 'bytes_total', type: 'bigint' },
     ],
   }),
   store({
@@ -83,6 +88,45 @@ describe('generator golden', () => {
     flipped[0].columns[3].type = 'text'; // priority: integer -> text
     expect(generateProductSchema(flipped)).not.toBe(golden);
     expect(generateProductSchema(flipped)).toContain("priority: text('priority')");
+  });
+
+  it('an integer → bigint flip emits the 64-bit builder WITH its mode (the mode is committed source)', () => {
+    const golden = generateProductSchema(REPRESENTATIVE);
+    const flipped = structuredClone(REPRESENTATIVE);
+    flipped[0].columns[3].type = 'bigint'; // priority: integer -> bigint
+    const out = generateProductSchema(flipped);
+    expect(out).not.toBe(golden);
+    // `{ mode: 'bigint' }` is NOT decoration: the `number` mode maps int8 through `Number(value)`
+    // inside the ORM, upstream of every chokepoint this platform owns, so a value past 2^53-1 would
+    // be rounded before any guard could see it. This is the one place that choice is pinned in
+    // COMMITTED generated source rather than only in runtime behaviour.
+    expect(out).toContain("priority: bigint('priority', { mode: 'bigint' })");
+    expect(out).not.toContain("mode: 'number'");
+  });
+
+  it('META: the runtime twin and the committed source agree on the bigint drizzle MODE', () => {
+    // The mode is baked into COMMITTED product source by `DRIZZLE_BUILDER` and into the RUNTIME twin
+    // by `build-product-tables.ts` `businessBuilder`. Nothing else pins the two together: the
+    // three-way twin pin in product-pipeline.test.ts compares `getSQLType()` + nullability, and BOTH
+    // drizzle modes report `getSQLType() === 'bigint'` (asserted below), so that test structurally
+    // cannot see a divergence. `columnType` can — `{ mode: 'bigint' }` is PgBigInt64, `{ mode:
+    // 'number' }` is PgBigInt53 — and the two halves differing is not cosmetic: a runtime column
+    // built in `number` mode maps int8 through `Number(value)` INSIDE the ORM, so a stored value past
+    // 2^53-1 arrives already rounded and the read-side range guard has nothing left to detect.
+    // Flipping EITHER half alone turns this red, in the package that owns both symbols.
+    expect(generateProductSchema(REPRESENTATIVE)).toContain(
+      "bytesTotal: bigint('bytes_total', { mode: 'bigint' })",
+    );
+    const table = buildProductTables(REPRESENTATIVE).get('projects');
+    if (!table) throw new Error('no projects table in the representative set');
+    const cols = getTableColumns(table) as Record<
+      string,
+      { columnType: string; getSQLType(): string }
+    >;
+    expect(cols.bytesTotal?.columnType).toBe('PgBigInt64');
+    // …and the reason `columnType` is the assertion: the SQL type carries NO information about the
+    // mode, so asserting it would be the vacuous version of this test.
+    expect(cols.bytesTotal?.getSQLType()).toBe('bigint');
   });
 
   it('a NULLABLE flip changes the output', () => {
@@ -171,11 +215,11 @@ describe('generator injection invariants', () => {
   });
 
   it('imports only the pg-core builders actually used (no unused import)', () => {
-    // REPRESENTATIVE uses text/uuid/timestamp/integer/boolean/jsonb -> all six + pgTable, plus
-    // `uniqueIndex` for the tenant-scoped compound unique on projects.slug. The full set
+    // REPRESENTATIVE uses text/uuid/timestamp/integer/bigint/boolean/jsonb -> all seven + pgTable,
+    // plus `uniqueIndex` for the tenant-scoped compound unique on projects.slug. The full set
     // exceeds printWidth (100) so the generator emits the Biome-canonical MULTILINE import.
     expect(out).toContain(
-      "import {\n  boolean,\n  integer,\n  jsonb,\n  pgTable,\n  text,\n  timestamp,\n  uniqueIndex,\n  uuid,\n} from 'drizzle-orm/pg-core';",
+      "import {\n  bigint,\n  boolean,\n  integer,\n  jsonb,\n  pgTable,\n  text,\n  timestamp,\n  uniqueIndex,\n  uuid,\n} from 'drizzle-orm/pg-core';",
     );
     // No unused import: `uniqueIndex` appears (compound unique) and every used builder is present.
     expect(out).toContain('  uniqueIndex,');

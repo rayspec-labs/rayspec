@@ -291,6 +291,14 @@ export function makeStoreHandler(args: {
               .where(where)
               .orderBy(...orderBy)
               .limit(limit)) as Record<string, unknown>[];
+            // SERIALIZE FIRST, mint the pagination headers AFTER. `serializeRow` can THROW (a stored
+            // value outside the range this API represents as a JSON number is refused rather than
+            // rounded), and Hono replays the context's prepared headers onto whatever response
+            // `onError` builds — so setting them first would put `X-Next-Cursor` (which carries the
+            // offending order value verbatim, base64url-encoded) and `X-Result-Truncated` on a 400 that
+            // returned no page at all. A client that follows the cursor before checking the status
+            // would then skip the very page it never received.
+            const body = rows.map((r) => serializeRow(store, r));
             if (rows.length === limit) {
               // The page hit the cap — signal HONESTLY. A ranked full-text-search page (`?__search=`) is
               // ordered by `ts_rank`, NOT a stored order column, so it mints NO keyset cursor (relevance
@@ -302,7 +310,7 @@ export function makeStoreHandler(args: {
                 if (cursor) c.header('X-Next-Cursor', cursor);
               }
             }
-            return c.json(rows.map((r) => serializeRow(store, r)));
+            return c.json(body);
           }
           case 'get': {
             const id = requireUuidId(c);

@@ -53,7 +53,7 @@ the request, and cannot write its result back into a row. It.2 is exactly that l
 Every branch is built on this. An It.0 PRD is DONE after step 6; It.1 adds an agent, It.2 adds the loop.
 
 1. **Model the data.** Each "thing we store" → a `stores[]` entry (one table); each field → a `columns[]`
-   entry with a `ColumnType` (`text | uuid | timestamp | integer | boolean | jsonb`); "optional" →
+   entry with a `ColumnType` (`text | uuid | timestamp | integer | bigint | boolean | jsonb`); "optional" →
    `nullable: true`; "no duplicates" → `unique: true`; a parent/child link → a `foreignKeys[]` entry.
    **NEVER declare the injected columns** (`tenant_id`, `id`, `created_at`, `deleted_at`,
    `retention_days`, `region`, `created_by` — all server-managed). Optional refinements (see the
@@ -855,7 +855,7 @@ frontend: []              # optional — static frontend mounts served alongside
 - name: <safe_identifier>           # /^[a-z_][a-z0-9_]*$/, 1..63 chars (snake_case; no metacharacters).
   columns:                          # REQUIRED, >= 1 — BUSINESS columns only.
     - name: <safe_identifier>
-      type: <ColumnType>            # one of: text | uuid | timestamp | integer | boolean | jsonb
+      type: <ColumnType>            # one of: text | uuid | timestamp | integer | bigint | boolean | jsonb
       nullable: <bool>              # optional, default false
       unique: <bool>                # optional, default false
       enum: [<value>, ...]          # optional — a value whitelist. TEXT COLUMNS ONLY; >= 1 DISTINCT member.
@@ -1162,7 +1162,7 @@ injected column (`id`/`tenant_id`/`created_at`/`deleted_at`/`retention_days`/`re
     { "col": "<snake_col>", "jsonType": "text", "required": true, "nullable": false },
     { "col": "<snake_col>", "jsonType": "text", "required": true, "nullable": false,
       "enumValues": ["ok", "review", "violation"] }   // optional closed set (text columns only)
-    // jsonType ∈ text | uuid | timestamp | integer | boolean | jsonb
+    // jsonType ∈ text | uuid | timestamp | integer | bigint | boolean | jsonb
   ],
   "fixedValues": { "status": "coded" },  // OPTIONAL author CONSTANTS server-stamped ON TOP of the
                                          //   coerced args (a model can never override them); keys are
@@ -1747,7 +1747,7 @@ declaring `input_normalize` without it fails closed at deploy. A `record_input` 
 - name: <safe-ident>                       # the store (table) name.
   description: <string>                     # OPTIONAL.
   columns:                                  # >= 1 BUSINESS column — the backend column vocabulary:
-    - { name: <safe-ident>, type: text | uuid | timestamp | integer | boolean | jsonb, nullable?: bool, unique?: bool }
+    - { name: <safe-ident>, type: text | uuid | timestamp | integer | bigint | boolean | jsonb, nullable?: bool, unique?: bool }
   key: [<column>]                           # REQUIRED — EXACTLY ONE column: the UPSERT conflict/idempotency key
                                             #   (derives `unique: true`; every store_write UPSERTs on it — single-flight).
                                             #   The key column MUST be a declared NON-nullable column

@@ -250,6 +250,7 @@ const PERSIST_COLUMN_COMPAT: Record<ColumnType, ReadonlySet<string>> = {
   uuid: new Set(['string']),
   timestamp: new Set(['string']),
   integer: new Set(['integer', 'number']),
+  bigint: new Set(['integer', 'number']),
   boolean: new Set(['boolean']),
   jsonb: new Set(['object', 'array', 'string', 'number', 'integer', 'boolean']),
 };

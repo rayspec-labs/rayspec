@@ -49,6 +49,14 @@ function seedValues(store: StoreSpec, parentId: string | undefined): Record<stri
       case 'integer':
         row[col.name] = 0;
         break;
+      case 'bigint':
+        // Above int4 max ON PURPOSE, so the seed itself exercises 64-bit width rather than proving
+        // only that a column accepts `0`. NOTE this switch ASSIGNS rather than returns and `scripts/`
+        // sits outside the package tsconfig `include`, so a missing arm here is invisible to both the
+        // compiler's exhaustiveness check and `pnpm typecheck` — the first product spec declaring a
+        // NOT-NULL bigint column would die on a bare `23502` inside the shadow dry-run instead.
+        row[col.name] = 3000000000;
+        break;
       case 'boolean':
         row[col.name] = false;
         break;

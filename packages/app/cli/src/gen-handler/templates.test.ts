@@ -189,6 +189,26 @@ describe('safety properties — every rendered handler', () => {
     expect(persistCode).not.toMatch(/\bnew Pool\b|\bforTenant\b|\bdrizzle\b|\bmakeDb\b/);
   });
 
+  it('a bigint column renders the safe-integer bound (the model arg is an already-rounded JSON number)', () => {
+    const withBigint = renderPersistHandler({
+      ...persistHoles,
+      columns: [
+        ...persistHoles.columns,
+        { col: 'bytes_total', jsonType: 'bigint', required: true, nullable: false },
+      ],
+    } as PersistHandlerHoles);
+    // `Number.isSafeInteger` is exactly the existing `integer` arm's `Number.isInteger` plus the
+    // bound — one identifier changed. It is also the only place this path can still tell the
+    // difference: the model arg arrived as a JSON number that `JSON.parse` already rounded if it
+    // exceeded 2^53-1, so a bare `Number.isInteger` would accept the rounded figure as correct.
+    expect(withBigint).toContain('bytes_total: bigint');
+    expect(withBigint).toMatch(/Number\.isSafeInteger\(val\)/);
+    // A plain JS number is assigned — the number → BigInt conversion happens below, in the HandlerDb
+    // facade, so no generated product source ever contains a BigInt literal.
+    expect(withBigint).not.toContain('BigInt(');
+    expect(withBigint).not.toMatch(/\d+n\b/);
+  });
+
   it('persist FK re-validation is present when declared (server-side, never trusts the model)', () => {
     expect(persistCode).toContain('FK re-validation');
     expect(persistCode).toContain('init.db.select("expense_categories"');

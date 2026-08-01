@@ -31,13 +31,14 @@
  * `validateHoles` rejects any other type). Arrays/floats map to `jsonb` upstream, never a typed
  * scalar array — the renderer never sees them.
  */
-export type ColumnType = 'text' | 'uuid' | 'timestamp' | 'integer' | 'boolean' | 'jsonb';
+export type ColumnType = 'text' | 'uuid' | 'timestamp' | 'integer' | 'bigint' | 'boolean' | 'jsonb';
 
 const COLUMN_TYPES: ReadonlySet<string> = new Set<ColumnType>([
   'text',
   'uuid',
   'timestamp',
   'integer',
+  'bigint',
   'boolean',
   'jsonb',
 ]);
@@ -259,7 +260,7 @@ function assertColumnHole(c: unknown, what: string): asserts c is ColumnHole {
   }
   if (typeof o.jsonType !== 'string' || !COLUMN_TYPES.has(o.jsonType)) {
     throw new HolesError(
-      `${what}.jsonType must be one of text|uuid|timestamp|integer|boolean|jsonb, got ` +
+      `${what}.jsonType must be one of text|uuid|timestamp|integer|bigint|boolean|jsonb, got ` +
         JSON.stringify(o.jsonType),
     );
   }

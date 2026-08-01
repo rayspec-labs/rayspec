@@ -75,7 +75,7 @@ stores:
 ```
 
 Column types are a small, closed vocabulary: `text`, `uuid`, `timestamp`,
-`integer`, `boolean`, and `jsonb`. Store and column names are validated as safe
+`integer`, `bigint`, `boolean`, and `jsonb`. Store and column names are validated as safe
 identifiers, so a name can never smuggle SQL into a generated statement. A store
 may declare a child→parent foreign key to another store. From a store the platform
 generates the Drizzle schema and the migration, which is diffed and passed through a

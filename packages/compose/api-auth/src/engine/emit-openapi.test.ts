@@ -45,6 +45,7 @@ function richSpec(): RaySpec {
           { name: 'title', type: 'text' },
           { name: 'note', type: 'text', nullable: true },
           { name: 'count', type: 'integer' },
+          { name: 'bytes_total', type: 'bigint' },
           { name: 'active', type: 'boolean' },
         ],
       },
@@ -225,6 +226,21 @@ describe('buildDeclaredRoutesOpenApi — product-agnostic emission', () => {
     expect(props).toContain('title');
     expect(props).toContain('count');
     expect(props).toContain('active');
+    // A `bigint` column is a bounded JSON integer on BOTH sides of the wire — the request body it
+    // documents must state the same range the response schema does, or one of the two over-claims.
+    // (The body shape keys on the camelCase twin; the response row keys on the AUTHOR's snake name.)
+    expect(schema.properties.bytesTotal).toMatchObject({
+      type: 'integer',
+      minimum: Number.MIN_SAFE_INTEGER,
+      maximum: Number.MAX_SAFE_INTEGER,
+    });
+    const rowSchema = doc.paths['/widgets/{id}'].get.responses['200']?.content?.['application/json']
+      .schema as { properties: Record<string, unknown> };
+    expect(rowSchema.properties.bytes_total).toEqual({
+      type: 'integer',
+      minimum: Number.MIN_SAFE_INTEGER,
+      maximum: Number.MAX_SAFE_INTEGER,
+    });
     // The injected/server-controlled columns are NEVER client-settable → absent from the request body.
     expect(props).not.toContain('tenant_id');
     expect(props).not.toContain('id');
@@ -316,6 +332,14 @@ describe('buildDeclaredRoutesOpenApi — product-agnostic emission', () => {
     // Typed filter schemas mirror the column type (integer/boolean stay typed, not string).
     expect(byName.get('count')?.schema).toMatchObject({ type: 'integer' });
     expect(byName.get('active')?.schema).toMatchObject({ type: 'boolean' });
+    // A `bigint` column IS filterable, and the document states the range the RUNTIME actually serves:
+    // the filter coercion refuses a value beyond ±(2^53-1), so an unbounded `{type:'integer'}` here
+    // would advertise a 64-bit query surface the validator does not honour.
+    expect(byName.get('bytes_total')?.schema).toEqual({
+      type: 'integer',
+      minimum: Number.MIN_SAFE_INTEGER,
+      maximum: Number.MAX_SAFE_INTEGER,
+    });
     // Every list query param is OPTIONAL.
     for (const p of params) expect(p.required ?? false).toBe(false);
   });

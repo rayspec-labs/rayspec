@@ -21,6 +21,7 @@ import { StoreSpec } from '@rayspec/spec';
 import postgres from 'postgres';
 import { describe, expect, it } from 'vitest';
 import { diffProductStores } from './diff-product-stores.js';
+import { detectDrift, type QueryFn } from './generated/drift-detect.js';
 import { emitStoreSql, type StoreConflictKeys } from './generated/generate-product-sql.js';
 
 /** Parse a raw store object through the REAL Zod grammar so defaults (nullable/unique/onDelete) apply. */
@@ -154,6 +155,67 @@ describe.skipIf(!baseUrl)(
         );
         expect(rows.length).toBe(1);
         expect((rows[0] as { indisunique: boolean }).indisunique).toBe(true);
+      });
+      scenariosRan++;
+    }, 60_000);
+
+    it('an integer → bigint change APPLIES, preserves the stored value, and lifts the int4 ceiling', async () => {
+      const before = [
+        store({ name: 'usage_totals', columns: [{ name: 'bytes_total', type: 'integer' }] }),
+      ];
+      const after = [
+        store({ name: 'usage_totals', columns: [{ name: 'bytes_total', type: 'bigint' }] }),
+      ];
+      const TENANT = '00000000-0000-4000-8000-0000000000c3';
+      await withMaterializedOld(before, async (sql) => {
+        await sql.unsafe(`INSERT INTO orgs (id, name) VALUES ($1, 'A')`, [TENANT]);
+        await sql.unsafe(
+          `INSERT INTO usage_totals (tenant_id, bytes_total) VALUES ($1, 2147483647)`,
+          [TENANT],
+        );
+        // BEFORE the ALTER the column is int4 and a 64-bit figure is rejected outright — this is the
+        // reported defect asserted as a passing arm, and it is what makes the after-state meaningful.
+        let beforeState: string | undefined;
+        try {
+          await sql.unsafe(
+            `INSERT INTO usage_totals (tenant_id, bytes_total) VALUES ($1, 3000000000)`,
+            [TENANT],
+          );
+        } catch (e) {
+          beforeState = (e as { code?: string }).code;
+        }
+        expect(beforeState).toBe('22003'); // numeric_value_out_of_range
+
+        const r = diffProductStores(before, after);
+        for (const stmt of r.statements) await sql.unsafe(stmt);
+
+        const dataType = (await sql.unsafe(
+          `SELECT data_type FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'usage_totals' AND column_name = 'bytes_total'`,
+        )) as unknown as Array<{ data_type: string }>;
+        expect(dataType[0]?.data_type).toBe('bigint');
+
+        // Data preserved exactly (the rewrite is data-safe; the cost is the lock, not the values) …
+        const kept = (await sql.unsafe(
+          `SELECT bytes_total::text AS v FROM usage_totals`,
+        )) as unknown as Array<{ v: string }>;
+        expect(kept.map((k) => k.v)).toEqual(['2147483647']);
+        // … and the ceiling is genuinely gone.
+        await sql.unsafe(
+          `INSERT INTO usage_totals (tenant_id, bytes_total) VALUES ($1, 3000000000)`,
+          [TENANT],
+        );
+        const wide = (await sql.unsafe(
+          `SELECT bytes_total::text AS v FROM usage_totals WHERE bytes_total > 2147483647`,
+        )) as unknown as Array<{ v: string }>;
+        expect(wide.map((w) => w.v)).toEqual(['3000000000']);
+
+        // Drift stays QUIET over the migrated column: EXPECTED_DATA_TYPE.bigint must be the
+        // normalized information_schema spelling, or every deployment carrying the column reports
+        // permanent phantom drift. Mapping it to 'integer' turns this arm RED with a column_type finding.
+        const queryFn: QueryFn = async (text, params) =>
+          (await sql.unsafe(text, params as never[])) as unknown as Record<string, unknown>[];
+        expect(await detectDrift(after, 'public', queryFn)).toEqual([]);
       });
       scenariosRan++;
     }, 60_000);
@@ -463,7 +525,7 @@ describe.skipIf(!baseUrl)(
 describe('diffProductStores DB apply — ran-guard (the apply proofs must not silently skip in CI)', () => {
   it('the apply scenarios ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (dbRequired) {
-      expect(scenariosRan).toBe(8);
+      expect(scenariosRan).toBe(9);
     } else {
       expect(dbRequired).toBe(false);
     }

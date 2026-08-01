@@ -22,6 +22,7 @@ const STORES: StoreSpec[] = [
       { name: 'state', type: 'text', nullable: false, unique: false },
       { name: 'ref_code', type: 'text', nullable: true, unique: false },
       { name: 'qty', type: 'integer', nullable: false, unique: false },
+      { name: 'bytes_total', type: 'bigint', nullable: false, unique: false },
       { name: 'rush', type: 'boolean', nullable: false, unique: false },
       { name: 'payload', type: 'jsonb', nullable: true, unique: false },
     ],
@@ -121,6 +122,30 @@ describe('a read with no declared `order_by` takes the facade default (`id asc`)
       { order_id: 'o1' },
     );
     expect((res.body as Record<string, unknown>).state).toBe('first'); // ord-a, not the seeded first
+  });
+
+  it('a bigint column above the int4 ceiling reaches the DTO as an exact JSON number', async () => {
+    // The read surface hands the interpreter what the store facade produces: a plain number (the
+    // facade normalizes the driver's BigInt and refuses anything it cannot represent). If the leaf
+    // ever saw a raw BigInt, `matchesLeafType('integer')` would reject it and `typedLeaf` would
+    // substitute the default — the DTO would silently read 0 with no error raised anywhere.
+    const surface = new FakeReadSurface(STORES);
+    surface.seed(TENANT, 'orders', {
+      id: 'ord-a',
+      order_id: 'o1',
+      state: 'open',
+      qty: 1,
+      bytes_total: 3000000000,
+      rush: false,
+    });
+    const res = await run(
+      singleView({
+        bytes_total: { kind: 'column', column: 'bytes_total', type: 'integer', default: 0 },
+      }),
+      surface,
+      { order_id: 'o1' },
+    );
+    expect((res.body as Record<string, unknown>).bytes_total).toBe(3000000000);
   });
 
   it('a `collect` view with no `order_by` collects in `id` order', async () => {

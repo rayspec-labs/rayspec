@@ -154,6 +154,18 @@ const ticketsStore: StoreSpec = {
   foreignKeys: [],
 };
 
+// BIGINT fixture — a 64-bit column. The facade is the OTHER write chokepoint (beside the HTTP body
+// validator) and the ONLY read chokepoint for handlers, the workflow `store_read` node, and the
+// declarative views interpreter, so the JSON-boundary rule has to hold here too: a value crosses as a
+// plain JS number while |v| <= Number.MAX_SAFE_INTEGER, and beyond that it is refused rather than
+// rounded. On `main` a BigInt write does not even reach the driver — `assertValidValue` classifies it
+// as a forbidden non-data value (SF-1) with a misleading SQL-injection message.
+const usageStore: StoreSpec = {
+  name: 'usage_totals',
+  columns: [{ name: 'bytes_total', type: 'bigint', nullable: false, unique: false }],
+  foreignKeys: [],
+};
+
 /** Every PRODUCT store this suite creates in the isolated schema, paired with its business columns. */
 const productStores = [
   meetingsStore,
@@ -164,6 +176,7 @@ const productStores = [
   notesStore,
   docsStore,
   ticketsStore,
+  usageStore,
 ];
 
 /**
@@ -256,6 +269,13 @@ function buildFacadeSchemaSql(): string {
         priority text,
         ${after}
       );
+      -- BIGINT fixture: a real int8 column, so the driver hands the facade a value the platform must
+      -- either represent exactly or refuse.
+      CREATE TABLE usage_totals (
+        ${before},
+        bytes_total bigint NOT NULL,
+        ${after}
+      );
       INSERT INTO orgs (id, name) VALUES ('${TENANT_A}', 'A'), ('${TENANT_B}', 'B');
     `;
 }
@@ -333,6 +353,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
       notesStore,
       docsStore,
       ticketsStore,
+      usageStore,
     ]);
     unregister = registerScopedTables([...productTables.values()]);
   });
@@ -344,7 +365,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
 
   beforeEach(async () => {
     await db.$client.unsafe(
-      `SET search_path TO ${SCHEMA}; TRUNCATE meetings, tags, gizmos, pairs, scoped, notes, docs, tickets CASCADE;`,
+      `SET search_path TO ${SCHEMA}; TRUNCATE meetings, tags, gizmos, pairs, scoped, notes, docs, tickets, usage_totals CASCADE;`,
     );
   });
 
@@ -1558,6 +1579,95 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     // free-form text value writes exactly as before (proves the check is opt-in, not global).
     const row = await aDb.insert('meetings', { title: 'anything-goes', completed: false });
     expect(row.title).toBe('anything-goes');
+  });
+
+  it('bigint: a BigInt and a safe-integer number both write; a non-safe number is refused', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // On `main` this FIRST line throws: `typeof 1n` is none of string/number/boolean, a BigInt is not
+    // a Date and not `typeof 'object'`, so it lands in the forbidden-non-data (SF-1) arm with a
+    // SQL-injection message — i.e. the facade cannot write the type at all.
+    const asBig = await aDb.insert('usage_totals', { bytes_total: 3000000000n });
+    expect(asBig.bytes_total).toBe(3000000000);
+    // A plain number is the SDK's "plain serializable rows" shape — it must work too, and it is what
+    // a generated handler emits (no generated product source ever contains a BigInt literal).
+    const asNum = await aDb.insert('usage_totals', { bytes_total: 4000000000 });
+    expect(asNum.bytes_total).toBe(4000000000);
+
+    // The write bound is the SAME boundary the HTTP validator applies, at the other write chokepoint:
+    // the platform must never write through one path what a read on another is then obliged to refuse.
+    await expect(
+      aDb.insert('usage_totals', { bytes_total: 9007199254740993n }),
+    ).rejects.toBeInstanceOf(StoreInputError);
+    await expect(aDb.insert('usage_totals', { bytes_total: 1.5 })).rejects.toBeInstanceOf(
+      StoreInputError,
+    );
+  });
+
+  it('bigint: a STRING is refused BEFORE the driver, so no row is committed', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // Without a TOTAL bigint arm the write bound is bypassable by a string — and a string is the
+    // normal shape a 64-bit value takes when it travels as JSON, so the workflow store_write node
+    // hands one straight through from an {event:}/{artifact:} source. postgres.js `inferType` returns
+    // OID 0 for a string (an UNTYPED parameter), PostgreSQL resolves that to the int8 column and
+    // parses it with `int8in`, and drizzle's PgBigInt64 declares no `mapToDriverValue` — so the value
+    // would be stored EXACTLY. `integer` is not a precedent for allowing it: an int4 column is
+    // NARROWER than the platform bound, so PostgreSQL raises 22003 itself; an int8 column is WIDER,
+    // and the platform is the only thing that can hold the ±9007199254740991 line.
+    await expect(aDb.insert('usage_totals', { bytes_total: '3000000000' })).rejects.toBeInstanceOf(
+      StoreInputError,
+    );
+    // The out-of-range string is the case that matters most. This insert is AUTO-COMMIT, so a value
+    // that slipped past the guard would COMMIT and only then fail when the RETURNING row is
+    // serialized — leaving a committed row that no read on any path can return (every later select
+    // through the facade, the workflow store_read node, the views interpreter and the REST list route
+    // would refuse it), i.e. exactly what this file's own contract forbids.
+    await expect(
+      aDb.insert('usage_totals', { bytes_total: '9007199254740993' }),
+    ).rejects.toBeInstanceOf(StoreInputError);
+    // Refused BEFORE the driver, not after: the table is still empty. This is the half a
+    // rejects.toBeInstanceOf assertion alone would NOT catch, because the read-side guard throws the
+    // same error class on the RETURNING row of a write that already landed.
+    expect(await aDb.select('usage_totals')).toEqual([]);
+  });
+
+  it('bigint: a BigInt aimed at a NON-bigint column is still SF-1, not an unmapped driver fault', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // The accepted-scalar early return for a BigInt is narrowed to a BIGINT column on purpose. Its
+    // range is checked in `coerceForColumn`, and that check fires ONLY for a bigint column — so a
+    // BigInt aimed at any other type would have nothing checking it and would reach the driver, where
+    // a `jsonb` column's mapper is `JSON.stringify` and throws an unmapped `TypeError: Do not know
+    // how to serialize a BigInt`. The api layer maps StoreInputError to 400 and everything else to
+    // 500, so widening the arm would turn a fail-closed 400 on a deny-by-default chokepoint into a
+    // 500. Both of these are 400s here and on `main`.
+    await expect(
+      aDb.insert('meetings', { title: 't', completed: false, metadata: 1n }),
+    ).rejects.toBeInstanceOf(StoreInputError);
+    await expect(aDb.insert('meetings', { title: 1n, completed: false })).rejects.toBeInstanceOf(
+      StoreInputError,
+    );
+  });
+
+  it('bigint: a select hands back a plain NUMBER, and refuses a row seeded past the bound', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    await aDb.insert('usage_totals', { bytes_total: 9007199254740991n });
+    const rows = await aDb.select('usage_totals');
+    // NOT a BigInt: a handler's JSON response and the workflow journal write both throw on one
+    // (`JSON.stringify` cannot serialize a BigInt), and the views interpreter's `matchesLeafType`
+    // ('integer' ⇒ typeof 'number') would reject it and silently substitute the leaf default.
+    expect(typeof rows[0]?.bytes_total).toBe('number');
+    expect(rows[0]?.bytes_total).toBe(9007199254740991);
+
+    // "Arrived by another route": a hand-written migration, a direct SQL write, or a column that was
+    // `integer` before a reviewed type change. The literal stays in the SQL text — putting it through
+    // a JS number would round it before it reached the column.
+    await db.$client.unsafe(
+      `SET search_path TO ${SCHEMA}; UPDATE usage_totals SET bytes_total = 9007199254740993`,
+    );
+    await expect(aDb.select('usage_totals')).rejects.toBeInstanceOf(StoreInputError);
   });
 });
 

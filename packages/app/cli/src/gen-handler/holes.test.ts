@@ -160,6 +160,24 @@ describe('validateHoles — fail-closed on malformed hole-sets', () => {
       ),
     ).toThrow(/jsonType/);
   });
+
+  it('accepts `bigint`, and its rejection message names the CURRENT vocabulary', () => {
+    // This local `ColumnType` union is a HAND-MAINTAINED copy with no type link to `@rayspec/spec`,
+    // so widening the grammar produces zero errors here — a bigint persist column would be blocked
+    // with a message quoting a vocabulary the grammar has outgrown. Fail-closed, but wrong.
+    expect(() =>
+      validateHoles(
+        persist({ columns: [{ col: 'x', jsonType: 'bigint', required: true, nullable: false }] }),
+      ),
+    ).not.toThrow();
+    // The enumerated list in the failure text is hand-written and is the edit most likely to be
+    // dropped; if it is, the message lies about what the renderer accepts.
+    expect(() =>
+      validateHoles(
+        persist({ columns: [{ col: 'x', jsonType: 'float', required: true, nullable: false }] }),
+      ),
+    ).toThrow(/bigint/);
+  });
   it('rejects enumValues on a non-text column', () => {
     expect(() =>
       validateHoles(
