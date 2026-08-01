@@ -124,14 +124,16 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
     // Identifying the row takes a deliberate step: a switch is a Bearer-required mutation, so
     // `authenticate` resolved the principal from the JWT and never read the cookie —
     // `principal.sessionId` is ALWAYS undefined here (the same reason the old cookie-rotation branch
-    // was unreachable). A browser nonetheless sends the httpOnly refresh cookie ambiently alongside
-    // the Bearer header, so we resolve it here and write only when it names a LIVE session of THIS
-    // user (the store predicate re-asserts the ownership, so the cookie can never select another
-    // user's row). We do NOT rotate that session — see the handler note above.
+    // was unreachable). A SAME-ORIGIN browser nonetheless sends the httpOnly refresh cookie ambiently
+    // alongside the Bearer header, so we resolve it here and write only when it names a LIVE session
+    // of THIS user (the store predicate re-asserts the ownership, so the cookie can never select
+    // another user's row). We do NOT rotate that session — see the handler note above.
     //
-    // LIMIT: a Bearer-only client (CLI/desktop) sends no cookie, so there is no session row to write
-    // and its selection stays inside the re-minted token exactly as before. That is a no-op, not an
-    // error — the switch must succeed either way.
+    // LIMIT: nothing is persisted for a client whose switch request carries no cookie — a CLI/desktop
+    // client, and equally a CROSS-ORIGIN browser client, which this API serves bearer-only (app.ts
+    // registers the CORS grant WITHOUT credentials, and the refresh cookie is `__Host-…;
+    // SameSite=Strict`, so such a client cannot attach it). Their selection stays inside the re-minted
+    // token exactly as before. That is a no-op, not an error — the switch must succeed either way.
     const refreshSecret = readRefreshCookie(c.req.header('cookie'));
     const session = refreshSecret
       ? await deps.authService.sessionFromSecret(refreshSecret)

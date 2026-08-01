@@ -148,7 +148,8 @@ describe('switch persists the selection on the session row', () => {
     const { token } = await register('cli@example.com');
     const orgId = await createOrg(token, 'CliCo');
 
-    // The CLI/desktop shape: Authorization only. The persistence is a no-op, NOT an error.
+    // The cookie-less shape (a CLI/desktop client, or a cross-origin browser one this API serves
+    // bearer-only): Authorization and nothing else. The persistence is a no-op, NOT an error.
     const res = await switchOrg(token, orgId);
     expect(res.status).toBe(200);
     expect((await res.json()).activeOrgId).toBe(orgId);

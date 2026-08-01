@@ -513,22 +513,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nowhere durable: `sessions.current_org_id` — the column `POST /v1/auth/refresh` reads back as
   `activeOrgId` — was only ever written when a session was created. A browser therefore lost its
   tenant on every refresh, which at an 8-minute access-token TTL means constantly, and again on every
-  login. The token still authenticated, but carrying no org it reached no tenant-scoped route, so the
-  user was signed in and saw none of their data until the client re-ran `GET /v1/orgs` and switched
-  back to where it already was. The switch now persists the choice on the caller's own session row,
-  strictly after the live-membership recheck — so a denied switch still writes nothing, and the
-  refresh that follows a successful one returns the same `activeOrgId` the switch returned. Session
-  rotation carries it onto the replacement row, as it already did for a session created with one.
+  login. The refresh reported `activeOrgId: null`, so a client that wanted to be back where it already
+  was had to re-run `GET /v1/orgs`, work out which of the returned organizations it had been in, and
+  switch into it again. The switch now persists the choice on the caller's own session row, strictly
+  after the live-membership recheck — so a denied switch still writes nothing, and the refresh that
+  follows a successful one returns the same `activeOrgId` the switch returned. Session rotation
+  carries it onto the replacement row, as it already did for a session created with one.
   **`POST /v1/auth/login` additionally pre-fills the org when the user is an active member of exactly
   one live organization**, the single-workspace case where the list-then-switch round trip was pure
   ceremony. Two or more memberships still yield `null`: the server has no basis on which to pick one
-  and does not guess. **One limit is worth knowing, because it is observable:** persisting the choice
-  needs the refresh cookie. A switch is a Bearer-required mutation, and a non-browser client
-  (CLI/desktop) sends only the `Authorization` header — there is no session row to write, so its
-  selection stays inside the re-minted token exactly as before and it must still re-switch after a
-  refresh. The switch succeeds either way; nothing about it fails for want of a cookie. A browser
-  sends the httpOnly refresh cookie alongside the Bearer token automatically, which is the flow this
-  fixes.
+  and does not guess.
+
+  **Two limits are worth stating, because a consumer observes both.** First, what a refreshed token
+  can do is unchanged: `POST /v1/auth/refresh` mints an access token carrying the remembered org but,
+  as it always has, no role claim, so the routes gated on a claim-trusted permission (`org:read`,
+  `apikey:read`, `store:read`, `agent:read`, `agent:run`) still answer `403` on it. What this change
+  removes for a returning browser is the `GET /v1/orgs` discovery step, not the subsequent
+  `POST /v1/orgs/{orgId}/switch` — the client now knows the org id it should switch into. The login
+  path has no such caveat: a sole-org user's login token carries the live role and is usable against
+  tenant routes immediately. Second, persisting the choice requires the switch request to carry the
+  refresh cookie, and a switch is a Bearer-required mutation. A **same-origin** browser sends the
+  httpOnly refresh cookie alongside the Bearer header automatically — that is the flow this fixes.
+  Any client that sends no cookie has no session row to write, so its selection stays inside the
+  re-minted token exactly as before: a CLI or desktop client, and equally a **cross-origin** browser
+  client, which this API serves bearer-only (the CORS grant never enables credentials, and the
+  refresh cookie is `__Host-…; SameSite=Strict`). The switch itself succeeds either way; nothing
+  about it fails for want of a cookie.
 
 - **The documentation no longer calls the tool-dispatch boundary "the defense against
   prompt-injection-style attacks".** It is the defense against ONE of three classes, and saying so
