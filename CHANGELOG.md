@@ -614,6 +614,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cancelling a run on the `pi` backend no longer lets the model request go out anyway.** The
+  adapter linked the run's abort signal to the session's `abort()`, but that call delegates to the
+  agent's abort, which aborts the controller of the run the agent is *currently* executing and does
+  nothing at all when there is none. A cancel that landed before the prompt reached the agent — including
+  one that landed while the session was still being created — was therefore swallowed: the run read
+  back as `cancelled` while the adapter issued the full request against a fresh, never-aborted
+  controller and streamed the entire answer, spending the tokens and holding the provider work open
+  after the caller had already been freed. The adapter now re-checks the run's signal immediately
+  before the SDK call and does not make it on a run that is already over; no new terminal state is
+  invented, because the platform already journals the cancelled run and discards whatever the adapter
+  returns. Cancelling *during* a run is unchanged and already reached the transport: the agent run's
+  controller signal is the one the model request carries, so an in-flight token stream is aborted, not
+  merely abandoned — the adapter's own header comment and the backend table in the spec reference said
+  otherwise and have been corrected. Without a cancel signal nothing changes: the session option bag
+  and the prompt call are byte-identical, and the recorded fixtures and parity suite are untouched. The
+  residual limits — the narrow window that remains, the session's separate compaction controller, a run
+  on another worker process, a host tool already in flight — are now written down in the adapter's
+  README.
+
 - **A tombstoned organization is now absent on the authorization path too.** Whether an org is a
   usable tenant is asked in four places, and three of them treated `orgs.deleted_at` as decisive: the
   org list does not return such an org, a login never resolves one, and a product deployment refuses

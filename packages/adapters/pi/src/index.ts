@@ -32,8 +32,13 @@
  *         ToolCall: { type:'toolCall', id, name, arguments }            (pi-ai:182)
  *         Usage: { input, output, cacheRead, cacheWrite, totalTokens, cost:{total,...} } (pi-ai:189)
  *   - session.abort(): Promise<void>; session.dispose()                (core/agent-session.d.ts:404,258)
- *       `prompt()` takes NO AbortSignal, so `abort()` is the ONLY stop this SDK offers. Cancelling a
- *       run brings that call forward; the model request under it is never handed a signal of its own.
+ *       `prompt()` takes NO AbortSignal (PromptOptions, core/agent-session.d.ts:125-136), so there is
+ *       no per-request stop to hand in and `abort()` is the ONLY stop this SDK offers. It is not a
+ *       weak one once a run is under way: `abort()` delegates to the AGENT's abort, and the agent
+ *       run's controller signal is the one carried into the model request options
+ *       (pi-agent-core agent-loop.js:105,188-193 -> pi-ai providers/openai-responses.js:89-94), so an
+ *       in-flight token stream IS aborted at the transport. What it does NOT reach is a run the agent
+ *       has not started yet — see the CANCELLATION block in run().
  *
  * COMPLIANCE: Pi runs on the OpenAI API key ONLY (founder decision). Never
  * against an Anthropic subscription — the exact pattern Anthropic banned. We only inject the OpenAI key.
@@ -480,12 +485,16 @@ export class PiAdapter implements Backend {
     let errorRetryAfter: number | undefined;
     let messages: PiMessage[] = [];
     let latencyMs = 0;
-    // CANCELLATION (best-effort, and the WEAKEST of the four backends — stated plainly): `prompt()`
-    // takes NO signal, so there is nothing to hand the call itself. What the session DOES expose is
-    // `abort()`, which the teardown below already uses; ending a run brings that call FORWARD instead
-    // of waiting for the prompt to settle. So a cancelled Pi run stops the session early, but the
-    // in-flight model request underneath it is not handed an abort — it ends when the session's own
-    // teardown reaches it. The platform race is what frees the caller either way.
+    // CANCELLATION: `prompt()` takes NO signal, so there is nothing to hand the call itself. What the
+    // session DOES expose is `abort()`, which the teardown below already uses; ending a run brings
+    // that call FORWARD instead of waiting for the prompt to settle. It reaches further than a
+    // teardown does: `session.abort()` delegates to the AGENT's abort, and the agent run's controller
+    // signal is the one the model request options carry (pi-agent-core dist/agent-loop.js:105 and
+    // :188-193 -> @earendil-works/pi-ai dist/providers/openai-responses.js:89-94), so an in-flight
+    // token stream stops at the transport rather than merely being abandoned. What `abort()` does NOT
+    // reach is a run the agent has not started (there is no controller yet) or the session's separate
+    // compaction/branch-summary controllers — README.md records those residual limits. The platform
+    // race frees the caller either way.
     const unlinkCancel = onAbortSignal(ctx.signal, () => {
       // `onAbortSignal`'s contract is that this callback does not throw — it runs inside the abort
       // event dispatch, where an exception is uncatchable by the caller and surfaces as an unhandled
@@ -504,7 +513,16 @@ export class PiAdapter implements Backend {
     // mirroring the Anthropic adapter's finally-abort.
     try {
       try {
-        await session.prompt(promptText);
+        // The stop linked above only reaches a run the agent has ALREADY started: `session.abort()`
+        // delegates to `agent.abort()`, which is `this.activeRun?.abortController.abort()` — a SILENT
+        // no-op when no run is active (pi-agent-core dist/agent.js:196-198) — and every prompt run
+        // gets a FRESH controller (dist/agent.js:306-320). So a cancellation that landed before the
+        // agent's run exists (including one that landed while createAgentSession() was in flight) is
+        // swallowed, and this call would issue the whole model request against a controller nothing
+        // has aborted. Re-check the run's signal here: a run already cancelled never calls the model.
+        // No terminal state is invented for it — run-core stopped waiting the moment the signal fired
+        // and DISCARDS whatever this call returns.
+        if (!ctx.signal?.aborted) await session.prompt(promptText);
       } catch (err) {
         status = 'error';
         const classified = classifyUpstreamError(err);
