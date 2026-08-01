@@ -36,7 +36,7 @@
  *       no per-request stop to hand in and `abort()` is the ONLY stop this SDK offers. It is not a
  *       weak one once a run is under way: `abort()` delegates to the AGENT's abort, and the agent
  *       run's controller signal is the one carried into the model request options
- *       (pi-agent-core agent-loop.js:105,188-193 -> pi-ai providers/openai-responses.js:89-94), so an
+ *       (pi-agent-core agent-loop.js:105,188-193 -> pi-ai providers/openai-responses.js:90-95), so an
  *       in-flight token stream IS aborted at the transport. What it does NOT reach is a run the agent
  *       has not started yet — see the CANCELLATION block in run().
  *
@@ -490,7 +490,7 @@ export class PiAdapter implements Backend {
     // that call FORWARD instead of waiting for the prompt to settle. It reaches further than a
     // teardown does: `session.abort()` delegates to the AGENT's abort, and the agent run's controller
     // signal is the one the model request options carry (pi-agent-core dist/agent-loop.js:105 and
-    // :188-193 -> @earendil-works/pi-ai dist/providers/openai-responses.js:89-94), so an in-flight
+    // :188-193 -> @earendil-works/pi-ai dist/providers/openai-responses.js:90-95), so an in-flight
     // token stream stops at the transport rather than merely being abandoned. What `abort()` does NOT
     // reach is a run the agent has not started (there is no controller yet) or the session's separate
     // compaction/branch-summary controllers — README.md records those residual limits. The platform

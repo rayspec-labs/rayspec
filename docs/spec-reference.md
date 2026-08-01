@@ -840,7 +840,7 @@ How well the work itself stops depends on the backend:
 | `openai`    | The signal is passed into the SDK run call, so the model request is aborted. |
 | `anthropic` | The signal aborts the controller the SDK already holds; the `claude` child is torn down. |
 | `codex`     | The signal aborts the streamed turn and the spawned child; the tool bridge closes. |
-| `pi`        | The prompt call takes no signal, so the session's `abort()` is brought forward; it aborts the agent run's controller, which is the signal the model request carries, so the token stream stops at the transport. A cancel that arrives before the request is issued skips it entirely. |
+| `pi`        | The prompt call takes no signal, so the session's `abort()` is brought forward; it aborts the agent run's controller, which is the signal the model request carries, so the token stream stops at the transport. A cancel that arrives before the adapter issues the prompt call skips the request; a narrow window between that check and the agent registering its run remains, and the adapter's README records it. |
 
 In every case the platform stops waiting immediately; the table is about the provider
 side, which is the part no platform can promise on an SDK's behalf.

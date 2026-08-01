@@ -209,9 +209,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Backend support is uneven and the documentation says so.** `openai` passes the signal into the SDK
   run call, so the model request itself is aborted. `anthropic` and `codex` link it to the
   `AbortController` each already owns, so the streamed turn and the spawned child are torn down at once
-  instead of at the end of the run. `pi` is the weakest: its prompt call takes no signal at all, so
-  cancelling brings the session's own `abort()` forward and the model request underneath is never
-  handed one. In every case the platform stops waiting immediately; that table is about the provider
+  instead of at the end of the run. `pi` has the least direct handle: its prompt call takes no signal
+  at all, so cancelling brings the session's own `abort()` forward, and that reaches the controller the
+  agent created for the run it is executing — which is the controller whose signal the model request
+  underneath carries. In every case the platform stops waiting immediately; that table is about the provider
   side, which no platform can promise on an SDK's behalf. A run nobody cancels is unaffected throughout:
   the signal is never aborted, nothing that shapes a request to a provider changed, and the pinned
   adapter fixtures are untouched. (The run context now always carries a signal, so an adapter that
@@ -626,12 +627,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invented, because the platform already journals the cancelled run and discards whatever the adapter
   returns. Cancelling *during* a run is unchanged and already reached the transport: the agent run's
   controller signal is the one the model request carries, so an in-flight token stream is aborted, not
-  merely abandoned — the adapter's own header comment and the backend table in the spec reference said
-  otherwise and have been corrected. Without a cancel signal nothing changes: the session option bag
-  and the prompt call are byte-identical, and the recorded fixtures and parity suite are untouched. The
-  residual limits — the narrow window that remains, the session's separate compaction controller, a run
-  on another worker process, a host tool already in flight — are now written down in the adapter's
-  README.
+  merely abandoned — the adapter's own header comment, the backend table in the spec reference and the
+  note above in this file said otherwise and have been corrected. Nothing changes on a run nobody
+  cancels: the session option bag and the prompt call are byte-identical whether the run context
+  carries a signal or not, both pinned by tests, and the recorded fixtures and parity suite are
+  untouched. The residual limits — the narrow window that remains and why it is a choice rather than an
+  SDK constraint, the session's separate compaction controller, a run on another worker process, a host
+  tool already in flight and the `run()` promise that stays pending behind it, and what the adapter
+  returns for a run cancelled before the call — are written down in the adapter's README.
 
 - **A tombstoned organization is now absent on the authorization path too.** Whether an org is a
   usable tenant is asked in four places, and three of them treated `orgs.deleted_at` as decisive: the
