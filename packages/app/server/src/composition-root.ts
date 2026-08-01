@@ -287,6 +287,13 @@ export interface BootedServer {
    */
   deployMode: 'auth-only' | 'materialized' | 'mounted' | 'updated';
   /**
+   * A product boot: the org id this deployment is bound to, AS THE DATABASE STORES IT (an additive
+   * ops signal; absent on an auth-only boot). It is resolved from `RAYSPEC_PRODUCT_TENANT_ID` rather
+   * than copied from it, because every runtime tenant comparison is a string comparison against a
+   * server-derived tenant — see `resolveLiveTenantOrgId`.
+   */
+  productTenantId?: string;
+  /**
    * The UPDATE flow: the REPORT-ONLY drift findings `deploy()` computed post-migrate,
    * surfaced so the wrapper/tests can assert the reconciled end-state. EMPTY on every SUCCESSFUL boot:
    * a mount/materialize boot only proceeds on a non-drifted schema (so its post-deploy drift is []),
@@ -1377,11 +1384,32 @@ export async function assertCronTenantBootable(db: Db, cronTenantId: string): Pr
  * start firing.
  */
 export async function tenantOrgExists(db: Db, tenantId: string): Promise<boolean> {
+  return (await resolveLiveTenantOrgId(db, tenantId)) !== undefined;
+}
+
+/**
+ * The same question, answered with the org id AS THE DATABASE STORES IT — `undefined` when no live org
+ * matches. `tenantOrgExists` is this predicate read as a boolean, so there is still ONE query.
+ *
+ * WHY the stored form matters, and not just the answer: `orgs.id` is a `uuid` column, so Postgres
+ * compares `$1` in uuid space and an id supplied in any letter case matches. It then hands the value
+ * back CANONICALLY (lower-case). Downstream, a bound deployment tenant is compared as a STRING against
+ * a tenant the server derived from that same column — `event.tenant_id !== boundTenant` in the
+ * capability sinks, `reqTenant !== tenantId` on the reprocess seam. A caller that binds the operator's
+ * raw spelling would therefore pass every uuid-space check at startup and then mismatch every
+ * server-derived tenant at runtime: on macOS/BSD `uuidgen` prints upper case, so the recommended way
+ * to mint an id produced exactly that. Binding what this returns keeps the two spaces from drifting —
+ * the deployment is bound to the org as the database knows it.
+ */
+export async function resolveLiveTenantOrgId(
+  db: Db,
+  tenantId: string,
+): Promise<string | undefined> {
   const rows = (await db.$client.unsafe(
-    'SELECT 1 FROM orgs WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
+    'SELECT id::text AS id FROM orgs WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
     [tenantId],
-  )) as unknown as unknown[];
-  return rows.length > 0;
+  )) as unknown as { id: string }[];
+  return rows[0]?.id;
 }
 
 /**
@@ -1547,6 +1575,8 @@ export async function assembleServer(
   let declaredCronTriggers: BootedServer['declaredCronTriggers'] = [];
   // the product-schema boot mode (auth-only until a spec deploy sets it to materialized/mounted).
   let deployMode: BootedServer['deployMode'] = 'auth-only';
+  // A product boot resolves the bound org from the database; an auth-only boot binds none.
+  let productTenantId: BootedServer['productTenantId'];
   // The report-only drift findings (empty on every successful boot — the backend
   // and the product deploy paths both populate it; a non-empty update-mode drift fails closed
   // inside deployDeclaredSpec / deployProductYamlSpec before we reach here).
@@ -1596,6 +1626,7 @@ export async function assembleServer(
     declaredAgents = deployed.declaredAgents;
     declaredCronTriggers = deployed.declaredCronTriggers;
     deployMode = deployed.deployMode;
+    productTenantId = deployed.productTenantId;
     // Surface the Product-YAML boot's report-only drift (empty on a successful mount/
     // materialize/update boot; a residual env-driven UPDATE drift fails closed INSIDE
     // deployProductYamlSpec before returning). Mount/materialize stays [] — byte-identical observable.
@@ -1678,6 +1709,7 @@ export async function assembleServer(
     declaredAgents,
     declaredCronTriggers,
     deployMode,
+    ...(productTenantId ? { productTenantId } : {}),
     drift,
     ...(fireCronNow ? { fireCronNow } : {}),
     ...(runCleanupNow ? { runCleanupNow } : {}),

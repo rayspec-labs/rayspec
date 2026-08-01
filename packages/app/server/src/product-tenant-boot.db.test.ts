@@ -35,6 +35,7 @@ import {
   type BootedServer,
   loadServerConfig,
 } from './composition-root.js';
+import { assertProductTenantBootable } from './product-boot.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -170,8 +171,37 @@ describe.skipIf(!baseUrl)('Product-YAML boot — the deployment-tenant gate', ()
     armsRan += 1;
   }, 120_000);
 
-  it('LIVE: the same spec with a real org id boots unchanged (materialized + routes mounted)', async () => {
-    server = await boot(LIVE_TENANT);
+  // The gate answers in uuid space — the shape regex is case-insensitive and `orgs.id` is a `uuid`
+  // column — while every runtime tenant comparison is a STRING comparison against a tenant the server
+  // read back from that same column (`event.tenant_id !== boundTenant` in the capability sinks,
+  // `reqTenant !== tenantId` on the reprocess seam). So a boot that bound the configured spelling
+  // would pass this gate and then refuse every event: exactly the silent misconfiguration the gate
+  // exists to end, one layer down. Not hypothetical — `uuidgen` prints upper case on macOS/BSD, which
+  // is how the documented recipe mints an id.
+  it('CASE: an id that differs only in letter case binds the form the database stores', async () => {
+    const shouted = LIVE_TENANT.toUpperCase();
+    expect(shouted).not.toBe(LIVE_TENANT); // the fixture id has hex letters, so the case differs
+
+    // The gate resolves rather than echoes.
+    const probe = makeDb(dbUrl);
+    try {
+      await expect(assertProductTenantBootable(probe, shouted)).resolves.toBe(LIVE_TENANT);
+    } finally {
+      await probe.$client.end();
+    }
+
+    // That the BOOT binds what the gate resolved is pinned by the LIVE arm below, which boots with
+    // this same shouted spelling (one boot per process: the durable executor registers its workflows
+    // process-globally, so a second `assembleServer` here would collide on the registration).
+    armsRan += 1;
+  }, 120_000);
+
+  it('LIVE: a real org id boots unchanged, bound to the form the database stores', async () => {
+    // Booted with the SHOUTED spelling deliberately: it exercises the ordinary boot AND pins that the
+    // deployment binds the resolved id rather than the configured one — the value every runtime tenant
+    // comparison is made against.
+    server = await boot(LIVE_TENANT.toUpperCase());
+    expect(server.productTenantId).toBe(LIVE_TENANT);
     expect(server.deployMode).toBe('materialized');
     const routes = server.declaredRoutes.map((r) => `${r.method} ${r.path}`);
     expect(routes).toContain('POST /records/{record_id}/submit');
@@ -186,7 +216,7 @@ describe.skipIf(!baseUrl)('Product-YAML boot — the deployment-tenant gate', ()
 // otherwise SILENTLY SKIP the whole tenant-gate proof and read GREEN.
 describe('product-tenant boot gate — ran-guard', () => {
   it('the gate arms actually ran under a required run', () => {
-    if (dbRequired) expect(armsRan).toBe(4);
+    if (dbRequired) expect(armsRan).toBe(5);
     else expect(true).toBe(true);
   });
 });
