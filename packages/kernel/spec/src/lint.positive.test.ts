@@ -7,6 +7,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import type { RaySpec } from './grammar.js';
+import { lintSpec } from './lint.js';
 import { parseSpec } from './parse.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -407,5 +409,143 @@ api:
     // is additive and an existing spec's action shape is unchanged.
     expect(res.value.api[0]?.action).toEqual({ kind: 'agent', agent: 'helper' });
     expect('persistTo' in (res.value.api[0]?.action ?? {})).toBe(false);
+  });
+});
+
+/**
+ * `api[].rateLimit` — the OPT-IN per-route request budget.
+ *
+ * Two halves are pinned here. The GRAMMAR half: the field is optional, `.strict()` on both levels, and
+ * an absent field leaves NO key on the parsed route — the whole backward-compatibility guarantee rests
+ * on that, so it is asserted rather than assumed. The LINT half: the positive-integer rule restated in
+ * `lintSpec` for CODE-BUILT specs, which never pass through the Zod parse at all. Those documents are a
+ * real path in this repository, and for them the lint pass is the only check standing between a bad
+ * number and a live throttle policy.
+ */
+describe('api[].rateLimit — the opt-in per-route budget', () => {
+  const withLimit = (limit: string) => `
+version: '1.0'
+metadata:
+  name: budgeted
+stores:
+  - name: notes
+    columns:
+      - { name: title, type: text }
+api:
+  - method: GET
+    path: /notes
+    action: { kind: store, store: notes, op: list }
+    rateLimit: ${limit}
+`;
+
+  it('accepts a declared rateLimit and parses both members through', () => {
+    const res = parseSpec(withLimit('{ windowSeconds: 60, max: 30 }'));
+    if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.value.api[0]?.rateLimit).toEqual({ windowSeconds: 60, max: 30 });
+  });
+
+  it('leaves NO rateLimit key on a route that does not declare one (no default is stamped on)', () => {
+    const res = parseSpec(`
+version: '1.0'
+metadata:
+  name: unbudgeted
+stores:
+  - name: notes
+    columns:
+      - { name: title, type: text }
+api:
+  - { method: GET, path: '/notes', action: { kind: store, store: notes, op: list } }
+`);
+    if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
+    const route = res.value.api[0];
+    expect(route?.rateLimit).toBeUndefined();
+    // Not merely undefined — the key is ABSENT. A `.default()` would have added it, which is exactly
+    // what would turn the frozen golden parse baseline red and destroy the absent-field guarantee.
+    expect(Object.hasOwn(route as object, 'rateLimit')).toBe(false);
+  });
+
+  it('rejects a non-positive / non-integer member at parse time (schema_violation)', () => {
+    for (const limit of [
+      '{ windowSeconds: 0, max: 5 }',
+      '{ windowSeconds: 60, max: 0 }',
+      '{ windowSeconds: -1, max: 5 }',
+      '{ windowSeconds: 1.5, max: 5 }',
+    ]) {
+      const res = parseSpec(withLimit(limit));
+      expect(res.ok, `expected ${limit} to be rejected`).toBe(false);
+      if (res.ok) continue;
+      expect(res.errors.map((e) => e.code)).toContain('schema_violation');
+    }
+  });
+
+  it('rejects an unknown key inside rateLimit (strict, like every other section)', () => {
+    const res = parseSpec(withLimit('{ windowSeconds: 60, max: 5, burst: 2 }'));
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors.map((e) => e.code)).toContain('unknown_field');
+  });
+
+  it('rejects a partial rateLimit — both members are required once the field is present', () => {
+    const res = parseSpec(withLimit('{ windowSeconds: 60 }'));
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors.map((e) => e.code)).toContain('schema_violation');
+  });
+
+  // ---- the CODE-BUILT path: lintSpec, which the Zod parse never sees ----------------------------
+  const codeBuiltSpec = (rateLimit: { windowSeconds: number; max: number }): RaySpec =>
+    ({
+      version: '1.0',
+      metadata: { name: 'code-built', description: 'built in code, never parsed' },
+      stores: [],
+      api: [
+        { method: 'GET', path: '/notes', action: { kind: 'handler', handler: 'h' }, rateLimit },
+      ],
+      agents: [],
+      tooling: [],
+      triggers: [],
+      handlers: [{ id: 'h', module: 'h.ts', export: 'h', kind: 'route' }],
+      extensions: [],
+    }) as unknown as RaySpec;
+
+  it.each([
+    ['zero', 0],
+    ['negative', -30],
+    ['fractional', 0.5],
+    ['NaN', Number.NaN],
+    ['an unsafe integer', 1e300],
+  ])('reports schema_violation at api[0].rateLimit.windowSeconds for a %s window', (_l, value) => {
+    const errors = lintSpec(codeBuiltSpec({ windowSeconds: value, max: 5 }));
+    const violation = errors.find((e) => e.path === 'api[0].rateLimit.windowSeconds');
+    expect(violation).toBeDefined();
+    expect(violation?.code).toBe('schema_violation');
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -5],
+    ['fractional', 2.5],
+    ['NaN', Number.NaN],
+    ['an unsafe integer', 1e300],
+  ])('reports schema_violation at api[0].rateLimit.max for a %s max', (_l, value) => {
+    const errors = lintSpec(codeBuiltSpec({ windowSeconds: 60, max: value }));
+    const violation = errors.find((e) => e.path === 'api[0].rateLimit.max');
+    expect(violation).toBeDefined();
+    expect(violation?.code).toBe('schema_violation');
+  });
+
+  it('reports BOTH members when both are wrong, and NEITHER when both are fine', () => {
+    const both = lintSpec(codeBuiltSpec({ windowSeconds: 0, max: -1 })).filter(
+      (e) => e.path?.startsWith('api[0].rateLimit') === true,
+    );
+    expect(both.map((e) => e.path).sort()).toEqual([
+      'api[0].rateLimit.max',
+      'api[0].rateLimit.windowSeconds',
+    ]);
+    expect(
+      lintSpec(codeBuiltSpec({ windowSeconds: 60, max: 5 })).filter(
+        (e) => e.path?.startsWith('api[0].rateLimit') === true,
+      ),
+    ).toEqual([]);
   });
 });

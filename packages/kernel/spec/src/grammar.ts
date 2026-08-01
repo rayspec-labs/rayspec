@@ -380,9 +380,20 @@ export const ApiRouteSpec = z
     /** Route path (e.g. `/meetings/{id}`); interpreted by the api interpreter. */
     path: z.string().min(1),
     action: RouteAction,
+    /**
+     * OPT-IN per-route request budget, enforced IN ADDITION to the two shared declared-route tiers
+     * and counted per tenant AND principal for this route alone. Absent ⇒ no per-route limit (the
+     * route keeps exactly today's behaviour), which is why this carries NO `.default()`: a default
+     * would stamp a `rateLimit` key onto every parsed route and destroy the absent-field guarantee
+     * this backward compatibility rests on. Both members are whole positive counts — `windowSeconds`
+     * is the window length in seconds and `max` the hits allowed inside it.
+     */
+    rateLimit: z.object({ windowSeconds: z.number().int().positive(), max: z.number().int().positive() }).strict().optional(),
   })
   .strict();
 export type ApiRouteSpec = z.infer<typeof ApiRouteSpec>;
+/** A declared route's per-route request budget — derived from the field so it cannot drift from it. */
+export type ApiRouteRateLimit = NonNullable<ApiRouteSpec['rateLimit']>;
 
 // ---------------------------------------------------------------------------------------
 // triggers[] — independent grammar (parse/register only)

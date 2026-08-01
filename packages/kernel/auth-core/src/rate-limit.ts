@@ -161,14 +161,34 @@ export class RateLimiter {
     this.policies = policies;
   }
 
-  /** True if this (bucket,id) is within its rate budget AND not locked. */
-  check(bucket: string, id: string): { allowed: boolean; retryAfterMs: number } {
+  /**
+   * True if this (bucket,id) is within its rate budget AND not locked.
+   *
+   * `policy` is the OPTIONAL per-call budget a caller carries with the call instead of registering a
+   * bucket up front. When present it is AUTHORITATIVE: it is never merged with a registered policy of
+   * the same bucket name, never registered and never stored — nothing here writes to `this.policies`,
+   * which for a default-constructed limiter IS the module-level `DEFAULT_POLICIES` object BY
+   * REFERENCE, so a write would mutate the shared table every other limiter in the process reads.
+   * An explicit policy also makes the `if (!effective)` fail-open branch below unreachable for that
+   * call, which is the point: a caller that carries its budget cannot be silently unlimited by having
+   * forgotten to register its bucket name.
+   *
+   * The lock short-circuit stays FIRST and is shared by both paths — an explicit budget is a request
+   * ceiling, never a way around the refresh-reuse anti-DoS lock. That sharing is also why the budget
+   * is a parameter here rather than a second method: a parallel method would have to re-implement both
+   * this lock check and the `${bucket}:${id}` key construction, and the two would silently drift.
+   */
+  check(
+    bucket: string,
+    id: string,
+    policy?: RateLimitPolicy,
+  ): { allowed: boolean; retryAfterMs: number } {
     const key = `${bucket}:${id}`;
     if (this.store.isLocked(key)) return { allowed: false, retryAfterMs: REUSE_LOCK_MS };
-    const policy = this.policies[bucket];
-    if (!policy) return { allowed: true, retryAfterMs: 0 };
-    const { count, resetAt } = this.store.hit(key, policy.windowMs);
-    if (count > policy.max)
+    const effective = policy ?? this.policies[bucket];
+    if (!effective) return { allowed: true, retryAfterMs: 0 };
+    const { count, resetAt } = this.store.hit(key, effective.windowMs);
+    if (count > effective.max)
       return { allowed: false, retryAfterMs: Math.max(0, resetAt - Date.now()) };
     return { allowed: true, retryAfterMs: 0 };
   }

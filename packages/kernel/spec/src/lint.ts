@@ -849,6 +849,32 @@ export function lintSpec(spec: RaySpec): SpecError[] {
 
   // api[].action.* -> declared store/agent/handler/stream (handler must be kind 'route').
   spec.api.forEach((route, ri) => {
+    // api[].rateLimit — RESTATE the positive-integer rule the Zod grammar already carries. That is not
+    // redundant here: runtime packages in this repository construct `ApiRouteSpec[]` literals directly
+    // and hand them to the engine without ever going through `parseSpec`, so for those documents this
+    // pass is the ONLY place the numbers are checked before they become a live throttle policy. A zero,
+    // a negative, a fraction, a NaN or a value outside the safe integer range is not a budget: it would
+    // either never throttle or never expire. `Number.isSafeInteger` (not `Number.isInteger`, which
+    // accepts 1e300) is the same guard the engine's `declaredRouteBudget` fails closed on.
+    if (route.rateLimit) {
+      (
+        [
+          ['windowSeconds', route.rateLimit.windowSeconds],
+          ['max', route.rateLimit.max],
+        ] as const
+      ).forEach(([field, value]) => {
+        if (!(Number.isSafeInteger(value) && value > 0)) {
+          errors.push(
+            specError(
+              'schema_violation',
+              `route ${route.method} ${route.path} declares rateLimit.${field} = ${String(value)}, ` +
+                'which must be a whole positive number (a safe integer greater than zero)',
+              `api[${ri}].rateLimit.${field}`,
+            ),
+          );
+        }
+      });
+    }
     const action = route.action;
     if (action.kind === 'store') {
       if (!storeNames.has(action.store)) {

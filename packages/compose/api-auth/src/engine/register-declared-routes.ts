@@ -24,6 +24,17 @@
  *                                          never a silent no-op (a declared stream route that 200s
  *                                          nothing would be a worse outcome than a loud refusal).
  *
+ * CHAIN POSITION of the optional per-route budget (a route that declares `rateLimit`):
+ * `routeRateLimit -> requireAuth -> [per-route budget] -> resolveTenant -> requirePermission ->
+ * handler`. It sits AFTER `requireAuth()` because the budget is keyed on tenant AND principal, and
+ * `requireAuth` is what guarantees a principal exists to key on — before it, every over-budget
+ * anonymous call would land in one shared counter. It sits BEFORE `resolveTenant` and
+ * `requirePermission` because both touch the DATABASE — `resolveTenant` makes a best-effort audit
+ * write on the cross-tenant path, and `requirePermission` does a live membership lookup for a
+ * sensitive permission — and an over-budget caller must cost no DB round trip. The consequence is
+ * worth stating plainly: a call that authenticates but LACKS the permission still spends budget and
+ * then gets its `403`. The throttle bounds load; it does not authorize.
+ *
  * EXHAUSTIVENESS: the action dispatch is an exhaustive if/continue chain terminated by an
  * `assertNever` default — adding a member to the closed `RouteAction` union without a matching arm
  * is a COMPILE error here, so a future route kind can never silently fall through.
@@ -52,7 +63,11 @@ import type { MediaTokenService } from '../media/media-token.js';
 import { mediaAuth, perUserStreamSemaphore } from '../media/playback-middleware.js';
 import { executeAgentRun } from '../routes/runs.js';
 import { makeRouteHandler } from './route-handlers.js';
-import { routeRateLimit } from './route-rate-limit.js';
+import {
+  assertLimiterHonoursExplicitPolicy,
+  declaredRouteBudget,
+  routeRateLimit,
+} from './route-rate-limit.js';
 import { makeStoreHandler } from './store-routes.js';
 import { makeStreamIngestHandler, makeStreamPlaybackHandler } from './stream-routes.js';
 
@@ -84,6 +99,15 @@ function storePermission(op: StoreOp): Permission {
  * `(method[], path[], handler)` overload. The MiddlewareHandler casts bridge the api-auth
  * `{ Variables }` middleware env to Hono's default env — the SAME middleware objects the typed
  * `app.post(...)` calls in runs.ts/orgs.ts already accept.
+ *
+ * `budget` is the OPTIONAL per-route throttle a route that declares `rateLimit` mounts, spliced in
+ * between `m2` (requireAuth) and `m3` (resolveTenant) — the chain position argued in the module
+ * header. It is a REQUIRED, possibly-`undefined` parameter in CHAIN POSITION rather than a trailing
+ * optional one, deliberately: this function is module-private, so widening it costs nothing, and a
+ * required parameter makes the compiler prove that every call site decided about the budget instead
+ * of letting one silently inherit an unthrottled default. The `undefined` branch is LITERALLY today's
+ * registration statement, so a route without a declared limit registers exactly the middleware it
+ * registered before this parameter existed — same count, same objects, same order.
  */
 function registerOn(
   app: OpenAPIHono<AppEnv>,
@@ -91,11 +115,16 @@ function registerOn(
   path: string,
   m1: MiddlewareHandler,
   m2: MiddlewareHandler,
+  budget: MiddlewareHandler | undefined,
   m3: MiddlewareHandler,
   m4: MiddlewareHandler,
   handler: (c: Context<AppEnv>) => Promise<Response>,
 ): void {
-  app.on(method, path, m1, m2, m3, m4, handler as MiddlewareHandler);
+  if (budget === undefined) {
+    app.on(method, path, m1, m2, m3, m4, handler as MiddlewareHandler);
+    return;
+  }
+  app.on(method, path, m1, m2, budget, m3, m4, handler as MiddlewareHandler);
 }
 
 /**
@@ -203,6 +232,12 @@ export function registerDeclaredRoutes(
   const throttle = routeRateLimit(deps);
   const auth = requireAuth();
   const tenant = resolveTenant(deps);
+  // The boot probe below runs LAZILY and at most ONCE, on the first route that declares a `rateLimit`
+  // AND has already survived its own playback + numeric validation. Lazily, so a spec that declares no
+  // per-route limit anywhere never touches the limiter at boot at all; after the per-route validation,
+  // so a limiter problem can never mask the more specific message about a wrong declaration; memoized,
+  // because the answer is a property of the injected limiter, not of the route.
+  let limiterProbed = false;
 
   for (const route of spec.api) {
     // Fail-closed at BOOT: a declared route must never shadow a reserved platform prefix (/v1/*,
@@ -217,6 +252,44 @@ export function registerDeclaredRoutes(
     }
     const honoPath = toHonoPath(route.path);
     const action = route.action;
+
+    // The per-route budget, derived ONCE per route at boot. This sits BEFORE the action dispatch on
+    // purpose: the playback arm registers its own middleware tuple further down and `continue`s, so a
+    // check placed inside the dispatch could be slipped past, and a declared limit that is silently
+    // ignored is the worst outcome available here.
+    let budget: MiddlewareHandler | undefined;
+    if (route.rateLimit) {
+      if (action.kind === 'stream' && action.mode === 'playback') {
+        // Fail-closed at BOOT rather than ignore the declaration. A playback route mounts its OWN
+        // tuple — media-JWT verification plus the per-user concurrent-stream semaphore — and never the
+        // authenticated chain this budget is enforced on. Even if it did, the synthetic media principal
+        // carries no api-key id, so there is no tenant+principal pair to key a counter on.
+        throw new Error(
+          `registerDeclaredRoutes: route ${route.method} ${route.path} is a stream PLAYBACK route and ` +
+            'may not declare a rateLimit. A playback route is authorized by a signed media token and ' +
+            'mounts its own middleware tuple (media-JWT verification + the per-user concurrent-stream ' +
+            'semaphore), never the authenticated chain a per-route budget is enforced on, and its ' +
+            'media principal carries no api-key id — so there is no tenant+principal to count on. It ' +
+            'is bounded by that concurrent-stream cap instead. Declare the rateLimit on the route ' +
+            'that MINTS the playback token. Fail-closed at boot (a silently ignored limit would be ' +
+            'worse than a loud refusal).',
+        );
+      }
+      // Throws fail-closed, naming this route, on any value the Zod grammar would have rejected — the
+      // code-built-spec path that never went through `parseSpec`.
+      const { tiers, policy } = declaredRouteBudget({
+        method: route.method,
+        path: route.path,
+        rateLimit: route.rateLimit,
+      });
+      if (!limiterProbed) {
+        // A per-route budget is UNREGISTERED by design and carried on the call, so a limiter that
+        // ignores the explicit policy would leave every budgeted route silently unlimited. Ask it once.
+        assertLimiterHonoursExplicitPolicy(deps.rateLimiter);
+        limiterProbed = true;
+      }
+      budget = routeRateLimit(deps, tiers, policy);
+    }
 
     if (action.kind === 'store') {
       const store = storeByName.get(action.store);
@@ -251,6 +324,7 @@ export function registerDeclaredRoutes(
         honoPath,
         throttle,
         auth,
+        budget,
         tenant,
         requirePermission(deps, perm),
         handler,
@@ -294,6 +368,7 @@ export function registerDeclaredRoutes(
         honoPath,
         throttle,
         auth,
+        budget,
         tenant,
         requirePermission(deps, 'agent:run'),
         (c) => executeAgentRun(c, deps, agentId, c.req.param(), action.persistTo),
@@ -352,6 +427,7 @@ export function registerDeclaredRoutes(
         honoPath,
         throttle,
         auth,
+        budget,
         tenant,
         requirePermission(deps, perm),
         routeHandler,
@@ -417,6 +493,7 @@ export function registerDeclaredRoutes(
           honoPath,
           throttle,
           auth,
+          budget,
           tenant,
           requirePermission(deps, 'store:write'),
           streamHandler,

@@ -62,19 +62,37 @@ const SCHEMA = 'rayspec_test_declared_route_throttle';
 const SOURCE_MAX = policyMax(DEFAULT_ROUTE_RATE_TIERS.source);
 const PRINCIPAL_MAX = policyMax(DEFAULT_ROUTE_RATE_TIERS.principal);
 
-// A self-contained throwaway backend-profile spec (product-free platform): one store and one
-// declared read route, which is all the throttle needs to be observable.
+// The DECLARED per-route budget the second half of this suite drives. Small enough to exhaust in a
+// handful of calls, and read off the fixture rather than restated, so the two cannot drift.
+const ROUTE_MAX = 3;
+
+// A self-contained throwaway backend-profile spec (product-free platform): one store and four declared
+// read routes — one unbudgeted (the tier fixture), two carrying the SAME small declared budget (so one
+// route's exhaustion can be shown not to touch the other's), and one whose declared budget is far above
+// the shared tier ceiling (so the tier can be shown to still bind).
 const THROTTLE_YAML = `
 version: '1.0'
 metadata:
   name: throttle-backend
-  description: A backend fixture whose one declared route exercises the throttle tiers.
+  description: A backend fixture whose declared routes exercise the throttle tiers and per-route budgets.
 stores:
   - name: pings
     columns:
       - { name: label, type: text }
 api:
   - { method: GET, path: '/pings', action: { kind: store, store: pings, op: list } }
+  - method: GET
+    path: /tight
+    action: { kind: store, store: pings, op: list }
+    rateLimit: { windowSeconds: 60, max: ${ROUTE_MAX} }
+  - method: GET
+    path: /tight-b
+    action: { kind: store, store: pings, op: list }
+    rateLimit: { windowSeconds: 60, max: ${ROUTE_MAX} }
+  - method: GET
+    path: /loose
+    action: { kind: store, store: pings, op: list }
+    rateLimit: { windowSeconds: 60, max: 1000000 }
 `;
 
 /**
@@ -135,12 +153,17 @@ describeDb('declared-route throttling tiers on the validated credential', () => 
     await h.close();
   });
 
-  /** GET the declared route over HTTP from `ip`, optionally presenting `bearer` / an `Origin`. */
-  async function ping(opts: { ip: string; bearer?: string; origin?: string }): Promise<Response> {
+  /** GET a declared route over HTTP from `ip`, optionally presenting `bearer` / an `Origin`. */
+  async function ping(opts: {
+    ip: string;
+    bearer?: string;
+    origin?: string;
+    path?: string;
+  }): Promise<Response> {
     const headers: Record<string, string> = { 'x-forwarded-for': opts.ip };
     if (opts.bearer !== undefined) headers.authorization = `Bearer ${opts.bearer}`;
     if (opts.origin !== undefined) headers.origin = opts.origin;
-    return fetch(`${base}/pings`, { method: 'GET', headers });
+    return fetch(`${base}${opts.path ?? '/pings'}`, { method: 'GET', headers });
   }
 
   /** Register → org → switch: an org-scoped owner token (owner holds `store:read`). */
@@ -299,13 +322,201 @@ describeDb('declared-route throttling tiers on the validated credential', () => 
       expect((await ping({ ip, bearer: secret })).status).toBe(200);
     }
   });
+
+  // -------------------------------------------------------------------------------------------
+  // The DECLARED per-route budget (`api[].rateLimit`) — enforced ON TOP of the two shared tiers.
+  //
+  // Everything below drives a real validated credential over the same real socket, because the two
+  // properties that matter most are only observable end to end: the budget is keyed on tenant AND
+  // principal, and it is enforced only AFTER authentication — a fact with a visible consequence in
+  // both directions (an unauthenticated call spends nothing, an authenticated call that lacks the
+  // permission spends anyway).
+  // -------------------------------------------------------------------------------------------
+
+  /** Register → org → switch → mint: a user token AND an api key for the SAME organization. */
+  async function ownerTokenAndKey(
+    email: string,
+    orgName: string,
+    scopes: string[] = ['store:read'],
+  ): Promise<{ token: string; secret: string }> {
+    const reg = await jsonRequest(h.app, 'POST', '/v1/auth/register', {
+      body: { email, password: 'a-long-enough-password' },
+    });
+    const t0 = (await reg.json()).accessToken as string;
+    const orgRes = await jsonRequest(h.app, 'POST', '/v1/orgs', {
+      body: { name: orgName },
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    const orgId = (await orgRes.json()).id as string;
+    const sw = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/switch`, {
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    const token = (await sw.json()).accessToken as string;
+    const mint = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/api-keys`, {
+      body: { scopes },
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const body = (await mint.json()) as { plaintext?: string };
+    if (!body.plaintext) throw new Error('api-key mint returned no plaintext secret');
+    return { token, secret: body.plaintext };
+  }
+
+  /** One user, TWO organizations: two org-scoped tokens for the SAME principal. */
+  async function twoOrgTokens(
+    email: string,
+    firstOrg: string,
+    secondOrg: string,
+  ): Promise<{ inFirst: string; inSecond: string }> {
+    const reg = await jsonRequest(h.app, 'POST', '/v1/auth/register', {
+      body: { email, password: 'a-long-enough-password' },
+    });
+    const t0 = (await reg.json()).accessToken as string;
+    const tokens: string[] = [];
+    for (const name of [firstOrg, secondOrg]) {
+      const orgRes = await jsonRequest(h.app, 'POST', '/v1/orgs', {
+        body: { name },
+        headers: { authorization: `Bearer ${t0}` },
+      });
+      const orgId = (await orgRes.json()).id as string;
+      const sw = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/switch`, {
+        headers: { authorization: `Bearer ${t0}` },
+      });
+      tokens.push((await sw.json()).accessToken as string);
+    }
+    const [inFirst, inSecond] = tokens;
+    if (!inFirst || !inSecond) throw new Error('expected two org-scoped tokens');
+    return { inFirst, inSecond };
+  }
+
+  it('ENFORCES a declared per-route budget, and refuses with the same 429 shape as a tier', async () => {
+    testsRan++;
+    const { token } = await ownerTokenAndKey('budget-owner@example.test', 'Budget Org');
+    const ip = '203.0.113.70';
+    // The declared allowance is far BELOW the generous tier, so nothing but the route's own budget can
+    // explain a refusal this early — the tier would still permit hundreds of calls.
+    expect(ROUTE_MAX).toBeLessThan(PRINCIPAL_MAX);
+    for (let i = 0; i < ROUTE_MAX; i++) {
+      expect((await ping({ ip, bearer: token, path: '/tight' })).status).toBe(200);
+    }
+    const throttled = await ping({ ip, bearer: token, path: '/tight' });
+    expect(throttled.status).toBe(429);
+    const body = await throttled.json();
+    expect(body.error.code).toBe('RATE_LIMITED');
+    // The retry advice on BOTH channels, exactly as a tiered refusal carries it — the per-route
+    // throttle goes through the SAME refusal path, so its 429 is identical in shape.
+    expect(typeof body.error.details.retryAfterMs).toBe('number');
+    expect(body.error.details.retryAfterMs).toBeGreaterThan(0);
+    const retryAfter = Number(throttled.headers.get('retry-after'));
+    expect(Number.isInteger(retryAfter)).toBe(true);
+    expect(retryAfter).toBeGreaterThanOrEqual(1);
+    expect(retryAfter).toBeLessThanOrEqual(60);
+    // The UNBUDGETED route is untouched: this is a per-route budget, not a per-principal kill switch.
+    expect((await ping({ ip, bearer: token, path: '/pings' })).status).toBe(200);
+  });
+
+  it('spends NO route budget on an unauthenticated call (the budget sits behind requireAuth)', async () => {
+    testsRan++;
+    const ip = '203.0.113.71';
+    // Unauthenticated calls to the budgeted route meet their usual 401 and must not consume it.
+    for (let i = 0; i < SOURCE_MAX; i++) {
+      expect((await ping({ ip, path: '/tight' })).status).toBe(401);
+    }
+    // A validated credential then still finds the FULL declared budget waiting for it.
+    const { token } = await ownerTokenAndKey('budget-401@example.test', 'Budget 401 Org');
+    for (let i = 0; i < ROUTE_MAX; i++) {
+      expect((await ping({ ip, bearer: token, path: '/tight' })).status).toBe(200);
+    }
+    expect((await ping({ ip, bearer: token, path: '/tight' })).status).toBe(429);
+  });
+
+  it('SPENDS route budget on a call that authenticates but lacks the permission', async () => {
+    testsRan++;
+    // The documented consequence of putting the budget before requirePermission (which does a live
+    // membership lookup): an over-budget caller costs no DB round trip, at the price that a 403 costs
+    // budget. The throttle bounds load; it does not authorize.
+    const { secret } = await ownerTokenAndKey('budget-403@example.test', 'Budget 403 Org', [
+      'agent:run',
+    ]);
+    const ip = '203.0.113.72';
+    for (let i = 0; i < ROUTE_MAX; i++) {
+      expect((await ping({ ip, bearer: secret, path: '/tight' })).status).toBe(403);
+    }
+    // Budget spent — the next call is refused BEFORE the permission check runs at all.
+    expect((await ping({ ip, bearer: secret, path: '/tight' })).status).toBe(429);
+  });
+
+  it('KEYS the budget per principal — two principals of one tenant do not share it', async () => {
+    testsRan++;
+    const { token, secret } = await ownerTokenAndKey('budget-two@example.test', 'Budget Two Org');
+    const ip = '203.0.113.73';
+    for (let i = 0; i < ROUTE_MAX; i++) {
+      expect((await ping({ ip, bearer: token, path: '/tight' })).status).toBe(200);
+    }
+    expect((await ping({ ip, bearer: token, path: '/tight' })).status).toBe(429);
+    // The api key is a DIFFERENT principal (`key:<id>` vs `user:<id>`) in the SAME organization, and
+    // it arrives from the same client source — so only per-principal keying can explain it passing.
+    for (let i = 0; i < ROUTE_MAX; i++) {
+      expect((await ping({ ip, bearer: secret, path: '/tight' })).status).toBe(200);
+    }
+    expect((await ping({ ip, bearer: secret, path: '/tight' })).status).toBe(429);
+  });
+
+  it('KEYS the budget per tenant — one principal in two organizations is counted twice', async () => {
+    testsRan++;
+    const { inFirst, inSecond } = await twoOrgTokens(
+      'budget-multi@example.test',
+      'Budget Org One',
+      'Budget Org Two',
+    );
+    const ip = '203.0.113.74';
+    for (let i = 0; i < ROUTE_MAX; i++) {
+      expect((await ping({ ip, bearer: inFirst, path: '/tight' })).status).toBe(200);
+    }
+    expect((await ping({ ip, bearer: inFirst, path: '/tight' })).status).toBe(429);
+    // Same user, same route, same source — only the tenant segment of the key differs.
+    for (let i = 0; i < ROUTE_MAX; i++) {
+      expect((await ping({ ip, bearer: inSecond, path: '/tight' })).status).toBe(200);
+    }
+    expect((await ping({ ip, bearer: inSecond, path: '/tight' })).status).toBe(429);
+  });
+
+  it('KEYS the budget per ROUTE — exhausting one budgeted route leaves the other intact', async () => {
+    testsRan++;
+    const { token } = await ownerTokenAndKey('budget-routes@example.test', 'Budget Routes Org');
+    const ip = '203.0.113.75';
+    for (let i = 0; i < ROUTE_MAX; i++) {
+      expect((await ping({ ip, bearer: token, path: '/tight' })).status).toBe(200);
+    }
+    expect((await ping({ ip, bearer: token, path: '/tight' })).status).toBe(429);
+    // A second route declaring the very same budget counts separately — distinct per-route buckets.
+    for (let i = 0; i < ROUTE_MAX; i++) {
+      expect((await ping({ ip, bearer: token, path: '/tight-b' })).status).toBe(200);
+    }
+    expect((await ping({ ip, bearer: token, path: '/tight-b' })).status).toBe(429);
+  });
+
+  it('is ADDITIVE, not substitutive — a declared max above the tier cannot make a route more permissive', async () => {
+    testsRan++;
+    // `/loose` declares a budget of a million per minute. If the declared limit REPLACED the shared
+    // tier, this route would answer far past the tier ceiling; because it is applied IN ADDITION, the
+    // effective allowance is the smaller of the two and the tier still binds at exactly its own max.
+    const { token } = await ownerTokenAndKey('budget-loose@example.test', 'Budget Loose Org');
+    const ip = '203.0.113.76';
+    for (let i = 0; i < PRINCIPAL_MAX; i++) {
+      const res = await ping({ ip, bearer: token, path: '/loose' });
+      expect(res.status, `call ${i + 1} of ${PRINCIPAL_MAX} was refused early`).toBe(200);
+    }
+    const throttled = await ping({ ip, bearer: token, path: '/loose' });
+    expect(throttled.status).toBe(429);
+    expect((await throttled.json()).error.code).toBe('RATE_LIMITED');
+  }, 120_000);
 });
 
 // Un-skippable ran-guard: when the DB is REQUIRED, this suite must actually have run its arms —
 // a silently skipped throttle acceptance would be a false green on the load-bearing property.
 describe('declared-route throttle suite ran', () => {
   it('executed its arms when the DB is required', () => {
-    if (requireDb) expect(testsRan).toBeGreaterThanOrEqual(5);
+    if (requireDb) expect(testsRan).toBeGreaterThanOrEqual(13);
     else expect(true).toBe(true);
   });
 });

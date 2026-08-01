@@ -12,7 +12,8 @@
  */
 
 import { OpenAPIHono } from '@hono/zod-openapi';
-import type { Permission } from '@rayspec/auth-core';
+import type { Permission, RateLimitPolicy } from '@rayspec/auth-core';
+import { RateLimiter } from '@rayspec/auth-core';
 import type { BlobStore, BlobStoreFactory, ResolvedHandler } from '@rayspec/platform';
 import type { ApiRouteSpec, HandlerSpec, RaySpec } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
@@ -21,6 +22,7 @@ import type { AgentRegistry, AppDeps, AppEnv } from '../app-context.js';
 import { requirePermission } from '../http/middleware.js';
 import type { MediaTokenService } from '../media/media-token.js';
 import { registerDeclaredRoutes, toHonoPath } from './register-declared-routes.js';
+import { DEFAULT_ROUTE_RATE_TIERS } from './route-rate-limit.js';
 
 // Spy on `requirePermission` so a route-registration test can assert WHICH permission a declared
 // route is wired behind (the middleware itself is never run here — the registrar throws/records at
@@ -377,5 +379,235 @@ describe('toHonoPath — `{param}` → `:param` conversion (linear, no-regex sca
     expect(toHonoPath(`/r/{${emoji}}/s/{ok}`)).toBe(`/r/:${emoji}/s/:ok`);
     // A neighbouring in-bound param on the same path still converts normally.
     expect(toHonoPath(`/r/{ok}/s/{${long129}}`)).toBe(`/r/:ok/s/:${long129}`);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// The DECLARED per-route budget — what gets MOUNTED, and the boot guards around it.
+//
+// The "no limit when the field is absent" property is pinned STRUCTURALLY here, not behaviourally.
+// A behavioural "the route still answers" assertion would stay green against a no-op passthrough
+// middleware quietly inserted into every chain, which is exactly the regression worth catching: it
+// would change the shape of every declared route in the product for a feature nobody opted into.
+// ---------------------------------------------------------------------------------------
+describe('registerDeclaredRoutes — a declared rateLimit mounts ONE extra middleware, after auth', () => {
+  const declaredHandlers = new Map<string, ResolvedHandler>([
+    ['h', { kind: 'route', fn: async () => ({ ok: true }) }],
+  ]);
+  const plain: ApiRouteSpec = {
+    method: 'GET',
+    path: '/plain',
+    action: { kind: 'handler', handler: 'h' },
+  };
+  const budgeted: ApiRouteSpec = {
+    method: 'GET',
+    path: '/budgeted',
+    action: { kind: 'handler', handler: 'h' },
+    rateLimit: { windowSeconds: 60, max: 3 },
+  };
+
+  /** A limiter that records every `check` call, third argument included. */
+  function recordingLimiter(): { limiter: RateLimiter; calls: unknown[][] } {
+    const calls: unknown[][] = [];
+    const limiter = new RateLimiter();
+    const real = limiter.check.bind(limiter);
+    limiter.check = ((bucket: string, id: string, policy?: RateLimitPolicy) => {
+      calls.push([bucket, id, policy]);
+      return real(bucket, id, policy);
+    }) as RateLimiter['check'];
+    return { limiter, calls };
+  }
+
+  /**
+   * Register BOTH routes in ONE call, so the shared front of the chain (the tier throttle,
+   * `requireAuth`, `resolveTenant`) is literally the same middleware OBJECT for both — which is what
+   * makes an identity comparison between the two chains meaningful.
+   */
+  function registerBoth(limiter: RateLimiter): {
+    app: OpenAPIHono<AppEnv>;
+  } {
+    const app = new OpenAPIHono<AppEnv>();
+    const deps = { rateLimiter: limiter } as unknown as AppDeps;
+    registerDeclaredRoutes(app, deps, {
+      spec: makeSpec({ api: [plain, budgeted] }),
+      productTables: emptyTables,
+      handlers: declaredHandlers,
+    });
+    return { app };
+  }
+
+  /** The registered middleware chain for one declared path, in mount order. */
+  function chainFor(app: OpenAPIHono<AppEnv>, path: string): unknown[] {
+    return app.routes.filter((r) => r.path === path).map((r) => r.handler);
+  }
+
+  it('registers EXACTLY today chain for a route with no rateLimit, and one more for a route with one', () => {
+    const { app } = registerBoth(new RateLimiter());
+    const withoutLimit = chainFor(app, '/plain');
+    const withLimit = chainFor(app, '/budgeted');
+    // Today: routeRateLimit → requireAuth → resolveTenant → requirePermission → handler.
+    expect(withoutLimit).toHaveLength(5);
+    expect(withLimit).toHaveLength(6);
+  });
+
+  it('keeps the SAME middleware identities, and splices the budget between auth and tenant', () => {
+    const { app } = registerBoth(new RateLimiter());
+    const withoutLimit = chainFor(app, '/plain');
+    const withLimit = chainFor(app, '/budgeted');
+    // The shared front is the same OBJECT in both chains — the tier throttle and requireAuth are
+    // untouched by the feature, not merely equivalent.
+    expect(withLimit[0]).toBe(withoutLimit[0]);
+    expect(withLimit[1]).toBe(withoutLimit[1]);
+    // resolveTenant is also the same object, one slot LATER — which is precisely the claim that the
+    // extra middleware sits between authentication and tenant resolution.
+    expect(withLimit[3]).toBe(withoutLimit[2]);
+    // And the spliced middleware is genuinely new: it appears nowhere in the unbudgeted chain.
+    expect(withoutLimit).not.toContain(withLimit[2]);
+    expect(withLimit[2]).toBeTypeOf('function');
+  });
+
+  it('drives EXACTLY ONE limiter check, carrying NO policy, for a request on the unbudgeted route', async () => {
+    const { limiter, calls } = recordingLimiter();
+    const { app } = registerBoth(limiter);
+    // Boot spends exactly two calls on the one-shot probe (the budgeted route in this pair triggers
+    // it); drop them so what remains is attributable to the REQUEST alone.
+    expect(calls).toHaveLength(2);
+    calls.length = 0;
+    // The tier throttle runs, then requireAuth refuses the credential-less call — so the request never
+    // reaches a second check, and the one it did make carried no per-route budget.
+    await app.request('/plain');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[0]).toBe(DEFAULT_ROUTE_RATE_TIERS.source);
+    expect(calls[0]?.[2]).toBeUndefined();
+  });
+
+  it('NEVER touches the limiter at boot for a spec that declares no rateLimit anywhere', () => {
+    // The probe is lazy on purpose: a deployment with no declared budget must not depend on the
+    // limiter answering a question it never asks.
+    const { limiter, calls } = recordingLimiter();
+    const app = new OpenAPIHono<AppEnv>();
+    const deps = { rateLimiter: limiter } as unknown as AppDeps;
+    registerDeclaredRoutes(app, deps, {
+      spec: makeSpec({ api: [plain] }),
+      productTables: emptyTables,
+      handlers: declaredHandlers,
+    });
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('registerDeclaredRoutes — boot guards around a declared rateLimit', () => {
+  const declaredHandlers = new Map<string, ResolvedHandler>([
+    ['h', { kind: 'route', fn: async () => ({ ok: true }) }],
+    ['play_h', { kind: 'route', fn: async () => ({ ok: true }) }],
+  ]);
+  const dummyBlobFactory: BlobStoreFactory = () => ({}) as BlobStore;
+  const dummyMediaService = {} as unknown as MediaTokenService;
+
+  function registerApi(api: ApiRouteSpec[], deps: AppDeps): void {
+    const app = new OpenAPIHono<AppEnv>();
+    registerDeclaredRoutes(app, deps, {
+      spec: makeSpec({ api }),
+      productTables: emptyTables,
+      handlers: declaredHandlers,
+      blobFactory: dummyBlobFactory,
+      mediaTokenService: dummyMediaService,
+    });
+  }
+
+  function depsWith(limiter: RateLimiter): AppDeps {
+    return { rateLimiter: limiter } as unknown as AppDeps;
+  }
+
+  it('REFUSES a rateLimit on a stream PLAYBACK route, explaining why and where to declare it', () => {
+    expect(() =>
+      registerApi(
+        [
+          {
+            method: 'GET',
+            path: '/media/{key}',
+            action: { kind: 'stream', handler: 'play_h', mode: 'playback' },
+            rateLimit: { windowSeconds: 60, max: 3 },
+          },
+        ],
+        depsWith(new RateLimiter()),
+      ),
+    ).toThrow(/stream PLAYBACK route and may not declare a rateLimit/);
+    // The message has to say WHY and what to do instead, or an author cannot act on it.
+    expect(() =>
+      registerApi(
+        [
+          {
+            method: 'GET',
+            path: '/media/{key}',
+            action: { kind: 'stream', handler: 'play_h', mode: 'playback' },
+            rateLimit: { windowSeconds: 60, max: 3 },
+          },
+        ],
+        depsWith(new RateLimiter()),
+      ),
+    ).toThrow(/own middleware tuple.*MINTS the playback token/s);
+  });
+
+  it('still registers a PLAYBACK route that declares NO rateLimit (no false positive)', () => {
+    expect(() =>
+      registerApi(
+        [
+          {
+            method: 'GET',
+            path: '/media/{key}',
+            action: { kind: 'stream', handler: 'play_h', mode: 'playback' },
+          },
+        ],
+        depsWith(new RateLimiter()),
+      ),
+    ).not.toThrow();
+  });
+
+  it('ABORTS registration when the injected limiter IGNORES the carried policy', () => {
+    // A version-skewed or subclassed limiter that drops the third argument type-checks, finds no
+    // registered policy for the deliberately-unregistered route bucket, and would allow everything —
+    // every budgeted route silently unlimited. The boot refuses instead.
+    class IgnoresPolicy extends RateLimiter {
+      override check(bucket: string, id: string): { allowed: boolean; retryAfterMs: number } {
+        return super.check(bucket, id);
+      }
+    }
+    expect(() =>
+      registerApi(
+        [
+          {
+            method: 'GET',
+            path: '/budgeted',
+            action: { kind: 'handler', handler: 'h' },
+            rateLimit: { windowSeconds: 60, max: 3 },
+          },
+        ],
+        depsWith(new IgnoresPolicy()),
+      ),
+    ).toThrow(/does not honour an explicit per-call policy/);
+  });
+
+  it('reports the BAD DECLARATION, not the probe, when both could fire', () => {
+    // The probe is deliberately run only AFTER a route has survived its own validation, so a limiter
+    // problem can never mask the more specific message about which declaration is wrong.
+    class IgnoresPolicy extends RateLimiter {
+      override check(bucket: string, id: string): { allowed: boolean; retryAfterMs: number } {
+        return super.check(bucket, id);
+      }
+    }
+    expect(() =>
+      registerApi(
+        [
+          {
+            method: 'GET',
+            path: '/budgeted',
+            action: { kind: 'handler', handler: 'h' },
+            rateLimit: { windowSeconds: 0, max: 3 },
+          },
+        ],
+        depsWith(new IgnoresPolicy()),
+      ),
+    ).toThrow(/rateLimit\.windowSeconds/);
   });
 });
