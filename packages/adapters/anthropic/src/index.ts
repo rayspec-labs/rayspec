@@ -349,7 +349,7 @@ export class AnthropicAdapter implements Backend {
     // that this run() settles before the child does. It asserts BOUNDS, not latencies, so the
     // figures below are indicative rather than contractual: measured on a development machine with
     // that file's own instrumentation, stdin ended at +1ms, a SIGTERM-honouring child was gone at
-    // +2009ms, a SIGTERM-ignoring one at +7010ms, and run() settled at +2005ms.
+    // +2014ms, a SIGTERM-ignoring one at +7030ms, and run() settled at +2008ms.
     // BOTH escalation timers are unref()ed: they do not hold this process open, so a parent that
     // exits inside that window never fires the forced kill and can leave such a child orphaned.
     // The ladder signals the child's OWN pid and never a process group (spawnLocalProcess passes no

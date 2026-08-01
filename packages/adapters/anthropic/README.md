@@ -30,18 +30,20 @@ surrounding platform, or of cancellation in general, rather than of this SDK.
 
 - **Stopping takes seconds, not milliseconds.** The SDK ends the child's standard input
   immediately, waits a two-second grace period, sends `SIGTERM` to a child still
-  running, and sends `SIGKILL` five seconds after that. Measured: standard input closed
-  1 ms after the abort, a child that honours `SIGTERM` gone at 2009 ms, a child that
-  ignores it gone at 7010 ms. The adapter's own call returns at about 2005 ms, so no
-  caller waits for the last rung — but the child can outlive the answer by seconds.
+  running, and sends `SIGKILL` five seconds after that. Measured in one run of that test,
+  which prints what it measured: standard input closed 1 ms after the abort, a child that
+  honours `SIGTERM` gone at 2014 ms, a child that ignores it gone at 7030 ms, and the
+  adapter's own call back at 2008 ms — so no caller waits for the last rung, but the child
+  can outlive the answer by seconds. The two "gone" figures are polled at 25 ms and are
+  indicative of one machine; the test asserts the rungs, not these latencies.
 - **A host process that exits inside that window can leave an orphan.** The escalation
   timers are `unref()`ed, so they do not hold the host process open, and the `SIGKILL`
   rung is lost if the host goes away first. The SDK does send `SIGTERM` to its tracked
   children from a process-exit hook, so a child that honours it still dies — measured,
-  within a second of a host that exits normally. A child that ignores `SIGTERM` does not:
-  with the host exiting 200 ms after the abort, it was still running ten seconds later,
-  and stayed running. A host that is killed outright runs no exit hook at all, so neither
-  child is reached in that case.
+  within a millisecond of a host that exits normally. A child that ignores `SIGTERM` does
+  not: with the host exiting 200 ms after the abort, it was still running twenty seconds
+  later, when the observation stopped and it had to be killed by hand. A host that is
+  killed outright runs no exit hook at all, so neither child is reached in that case.
 - **Only the child itself is signalled.** Every rung of the ladder is sent to the pid the
   SDK spawned, never to a process group — the SDK spawns without `detached`. Any process
   that child starts in turn is therefore not reached by cancelling the run.

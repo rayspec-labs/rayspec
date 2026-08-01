@@ -17,16 +17,18 @@
  *   - a real per-step llm ledger (one step per assistant turn) -> stepCount > 1;
  *   - the abortController is aborted (the child is owned/torn down).
  */
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AuthMode, NeutralTool, RunContext, StepReport } from '@rayspec/core';
 import { makeDispatchTool } from '@rayspec/platform';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // A hermetic, per-run config root (a fresh 0700 tree). The adapter now refuses a group/world-accessible
 // tenant dir, so these tests must not share a persistent, world-readable location across runs.
 const CONFIG_ROOT = mkdtempSync(join(tmpdir(), 'rayspec-anth-int-'));
+// …and removed again, so a run of this file leaves nothing behind in the temp directory.
+afterAll(() => rmSync(CONFIG_ROOT, { recursive: true, force: true }));
 
 // ---- mock the SDK: real-ish tool()/createSdkMcpServer + a controllable query() -----------------
 interface CapturedTool {

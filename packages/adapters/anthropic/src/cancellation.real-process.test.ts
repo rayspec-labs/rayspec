@@ -27,6 +27,7 @@
  * forced-kill rung and about 8s the no-signal arm sitting out the whole window. That is the test
  * working, not a hang.
  */
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -70,6 +71,21 @@ function readPid(pidPath: string): number | undefined {
   }
 }
 
+/**
+ * Whether `pid` is (still) one of this file's stand-in children. A pid read out of a file can be
+ * stale by the time the sweep runs — the child usually died seconds earlier — and the OS is free to
+ * hand that number to something else, so the sweep must not signal a pid on the strength of the file
+ * alone. If `ps` cannot answer, the honest answer is "not ours" and the pid is left alone.
+ */
+function isStandInChild(pid: number): boolean {
+  try {
+    const cmd = execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' });
+    return cmd.includes('fake-claude.mjs');
+  } catch {
+    return false;
+  }
+}
+
 afterEach(async () => {
   for (const child of children) {
     // Writing the pid is the child's first statement, so a short poll is enough to catch one that a
@@ -79,7 +95,7 @@ afterEach(async () => {
       await sleep(50);
       pid = readPid(child.pidPath);
     }
-    if (pid === undefined) continue;
+    if (pid === undefined || !isStandInChild(pid)) continue;
     try {
       process.kill(pid, 'SIGKILL');
     } catch {
@@ -159,6 +175,18 @@ function readStdinEofAt(stdinEofPath: string): number | undefined {
   if (!existsSync(stdinEofPath)) return undefined;
   const at = Number(readFileSync(stdinEofPath, 'utf8'));
   return Number.isFinite(at) && at > 0 ? at : undefined;
+}
+
+/**
+ * Print the rung latencies an arm actually measured. The adapter's README, the changelog entry and
+ * the comment in `index.ts` all cite figures "measured with this file's own instrumentation" — this
+ * is that instrumentation, so those citations can be checked by running this file rather than by
+ * first having to add a print to it (`vitest run src/cancellation.real-process.test.ts
+ * --reporter=verbose` — the default reporter hides the output of a passing test). The assertions
+ * above each call bound the rungs; these numbers are reported, never asserted.
+ */
+function reportRungs(label: string, rungs: Record<string, number>): void {
+  console.log(`[cancellation] ${label} ${JSON.stringify(rungs)}`);
 }
 
 class NoopJournal {
@@ -258,6 +286,12 @@ describe('Anthropic adapter: cancelling a run kills the real child process it dr
       if (outcome.ok) expect(outcome.res.status).toBe('error');
       // The caller is not made to wait for the last rung.
       expect(outcome.at - abortedAt).toBeLessThan(FORCED_KILL_MS);
+
+      reportRungs('child honours SIGTERM', {
+        stdinEofAfterAbortMs,
+        settledAfterAbortMs: outcome.at - abortedAt,
+        goneAfterMs,
+      });
     },
   );
 
@@ -266,11 +300,12 @@ describe('Anthropic adapter: cancelling a run kills the real child process it dr
     { timeout: 60_000 },
     async () => {
       const controller = new AbortController();
-      const { pid, settled } = await startRunWithLiveChild({
+      const { pid, settled, stdinEofAt } = await startRunWithLiveChild({
         ignoreTerminate: true,
         signal: controller.signal,
       });
       expect(alive(pid)).toBe(true);
+      expect(stdinEofAt()).toBeUndefined();
 
       const abortedAt = Date.now();
       controller.abort();
@@ -281,11 +316,23 @@ describe('Anthropic adapter: cancelling a run kills the real child process it dr
       // It survived the terminate rung — so what ended it was the forced kill, the last rung.
       expect(goneAfterMs).toBeGreaterThanOrEqual(FORCED_KILL_MS - 250);
 
+      // Rung one fires for this child too, and just as early: what it ignores is the SIGNALS, not
+      // the closing of its stdin. Measured here rather than carried over from the other arm.
+      const stdinEofAfterAbortMs = (stdinEofAt() ?? Number.NaN) - abortedAt;
+      expect(stdinEofAfterAbortMs).toBeGreaterThanOrEqual(0);
+      expect(stdinEofAfterAbortMs).toBeLessThan(GRACE_THEN_TERMINATE_MS);
+
       // The documented cost of that: the caller already had its answer while this child was still
       // running. This is the arm behind the README's "the child can outlive the answer by seconds".
       const outcome = await settled;
       expect(outcome.at).toBeLessThan(goneAt);
       expect(outcome.at - abortedAt).toBeLessThan(FORCED_KILL_MS - 250);
+
+      reportRungs('child ignores SIGTERM', {
+        stdinEofAfterAbortMs,
+        settledAfterAbortMs: outcome.at - abortedAt,
+        goneAfterMs,
+      });
     },
   );
 });
