@@ -17,8 +17,11 @@
  *                                                      re-create a CLEAN database (--reset alone
  *                                                      refuses without --yes).
  *   rayspec dev bootstrap-tenant --base-url <url> [--email …] [--password …] [--org-name …]
- *                                                      Create the first tenant+owner via the shipped
+ *                                [--org-id <uuid>]     Create the first tenant+owner via the shipped
  *                                                      auth API; emit ORG_ID + the org-scoped token.
+ *                                                      --org-id creates the org under THAT id and
+ *                                                      needs RAYSPEC_TENANT_BOOTSTRAP_ENABLED on the
+ *                                                      target server.
  *
  * Each returns a value-free (gen-secrets/db) or deliberate-credential (bootstrap-tenant) JSON summary;
  * a usage/argument problem is a `DevCliError` (mapped to exit 2 by `index.ts`).

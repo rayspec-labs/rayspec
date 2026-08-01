@@ -37,12 +37,18 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { InMemoryAgentHandlerRegistry } from '@rayspec/agent-runtime';
+import { makeDb } from '@rayspec/db';
 import { registerScopedTables } from '@rayspec/db/testing';
 import { FakeSttAdapter } from '@rayspec/stt-port';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { assembleServer, type BootedServer, loadServerConfig } from './composition-root.js';
+import {
+  applyMigrations,
+  assembleServer,
+  type BootedServer,
+  loadServerConfig,
+} from './composition-root.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -58,7 +64,7 @@ const FILE_ONLY_YAML = resolve(here, '__fixtures__/file-ingest.product.yaml');
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
 let armsRan = 0;
 
-const DEMAND_DB = `rayspec_boot_demand_${process.pid}`; // shared, read-only (the throw arms never write)
+const DEMAND_DB = `rayspec_boot_demand_${process.pid}`; // shared; seeded once, then only read
 const INTAKE_DB = `rayspec_boot_intake_${process.pid}`; // the ONE full boot + launch
 const TENANT = '00000000-0000-4000-8000-0000000000e4';
 
@@ -153,6 +159,22 @@ describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands', () => 
     process.env.PORT = '8806';
     delete process.env.DBOS_SYSTEM_DATABASE_URL;
     process.env.RAYSPEC_PRODUCT_TENANT_ID = TENANT;
+
+    // The deployment tenant must be a LIVE org in BOTH databases before any arm boots: a product
+    // deployment whose RAYSPEC_PRODUCT_TENANT_ID names none refuses to start, and that refusal would
+    // otherwise pre-empt the env demands these arms exist to pin. The committed platform chain
+    // bootstraps each clean DB so `orgs` is there to seed; each boot's own migrate then no-ops.
+    for (const url of [demandDbUrl, intakeDbUrl]) {
+      const seed = makeDb(url);
+      try {
+        await applyMigrations(seed);
+        await seed.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'Boot', 'boot')`, [
+          TENANT,
+        ]);
+      } finally {
+        await seed.$client.end();
+      }
+    }
   }, 180_000);
 
   afterAll(async () => {

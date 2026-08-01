@@ -283,7 +283,7 @@ async function waitForTerminal(jobId: string, ms = 30_000): Promise<string> {
 
 /**
  * The deployment-tenant existence probe every scheduler is wired with — the SAME question the
- * composition root's `cronTenantExists` asks (an org row that is not soft-deleted). Answered on ground
+ * composition root's `tenantOrgExists` asks (an org row that is not soft-deleted). Answered on ground
  * truth rather than stubbed, since this suite seeds the org itself. The absent-org behaviour it gates
  * (skip, one log line, no reserve consumed) is proven in cron-scheduler-late-binding.db.test.ts.
  */

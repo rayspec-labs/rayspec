@@ -120,7 +120,7 @@ async function countFireMarkers(tenant: string, key: string): Promise<number> {
 
 /**
  * The existence probe the deployment injects — the same question the composition root's
- * `cronTenantExists` asks (an org row that is not soft-deleted). Counted so the suite can prove it is
+ * `tenantOrgExists` asks (an org row that is not soft-deleted). Counted so the suite can prove it is
  * asked per firing rather than cached.
  *
  * It answers about the tenant the SCHEDULER hands it per firing, exactly as the composition root's
@@ -261,7 +261,7 @@ describe.skipIf(!hasDb)('cron firing under a LATE-BOUND deployment tenant', () =
   });
 
   it('an org SOFT-DELETED while the deployment runs stops firing at the next instant', async () => {
-    // The mirror image of late binding, and a claim the changelog makes: `cronTenantExists` treats a
+    // The mirror image of late binding, and a claim the changelog makes: `tenantOrgExists` treats a
     // tombstoned org as absent, so the same per-firing gate that lets a new org start firing also
     // stops a tombstoned one — without a restart, and without the suite ever re-wiring the scheduler.
     const scheduler = makeScheduler(PRESENT_TENANT);

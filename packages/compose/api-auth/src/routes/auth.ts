@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import {
   ApiError,
+  BootstrapTenantRequest,
   LoginRequest,
   type MeResponse,
   normalizeEmail,
@@ -30,6 +31,7 @@ import {
 } from '../http/cookies.js';
 import { requireAuth } from '../http/middleware.js';
 import { SESSION_TTL_MS } from '../services/auth-service.js';
+import { OrgIdInUseError } from '../stores/org-store.js';
 
 const SESSION_TTL_SECONDS = Math.floor(SESSION_TTL_MS / 1000);
 
@@ -73,6 +75,62 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
       201,
     );
   });
+
+  // POST /v1/auth/bootstrap-tenant — register an owner + create their org under a CHOSEN id.
+  //
+  // REGISTERED ONLY IN THE OPERATOR POSTURE. On a default deployment this `if` never runs, so the
+  // path does not exist (404) rather than existing-and-refusing. That is the whole mitigation: the
+  // public, unauthenticated `/v1/auth/register` above keeps assigning a server-generated id, and a
+  // caller who has learned the id an operator intends to deploy against has nowhere to send it — no
+  // gate to guess at, no collision reply to read as an existence oracle. The store enforces the same
+  // posture underneath (a chosen id without it throws), so this is a gate, not the only gate.
+  //
+  // Read through `?.` because this runs at REGISTRATION time, and unit-only suites build the app from
+  // a partial deps cast (no store) to exercise route-independent concerns like CORS. A missing store
+  // means no bootstrap route, which is the fail-closed answer anyway.
+  if (deps.orgStore?.tenantBootstrapEnabled) {
+    app.post('/v1/auth/bootstrap-tenant', async (c) => {
+      const rid = c.get('requestId');
+      const ip = clientIp(c, deps);
+      enforceRate(deps, 'register', ip); // the same bucket as register — it IS a registration
+      const rawBody = await readBoundedRequestBytes(c, deps.maxJsonBodyBytes);
+      const body = BootstrapTenantRequest.parse(JSON.parse(new TextDecoder().decode(rawBody)));
+      const email = normalizeEmail(body.email);
+      const reg = await deps.authService.register(email, body.password, {
+        ua: c.req.header('user-agent') ?? null,
+        ip,
+      });
+      const slug = await deps.orgStore.deriveUniqueSlug(body.orgName);
+      let org: { id: string };
+      try {
+        org = await deps.orgStore.createOrgWithOwner({
+          name: body.orgName,
+          slug,
+          ownerUserId: reg.userId,
+          id: body.orgId,
+        });
+      } catch (e) {
+        // A taken id is the operator's problem to resolve, not a server fault: say so as a 409 rather
+        // than succeeding under a different id they would then deploy against.
+        if (e instanceof OrgIdInUseError) {
+          throw new ApiError('CONFLICT', 'That org id already exists.');
+        }
+        throw e;
+      }
+      reg.audit.push({ event: 'org_create', actorUserId: reg.userId, actorOrgId: org.id });
+      await deps.auditStore.appendMany(reg.audit, rid, ipHashOf(c, deps));
+      const refreshToken = deliverRefresh(
+        c,
+        deps,
+        reg.refreshSecret,
+        body.deliverRefreshTokenInBody,
+      );
+      return c.json(
+        tokenResponse(reg.accessToken, org.id, deps.signer.accessTokenTtlSeconds, refreshToken),
+        201,
+      );
+    });
+  }
 
   // POST /v1/auth/login
   app.post('/v1/auth/login', async (c) => {

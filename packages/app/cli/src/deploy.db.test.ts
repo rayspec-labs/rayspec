@@ -23,6 +23,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { makeDb } from '@rayspec/db';
+import { applyMigrations } from '@rayspec/server';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -92,6 +94,19 @@ describe.skipIf(!baseUrl)('rayspec deploy — acme-notes served on a fresh DB (r
     const { privateKey } = await generateKeyPair('RS256', { extractable: true });
     const pem = await exportPKCS8(privateKey);
 
+    // The deployment tenant must be a LIVE org BEFORE the child boots: `deploy` refuses to start when
+    // RAYSPEC_PRODUCT_TENANT_ID names none. The committed platform chain bootstraps the clean DB so
+    // `orgs` is there to seed; the child's own migrate then no-ops over it.
+    const seed = makeDb(appDbUrl);
+    try {
+      await applyMigrations(seed);
+      await seed.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'Acme', 'acme')`, [
+        TENANT,
+      ]);
+    } finally {
+      await seed.$client.end();
+    }
+
     // Boot via the REAL CLI subprocess. LIVE extraction + an INERT OpenAI key (boot makes no provider
     // call); STT_PROVIDER=fake. The deployment tenant is the product tenant. RAYSPEC_SKIP_DOTENV=1 so
     // no stray repo-root .env leaks into the child.
@@ -123,15 +138,6 @@ describe.skipIf(!baseUrl)('rayspec deploy — acme-notes served on a fresh DB (r
       throw new Error(
         `${e instanceof Error ? e.message : String(e)}\n--- child stderr ---\n${childErr}`,
       );
-    }
-
-    // The deployment tenant org must exist for the membership FK (boot does not create it — mirrors
-    // product-yaml-boot.db.test.ts).
-    const c = postgres(appDbUrl, { max: 1 });
-    try {
-      await c.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'Acme', 'acme')`, [TENANT]);
-    } finally {
-      await c.end();
     }
   }, 180_000);
 

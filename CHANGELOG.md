@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The tenant bootstrap can target an org id you chose in advance: `rayspec dev bootstrap-tenant
+  --org-id <uuid>`.** Org ids were server-generated without exception, which left the deployment
+  variable `RAYSPEC_PRODUCT_TENANT_ID` in an awkward position: it has to name an org that already
+  exists, so the only way to configure a deployment was to bring something up, create an org, read
+  its id back, and re-provision with it. With `--org-id` the id is settled first, and the
+  deployment is configured with it from the outset. The org row and its owner membership are still
+  created in **one transaction**, so a chosen id can never leave a memberless org behind — and that
+  matters more than it sounds, because invites are owner-only and `invites.tenant_id` is a NOT NULL
+  foreign key to `orgs(id)`, which makes an org with no owner a permanent dead end rather than an
+  inconvenience. Without the flag the command is unchanged: the same request to the same route, and
+  the database generates the id exactly as before.
+
+  **A chosen id travels over an operator-gated route, and never over the public one.** The public,
+  unauthenticated `POST /v1/auth/register` does not accept an org id and will not start doing so.
+  The reason is concrete: a deployment binds itself to one org id, so if any public caller could
+  name the id, somebody who learned the id an operator intends to deploy against could create that
+  organization first, with themselves as owner, and the deployment would come up bound to an
+  organization they control. Instead the chosen-id path is a separate route, `POST
+  /v1/auth/bootstrap-tenant`, which a server **registers only** when it was started with
+  `RAYSPEC_TENANT_BOOTSTRAP_ENABLED=true` (exact string, like the other operator gates). On any
+  other deployment that path does not exist at all — a `404`, not a refusal — so there is no gate to
+  probe and no collision reply to read as an org-existence oracle. Turn it on for the bootstrap
+  boot; leave it off everywhere else.
+
+  **The deployment binds the org as the database stores it, not as the variable spells it.** `orgs.id`
+  is a `uuid` column, so Postgres matches an id supplied in any letter case and hands it back
+  canonically — while at runtime the bound tenant is compared as a *string* against a tenant the
+  server derived from that same column (the capability sinks, the reprocess seam). Binding the
+  configured spelling would therefore pass both boot checks and then refuse every capability event
+  with `cross_tenant`: the same silent misconfiguration one layer down. That is not a thought
+  experiment — `uuidgen` prints upper case on macOS and BSD. The boot now resolves the id and binds
+  what the database returned, so a differently-cased id is simply the same org. The resolved value is
+  additionally exposed as `productTenantId` on the boot result — an in-process signal for an embedder
+  that assembles the server itself, not something the CLI prints.
+
+  **Embedder note:** `ServerConfig` — the assembly configuration exported as a type from
+  `@rayspec/server` — gains a REQUIRED `tenantBootstrapEnabled: boolean`. `loadServerConfig` fills it
+  from the environment, so anything that gets its config from there is unaffected; code outside this
+  repository that builds the object literally has to add the field. It carries no default on purpose:
+  the value decides whether an operator route exists at all, and a silent `false` would be a guess
+  about a deployment's posture rather than a statement of it.
+
 - **A 64-bit integer column type: `bigint`, alongside `integer` rather than replacing it.** The
   declared `integer` type maps to PostgreSQL `int4`, whose ceiling is 2 147 483 647 — for a column
   counting bytes, 2048 MiB. A store that measures anything real in bytes reaches that ceiling on a
@@ -368,6 +410,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A product deployment whose `RAYSPEC_PRODUCT_TENANT_ID` is malformed or names no live org now
+  REFUSES TO BOOT.** Until now that variable was only checked for being non-empty, so a deployment
+  pointed at nothing came up green and reported healthy — and then failed for everybody, far from
+  the cause: a bare `404` on the reprocess seam, or a `cross_tenant` throw on the first capability
+  event to reach the tenant-bound dispatcher. Every workflow run, every capability event and every
+  authenticated principal of a product deployment binds to that one org, so a phantom tenant does
+  not degrade the deployment, it makes it serve nobody. Both halves are now checked at startup and
+  the boot aborts with a message naming the variable, its value and the remedy: the **shape**,
+  through the same tenant chokepoint that already rejects a malformed cron tenant, and the
+  **existence**, through the same `deleted_at IS NULL` query the cron tenant is answered with — so a
+  soft-deleted org counts as absent and a deployment can never bind to an erased tenant.
+
+  **What an operator must do, and in which order.** Because `deploy` also serves the auth surface, a
+  product deployment can no longer create its own org through itself, so the tenant has to exist
+  first. Against an org that already exists nothing changes — set `RAYSPEC_PRODUCT_TENANT_ID` to its
+  id and deploy. From nothing, the supported order is: boot the auth surface alone
+  (`RAYSPEC_TENANT_BOOTSTRAP_ENABLED=true rayspec-serve`, no spec), run `rayspec dev
+  bootstrap-tenant --base-url <url> --org-id <the uuid>` against it, stop it, then deploy with that
+  id and the gate off. A deployment that used to come up and wait for its org to appear will now
+  refuse to start until it does.
+
+  **The cron tenant is deliberately NOT treated this way, and keeps its current behavior exactly.**
+  `RAYSPEC_CRON_TENANT_ID` is still checked for shape only at boot; whether it names an existing org
+  is still asked per firing. The failure profiles are genuinely different, so the decisions are. A
+  cron deployment whose org does not exist yet is merely idle: it comes up, skips each firing with
+  one log line, and starts firing by itself the moment the org appears, no restart needed — and
+  gating that at boot would have made the org impossible to create through the very application it
+  was waiting for. A product deployment in the same state has no such self-healing moment and
+  nothing about it improves by staying up.
+
 - **Embedders implementing the neutral `DurableExecutor` must add a `cancel` method.** The cancel
   route needs an engine-agnostic way to end a job that has not been dequeued, so `DurableExecutor`
   — exported from `@rayspec/platform`'s public surface — gained `cancel(jobId: string):
@@ -423,9 +495,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the only way in was to deploy without the trigger first. The boot no longer asks that question.
   A well-formed id naming an org that does not exist yet starts the scheduler, and firing begins the
   moment an `orgs` row with that id exists. Which id that is remains the row's to decide: `POST
-  /v1/orgs`, `POST /v1/auth/register` and `rayspec dev bootstrap-tenant` all let the database generate
-  it, so an operator using those still reads the id back before setting the variable, while an id
-  chosen up front has to be the id its `orgs` row is created with. Nothing fires under an unknown
+  /v1/orgs`, `POST /v1/auth/register` and a plain `rayspec dev bootstrap-tenant` all let the database
+  generate it, so an operator using those still reads the id back before setting the variable, while
+  an id chosen up front has to be the id its `orgs` row is created with — by hand, or with `rayspec
+  dev bootstrap-tenant --org-id <uuid>` against a server in the tenant-bootstrap operator posture
+  (see the **Added** entry on choosing the org id). Nothing fires under an unknown
   tenant: the existence check moved to the firing itself, where it runs **before** the firing's
   reserve, so a skipped firing dispatches nothing and writes no marker — which leaves that instant
   explicitly re-fireable instead of burning it. Each skipped firing emits exactly one line naming the

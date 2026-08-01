@@ -326,6 +326,7 @@ touches nothing (the guard fires before any DB connection). Local-dev only.
 
 ```
 rayspec dev bootstrap-tenant --base-url <url> [--email <e>] [--password <p>] [--org-name <n>]
+                             [--org-id <uuid>]
 ```
 
 Creates the first tenant and owner against a **running** RaySpec backend — it is
@@ -339,6 +340,13 @@ to obtain an org-scoped token.
   - `--base-url <url>` — **required**. The running backend's base URL.
   - `--email`, `--password`, `--org-name` — optional; sensible defaults are used
     when omitted.
+  - `--org-id <uuid>` — optional. Create the organization under **this** id
+    instead of a server-generated one, so you can put the id in
+    `RAYSPEC_PRODUCT_TENANT_ID` before the product deployment exists. Requires the
+    target server to be running with `RAYSPEC_TENANT_BOOTSTRAP_ENABLED=true` (see
+    below); against a server without it the request is a plain `404` and the
+    command reports `REGISTER_FAILED`. A malformed uuid is a usage error, refused
+    before any request is made. An id that is already taken is a `409`.
 - **Output** (the `orgToken` is the command's deliberate credential output — an
   org-scoped token you need for tenant routes):
 
@@ -354,6 +362,51 @@ to obtain an org-scoped token.
   ```
 
 - **Exit:** `0` on success; `1` on an HTTP/network failure or unexpected response.
+
+### Choosing the org id: the operator gate, and why it exists
+
+`POST /v1/auth/register` is public and unauthenticated, and it will **never**
+accept a client-chosen org id: ids stay server-generated and unguessable there.
+That unguessability is load-bearing, because a product deployment binds itself to
+one org id. If any public caller could name the id, somebody who learned the id
+you intend to deploy against could create that organization first, with themselves
+as owner, and your deployment would come up bound to an organization they control.
+
+So the chosen-id path is a **separate route** (`POST /v1/auth/bootstrap-tenant`)
+that a server **only registers** when it was started with
+`RAYSPEC_TENANT_BOOTSTRAP_ENABLED=true`. On any other deployment that path does
+not exist at all — there is no gate to guess at and no collision reply to read as
+an existence oracle. Turn the variable on for the bootstrap boot, and off again
+for the deployment.
+
+### The supported order for a product deployment
+
+A product deployment **refuses to boot** when `RAYSPEC_PRODUCT_TENANT_ID` is
+malformed or names no live organization, and — because `deploy` serves the auth
+surface itself — it therefore cannot create its own tenant. Bootstrap first,
+deploy second:
+
+```bash
+# 0. Settle the id first — this one does not exist yet; step 2 creates it.
+ORG_ID=$(uuidgen)
+
+# 1. Boot the auth surface alone, with the bootstrap gate on. No spec, no product.
+#    This runs in the foreground, so give steps 2-3 a second shell.
+RAYSPEC_TENANT_BOOTSTRAP_ENABLED=true rayspec-serve
+
+# 2. Create the tenant under the id you chose.
+rayspec dev bootstrap-tenant --base-url http://127.0.0.1:8080 --org-id "$ORG_ID"
+
+# 3. Stop that server. Deploy the product against the id — gate off.
+RAYSPEC_PRODUCT_TENANT_ID="$ORG_ID" rayspec deploy path/to/product.yaml
+```
+
+Step 0 is the one case where generating a fresh UUID is right: the id is created
+in step 2. Everywhere else `RAYSPEC_PRODUCT_TENANT_ID` must name an organization
+that already exists — a random id names none, and the boot check refuses it.
+
+Against an existing organization, skip steps 1–2 entirely and set
+`RAYSPEC_PRODUCT_TENANT_ID` to that organization's id.
 
 ---
 

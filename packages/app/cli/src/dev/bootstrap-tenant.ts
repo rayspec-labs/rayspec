@@ -7,6 +7,13 @@
  *   2. POST `${baseUrl}/v1/orgs/${activeOrgId}/switch` with `authorization: Bearer <accessToken>` —
  *      LIVE-rechecks membership + re-mints a JWT SCOPED to that org → `{ accessToken }` (the ORG token).
  *
+ * With `--org-id`, step 1 goes to `${baseUrl}/v1/auth/bootstrap-tenant` instead, adding `orgId` to the
+ * same body — the org is created under an id the operator chose, which is what lets a product
+ * deployment be configured with `RAYSPEC_PRODUCT_TENANT_ID` before the org exists. That is a DIFFERENT
+ * route on purpose: `/v1/auth/register` is public and unauthenticated and must never accept a chosen
+ * id, so the server registers the bootstrap route only under its operator gate — against a server
+ * without the gate the request is a plain 404, reported as REGISTER_FAILED.
+ *
  * Routes/payloads verified doc-first against `packages/api-auth/src/routes/auth.ts` (register) +
  * `orgs.ts` (switch) + the `RegisterRequest`/`TokenResponse` DTOs in `packages/auth-core/src/dto.ts`.
  *
@@ -46,8 +53,12 @@ async function readJson(res: Response): Promise<Record<string, unknown>> {
   }
 }
 
+/** The org-id shape the server enforces too — checked here so a typo costs no round trip. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
- * `rayspec dev bootstrap-tenant --base-url <url> [--email …] [--password …] [--org-name …]`.
+ * `rayspec dev bootstrap-tenant --base-url <url> [--email …] [--password …] [--org-name …]
+ * [--org-id <uuid>]`.
  * Returns the org id + org-scoped token; throws `DevCliError` on a usage problem (→ exit 2). An HTTP/
  * network failure or an unexpected response is returned as `ok:false` (→ exit 1).
  */
@@ -59,6 +70,7 @@ export async function runBootstrapTenant(
   let email: string;
   let password: string;
   let orgName: string;
+  let chosenOrgId: string | undefined;
   try {
     const { values } = parseArgs({
       args: [...args],
@@ -69,12 +81,14 @@ export async function runBootstrapTenant(
         email: { type: 'string' },
         password: { type: 'string' },
         'org-name': { type: 'string' },
+        'org-id': { type: 'string' },
       },
     });
     baseUrlFlag = values['base-url'];
     email = values.email ?? `owner-${Date.now()}@rayspec.local`;
     password = values.password ?? 'correct-horse-battery-staple-9';
     orgName = values['org-name'] ?? 'My Workspace';
+    chosenOrgId = values['org-id'];
   } catch (e) {
     throw new DevCliError(`invalid arguments: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -82,15 +96,28 @@ export async function runBootstrapTenant(
   if (!baseUrlFlag || baseUrlFlag.trim().length === 0) {
     throw new DevCliError('--base-url <url> is required (the running RaySpec backend).');
   }
+  if (chosenOrgId !== undefined && !UUID_RE.test(chosenOrgId)) {
+    throw new DevCliError(
+      `--org-id must be an org UUID (8-4-4-4-12), got '${chosenOrgId}'. It becomes the tenant id ` +
+        'the deployment binds to, so a malformed value could never name an org.',
+    );
+  }
   const base = baseUrlFlag.replace(/\/+$/, '');
   const fetchImpl = deps.fetchImpl ?? fetch;
 
   try {
-    // 1. Register (orgName auto-creates the personal org + owner membership).
-    const regRes = await fetchImpl(`${base}/v1/auth/register`, {
+    // 1. Register (orgName auto-creates the personal org + owner membership). With a chosen id the
+    //    request goes to the operator-gated bootstrap route instead — see the module doc.
+    const registerPath = chosenOrgId ? '/v1/auth/bootstrap-tenant' : '/v1/auth/register';
+    const regRes = await fetchImpl(`${base}${registerPath}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email, password, orgName }),
+      body: JSON.stringify({
+        email,
+        password,
+        orgName,
+        ...(chosenOrgId ? { orgId: chosenOrgId } : {}),
+      }),
     });
     const regBody = await readJson(regRes);
     const regToken = typeof regBody.accessToken === 'string' ? regBody.accessToken : '';

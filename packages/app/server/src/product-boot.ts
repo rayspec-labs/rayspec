@@ -116,7 +116,11 @@ import {
   type SttMediaSource,
 } from '@rayspec/stt-port';
 import type { PgTable } from 'drizzle-orm/pg-core';
-import type { BootedServer, ServerConfig } from './composition-root.js';
+import {
+  type BootedServer,
+  resolveLiveTenantOrgId,
+  type ServerConfig,
+} from './composition-root.js';
 
 /** A fail-closed product-boot config defect (a missing/invalid env or config file). */
 export class ProductBootError extends Error {
@@ -133,6 +137,8 @@ export interface DeployedProductBoot {
   declaredAgents: BootedServer['declaredAgents'];
   declaredCronTriggers: BootedServer['declaredCronTriggers'];
   deployMode: BootedServer['deployMode'];
+  /** The org this deployment bound to, in the form the database stores (see BootedServer). */
+  productTenantId: BootedServer['productTenantId'];
   /**
    * The REPORT-ONLY drift `deploy()` computed post-migrate, surfaced additively so the
    * composition root / tests can assert the reconciled end-state (mirrors the classic BootedServer.drift).
@@ -1979,6 +1985,65 @@ export function buildRecordNormalizer(
   return makeLiveRecordNormalizer(normalizerCfg);
 }
 
+/**
+ * Fail-closed BOOT gate on `RAYSPEC_PRODUCT_TENANT_ID`: it must be a well-formed org id AND name a
+ * live org. Both halves matter and neither was checked before — `requireEnv` only rejects an empty
+ * value, so a deployment pointed at nothing came up green and then failed far from the cause: a bare
+ * 404 on the reprocess seam, or a `cross_tenant` throw on the first capability event reaching the
+ * tenant-bound dispatcher.
+ *
+ * SHAPE via `forTenant(db, tenantId)`, which THROWS the fail-closed "tenantId must be a UUID" for a
+ * malformed id — reused (not re-derived as a second regex) so the shape rule keeps ONE source of
+ * truth, the TenantDb chokepoint. EXISTENCE via the composition root's `resolveLiveTenantOrgId`, the SAME
+ * `deleted_at IS NULL` query the cron tenant is answered with, so "a usable org" cannot come to mean
+ * two things; a tombstoned org counts as absent, because a deployment must never bind to an erased
+ * tenant.
+ *
+ * WHY THIS IS A BOOT GATE WHILE THE CRON TENANT'S IS NOT. `assertCronTenantBootable` deliberately
+ * checks shape ONLY: an org is registered against a RUNNING application, so a cron boot gate would
+ * have made the org impossible to create, and the existence question moved to the firing instead. The
+ * failure profiles are genuinely different, so the decisions are. A cron deployment whose org does not
+ * exist yet is merely IDLE — it skips each firing and starts firing by itself the moment the org
+ * appears. A PRODUCT deployment whose tenant does not exist is unusable for EVERY principal, forever,
+ * with no self-healing moment: nothing about it improves by staying up.
+ *
+ * The operational consequence, stated plainly because it is a real constraint: since `deploy` also
+ * serves the auth surface, a product deployment can no longer create its own org through itself. The
+ * supported order is an auth-only `rayspec-serve` boot → `rayspec dev bootstrap-tenant --org-id <id>`
+ * against it → `deploy` with that id in `RAYSPEC_PRODUCT_TENANT_ID`.
+ *
+ * RETURNS the org id as the DATABASE stores it, and the boot binds THAT rather than the configured
+ * spelling. Both checks above answer in uuid space (the shape regex is case-insensitive, and `orgs.id`
+ * is a `uuid` column), while the deployment's tenant is compared as a STRING at runtime — against
+ * `event.tenant_id` in the capability sinks and against the requested tenant on the reprocess seam,
+ * both of which the server derives from that same column and therefore reads canonically. Binding the
+ * raw value would let an id that differs only in letter case pass this gate and then refuse every
+ * event — the precise silent misconfiguration this gate exists to end, reintroduced one layer down.
+ * It is not hypothetical: `uuidgen` prints upper case on macOS/BSD.
+ */
+export async function assertProductTenantBootable(db: Db, tenantId: string): Promise<string> {
+  try {
+    forTenant(db, tenantId);
+  } catch {
+    throw new ProductBootError(
+      `RAYSPEC_PRODUCT_TENANT_ID='${tenantId}' is not a valid org UUID. Every workflow run, ` +
+        'capability event and authenticated principal of this deployment binds to that org id ' +
+        '(8-4-4-4-12 UUID). Fail-closed.',
+    );
+  }
+  const storedId = await resolveLiveTenantOrgId(db, tenantId);
+  if (storedId === undefined) {
+    throw new ProductBootError(
+      `RAYSPEC_PRODUCT_TENANT_ID='${tenantId}' does not name a live org (a soft-deleted org counts ` +
+        'as absent). Every principal of this deployment is bound to that tenant, so it would serve ' +
+        'nobody: 404 on the reprocess seam, cross_tenant on the first capability event. Create the ' +
+        'org FIRST — boot the auth surface alone (`rayspec-serve` with no spec), run `rayspec dev ' +
+        'bootstrap-tenant --org-id <this id>` against it, then deploy with that id. Fail-closed.',
+    );
+  }
+  return storedId;
+}
+
 // ── the boot ─────────────────────────────────────────────────────────────────────────────────────
 
 export async function deployProductYamlSpec(
@@ -2015,10 +2080,15 @@ export async function deployProductYamlSpec(
     throw e;
   }
 
-  const tenantId = requireEnv(
-    env,
-    'RAYSPEC_PRODUCT_TENANT_ID',
-    'the deployment tenant every workflow run + dispatcher binds to (single-node posture)',
+  // The deployment binds to the org as the DATABASE stores it, not to the spelling the operator
+  // configured — see `assertProductTenantBootable`, which returns that canonical form.
+  const tenantId = await assertProductTenantBootable(
+    db,
+    requireEnv(
+      env,
+      'RAYSPEC_PRODUCT_TENANT_ID',
+      'the deployment tenant every workflow run + dispatcher binds to (single-node posture)',
+    ),
   );
 
   // ── DOC-DRIVEN env demands — each capability's env is demanded iff the spec USES it ────────
@@ -2509,6 +2579,10 @@ export async function deployProductYamlSpec(
     declaredAgents: [],
     declaredCronTriggers: [],
     deployMode,
+    // The org this deployment is bound to, in the form the database stores — the value the capability
+    // sinks and the reprocess seam compare against. Exposed so an embedder (and the gate suite) can
+    // read what the boot RESOLVED rather than what was configured; nothing prints it.
+    productTenantId: tenantId,
     // The report-only post-migrate drift (empty on a successful mount/materialize/update boot;
     // a residual UPDATE drift threw the fail-closed gate above and never reaches here).
     drift: result.drift,

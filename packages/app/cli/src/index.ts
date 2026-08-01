@@ -108,9 +108,12 @@ LOCAL-DEV, MUTATING (the \`dev\` group — creates a dev DB / writes secret file
                                 Base URL from --database-url or DATABASE_URL. With --reset --yes,
                                 DROP + re-create a CLEAN database (destroys all data; --reset alone
                                 refuses without --yes).
-  rayspec dev bootstrap-tenant --base-url <url> [--email <e>] [--password <p>] [--org-name <n>]
+  rayspec dev bootstrap-tenant --base-url <url> [--email <e>] [--password <p>] [--org-name <n>] [--org-id <uuid>]
                                 Create the first tenant+owner via the shipped auth API; emit ORG_ID
-                                + the org-scoped token (a deliberate operator credential).
+                                + the org-scoped token (a deliberate operator credential). With
+                                --org-id, the org is created under THAT id (for
+                                RAYSPEC_PRODUCT_TENANT_ID); the target server must be running with
+                                RAYSPEC_TENANT_BOOTSTRAP_ENABLED=true.
 
 Output: a single JSON object on stdout. Exit 1 = not-ok; exit 2 = a CLI/usage error.`;
 

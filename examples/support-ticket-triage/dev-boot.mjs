@@ -27,8 +27,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
+import { makeDb } from '@rayspec/db';
 import { registerProductStores } from '@rayspec/db/composition';
-import { assembleServer, bootBaseUrl, loadServerConfig } from '@rayspec/server';
+import { applyMigrations, assembleServer, bootBaseUrl, loadServerConfig } from '@rayspec/server';
 import postgres from 'postgres';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -81,7 +82,25 @@ try {
   await admin.end();
 }
 
-// 4. Boot the composed stack with the LOCAL table-registration stand-in.
+// 4. Bring the deployment tenant into existence BEFORE the boot. A product deployment whose
+//    RAYSPEC_PRODUCT_TENANT_ID names no live org refuses to start — it would serve nobody, since every
+//    principal is bound to that tenant. Applying the committed platform chain here creates `orgs`, so
+//    the row can be seeded; the boot's own migrate then no-ops over it. Idempotent, so re-running this
+//    script against an existing database is a no-op.
+const seed = makeDb(DATABASE_URL);
+try {
+  await applyMigrations(seed);
+  await seed.$client.unsafe(
+    `INSERT INTO orgs (id, name, slug) VALUES ($1, 'Support Co', 'support-co')
+     ON CONFLICT DO NOTHING`,
+    [TENANT],
+  );
+  console.log(`[dev-boot] deployment tenant ${TENANT} is live (idempotent)`);
+} finally {
+  await seed.$client.end();
+}
+
+// 5. Boot the composed stack with the LOCAL table-registration stand-in.
 process.env.DATABASE_URL = DATABASE_URL;
 process.env.PORT = PORT;
 process.env.RAYSPEC_PRODUCT_TENANT_ID = TENANT;

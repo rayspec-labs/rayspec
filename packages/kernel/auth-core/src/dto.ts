@@ -1,8 +1,13 @@
 /**
  * RaySpec HTTP DTOs (Zod) — the ONLY shapes that cross the public HTTP boundary. No
  * node-oidc-provider / jose / argon2 / Drizzle type appears here; handlers translate to/from
- * these. Mass-assignment defense: org_id / role / tenant_id are NEVER body-bindable — they are
- * server-derived. password_hash / key_hash / token_hash NEVER appear in any response DTO.
+ * these. Mass-assignment defense: org_id / role / tenant_id are NEVER body-bindable on a PUBLIC
+ * shape — they are server-derived. password_hash / key_hash / token_hash NEVER appear in any
+ * response DTO.
+ *
+ * The ONE deliberate, gated exception is `BootstrapTenantRequest.orgId` — see its type doc. It is a
+ * SEPARATE shape precisely so the public `RegisterRequest` keeps the rule absolutely: the org id is
+ * bindable only on a route a default deployment does not register at all.
  *
  * The ONE deliberate, gated secret-in-a-response exception is `TokenResponse.refreshToken`
  * — the rotated refresh secret, returned to a NON-browser client ONLY on the
@@ -39,6 +44,29 @@ export const RegisterRequest = z.object({
   deliverRefreshTokenInBody,
 });
 export type RegisterRequest = z.infer<typeof RegisterRequest>;
+
+/**
+ * The OPERATOR-GATED tenant bootstrap: register an owner AND create their org under a PRE-CHOSEN id,
+ * so a deployment can be configured with `RAYSPEC_PRODUCT_TENANT_ID` before the org exists (that
+ * variable must name a live org or the product boot refuses to start).
+ *
+ * `orgId` is the ONLY client-supplied org id anywhere in this file, and it is deliberately NOT an
+ * optional field on `RegisterRequest`. Register is PUBLIC and unauthenticated: if a public caller
+ * could name the id, someone who learned the id an operator intends to deploy against could create
+ * that org FIRST with themselves as owner, and the deployment would bind to an org they control — a
+ * tenant takeover. This shape is served only by `POST /v1/auth/bootstrap-tenant`, which is registered
+ * ONLY when the deployment set RAYSPEC_TENANT_BOOTSTRAP_ENABLED, so on a default deployment there is
+ * no route to send it to. `orgName` is REQUIRED here (unlike register, where it is optional): binding
+ * an id to no org is the one thing this route cannot do.
+ */
+export const BootstrapTenantRequest = z.object({
+  email: emailField,
+  password: passwordField,
+  orgName: z.string().min(1).max(200),
+  orgId: z.string().uuid(),
+  deliverRefreshTokenInBody,
+});
+export type BootstrapTenantRequest = z.infer<typeof BootstrapTenantRequest>;
 
 export const LoginRequest = z.object({
   email: emailField,
