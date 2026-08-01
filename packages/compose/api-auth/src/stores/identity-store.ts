@@ -277,6 +277,30 @@ export class IdentityStore {
     });
   }
 
+  /**
+   * Persist the ACTIVE ORG on ONE session row (the org-switch write). The selection is read back by
+   * refresh (`activeOrgId`) and by the cookie principal, so without this write the choice would live
+   * only inside the short-lived access token.
+   *
+   * The predicate is (id AND user_id): `userId` is the AUTHENTICATED caller's, so the update can only
+   * ever touch a row that BELONGS to the caller — a session id that resolves to someone else's row
+   * matches nothing rather than moving another user's tenant. `revoked_at IS NULL` keeps a dead
+   * session dead. Returns nothing: a no-match (a foreign row, or one revoked mid-request) is a
+   * legitimate no-op, never an error — the switch itself has already succeeded by the time we get here.
+   */
+  async setSessionCurrentOrg(sessionId: string, userId: string, orgId: string): Promise<void> {
+    await this.db
+      .update(schema.sessions)
+      .set({ currentOrgId: orgId })
+      .where(
+        and(
+          eq(schema.sessions.id, sessionId),
+          eq(schema.sessions.userId, userId),
+          isNull(schema.sessions.revokedAt),
+        ),
+      );
+  }
+
   /** Revoke a single session (logout). Reason 'logout' → a benign stale-cookie refresh is NOT reuse. */
   async revokeSession(id: string, reason = 'logout'): Promise<void> {
     await this.db
@@ -302,6 +326,39 @@ export class IdentityStore {
       .from(schema.memberships)
       .where(and(eq(schema.memberships.userId, userId), isNull(schema.memberships.deletedAt)));
     return rows as MembershipRow[];
+  }
+
+  /**
+   * The user's SOLE live membership — defined only when they are an ACTIVE member of EXACTLY ONE
+   * LIVE org; `undefined` for zero or for two-or-more (login uses it to pre-fill the session's org,
+   * and an ambiguous answer must stay `null` rather than have the server pick a tenant for the user).
+   *
+   * The org join + `orgs.deleted_at IS NULL` matter: a membership whose org was soft-deleted is not a
+   * usable tenant, so it must neither BE the answer nor make a real second org look ambiguous —
+   * exactly the predicate `OrgStore.orgsForUser` lists by. `limit(2)` is the whole counting strategy:
+   * we only ever need to know "exactly one or not", so two rows is enough to decide it.
+   */
+  async soleActiveOrgForUser(userId: string): Promise<MembershipRow | undefined> {
+    const rows = await this.db
+      .select({
+        id: schema.memberships.id,
+        orgId: schema.memberships.orgId,
+        userId: schema.memberships.userId,
+        role: schema.memberships.role,
+        status: schema.memberships.status,
+      })
+      .from(schema.memberships)
+      .innerJoin(schema.orgs, eq(schema.memberships.orgId, schema.orgs.id))
+      .where(
+        and(
+          eq(schema.memberships.userId, userId),
+          eq(schema.memberships.status, 'active'),
+          isNull(schema.memberships.deletedAt),
+          isNull(schema.orgs.deletedAt),
+        ),
+      )
+      .limit(2);
+    return rows.length === 1 ? (rows[0] as MembershipRow) : undefined;
   }
 
   /**

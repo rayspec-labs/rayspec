@@ -530,6 +530,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The chosen organization now survives a refresh and a fresh login instead of dying with the access
+  token.** `POST /v1/orgs/{orgId}/switch` re-minted a JWT scoped to the org but recorded the choice
+  nowhere durable: `sessions.current_org_id` — the column `POST /v1/auth/refresh` reads back as
+  `activeOrgId` — was only ever written when a session was created. A browser therefore lost its
+  tenant on every refresh, which at an 8-minute access-token TTL means constantly, and again on every
+  login. The refresh reported `activeOrgId: null`, so a client that wanted to be back where it already
+  was had to re-run `GET /v1/orgs`, work out which of the returned organizations it had been in, and
+  switch into it again. The switch now persists the choice on the caller's own session row, strictly
+  after the live-membership recheck — so a denied switch still writes nothing, and the refresh that
+  follows a successful one returns the same `activeOrgId` the switch returned. Session rotation
+  carries it onto the replacement row, as it already did for a session created with one.
+  **`POST /v1/auth/login` additionally pre-fills the org when the user is an active member of exactly
+  one live organization**, the single-workspace case where the list-then-switch round trip was pure
+  ceremony. Two or more memberships still yield `null`: the server has no basis on which to pick one
+  and does not guess.
+
+  **Two limits are worth stating, because a consumer observes both.** First, a refreshed token is
+  now tenant-scoped but still roleless. `POST /v1/auth/refresh` mints an access token carrying the
+  remembered org — that half is new — but, as it always has, no role claim. So the routes gated on
+  a claim-trusted permission (`org:read`, `apikey:read`, `store:read`, `agent:read`, `agent:run`)
+  answer `403` on it, while the permissions that are re-resolved live instead of trusted from the
+  claim (`store:write` on the declared store routes, `apikey:mint`, `apikey:revoke`,
+  `org:member:add`, `org:member:change`) now succeed on it in the remembered org — before this
+  change a refreshed token carried no org at all, so every tenant-scoped route answered `404` for
+  want of a tenant. That is a shorter path to those routes rather than new authority: the same
+  refresh cookie already reached them by calling `POST /v1/orgs/{orgId}/switch` first, which carries
+  no permission gate of its own and re-checks membership live exactly as those routes do. What this
+  change removes for a returning browser is therefore the `GET /v1/orgs` discovery step, not the
+  subsequent `POST /v1/orgs/{orgId}/switch` — the client now knows the org id it should switch into,
+  and still has to switch before it can READ its tenant data. The login path has no such caveat: a
+  sole-org user's login token carries the live role and is usable against tenant routes immediately.
+  Second, persisting the choice requires the switch request to carry the refresh cookie, and a
+  switch is a Bearer-required mutation. A **same-origin** browser sends the httpOnly refresh cookie
+  alongside the Bearer header automatically — that is the flow this fixes.
+  Any client that sends no cookie has no session row to write, so its selection stays inside the
+  re-minted token exactly as before: a CLI or desktop client, and equally a **cross-origin** browser
+  client, which this API serves bearer-only (the CORS grant never enables credentials, and the
+  refresh cookie is `__Host-…; SameSite=Strict`). The switch itself succeeds either way; nothing
+  about it fails for want of a cookie.
+
 - **The documentation no longer calls the tool-dispatch boundary "the defense against
   prompt-injection-style attacks".** It is the defense against ONE of three classes, and saying so
   without the qualifier taught the wrong mental model everywhere it appeared — the tool-dispatch

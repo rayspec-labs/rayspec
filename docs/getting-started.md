@@ -278,27 +278,41 @@ curl -s -X POST http://localhost:8080/v1/orgs/<ORG_ID>/switch \
 ```
 
 `register` **auto-created** the org because the request passed an `orgName`, so its
-response's `activeOrgId` is the new org. A **returning** user who already has an
-account signs in instead — and sign-in never creates an org, so its `activeOrgId`
-is `null`:
+response's `activeOrgId` is the new org — but the access token in that same response
+was minted before the org existed, so it is not yet scoped to it. That is why the
+block above still switches.
+
+A **returning** user who already has an account signs in instead. Sign-in never
+*creates* an org, but it does resolve one when the answer is unambiguous: a user who
+is an active member of exactly one live organization gets that org back, and here the
+token **is** scoped to it — it carries the same `orgId` and live role a switch would
+mint. The user above has just the one org, so a fresh login lands them in it:
 
 ```bash
-# A returning user logs in — no org is auto-created, so activeOrgId is null
+# A returning user logs in — a member of exactly one live org gets it back
 curl -s -X POST http://localhost:8080/v1/auth/login \
   -H 'content-type: application/json' \
   -d '{"email":"owner@example.com","password":"a-long-passphrase"}'
-# → {"accessToken":"<JWT>","tokenType":"Bearer","expiresIn":480,"activeOrgId":null}
+# → {"accessToken":"<ORG_TOKEN>","tokenType":"Bearer","expiresIn":480,"activeOrgId":"<ORG_ID>"}
+```
 
-# Then switch into one of their orgs to get an org-scoped token (as above)
+Every other case is `activeOrgId: null` — an active membership in **two or more**
+live organizations, and equally **none** at all. The server has no basis on which to
+pick one, and it does not guess. Such a client chooses explicitly, as does anyone who
+wants a *different* org than the one login resolved:
+
+```bash
+# Switch into one of their orgs to get an org-scoped token (as above). <JWT> is the
+# token from a response whose activeOrgId did not scope it — register, or a login
+# that returned null.
 curl -s -X POST http://localhost:8080/v1/orgs/<ORG_ID>/switch \
   -H 'authorization: Bearer <JWT>'
 # → {"accessToken":"<ORG_TOKEN>","tokenType":"Bearer","expiresIn":480,"activeOrgId":"<ORG_ID>"}
 ```
 
-Because `login` returns `activeOrgId: null`, a returning client must call
-`POST /v1/orgs/{id}/switch` to obtain an org-scoped token before it can use any
-tenant route. A user can look up their org ids from `GET /v1/auth/me`, which lists
-their memberships.
+A token without an org reaches no tenant route, so a client that receives
+`activeOrgId: null` must switch before it can use one. A user can look up their org
+ids from `GET /v1/auth/me`, which lists their memberships.
 
 ---
 
