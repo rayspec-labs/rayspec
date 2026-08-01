@@ -192,9 +192,13 @@ export interface RouteBudget {
  * the `source` arm otherwise. Behind `requireAuth()` the source arm is only reachable through that
  * function's own fail-closed "no canonical actor" fallback, and giving it a separate name keeps that
  * fallback visible in the key space instead of quietly merging two different populations into one
- * counter — and keeps the derivation correct if the chain is ever reordered. `${method} ${path}` is
- * injective over the declared surface (lint already rejects a duplicate method+path pair), so two
- * routes can never share a counter. Guard and derivation live in ONE function so they cannot drift.
+ * counter — and keeps the derivation correct if the chain is ever reordered. `${method} ${path}`
+ * separates the routes of a PARSED spec, where lint rejects a duplicate method+path pair. It does
+ * NOT separate them everywhere, and the exception is precisely the path this guard exists for: a
+ * spec assembled in code skips `parseSpec`, and `lintSpec` is only ever called from inside it, so
+ * nothing rejects a duplicate there. Two identical declarations would then count into ONE bucket —
+ * which drains a single budget twice as fast rather than granting two, so that failure runs strictly
+ * stricter and never leaks allowance. Guard and derivation live in ONE function so they cannot drift.
  */
 export function declaredRouteBudget(route: {
   method: string;
