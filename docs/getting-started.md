@@ -262,31 +262,28 @@ It emits the new org id and an org-scoped token:
 }
 ```
 
-Under the hood that is two calls you can also make by hand:
+Under the hood that is one call you can also make by hand:
 
 ```bash
 # Register a user and auto-create the org + owner membership
 curl -s -X POST http://localhost:8080/v1/auth/register \
   -H 'content-type: application/json' \
   -d '{"email":"owner@example.com","password":"a-long-passphrase","orgName":"Acme"}'
-# → {"accessToken":"<JWT>","tokenType":"Bearer","expiresIn":480,"activeOrgId":"<ORG_ID>"}
-
-# Switch into that org to get an org-scoped token (Bearer, no body)
-curl -s -X POST http://localhost:8080/v1/orgs/<ORG_ID>/switch \
-  -H 'authorization: Bearer <JWT>'
 # → {"accessToken":"<ORG_TOKEN>","tokenType":"Bearer","expiresIn":480,"activeOrgId":"<ORG_ID>"}
 ```
 
-`register` **auto-created** the org because the request passed an `orgName`, so its
-response's `activeOrgId` is the new org — but the access token in that same response
-was minted before the org existed, so it is not yet scoped to it. That is why the
-block above still switches.
+`register` **auto-created** the org because the request passed an `orgName`, and the
+token it hands back is already scoped to it: the org is created as part of the
+registration, so the response, the session and the token's claims all name the same
+tenant. `dev bootstrap-tenant` additionally calls `POST /v1/orgs/{id}/switch` — that
+call is how you move to a *different* org later, and it is what a client uses when it
+holds a token that carries no org at all.
 
 A **returning** user who already has an account signs in instead. Sign-in never
 *creates* an org, but it does resolve one when the answer is unambiguous: a user who
-is an active member of exactly one live organization gets that org back, and here the
-token **is** scoped to it — it carries the same `orgId` and live role a switch would
-mint. The user above has just the one org, so a fresh login lands them in it:
+is an active member of exactly one live organization gets that org back, in a token
+carrying the same `orgId` and live role a switch would mint. The user above has just
+the one org, so a fresh login lands them in it:
 
 ```bash
 # A returning user logs in — a member of exactly one live org gets it back
@@ -302,9 +299,8 @@ pick one, and it does not guess. Such a client chooses explicitly, as does anyon
 wants a *different* org than the one login resolved:
 
 ```bash
-# Switch into one of their orgs to get an org-scoped token (as above). <JWT> is the
-# token from a response whose activeOrgId did not scope it — register, or a login
-# that returned null.
+# Switch into one of their orgs to get an org-scoped token (as above). <JWT> is a
+# token that carries no org — a login that returned activeOrgId: null.
 curl -s -X POST http://localhost:8080/v1/orgs/<ORG_ID>/switch \
   -H 'authorization: Bearer <JWT>'
 # → {"accessToken":"<ORG_TOKEN>","tokenType":"Bearer","expiresIn":480,"activeOrgId":"<ORG_ID>"}

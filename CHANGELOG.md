@@ -604,6 +604,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`POST /v1/auth/register` with an `orgName` now hands back a token that is actually scoped to the
+  org it just created.** The response has always reported `activeOrgId`, but the session was issued
+  *before* the org existed, so the row carried `null` and the token carried no org claim: the very
+  first `POST /v1/auth/refresh` after the documented onboarding call answered `activeOrgId: null`,
+  and a browser that registered and reloaded landed in no tenant at all. The org is now created as
+  part of the registration, so the response, the session row and the token's claims name the same
+  tenant, and the owner role travels with it. Registering without an `orgName` is unchanged. The same
+  seam carries the operator bootstrap route, so a chosen-id tenant likewise comes back ready to use.
+
+- **A switch presented with a rotated refresh cookie records the choice on the live session instead
+  of losing it.** Inside the refresh grace window a client legitimately still holds the pre-rotation
+  secret — `POST /v1/auth/refresh` already resolves that to the replacement row. The switch write did
+  not: it landed on the superseded row, which no later refresh reads, so the selection vanished at the
+  next reload. It now resolves the same hop, and the store refuses a write to a superseded row
+  outright, so the rule is structural rather than a convention a future call site could forget. A
+  rotated cookie beyond the grace window still resolves to nothing here; detecting a replay remains
+  the refresh route's job.
+
 - **The chosen organization now survives a refresh and a fresh login instead of dying with the access
   token.** `POST /v1/orgs/{orgId}/switch` re-minted a JWT scoped to the org but recorded the choice
   nowhere durable: `sessions.current_org_id` — the column `POST /v1/auth/refresh` reads back as
