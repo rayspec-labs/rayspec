@@ -214,12 +214,16 @@ function assertValidValue(col: PgColumn, where: string, name: string, value: unk
   if (value === null) return;
   const t = typeof value;
   if (t === 'string' || t === 'number' || t === 'boolean') return;
-  // A BigInt is a plain SCALAR data value (it is what a `{ mode: 'bigint' }` column reads back, so a
-  // read-modify-write handler naturally produces one). Without this arm it is neither string/number/
-  // boolean nor a Date nor `typeof 'object'`, so `isPlain` is false and it lands in the forbidden-
-  // non-data (SF-1) arm below with a misleading SQL-injection message — i.e. the facade could not
-  // write the type at all. Its RANGE is checked in `coerceForColumn`, which runs right after this.
-  if (t === 'bigint') return;
+  // A BigInt is a plain SCALAR data value ON A BIGINT COLUMN (it is what a `{ mode: 'bigint' }` column
+  // reads back, so a read-modify-write handler naturally produces one). Without this arm it is neither
+  // string/number/boolean nor a Date nor `typeof 'object'`, so `isPlain` is false and it lands in the
+  // forbidden-non-data (SF-1) arm below with a misleading SQL-injection message — i.e. the facade could
+  // not write the type at all. Its RANGE is then checked in `coerceForColumn`, which runs right after
+  // this. The arm is NARROWED to a bigint column deliberately: that range check fires only for one, so
+  // a BigInt aimed at any OTHER column type would have nothing checking it and would reach the driver —
+  // where a `jsonb` column's mapper is `JSON.stringify`, which throws an unmapped `TypeError: Do not
+  // know how to serialize a BigInt` (a 500) instead of the 400 this SF-1 guard gives it.
+  if (t === 'bigint' && isBigintColumn(col)) return;
   if (value instanceof Date) return;
   // From here `value` is an object/function/etc. A FORBIDDEN NON-DATA value is rejected for EVERY
   // column type (the SF-1 injection block): a function, a Drizzle SQL object, OR any non-plain value —
@@ -417,8 +421,17 @@ function toDbValues(
  * is then obliged to refuse. This also covers the `persistTo` run-output writer, which reuses the
  * facade insert path, and the generated handlers, which assign a plain number and convert here (so no
  * generated product source ever contains a BigInt literal and the SDK's plain-serializable-row
- * contract is preserved). A string or boolean into a bigint column falls through unchanged and fails
- * at the driver, exactly as it does for an `integer` column today.
+ * contract is preserved).
+ *
+ * The bigint arm is therefore TOTAL — every other value shape is refused HERE rather than left to the
+ * driver, which for this column type would not refuse it. postgres.js `inferType` returns OID 0 (an
+ * UNTYPED parameter) for a string, PostgreSQL resolves that to the target column and parses it with
+ * `int8in`, and drizzle's `PgBigInt64` declares no `mapToDriverValue` — so a numeric STRING would be
+ * stored EXACTLY, past this bound and un-refused. `integer` is not a precedent for letting that
+ * through: an int4 column is NARROWER than the platform bound, so PostgreSQL itself raises 22003,
+ * whereas an int8 column is WIDER and the platform is the only thing that can hold the ±2^53-1 line.
+ * The facade insert is auto-commit, so a value that slipped through would COMMIT and only then fail
+ * when the RETURNING row is serialized — leaving a committed row that no read on any path can return.
  */
 function coerceForColumn(col: PgColumn, name: string, value: unknown, op: string): unknown {
   if (value === null) return null;
@@ -443,6 +456,12 @@ function coerceForColumn(col: PgColumn, name: string, value: unknown, op: string
       }
       return BigInt(value);
     }
+    throw new StoreInputError(
+      `HandlerDb: ${op} value for bigint column '${name}' must be a number or a BigInt — got ` +
+        `${typeof value}. A string is deliberately NOT parsed here: the driver would bind it as an ` +
+        'untyped parameter and PostgreSQL would store it past this bound (fail-closed).',
+      'A supplied value is not a valid integer.',
+    );
   }
   if (isTimestampColumn(col) && typeof value === 'string') {
     const d = new Date(value);

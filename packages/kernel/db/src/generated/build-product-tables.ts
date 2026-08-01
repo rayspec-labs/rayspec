@@ -68,7 +68,10 @@ function businessBuilder(type: ColumnType, snake: string): ChainableBuilder {
     case 'bigint':
       // The mode is NOT optional here: it must stay byte-identical to generate-product-schema's
       // DRIZZLE_BUILDER, or the runtime twin and the committed source disagree about the JS type an
-      // int8 column produces (a BigInt vs an already-rounded number). A meta-test pins the two together.
+      // int8 column produces (a BigInt vs an already-rounded number). The three-way twin pin in
+      // product-pipeline.test.ts CANNOT see that divergence — it compares `getSQLType()`, which is
+      // 'bigint' for both modes. The mode meta-test in generate-product-schema.test.ts compares
+      // `columnType` (PgBigInt64 vs PgBigInt53) and is the one guard that does.
       return chain(bigint(snake, { mode: 'bigint' }));
     case 'boolean':
       return chain(boolean(snake));

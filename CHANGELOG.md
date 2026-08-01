@@ -32,8 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   concrete and deliberate: **one out-of-range row makes the whole list page containing it fail**, and
   the same bound on filters means you cannot query for that row either, so recovering it is a
   SQL-level operation. The error names the column and the row id — never the value — so the row is
-  findable. Below the bound nothing changes: values are exact, and the column is orderable,
-  filterable, and usable as a keyset pagination column like any other.
+  findable, and a page that failed this way carries no pagination cursor, so a client that pages by
+  following one cannot skip silently past the page it never received. Below the bound nothing
+  changes: values are exact, and the column is orderable, filterable, and usable as a keyset
+  pagination column like any other.
 
   **Changing an existing column from `integer` to `bigint` is gated, not automatic.** The diff
   generator emits a single `ALTER … SET DATA TYPE bigint` and the destructive-migration scanner

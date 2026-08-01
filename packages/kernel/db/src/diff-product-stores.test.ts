@@ -336,14 +336,29 @@ describe('diffProductStores — golden per-shape deltas', () => {
     // Shadow mutation (the file's byte-fidelity discipline): the scan matches the FULL statement by
     // exact equality, so perturbing the proposed match by a single character re-BLOCKS the change.
     // That is what makes the arm above a proof of the match invariant rather than a restatement that
-    // a non-empty allowlist exists. A whitespace-only perturbation would NOT flip it — the matcher
-    // collapses whitespace runs and strips a trailing `;` on both sides, which is precisely the
-    // normalization `normalizeStatementForMatch` mirrors.
+    // a non-empty allowlist exists.
     const perturbed = r.proposedAllowlist.map((e) => ({
       ...e,
       match: e.match.replace('bytes_total', 'bytes_totals'),
     }));
     expect(scanMigrationSql(r.migrationSql, perturbed).pass).toBe(false);
+
+    // INTERNAL WHITESPACE IS PART OF THE BYTES, and this is the perturbation the invariant is really
+    // about. The scanner collapses whitespace runs on the STATEMENT side only (inside `splitStatements`);
+    // the allowlist side is compared after `stripTerminator` ALONE — trimEnd + at most one trailing `;`
+    // + trim — which never touches an internal run. So a single extra space inside a hand-edited entry
+    // re-BLOCKS a reviewed change at deploy time, which is exactly the failure the module docblock
+    // warns about and why `normalizeStatementForMatch` emits the already-collapsed form rather than
+    // leaving a maintainer to reproduce it.
+    const doubleSpaced = r.proposedAllowlist.map((e) => ({
+      ...e,
+      match: e.match.replace('ALTER TABLE', 'ALTER  TABLE'),
+    }));
+    expect(doubleSpaced[0]?.match).toContain('ALTER  TABLE'); // the perturbation really is applied
+    expect(scanMigrationSql(r.migrationSql, doubleSpaced).pass).toBe(false);
+    // …while a trailing `;` (the ONE difference `stripTerminator` does absorb) still clears.
+    const terminated = r.proposedAllowlist.map((e) => ({ ...e, match: `${e.match};` }));
+    expect(scanMigrationSql(r.migrationSql, terminated).pass).toBe(true);
   });
 
   it('relaxing NOT NULL is additive (DROP NOT NULL); tightening is destructive (SET NOT NULL)', () => {

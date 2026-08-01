@@ -138,8 +138,10 @@ stores:
     the whole `list` page that contains it fail**, and the same bound on filters
     means you cannot query for that row either, so recovering it is a SQL-level
     operation. The error names the column and the row `id` (never the value), so
-    the row is findable. Below the bound a `bigint` column behaves like any
-    other scalar: orderable, filterable, and usable as a keyset pagination
+    the row is findable, and a `list` page that failed this way carries **no**
+    `X-Next-Cursor` — a client paging by that header cannot advance silently past
+    the page it never received. Below the bound a `bigint` column behaves like
+    any other scalar: orderable, filterable, and usable as a keyset pagination
     column.
 
     Two honest limits of JSON itself, neither specific to this platform:
