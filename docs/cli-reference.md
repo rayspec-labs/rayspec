@@ -504,9 +504,10 @@ change is applied by the explicit `--apply-migration` flag below.
   and `examples/stream-backend` compiles its extension pack. A **pack** additionally
   resolves `@rayspec/platform` at load starting from its own compiled entry's location, so
   ship the pack directory to the deploy target with its installed `node_modules` — that is
-  what pins the platform build it runs against — see
-  [spec-reference → `extensions`](./spec-reference.md#extensions). See
-  [getting-started → the backend profile](./getting-started.md#the-backend-profile-direct-agent-boot).
+  what pins the platform build it runs against. See
+  [spec-reference → `extensions`](./spec-reference.md#extensions) for the section grammar and
+  [getting-started → the backend profile](./getting-started.md#the-backend-profile-direct-agent-boot)
+  for the walkthrough.
   ([`gen-handler`](#gen-handler) scaffolds a handler; [`doctor`](#doctor) validates the spec.)
 - **Database state.** The serve path applies the committed **platform** migration
   chain to `DATABASE_URL` (idempotent — it bootstraps a clean database and no-ops on an
