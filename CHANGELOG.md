@@ -468,7 +468,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   certified. And a **directory that declares a body** is refused: tar gives a directory no content,
   so those bytes are the next entries to an installer, which writes them, while a reader that took
   the declared size at face value would record nothing for them — a package whose own files are
-  attacker-chosen, with every digest still matching. And when `git` cannot answer whether the working tree
+  attacker-chosen, with every digest still matching. Two narrower shapes of the same fault go with
+  it: an **empty name field** joined to a prefix (node-tar decides file-vs-directory before the join,
+  so it writes a 0-byte file where the reader sees a directory — emptying a certified file), and an
+  **empty prefix in the wide branch**, where node-tar prepends a bare `/` and the resulting absolute
+  path installs a level deeper. And when `git` cannot answer whether the working tree
   was clean, generation refuses rather than recording the flattering value — a failed command and a
   clean tree both produce no output, and only one of them is worth writing down.
 

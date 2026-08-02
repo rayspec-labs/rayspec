@@ -498,6 +498,19 @@ function unpack(gzipped) {
           `a prefix field ending in '/' — tar readers join it to the name differently`,
         );
       }
+      // AN EMPTY NAME FIELD IS REFUSED, because the two readers classify it differently. node-tar
+      // decides file-vs-directory from the NAME FIELD before the prefix is joined (`header.js`), so
+      // an empty field stays a FILE and the joined path keeps a trailing slash that extraction then
+      // strips — it writes a 0-byte file at the prefix's path. A reader that classifies from the
+      // JOINED name sees a directory, skips it, and records nothing: aim the prefix at a file the
+      // package really ships and the certified artifact installs with that file emptied, with every
+      // digest unchanged. Measured on the launcher: `dist/bin.js` 893 bytes to 0, no tar warning.
+      // No packer emits a nameless entry, so refusing costs nothing.
+      if (override === null && text(0, 100) === '') {
+        throw new Error(
+          `an entry whose name field is empty — tar readers disagree on whether its prefix alone names a file or a directory`,
+        );
+      }
       const resolved =
         override ?? (widePrefix || prefix ? `${prefix}/${text(0, 100)}` : text(0, 100));
       if (resolved === '') throw new Error(`an entry with an empty name`);

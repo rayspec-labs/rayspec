@@ -55,7 +55,11 @@
  *       installed. A reader that believed the declared size would consume them as opaque content and
  *       record nothing: the file list is unchanged, every digest still matches, and the package's own
  *       files are attacker-chosen. This is the one shape here that substitutes CONTENT rather than
- *       misplacing it, so both costumes are refused, as is a prefix field ending in '/'.
+ *       misplacing it, so both costumes are refused, as is a prefix field ending in '/', an empty
+ *       prefix in the wide byte-475 branch (node-tar prepends a bare '/' there, making the path
+ *       absolute), and an EMPTY NAME FIELD — node-tar classifies from the name field before the
+ *       prefix join, so an empty one stays a file and writes 0 bytes at the prefix's path, emptying
+ *       a certified file while the reader sees a directory and records nothing.
  *   (Q) THE DOCUMENTED RELEASE SEQUENCE REPEATS — the manifest is gitignored and listed in the
  *       launcher's `files`, so it SURVIVES a release run and the next pack would ship the previous
  *       run's manifest. Running the sequence twice (with the removal step it prescribes) is green
@@ -921,6 +925,40 @@ try {
       wideEmpty.code,
       0,
       `(H) an empty prefix in the wide branch must not name the entry as recorded; got ${wideEmpty.code}`,
+    );
+
+    // (e) an EMPTY name field with a prefix. node-tar classifies file-vs-directory from the name
+    // FIELD before the prefix is joined, so an empty field stays a FILE: the joined path keeps a
+    // trailing slash, extraction strips it, and a 0-byte file lands at the prefix's path. A reader
+    // that classified from the JOINED name would see a directory and skip it, recording nothing —
+    // so aiming the prefix at a file the package really ships empties that file while every digest
+    // stays identical. Measured on the real launcher: dist/bin.js went from 893 bytes to 0 with no
+    // tar warning at all, and verification stayed green.
+    const namelessOverwrite = Buffer.alloc(512);
+    namelessOverwrite.write('0000644\0', 100, 'utf8');
+    namelessOverwrite.write('0000000\0', 108, 'utf8');
+    namelessOverwrite.write('0000000\0', 116, 'utf8');
+    namelessOverwrite.write(`${(0).toString(8).padStart(11, '0')}\0`, 124, 'utf8');
+    namelessOverwrite.write(`${(0).toString(8).padStart(11, '0')}\0`, 136, 'utf8');
+    namelessOverwrite.fill(0x20, 148, 156);
+    namelessOverwrite.write('0', 156, 'utf8');
+    Buffer.from([0x75, 0x73, 0x74, 0x61, 0x72, 0x00, 0x30, 0x30]).copy(namelessOverwrite, 257);
+    namelessOverwrite.write('package/dist/index.js', 345, 'utf8'); // aimed at a file the fixture ships
+    let nameSum = 0;
+    for (const byte of namelessOverwrite) nameSum += byte;
+    namelessOverwrite.fill(0, 148, 156);
+    namelessOverwrite.write(`${nameSum.toString(8).padStart(6, '0')}\0 `, 148, 'utf8');
+    ship([...base, namelessOverwrite]);
+    const nameless = verify(fx);
+    assert.notEqual(
+      nameless.code,
+      0,
+      `(H) an entry with an empty name field must be refused; got ${nameless.code}`,
+    );
+    assert.match(
+      nameless.err,
+      /name field is empty/i,
+      `(H) the refusal must name it: ${nameless.err}`,
     );
 
     console.log('ok (H) — a body no installer reads cannot hide entries from this reader');
