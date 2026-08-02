@@ -350,6 +350,43 @@ describe('bindProductBackends — the fail-closed checks on what the factory ret
     ).toThrow(/a spread\/clone loses identity — use the requirement objects exactly as given/);
   });
 
+  it('refuses a call the survey never saw, rather than serving some other requirement’s Backend', () => {
+    const spec = specWithAgents(['note_extractor']);
+    const specPath = writeDeploymentDir({
+      extractors: [{ id: 'note_extractor', backend: 'openai', model: 'm' }],
+    });
+    const source = bindProductBackends(
+      (ctx) => new Map(ctx.requirements.map((r) => [r, fakeBackend(r.backend)])),
+      { env: { RAYSPEC_EXTRACTION_MODE: 'live' }, specPath, spec, withConversationInput: false },
+    );
+    // The sealed map is keyed by kind+agentId, so a lookup miss means the survey and the builder
+    // disagree about which model calls this document needs. Refusing is the only honest answer: the
+    // alternative — returning any Backend that happens to be in the map — would run this call on a
+    // credential brokered for a DIFFERENT agent.
+    expect(() => source.backendFor('extraction', 'never_surveyed', 'openai', 'm')).toThrow(
+      /was not shown extraction 'never_surveyed' \(declared backend 'openai', model 'm'\)/,
+    );
+  });
+
+  it('refuses when the sidecar changed between the survey and the build (same agent, new model)', () => {
+    const spec = specWithAgents(['note_extractor']);
+    const specPath = writeDeploymentDir({
+      extractors: [{ id: 'note_extractor', backend: 'openai', model: 'surveyed-model' }],
+    });
+    const source = bindProductBackends(
+      (ctx) => new Map(ctx.requirements.map((r) => [r, fakeBackend(r.backend)])),
+      { env: { RAYSPEC_EXTRACTION_MODE: 'live' }, specPath, spec, withConversationInput: false },
+    );
+    // The survey and the builder read the same sidecar at different moments. An edit in between would
+    // otherwise hand the run a Backend the deployment brokered for a configuration the boot is no
+    // longer using — the model the factory was asked about is not the model that would run.
+    expect(() =>
+      source.backendFor('extraction', 'note_extractor', 'openai', 'edited-model'),
+    ).toThrow(
+      /config changed between the factory survey \(backend 'openai', model 'surveyed-model'\) and the boot \(backend 'openai', model 'edited-model'\)/,
+    );
+  });
+
   it('an UNWIRED extractor sidecar reads CHARACTER-IDENTICALLY with and without a factory', () => {
     const spec = specWithAgents(['agent_one', 'agent_two']);
     const specPath = writeDeploymentDir({

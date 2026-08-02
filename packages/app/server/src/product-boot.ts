@@ -189,6 +189,13 @@ export interface DeployProductYamlOpts {
    * from env exactly as today. A deterministic executor mode (RAYSPEC_EXTRACTION_MODE /
    * _RESPONDER_MODE / _NORMALIZE_MODE = deterministic) never reaches this seam — the injected dev/CI
    * Backend still wins, structurally.
+   *
+   * ONE DIVERGENCE, IN THE STRICTER DIRECTION: an extractor sidecar with a missing or blank `model`
+   * is excluded from the survey, so the factory is never shown it and the boot then refuses that call
+   * rather than brokering one nobody described. Without a factory the same document boots, because
+   * `buildLiveAgent` does not validate the model itself. A factory therefore turns a silently
+   * under-specified sidecar into a boot failure — deliberately, since the alternative is asking a
+   * deployment to broker a model call whose model it was never told.
    */
   agentBackendsFactory?: ProductAgentBackendsFactory;
 }

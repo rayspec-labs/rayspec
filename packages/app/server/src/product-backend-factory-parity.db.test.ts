@@ -517,7 +517,11 @@ describe.skipIf(!baseUrl)(
       const stepsA = await journalSteps(runA);
       expect(stepsA.length).toBeGreaterThan(0);
       expect(stepsA.every((s) => s.backend === 'openai')).toBe(true);
-      expect(await runHeader(runA)).toEqual(await runHeader(runB));
+      // Both headers must EXIST before they are compared: two absent rows are equal to each other, so
+      // the comparison alone would read green on a path that wrote no header at all.
+      const headerA = await runHeader(runA);
+      expect(headerA).toBeDefined();
+      expect(await runHeader(runB)).toEqual(headerA);
       expect(await journalSteps(runB)).toEqual(stepsA);
 
       // (iv) Replay: repeating each turn ATTACHes to the persisted header on BOTH paths (the reply is
