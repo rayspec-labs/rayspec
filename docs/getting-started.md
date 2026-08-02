@@ -279,6 +279,15 @@ tenant. `dev bootstrap-tenant` additionally calls `POST /v1/orgs/{id}/switch` â€
 call is how you move to a *different* org later, and it is what a client uses when it
 holds a token that carries no org at all.
 
+> **In production, provision the organization with
+> [`rayspec tenant ensure`](./cli-reference.md#tenant-ensure) instead.** The walkthrough
+> here goes through a running server because that is what a first local run already has
+> in front of it. A deployment does not: it needs the org id *before* it boots, and it
+> should not leave a temporary user behind to get one. `tenant ensure` talks to
+> `DATABASE_URL` directly, is idempotent under the id you choose, creates no user, and
+> prints no credential â€” an owner invite, when you ask for one, goes to a mode-600 file
+> and nowhere else. `RAYSPEC_TENANT_BOOTSTRAP_ENABLED` can stay unset forever.
+
 A **returning** user who already has an account signs in instead. Sign-in never
 *creates* an org, but it does resolve one when the answer is unambiguous: a user who
 is an active member of exactly one live organization gets that org back, in a token

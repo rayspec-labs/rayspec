@@ -21,16 +21,20 @@ three-value exit-code contract:
 | ---- | ---------------------------------------------------------------------- |
 | `0`  | Success — the spec is valid / the plan passed / the action succeeded.  |
 | `1`  | A not-ok result — an invalid spec, a blocked migration, a failed op. The JSON result explains why (in its `errors` / findings). |
-| `2`  | A usage/CLI error — no subcommand, an unknown subcommand, or an unknown/invalid flag (including a missing or invalid required flag or path for `gen-handler` and `dev`). A short JSON error is written to **stderr** and the usage text is printed. |
+| `2`  | A usage/CLI error — no subcommand, an unknown subcommand, or an unknown/invalid flag (including a missing or invalid required flag or path for `gen-handler`, `tenant` and `dev`). A short JSON error is written to **stderr** and the usage text is printed. |
 
 A bad, missing, or out-of-jail **spec path** given to `doctor`, `plan`, or
 `openapi` is *not* a usage error — it is caught and returned as an `ok: false`
 result on **stdout** (exit `1`), the same channel as an invalid spec.
 
-The commands split into two groups:
+The commands split into three groups:
 
 - A **read-only diagnostic floor** — `doctor`, `plan`, `openapi`, `gen-handler`.
   These never mutate a real/target database and never print secret values.
+- A **production-mutating `tenant` group** — `tenant ensure`. It writes to the
+  database `DATABASE_URL` names (and applies the committed migration chain to
+  it), so it is deliberately *not* under `dev`, which is local-only. It prints no
+  secret value: a minted invite token goes to a file and nowhere else.
 - A clearly separated **local-dev, mutating `dev` group** — `dev gen-secrets`,
   `dev db`, `dev bootstrap-tenant`. These deliberately write a secrets file,
   create a database, or provision a tenant.
@@ -248,6 +252,139 @@ you actually asked for.
 
 ---
 
+## `tenant ensure`
+
+```
+rayspec tenant ensure --org-id <uuid> --name <n> [--owner-email <e>] [--owner-invite-out <path>]
+                      [--invite-ttl-seconds <n>] [--reissue-owner-invite]
+```
+
+Idempotently **creates or resolves** the organization named by `--org-id`, so a
+product deployment's `RAYSPEC_PRODUCT_TENANT_ID` can be settled before anything
+is deployed. It talks to `DATABASE_URL` directly — **no running server, and no
+HTTP route exists for it in any posture**.
+
+Run it twice with the same `--org-id` and you get the same organization and no
+second row. The chosen id *is* the operation id: `orgs.id` is a primary key, so
+the database itself is the ledger and two concurrent runs converge rather than
+race. That makes it safe to call unconditionally from a deploy script that cannot
+know whether an earlier attempt got through.
+
+- **Postgres:** yes, directly. **It applies the committed migration chain** to
+  that database — required on a first bootstrap and idempotent afterwards, but it
+  means pointing the command at an unexpected `DATABASE_URL` migrates *that*
+  database.
+- **Secrets:** `DATABASE_URL` and `RAYSPEC_API_KEY_PEPPER`, each also honouring
+  its `<VAR>_FILE` variant with the usual precedence and fail-closed behaviour
+  (see the [server package README](https://github.com/rayspec-labs/rayspec/blob/main/packages/app/server/README.md)).
+  The pepper must be the **same value the target deployment runs with**, because
+  it is what the invite token is hashed under. `RAYSPEC_JWT_SIGNING_KEY` is
+  deliberately not read — the command mints no JWT.
+- **Flags:**
+  - `--org-id <uuid>` — **required**. The organization id to create or resolve.
+    A malformed uuid is a usage error, refused before the database is opened.
+    Letter case does not matter: the id is bound and reported as the database
+    stores it (lower case), which is what a deployment compares against.
+  - `--name <n>` — **required**. The display name; the slug is derived from it
+    the same way every other path derives one.
+  - `--owner-email <e>` — optional. Mint an owner **invite** for this address so
+    a human can claim the organization. Omitted, the command only reserves the
+    organization and writes no invite.
+  - `--owner-invite-out <path>` — **required with `--owner-email`**. Where the
+    minted token is written: an exclusively-created, mode-600 file holding the
+    token and nothing else. An existing path is **refused**, never overwritten.
+    There is deliberately no flag that takes a token *value* — a secret passed as
+    an argument lands in shell history and in `ps`.
+  - `--invite-ttl-seconds <n>` — optional. Overrides the **1-hour** operator
+    default, clamped to the shipped 5-minute/30-day bounds.
+  - `--reissue-owner-invite` — optional. Revoke the outstanding owner invite and
+    mint a replacement, in one transaction (for a token that was lost). Without
+    it, a run that finds a live invite reports it and mints nothing.
+- **Output** — one JSON object, containing **no secret material**:
+
+  ```json
+  {
+    "ok": true,
+    "command": "tenant ensure",
+    "orgId": "<ORG_ID>",
+    "name": "Acme",
+    "slug": "acme",
+    "org": "created",
+    "ownerHandoff": {
+      "status": "issued",
+      "inviteId": "<INVITE_ID>",
+      "email": "founder@example.com",
+      "expiresAt": "2026-08-02T13:00:00.000Z",
+      "tokenFile": "/run/secrets/owner.token"
+    },
+    "acceptPath": "/v1/invites/accept",
+    "errors": []
+  }
+  ```
+
+  `org` is `created` on the run that made the organization and `existing` on
+  every later one. `ownerHandoff.status` is one of `not_requested` (no
+  `--owner-email`), `already_owned` (the organization already has an owner — the
+  command **never** displaces one), `pending` (an earlier run's invite is still
+  live) or `issued` (this run minted one).
+
+- **Exit:** `0` on success; `1` on an operational failure (a missing secret, a
+  soft-deleted id, an invite-out path that is taken); `2` on a usage error.
+
+### The owner handoff, and why it creates no user
+
+The command creates **no platform user and no membership**. What it writes, in
+the same transaction as the organization row, is one `owner` invite authored by
+nobody (`created_by IS NULL`). A real person then redeems it at the ordinary
+public `POST /v1/invites/accept` — which provisions *their* account with *their*
+password and attaches the owner membership. Nothing temporary is left behind,
+which is the property the older bootstrap dance could not offer: a user cannot be
+removed once created (the last owner cannot be removed, and a user delete is a
+soft delete that leaves a row).
+
+Between the two steps the organization has **zero members**. Nothing can act in
+that window, but the product boot gate checks only that the organization exists
+and is not soft-deleted, so a reserved organization is bootable before it is
+claimed.
+
+> **The token in `--owner-invite-out` is a tenant-takeover credential** until it
+> is consumed or expires. `POST /v1/invites/accept` lets any holder provision the
+> target account with a password of their choosing when that address has no
+> account yet — so whoever can read that file owns the organization. The
+> exclusive-create mode-600 write and the short default lifetime bound the
+> exposure; they do not remove it. Delete the file once the invite is redeemed.
+
+Note also what the command does **not** check. The data-integrity rules are the
+same code the HTTP surface runs — the tenant predicate, email normalization, the
+role, the TTL clamp, the single-flight on `orgs.id`. The *authorization* check is
+absent, because there is no principal: the command's authority is possession of
+`DATABASE_URL` and `RAYSPEC_API_KEY_PEPPER`.
+
+### The one-step production order
+
+```bash
+# 0. Settle the id first — this one does not exist yet; step 1 creates it.
+ORG_ID=$(uuidgen)
+
+# 1. Create the organization and mint the owner handoff. No server needed.
+rayspec tenant ensure --org-id "$ORG_ID" --name "Acme" \
+  --owner-email founder@example.com --owner-invite-out ./owner.token
+
+# 2. Hand ./owner.token to the founder, who redeems it:
+#      POST /v1/invites/accept  {"token": "<contents>", "password": "…"}
+#    …then delete the file.
+
+# 3. Deploy the product against the id.
+RAYSPEC_PRODUCT_TENANT_ID="$ORG_ID" rayspec deploy path/to/product.yaml
+```
+
+Steps 1 and 3 can run against the same `DATABASE_URL` with no server in between,
+and step 1 is safe to re-run. `RAYSPEC_TENANT_BOOTSTRAP_ENABLED` stays unset
+throughout — `POST /v1/auth/bootstrap-tenant` is never registered on the
+deployment at all.
+
+---
+
 ## `dev gen-secrets`
 
 ```
@@ -379,12 +516,17 @@ not exist at all — there is no gate to guess at and no collision reply to read
 an existence oracle. Turn the variable on for the bootstrap boot, and off again
 for the deployment.
 
-### The supported order for a product deployment
+### The local-dev order for a product deployment
 
 A product deployment **refuses to boot** when `RAYSPEC_PRODUCT_TENANT_ID` is
 malformed or names no live organization, and — because `deploy` serves the auth
 surface itself — it therefore cannot create its own tenant. Bootstrap first,
-deploy second:
+deploy second.
+
+In **production**, use [`tenant ensure`](#tenant-ensure): it does the same thing
+in one step, against `DATABASE_URL` directly, without a server and without ever
+registering `POST /v1/auth/bootstrap-tenant`. The walkthrough below is the
+local-dev route through a running server, and stays fully supported:
 
 ```bash
 # 0. Settle the id first — this one does not exist yet; step 2 creates it.

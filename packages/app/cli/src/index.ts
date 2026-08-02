@@ -12,6 +12,13 @@
  *                                 to a THROWAWAY DB (never the real target). Mutates NOTHING on it.
  *   rayspec gen-handler …        Render ONE bounded-template handler (.ts or .js) from a holes contract.
  *
+ * PRODUCTION-MUTATING (`tenant` group — writes to the database DATABASE_URL names):
+ *   rayspec tenant ensure …      Idempotently create OR resolve one organization under a chosen id,
+ *                                 speaking to the database directly (no running server, no HTTP
+ *                                 route). Applies the committed migration chain. Emits ONE JSON
+ *                                 object carrying no secret material; an owner-invite token, when one
+ *                                 is minted, is written to a mode-600 file and printed nowhere.
+ *
  * LOCAL-DEV, MUTATING (`dev` group — deliberately creates a dev DB / writes secret files; distinct
  * from the diagnostic floor above):
  *   rayspec dev gen-secrets …    Mint the 3 platform boot secrets into a `.env` (idempotent; never
@@ -25,7 +32,8 @@
  * JSON only (stdout); a usage/CLI error prints a short JSON error to stderr + exit 2. The read-only
  * floor never echoes env vars / DB URLs / credentials; `dev gen-secrets`/`dev db` never echo a secret
  * VALUE (only a written/present summary), while `dev bootstrap-tenant` emits a freshly-minted org token
- * as its deliberate, documented output.
+ * as its deliberate, documented output. `tenant ensure` is the one mutating command that emits NO
+ * credential at all: a minted invite token reaches a mode-600 file and nothing else.
  */
 import { realpathSync } from 'node:fs';
 import { argv } from 'node:process';
@@ -39,6 +47,7 @@ import { InitCliError, runInit } from './init.js';
 import { runOpenapi } from './openapi.js';
 import { runPlan } from './plan.js';
 import { loadLocalDotenvIfPresent } from './read-env.js';
+import { runTenant, TenantCliError } from './tenant.js';
 
 const USAGE = `rayspec — RaySpec CLI
 
@@ -96,6 +105,26 @@ PRODUCTION-MUTATING (boots + serves a real deployment; mutates the target DB):
                                 rollout. NO DB, NO network. Emits a JSON verdict. Does NOT prove: the
                                 migration, boot-env sufficiency, any provider credential, live-schema
                                 drift, or that the app serves. Exit 0 ok / 1 not.
+
+PRODUCTION-MUTATING (the \`tenant\` group — writes to the database DATABASE_URL names):
+  rayspec tenant ensure --org-id <uuid> --name <n> [--owner-email <e>] [--owner-invite-out <path>]
+                        [--invite-ttl-seconds <n>] [--reissue-owner-invite]
+                                Create OR resolve the organization under <uuid>, idempotently — run it
+                                twice with the same id and you get the same org and no second row. Use
+                                it to settle RAYSPEC_PRODUCT_TENANT_ID before the deployment exists.
+                                Talks to DATABASE_URL directly (no running server, no HTTP route), and
+                                APPLIES THE COMMITTED MIGRATION CHAIN to that database on the way — so
+                                point it only at a database you mean to migrate. Reads DATABASE_URL and
+                                RAYSPEC_API_KEY_PEPPER, each also honouring its <VAR>_FILE variant.
+                                With --owner-email it mints ONE owner invite and writes the token to
+                                --owner-invite-out (required with it) as a mode-600 file it will never
+                                overwrite; the token is NEVER printed, returned or logged. A human
+                                redeems it at POST /v1/invites/accept, which provisions THEIR account
+                                with THEIR password — the command creates no user. Whoever can read
+                                that file can take the tenant, so treat it as a credential: it defaults
+                                to a 1-hour lifetime (--invite-ttl-seconds overrides, clamped to
+                                5min-30d). --reissue-owner-invite revokes the outstanding invite and
+                                mints a replacement (for a lost token). Emits ONE JSON object.
 
 LOCAL-DEV, MUTATING (the \`dev\` group — creates a dev DB / writes secret files):
   rayspec dev gen-secrets [--out <path>]
@@ -167,12 +196,12 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   const rest = args.slice(1);
   if (command === undefined) {
     throw new CliError(
-      'missing command (expected `init`, `doctor`, `plan`, `openapi`, `gen-handler`, `deploy`, or `dev`)',
+      'missing command (expected `init`, `doctor`, `plan`, `openapi`, `gen-handler`, `deploy`, `tenant`, or `dev`)',
     );
   }
   if (command.startsWith('-')) {
     throw new CliError(
-      `expected a subcommand (\`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, or \`dev\`), got ${command}`,
+      `expected a subcommand (\`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, \`tenant\`, or \`dev\`), got ${command}`,
     );
   }
 
@@ -239,6 +268,23 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
       // 'served' — the server is listening; the process stays alive until a signal fires shutdown.
       return 0;
     }
+    case 'tenant': {
+      // PRODUCTION-MUTATING: the `tenant` group provisions organizations against the database
+      // `DATABASE_URL` names, applying the committed migration chain on the way. It is a TOP-LEVEL
+      // group rather than a `dev` member because `dev` is documented as local-only, which is precisely
+      // why a production deployment had no supported provisioning path. A usage problem inside it is a
+      // TenantCliError; re-throw it as a CliError so the top level maps it to exit 2 (an operational
+      // failure is returned ok:false → exit 1).
+      let result: Awaited<ReturnType<typeof runTenant>>;
+      try {
+        result = await runTenant(rest);
+      } catch (e) {
+        if (e instanceof TenantCliError) throw new CliError(e.message);
+        throw e;
+      }
+      await emit(result);
+      return result.ok ? 0 : 1;
+    }
     case 'dev': {
       // The `dev` group is LOCAL-DEV + MUTATING (creates a dev DB / writes secret files) — distinct
       // from the read-only diagnostic floor. A usage problem inside `dev` is a DevCliError; re-throw it
@@ -255,7 +301,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
     }
     default:
       throw new CliError(
-        `unknown command ${JSON.stringify(command)} (expected \`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, or \`dev\`)`,
+        `unknown command ${JSON.stringify(command)} (expected \`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, \`tenant\`, or \`dev\`)`,
       );
   }
 }

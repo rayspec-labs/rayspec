@@ -2009,8 +2009,10 @@ export function buildRecordNormalizer(
  *
  * The operational consequence, stated plainly because it is a real constraint: since `deploy` also
  * serves the auth surface, a product deployment can no longer create its own org through itself. The
- * supported order is an auth-only `rayspec-serve` boot → `rayspec dev bootstrap-tenant --org-id <id>`
- * against it → `deploy` with that id in `RAYSPEC_PRODUCT_TENANT_ID`.
+ * production order is `rayspec tenant ensure --org-id <id> --name <n>`, which creates or resolves the
+ * org against `DATABASE_URL` without a running server, then `deploy` with that id in
+ * `RAYSPEC_PRODUCT_TENANT_ID`. Locally the same id can come from an auth-only `rayspec-serve` boot →
+ * `rayspec dev bootstrap-tenant --org-id <id>` against it → `deploy`.
  *
  * RETURNS the org id as the DATABASE stores it, and the boot binds THAT rather than the configured
  * spelling. Both checks above answer in uuid space (the shape regex is case-insensitive, and `orgs.id`
@@ -2037,8 +2039,10 @@ export async function assertProductTenantBootable(db: Db, tenantId: string): Pro
       `RAYSPEC_PRODUCT_TENANT_ID='${tenantId}' does not name a live org (a soft-deleted org counts ` +
         'as absent). Every principal of this deployment is bound to that tenant, so it would serve ' +
         'nobody: 404 on the reprocess seam, cross_tenant on the first capability event. Create the ' +
-        'org FIRST — boot the auth surface alone (`rayspec-serve` with no spec), run `rayspec dev ' +
-        'bootstrap-tenant --org-id <this id>` against it, then deploy with that id. Fail-closed.',
+        'org FIRST — run `rayspec tenant ensure --org-id <this id> --name <n>` against the same ' +
+        'DATABASE_URL (no server needed), then deploy with that id. Locally you can instead boot the ' +
+        'auth surface alone (`rayspec-serve` with no spec) and run `rayspec dev bootstrap-tenant ' +
+        '--org-id <this id>` against it. Fail-closed.',
     );
   }
   return storedId;

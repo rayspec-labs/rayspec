@@ -51,6 +51,7 @@ export {
   isStaticProfile,
   loadServerConfig,
   loadStaticServerConfig,
+  loadTenantProvisionSecrets,
   type ProductTableRegistrar,
   type ServerConfig,
   type StaticBootedServer,
@@ -77,3 +78,17 @@ export {
 // (packages/app/cli/src/deploy.ts) reuses it instead of duplicating the opts logic; lives in serve-opts.ts
 // (not the self-executing bin) so re-exporting it here drags in no entrypoint side effect.
 export { assembleOptsFromEnv } from './serve-opts.js';
+// The OPERATOR tenant-provisioning path — create-or-resolve one org under a chosen id, with an owner
+// handoff that leaves no platform user behind. It lives in the composition root because it is the only
+// package permitted to name `makeDb`, and it is exported so the `rayspec tenant ensure` CLI can reach
+// it; it mounts NO route in any posture, which is the property `tenant-provision-unreachable.db.test.ts`
+// exists to keep true.
+export {
+  OPERATOR_INVITE_DEFAULT_TTL_SECONDS,
+  type OwnerHandoff,
+  provisionTenant,
+  TenantProvisionError,
+  type TenantProvisionInput,
+  type TenantProvisionResult,
+  type TenantProvisionSecrets,
+} from './tenant-provision.js';

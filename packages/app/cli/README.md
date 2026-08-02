@@ -1,9 +1,12 @@
 # @rayspec/cli
 
 The RaySpec CLI: a **read-only diagnostic floor** (`rayspec doctor` for static spec
-diagnosis, `rayspec plan` for a deploy preview) plus a clearly separated, local-dev
-`dev` command group (scaffolding, secret minting). Every subcommand emits
-machine-parseable JSON to stdout.
+diagnosis, `rayspec plan` for a deploy preview), a production-mutating `tenant`
+command group (`rayspec tenant ensure` — idempotently create or resolve the
+organization a deployment binds to), and a clearly separated, local-dev `dev`
+command group (scaffolding, secret minting). Every subcommand emits
+machine-parseable JSON to stdout, and none of them prints a secret except
+`rayspec dev bootstrap-tenant`, whose org token is its documented output.
 
 Usually invoked through the unscoped launcher
 [`rayspec`](https://www.npmjs.com/package/rayspec) (`npx rayspec …`).

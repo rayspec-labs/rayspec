@@ -94,11 +94,15 @@ file mount buys.
   exists, so a rotation onto a path an earlier key or a configuration-management copy left
   group- or world-readable keeps that mode when the redirect truncates it, and only the `chmod`
   corrects that.
-- **Server boot only:** `rayspec-serve` and `rayspec deploy` read `<VAR>_FILE`; the CLI subcommands
-  that need a database URL of their own (`rayspec plan`, `rayspec dev db`) read the plain
-  `DATABASE_URL`. With only `DATABASE_URL_FILE` set, `rayspec plan` has no connection string to
-  compare `SHADOW_DATABASE_URL` against, so its guard against a dry-run landing on the real database
-  does not fire — set the plain `DATABASE_URL` as well wherever you run those.
+- **Server boot and `tenant ensure`:** `rayspec-serve`, `rayspec deploy` and `rayspec tenant ensure`
+  read `<VAR>_FILE`; the CLI subcommands that need a database URL of their own (`rayspec plan`,
+  `rayspec dev db`) read the plain `DATABASE_URL`. With only `DATABASE_URL_FILE` set, `rayspec plan`
+  has no connection string to compare `SHADOW_DATABASE_URL` against, so its guard against a dry-run
+  landing on the real database does not fire — set the plain `DATABASE_URL` as well wherever you run
+  those. `tenant ensure` resolves exactly two secrets, `DATABASE_URL` and `RAYSPEC_API_KEY_PEPPER`,
+  through the same resolver with the same precedence and the same fail-closed abort. It deliberately
+  does **not** ask for `RAYSPEC_JWT_SIGNING_KEY`: it mints no JWT, so a provisioning job never has to
+  carry the platform signing key.
 - **The local development wrapper is both:** `examples/local-boot` requires all three *plain*
   variables of its own accord, because it provisions a throwaway dev database from `DATABASE_URL`
   before the resolver is ever reached — so a `_FILE`-only environment fails there first, early and
@@ -122,6 +126,40 @@ file mount buys.
   an `AgentBackendsFactory` + a `registerProductTables` hook (the local table-registration
   stand-in) — see `examples/local-boot`, the local backend-boot wrapper. An auth-only or
   stores/api/handler-only spec boots here directly.
+
+## Provisioning the deployment's organization
+
+A product deployment binds to one organization (`RAYSPEC_PRODUCT_TENANT_ID`) and **refuses to boot**
+when that id names no live org — and, because `deploy` also serves the auth surface, it cannot create
+its own. The supported production path is `rayspec tenant ensure`, which this package backs
+(`provisionTenant`). It talks to `DATABASE_URL` directly, so it needs no running server, and it is
+**idempotent**: the chosen org id is the operation id, `orgs.id` is the primary key, and a re-run
+against the same id resolves the same organization instead of creating a second one.
+
+It mounts **no HTTP route in any posture**. That is the point of doing it here rather than behind an
+endpoint: `RAYSPEC_TENANT_BOOTSTRAP_ENABLED` never has to be set on a production deployment, so
+`POST /v1/auth/bootstrap-tenant` is never registered on a production listener at all.
+
+Three things about it are worth stating plainly before you run it:
+
+- **It applies the committed migration chain** to whatever `DATABASE_URL` names. On a first
+  bootstrap that is required and it is idempotent afterwards — but point it at an unexpected
+  database and you have migrated that database.
+- **The owner-invite token is a tenant-takeover credential** until it is consumed or expires.
+  `POST /v1/invites/accept` lets any holder provision the target account with their own password when
+  that address has no account yet, so whoever can read the `--owner-invite-out` file owns the tenant.
+  The exclusive-create mode-600 file and the short default lifetime (1 hour, clamped to the shipped
+  5-minute/30-day bounds) bound that exposure; they do not remove it.
+- **It runs the same data-integrity checks as the HTTP surface, and none of its authorization.** The
+  tenant predicate, email normalization, the role, the TTL clamp and the single-flight on `orgs.id`
+  are the same code the routes use. What is absent is `requirePermission(deps, 'org:member:add')` —
+  there is no principal to check. The command's authority is possession of `DATABASE_URL` and
+  `RAYSPEC_API_KEY_PEPPER`.
+
+A window exists between the reservation and the human redeeming the invite in which the organization
+has **zero members**. Nothing can act inside it — every principal path requires a membership — but
+the product boot gate checks only that the org exists and is not soft-deleted, so a reserved
+organization is bootable before it is claimed.
 
 ## Migration application
 

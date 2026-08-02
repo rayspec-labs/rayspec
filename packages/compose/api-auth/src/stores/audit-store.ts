@@ -81,6 +81,44 @@ export class AuditStore {
   }
 
   /**
+   * append ONE out-of-band TENANT-PROVISIONED record (its own committed insert). An operator holding
+   * the database created or resolved an org and, optionally, issued the owner invite that hands it
+   * over — a durable trail is the only evidence that ever existed of who the tenant was made for.
+   *
+   * The event name is a fixed literal — NOT an `AuthEventName` (that closed union is the auth surface;
+   * a provisioning run reaches no route), mirroring {@link appendErasure}'s `tenant_data_erased`.
+   * `actorUserId` is NULL, and that is the honest value rather than a gap: there is no principal, the
+   * command's authority is possession of the connection string, and `auth_audit.actor_user_id` is a
+   * nullable column with no FK precisely so an actor-less platform action can be recorded.
+   * `actorOrgId` is the provisioned org — the scope key `readForTenant` surfaces the row under.
+   * `requestId` is a per-run correlation id, because an operator run has no HTTP request to name.
+   *
+   * `meta` carries whether the org was created, which handoff state the run reached, and the invite id
+   * — NO email address and NO token material. Like {@link appendReprocess} this is BEST-EFFORT and
+   * swallows a write failure: the org and its invite are ALREADY committed when this runs, so a failed
+   * audit must not turn a successful provision into a reported failure that an operator retries.
+   */
+  async appendTenantProvisioned(record: {
+    tenantId: string;
+    requestId: string;
+    meta: Record<string, unknown>;
+  }): Promise<void> {
+    try {
+      await this.db.insert(schema.authAudit).values({
+        actorOrgId: record.tenantId,
+        actorUserId: null,
+        event: 'tenant_provisioned',
+        requestId: record.requestId,
+        targetHash: null,
+        ipHash: null,
+        meta: record.meta,
+      });
+    } catch {
+      // Best-effort: the org + invite are already committed; a failed audit must not fail the run.
+    }
+  }
+
+  /**
    * append ONE out-of-band session-reprocess record (its own committed insert). A reprocess re-drives
    * a session's finalized workflow as a FRESH durable run (a cost-sensitive operational action), so it
    * leaves an immutable trail: the acting principal, the tenant scope, the session, the operator's
