@@ -36,11 +36,15 @@
  * THE ORDER IS LOAD-BEARING: mint → write the file → insert the invite → commit. Reversed, a failure
  * between the commit and the write would leave a committed invite whose token is lost while
  * `findLiveUnconsumed` blocks re-issuing it — a tenant that is silently unrecoverable. Written this
- * way, a failed write rolls the whole reservation back, and a failure after the write unlinks the file.
+ * way, a failed write rolls the whole reservation back, and no file survives a reservation that did
+ * not commit: a failure DURING the write is cleaned up by the writer (the only code that knows the
+ * file exists yet), and a failure after it by this module's own tracker.
  *
  * IT APPLIES THE COMMITTED MIGRATION CHAIN. That is what makes it genuinely one step against a fresh
  * database, and it is the same idempotent chain every boot runs — but it does mean the command
- * migrates whatever `DATABASE_URL` it is pointed at.
+ * migrates whatever `DATABASE_URL` it is pointed at. The step is serialized by an advisory lock, so
+ * two runs fanned out at the same instant against an EMPTY database converge here too and not only at
+ * the reservation.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -141,6 +145,39 @@ export class TenantProvisionError extends Error {
 export const OPERATOR_INVITE_DEFAULT_TTL_SECONDS = 60 * 60;
 
 /**
+ * The advisory-lock the migration step serializes on. `0x72617973` is a namespace this project owns,
+ * so the pair cannot collide with an unrelated application holding advisory locks on the same
+ * database; slot 1 is the platform migration chain. Any pair works as long as every runner of this
+ * command uses the SAME one, which is why it is a constant rather than a parameter.
+ */
+const MIGRATION_LOCK_NAMESPACE = 0x7261_7973;
+const MIGRATION_LOCK_SLOT = 1;
+
+/**
+ * Apply the committed chain with the whole step serialized by a Postgres ADVISORY LOCK.
+ *
+ * The migrator takes no lock of its own, and its first two statements — `CREATE SCHEMA IF NOT EXISTS
+ * "drizzle"` and `CREATE TABLE IF NOT EXISTS "drizzle"."__drizzle_migrations"` — are not
+ * concurrency-safe: `IF NOT EXISTS` checks the catalogue and then creates, so two runs started
+ * together against a FRESH database both see nothing and the loser dies on a duplicate-object error
+ * before it ever reaches the reservation. That is precisely the shape a deploy script produces when
+ * it fans out on a first bring-up, and it is the one case where "safe to call unconditionally" would
+ * otherwise be false. Serialized, the loser waits, then finds the chain applied and no-ops — which is
+ * what the reservation below already does, one layer down.
+ *
+ * The lock is transaction-scoped and the transaction does nothing else, so it is released by the
+ * COMMIT — and by the connection dying, so a killed run never leaves the next one waiting. The
+ * migration itself runs on a different connection of the same pool: an advisory lock is a mutex
+ * between runners, not a data lock, so it blocks the other command, never our own work.
+ */
+async function migrateUnderLock(db: ReturnType<typeof makeDb>): Promise<void> {
+  await db.$client.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(${MIGRATION_LOCK_NAMESPACE}::int4, ${MIGRATION_LOCK_SLOT}::int4)`;
+    await applyMigrations(db);
+  });
+}
+
+/**
  * Write the minted token to `path`, creating it EXCLUSIVELY at mode 600.
  *
  * `wx` is the whole point: an existing path is an error, never an overwrite — the same never-clobber
@@ -165,8 +202,17 @@ async function writeTokenFile(path: string, token: string): Promise<void> {
   try {
     await handle.chmod(0o600);
     await handle.write(token);
-  } finally {
     await handle.close();
+  } catch (err) {
+    // The open already SUCCEEDED, so the path holds a file this call created — empty or partial. A
+    // full volume or a quota is enough to land here, and `provisionTenant`'s own cleanup cannot help:
+    // it only learns the path once this function resolves. Left behind, the file grants nothing (the
+    // reservation rolls back) but the never-clobber guard would refuse that path forever after. So
+    // the writer removes exactly what the writer created — and never touches a pre-existing file,
+    // which is the EEXIST branch above and returns before this point.
+    await handle.close().catch(() => {});
+    await unlink(path).catch(() => {});
+    throw err;
   }
 }
 
@@ -202,8 +248,19 @@ export async function provisionTenant(
   try {
     // The committed platform chain, idempotent on an already-migrated database and the bootstrap of a
     // clean one. This is the side effect that makes the command one step — and the reason pointing it
-    // at an unexpected DATABASE_URL migrates that database.
-    await applyMigrations(db);
+    // at an unexpected DATABASE_URL migrates that database. A failure here is reported as ITS OWN
+    // code: the migrator's rejection is a multi-line query dump, and an operator handed one has no
+    // way to tell that nothing was reserved.
+    try {
+      await migrateUnderLock(db);
+    } catch (err) {
+      throw new TenantProvisionError(
+        'MIGRATION_FAILED',
+        'Applying the committed migration chain to the target database failed, so no organization ' +
+          'was created or resolved. Check that DATABASE_URL names the database you meant and that ' +
+          `its role may create schemas and tables in it. Reported by the database: ${oneLine(err)}`,
+      );
+    }
 
     // The posture is hardcoded, not read from the environment — see the module docblock.
     const orgStore = new OrgStore(db, { tenantBootstrapEnabled: true });
@@ -349,6 +406,11 @@ export async function provisionTenant(
   } finally {
     await db.$client.end();
   }
+}
+
+/** A driver rejection as ONE line: the migrator quotes the whole failing statement back at us. */
+function oneLine(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').trim();
 }
 
 /**

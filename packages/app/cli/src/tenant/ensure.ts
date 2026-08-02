@@ -44,8 +44,10 @@ export interface TenantEnsureResult {
 }
 
 /**
- * Injection seam for the suite: both default to the real implementations, dynamically imported. It
- * exists so the output contract can be driven end-to-end without a database.
+ * Injection seam for the suite: each defaults to the real implementation, dynamically imported. It
+ * exists so the output contract can be driven without a database — and supplying BOTH means the
+ * provisioning package is never imported at all, so the seam is a real substitute rather than a
+ * decoration on top of one.
  */
 export interface TenantEnsureDeps {
   readonly provisionImpl?: typeof provisionTenant;
@@ -149,11 +151,15 @@ export async function runTenantEnsure(
   deps: TenantEnsureDeps = {},
 ): Promise<TenantEnsureResult> {
   const parsed = parseEnsureArgs(args);
-  const { loadTenantProvisionSecrets: loadReal, provisionTenant: provisionReal } = await import(
-    '@rayspec/server'
-  );
-  const loadSecrets = deps.loadSecretsImpl ?? loadReal;
-  const provision = deps.provisionImpl ?? provisionReal;
+  let loadSecrets = deps.loadSecretsImpl;
+  let provision = deps.provisionImpl;
+  if (loadSecrets === undefined || provision === undefined) {
+    // Only for an implementation that was NOT supplied: the composition root drags in Drizzle, Hono
+    // and the durable worker, so a caller that injected both must not pay for loading it.
+    const real = await import('@rayspec/server');
+    loadSecrets ??= real.loadTenantProvisionSecrets;
+    provision ??= real.provisionTenant;
+  }
 
   let secrets: TenantProvisionSecrets;
   try {
@@ -179,7 +185,7 @@ export async function runTenantEnsure(
       name: out.name,
       slug: out.slug,
       org: out.org,
-      ownerHandoff: out.ownerHandoff,
+      ownerHandoff: narrowHandoff(out.ownerHandoff),
       acceptPath: out.acceptPath,
       errors: [],
     };
@@ -198,6 +204,45 @@ export async function runTenantEnsure(
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Rebuild the handoff FIELD BY FIELD instead of forwarding the provisioning layer's object.
+ *
+ * `OwnerHandoff` has no member capable of declaring a token, but a structural pass-through would still
+ * print whatever property the value arrived with — a type stops a field being written in source, not
+ * an object from carrying one at runtime. Copying by name is what makes "no credential reaches a
+ * stream" a property of this function rather than a property of everything upstream of it.
+ */
+function narrowHandoff(handoff: OwnerHandoff): OwnerHandoff {
+  switch (handoff.status) {
+    case 'not_requested':
+      return { status: 'not_requested' };
+    case 'already_owned':
+      return { status: 'already_owned', owners: handoff.owners };
+    case 'pending':
+      return {
+        status: 'pending',
+        inviteId: handoff.inviteId,
+        email: handoff.email,
+        expiresAt: handoff.expiresAt,
+      };
+    case 'issued':
+      return {
+        status: 'issued',
+        inviteId: handoff.inviteId,
+        email: handoff.email,
+        expiresAt: handoff.expiresAt,
+        tokenFile: handoff.tokenFile,
+      };
+    default: {
+      // Fail closed on a shape this command does not know how to strip: the caller gets an
+      // `ok:false` (the block above catches this), never an object forwarded unread. Only the
+      // status name is quoted — never the value it came in.
+      const status = (handoff as { status?: unknown }).status;
+      throw new Error(`unrecognized owner handoff status ${JSON.stringify(String(status))}`);
+    }
+  }
 }
 
 /**

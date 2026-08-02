@@ -10,14 +10,15 @@
  * writes instead is an owner INVITE with `created_by IS NULL`, and a real human turns that into their
  * own account — with their own password — through the completely unmodified `POST /v1/invites/accept`.
  *
- * The second arm is the idempotency contract: the chosen org id IS the operation id, `orgs.id` is a
+ * The idempotency contract is the other half: the chosen org id IS the operation id, `orgs.id` is a
  * PRIMARY KEY, and so the database itself is the ledger. Two runs, sequential or concurrent, converge
  * on one org row and one live owner invite; the second run mints NOTHING, which is what makes a retry
  * safe to run from a deploy script that cannot know whether the first attempt got through.
  *
- * The suite database is created EMPTY on purpose: the first arm's provisioning call is what applies
- * the committed migration chain, which is the difference between a one-step command and a command
- * with a documented prerequisite.
+ * The suite database is created EMPTY on purpose, and the CONCURRENT arm is ordered FIRST so it is the
+ * one that meets it that way: applying the committed migration chain is part of what these two runs
+ * are racing on, not a prerequisite arranged for them. That ordering is the whole difference between
+ * measuring the claim and measuring a convenient subset of it.
  *
  * Skips without DATABASE_URL; the un-skippable ran-guard hard-fails a REQUIRED run that did not run.
  */
@@ -142,6 +143,43 @@ describe.skipIf(!baseUrl)('provisionTenant — the operator create-or-resolve', 
     }
   }, 60_000);
 
+  /**
+   * FIRST on purpose, and the reason the suite database is created empty: this arm is the only place
+   * the two concurrent runs meet an UNMIGRATED database, which is exactly the shape a deploy script
+   * produces when it fans out on a first bring-up. Run after any other arm it would prove far less —
+   * the chain would already be applied, and only the reservation would still be racing.
+   */
+  it('two concurrent runs against a FRESH, unmigrated database: exactly one creates, neither throws', async () => {
+    const tokens: string[] = [];
+    const writeToken = async (_path: string, token: string) => {
+      tokens.push(token);
+    };
+    const input = {
+      orgId: CONCURRENT,
+      name: 'Race Runs',
+      ownerEmail: 'race@example.com',
+      ownerInviteOut: join(dir, 'race.token'),
+    };
+
+    const [a, b] = await Promise.all([
+      provisionTenant(secrets, input, { writeToken }),
+      provisionTenant(secrets, input, { writeToken }),
+    ]);
+
+    expect([a.org, b.org].filter((s) => s === 'created')).toHaveLength(1);
+    expect(a.orgId).toBe(CONCURRENT);
+    expect(b.orgId).toBe(CONCURRENT);
+    expect(await scalar('SELECT count(*) FROM orgs WHERE id = $1', [CONCURRENT])).toBe('1');
+    expect(
+      await scalar(
+        'SELECT count(*) FROM invites WHERE tenant_id = $1 AND consumed_at IS NULL AND expires_at > now()',
+        [CONCURRENT],
+      ),
+    ).toBe('1');
+    expect(tokens).toHaveLength(1);
+    armsRan += 1;
+  }, 180_000);
+
   it('the owner handoff leaves ZERO platform users and the org is claimable through the shipped accept route', async () => {
     let captured = '';
     const out = await provisionTenant(
@@ -261,37 +299,6 @@ describe.skipIf(!baseUrl)('provisionTenant — the operator create-or-resolve', 
     expect(shouted.orgId).toBe(SECOND);
     expect(shouted.org).toBe('existing');
     expect(await scalar('SELECT count(*) FROM orgs WHERE id = $1', [SECOND])).toBe('1');
-    armsRan += 1;
-  }, 180_000);
-
-  it('two concurrent runs of the same operation id: exactly one creates, neither throws', async () => {
-    const tokens: string[] = [];
-    const writeToken = async (_path: string, token: string) => {
-      tokens.push(token);
-    };
-    const input = {
-      orgId: CONCURRENT,
-      name: 'Race Runs',
-      ownerEmail: 'race@example.com',
-      ownerInviteOut: join(dir, 'race.token'),
-    };
-
-    const [a, b] = await Promise.all([
-      provisionTenant(secrets, input, { writeToken }),
-      provisionTenant(secrets, input, { writeToken }),
-    ]);
-
-    expect([a.org, b.org].filter((s) => s === 'created')).toHaveLength(1);
-    expect(a.orgId).toBe(CONCURRENT);
-    expect(b.orgId).toBe(CONCURRENT);
-    expect(await scalar('SELECT count(*) FROM orgs WHERE id = $1', [CONCURRENT])).toBe('1');
-    expect(
-      await scalar(
-        'SELECT count(*) FROM invites WHERE tenant_id = $1 AND consumed_at IS NULL AND expires_at > now()',
-        [CONCURRENT],
-      ),
-    ).toBe('1');
-    expect(tokens).toHaveLength(1);
     armsRan += 1;
   }, 180_000);
 

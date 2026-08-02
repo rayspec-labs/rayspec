@@ -22,11 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Running it twice with the same `--org-id` is the same organization and no second row.** The chosen
   id *is* the operation id: `orgs.id` is the primary key, so the database itself is the ledger and
-  there is no second key or mapping table to keep. Two concurrent runs converge rather than race — one
-  reports `created`, the other `existing`, and both name the same org. An id supplied in upper case is
-  the same organization, reported as the database stores it, which is the form a deployment compares
-  against (`uuidgen` prints upper case on macOS). That makes the command safe to call unconditionally
-  from a script that cannot know whether an earlier attempt got through.
+  there is no second key or mapping table to keep. Two concurrent runs of the command converge rather
+  than race — one reports `created`, the other `existing`, and both name the same org — and that holds
+  against a fresh database, because the migration step is serialized by an advisory lock rather than
+  left to a migrator whose `CREATE … IF NOT EXISTS` bootstrap is not concurrency-safe. An id supplied
+  in upper case is the same organization, reported as the database stores it, which is the form a
+  deployment compares against (`uuidgen` prints upper case on macOS). That makes the command safe to
+  call unconditionally from a script that cannot know whether an earlier attempt got through.
 
   **The owner handoff leaves no platform user behind.** With `--owner-email` the command writes one
   `owner` invite — authored by nobody — in the same transaction as the organization row, so an

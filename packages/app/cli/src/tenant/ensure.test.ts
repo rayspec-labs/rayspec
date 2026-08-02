@@ -8,13 +8,20 @@
  * the key-set assertion below is written as an exact allowlist rather than a set of `not.toHaveProperty`
  * probes: a future field named `inviteToken` would have to break the allowlist to exist at all.
  *
- * `@rayspec/server` is replaced wholesale, so the provisioning layer is never loaded and the minted
- * token stays in this file's memory — the token really exists, and really never reaches a stream,
- * without the suite touching a database or a disk. The usage arms drive the same `main()` the shipped
- * bin does, so the exit codes are the shipped mapping (2 = usage, 1 = operational, 0 = ok).
+ * SO THE FAKE IS ADVERSARIAL, NOT INERT. `@rayspec/server` is replaced wholesale, and its stand-in
+ * HANDS THE COMMAND A TOKEN — on the result object and inside the handoff, the two shapes a
+ * credential-printing implementation would produce. That is what gives the assertions below their
+ * teeth: they fail against a command that spreads the provisioning result into its output or forwards
+ * the handoff unread, and they can only pass because the mapping copies field by field. A fake that
+ * returned no token at all would leave every one of them unfalsifiable.
+ *
+ * The usage arms drive the same `main()` the shipped bin does, so the exit codes are the shipped
+ * mapping (2 = usage, 1 = operational, 0 = ok).
  */
+import type { TenantProvisionResult } from '@rayspec/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../index.js';
+import { runTenantEnsure } from './ensure.js';
 
 const DB_URL = 'postgres://provision-user:provision-pass@provision-host:5432/provision-db';
 const PEPPER = 'provision-suite-pepper-value-never-printed';
@@ -22,7 +29,7 @@ const ORG_ID = '3f0d0c8a-2a7e-4f2c-9a1b-6d5e4c3b2a10';
 const INVITE_OUT = '/tmp/rayspec-tenant-ensure-suite-does-not-exist/owner.token';
 
 /**
- * The token the fake provisioning layer mints. It is 43 base64url characters, the exact shape
+ * The token the fake provisioning layer hands back. It is 43 base64url characters, the exact shape
  * `mintInviteToken` produces, so the "no 8-character substring of it appears" assertion is a
  * statement about a realistic credential rather than a short literal that could not collide anyway.
  */
@@ -31,28 +38,43 @@ const state = vi.hoisted(() => ({
   calls: [] as unknown[],
 }));
 
+/**
+ * A result carrying the token in BOTH places a leak could come from: a top-level field (what a
+ * `{ ...result }` spread would publish) and one inside the handoff (what forwarding the provisioning
+ * layer's object unread would publish). `TenantProvisionResult` declares neither — this is a runtime
+ * object deliberately wider than its type, because the type is what the command is being tested for,
+ * not what it is allowed to assume.
+ */
+function leakyResult(input: {
+  readonly name?: unknown;
+  readonly ownerEmail?: unknown;
+  readonly ownerInviteOut?: unknown;
+}): Record<string, unknown> {
+  return {
+    orgId: ORG_ID,
+    name: input.name,
+    slug: 'acme',
+    org: 'created',
+    token: state.token,
+    ownerHandoff: input.ownerEmail
+      ? {
+          status: 'issued',
+          inviteId: '9c2b1e6d-4a3f-4c58-8b7d-0e1f2a3b4c5d',
+          email: input.ownerEmail,
+          expiresAt: '2026-08-02T13:00:00.000Z',
+          tokenFile: input.ownerInviteOut,
+          token: state.token,
+        }
+      : { status: 'not_requested', token: state.token },
+    acceptPath: '/v1/invites/accept',
+  };
+}
+
 vi.mock('@rayspec/server', () => ({
   loadTenantProvisionSecrets: () => ({ databaseUrl: DB_URL, apiKeyPepper: PEPPER }),
   provisionTenant: async (secrets: unknown, input: Record<string, unknown>) => {
     state.calls.push({ secrets, input });
-    // The real implementation writes the token to `ownerInviteOut` and returns a result that names the
-    // FILE, never the token. Keeping the token in this module's memory models exactly that split.
-    return {
-      orgId: ORG_ID,
-      name: input.name,
-      slug: 'acme',
-      org: 'created',
-      ownerHandoff: input.ownerEmail
-        ? {
-            status: 'issued',
-            inviteId: '9c2b1e6d-4a3f-4c58-8b7d-0e1f2a3b4c5d',
-            email: input.ownerEmail,
-            expiresAt: '2026-08-02T13:00:00.000Z',
-            tokenFile: input.ownerInviteOut,
-          }
-        : { status: 'not_requested' },
-      acceptPath: '/v1/invites/accept',
-    };
+    return leakyResult(input);
   },
 }));
 
@@ -100,6 +122,11 @@ describe('tenant ensure — exactly one JSON object, and no secret material anyw
       INVITE_OUT,
     ]);
     expect(code).toBe(0);
+    // The premise of every assertion in this arm, asserted rather than assumed: the layer under test
+    // really was handed the credential, on the result and inside the handoff.
+    const handed = leakyResult({ name: 'Acme', ownerEmail: 'o@e.com', ownerInviteOut: INVITE_OUT });
+    expect(handed.token).toBe(state.token);
+    expect((handed.ownerHandoff as { token?: string }).token).toBe(state.token);
 
     const stdout = outChunks.join('');
     // The WHOLE buffer parses — one object, not a log line followed by one, and not two objects.
@@ -187,6 +214,46 @@ describe('tenant ensure — exactly one JSON object, and no secret material anyw
       ownerInviteOut: INVITE_OUT,
       inviteTtlSeconds: 900,
       reissueOwnerInvite: true,
+    });
+  });
+});
+
+describe('tenant ensure — the injected implementations are the ones that run', () => {
+  it('maps a leaky provisioning result through TenantEnsureDeps without reaching the package', async () => {
+    const seen: unknown[] = [];
+    const result = await runTenantEnsure(
+      [
+        '--org-id',
+        ORG_ID,
+        '--name',
+        'Acme',
+        '--owner-email',
+        'owner@example.com',
+        '--owner-invite-out',
+        INVITE_OUT,
+      ],
+      {
+        loadSecretsImpl: () => ({ databaseUrl: DB_URL, apiKeyPepper: PEPPER }),
+        provisionImpl: async (_secrets, input) => {
+          seen.push(input);
+          return leakyResult(input) as unknown as TenantProvisionResult;
+        },
+      },
+    );
+
+    expect(seen).toHaveLength(1);
+    // With BOTH implementations supplied the handler imports nothing, so the wholesale module fake —
+    // which stands in for the provisioning package here — is never consulted.
+    expect(state.calls).toHaveLength(0);
+    expect(result.ok).toBe(true);
+    // Same strip, driven through the seam rather than through the module mock.
+    expect(JSON.stringify(result)).not.toContain(state.token);
+    expect(result.ownerHandoff).toEqual({
+      status: 'issued',
+      inviteId: '9c2b1e6d-4a3f-4c58-8b7d-0e1f2a3b4c5d',
+      email: 'owner@example.com',
+      expiresAt: '2026-08-02T13:00:00.000Z',
+      tokenFile: INVITE_OUT,
     });
   });
 });

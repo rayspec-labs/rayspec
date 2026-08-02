@@ -266,9 +266,14 @@ HTTP route exists for it in any posture**.
 
 Run it twice with the same `--org-id` and you get the same organization and no
 second row. The chosen id *is* the operation id: `orgs.id` is a primary key, so
-the database itself is the ledger and two concurrent runs converge rather than
-race. That makes it safe to call unconditionally from a deploy script that cannot
-know whether an earlier attempt got through.
+the database itself is the ledger and two concurrent runs of the command converge
+rather than race — one reports `created`, the other `existing`, and both name the
+same organization. That holds against a **fresh** database too: the migration
+step below is serialized by a Postgres advisory lock, because the migrator's own
+`CREATE … IF NOT EXISTS` bootstrap is not concurrency-safe and would otherwise
+fail the loser before it ever reached the reservation. So the command is safe to
+call unconditionally from a deploy script that cannot know whether an earlier
+attempt got through.
 
 - **Postgres:** yes, directly. **It applies the committed migration chain** to
   that database — required on a first bootstrap and idempotent afterwards, but it
@@ -329,7 +334,9 @@ know whether an earlier attempt got through.
   live) or `issued` (this run minted one).
 
 - **Exit:** `0` on success; `1` on an operational failure (a missing secret, a
-  soft-deleted id, an invite-out path that is taken); `2` on a usage error.
+  soft-deleted id, an invite-out path that is taken, a migration chain that could
+  not be applied — that one reports `MIGRATION_FAILED` and creates nothing); `2`
+  on a usage error.
 
 ### The owner handoff, and why it creates no user
 
