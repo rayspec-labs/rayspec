@@ -129,6 +129,19 @@ describe('tenant ensure — exactly one JSON object, and no secret material anyw
     expect((handed.ownerHandoff as { token?: string }).token).toBe(state.token);
 
     const stdout = outChunks.join('');
+    // FIRST, before anything about shape: nothing the command was handed reached a stream. Asserted
+    // ahead of the deep-equals on purpose — a leak must fail on the leak, not on a shape mismatch
+    // that happens to accompany it.
+    const streams = stdout + errChunks.join('');
+    expect(streams).not.toContain(state.token);
+    // Not even a fragment: 8 base64url characters is already enough to make a leaked prefix a
+    // meaningful head start, so the whole token is checked window by window.
+    for (let i = 0; i + 8 <= state.token.length; i += 1) {
+      expect(streams).not.toContain(state.token.slice(i, i + 8));
+    }
+    expect(streams).not.toContain(DB_URL);
+    expect(streams).not.toContain(PEPPER);
+
     // The WHOLE buffer parses — one object, not a log line followed by one, and not two objects.
     const parsed = JSON.parse(stdout);
     expect(Object.keys(parsed).sort()).toEqual([
@@ -155,15 +168,6 @@ describe('tenant ensure — exactly one JSON object, and no secret material anyw
       tokenFile: INVITE_OUT,
     });
 
-    const streams = stdout + errChunks.join('');
-    expect(streams).not.toContain(state.token);
-    // Not even a fragment: 8 base64url characters is already enough to make a leaked prefix a
-    // meaningful head start, so the whole token is checked window by window.
-    for (let i = 0; i + 8 <= state.token.length; i += 1) {
-      expect(streams).not.toContain(state.token.slice(i, i + 8));
-    }
-    expect(streams).not.toContain(DB_URL);
-    expect(streams).not.toContain(PEPPER);
     // No key ANYWHERE in the tree could hold one either.
     const keys = new Set<string>();
     const walk = (v: unknown): void => {
