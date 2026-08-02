@@ -1,0 +1,536 @@
+#!/usr/bin/env node
+/**
+ * Behaviour test for the release identity manifest (`release-identity.mjs`).
+ *
+ * The manifest is the only artifact that maps a published npm closure back to the commit it was
+ * built from, and the only thing that makes it worth anything is that a THIRD PARTY can refute it.
+ * So the script is driven end-to-end here inside a THROWAWAY GIT REPO (real commits, real annotated
+ * tags) with the real script COPIED into it, so its repo root resolves to the fixture, against a
+ * directory of REAL tarballs this file builds byte-by-byte (a minimal ustar writer + gzip). No
+ * test-only flag or seam exists in the script itself, and nothing here reaches a network.
+ *
+ * The properties, each a real failure mode:
+ *
+ *   (B) AN ALTERED TARBALL BYTE FAILS VERIFICATION — the case is isolated on purpose: the tarball is
+ *       re-gzipped at another compression level, so its UNPACKED CONTENT is identical and only the
+ *       archive bytes moved. Nothing but the recorded tarball integrity can catch that.
+ *   (F) AN ALTERED FILE LIST FAILS VERIFICATION — isolated the other way: the tampering is done to
+ *       the LAUNCHER, the one member whose tarball integrity is deliberately NOT recorded (see (X)),
+ *       so only the unpacked file-list digest is left to catch it. A launcher that records no
+ *       integrity must not thereby become the one package nobody can check.
+ *   (X) THE SELF-REFERENCE HOLDS — the manifest ships INSIDE the launcher tarball, so the launcher
+ *       cannot record its own tarball integrity: the fixed point does not exist. What IS invariant
+ *       is the launcher's file list with the manifest entry excluded, and this pins exactly that —
+ *       embedding the manifest leaves verification green, and the run reports that the tarball
+ *       carries THESE bytes. Embedding a DIFFERENT manifest is red: the exclusion must not become a
+ *       hole an attacker can post anything through.
+ *   (R) THE MANIFEST REPRODUCES FROM THE SAME INPUTS — two runs over the same checkout and the same
+ *       tarballs produce byte-identical manifests. A manifest carrying a timestamp or an unordered
+ *       map cannot be re-derived by anyone, which is the whole point of it.
+ *   (K) THE CONTENT DIGEST SURVIVES A RE-PACK — `pnpm pack` rewrites `workspace:*` into the packed
+ *       `package.json` and does NOT emit that map in a stable key order (measured on this repo: two
+ *       consecutive `--pack` runs of one commit differed in 10 and in 12 of the 29 tarballs, the
+ *       difference confined every time to that file's key order). The file-list digest canonicalises
+ *       `package.json` for exactly that reason, so it identifies the same package across packs while
+ *       the tarball integrity — which identifies one artifact, not a build — legitimately moves.
+ *   (N) NOTHING IS FABRICATED — before the release tag exists the tag is recorded as absent with a
+ *       reason, and outside GitHub Actions the workflow run is an explicit null with a reason. With
+ *       the annotated tag on HEAD and an Actions environment present, both are recorded for real.
+ *   (W) A DIRTY WORKING TREE IS RECORDED, NOT HIDDEN — a modified tracked file makes the manifest
+ *       say so and name the path. A release identity that quietly claims a clean tree is a lie.
+ *   (C) AN INCOMPLETE CLOSURE IS NOT A CLOSURE — a directory missing a package that another member
+ *       depends on refuses instead of emitting a manifest that describes most of a release.
+ *   (Z) NEITHER MODE TOUCHES THE PACKAGE MANAGER — generating and verifying are pure file reads.
+ *       The child runs with a stub `pnpm`/`npm` FIRST on PATH, the publish gate armed and the
+ *       registry pointed at an unroutable address; the stub log must stay empty in every case.
+ *
+ * Standalone (no test framework is wired for the repo scripts): `node <thisfile>`; exit 0 = pass.
+ */
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
+
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'release-identity.mjs');
+const VERSION = '1.6.2';
+const NODE_ENGINE = '>=22';
+const PACKAGE_MANAGER = 'pnpm@10.12.4';
+const LAUNCHER = 'rayspec';
+const MANIFEST_NAME = 'rayspec-release-identity.json';
+// The checked-in artifacts the manifest digests, at the paths the script reads them from.
+const SOURCE_FILES = [
+  'packages/kernel/spec/version-1.0.schema.json',
+  'packages/kernel/spec/spec.schema.json',
+  'packages/kernel/spec/product.schema.json',
+  'pnpm-lock.yaml',
+  'docs/dependency-sbom.json',
+];
+
+// ── the package-manager test double ─────────────────────────────────────────────────────────────
+// Logs one line per invocation and succeeds. Its log staying EMPTY is the assertion: neither mode
+// of this script has any business starting a package manager.
+const FAKE_PM = `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+appendFileSync(process.env.FAKE_PM_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');
+`;
+
+/**
+ * The fixture closure in miniature, with the real shape that matters: the launcher reaches every
+ * other member over internal production dependencies, and two members declare MORE THAN ONE of them
+ * (the only packages whose packed dependency map has a key order that can move — see (K)).
+ */
+const MEMBERS = [
+  { name: 'rayspec', deps: ['@rayspec/cli'] },
+  { name: '@rayspec/cli', deps: ['@rayspec/server', '@rayspec/spec'] },
+  { name: '@rayspec/server', deps: ['@rayspec/core', '@rayspec/spec'] },
+  { name: '@rayspec/core', deps: ['@rayspec/spec'] },
+  { name: '@rayspec/spec', deps: [] },
+];
+
+const workspaces = [];
+
+// ── a minimal ustar writer ──────────────────────────────────────────────────────────────────────
+// Enough of the format for what an npm tarball actually is: regular files, short paths, one fixed
+// mtime so a fixture tarball is a pure function of its contents.
+
+/** One 512-byte ustar header plus the padded body. */
+function tarEntry(path, body) {
+  const head = Buffer.alloc(512);
+  const put = (s, off, len) => head.write(s.slice(0, len), off, 'utf8');
+  put(path, 0, 100);
+  put('0000644\0', 100, 8); // mode
+  put('0000000\0', 108, 8); // uid
+  put('0000000\0', 116, 8); // gid
+  put(`${body.length.toString(8).padStart(11, '0')}\0`, 124, 12);
+  put('00000000000\0', 136, 12); // mtime, fixed
+  head.fill(' ', 148, 156); // the checksum field reads as spaces while the checksum is summed
+  put('0', 156, 1); // typeflag: regular file
+  put('ustar\0', 257, 6);
+  put('00', 263, 2);
+  let sum = 0;
+  for (const byte of head) sum += byte;
+  put(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 8);
+  return Buffer.concat([head, body, Buffer.alloc((512 - (body.length % 512)) % 512)]);
+}
+
+/** A gzipped tar of `[path, contents]` pairs, terminated by the two empty blocks the format wants. */
+function tarball(files, { level = 9 } = {}) {
+  const blocks = files.map(([p, b]) => tarEntry(p, Buffer.isBuffer(b) ? b : Buffer.from(b)));
+  return gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]), { level });
+}
+
+/** The unpacked entries of one member's tarball, as `pnpm pack` lays them out under `package/`. */
+function memberFiles(member, { reverseDeps = false, extra = [] } = {}) {
+  const deps = reverseDeps ? [...member.deps].reverse() : member.deps;
+  const manifest = {
+    name: member.name,
+    version: VERSION,
+    private: false,
+    files: ['dist'],
+    engines: { node: NODE_ENGINE },
+    dependencies: Object.fromEntries(deps.map((d) => [d, VERSION])),
+  };
+  return [
+    ['package/package.json', `${JSON.stringify(manifest, null, 2)}\n`],
+    ['package/dist/index.js', `export const name = '${member.name}';\n`],
+    ['package/README.md', `# ${member.name}\n`],
+    ...extra,
+  ];
+}
+
+const tarballName = (name) => `${name.replace('@', '').replace('/', '-')}-${VERSION}.tgz`;
+
+/** Read-only-safe git in the fixture, with an identity and signing forced off (host config varies). */
+function gitIn(root, ...args) {
+  const res = spawnSync(
+    'git',
+    [
+      '-c',
+      'user.email=fixture@rayspec.test',
+      '-c',
+      'user.name=Release Fixture',
+      '-c',
+      'commit.gpgsign=false',
+      '-c',
+      'tag.gpgSign=false',
+      ...args,
+    ],
+    { cwd: root, encoding: 'utf8' },
+  );
+  assert.equal(res.status, 0, `git ${args.join(' ')} failed: ${res.stderr}`);
+  return (res.stdout ?? '').trim();
+}
+
+/**
+ * Build a throwaway repo carrying everything the manifest digests (the three schema artifacts, the
+ * lockfile, the dependency SBOM, the launcher manifest), the REAL script, a `tarballs/` directory
+ * holding one tarball per member, and the requested annotated tags.
+ */
+function fixture({ tags = [], reverseDeps = false, only = null } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'rayspec-release-identity-'));
+  workspaces.push(root);
+
+  const write = (rel, contents) => {
+    mkdirSync(join(root, dirname(rel)), { recursive: true });
+    writeFileSync(join(root, rel), contents);
+  };
+
+  mkdirSync(join(root, 'scripts'), { recursive: true });
+  copyFileSync(SCRIPT, join(root, 'scripts', 'release-identity.mjs'));
+  write(
+    'package.json',
+    `${JSON.stringify(
+      {
+        name: 'rayspec',
+        version: VERSION,
+        private: true,
+        packageManager: PACKAGE_MANAGER,
+        engines: { node: NODE_ENGINE },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  write(
+    'packages/app/rayspec/package.json',
+    `${JSON.stringify({ name: LAUNCHER, version: VERSION, private: true }, null, 2)}\n`,
+  );
+  for (const rel of SOURCE_FILES) write(rel, `contents of ${rel}\n`);
+
+  gitIn(root, 'init', '-b', 'main');
+  gitIn(root, 'add', '-A');
+  gitIn(root, 'commit', '-m', 'release candidate');
+  for (const t of tags) gitIn(root, 'tag', '-a', t, '-m', `release ${t}`);
+
+  const tarDir = join(root, 'tarballs');
+  mkdirSync(tarDir);
+  for (const m of MEMBERS) {
+    if (only && !only.includes(m.name)) continue;
+    writeFileSync(join(tarDir, tarballName(m.name)), tarball(memberFiles(m, { reverseDeps })));
+  }
+
+  const stubs = join(root, 'stub-bin');
+  mkdirSync(stubs);
+  for (const bin of ['pnpm', 'npm']) {
+    writeFileSync(join(stubs, bin), FAKE_PM);
+    chmodSync(join(stubs, bin), 0o755);
+  }
+  return { root, tarDir, stubs, head: gitIn(root, 'rev-parse', 'HEAD') };
+}
+
+/**
+ * Drive the REAL script inside the fixture. The package manager is shadowed on PATH, the publish
+ * gate is armed and the registry points at an unroutable address — so a package-manager call would
+ * be recorded by the stub and a registry call could not complete even if the stub were bypassed.
+ */
+function run(fx, args, { env = {} } = {}) {
+  const log = join(fx.root, 'pm-calls.log');
+  writeFileSync(log, '');
+  const res = spawnSync('node', [join(fx.root, 'scripts', 'release-identity.mjs'), ...args], {
+    cwd: fx.root,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${fx.stubs}:${process.env.PATH}`,
+      FAKE_PM_LOG: log,
+      npm_config_registry: 'http://127.0.0.1:1/',
+      RAYSPEC_ALLOW_PUBLISH: '1',
+      GITHUB_ACTIONS: '',
+      ...env,
+    },
+  });
+  const calls = readFileSync(log, 'utf8').split('\n').filter(Boolean);
+  return { code: res.status, out: res.stdout ?? '', err: res.stderr ?? '', calls };
+}
+
+/** Generate into the fixture's default location and return the parsed manifest plus its bytes. */
+function generate(fx, args = [], opts = {}) {
+  const r = run(fx, ['--tarballs', fx.tarDir, ...args], opts);
+  assert.equal(r.code, 0, `generate must succeed; got ${r.code}: ${r.err}`);
+  const path = join(fx.root, 'packages/app/rayspec', MANIFEST_NAME);
+  const bytes = readFileSync(path);
+  return { ...r, path, bytes, manifest: JSON.parse(bytes.toString('utf8')) };
+}
+
+const verify = (fx, args = [], opts = {}) =>
+  run(fx, ['--verify', '--tarballs', fx.tarDir, ...args], opts);
+const entryFor = (manifest, name) => manifest.closure.find((m) => m.name === name);
+
+/** Every case: the run must never have started a package manager. */
+function assertNoPackageManager(r, label) {
+  assert.deepEqual(
+    r.calls,
+    [],
+    `${label} neither mode may invoke a package manager, got ${JSON.stringify(r.calls)}`,
+  );
+}
+
+try {
+  // ── (R) + the manifest's content: two runs over the same inputs agree to the byte ──────────────
+  {
+    const fx = fixture();
+    const first = generate(fx);
+    const second = generate(fx);
+    assert.ok(
+      first.bytes.equals(second.bytes),
+      '(R) two runs over the same checkout and tarballs must produce byte-identical manifests',
+    );
+
+    const m = first.manifest;
+    assert.equal(m.version, VERSION, `(R) the release version must be recorded: ${m.version}`);
+    assert.equal(m.source.commit, fx.head, '(R) the source commit must be the checkout HEAD');
+    assert.equal(m.runtime.node, NODE_ENGINE, '(R) the Node requirement must be recorded');
+    assert.equal(
+      m.runtime.package_manager,
+      PACKAGE_MANAGER,
+      '(R) the pnpm requirement must be recorded',
+    );
+    assert.deepEqual(
+      m.closure.map((e) => e.name).sort(),
+      MEMBERS.map((e) => e.name).sort(),
+      `(R) every closure member must be recorded: ${m.closure.map((e) => e.name)}`,
+    );
+    for (const rel of SOURCE_FILES) {
+      const recorded = [...m.schemas, m.lockfile, m.dependency_sbom].find((a) => a.path === rel);
+      assert.ok(recorded, `(R) ${rel} must carry a digest in the manifest`);
+      assert.match(recorded.sha256, /^[0-9a-f]{64}$/, `(R) ${rel} must carry a sha256`);
+    }
+    // The algorithm names must be IN the manifest: a third party has to reproduce a digest without
+    // reading this repository's scripts.
+    for (const key of [
+      'tarball_integrity',
+      'file_digest',
+      'file_list_digest',
+      'source_file_digest',
+    ])
+      assert.match(
+        m.algorithms[key] ?? '',
+        /sha(256|512)/,
+        `(R) algorithms.${key} must state its hash function`,
+      );
+    assertNoPackageManager(first, '(R)');
+    console.log('ok (R) — the manifest is a pure function of the checkout and the tarballs');
+  }
+
+  // ── (K) the file-list digest survives a re-pack; the tarball integrity legitimately does not ───
+  {
+    const straight = generate(fixture());
+    const reordered = generate(fixture({ reverseDeps: true }));
+    const multiDep = MEMBERS.filter((m) => m.deps.length > 1).map((m) => m.name);
+    assert.ok(multiDep.length > 0, '(K) the fixture must carry a member with two internal deps');
+    for (const name of multiDep) {
+      const a = entryFor(straight.manifest, name);
+      const b = entryFor(reordered.manifest, name);
+      assert.notEqual(
+        a.tarball.integrity,
+        b.tarball.integrity,
+        `(K) ${name}: a re-pack that moves the dependency key order does change the tarball bytes`,
+      );
+      assert.equal(
+        a.files.list_digest,
+        b.files.list_digest,
+        `(K) ${name}: the file-list digest must identify the package across that re-pack`,
+      );
+    }
+    console.log('ok (K) — the content digest is stable across a re-pack, the byte digest is not');
+  }
+
+  // ── (P) the positive control: an untouched tarball directory verifies ──────────────────────────
+  {
+    const fx = fixture();
+    generate(fx);
+    const r = verify(fx);
+    assert.equal(r.code, 0, `(P) an untouched directory must verify; got ${r.code}: ${r.err}`);
+    assertNoPackageManager(r, '(P)');
+    console.log('ok (P) — the manifest verifies against the tarballs it was generated from');
+  }
+
+  // ── (B) one altered tarball BYTE — identical contents, different archive — fails ───────────────
+  {
+    const fx = fixture();
+    generate(fx);
+    const victim = '@rayspec/core';
+    writeFileSync(
+      join(fx.tarDir, tarballName(victim)),
+      tarball(memberFiles(MEMBERS.find((m) => m.name === victim)), { level: 1 }),
+    );
+    const r = verify(fx);
+    assert.notEqual(r.code, 0, `(B) an altered tarball must fail verification; got ${r.code}`);
+    assert.match(r.err, /@rayspec\/core/, `(B) the failing package must be named: ${r.err}`);
+    assert.match(r.err, /integrity/i, `(B) the failing check must be named: ${r.err}`);
+    assertNoPackageManager(r, '(B)');
+    console.log('ok (B) — a tarball whose bytes moved fails, even with identical contents');
+  }
+
+  // ── (F) one altered FILE LIST fails — on the member that records no tarball integrity ──────────
+  {
+    const fx = fixture();
+    generate(fx);
+    const launcher = MEMBERS.find((m) => m.name === LAUNCHER);
+    writeFileSync(
+      join(fx.tarDir, tarballName(LAUNCHER)),
+      tarball(
+        memberFiles(launcher, { extra: [['package/dist/extra.js', 'export const x = 1;\n']] }),
+      ),
+    );
+    const r = verify(fx);
+    assert.notEqual(r.code, 0, `(F) an altered file list must fail verification; got ${r.code}`);
+    assert.match(r.err, /rayspec/, `(F) the failing package must be named: ${r.err}`);
+    assert.match(r.err, /file/i, `(F) the failing check must be named: ${r.err}`);
+    assertNoPackageManager(r, '(F)');
+    console.log(
+      'ok (F) — a file added to the launcher fails, though it records no tarball integrity',
+    );
+  }
+
+  // ── (X) the self-reference: the manifest inside the launcher tarball, and only that manifest ───
+  {
+    const fx = fixture();
+    const generated = generate(fx);
+    const launcher = MEMBERS.find((m) => m.name === LAUNCHER);
+    const entry = entryFor(generated.manifest, LAUNCHER);
+    assert.equal(
+      entry.tarball.integrity,
+      null,
+      '(X) the launcher must not claim a tarball integrity the shipped tarball cannot have',
+    );
+    assert.ok(
+      entry.tarball.reason,
+      '(X) the absent integrity must carry a machine-readable reason',
+    );
+    assert.deepEqual(
+      entry.files.excluded,
+      [MANIFEST_NAME],
+      `(X) the launcher must exclude exactly the manifest: ${JSON.stringify(entry.files.excluded)}`,
+    );
+
+    // Ship it: the launcher tarball now carries the manifest, which is how a consumer receives it.
+    writeFileSync(
+      join(fx.tarDir, tarballName(LAUNCHER)),
+      tarball(memberFiles(launcher, { extra: [[`package/${MANIFEST_NAME}`, generated.bytes]] })),
+    );
+    const shipped = verify(fx);
+    assert.equal(
+      shipped.code,
+      0,
+      `(X) embedding the manifest must leave verification green; got ${shipped.code}: ${shipped.err}`,
+    );
+    assert.match(
+      shipped.out,
+      /carries/i,
+      `(X) the run must report that the launcher carries the manifest: ${shipped.out}`,
+    );
+
+    // And the exclusion must not be a hole: a DIFFERENT manifest inside the launcher is red.
+    const forged = JSON.parse(generated.bytes.toString('utf8'));
+    forged.source.commit = '0'.repeat(40);
+    writeFileSync(
+      join(fx.tarDir, tarballName(LAUNCHER)),
+      tarball(
+        memberFiles(launcher, {
+          extra: [[`package/${MANIFEST_NAME}`, `${JSON.stringify(forged, null, 2)}\n`]],
+        }),
+      ),
+    );
+    const swapped = verify(fx);
+    assert.notEqual(
+      swapped.code,
+      0,
+      '(X) a launcher carrying a DIFFERENT manifest must fail verification',
+    );
+    assert.match(
+      swapped.err,
+      new RegExp(MANIFEST_NAME),
+      `(X) the mismatch must name it: ${swapped.err}`,
+    );
+    assertNoPackageManager(swapped, '(X)');
+    console.log('ok (X) — the launcher is verifiable from the manifest it ships');
+  }
+
+  // ── (N) an absent tag and an absent workflow run are explicit nulls with reasons ───────────────
+  {
+    const bare = generate(fixture()).manifest;
+    assert.equal(bare.source.tag.commit, null, '(N) an absent tag must not be given a commit');
+    assert.equal(
+      bare.source.tag.state,
+      'absent',
+      `(N) the state must say so: ${bare.source.tag.state}`,
+    );
+    assert.ok(bare.source.tag.note, '(N) an absent tag must carry a reason');
+    assert.equal(bare.workflow_run.value, null, '(N) no Actions environment means no workflow run');
+    assert.ok(
+      bare.workflow_run.reason,
+      '(N) an absent workflow run must carry a machine-readable reason',
+    );
+
+    const tagged = fixture({ tags: [`v${VERSION}`] });
+    const withRun = generate(tagged, [], {
+      env: {
+        GITHUB_ACTIONS: 'true',
+        GITHUB_SERVER_URL: 'https://github.test',
+        GITHUB_REPOSITORY: 'rayspec-labs/rayspec',
+        GITHUB_WORKFLOW: 'CI',
+        GITHUB_RUN_ID: '4242',
+        GITHUB_RUN_ATTEMPT: '2',
+      },
+    }).manifest;
+    assert.equal(
+      withRun.source.tag.state,
+      'at-head',
+      '(N) an annotated tag on HEAD must be recorded',
+    );
+    assert.equal(withRun.source.tag.commit, tagged.head, '(N) the tag must record its commit');
+    assert.equal(withRun.workflow_run.reason, null, '(N) a recorded workflow run needs no reason');
+    assert.equal(withRun.workflow_run.value.run_id, '4242', '(N) the run id must be recorded');
+    assert.equal(
+      withRun.workflow_run.value.url,
+      'https://github.test/rayspec-labs/rayspec/actions/runs/4242/attempts/2',
+      `(N) the run must be addressable: ${withRun.workflow_run.value.url}`,
+    );
+    console.log('ok (N) — what does not exist is recorded as null with a reason, never invented');
+  }
+
+  // ── (W) a modified tracked file is recorded, with its path ─────────────────────────────────────
+  {
+    const fx = fixture();
+    assert.equal(generate(fx).manifest.source.worktree_clean, true, '(W) a clean tree must say so');
+    writeFileSync(join(fx.root, 'pnpm-lock.yaml'), 'edited after the tag\n');
+    const dirty = generate(fx).manifest;
+    assert.equal(
+      dirty.source.worktree_clean,
+      false,
+      '(W) a modified tracked file must be recorded',
+    );
+    assert.deepEqual(
+      dirty.source.dirty_paths,
+      ['pnpm-lock.yaml'],
+      `(W) the modified path must be named: ${JSON.stringify(dirty.source.dirty_paths)}`,
+    );
+    console.log('ok (W) — a dirty working tree is recorded, not smoothed over');
+  }
+
+  // ── (C) a tarball directory that is not a closure refuses ──────────────────────────────────────
+  {
+    const fx = fixture({ only: ['rayspec', '@rayspec/cli', '@rayspec/core'] });
+    const r = run(fx, ['--tarballs', fx.tarDir]);
+    assert.notEqual(r.code, 0, `(C) an incomplete closure must refuse; got ${r.code}: ${r.out}`);
+    assert.match(r.err, /@rayspec\/spec/, `(C) the missing package must be named: ${r.err}`);
+    assertNoPackageManager(r, '(C)');
+    console.log('ok (C) — a directory missing a dependency is not a closure and is refused');
+  }
+
+  console.log('\nrelease identity manifest: ALL CASES PASSED');
+} finally {
+  for (const d of workspaces) rmSync(d, { recursive: true, force: true });
+}

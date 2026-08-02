@@ -32,6 +32,7 @@
     "test:gate-portability": "node scripts/check-no-pack-imports.spacepath.test.mjs",
     "test:advisory-sync": "node scripts/sync-advisory-issues.test.mjs",
     "test:release-guard": "node scripts/publish.test.mjs",
+    "test:release-identity": "node scripts/release-identity.test.mjs",
     "gate:migrations": "pnpm --filter @rayspec/db gate:migrations",
     "gate:shadow-dryrun": "pnpm --filter @rayspec/db gate:shadow-dryrun",
     "gate:migrate-clean": "pnpm --filter @rayspec/db gate:migrate-clean",
@@ -41,6 +42,9 @@
     "//release": "scripts/publish.mjs is the ONLY sanctioned path to npm: it transiently stamps the release version (DERIVED from this manifest's `version`; --version only asserts it) + flips private:false + ensures files:['dist'] for the CLI runtime closure, then ALWAYS restores the committed tree (private:true stays the accidental-publish guard). `release:pack` and `release:dry-run` are no-write proofs; a real registry write is `node scripts/publish.mjs --publish --yes-really-publish` with RAYSPEC_ALLOW_PUBLISH=1 (founder release window). Requires `pnpm build` first.",
     "release:pack": "node scripts/publish.mjs --pack",
     "release:dry-run": "node scripts/publish.mjs --dry-run",
+    "//release-identity": "scripts/release-identity.mjs emits the RELEASE IDENTITY MANIFEST — the artifact that maps the published closure back to the commit it was built from (version, source commit + worktree state, per-package tarball integrity and unpacked file-list digest, the three schema artifacts, the lockfile and dependency-SBOM digests, the Node/pnpm requirements, the tag and the build workflow run). It is UNSIGNED: there is no release workflow (see the scripts/publish.mjs docblock), so keyless CI signing would mean moving the release into CI; the manifest's authenticity comes from the authenticated release it is attached to. A release run is: (1) `pnpm build`; (2) `node scripts/publish.mjs --pack --out release/v<version>`; (3) `pnpm release:identity --tarballs release/v<version>` — writes packages/app/rayspec/rayspec-release-identity.json (gitignored, listed in the launcher's `files`, so the NEXT pack/publish of the launcher ships it); (4) `pnpm release:identity-verify --tarballs release/v<version>` — must print 0 failures; (5) publish per the //release note; (6) attach the manifest AND the tarballs it pins to the GitHub release: `gh release upload v<version> packages/app/rayspec/rayspec-release-identity.json release/v<version>/*.tgz`. Step 6 is the release-asset half of the manifest's reachability; the launcher tarball is the installed-package half.",
+    "release:identity": "node scripts/release-identity.mjs",
+    "release:identity-verify": "node scripts/release-identity.mjs --verify",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down"
   },
