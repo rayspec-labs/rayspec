@@ -200,14 +200,25 @@ function run(fx, args, { allowPublish = false } = {}) {
 }
 
 /** A refusal: nonzero exit, an explanation on stderr, and NOT ONE package manager invocation. */
-function assertRefused(r, label) {
-  assert.notEqual(r.code, 0, `${label} the run must exit nonzero; got ${r.code}: ${r.out}`);
+function assertRefused(r, label, fx) {
+  // Exit 2 specifically, not merely nonzero: an uncaught throw exits 1, and a refusal that decayed
+  // into a stack trace would still satisfy "nonzero" while telling an operator nothing.
+  assert.equal(r.code, 2, `${label} a refusal must exit 2; got ${r.code}: ${r.err || r.out}`);
   assert.notEqual(r.err.trim(), '', `${label} a refusal must say why`);
   assert.deepEqual(
     r.calls,
     [],
     `${label} the refusal must land BEFORE the first pnpm invocation, got ${JSON.stringify(r.calls)}`,
   );
+  // The other half of "nothing happened": `process.exit` skips the restore `finally`, so a guard
+  // that ran after the stamping loop would leave every manifest rewritten and private:false on disk.
+  if (fx) {
+    assert.equal(
+      gitIn(fx.root, 'status', '--porcelain', '--untracked-files=no'),
+      '',
+      `${label} a refusal must leave every tracked byte alone`,
+    );
+  }
 }
 
 /** Which package each pnpm invocation ran in, in order. */
@@ -225,7 +236,7 @@ try {
   {
     const fx = fixture({ versions: { '@rayspec/core': '1.6.1', '@rayspec/parity': '1.4.0' } });
     const r = run(fx, ['--pack', '--out', join(fx.root, 'out')]);
-    assertRefused(r, '(W)');
+    assertRefused(r, '(W)', fx);
     assert.match(
       r.err,
       /packages\/kernel\/core\/package\.json/,
@@ -251,7 +262,7 @@ try {
   {
     const fx = fixture({ versions: { rayspec: '9.9.9' } });
     const r = run(fx, ['--pack', '--out', join(fx.root, 'out')]);
-    assertRefused(r, '(L)');
+    assertRefused(r, '(L)', fx);
     assert.match(
       r.err,
       /packages\/app\/rayspec\/package\.json/,
@@ -267,7 +278,7 @@ try {
   {
     const fx = fixture({ engines: { '@rayspec/core': null } });
     const r = run(fx, ['--pack', '--out', join(fx.root, 'out')]);
-    assertRefused(r, '(E)');
+    assertRefused(r, '(E)', fx);
     assert.match(
       r.err,
       /packages\/kernel\/core\/package\.json/,
@@ -282,7 +293,7 @@ try {
   {
     const fx = fixture({ engines: { '@rayspec/cli': '>=20' } });
     const r = run(fx, ['--pack', '--out', join(fx.root, 'out')]);
-    assertRefused(r, '(D)');
+    assertRefused(r, '(D)', fx);
     assert.match(
       r.err,
       /packages\/app\/cli\/package\.json/,
@@ -297,7 +308,7 @@ try {
   {
     const fx = fixture();
     const r = run(fx, ['--pack', '--out', join(fx.root, 'out'), '--version', '1.7.0']);
-    assertRefused(r, '(A)');
+    assertRefused(r, '(A)', fx);
     assert.match(r.err, /1\.7\.0/, `(A) the asserted value must be named: ${r.err}`);
     assert.match(r.err, /1\.6\.2/, `(A) the derived value must be named: ${r.err}`);
     console.log('ok (A) — --version asserts the derived version, it cannot override it');
@@ -307,7 +318,7 @@ try {
   {
     const fx = fixture();
     const r = run(fx, ['--publish', '--yes-really-publish'], { allowPublish: true });
-    assertRefused(r, '(T)');
+    assertRefused(r, '(T)', fx);
     assert.match(r.err, /v1\.6\.2/, `(T) the missing tag must be named: ${r.err}`);
     console.log('ok (T) — a real registry write refuses without the release tag');
   }
@@ -317,7 +328,7 @@ try {
   {
     const fx = fixture({ tags: [{ name: 'v1.6.2', annotated: false }] });
     const r = run(fx, ['--publish', '--yes-really-publish'], { allowPublish: true });
-    assertRefused(r, '(K)');
+    assertRefused(r, '(K)', fx);
     assert.match(r.err, /v1\.6\.2/, `(K) the tag must be named: ${r.err}`);
     assert.match(r.err, /lightweight/i, `(K) the refusal must say what is wrong: ${r.err}`);
     console.log('ok (K) — a lightweight tag is not a release tag');
@@ -327,7 +338,7 @@ try {
   {
     const fx = fixture({ tags: [{ name: 'v1.6.2', annotated: true, at: 'previous' }] });
     const r = run(fx, ['--publish', '--yes-really-publish'], { allowPublish: true });
-    assertRefused(r, '(C)');
+    assertRefused(r, '(C)', fx);
     assert.match(r.err, /v1\.6\.2/, `(C) the tag must be named: ${r.err}`);
     assert.match(r.err, /HEAD/, `(C) the refusal must contrast the tag with HEAD: ${r.err}`);
     console.log('ok (C) — publishing from a commit the release tag does not point at refuses');
@@ -376,6 +387,69 @@ try {
     );
     assert.equal(dry.calls.length, TARGETS.length, '(R) the dry-run must still run');
     console.log('ok (R) — pack and dry-run report the tag state instead of enforcing it');
+  }
+
+  // ── (V) --version with an EMPTY value keeps its own message ────────────────────────────────────
+  {
+    const fx = fixture({ tags: [{ name: 'v1.6.2', annotated: true }] });
+    const r = run(fx, ['--pack', '--out', join(fx.root, 'out'), '--version', '']);
+    assertRefused(r, '(V)', fx);
+    assert.match(
+      r.err,
+      /--version requires a value/,
+      `(V) an empty --version is a usage error, not a version disagreement: ${r.err}`,
+    );
+    console.log('ok (V) — --version with no value says so, instead of reporting a mismatch');
+  }
+
+  // ── (J) a tracked manifest this loader cannot read refuses, instead of vanishing ────────────────
+  {
+    const fx = fixture({ tags: [{ name: 'v1.6.2', annotated: true }] });
+    // A RaySpec manifest that does not parse. Skipping it would drop the package out of the version
+    // and engines preflights entirely — the guards that exist to catch exactly this file.
+    const broken = MEMBERS.find((m) => m.name === '@rayspec/core');
+    writeFileSync(join(fx.root, broken.dir, 'package.json'), '{ "name": "@rayspec/core", oops\n');
+    const r = run(fx, ['--pack', '--out', join(fx.root, 'out')]);
+    // No tree assertion here: this case deliberately writes a broken tracked manifest, so the
+    // fixture is dirty by construction and the check would flag the setup rather than the run.
+    assertRefused(r, '(J)');
+    assert.match(
+      r.err,
+      /cannot read .*package\.json/,
+      `(J) the refusal must name the unreadable manifest: ${r.err}`,
+    );
+    console.log('ok (J) — an unreadable manifest refuses the run instead of dropping out of it');
+  }
+
+  // ── (M) a MATCHING --version is accepted — the assertion is not "always refuse" ────────────────
+  {
+    const fx = fixture({ tags: [{ name: 'v1.6.2', annotated: true }] });
+    const r = run(fx, ['--pack', '--out', join(fx.root, 'out'), '--version', VERSION, '--json']);
+    assert.equal(r.code, 0, `(M) --version ${VERSION} must be accepted; got ${r.code}: ${r.err}`);
+    assert.equal(
+      r.calls.length,
+      TARGETS.length,
+      `(M) every target must still be packed: ${JSON.stringify(r.calls.map((c) => c.argv))}`,
+    );
+    // Without this arm, an implementation that refused EVERY --version would pass case (A).
+    console.log('ok (M) — --version that agrees with the tree is accepted, not refused');
+  }
+
+  // ── (U) an unbuilt target refuses before anything is packed ────────────────────────────────────
+  {
+    const fx = fixture({ tags: [{ name: 'v1.6.2', annotated: true }] });
+    // Remove one target's dist/. It is the LAST in dependency order, so a check that ran per target
+    // inside the publish loop would already have packed the others before reaching it.
+    const last = MEMBERS.find((m) => m.name === 'rayspec');
+    rmSync(join(fx.root, last.dir, 'dist'), { recursive: true, force: true });
+    const r = run(fx, ['--pack', '--out', join(fx.root, 'out')]);
+    assertRefused(r, '(U)', fx);
+    assert.match(
+      r.err,
+      /unbuilt target\(s\): rayspec/,
+      `(U) the refusal must name the unbuilt target: ${r.err}`,
+    );
+    console.log('ok (U) — an unbuilt target stops the run before the first target is packed');
   }
 
   // ── (P) the positive control: a coherent checkout packs, in dependency order, and restores ─────

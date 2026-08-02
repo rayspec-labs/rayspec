@@ -53,8 +53,9 @@
  *
  * MODES (default: --dry-run; a real registry write is opt-in and double-gated)
  * ---------------------------------------------------------------------------
- *   --pack         `pnpm pack` each target into --out (default a temp dir); prints each tarball's file
- *                  list + resolved deps. TOKENLESS, no registry contact. The tarball-contents proof.
+ *   --pack         `pnpm pack` each target into --out (default a temp dir), writing one .tgz per
+ *                  target. TOKENLESS, no registry contact. The tarball-contents proof: the archives
+ *                  are on disk to inspect (the child's own output is captured, not printed).
  *   --dry-run      `pnpm publish --dry-run --no-git-checks` each target (the default). Simulates the
  *                  publish incl. workspace resolution; no registry write. Tokenless in normal operation
  *                  (if your registry demands auth even for a dry-run, use --pack instead).
@@ -146,8 +147,13 @@ function loadRayspecPackages() {
     let json;
     try {
       json = JSON.parse(readFileSync(path, 'utf8'));
-    } catch {
-      continue;
+    } catch (err) {
+      // A manifest this loader cannot read is a manifest the version and engines preflights cannot
+      // check. Skipping it would make a tracked, unreadable RaySpec package invisible to exactly the
+      // guards that exist to catch it, so the run refuses instead.
+      console.error(`cannot read ${relative(REPO_ROOT, path)}: ${err.message}`);
+      console.error('nothing was packed. Every tracked manifest must be readable to be checked.');
+      process.exit(2);
     }
     const isScoped = typeof json.name === 'string' && json.name.startsWith('@rayspec/');
     const isLauncher = json.name === 'rayspec' && path !== rootManifest;
@@ -357,7 +363,7 @@ function preflight(flags, version, engine, pkgs, publishSet) {
     const detail = {
       absent: `tag ${tag.name} does not exist`,
       lightweight: `tag ${tag.name} is a lightweight tag, not an annotated release tag`,
-      'other-commit': `annotated tag ${tag.name} points at ${tag.commit}`,
+      'other-commit': `annotated tag ${tag.name} points at ${tag.commit || '(unreadable)'}`,
     }[tag.state];
     console.error(
       `refusing to publish ${version}: ${detail}, and HEAD is ${tag.head}. An irreversible registry ` +
@@ -365,14 +371,28 @@ function preflight(flags, version, engine, pkgs, publishSet) {
     );
     process.exit(2);
   }
-  // In --pack and --dry-run the tag state is REPORTED and never fatal: both write nothing anywhere,
+  // Every target must be BUILT before anything is packed. This ran per target inside the publish
+  // loop, which is a check after an irreversible step: a --publish whose Nth target was unbuilt had
+  // already put targets 1..N-1 on the registry when it threw. Nothing about it needs the loop.
+  const unbuilt = [...publishSet]
+    .filter((name) => !existsSync(join(dirname(pkgs.get(name).path), 'dist')))
+    .sort();
+  if (unbuilt.length) {
+    console.error(
+      `unbuilt target(s): ${unbuilt.join(', ')} — run \`pnpm build\` before packing or publishing.`,
+    );
+    console.error('nothing was packed.');
+    process.exit(2);
+  }
+
+  // In --pack and --dry-run the tag state is REPORTED and never fatal: both write nothing to the registry and nothing to the tracked tree,
   // and a pack rehearsal legitimately happens before the tag for the version being prepared exists.
   return tag;
 }
 
 function main() {
   const flags = parseFlags(process.argv.slice(2));
-  if (flags.version === undefined) {
+  if (flags.version === undefined || flags.version === '') {
     console.error('--version requires a value (e.g. --version <x.y.z>)');
     process.exit(2);
   }
@@ -402,9 +422,6 @@ function main() {
     // Phase 2 — run the requested command per target, in dependency order.
     for (const name of order) {
       const pkgDir = dirname(pkgs.get(name).path);
-      if (!existsSync(join(pkgDir, 'dist'))) {
-        throw new Error(`${name}: dist/ missing — run \`pnpm build\` before packing/publishing`);
-      }
       let stdout = '';
       if (flags.mode === 'pack') {
         stdout = execFileSync('pnpm', ['pack', '--pack-destination', outDir], {
