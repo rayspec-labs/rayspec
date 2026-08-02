@@ -101,10 +101,18 @@ export {
 } from './media/media-token.js';
 export { mountOidc, OIDC_MOUNT_PATH } from './oidc/mount.js';
 export { createOidcProvider, type OidcProviderOptions } from './oidc/provider.js';
+// The invite TTL policy is exported so a composition root that issues an invite OUTSIDE the HTTP
+// surface (the operator provisioning path) clamps with the SAME shipped bounds the route does, rather
+// than growing a second lifetime policy that could drift from it.
+export {
+  INVITE_DEFAULT_TTL_SECONDS,
+  INVITE_MAX_TTL_SECONDS,
+  INVITE_MIN_TTL_SECONDS,
+} from './routes/invites.js';
 export { AuthService } from './services/auth-service.js';
 export { ApiKeyStore } from './stores/api-key-store.js';
 export { AuditStore } from './stores/audit-store.js';
 export { IdempotencyStore } from './stores/idempotency-store.js';
 export { IdentityStore } from './stores/identity-store.js';
 export { InviteStore } from './stores/invite-store.js';
-export { OrgStore } from './stores/org-store.js';
+export { OrgIdInUseError, OrgStore, OrgTombstonedError } from './stores/org-store.js';

@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **One command now creates or resolves the organization a deployment binds to, from a deploy script,
+  with no server running: `rayspec tenant ensure --org-id <uuid> --name <n>`.** A product or cron
+  deployment has to be pointed at an organization that already exists, while the organization service
+  owns id generation — so automating it meant booting the auth surface alone, registering a user
+  through the public API, reading the generated id back, stopping, and booting the real profile. Four
+  steps for a one-step need, and the temporary user it registered could never be removed: the last
+  owner cannot be removed, and a user delete is a soft delete that leaves a row. `tenant ensure` talks
+  to `DATABASE_URL` directly and settles the whole thing in one call. It lives in a new top-level
+  `tenant` group rather than under `dev`, which is documented as local-development-only — that scoping
+  was the gap.
+
+  **Running it twice with the same `--org-id` is the same organization and no second row.** The chosen
+  id *is* the operation id: `orgs.id` is the primary key, so the database itself is the ledger and
+  there is no second key or mapping table to keep. Two concurrent runs of the command converge rather
+  than race — one reports `created`, the other `existing`, and both name the same org — and that holds
+  against a fresh database, because the migration step is serialized by an advisory lock rather than
+  left to a migrator whose `CREATE … IF NOT EXISTS` bootstrap is not concurrency-safe. An id supplied
+  in upper case is the same organization, reported as the database stores it, which is the form a
+  deployment compares against (`uuidgen` prints upper case on macOS). That makes the command safe to
+  call unconditionally from a script that cannot know whether an earlier attempt got through.
+
+  **The owner handoff leaves no platform user behind.** With `--owner-email` the command writes one
+  `owner` invite — authored by nobody — in the same transaction as the organization row, so an
+  organization is never created without the thing that makes it claimable. A real person then redeems
+  it at the ordinary public `POST /v1/invites/accept`, which provisions *their* account with *their*
+  password. The command creates no user and no membership at all. The minted token is written to an
+  exclusively-created mode-600 file and appears in no output, no log line and no audit row; the result
+  object has no field that could hold one. There is no flag that takes a token *value* either — a
+  secret passed as an argument lands in shell history and in `ps`.
+
+  **It has no HTTP route, in any posture.** That is the point of doing it through the database rather
+  than an endpoint: `RAYSPEC_TENANT_BOOTSTRAP_ENABLED` never has to be set on a production deployment,
+  so `POST /v1/auth/bootstrap-tenant` is never registered on a production listener at all. It reads
+  exactly two secrets — `DATABASE_URL` and `RAYSPEC_API_KEY_PEPPER` — through the existing `<VAR>_FILE`
+  convention with the same precedence and the same fail-closed abort, and deliberately not
+  `RAYSPEC_JWT_SIGNING_KEY`, because it mints no JWT and a provisioning job should not have to carry
+  the platform signing key.
+
+  **Two things to know before pointing it somewhere.** It **applies the committed migration chain** to
+  whatever `DATABASE_URL` names — required on a first bootstrap, idempotent afterwards, and a real
+  side effect if the variable is not what you thought. And the token in `--owner-invite-out` is a
+  tenant-takeover credential until it is consumed or expires: whoever can read that file owns the
+  organization, which is why the operator default lifetime is one hour rather than the HTTP surface's
+  seven days (`--invite-ttl-seconds` overrides it, clamped by the same shipped bounds).
+
+  **Nothing that existed changes.** `rayspec dev bootstrap-tenant` and `POST
+  /v1/auth/bootstrap-tenant` are untouched and fully supported, and the local walkthrough through a
+  running server still reads the same. `createOrgWithOwner` is not edited — the reservation is a new
+  sibling method — so the public `register` path emits the identical INSERT it always has. No route is
+  added, removed or re-registered anywhere; turning the bootstrap posture on still adds exactly one
+  path and the reservation contributes none. `InviteStore.create` and `.consume` each gain one
+  optional trailing parameter, so both shipped call sites compile to the same handle they did before.
+  There is no migration, no new column and no new table.
+
 - **The reserved store names are now drift-locked on both sides, and the authoring skill teaches
   them.** The lint rule and the boot registrar already shared one constant; what could still rot was
   everything around it. The lock in `@rayspec/db` derived its expectation from a hand-written list of

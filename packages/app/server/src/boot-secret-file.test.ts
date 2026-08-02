@@ -25,7 +25,11 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { BootConfigError, loadServerConfig } from './composition-root.js';
+import {
+  BootConfigError,
+  loadServerConfig,
+  loadTenantProvisionSecrets,
+} from './composition-root.js';
 
 const DB_URL = 'postgres://u:p@localhost:5432/app';
 const PEPPER = 'file-sourced-pepper-value';
@@ -809,5 +813,86 @@ describe('loadServerConfig — neither variant set', () => {
       message = (err as Error).message;
     }
     expect(message).toContain('missing: DATABASE_URL');
+  });
+});
+
+/**
+ * The OPERATOR-PROVISIONING secret pair — `loadTenantProvisionSecrets`, which resolves only the two
+ * secrets `rayspec tenant ensure` actually uses.
+ *
+ * It shares `resolveBootSecret` with `loadServerConfig`, so the `<VAR>_FILE` precedence, the single
+ * trim contract and the fail-closed abort on a broken mount are the SAME behaviour rather than a
+ * lookalike — that is what these arms pin. The load-bearing difference is what it does NOT demand:
+ * `RAYSPEC_JWT_SIGNING_KEY`. The provisioning path mints no JWT, so requiring the platform signing key
+ * would force a CI provisioning job to carry the one secret it never uses.
+ */
+describe('loadTenantProvisionSecrets — the two secrets the provisioning path uses', () => {
+  it('a _FILE mount wins over the plain variable for BOTH, and the trailing newline is trimmed', () => {
+    const secrets = loadTenantProvisionSecrets({
+      ...plainEnv,
+      DATABASE_URL_FILE: secretFile('prov-db', `${DB_URL}\n`),
+      RAYSPEC_API_KEY_PEPPER_FILE: secretFile('prov-pepper', `${PEPPER}\n`),
+    });
+    expect(secrets.databaseUrl).toBe(DB_URL);
+    expect(secrets.apiKeyPepper).toBe(PEPPER);
+    // Not the plain values that were also present — the mount takes precedence outright.
+    expect(secrets.databaseUrl).not.toBe(plainEnv.DATABASE_URL);
+    expect(secrets.apiKeyPepper).not.toBe(plainEnv.RAYSPEC_API_KEY_PEPPER);
+  });
+
+  it('an environment with NO signing key at all still resolves — the command mints no JWT', () => {
+    const secrets = loadTenantProvisionSecrets({
+      DATABASE_URL: DB_URL,
+      RAYSPEC_API_KEY_PEPPER: PEPPER,
+    });
+    expect(secrets).toEqual({ databaseUrl: DB_URL, apiKeyPepper: PEPPER });
+    // The same environment is NOT enough for a server boot, which is exactly why the provisioning
+    // path has its own loader rather than reusing loadServerConfig.
+    expect(() =>
+      loadServerConfig({ DATABASE_URL: DB_URL, RAYSPEC_API_KEY_PEPPER: PEPPER }),
+    ).toThrow(/RAYSPEC_JWT_SIGNING_KEY/);
+  });
+
+  it('a non-blank _FILE naming a missing path ABORTS — it never downgrades to the plain variable', () => {
+    const missing = join(dir, 'prov-absent-secret');
+    let message = '';
+    expect(() => {
+      try {
+        loadTenantProvisionSecrets({ ...plainEnv, DATABASE_URL_FILE: missing });
+      } catch (err) {
+        message = (err as Error).message;
+        throw err;
+      }
+    }).toThrow(BootConfigError);
+    expect(message).toContain('DATABASE_URL_FILE');
+    expect(message).toContain(missing);
+    expect(message).not.toContain(plainEnv.DATABASE_URL as string);
+  });
+
+  it('neither variant set: a BootConfigError naming the missing variables, not a partial result', () => {
+    let message = '';
+    try {
+      loadTenantProvisionSecrets({});
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain('DATABASE_URL');
+    expect(message).toContain('RAYSPEC_API_KEY_PEPPER');
+    // It must not tell an operator to set a key it will never read.
+    expect(message).not.toContain('RAYSPEC_JWT_SIGNING_KEY');
+  });
+
+  it('does not leak a mounted value into the normalization warning it emits', () => {
+    const warnings: string[] = [];
+    const secrets = loadTenantProvisionSecrets(
+      {
+        DATABASE_URL_FILE: secretFile('prov-warn-db', `  ${DB_URL}  `),
+        RAYSPEC_API_KEY_PEPPER: PEPPER,
+      },
+      (m) => warnings.push(m),
+    );
+    expect(secrets.databaseUrl).toBe(DB_URL);
+    expect(warnings.join('\n')).toContain('DATABASE_URL_FILE');
+    expect(warnings.join('\n')).not.toContain(DB_URL);
   });
 });
