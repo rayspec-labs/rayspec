@@ -1090,7 +1090,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every kernel, compose, capability and workflow package they depend on. Installing one under Node
   18.20.4 makes npm print `npm warn EBADENGINE … required: { node: '>=22' }`, and with
   `--engine-strict` it refuses outright (`npm error code EBADENGINE`, exit 1); under Node 22 the same
-  install succeeds. Nothing else about the packages changed — same contents, same dependencies, same
+  install succeeds. One honest caveat about the closure as a whole: `@rayspec/adapter-pi` depends on
+  `@earendil-works/pi-ai`, which declares `engines.node: ">=22.19.0"`, so an `--engine-strict`
+  install of the full launcher closure needs that patch level rather than any Node 22. The `>=22`
+  stamped here is this project's own floor, not a claim about every transitive dependency. Nothing else about the packages changed — same contents, same dependencies, same
   entrypoints.
 
   **A future package cannot ship without it.** The requirement string has one source, the
