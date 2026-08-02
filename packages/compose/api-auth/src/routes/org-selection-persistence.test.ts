@@ -20,7 +20,10 @@ import { createHarness, type Harness, jsonRequest } from '../test-support/harnes
 let h: Harness;
 
 beforeAll(async () => {
-  h = await createHarness({ schema: 'rayspec_test_apiauth_orgsel' });
+  // The injected clock, not the wall clock, drives the refresh grace window here. One test below
+  // presents a ROTATED cookie and needs to be INSIDE that window; on the real clock the 30ms budget
+  // is spent by the round trips themselves under load, so the test raced its own setup.
+  h = await createHarness({ schema: 'rayspec_test_apiauth_orgsel', useFakeClock: true });
 });
 beforeEach(async () => {
   await h.reset();
@@ -184,6 +187,10 @@ describe('switch persists the selection on the session row', () => {
     const { token, refresh: r0 } = await registerWithOrg('rotate@example.com', 'RotateCo');
     const second = await createOrg(token, 'RotateTwo');
     const r1 = (await refresh(r0)).cookie; // rotates: r0's row is superseded by r1's
+
+    // Spend part of the 30ms grace budget deliberately, on the injected clock: the arm is INSIDE the
+    // window because the test says so, not because the round trips happened to be fast enough.
+    h.clock?.advance(10);
 
     const res = await switchOrg(token, second, r0); // the OLD secret, within grace
     expect(res.status).toBe(200);
