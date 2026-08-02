@@ -559,15 +559,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the seam substitutes construction, not identity, and journal attribution, the native-structured-
   output boot gate and run-core's capability validation all key on that id.
 
-  **Omitting it changes nothing.** With no factory the boot never executes a byte of the new code:
-  the option is read once, and every builder falls back to the same `makeExtractionBackend` call it
-  made before, with the same two arguments, at the same point in the same loop. The per-backend
+  **Omitting it changes nothing.** With no factory the boot never executes a byte of the survey or of
+  the checks on what a factory returns — that whole block is unreachable without one. What still runs
+  is the seam's own default source, and all it does is make the same `makeExtractionBackend` call
+  every builder made before, with the same two arguments, at the same point in the same loop. The per-backend
   environment demands, the anthropic billing and reuse-login warnings and their order, the
   per-extractor abort order, and every error string — including `extraction backend '<x>' is not
   wired in this boot (wired: openai | anthropic | pi | codex). Fail-closed.` — are unchanged. A
   deterministic executor mode keeps its exact meaning too: `RAYSPEC_EXTRACTION_MODE`,
   `RAYSPEC_RESPONDER_MODE` or `RAYSPEC_NORMALIZE_MODE` set to `deterministic` still uses the injected
   dev/CI Backend, and the factory is never even asked for a Backend that mode would discard.
+
+  **Installing a factory does tighten one check, in the stricter direction.** An extractor sidecar
+  whose `model` is missing or blank is left out of the requirement set, so the factory is never shown
+  it and the boot refuses that call instead of brokering one nobody described. The same document boots
+  without a factory, because the extraction builder does not validate the model itself. If you install
+  a factory and a boot now stops on an extractor it previously accepted, that sidecar is the reason.
 
   **What it does not cover, stated plainly.** Speech-to-text is not part of this seam: the STT
   adapter is still selected by `STT_PROVIDER` and still needs `DEEPGRAM_API_KEY` in the product
