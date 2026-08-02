@@ -26,6 +26,10 @@ examples/**/packs/**/*.js
 # would make it name its own parent commit and be stale the moment it lands.
 packages/app/rayspec/rayspec-release-identity.json
 
+# The packed release closure. The `//release-identity` operator sequence packs the 29 tarballs
+# into release/v<version>/ before generating the manifest from them; they are build output.
+release/
+
 # Caches
 .turbo/
 .cache/

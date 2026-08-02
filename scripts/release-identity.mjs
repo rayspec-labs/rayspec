@@ -149,11 +149,19 @@ function parseFlags(argv) {
   const flags = { verify: false, tarballs: null, out: null, manifest: null, json: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    // A value-taking flag with no value reads as `undefined`, which for --out and --manifest used to
+    // fall back to the default path — so a mistyped command wrote somewhere the operator did not ask
+    // for and exited 0. Every one of them is checked the same way.
+    const value = (flag) => {
+      const v = argv[++i];
+      if (v === undefined || v.startsWith('--')) refuse(`${flag} requires a value.`);
+      return v;
+    };
     if (a === '--verify') flags.verify = true;
     else if (a === '--json') flags.json = true;
-    else if (a === '--tarballs') flags.tarballs = argv[++i];
-    else if (a === '--out') flags.out = argv[++i];
-    else if (a === '--manifest') flags.manifest = argv[++i];
+    else if (a === '--tarballs') flags.tarballs = value('--tarballs');
+    else if (a === '--out') flags.out = value('--out');
+    else if (a === '--manifest') flags.manifest = value('--manifest');
     else refuse(`unknown flag: ${a}`);
   }
   if (!flags.tarballs)
@@ -638,7 +646,23 @@ function loadTarballs(dir) {
     }
     const manifestEntry = entries.find((e) => e.path === 'package.json');
     if (!manifestEntry) refuse(`${file}: the tarball carries no package/package.json.`);
-    const json = JSON.parse(manifestEntry.body.toString('utf8'));
+    let json;
+    try {
+      json = JSON.parse(manifestEntry.body.toString('utf8'));
+    } catch (err) {
+      // The documented exit code for a bad input is 2; an uncaught SyntaxError would exit 1 with a
+      // stack trace instead.
+      refuse(`${file}: its packed package.json does not parse: ${err.message}`);
+    }
+    const already = members.find((m) => m.name === json.name);
+    if (already) {
+      // A directory holding two tarballs for one package (a stray copy, a re-pack left behind) makes
+      // the closure ambiguous: generate would record the package twice and verify keys by name, so
+      // one of the two silently decides the result. Which one is not something to leave to readdir.
+      refuse(
+        `${file} and ${already.file} both declare ${json.name} — the release directory must hold one tarball per package.`,
+      );
+    }
     members.push({
       file,
       bytes,
@@ -648,7 +672,9 @@ function loadTarballs(dir) {
       deps: Object.keys(json.dependencies ?? {}).filter((d) => d.startsWith('@rayspec/')),
     });
   }
-  return members.sort((a, b) => a.name.localeCompare(b.name));
+  // Byte order, not `localeCompare`: the DETERMINISM claim above is that the same inputs give the
+  // same bytes anywhere, and collation is locale- and ICU-build-dependent.
+  return members.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 /**
@@ -690,7 +716,7 @@ function assertClosure(members, launcherName, version) {
       `the tarball directory is not a closure — ${missing.size} package(s) are depended on but not ` +
         'packed:',
       ...[...missing]
-        .sort(([a], [b]) => a.localeCompare(b))
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
         .map(([dep, by]) => `  ${dep} — required by ${by.sort().join(', ')}`),
     );
   }
