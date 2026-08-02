@@ -51,9 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the tree resolves its auth mode by the identical code path it used previously, and no existing test
   needed changing.
 
-  **Two limits worth stating plainly.** The preflight is **not bounded**: the run's wall-clock bound
+  **Three limits worth stating plainly.** The preflight is **not bounded**: the run's wall-clock bound
   and its cancellation controller are both armed after this point, so a remote preflight that hangs
-  holds the run (and, on the durable path, a worker slot). Bounding it is a separate change. And an
+  holds the run — and, on the durable path, a worker slot *and* the open Postgres transaction the
+  worker wraps the run in, which means a pooled connection for the whole time it hangs. Bounding it is
+  a separate change. Nothing in this repository supplies a `RunOptions.credentialBindingRef`: the
+  platform mints no credentials and ships no remote backend, so the field is an injection point for a
+  deployment's own composition root, and the only callers that set it here are tests. And an
   `llm` step's auth mode is still whatever the adapter records — the Anthropic adapter deliberately
   reconciles it mid-run from the live session — so the bound mode is guaranteed on every
   *platform-dispatched tool* step by construction, and on `llm` steps by the adapter honouring the

@@ -765,7 +765,8 @@ export async function runAgent(
   // setWhere is false for it, so a later spurious re-run that ERRORS can NEVER downgrade a completed run
   // back to 'error'. The `backend`/`authMode` identity columns are refreshed WITH the outcome, because
   // the earlier writes recorded a PRE-run guess: the enqueue-time header has no credential resolved at
-  // all, and the `running` transition carries `resolveAuth()`'s answer — which an adapter may RECONCILE
+  // all, and the `running` transition carries the PRE-RUN resolution — `resolveAuth()`'s answer, or the
+  // preflight's for a backend that implements one — which an adapter may RECONCILE
   // during the run (the RunResult's authMode is the one the run actually executed under, and it is the
   // one the journal's steps carry). agentName/model are the run's own spec either way; createdAt (the
   // run's first-seen instant) is preserved.
