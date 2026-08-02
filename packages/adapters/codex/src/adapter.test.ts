@@ -1126,6 +1126,20 @@ describe('Codex adapter: with no cancellation signal the run is exactly what it 
     expect(step?.output).toEqual({ finalText: 'ok', output: null, reasoningCount: 0 });
     expect(step?.usage).toEqual({ inputTokens: 7, outputTokens: 3, totalTokens: 10 });
     expect(typeof step?.latencyMs).toBe('number');
+    // Everything the run derives from the spec is pinned by value too: the auth mode, the priced
+    // cost, the idempotency key and the input hash all fall out of this run and nothing else, so a
+    // change to any of them on the unsignalled path is a change this arm has to report.
+    expect(step?.authMode).toBe('codex-subscription-oauth');
+    expect(step?.costUsd).toBe(0.00003875);
+    expect(step?.idempotencyKey).toBe(
+      'llm:d860beb1aadd910e68d7373840bcfb306e1f9d7a57bcabc38b71c2005af6df3b:0',
+    );
+    expect(step?.inputHash).toBe(
+      '1062e040c7ac68a8e714d112e5bfaa4cd25fa138092605ff69e9b90189949151',
+    );
+    // The producer stamp carries the pinned SDK version, so it is held by shape: pinning the string
+    // would make an unrelated dependency bump fail here rather than where it belongs.
+    expect(step?.producedBy).toMatch(/^@openai\/codex-sdk@.+\+adapter-codex$/);
 
     // The neutral event stream, pinned exactly (seq is run-core's single authority, stamped by makeCtx).
     expect(events).toEqual([

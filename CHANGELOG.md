@@ -628,8 +628,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an ordinary uncancelled run — one that used to hang and now finishes, which is precisely the
   observable change on a run with no cancellation signal. Everything else there is what it was: the
   SDK call, the sandbox confinement, the neutral result, the event sequence and the journaled step
-  are pinned by value, save the working directory and the step's wall clock, which are not stable
-  across machines and are pinned by shape. The residual limits are stated in the adapter's
+  are pinned by value, save three that cannot honestly be held that way and are pinned by shape: the
+  working directory and the step's wall clock, which are not stable across machines, and the producer
+  stamp, which carries the pinned SDK version. The residual limits are stated in the adapter's
   README and in the per-backend table in `docs/spec-reference.md`, and the sharpest one is that a
   bounded teardown is only *reached* once the streamed turn ends: the child is signalled rather than
   force-killed, processes it spawned itself are not signalled, and a child that ignores the signal
