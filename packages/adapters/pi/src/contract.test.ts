@@ -25,15 +25,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ---- mock the Pi SDK surface the adapter imports (no real session, no network) --------
 const createAgentSession = vi.fn();
-const setRuntimeApiKey = vi.fn();
 
 vi.mock('@earendil-works/pi-ai', () => ({
   getModel: vi.fn(() => ({ id: 'gpt-4.1-mini' })),
 }));
 
 vi.mock('@earendil-works/pi-coding-agent', () => ({
-  // The adapter uses AuthStorage.inMemory() (no ~/.pi file I/O), not .create().
-  AuthStorage: { inMemory: () => ({ setRuntimeApiKey }) },
+  // The adapter uses AuthStorage.inMemory() (no ~/.pi file I/O), not .create(). Each call returns a
+  // DISTINCT storage with its OWN setRuntimeApiKey spy, so an arm can tell the storage that received
+  // the run's API key apart from a freshly constructed, keyless one that merely looks the same.
+  AuthStorage: { inMemory: () => ({ setRuntimeApiKey: vi.fn() }) },
   ModelRegistry: { inMemory: () => ({}) },
   SessionManager: { inMemory: () => ({}) },
   // defineTool is identity-ish: it returns the tool definition (with the execute closure intact) so
@@ -160,7 +161,6 @@ const defaultMessages = [
 
 beforeEach(() => {
   createAgentSession.mockReset();
-  setRuntimeApiKey.mockReset();
   createAgentSession.mockResolvedValue({ session: fakeSession(defaultMessages) });
 });
 
@@ -922,41 +922,260 @@ describe('piToolParameters validate-and-repair (mirrors pi-agent-core validateTo
   });
 });
 
+/**
+ * A fake session that mirrors the PINNED SDK's REAL stop semantics, so an arm about cancellation is an
+ * arm about what @earendil-works/pi-coding-agent 0.79.9 actually does rather than about a convenient
+ * mock. Read doc-first from the installed dist:
+ *   - `session.abort()` is `abortRetry(); agent.abort(); await agent.waitForIdle()`
+ *     (pi-coding-agent dist/core/agent-session.js:1082-1086);
+ *   - `agent.abort()` is `this.activeRun?.abortController.abort()` — a SILENT no-op when no run is
+ *     active (pi-agent-core dist/agent.js:196-198), and `waitForIdle()` then resolves immediately
+ *     (dist/agent.js:204-206);
+ *   - every prompt run gets a FRESH AbortController (dist/agent.js:306-320), and it is THAT
+ *     controller's signal the model request is handed (dist/agent-loop.js:105 + :188-193 →
+ *     @earendil-works/pi-ai dist/providers/openai-responses.js:90-95, the `requestOptions` literal
+ *     carrying `signal` and the `client.responses.create(params, requestOptions)` it is passed to).
+ *     So a stop issued before the run exists cannot reach the request the run then issues;
+ *   - `prompt()` returns only when the run does — the run promise resolves in `runWithLifecycle`'s
+ *     `finally` (dist/agent.js:306-327) — so on a run that is stopped mid-flight, what ENDS the
+ *     adapter's await is the stop itself. `holdUntilAborted` models that.
+ * `modelRequests` records one entry per model request the session actually issued — the thing a
+ * cancelled run must not produce — and each entry is the signal that request was handed, so an arm
+ * can assert the request was stopped AT THE TRANSPORT rather than merely abandoned.
+ * `abortPhases` records WHEN each stop arrived. The adapter drops its subscription BEFORE the
+ * teardown stop (`unlinkCancel(); unsubscribe(); await session.abort();`), so a stop recorded while
+ * the subscription is still live can only be the one the run's signal brought forward — the
+ * discrimination `expect(session.abort).toHaveBeenCalled()` cannot make, because the teardown
+ * satisfies that on every run, cancelled or not.
+ *
+ * What this fake deliberately does NOT model: the real SDK creates the run controller several awaited
+ * steps into `prompt()` (agent-session.js:708-820), whereas this one creates it on entry. The window
+ * those awaits open is a residual limit recorded in README.md, not a property any arm here pins.
+ */
+function fakeAgentSession(
+  messages: unknown[],
+  opts: { holdUntilAborted?: boolean; onPrompt?: () => void } = {},
+) {
+  let activeRun: AbortController | undefined;
+  let subscribed = false;
+  const modelRequests: AbortSignal[] = [];
+  const abortPhases: Array<'linked' | 'teardown'> = [];
+  const session = {
+    subscribe: () => {
+      subscribed = true;
+      return () => {
+        subscribed = false;
+      };
+    },
+    prompt: vi.fn(async () => {
+      const run = new AbortController();
+      activeRun = run;
+      modelRequests.push(run.signal);
+      // Arm the hold BEFORE handing control to onPrompt, so a stop issued from there ends the run
+      // the way the agent loop's own abort does instead of racing the listener registration.
+      const ended = opts.holdUntilAborted
+        ? new Promise<void>((resolve) => {
+            run.signal.addEventListener('abort', () => resolve(), { once: true });
+          })
+        : Promise.resolve();
+      opts.onPrompt?.();
+      await ended;
+      activeRun = undefined;
+    }),
+    abort: vi.fn(async () => {
+      abortPhases.push(subscribed ? 'linked' : 'teardown');
+      // The pinned SDK's semantics exactly: a stop with no active run reaches nothing.
+      activeRun?.abort();
+    }),
+    dispose: vi.fn(),
+    messages,
+  };
+  return { session, modelRequests, abortPhases };
+}
+
 describe('Pi adapter: the run’s cancellation signal brings the session abort forward', () => {
-  it('calls session.abort() when the run is cancelled, before the teardown would have', async () => {
+  it('a mid-run cancellation aborts the signal the model request is carrying, and run() settles on it', async () => {
     const fake = makeFakeJournal();
     const controller = new AbortController();
-    const session = fakeSession(defaultMessages);
-    let abortsDuringPrompt: number | undefined;
-    session.prompt = vi.fn().mockImplementation(async () => {
-      // MID-PROMPT. The teardown calls abort() too, so counting after the run would pass with no
-      // link at all — the count taken here can only have come from the run's signal.
-      controller.abort();
-      abortsDuringPrompt = session.abort.mock.calls.length;
+    // The run is HELD: like the real agent loop, this prompt returns only when the run ends, and the
+    // only thing that can end it here is the stop. So reaching the assertions at all is the evidence
+    // that run() settled off the cancellation rather than off the prompt completing on its own —
+    // the adapter leaves no await of its own bound behind the freed caller.
+    const { session, modelRequests, abortPhases } = fakeAgentSession(defaultMessages, {
+      holdUntilAborted: true,
+      onPrompt: () => controller.abort(),
     });
     createAgentSession.mockResolvedValue({ session });
 
     const adapter = new PiAdapter({ apiKey: 'sk-test' });
     await adapter.run(spec as never, makeCtx(fake.journal, { signal: controller.signal }));
 
-    expect(abortsDuringPrompt).toBe(1);
+    // The stop arrived while the subscription was still live, i.e. from the run's signal — the
+    // teardown stop comes after `unsubscribe()` and is recorded separately.
+    expect(abortPhases).toEqual(['linked', 'teardown']);
+    // And it reached the request: the signal that request was handed is aborted, so an in-flight
+    // token stream stops at the transport instead of being abandoned.
+    expect(modelRequests).toHaveLength(1);
+    expect(modelRequests[0]?.aborted).toBe(true);
   });
 
-  it('an already-aborted signal stops the session without waiting for the prompt to settle', async () => {
+  it('a cancellation that lands while the session is being created never reaches the model', async () => {
+    const fake = makeFakeJournal();
+    const controller = new AbortController();
+    // No transcript: a session that was never prompted has no messages, so this is the state the
+    // real SDK would be in — not a happy-path transcript the cancelled run could not have produced.
+    const { session, modelRequests, abortPhases } = fakeAgentSession([]);
+    // The cancel lands WHILE createAgentSession() is in flight — the window the session-level stop
+    // cannot cover: there is no session to stop yet, and by the time there is one its agent has no
+    // active run for `abort()` to reach (see fakeAgentSession for the pinned-SDK citations). The
+    // adapter must not issue the model request for a run that is already over.
+    createAgentSession.mockImplementation(async () => {
+      controller.abort();
+      return { session };
+    });
+
+    const adapter = new PiAdapter({ apiKey: 'sk-test' });
+    await adapter.run(spec as never, makeCtx(fake.journal, { signal: controller.signal }));
+
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(modelRequests).toHaveLength(0);
+    // The session-level stop WAS issued as the link was established — it simply reached nothing,
+    // which is exactly why the adapter re-checks the signal before calling the SDK.
+    expect(abortPhases).toEqual(['linked', 'teardown']);
+  });
+
+  it('an already-aborted signal stops the session at link time and never issues the prompt', async () => {
     const fake = makeFakeJournal();
     const controller = new AbortController();
     controller.abort();
-    const session = fakeSession(defaultMessages);
-    let abortsAtPromptTime: number | undefined;
-    session.prompt = vi.fn().mockImplementation(async () => {
-      abortsAtPromptTime = session.abort.mock.calls.length;
-    });
+    const { session, modelRequests, abortPhases } = fakeAgentSession([]);
     createAgentSession.mockResolvedValue({ session });
 
     const adapter = new PiAdapter({ apiKey: 'sk-test' });
-    await adapter.run(spec as never, makeCtx(fake.journal, { signal: controller.signal }));
+    const res = await adapter.run(spec as never, makeCtx(fake.journal, { signal: controller.signal }));
 
-    // Cancelled before the call started: the stop is issued as the link is established.
-    expect(abortsAtPromptTime).toBe(1);
+    // (An already-aborted ctx.signal is a state run-core never hands a backend — it throws before
+    // backend.run — so this pins the adapter's own Backend surface, not a platform path.)
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(modelRequests).toHaveLength(0);
+    // The link-time stop is DISTINGUISHED from the teardown stop: the adapter unsubscribes before it
+    // tears the session down, so the 'linked' entry can only have come from the run's signal.
+    // `expect(session.abort).toHaveBeenCalled()` would pass with the link deleted entirely.
+    expect(abortPhases).toEqual(['linked', 'teardown']);
+    // And what the adapter RETURNS: no terminal state is invented for the skipped call — it falls
+    // through its normal epilogue with no model output. run-core discards this (it stopped waiting
+    // the moment the signal fired), but a caller embedding this adapter directly reads it, so the
+    // README says the same thing and this pins it.
+    expect(res).toMatchObject({ status: 'completed', finalText: '', output: null, error: null });
+  });
+});
+
+/**
+ * Pins the whole no-tools call — option bag AND prompt — for one signal configuration. Both arms
+ * below run it, so the two configurations are checked against the SAME literal rather than against
+ * each other: whatever the adapter emits on an uncancelled run, it emits identically whether or not
+ * a signal is present.
+ */
+async function pinTheNoToolsCall(signal?: AbortSignal): Promise<void> {
+  const fake = makeFakeJournal();
+  const { session, modelRequests } = fakeAgentSession(defaultMessages);
+  createAgentSession.mockResolvedValue({ session });
+
+  const adapter = new PiAdapter({ apiKey: 'sk-test' });
+  await adapter.run(spec as never, makeCtx(fake.journal, signal ? { signal } : {}));
+
+  // The signal re-check the adapter performs before the SDK call is a BRANCH; these arms are what
+  // prove the branch cannot fire on an uncancelled run. The option bag is pinned EXACTLY — key set
+  // AND values, not merely "no signal key": a key silently added here would ship on every pi run,
+  // including one added only when a signal is present. Both matchers are needed and neither
+  // subsumes the other: `toEqual` treats an undefined-valued key as absent, so the key set is
+  // asserted directly (the same pairing as packages/adapters/openai/src/adapter.integration.test.ts).
+  const bag = createAgentSession.mock.calls[0]?.[0] as Record<string, unknown>;
+  expect(Object.keys(bag).sort()).toEqual([
+    'authStorage',
+    'model',
+    'modelRegistry',
+    'noTools',
+    'sessionManager',
+  ]);
+  expect(bag).toEqual({
+    model: { id: 'gpt-4.1-mini' },
+    noTools: 'all',
+    sessionManager: {},
+    authStorage: { setRuntimeApiKey: expect.any(Function) },
+    modelRegistry: {},
+  });
+  // Value equality alone would accept a freshly constructed storage that never received the key, so
+  // assert the storage handed to the session is the one the run's API key went into.
+  expect(
+    (bag.authStorage as { setRuntimeApiKey: ReturnType<typeof vi.fn> }).setRuntimeApiKey,
+  ).toHaveBeenCalledWith('openai', 'sk-test');
+  // And the prompt: one call, one positional argument, the exact text. Spelled out literally rather
+  // than rebuilt from the adapter's own builders, so a change to either side is visible here.
+  expect(session.prompt).toHaveBeenCalledTimes(1);
+  expect(session.prompt.mock.calls[0]).toEqual([
+    'extract fields\n\na transcript\n\nRespond with ONLY a single JSON object matching this JSON Schema (no prose, no markdown fences):\n{"type":"object","properties":{}}',
+  ]);
+  // The model request was issued and nothing stopped it — an uncancelled run is unaffected.
+  expect(modelRequests).toHaveLength(1);
+  expect(modelRequests[0]?.aborted).toBe(false);
+}
+
+describe('Pi adapter: with no cancellation in play the call is byte-identical', () => {
+  it('UNSET: with no ctx.signal the createAgentSession option bag and the prompt call are EXACTLY the ones they always were', async () => {
+    await pinTheNoToolsCall();
+  });
+
+  it('SET but never aborted: the SAME option bag and the SAME prompt call — the shape run-core actually hands a backend', async () => {
+    // run-core sets `signal: cancellation.signal` on EVERY RunContext (packages/kernel/platform/
+    // src/run-core.ts), so a present-but-unaborted signal is the configuration every real run has;
+    // the UNSET arm above pins the adapter's own Backend surface for a caller that omits it.
+    await pinTheNoToolsCall(new AbortController().signal);
+  });
+
+  it('UNSET, tool path: with no ctx.signal the active-set allowlist bag is EXACTLY the one it always was', async () => {
+    const tool: NeutralTool = {
+      spec: {
+        name: 'get_weather',
+        description: 'weather',
+        parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] },
+      },
+      handler: () => ({ tempC: 18 }),
+      timeoutMs: 1000,
+      idempotent: true,
+    };
+    const fake = makeFakeJournal();
+    const { session } = fakeAgentSession(defaultMessages);
+    createAgentSession.mockResolvedValue({ session });
+
+    const adapter = new PiAdapter({ apiKey: 'sk-test' });
+    await adapter.run(
+      { ...spec, outputSchema: undefined, tools: [tool.spec] } as never,
+      makeCtx(fake.journal, { tools: [tool] }),
+    );
+
+    // Key set AND values, for the same reason as the no-tools arms above.
+    const bag = createAgentSession.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(Object.keys(bag).sort()).toEqual([
+      'authStorage',
+      'customTools',
+      'model',
+      'modelRegistry',
+      'sessionManager',
+      'tools',
+    ]);
+    expect(bag).toEqual({
+      model: { id: 'gpt-4.1-mini' },
+      tools: ['get_weather'],
+      customTools: [expect.objectContaining({ name: 'get_weather' })],
+      sessionManager: {},
+      authStorage: { setRuntimeApiKey: expect.any(Function) },
+      modelRegistry: {},
+    });
+    expect(
+      (bag.authStorage as { setRuntimeApiKey: ReturnType<typeof vi.fn> }).setRuntimeApiKey,
+    ).toHaveBeenCalledWith('openai', 'sk-test');
+    expect(session.prompt).toHaveBeenCalledTimes(1);
+    expect(session.prompt.mock.calls[0]).toEqual(['extract fields\n\na transcript']);
   });
 });

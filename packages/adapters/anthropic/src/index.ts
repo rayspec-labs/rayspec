@@ -336,12 +336,30 @@ export class AnthropicAdapter implements Backend {
     // plain-string prompt, abortController — not Query.interrupt() — is the documented cancellation
     // mechanism.)
     const abortController = new AbortController();
-    // CANCELLATION (best-effort, and this backend can honour it well): the run's signal is LINKED to
-    // the controller the SDK already receives, so ending a run tears the `claude` child down at once
-    // instead of waiting for the run to finish. What "best-effort" means concretely here: the SDK's
-    // documented cancellation for a plain-string prompt IS this controller, so the child is stopped —
-    // but work the child had already committed upstream is not undone, and a link cannot exist before
-    // the controller does, so a run cancelled during setup is caught by the platform race, not here.
+    // CANCELLATION: the run's signal is LINKED to the controller the SDK already receives, so ending
+    // a run tears the `claude` child down instead of waiting for the run to finish. The SDK's
+    // documented cancellation for a plain-string prompt IS this controller, so this is the strongest
+    // stop the pinned SDK offers — but "promptly" here means SECONDS, not milliseconds, and the
+    // TERMINATION LADDER is worth knowing before you rely on it. Read out of the pinned sdk.mjs
+    // (0.3.185): on abort the SDK ends the child's stdin IMMEDIATELY, waits a 2000ms grace, sends
+    // SIGTERM to a child still running, and 5000ms after THAT sends SIGKILL to a child still
+    // running. cancellation.real-process.test.ts drives that ladder against a real child process
+    // and asserts each rung — that stdin ends before the grace expires, that a SIGTERM-honouring
+    // child is gone without the last rung, that a SIGTERM-ignoring one is gone only at it, and
+    // that this run() settles before the child does. It asserts BOUNDS, not latencies, so the
+    // figures below are indicative rather than contractual: measured on a development machine with
+    // that file's own instrumentation, stdin ended at +1ms, a SIGTERM-honouring child was gone at
+    // +2014ms, a SIGTERM-ignoring one at +7030ms, and run() settled at +2008ms.
+    // BOTH escalation timers are unref()ed: they do not hold this process open, so a parent that
+    // exits inside that window never fires the forced kill and can leave such a child orphaned.
+    // The ladder signals the child's OWN pid and never a process group (spawnLocalProcess passes no
+    // `detached`), so any process that child itself started is not reached by it.
+    // This adapter's own run() settles as soon as the SDK's iterator rejects, so it never leaves its
+    // run() promise pending behind a caller that stopped waiting — though, per the rungs above, the
+    // child can still be exiting after that promise has settled.
+    // Two limits are structural and are NOT fixable here (both listed in this package's README):
+    // work the child already committed upstream is not undone, and a link cannot exist before the
+    // controller does, so a run cancelled during setup is caught by the platform race, not here.
     const unlinkCancel = linkAbort(ctx.signal, abortController);
 
     // ---- in-proc MCP tool bridge (BRIDGED, not fail-closed) -----------------------------------

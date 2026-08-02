@@ -209,9 +209,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Backend support is uneven and the documentation says so.** `openai` passes the signal into the SDK
   run call, so the model request itself is aborted. `anthropic` and `codex` link it to the
   `AbortController` each already owns, so the streamed turn and the spawned child are torn down at once
-  instead of at the end of the run. `pi` is the weakest: its prompt call takes no signal at all, so
-  cancelling brings the session's own `abort()` forward and the model request underneath is never
-  handed one. In every case the platform stops waiting immediately; that table is about the provider
+  instead of at the end of the run. `pi` has the least direct handle: its prompt call takes no signal
+  at all, so cancelling brings the session's own `abort()` forward, and that reaches the controller the
+  agent created for the run it is executing — which is the controller whose signal the model request
+  underneath carries. In every case the platform stops waiting immediately; that table is about the provider
   side, which no platform can promise on an SDK's behalf. A run nobody cancels is unaffected throughout:
   the signal is never aborted, nothing that shapes a request to a provider changed, and the pinned
   adapter fixtures are untouched. (The run context now always carries a signal, so an adapter that
@@ -636,6 +637,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   force-killed, processes it spawned itself are not signalled, and a child that ignores the signal
   keeps its stdout — and therefore the whole run — open.
 
+- **Cancelling a run on the `pi` backend no longer lets the model request go out anyway.** The
+  adapter linked the run's abort signal to the session's `abort()`, but that call delegates to the
+  agent's abort, which aborts the controller of the run the agent is *currently* executing and does
+  nothing at all when there is none. A cancel that landed before the prompt reached the agent — including
+  one that landed while the session was still being created — was therefore swallowed: the run read
+  back as `cancelled` while the adapter issued the full request against a fresh, never-aborted
+  controller and streamed the entire answer, spending the tokens and holding the provider work open
+  after the caller had already been freed. The adapter now re-checks the run's signal immediately
+  before the SDK call and does not make it on a run that is already over; no new terminal state is
+  invented, because the platform already journals the cancelled run and discards whatever the adapter
+  returns. Cancelling *during* a run is unchanged and already reached the transport: the agent run's
+  controller signal is the one the model request carries, so an in-flight token stream is aborted, not
+  merely abandoned — the adapter's own header comment, the backend table in the spec reference and the
+  note above in this file said otherwise and have been corrected. Nothing changes on a run nobody
+  cancels: the session option bag and the prompt call are byte-identical whether the run context
+  carries a signal or not, both pinned by tests, and the recorded fixtures and parity suite are
+  untouched. The residual limits — the narrow window that remains and why it is a choice rather than an
+  SDK constraint, the session's separate compaction controller, a run on another worker process, a host
+  tool already in flight and the `run()` promise that stays pending behind it, and what the adapter
+  returns for a run cancelled before the call — are written down in the adapter's README.
+
 - **A tombstoned organization is now absent on the authorization path too.** Whether an org is a
   usable tenant is asked in four places, and three of them treated `orgs.deleted_at` as decisive: the
   org list does not return such an org, a login never resolves one, and a product deployment refuses
@@ -985,6 +1007,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `examples/expense-claim-coder/README.md` carried the same one-third framing; the latter credited the
   trust boundary for an outcome its handler's server-side re-validation of the model-chosen category
   is what actually guarantees.
+
+- **Cancelling a run on the `anthropic` backend is now described by how long it actually takes, and
+  the child's death is proved against a real process id.** The reference table said the `claude`
+  child "is torn down", with no qualification, and the adapter said the same to anyone reading its
+  source — which reads as "immediately" and is not what happens. The pinned SDK ends the child's
+  standard input at once and then escalates on timers: a two-second grace, then `SIGTERM`, then five
+  more seconds, then `SIGKILL`. Measured against a real child, standard input closed 1 ms after the
+  abort, a child that honours `SIGTERM` was gone at 2014 ms, and one that ignores it at 7030 ms,
+  while the adapter's own call returned at 2008 ms — so a caller gets its answer while the child may
+  still be exiting. Both escalation timers are `unref()`ed, which costs something real: a host
+  process that exits inside that window loses the `SIGKILL` rung, and a child that ignores `SIGTERM`
+  is then left running — measured still alive twenty seconds after a host that exited 200 ms after
+  the abort, at which point the observation stopped. The adapter's README now lists that limit
+  alongside the four others this backend inherits (every rung is sent to the child's own process id
+  and never to a process group; no signal reaches a run executing in a separate worker process,
+  tracked as #210; a tool call already in flight is not interrupted; work already committed upstream
+  is not undone), and the reference table's `anthropic` row says seconds rather than implying
+  instants. Nothing about how a run behaves changed — what changed is that a reader can now find out
+  what they are getting, and that a test in the adapter package drives the real SDK against a
+  stand-in executable, holds the process id the SDK spawned and watches it disappear, instead of
+  checking that a boolean flipped. That test exercises the SDK's process-level teardown; it says
+  nothing about the vendor binary's own shutdown behaviour.
 
 ### Security
 

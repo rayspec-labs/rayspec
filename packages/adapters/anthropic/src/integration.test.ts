@@ -17,16 +17,18 @@
  *   - a real per-step llm ledger (one step per assistant turn) -> stepCount > 1;
  *   - the abortController is aborted (the child is owned/torn down).
  */
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AuthMode, NeutralTool, RunContext, StepReport } from '@rayspec/core';
 import { makeDispatchTool } from '@rayspec/platform';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // A hermetic, per-run config root (a fresh 0700 tree). The adapter now refuses a group/world-accessible
 // tenant dir, so these tests must not share a persistent, world-readable location across runs.
 const CONFIG_ROOT = mkdtempSync(join(tmpdir(), 'rayspec-anth-int-'));
+// …and removed again, so a run of this file leaves nothing behind in the temp directory.
+afterAll(() => rmSync(CONFIG_ROOT, { recursive: true, force: true }));
 
 // ---- mock the SDK: real-ish tool()/createSdkMcpServer + a controllable query() -----------------
 interface CapturedTool {
@@ -899,14 +901,23 @@ describe('Anthropic adapter: the run’s cancellation signal reaches the child i
   it('links ctx.signal to the AbortController it hands the SDK, so cancelling tears the child down', async () => {
     const journal = new FakeJournal();
     const controller = new AbortController();
+    // Everything is CAPTURED here and asserted after the run. An `expect` that throws inside the
+    // mocked query() throws inside the adapter's own `try`, which converts it into a RunResult, so
+    // the assertion's own message never reaches the reporter: the run fails at whatever later
+    // assertion reads a value the throw skipped — measured as `expected undefined to be true`,
+    // pointing at the wrong line — or passes outright when nothing downstream depended on the
+    // skipped statements. Capturing here and asserting below is what makes a failure legible.
+    let handedController: unknown;
+    let abortedBeforeCancel: boolean | undefined;
     let abortedWhileRunning: boolean | undefined;
     querySpy.mockImplementation((params: unknown) => {
       const handed = (params as { options?: { abortController?: AbortController } }).options
         ?.abortController;
-      // MID-CALL, before the adapter's teardown runs. Asserting after the run would prove nothing:
-      // the `finally` aborts this controller either way, so a missing link would still look aborted.
-      expect(handed).toBeInstanceOf(AbortController);
-      expect(handed?.signal.aborted).toBe(false);
+      // Sampled MID-CALL, before the adapter's teardown runs. Sampling after the run would prove
+      // nothing: the `finally` aborts this controller either way, so a missing link would still look
+      // aborted.
+      handedController = handed;
+      abortedBeforeCancel = handed?.signal.aborted;
       controller.abort();
       abortedWhileRunning = handed?.signal.aborted;
       return mockQueryWithToolCall('toolu_SIG')(params);
@@ -916,6 +927,8 @@ describe('Anthropic adapter: the run’s cancellation signal reaches the child i
     const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
     await adapter.run({ ...baseSpec, tools: [tool.spec] }, makeCtx(journal, [tool], controller.signal));
 
+    expect(handedController).toBeInstanceOf(AbortController);
+    expect(abortedBeforeCancel).toBe(false);
     // The run's signal reached the controller the adapter hands the SDK, while the call was live.
     expect(abortedWhileRunning).toBe(true);
   });
@@ -923,7 +936,8 @@ describe('Anthropic adapter: the run’s cancellation signal reaches the child i
   it('an already-aborted signal is honoured (the run was cancelled before the call started)', async () => {
     const journal = new FakeJournal();
     // Captured OUTSIDE the mock and asserted after: an `expect` that throws inside the SDK call is
-    // caught by the adapter's own error handling and would never fail the test.
+    // caught by the adapter's own error handling, so it can only fail the test indirectly and at
+    // the wrong line, if at all.
     let abortedAtCallTime: boolean | undefined;
     querySpy.mockImplementation((params: unknown) => {
       const handed = (params as { options?: { abortController?: AbortController } }).options
@@ -940,5 +954,123 @@ describe('Anthropic adapter: the run’s cancellation signal reaches the child i
     // Cancelled BEFORE the backend call started: the controller must already be aborted when the SDK
     // receives it, not merely by the time the run unwinds.
     expect(abortedAtCallTime).toBe(true);
+  });
+});
+
+/**
+ * UNSET — the no-signal arm, in the form that actually has teeth for THIS adapter.
+ *
+ * The OpenAI adapter's equivalent arm pins the whole option key set, because there a conditional
+ * spread decides whether a `signal` key exists at all. Here the `abortController` is handed to the
+ * SDK UNCONDITIONALLY (it is the process-lifecycle owner, not a cancellation feature), so a key-set
+ * assertion would pass whatever the cancellation wiring did — it is near-vacuous and is NOT the
+ * assertion made here. What IS observable, and what an unconditional or mis-linked abort would
+ * break, is that with no `ctx.signal` the controller the SDK holds is never aborted while the call
+ * is in flight, and that the run a caller sees is bit-for-bit the run it always was.
+ *
+ * This arm is deliberately weaker than openai's: because the option bag does not change shape, the
+ * strongest byte-identity evidence for this adapter is the OBSERVABLE run — the RunResult and the
+ * journal — plus the real-process arm in cancellation.real-process.test.ts, which shows that with no
+ * signal the spawned child is not torn down early.
+ */
+describe('Anthropic adapter: UNSET — with no ctx.signal the run is the one it always was', () => {
+  /**
+   * The tool-call stream, instrumented to SAMPLE the handed controller's `aborted` flag at each
+   * point of the stream. Sampling after the run would prove nothing — the adapter's `finally` aborts
+   * the controller either way.
+   */
+  function samplingQuery(toolCallId: string, samples: boolean[], optionKeys: string[][]) {
+    return (params: unknown) => {
+      const options = (params as { options?: Record<string, unknown> }).options ?? {};
+      optionKeys.push(Object.keys(options).sort());
+      const handed = options.abortController as AbortController | undefined;
+      const sample = () => samples.push(handed?.signal.aborted ?? true);
+      const inner = mockQueryWithToolCall(toolCallId)(params) as {
+        [Symbol.asyncIterator](): AsyncGenerator<unknown>;
+      };
+      return {
+        async *[Symbol.asyncIterator]() {
+          sample();
+          for await (const msg of inner) {
+            sample();
+            yield msg;
+          }
+          sample();
+        },
+        interrupt: async () => {},
+      };
+    };
+  }
+
+  /** Journal steps minus `latencyMs`, the one field that is wall-clock and cannot be compared. */
+  const withoutLatency = (steps: (StepReport & { authMode: AuthMode })[]) =>
+    steps.map(({ latencyMs: _latencyMs, ...rest }) => rest);
+
+  it('no signal ⇒ the SDK’s controller is never aborted in flight, and result + journal are unchanged', async () => {
+    const samples: boolean[] = [];
+    const optionKeys: string[][] = [];
+    const journal = new FakeJournal();
+    querySpy.mockImplementation(samplingQuery('toolu_UNSET', samples, optionKeys));
+
+    const tool = recordingTool([]);
+    const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
+    const res = await adapter.run({ ...baseSpec, tools: [tool.spec] }, makeCtx(journal, [tool]));
+
+    // The controller was sampled at every point of the stream and was aborted at NONE of them: with
+    // no run-level signal, nothing in this adapter cancels the SDK before the run is over.
+    expect(samples.length).toBeGreaterThanOrEqual(7);
+    expect(samples).toEqual(samples.map(() => false));
+
+    // And the run a caller observes is the unchanged one — the same result the tool-call scenario
+    // has always produced.
+    expect(res.status).toBe('completed');
+    expect(res.finalText).toBe('It is 18C and cloudy in Berlin.');
+    expect(res.error).toBeNull();
+    expect(res.errorClass).toBeNull();
+    expect(res.output).toBeNull();
+    expect(res.usage).toEqual({ inputTokens: 120, outputTokens: 22, totalTokens: 142 });
+    expect(res.costUsd).toBe(0.0012);
+    expect(res.stepCount).toBe(3);
+    expect(journal.records.map((s) => s.type)).toEqual(['tool', 'llm', 'llm']);
+  });
+
+  it('supplying a signal that is never aborted changes NOTHING a caller can observe', async () => {
+    // The sharpest available form of "byte-identical without a cancel": run the SAME scenario with
+    // and without a `ctx.signal` and compare everything the platform reads back. The signal is never
+    // aborted, so the two runs must be indistinguishable — result, journal, and the option key set
+    // handed to the SDK alike.
+    const runOnce = async (signal?: AbortSignal) => {
+      const samples: boolean[] = [];
+      const optionKeys: string[][] = [];
+      const journal = new FakeJournal();
+      querySpy.mockReset();
+      capturedTools.length = 0;
+      querySpy.mockImplementation(samplingQuery('toolu_PARITY', samples, optionKeys));
+      const tool = recordingTool([]);
+      const adapter = new AnthropicAdapter({ configRoot: CONFIG_ROOT });
+      const res = await adapter.run(
+        { ...baseSpec, tools: [tool.spec] },
+        makeCtx(journal, [tool], signal),
+      );
+      return { res, steps: withoutLatency(journal.records), samples, optionKeys };
+    };
+
+    const unset = await runOnce();
+    const controller = new AbortController();
+    const set = await runOnce(controller.signal);
+
+    // Neither run was ever cancelled mid-flight. The length bound comes first: `samples` compared
+    // against a map of itself is vacuously true on an empty array, so an arm that sampled nothing
+    // would otherwise look clean.
+    expect(unset.samples.length).toBeGreaterThanOrEqual(7);
+    expect(set.samples.length).toBe(unset.samples.length);
+    expect(unset.samples).toEqual(unset.samples.map(() => false));
+    expect(set.samples).toEqual(set.samples.map(() => false));
+    // The option bag the SDK receives has the same shape either way — this adapter has no
+    // conditional spread on the cancellation path, and that is the claim, not an accident.
+    expect(set.optionKeys).toEqual(unset.optionKeys);
+    // Everything the platform reads back is identical.
+    expect(set.res).toEqual(unset.res);
+    expect(set.steps).toEqual(unset.steps);
   });
 });
