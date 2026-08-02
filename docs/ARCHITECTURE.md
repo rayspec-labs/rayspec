@@ -136,6 +136,20 @@ vocabulary for every adapter; it deliberately does **not** equalize the event st
 itself, because levelling down to the lowest common denominator would take
 token-level streaming away from the backends that have it.
 
+One part of the contract is deliberately not uniform: *when* a backend decides how
+it authenticates. The platform resolves a run's auth mode once, before the run
+starts, and threads it onto the run context so every journaled step attributes to
+the same mode. A local adapter answers that from its own environment and needs
+nothing else. A remote backend cannot: at that moment there is no run identity to
+select a tenant- or run-scoped credential with, so it could only report a mode it
+has not yet bound. Such a backend may instead implement an optional context-aware
+preflight, which is handed the server-derived run identity — run id, tenant, the
+agent's neutral name, the model, and an opaque credential-binding reference the
+deployment supplies — and returns the mode it has actually bound. It **replaces**
+`resolveAuth()` for that one pre-run resolution rather than joining it, its answer
+is validated against the neutral auth-mode vocabulary, and a backend that does not
+implement it takes exactly the path it always did.
+
 ### 2. The fail-closed tenant chokepoint
 
 Every query against tenant-owned data goes through a single tenant-scoped database
