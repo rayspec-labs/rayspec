@@ -690,7 +690,7 @@ try {
     );
     assert.match(escaped.err, /escapes package\//i, `(E) the refusal must name it: ${escaped.err}`);
     console.log(
-      'ok (E) — a pax rename the readers disagree on is refused, not read at the excluded path',
+      'ok (E) — pax headers: refused where the readers disagree, read where a packer writes one',
     );
   }
 
