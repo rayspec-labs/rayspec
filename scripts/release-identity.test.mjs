@@ -41,10 +41,10 @@
  *       map cannot be re-derived by anyone, which is the whole point of it.
  *   (K) THE CONTENT DIGEST SURVIVES A RE-PACK — `pnpm pack` rewrites `workspace:*` into the packed
  *       `package.json` and does NOT emit that map in a stable key order (measured on this repo: two
- *       consecutive `--pack` runs of one commit differed in 10 to 12 of the 29 tarballs across four
- *       pairs, the difference confined every time to that file's key order). The digest canonicalises
- *       `package.json` for exactly that reason, so it identifies the same package across packs while
- *       the tarball integrity — which identifies one artifact, not a build — legitimately moves.
+ *       consecutive `--pack` runs of one commit moved 9, 11, 12 and 12 of the 29 tarballs across
+ *       four pairs, the difference confined every time to that file's key order). The file-list
+ *       digest canonicalises `package.json` for that reason, so it identifies the package across
+ *       packs while the tarball integrity — which identifies one artifact, not a build — moves.
  *   (N) NOTHING IS FABRICATED — before the release tag exists the tag is recorded as absent with a
  *       reason, and outside GitHub Actions the workflow run is an explicit null with a reason. With
  *       the annotated tag on HEAD and an Actions environment present, both are recorded for real.

@@ -29,9 +29,10 @@
  * --------------------------------------------------------------------
  * `pnpm pack` rewrites each `workspace:*` dependency to the stamped version in the PACKED manifest,
  * and it does not emit that map in a stable key order: two consecutive `--pack` runs of one commit
- * differed in 10 to 12 of the 29 tarballs across four measured pairs (15 of the 29 packed manifests
- * carry more than one internal dependency, which is the ceiling), and in every single case the
- * difference was confined to `package/package.json` and vanished once its keys were sorted. So:
+ * move a varying subset of the tarballs, bounded by the 15 of 29 packed manifests that declare more
+ * than one internal dependency (measured pairs moved 9, 11, 12 and 12 of the 29), and in every
+ * single case the difference was confined to `package/package.json` and vanished once its keys were
+ * sorted. So:
  *   - `tarball.integrity` (sha512 SRI) identifies ONE ARTIFACT — the exact tarball this manifest was
  *     generated from, i.e. the file an operator attaches to the release. It is not a reproducible
  *     build claim, and re-packing the same commit will legitimately move it.
@@ -134,10 +135,11 @@ const SCOPE_NOTE =
   '`tarball.integrity` pins those exact files. `files.list_digest` pins their unpacked content and ' +
   'is the digest that survives a re-pack of the same commit, so it is also the digest that matches ' +
   'a tarball fetched from the registry (a real publish packs again at publish time). Measured: two ' +
-  'consecutive packs of one commit differed in 10 to 12 of the 29 tarballs across four pairs, ' +
-  'and in every case the difference was confined to `package/package.json` and vanished once its ' +
-  'keys were sorted — which is exactly what the file digest canonicalises away. Neither digest is ' +
-  'a reproducible-build claim about the toolchain.';
+  'consecutive packs of one commit moved 9, 11, 12 and 12 of the 29 tarballs across four pairs — ' +
+  'bounded by the 15 packed manifests that declare more than one internal dependency — and in every ' +
+  'case the difference was confined to `package/package.json` and vanished once its keys were ' +
+  'sorted, which is exactly what the file digest canonicalises away. Neither digest is a ' +
+  'reproducible-build claim about the toolchain.';
 
 /** Parse the flag grammar (no positionals). */
 function parseFlags(argv) {
