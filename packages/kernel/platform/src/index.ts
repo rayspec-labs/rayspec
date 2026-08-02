@@ -148,6 +148,7 @@ export { rehydrateConversation } from './rehydrate.js';
 // and the executing case.
 export {
   armRunCancellation,
+  CANCELLED_CLASS,
   isRunCancelled,
   markRunCancelled,
   RUN_CANCEL_LOCK_WAIT_MS,

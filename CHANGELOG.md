@@ -615,6 +615,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A cancelled run reports being cancelled, whatever else it also recorded.** A run can hold two
+  classed failures at once: the platform records the cancellation for a run that produced its answer
+  anyway — the signal reached it in the post-backend tail, or it executes in a process the signal
+  cannot reach — on top of whatever failing step the run had already journaled. The read path picked
+  between them by position, taking whichever classed step the database returned last, and that order
+  is not specified: the same rows, asked for with the same predicate, come back in different orders
+  for different queries. A cancelled run could therefore read back with an upstream failure as its
+  class, contradicting the rule the write side already follows — a cancelled run records the
+  cancellation as its outcome and commits nothing else. The read now selects by class rather than by
+  position, so it answers the same way regardless of row order. Runs with a single failing step are
+  unaffected.
+
 - **The `codex` adapter's tool-bridge teardown can no longer hang forever, so a cancelled run whose
   turn ends reaches its end instead of leaving the bridge alive.** The adapter hosts an in-process MCP bridge
   — a listening HTTP server — alongside the `codex` child, and closed it by awaiting
