@@ -465,7 +465,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in different places (node-tar's terminator stops at a newline); and the ustar **prefix** field is
   read only under the exact magic node-tar requires, so a header rewritten in place with its path
   split across `name` and `prefix` under GNU magic — every digest unchanged — is refused instead of
-  certified. And when `git` cannot answer whether the working tree
+  certified. And a **directory that declares a body** is refused: tar gives a directory no content,
+  so those bytes are the next entries to an installer, which writes them, while a reader that took
+  the declared size at face value would record nothing for them — a package whose own files are
+  attacker-chosen, with every digest still matching. And when `git` cannot answer whether the working tree
   was clean, generation refuses rather than recording the flattering value — a failed command and a
   clean tree both produce no output, and only one of them is worth writing down.
 

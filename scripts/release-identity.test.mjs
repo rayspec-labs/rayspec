@@ -49,6 +49,13 @@
  *       a `..` segment that escapes `package/` is refused, as a file and as a directory. All of them
  *       are the same fault: the reader must not name — or delimit — an entry differently from the
  *       installer, least of all at the excluded manifest path.
+ *   (H) A BODY NO INSTALLER READS CANNOT HIDE ENTRIES — tar gives a DIRECTORY no body, and node-tar
+ *       enforces that by zeroing the size (and by reclassifying a regular entry whose name ends in
+ *       '/' as a directory), so bytes behind such a header are parsed as the next ENTRIES and
+ *       installed. A reader that believed the declared size would consume them as opaque content and
+ *       record nothing: the file list is unchanged, every digest still matches, and the package's own
+ *       files are attacker-chosen. This is the one shape here that substitutes CONTENT rather than
+ *       misplacing it, so both costumes are refused, as is a prefix field ending in '/'.
  *   (Q) THE DOCUMENTED RELEASE SEQUENCE REPEATS — the manifest is gitignored and listed in the
  *       launcher's `files`, so it SURVIVES a release run and the next pack would ship the previous
  *       run's manifest. Running the sequence twice (with the removal step it prescribes) is green
@@ -139,15 +146,19 @@ const workspaces = [];
 // Enough of the format for what an npm tarball actually is: regular files, short paths, one fixed
 // mtime so a fixture tarball is a pure function of its contents.
 
-/** One 512-byte ustar header plus the padded body; `type` defaults to a regular file. */
-function tarEntry(path, body, type = '0') {
+/**
+ * One 512-byte ustar header plus the padded body; `type` defaults to a regular file. `declared`
+ * overrides the size FIELD without changing the bytes that follow — the way a header can claim a
+ * body a reader should not believe.
+ */
+function tarEntry(path, body, type = '0', declared = body.length) {
   const head = Buffer.alloc(512);
   const put = (s, off, len) => head.write(s.slice(0, len), off, 'utf8');
   put(path, 0, 100);
   put('0000644\0', 100, 8); // mode
   put('0000000\0', 108, 8); // uid
   put('0000000\0', 116, 8); // gid
-  put(`${body.length.toString(8).padStart(11, '0')}\0`, 124, 12);
+  put(`${declared.toString(8).padStart(11, '0')}\0`, 124, 12);
   put('00000000000\0', 136, 12); // mtime, fixed
   head.fill(' ', 148, 156); // the checksum field reads as spaces while the checksum is summed
   put(type, 156, 1); // typeflag
@@ -816,6 +827,79 @@ try {
     console.log(
       'ok (E) — pax headers: refused where the readers disagree, read where a packer writes one',
     );
+  }
+
+  // ── (H) entries hidden inside a body no installer reads ────────────────────────────────────────
+  {
+    const fx = fixture();
+    generate(fx);
+    const launcher = MEMBERS.find((m) => m.name === LAUNCHER);
+    const base = memberFiles(launcher).map(([p, b]) => tarEntry(p, Buffer.from(b)));
+    const ship = (blocks) =>
+      writeFileSync(
+        join(fx.tarDir, tarballName(LAUNCHER)),
+        gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)])),
+      );
+    // The payload is a COMPLETE entry replacing a file the launcher really ships.
+    const forged = tarEntry(
+      'package/dist/index.js',
+      Buffer.from("export const name = 'FORGED';\n"),
+    );
+
+    // (a) a type-5 DIRECTORY whose header declares a body. tar gives a directory no body at all —
+    // node-tar zeroes the size and parses what follows as the next ENTRIES, installing them
+    // (last writer wins, so the forged copy is what lands). A reader that believed the declared
+    // size would consume those bytes as opaque content and record NOTHING for them: the file list
+    // is unchanged, every digest still matches, and the launcher's own files are attacker-chosen.
+    // This is the one shape in this file that substitutes CONTENT rather than misplacing it.
+    ship([...base, tarEntry('package/.pkg-meta/', forged, '5', forged.length)]);
+    const dirBody = verify(fx);
+    assert.notEqual(
+      dirBody.code,
+      0,
+      `(H) a directory declaring a body must be refused; got ${dirBody.code}`,
+    );
+    assert.match(
+      dirBody.err,
+      /directory entry declares/i,
+      `(H) the refusal must name it: ${dirBody.err}`,
+    );
+
+    // (b) the same trick wearing the older costume: a REGULAR entry whose name ends in '/'.
+    // node-tar reclassifies it as a directory (and so zeroes its size); a reader that took it at
+    // face value would hash a file nobody installs and swallow the entries behind it.
+    ship([...base, tarEntry('package/.pkg-meta/', forged, '0', forged.length)]);
+    const slashName = verify(fx);
+    assert.notEqual(
+      slashName.code,
+      0,
+      `(H) a trailing-slash entry declaring a body must be refused; got ${slashName.code}`,
+    );
+    assert.match(
+      slashName.err,
+      /directory entry declares/i,
+      `(H) a trailing-slash name is a directory here too: ${slashName.err}`,
+    );
+
+    // (c) a prefix field ending in '/', where the two readers join prefix and name differently.
+    const prefixSlash = Buffer.from(base[1]);
+    prefixSlash.fill(0, 0, 100);
+    prefixSlash.write('index.js', 0, 'utf8');
+    prefixSlash.fill(0, 345, 500);
+    prefixSlash.write('package/dist/', 345, 'utf8');
+    prefixSlash.fill(0x20, 148, 156);
+    let sum = 0;
+    for (const byte of prefixSlash.subarray(0, 512)) sum += byte;
+    prefixSlash.fill(0, 148, 156);
+    prefixSlash.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 'utf8');
+    ship([base[0], prefixSlash, ...base.slice(2)]);
+    const trailingPrefix = verify(fx);
+    assert.notEqual(
+      trailingPrefix.code,
+      0,
+      `(H) a prefix ending in '/' must be refused; got ${trailingPrefix.code}`,
+    );
+    console.log('ok (H) — a body no installer reads cannot hide entries from this reader');
   }
 
   // ── (Q) the documented release sequence, run twice ─────────────────────────────────────────────

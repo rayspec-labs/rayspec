@@ -408,6 +408,14 @@ function paxOverrides(body, { global }) {
  *     precedes another HEADER is refused outright: node-tar clears its pending pax state only on the
  *     non-meta branch, so the record sizes that header's body for the installer and not for a reader
  *     that frames it by its own field, and the two would part company for the rest of the archive.
+ *   - A DIRECTORY THAT DECLARES A BODY. tar gives a directory no content, and node-tar enforces it
+ *     by zeroing the size — so bytes behind such a header are the NEXT ENTRIES to an installer, and
+ *     it writes them. A reader that believed the declared size would swallow them as opaque content
+ *     and record nothing at all: the file list would be unchanged, every digest would still match,
+ *     and the package's own files would be whatever the hidden entries say. That is the one shape in
+ *     this file that substitutes CONTENT rather than misplacing it, and the launcher — pinned by the
+ *     file list alone — is exactly the package it defeats. node-tar also reclassifies a regular entry
+ *     whose name ends in '/' as a directory, so that costume is refused too.
  *   - A PREFIX FIELD WITHOUT THE USTAR MAGIC. A ustar header may split a long path across `name` and
  *     `prefix`, but node-tar reads `prefix` only under the exact `ustar\0` + `00` magic; under GNU's
  *     `ustar  \0` it takes `name` alone. Reading it unconditionally is the cheapest tamper of the
@@ -455,16 +463,60 @@ function unpack(gzipped) {
       if (!/^[0-7]*$/.test(raw)) throw new Error(`unsupported numeric header field`);
       return raw === '' ? 0 : Number.parseInt(raw, 8);
     };
+    /**
+     * This entry's name. THE PREFIX FIELD IS GATED ON THE MAGIC: a ustar header may split a long
+     * path across `name` and `prefix`, but node-tar reads `prefix` only when bytes 257-264 are
+     * exactly `ustar\0` + `00` (`header.js`) — under GNU's `ustar  \0` it takes `name` alone.
+     * Reading the field unconditionally would let ONE in-place header edit — the real path split
+     * across the two fields, GNU magic, checksum fixed — name the entry exactly as recorded here
+     * while the installer writes it somewhere else, with nothing added, removed or reordered and
+     * every digest byte-identical. A non-empty prefix under any other magic is refused outright:
+     * a POSIX reader would honour what node-tar ignores, and this reader picks neither. A prefix
+     * that itself ends in '/' and an empty name are refused for the same reason — the join and the
+     * emptiness are normalised differently on the way to disk.
+     */
+    const entryName = () => {
+      const ustarMagic = head.subarray(257, 265).toString('binary') === 'ustar\u000000';
+      if (!ustarMagic && text(345, 500) !== '') {
+        throw new Error(
+          `a header carries a prefix field without the ustar magic — tar readers disagree on whether it names part of the path`,
+        );
+      }
+      const prefix = text(345, ustarMagic && head[475] !== 0 ? 500 : 475);
+      if (prefix.endsWith('/')) {
+        throw new Error(
+          `a prefix field ending in '/' — tar readers join it to the name differently`,
+        );
+      }
+      const resolved = override ?? (prefix ? `${prefix}/${text(0, 100)}` : text(0, 100));
+      if (resolved === '') throw new Error(`an entry with an empty name`);
+      return resolved;
+    };
     let sum = 0;
     for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 0x20 : head[i];
     if (sum !== octal(148, 156)) throw new Error(`tar header checksum mismatch`);
     const type = String.fromCharCode(head[156]) || '0';
     const meta = type === 'x' || type === 'g' || type === 'L';
+    // THE NAME IS RESOLVED BEFORE ANY BODY IS CONSUMED, because the name decides whether there IS a
+    // body: node-tar reclassifies a regular entry whose name ends in '/' as a directory, and a
+    // directory's size is forced to ZERO (`header.js`) — the bytes that follow are parsed as the
+    // next entries, not as content. A reader that consumed a declared directory body would swallow
+    // whole entries the installer writes, WITHOUT changing anything it records: that is a forged
+    // package the file-list digest cannot see. Refused below rather than modelled.
+    const name = meta ? null : entryName();
+    const declared = octal(124, 136);
+    const directory =
+      !meta && (type === '5' || ((type === '0' || type === '\0') && name.endsWith('/')));
+    if (directory && (declared !== 0 || sizeOverride !== null)) {
+      throw new Error(
+        `a directory entry declares ${sizeOverride ?? declared} byte(s) of content — tar gives a directory no body, so those bytes are the next entries to an installer and content to this reader`,
+      );
+    }
     // A pax `size` record replaces the header's own byte count — for node-tar (it copies every pax
     // key onto the header) and for libarchive alike, so it moves both the end of this entry and the
     // start of the next one. It applies to the entry that FOLLOWS the header, never to the header
     // block itself, which is framed by its own field.
-    const size = meta ? octal(124, 136) : (sizeOverride ?? octal(124, 136));
+    const size = meta ? declared : (sizeOverride ?? declared);
     if (off + 512 + size > buf.length) {
       throw new Error(`an entry declares ${size} byte(s) of content the archive does not contain`);
     }
@@ -504,23 +556,6 @@ function unpack(gzipped) {
       }
       continue;
     }
-    // THE PREFIX FIELD IS GATED ON THE MAGIC. A ustar header may split a long path across `name`
-    // and `prefix`, but node-tar reads `prefix` ONLY when bytes 257-264 are exactly `ustar\0` + `00`
-    // (`header.js`), because that is the POSIX form — under GNU's `ustar  \0` it takes `name` alone.
-    // Reading the field unconditionally would let one in-place header edit — real path split across
-    // the two fields, GNU magic, checksum fixed — name the entry as recorded here while the
-    // installer writes it somewhere else, with no entry added, removed or reordered and every
-    // digest unchanged. Which of the two fields is even read must therefore be decided the same way
-    // node-tar decides it, and a non-empty prefix under any other magic is refused outright: POSIX
-    // readers would honour it, node-tar would not, and this reader does not pick between them.
-    const ustarMagic = head.subarray(257, 265).toString('binary') === 'ustar\u000000';
-    const prefix = text(345, ustarMagic && head[475] !== 0 ? 500 : 475);
-    if (!ustarMagic && text(345, 500) !== '') {
-      throw new Error(
-        `a header carries a prefix field without the ustar magic — tar readers disagree on whether it names part of the path`,
-      );
-    }
-    const name = override ?? (prefix ? `${prefix}/${text(0, 100)}` : text(0, 100));
     override = null;
     sizeOverride = null;
     // Every entry is held to the path rules, including the directories skipped just below: a reader
@@ -530,7 +565,7 @@ function unpack(gzipped) {
     // nothing legitimate.
     if (!name.startsWith('package/')) throw new Error(`entry outside package/: ${name}`);
     if (name.split('/').includes('..')) throw new Error(`entry escapes package/: ${name}`);
-    if (type === '5') continue; // a directory carries no content of its own
+    if (directory) continue; // a directory carries no content of its own
     if (type !== '0' && type !== '\0') {
       throw new Error(`unsupported tar entry type '${type}' at ${name}`);
     }
