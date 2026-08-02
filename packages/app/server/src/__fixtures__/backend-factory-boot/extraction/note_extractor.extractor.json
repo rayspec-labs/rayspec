@@ -1,0 +1,10 @@
+{
+  "$comment": "Deployment config for the declared extraction executor. The boot reads it to build rollout.liveAgent; paths are relative to this file's directory.",
+  "agent_id": "note_extractor",
+  "backend": "openai",
+  "model": "test-extraction-model",
+  "prompt_file": "note_extractor.prompt.md",
+  "schema_file": "note_extractor.schema.json",
+  "output_schema_name": "factoryboot_note",
+  "input_context": { "payload_fields": ["title"], "artifact_inputs": false }
+}

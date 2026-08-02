@@ -105,7 +105,12 @@ import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { type Env, Hono, type MiddlewareHandler } from 'hono';
 import { exportJWK, importPKCS8 } from 'jose';
 import { stringify as stringifyYaml } from 'yaml';
-import { deployProductYamlSpec, makeSchemaProbe, planUpdateBoot } from './product-boot.js';
+import {
+  deployProductYamlSpec,
+  makeSchemaProbe,
+  type ProductAgentBackendsFactory,
+  planUpdateBoot,
+} from './product-boot.js';
 import {
   type FrontendReadiness,
   frontendMountsReadiness,
@@ -1521,6 +1526,15 @@ export async function assembleServer(
     /** A deployment-supplied STT adapter for a Product-YAML boot (dev/CI — else STT_PROVIDER). */
     productSttAdapter?: SttAdapter;
     /**
+     * A Product-YAML boot's model-call construction seam — the `agentBackendsFactory` sibling for the
+     * PRODUCT profile. Called once, after the sidecar configs and the capability composition, with
+     * every model call the deployed document needs, so a deployment that brokers its model calls
+     * through its own execution boundary can apply the same mechanism to product extractors,
+     * responders and normalizers. Ignored by the backend-profile (6b) and auth-only branches; omitted
+     * ⇒ the product boot builds its in-process adapters from env exactly as today.
+     */
+    productAgentBackendsFactory?: ProductAgentBackendsFactory;
+    /**
      * DEV/TEST ONLY — the module importer used to load extension-pack modules (and, through them, pack
      * handlers). Defaults to the production compiled-JavaScript-only importer, which fail-closed-rejects
      * a TypeScript-source module. A dev/test caller may inject `typeStrippingImporter` to load an
@@ -1672,6 +1686,9 @@ export async function assembleServer(
         : {}),
       ...(opts.productDeterministicNormalizerBackend
         ? { deterministicNormalizerBackend: opts.productDeterministicNormalizerBackend }
+        : {}),
+      ...(opts.productAgentBackendsFactory
+        ? { agentBackendsFactory: opts.productAgentBackendsFactory }
         : {}),
     });
     app = deployed.app;

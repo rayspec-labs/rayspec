@@ -56,7 +56,7 @@ import {
   DEFAULT_MAX_HISTORY_CHARS,
   DEFAULT_MAX_HISTORY_TURNS,
 } from '@rayspec/conversation-runtime';
-import { type Backend, capabilitiesFor } from '@rayspec/core';
+import { type Backend, type BackendId, capabilitiesFor } from '@rayspec/core';
 import {
   type AllowlistEntry,
   buildProductTables,
@@ -182,6 +182,15 @@ export interface DeployProductYamlOpts {
    * the declared `output_contract`) still runs; ONLY the neutral Backend is swapped. LIVE mode ignores this.
    */
   deterministicNormalizerBackend?: Backend;
+  /**
+   * OPTIONAL: construct every product-side model call (extraction, responder, normalizer) instead of
+   * the in-process adapters. Called ONCE, after the sidecar configs and the capability composition,
+   * with the COMPLETE requirement set the deployed document needs. OMITTED ⇒ the adapters are built
+   * from env exactly as today. A deterministic executor mode (RAYSPEC_EXTRACTION_MODE /
+   * _RESPONDER_MODE / _NORMALIZE_MODE = deterministic) never reaches this seam — the injected dev/CI
+   * Backend still wins, structurally.
+   */
+  agentBackendsFactory?: ProductAgentBackendsFactory;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, name: string, why: string): string {
@@ -900,12 +909,275 @@ export function makeExtractionBackend(env: NodeJS.ProcessEnv, backend: string): 
       return new CodexAdapter({ codexHome });
     }
     default:
-      throw new ProductBootError(
-        `extraction backend '${backend}' is not wired in this boot (wired: ${WIRED_EXTRACTION_BACKENDS.join(
-          ' | ',
-        )}). Fail-closed.`,
-      );
+      throw unwiredExtractionBackendError(backend);
   }
+}
+
+// ── the OPTIONAL deployment-supplied product-backend seam ────────────────────────────────────────
+// The backend profile lets a deployment substitute how every model call is CONSTRUCTED (the
+// composition root's `AgentBackendsFactory`). The product profile had no such seam: the four
+// in-process adapters above were the only way a product extractor/responder/normalizer could get a
+// Backend, so a deployment that brokers its model calls through its own execution boundary had to
+// fall back to a coarser, whole-process credential boundary for every product deployment. What
+// follows is the product-profile sibling — and ONLY that: model, instructions, output schema,
+// structured-output policy, validation, journaling, replay and `capabilitiesFor` all stay exactly
+// where they are, and the returned Backend's `id` is PINNED to what the sidecar declared.
+
+/**
+ * Which product-side model call a Backend is being constructed for. A CLOSED set on purpose: a fourth
+ * product-side model call must break the compile here rather than slip through as a construction the
+ * factory was never shown and the boot quietly built itself.
+ */
+export type ProductBackendKind = 'extraction' | 'responder' | 'normalizer';
+
+/** ONE product-side model call the deployed document needs, as the boot resolved it. */
+export interface ProductBackendRequirement {
+  readonly kind: ProductBackendKind;
+  /** The declared agent id: the extractor id, the responder config stem, or the input_normalize agent. */
+  readonly agentId: string;
+  /**
+   * The backend id the resolved sidecar declares — always one of WIRED_EXTRACTION_BACKENDS. An
+   * extractor sidecar naming anything else is EXCLUDED from the survey (see `bindProductBackends`), so
+   * a factory is never shown a requirement this boot is about to reject anyway.
+   */
+  readonly backend: BackendId;
+  /**
+   * The model the resolved sidecar declares. READ-ONLY context: the BOOT passes the model to the run,
+   * never the factory — the seam substitutes construction, not contract.
+   */
+  readonly model: string;
+}
+
+/** What a deployment-supplied factory is shown: the deployed document's COMPLETE model-call set. */
+export interface ProductBackendContext {
+  /** `spec.product.id` — the deployed product document's id. */
+  readonly productId: string;
+  /**
+   * EVERY product-side model call the DEPLOYED document needs, in boot order (extraction in
+   * `spec.extractors` order, then the responder, then the normalizer), resolved AFTER the sidecar
+   * configs and the capability composition — so a broker sees what the document actually needs, never
+   * one call at a time. THESE EXACT OBJECTS are the keys of the map the factory returns.
+   */
+  readonly requirements: readonly ProductBackendRequirement[];
+}
+
+/**
+ * The product-profile mirror of the composition root's `AgentBackendsFactory`: ONE call, synchronous,
+ * returning a Backend per requirement. Synchronous like its sibling — an async seam would put a new
+ * unbounded await on the boot path and buys a broker nothing it cannot do at construction time.
+ */
+export type ProductAgentBackendsFactory = (
+  ctx: ProductBackendContext,
+) => ReadonlyMap<ProductBackendRequirement, Backend>;
+
+/**
+ * The internal chokepoint the three builders call in place of `makeExtractionBackend`. FAIL-CLOSED: it
+ * either returns a Backend or throws, and it never returns undefined — a per-requirement fallback to
+ * the in-process construction is precisely the hole this seam exists to close (a broker that forgot
+ * one requirement would get the rest brokered and that one built against an ambient credential, with
+ * no signal anywhere).
+ */
+export interface ProductBackendSource {
+  backendFor(kind: ProductBackendKind, agentId: string, backend: string, model: string): Backend;
+}
+
+/**
+ * ONE source of truth for the unwired-backend message, shared by `makeExtractionBackend`'s default arm
+ * and by the sealed source's wired-check below — which is what keeps an unwired extractor sidecar
+ * reading CHARACTER-IDENTICALLY whether or not a factory is installed.
+ */
+function unwiredExtractionBackendError(backend: string): ProductBootError {
+  return new ProductBootError(
+    `extraction backend '${backend}' is not wired in this boot (wired: ${WIRED_EXTRACTION_BACKENDS.join(
+      ' | ',
+    )}). Fail-closed.`,
+  );
+}
+
+/**
+ * The DEFAULT source — the built-in env construction, unchanged. It holds no state and emits nothing
+ * of its own: every per-backend env demand, warning and error still comes from inside
+ * `makeExtractionBackend`, at the same point in the same loop, so a boot that installs no factory is
+ * byte-identical to before this seam existed.
+ */
+export function envProductBackends(env: NodeJS.ProcessEnv): ProductBackendSource {
+  return { backendFor: (_kind, _agentId, backend) => makeExtractionBackend(env, backend) };
+}
+
+/**
+ * Survey every product-side model call the DEPLOYED document needs, show the factory the complete set
+ * in ONE call, validate what comes back, and seal the result into the source the three builders read.
+ *
+ * THE SURVEY IS READ-ONLY AND STRICTLY NON-THROWING. It runs at step 3b — before the boot's own
+ * `requireEnv(RAYSPEC_EXTRACTION_MODE)` and before the responder/normalizer mode demands — so a throw
+ * (or an env DEMAND) here would change which boot error an operator sees FIRST. Every executor mode is
+ * therefore read RAW, never through `requireEnv`, and every config error is swallowed: the builder
+ * re-raises that same error, unchanged, at its own unchanged position, so the boot's error text AND
+ * order are identical with or without a factory installed.
+ */
+export function bindProductBackends(
+  factory: ProductAgentBackendsFactory,
+  args: {
+    readonly env: NodeJS.ProcessEnv;
+    readonly specPath: string;
+    readonly spec: ProductSpec;
+    /** `declaresConversationInput(spec)` — passed in, never recomputed (one source for the predicate). */
+    readonly withConversationInput: boolean;
+    /** `recordInputNormalize(spec)?.agent` — absent when the doc declares no input_normalize. */
+    readonly normalizeAgentId?: string;
+  },
+): ProductBackendSource {
+  const { env, specPath, spec } = args;
+  const requirements: ProductBackendRequirement[] = [];
+
+  // (a) EXTRACTION — only when the document declares extractors AND the executor is live (a
+  // deterministic executor's Backend is embedder-supplied, so the factory is never asked for one that
+  // would be discarded).
+  if (spec.extractors.length > 0 && env.RAYSPEC_EXTRACTION_MODE?.trim() === 'live') {
+    for (const extractor of spec.extractors) {
+      try {
+        const configPath = resolveExtractorConfigPath(env, specPath, spec, extractor.id);
+        const cfg = JSON.parse(readFileSync(configPath, 'utf8')) as ExtractorConfig;
+        if (cfg.agent_id !== extractor.id) continue;
+        // LOAD-BEARING exclusion: the extractor path (unlike `resolveResponderConfig` /
+        // `resolveRecordNormalizerConfig`) does NOT validate the backend id at resolve, so an unwired
+        // one must stay `makeExtractionBackend`'s throw. Skipping it here — and re-issuing the SAME
+        // message from the sealed source's wired-check — is what keeps that error character-identical.
+        if (
+          typeof cfg.backend !== 'string' ||
+          !(WIRED_EXTRACTION_BACKENDS as readonly string[]).includes(cfg.backend)
+        ) {
+          continue;
+        }
+        if (typeof cfg.model !== 'string' || cfg.model.trim().length === 0) continue;
+        requirements.push({
+          kind: 'extraction',
+          agentId: extractor.id,
+          backend: cfg.backend as BackendId,
+          model: cfg.model,
+        });
+      } catch {
+        // `buildLiveAgent` re-raises this config error, unchanged, at its own position in the loop.
+      }
+    }
+  }
+
+  // (b) RESPONDER — a conversation-declaring document whose reply executor is live.
+  // `resolveResponderConfig` rejects an unwired backend AT RESOLVE, so a surviving entry is wired.
+  if (args.withConversationInput && env.RAYSPEC_RESPONDER_MODE?.trim() === 'live') {
+    try {
+      const cfg = resolveResponderConfig(specPath, spec);
+      requirements.push({
+        kind: 'responder',
+        agentId: cfg.agentId,
+        backend: cfg.backend as BackendId,
+        model: cfg.model,
+      });
+    } catch {
+      // `buildTurnResponder` re-raises this config error, unchanged, at its own position.
+    }
+  }
+
+  // (c) NORMALIZER — the responder mirror on the record-ingress side (same resolve-side backend guard).
+  if (args.normalizeAgentId !== undefined && env.RAYSPEC_NORMALIZE_MODE?.trim() === 'live') {
+    try {
+      const cfg = resolveRecordNormalizerConfig(specPath, args.normalizeAgentId);
+      requirements.push({
+        kind: 'normalizer',
+        agentId: cfg.agentId,
+        backend: cfg.backend as BackendId,
+        model: cfg.model,
+      });
+    } catch {
+      // `buildRecordNormalizer` re-raises this config error, unchanged, at its own position.
+    }
+  }
+
+  const ctx: ProductBackendContext = {
+    productId: spec.product.id,
+    requirements: Object.freeze(requirements.slice()),
+  };
+  const returned = factory(ctx);
+
+  // KEY IDENTITY. The map is keyed by the OBJECTS the boot handed out, never by a guessable string —
+  // a fabricable key turns a typo into a debugging session and lets a factory invent entries the boot
+  // never asked about. Name the footgun, because a spread is the natural thing to reach for.
+  const declared = new Set<ProductBackendRequirement>(requirements);
+  for (const key of returned.keys()) {
+    if (!declared.has(key)) {
+      throw new ProductBootError(
+        'the product backend factory returned a map key that is not one of the objects passed in ' +
+          'ctx.requirements (a spread/clone loses identity — use the requirement objects exactly as ' +
+          'given). Fail-closed.',
+      );
+    }
+  }
+
+  // COMPLETENESS. A factory OWNS every requirement it is shown; there is deliberately no fallback.
+  for (const req of requirements) {
+    if (!returned.has(req)) {
+      throw new ProductBootError(
+        `the product backend factory returned no Backend for ${req.kind} '${req.agentId}' (declared ` +
+          `backend '${req.backend}', model '${req.model}') — a factory OWNS every requirement it is ` +
+          'shown. To keep one call in-process, return makeExtractionBackend(env, requirement.backend) ' +
+          'for it. Fail-closed.',
+      );
+    }
+  }
+
+  // NO EXTRAS. Implied by the two checks above (map keys are unique), asserted anyway with its own
+  // message so a future relaxation of either cannot let an unasked-for entry through unnoticed.
+  if (returned.size !== requirements.length) {
+    throw new ProductBootError(
+      `the product backend factory returned ${returned.size} Backend(s) for ${requirements.length} ` +
+        'requirement(s) — exactly one per requirement it was shown, and nothing else. Fail-closed.',
+    );
+  }
+
+  // ID PIN + SEAL. Relabelling would move contract ownership out of RaySpec: `Backend.id` is what the
+  // boot's fork-4 native-structured-output gates read, what run-core validates capabilities against,
+  // and what the run header + journal steps record as the `backend` column.
+  const sealed = new Map<string, { req: ProductBackendRequirement; backend: Backend }>();
+  for (const [req, backend] of returned) {
+    if (backend.id !== req.backend) {
+      throw new ProductBootError(
+        `the product backend factory returned a Backend reporting id '${backend.id}' for ${req.kind} ` +
+          `'${req.agentId}', whose config declares backend '${req.backend}' — the seam substitutes ` +
+          `CONSTRUCTION, not identity: journal attribution, the boot's native-structured-output gate ` +
+          `and run-core's capability validation all key on Backend.id. Fail-closed.`,
+      );
+    }
+    sealed.set(`${req.kind} ${req.agentId}`, { req, backend });
+  }
+
+  return {
+    backendFor(kind, agentId, backend, model) {
+      // ORDER IS LOAD-BEARING. The wired-check runs FIRST so an unwired EXTRACTOR sidecar — which the
+      // survey deliberately excluded — still produces today's message instead of a sealed-source miss.
+      if (!(WIRED_EXTRACTION_BACKENDS as readonly string[]).includes(backend)) {
+        throw unwiredExtractionBackendError(backend);
+      }
+      const hit = sealed.get(`${kind} ${agentId}`);
+      if (!hit) {
+        throw new ProductBootError(
+          `the product backend factory was not shown ${kind} '${agentId}' (declared backend ` +
+            `'${backend}', model '${model}') — the survey that built ctx.requirements and the builder ` +
+            'that consumes them disagree about which model calls this document needs. Fail-closed.',
+        );
+      }
+      // The survey and the builder read the same sidecar files at different moments; a config edited
+      // in between would hand the run a Backend brokered for a configuration the boot is no longer
+      // using, so refuse rather than run the new model on the old construction.
+      if (hit.req.backend !== backend || hit.req.model !== model) {
+        throw new ProductBootError(
+          `the ${kind} '${agentId}' config changed between the factory survey (backend ` +
+            `'${hit.req.backend}', model '${hit.req.model}') and the boot (backend '${backend}', ` +
+            `model '${model}'). Fail-closed.`,
+        );
+      }
+      return hit.backend;
+    },
+  };
 }
 
 /**
@@ -1237,11 +1509,16 @@ interface ResolvedExtractor {
  * fork-4 structured-output policy (native-default; fail-closed at boot on an emulating backend), and
  * returns `buildNodeForAgent(agentId, deps)` so compose registers a DISTINCT node per agent. All the
  * fail-closed resolution happens UP FRONT (at boot), before any run.
+ *
+ * `backends` is the CONSTRUCTION source: the default builds each backend from env exactly as before,
+ * a deployment-supplied factory (bound at step 3b) constructs them instead. Everything else on this
+ * path — the config resolve, the prompt assembly, the structured-output policy — is unaffected.
  */
 export function buildLiveAgent(
   env: NodeJS.ProcessEnv,
   specPath: string,
   spec: ProductSpec,
+  backends: ProductBackendSource = envProductBackends(env),
 ): NonNullable<ProductYamlRollout['liveAgent']> {
   if (spec.extractors.length === 0) {
     throw new ProductBootError(
@@ -1283,7 +1560,7 @@ export function buildLiveAgent(
     // missing per-backend env) — the factory itself is agent-agnostic, so wrap for legible boot errors.
     let backend: Backend;
     try {
-      backend = makeExtractionBackend(env, cfg.backend);
+      backend = backends.backendFor('extraction', extractor.id, cfg.backend, cfg.model);
     } catch (e) {
       if (e instanceof ProductBootError) {
         throw new ProductBootError(`extractor '${extractor.id}': ${e.message}`);
@@ -1616,6 +1893,9 @@ function resolveResponderStoreContext(
  * Backend; dev/CI) — while the config resolve + validation run in BOTH modes (the e2e proves the
  * full config path with zero LLM creds). The factory closes over the raw db; the tenant is bound
  * per request from the SERVER-DERIVED value the capability binding passes.
+ *
+ * `backends` is the live arm's CONSTRUCTION source (default: the env construction, unchanged). The
+ * deterministic arm never reads it — that Backend is embedder-supplied and still wins structurally.
  */
 export function buildTurnResponder(
   env: NodeJS.ProcessEnv,
@@ -1623,6 +1903,7 @@ export function buildTurnResponder(
   spec: ProductSpec,
   db: Db,
   opts: DeployProductYamlOpts,
+  backends: ProductBackendSource = envProductBackends(env),
 ): ConversationTurnResponderFactory {
   const mode = requireEnv(
     env,
@@ -1639,7 +1920,7 @@ export function buildTurnResponder(
   let backend: Backend;
   if (mode === 'live') {
     try {
-      backend = makeExtractionBackend(env, cfg.backend);
+      backend = backends.backendFor('responder', cfg.agentId, cfg.backend, cfg.model);
     } catch (e) {
       if (e instanceof ProductBootError) {
         throw new ProductBootError(`responder '${cfg.agentId}': ${e.message}`);
@@ -1917,6 +2198,9 @@ export function buildNormalizeOutputSchema(
  * from — `live` (the boot-side backend factory over the config's `backend`) or `deterministic` (the injected
  * proof Backend; dev/CI) — while the config resolve + validation + the output-schema build run in BOTH
  * modes. The factory closes over the raw db; the tenant is bound per request from the SERVER-DERIVED value.
+ *
+ * `backends` is the live arm's CONSTRUCTION source (default: the env construction, unchanged) — the
+ * `buildTurnResponder` mirror; the deterministic arm never reads it.
  */
 export function buildRecordNormalizer(
   env: NodeJS.ProcessEnv,
@@ -1925,6 +2209,7 @@ export function buildRecordNormalizer(
   db: Db,
   opts: DeployProductYamlOpts,
   decl: NonNullable<ReturnType<typeof recordInputNormalize>>,
+  backends: ProductBackendSource = envProductBackends(env),
 ): NonNullable<NonNullable<ProductYamlRollout['record']>['normalizer']> {
   const mode = requireEnv(
     env,
@@ -1941,7 +2226,7 @@ export function buildRecordNormalizer(
   let backend: Backend;
   if (mode === 'live') {
     try {
-      backend = makeExtractionBackend(env, cfg.backend);
+      backend = backends.backendFor('normalizer', cfg.agentId, cfg.backend, cfg.model);
     } catch (e) {
       if (e instanceof ProductBootError) {
         throw new ProductBootError(`normalizer '${cfg.agentId}': ${e.message}`);
@@ -2249,6 +2534,21 @@ export async function deployProductYamlSpec(
     }
   }
 
+  // ── 3b. the OPTIONAL deployment-supplied product backend factory ───────────────────────────────
+  // Reached ONLY when the option is present. An omitting boot never executes a byte of this block and
+  // every builder below keeps its built-in env construction, unchanged. The factory is called HERE —
+  // after the sidecar configs and the capability composition — so it sees the COMPLETE set of model
+  // calls the deployed document needs, never one at a time.
+  const productBackends = opts.agentBackendsFactory
+    ? bindProductBackends(opts.agentBackendsFactory, {
+        env,
+        specPath,
+        spec,
+        withConversationInput,
+        ...(recordNormalizeDecl ? { normalizeAgentId: recordNormalizeDecl.agent } : {}),
+      })
+    : undefined;
+
   // ── 4. the extraction executor — DEMANDED iff the doc declares agents ─────────────────────────
   // A zero-agent doc has nothing to extract, so it demands NO RAYSPEC_EXTRACTION_MODE (the env is
   // only read inside the `hasAgents` guard). An agent-declaring product ⇒ the demand + the live/
@@ -2263,7 +2563,8 @@ export async function deployProductYamlSpec(
       "the extraction executor: 'live' (real runAgent/gpt-5) | 'deterministic' (injected, dev/CI)",
     );
     if (extractionMode === 'live') {
-      liveAgent = buildLiveAgent(env, specPath, spec);
+      // `undefined` triggers the parameter default, so an omitting boot builds exactly as before.
+      liveAgent = buildLiveAgent(env, specPath, spec, productBackends);
     } else if (extractionMode === 'deterministic') {
       if (!opts.deterministicAgents) {
         throw new ProductBootError(
@@ -2436,7 +2737,11 @@ export async function deployProductYamlSpec(
     // compose fail-closes a conversation-declaring doc without it, so the guard here and the
     // compose guard can never disagree on when a responder exists).
     ...(withConversationInput
-      ? { conversation: { responder: buildTurnResponder(env, specPath, spec, db, opts) } }
+      ? {
+          conversation: {
+            responder: buildTurnResponder(env, specPath, spec, db, opts, productBackends),
+          },
+        }
       : {}),
     // the record input-normalize step — built iff the record_input capability declares input_normalize
     // (demands RAYSPEC_NORMALIZE_MODE + the per-product record/<agent_id>.normalizer.json; compose
@@ -2446,7 +2751,15 @@ export async function deployProductYamlSpec(
     ...(recordNormalizeDecl
       ? {
           record: {
-            normalizer: buildRecordNormalizer(env, specPath, spec, db, opts, recordNormalizeDecl),
+            normalizer: buildRecordNormalizer(
+              env,
+              specPath,
+              spec,
+              db,
+              opts,
+              recordNormalizeDecl,
+              productBackends,
+            ),
           },
         }
       : {}),

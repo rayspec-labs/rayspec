@@ -60,13 +60,21 @@ export {
 // The Product-YAML boot composition + its extraction-config helpers (deployment wiring).
 // The per-agent / multi-backend extraction seam — the boot-side backend factory,
 // the per-agent config-path resolver, and the fork-4 structured-output policy resolver are exported so
-// a wrapper/test can assert the multi-backend wiring deterministically (no creds).
+// a wrapper/test can assert the multi-backend wiring deterministically (no creds). `bindProductBackends`
+// + the ProductBackend* types are the OPTIONAL construction seam an embedder installs through
+// `assembleServer`'s `productAgentBackendsFactory` (omitting it leaves the env construction unchanged).
 export {
   assembleExtractionInstructions,
+  bindProductBackends,
   buildLiveAgent,
   buildSttAdapter,
   deployProductYamlSpec,
   makeExtractionBackend,
+  type ProductAgentBackendsFactory,
+  type ProductBackendContext,
+  type ProductBackendKind,
+  type ProductBackendRequirement,
+  type ProductBackendSource,
   ProductBootError,
   resolveExtractorConfigPath,
   resolveStructuredOutputMode,
