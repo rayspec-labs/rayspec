@@ -13,8 +13,10 @@
  *    it omits the property or carries an explicit `preflightAuth: undefined`.
  *  - FAIL-CLOSED. A preflight that throws, or that answers outside the neutral `AuthMode` vocabulary,
  *    ends the run before the header transition, before the cancellation controller is armed and
- *    before `backend.run()` — so the run leaves no `runs` row, no `journal_steps` row and no
- *    `run_events` row at all.
+ *    before `backend.run()` — so the refusal writes nothing of its own. On the synchronous run
+ *    surface that leaves no `runs` row, no `journal_steps` row and no `run_events` row at all; where
+ *    the API enqueue already wrote an `enqueued` header, that row stays exactly as the enqueue left
+ *    it.
  *  - OPAQUE. The credential-binding reference the deployment hands in reaches the backend byte-for-
  *    byte and reaches storage nowhere.
  */
@@ -31,7 +33,7 @@ import { schema } from '@rayspec/db';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { runAgent } from './run-core.js';
-import { RUN_STATUS_RUNNING } from './run-header.js';
+import { insertEnqueuedRunHeader, RUN_STATUS_ENQUEUED, RUN_STATUS_RUNNING } from './run-header.js';
 import {
   forTenant,
   makeTestDb,
@@ -351,13 +353,32 @@ describe('a backend that implements only resolveAuth() is unchanged', () => {
     expect(result.authMode).toBe('unauthenticated');
     expect((await readHeader(runId))?.status).toBe('completed');
   });
+
+  it('an OFF-VOCABULARY answer from resolveAuth() still completes and is still recorded as given', async () => {
+    const tdb = forTenant(db, TENANT_A);
+    // `resolveAuth()` is declared to return an `AuthMode`, but types are erased: a third-party backend
+    // can return anything at runtime, and today such a run completes and records what it reported.
+    // This arm is what the asymmetry buys — applying the preflight's fail-closed guard one call too
+    // early would newly refuse this run, a failure the contract never had.
+    const backend = makeLegacyBackend('bound-somehow' as AuthMode);
+    const runId = 'legacy-off-vocabulary-run';
+
+    const result = await runAgent(tdb, backend, spec, { runId, tools: [probeTool()] });
+
+    expect(result.status).toBe('completed');
+    expect(result.authMode).toBe('bound-somehow');
+    const header = await readHeader(runId);
+    expect(header?.status).toBe('completed');
+    expect(header?.authMode).toBe('bound-somehow');
+    for (const step of await readSteps(runId)) expect(step.authMode).toBe('bound-somehow');
+  });
 });
 
-describe('a refused preflight ends the run before anything is written', () => {
+describe('a refused preflight ends the run before it writes anything of its own', () => {
   // Deliberately NOT wrapped in `tdb.transaction(...)`: a rollback would make "no header row" true
   // for the wrong reason, and the arm would pass even if the preflight ran after the header
   // transition. Outside a transaction, an absent row means the write never happened.
-  it('a THROW propagates verbatim and leaves no run, no journal step and no event', async () => {
+  it('SYNC: a THROW propagates verbatim and leaves no run, no journal step and no event', async () => {
     const tdb = forTenant(db, TENANT_A);
     const backend = openRemote();
     backend.preflightError = new Error('cloud: no binding for tenant');
@@ -369,6 +390,36 @@ describe('a refused preflight ends the run before anything is written', () => {
 
     expect(backend.runs).toBe(0);
     expect(await readHeader(runId)).toBeUndefined();
+    expect(await readSteps(runId)).toHaveLength(0);
+    expect(await readEvents(runId)).toHaveLength(0);
+  });
+
+  it('ASYNC: an enqueue-time header SURVIVES the refusal, untouched at `enqueued`', async () => {
+    // The arm above is the SYNCHRONOUS surface, where run-core owns the whole header. A run enqueued
+    // through the API is different and the difference is worth pinning rather than glossing: that
+    // path writes an `enqueued` header BEFORE handing the job over, outside the transaction the
+    // durable worker wraps the run in, so a refusal cannot roll it back. What the refusal must not do
+    // is ADVANCE it — no `running` transition, no terminal write — or add a journal row or an event.
+    const tdb = forTenant(db, TENANT_A);
+    const backend = openRemote();
+    backend.preflightError = new Error('cloud: no binding for tenant');
+    const runId = 'preflight-throw-enqueued-run';
+
+    await insertEnqueuedRunHeader(tdb, {
+      runId,
+      backend: 'openai',
+      agentName: spec.name,
+      model: spec.model,
+    });
+    const enqueued = await readHeader(runId);
+
+    await expect(runAgent(tdb, backend, spec, { runId, tools: [probeTool()] })).rejects.toThrow(
+      'cloud: no binding for tenant',
+    );
+
+    expect(backend.runs).toBe(0);
+    expect(await readHeader(runId)).toEqual(enqueued);
+    expect((await readHeader(runId))?.status).toBe(RUN_STATUS_ENQUEUED);
     expect(await readSteps(runId)).toHaveLength(0);
     expect(await readEvents(runId)).toHaveLength(0);
   });

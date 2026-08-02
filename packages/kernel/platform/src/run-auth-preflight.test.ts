@@ -16,7 +16,9 @@
  *
  * The omission arms here are the cheapest possible pin on `typeof backend.preflightAuth !==
  * 'function'`: a backend carrying an EXPLICIT `preflightAuth: undefined` must still take the legacy
- * path, which an `in` test would get wrong.
+ * path, which an `in` test would get wrong. One of them also pins the ASYMMETRY itself — a legacy
+ * answer is returned unvalidated even when it is off-vocabulary — so applying the fail-closed guard
+ * one call too early is a red test rather than a silent contract change.
  */
 import type { AuthMode, Backend, RunAuthPreflight, RunResult } from '@rayspec/core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -161,11 +163,21 @@ describe('the preflight REPLACES the pre-run resolveAuth(), it does not race it'
     expect(await resolvePreRunAuthMode(backend, IDENTITY)).toBe('api-key');
     expect(backend.calls.resolveAuth).toBe(1);
 
-    // The legacy answer is returned UNVALIDATED: 'unauthenticated' is a mode a backend legitimately
-    // reports today, and validating this path would change what such a run does.
     const anonymous = makeLegacyBackend('unauthenticated');
     expect(await resolvePreRunAuthMode(anonymous, IDENTITY)).toBe('unauthenticated');
     expect(anonymous.calls.resolveAuth).toBe(1);
+  });
+
+  it('the legacy answer is UNVALIDATED — even an off-vocabulary one is returned as given', async () => {
+    // THE PIN ON THE ASYMMETRY. `resolveAuth()` is declared to return an `AuthMode`, but types are
+    // erased: a third-party backend can return anything at runtime, and today that run completes and
+    // records what it reported. Applying the preflight's fail-closed guard one call too early would
+    // newly REFUSE it — a failure the contract never had. This arm is what goes red if anyone does,
+    // and it is the reason the asymmetry is not a symmetry waiting to be tidied up. Note the guard is
+    // not about which modes are acceptable: 'unauthenticated' passes it (covered below).
+    const offVocabulary = makeLegacyBackend('bound-somehow' as AuthMode);
+    expect(await resolvePreRunAuthMode(offVocabulary, IDENTITY)).toBe('bound-somehow');
+    expect(offVocabulary.calls.resolveAuth).toBe(1);
   });
 
   it('a backend carrying an EXPLICIT preflightAuth: undefined still takes the legacy path', async () => {

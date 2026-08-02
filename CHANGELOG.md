@@ -30,17 +30,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out-of-band; it is forwarded byte-for-byte and the platform never inspects, derives, logs or
   persists it. An answer outside the neutral auth-mode vocabulary, or a preflight that throws, ends
   the run closed — before the header transition, before any journal row and before any model call —
-  so a refused run leaves no `runs` row, no `journal_steps` row and no `run_events` row at all. The
-  refusal names the run, never the value it rejected, so a backend that mistakenly handed back its
-  credential does not get it echoed into an error message.
+  so the refusal itself writes nothing: no `journal_steps` row, no `run_events` row and no `runs` row
+  of its own. On the synchronous run surface that leaves nothing behind at all, while a run enqueued
+  through the API keeps the `enqueued` header that path writes before handing the job over, exactly as
+  it stands — the refusal neither advances it nor adds to it. The refusal names the run, never the
+  value it rejected, so a backend that mistakenly handed back its credential does not get it echoed
+  into an error message.
 
   **A backend that does not implement it runs byte-identically.** `resolveAuth()` is untouched and
   remains the contract's one required auth method. A backend that omits `preflightAuth()` — or that
   carries it as an explicit `undefined` — takes the same single `resolveAuth()` call at the same
-  point it always did, and that answer is still used verbatim and unvalidated, so a backend that
-  honestly reports `unauthenticated` still runs exactly as before. The new validation applies only to
-  a preflight's answer. No adapter in this repository implements the preflight, so every run in the
-  tree resolves its auth mode by the identical code path it used previously, and no existing test
+  point it always did, and that answer is still used verbatim and unvalidated. The asymmetry is
+  deliberate and it is not about which modes are acceptable — every member of the vocabulary,
+  `unauthenticated` included, passes the new check. It is about not inventing a failure the contract
+  never had: `resolveAuth()` is declared to return an `AuthMode` and its answer has always been used
+  as given, so validating it now would newly *refuse* a third-party backend that returns an
+  off-vocabulary value at runtime, where today that run completes and records the mode it reported.
+  The new validation therefore applies only to a preflight's answer, which is a value no existing
+  backend has ever produced. No adapter in this repository implements the preflight, so every run in
+  the tree resolves its auth mode by the identical code path it used previously, and no existing test
   needed changing.
 
   **Two limits worth stating plainly.** The preflight is **not bounded**: the run's wall-clock bound

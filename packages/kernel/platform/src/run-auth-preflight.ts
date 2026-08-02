@@ -31,16 +31,24 @@ export interface PreRunAuthIdentity {
  * Resolve the run's pre-run auth mode: the backend's context-aware preflight when it has one, the
  * legacy `resolveAuth()` otherwise. Throws (fail-closed) when a preflight refuses or answers outside
  * the neutral vocabulary — at the call site that is before the header transition, before the
- * cancellation controller is armed and before `backend.run()`, so a refused run leaves no trace.
+ * cancellation controller is armed and before `backend.run()`, so the refusal writes nothing of its
+ * own: no `runs` row, no journal row, no event. On the synchronous run surface that leaves nothing
+ * behind at all; a run enqueued through the API keeps the `enqueued` header that path wrote before
+ * handing the job over, untouched.
  */
 export async function resolvePreRunAuthMode(
   backend: Backend,
   identity: PreRunAuthIdentity,
 ): Promise<AuthMode> {
   // BYTE-IDENTITY: a backend without the optional preflight takes exactly the path it always took —
-  // one `resolveAuth()`, answer returned verbatim and UNVALIDATED. (Validating it would change
-  // today's behaviour for a backend that legitimately answers 'unauthenticated'.) The presence test
-  // is `typeof … !== 'function'` rather than `in`, so a backend carrying an explicit
+  // one `resolveAuth()`, answer returned verbatim and UNVALIDATED. The asymmetry with the preflight
+  // arm below is deliberate, and it is NOT about which modes are acceptable (every member of the
+  // vocabulary, 'unauthenticated' included, passes that check). `resolveAuth()` is declared to return
+  // an `AuthMode` and its answer has always been used as given, so validating it here would INVENT a
+  // failure the contract never had: a third-party backend that returns an off-vocabulary value at
+  // runtime — types are erased — completes today and would be refused tomorrow. A preflight's answer
+  // has no such history, so the guard costs nobody anything there. The presence test is
+  // `typeof … !== 'function'` rather than `in`, so a backend carrying an explicit
   // `preflightAuth: undefined` is a backend WITHOUT a preflight, not one with a broken seam.
   const preflight = backend.preflightAuth;
   if (typeof preflight !== 'function') return await backend.resolveAuth();
