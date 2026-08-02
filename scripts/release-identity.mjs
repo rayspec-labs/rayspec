@@ -54,11 +54,12 @@
  * (`files.excluded`). Verification computes the same exclusion, and — when the tarball carries the
  * manifest — additionally requires those bytes to be byte-identical to the manifest being verified.
  * So the exclusion is not a hole: a launcher carrying some OTHER manifest fails. That holds because
- * `unpack` reads WHICH file each entry is the way node-tar and libarchive do, and refuses the rest —
- * an archive that carries one path twice, that hides content behind a lone null block, or that
- * renames an entry through a pax `path=` override no other reader honours. Without those refusals the
- * excluded path is a place to post a second, forged copy that the file list never sees while
- * extraction installs something else.
+ * `unpack` reads WHICH file each entry is, and WHERE it ends, the way node-tar and libarchive do, and
+ * refuses the rest — an archive that carries one path twice, that hides content behind a lone null
+ * block, that renames an entry through a pax `path=` the two readers read differently, or that
+ * carries a pax record able to move an entry's boundaries in a way this reader does not model.
+ * Without those refusals the excluded path is a place to post a second, forged copy that the file
+ * list never sees while extraction installs something else.
  * The launcher is also packed FROM a directory a previous release run may have left a manifest in,
  * so generation refuses when the packed launcher already carries a manifest that is not the one it
  * would write — see the `//release-identity` operator sequence, whose first step removes it.
@@ -204,13 +205,39 @@ function sortKeysDeep(value) {
 }
 
 /**
- * The `path` a length-framed reader takes from a pax extended-header body, or null when it carries
- * none. A pax body is a sequence of records `"<len> <key>=<value>\n"`, where `len` counts the WHOLE
- * record — its own digits, the separating space and the trailing newline included. This walks them
- * exactly, consuming `len` bytes at a time, and refuses a body that does not frame cleanly.
+ * The pax keys this reader can let through: none of them changes WHICH file an entry is or WHERE its
+ * content ends, so honouring them or ignoring them cannot make this reader and an installer disagree
+ * about the archive's contents. `path` is handled separately (it renames, so both readings of it are
+ * compared). Everything else — `size`, which moves the end of the entry and therefore the start of
+ * the next one, `linkpath`, the `GNU.sparse.*` family, which reinterprets the content bytes, and any
+ * key added to the format after this was written — is refused rather than guessed at.
  */
-function paxPathByRecord(body) {
-  let path = null;
+const PAX_KEYS_WITHOUT_EFFECT = new Set([
+  'atime',
+  'comment',
+  'ctime',
+  'dev',
+  'gid',
+  'gname',
+  'ino',
+  'mtime',
+  'nlink',
+  'uid',
+  'uname',
+  'SCHILY.dev',
+  'SCHILY.ino',
+  'SCHILY.nlink',
+]);
+
+/**
+ * The records a length-framed reader takes from a pax extended-header body, as `[key, value]` pairs.
+ * A pax body is a sequence of records `"<len> <key>=<value>\n"`, where `len` counts the WHOLE record
+ * — its own digits, the separating space and the trailing newline included. This walks them exactly,
+ * consuming `len` bytes at a time, and refuses a body that does not frame cleanly. It is how
+ * libarchive reads the body.
+ */
+function paxRecordsByRecord(body) {
+  const records = [];
   let off = 0;
   while (off < body.length) {
     let space = off;
@@ -226,59 +253,95 @@ function paxPathByRecord(body) {
     const record = body.subarray(space + 1, off + len - 1).toString('utf8');
     const eq = record.indexOf('=');
     if (eq < 0) throw new Error(`malformed pax record: no '<key>=<value>'`);
-    if (record.slice(0, eq) === 'path') path = record.slice(eq + 1);
+    records.push([record.slice(0, eq), record.slice(eq + 1)]);
     off += len;
   }
-  return path;
+  return records;
 }
 
 /**
- * The `path` a LINE-SCANNING reader takes from the same body — node-tar's rule, transcribed from the
+ * The records a LINE-SCANNING reader takes from the same body — node-tar's rule, transcribed from the
  * reader an `npm i` actually runs: the body loses one trailing newline, is split on the rest, and a
  * line counts as a record when its leading decimal equals the line's own byte length plus the
- * newline it lost. A line that does not is skipped, key is everything before the first `=`, value is
- * everything after it, and the LAST `path` wins.
+ * newline it lost. A line that does not is skipped; the key is everything before the first `=`.
  */
-function paxPathByLine(body) {
-  let path = null;
+function paxRecordsByLine(body) {
+  const records = [];
   for (const line of body.toString('utf8').replace(/\n$/, '').split('\n')) {
     const declared = Number.parseInt(line, 10);
     if (declared !== Buffer.byteLength(line) + 1) continue;
     const record = line.slice(`${declared} `.length);
     const eq = record.indexOf('=');
     if (eq <= 0) continue;
-    if (record.slice(0, eq) === 'path') path = record.slice(eq + 1);
+    records.push([record.slice(0, eq), record.slice(eq + 1)]);
   }
-  return path;
+  return records;
 }
 
 /**
  * The `path` override carried by a pax extended-header body, or null when it carries none — but only
- * when the readers that matter agree on it.
+ * a body every reader agrees about, and only one whose other records change nothing this reader
+ * models. Anything else is refused.
  *
- * WHY TWO READINGS. A record VALUE may contain a newline, and there the two implementations a
- * consumer runs part ways: libarchive frames records by their declared length, while node-tar — the
- * reader behind `npm i` — splits the body into lines and keeps each line whose leading number
- * matches its own length, so a `path=` smuggled inside another record's value renames the entry for
- * node-tar and for nothing else. Its source says so itself: "XXX Values with \n in them will fail
- * this. Refactor to not be a naive line-by-line parse."
+ * THE RULE. A verifier's whole claim is that the bytes it hashed are the bytes a consumer installs,
+ * so wherever it and an installer could name — or delimit — a file differently, the honest answer is
+ * to refuse the archive rather than to pick a reading. Two ways a pax header can produce that
+ * divergence, both closed here:
  *
- * Picking either reading would let a tampered archive verify here and install as something else —
- * insert such a header before an existing entry and the entry list, and therefore every digest this
- * file records, is untouched while the installer writes different files. So both readings are taken
- * and a body they name differently is REFUSED. That is the general form: this reader never has to
- * out-guess an installer, it only has to notice that installers would not agree. No packer emits a
- * record value containing a newline, so nothing legitimate is turned away.
+ *   1. THE TWO PARSES DISAGREE. A record VALUE may contain a newline, and there the implementations
+ *      part ways: libarchive frames records by their declared length, while node-tar — the reader
+ *      behind `npm i` — splits the body into lines and keeps every line whose leading number matches
+ *      its own length. Its source says so itself: "XXX Values with \n in them will fail this.
+ *      Refactor to not be a naive line-by-line parse." A `path=` smuggled inside another record's
+ *      value therefore renames the entry for node-tar and for nothing else. Both readings are taken
+ *      and a body they name differently is refused. Splicing such a header before an existing entry
+ *      is the reason this matters: nothing is added, removed or reordered, so every digest recorded
+ *      here still matches while the installed files are different.
+ *   2. A RECORD THIS READER DOES NOT MODEL. node-tar copies EVERY pax key onto the entry header
+ *      (`lib/header.js`, `SLURP`), so a record can change more than a name: `size` moves the end of
+ *      the entry, and therefore the start of the next one — an entry can be swallowed whole into its
+ *      predecessor's content, so the installer receives a file list this reader never sees. Only the
+ *      keys in PAX_KEYS_WITHOUT_EFFECT are let through; `path` is compared as above; every other
+ *      key, present or future, is refused. Both parses are inspected, because a key the line scanner
+ *      honours is exactly the one that would otherwise pass unnoticed.
+ *
+ * A packer emits neither shape for a package of this kind — a real long path produces one `path`
+ * record, which is read normally — so nothing legitimate is turned away.
  */
-function paxPath(body) {
-  const framed = paxPathByRecord(body);
-  const scanned = paxPathByLine(body);
-  if (framed !== scanned) {
+function paxOverrides(body, { global }) {
+  const framed = paxRecordsByRecord(body);
+  const scanned = paxRecordsByLine(body);
+  // A GLOBAL header applies to every following entry, which this reader does not model, so only
+  // records that change nothing are tolerated there — `path` reaches its own refusal in the caller.
+  const modelled = global ? ['path'] : ['path', 'size'];
+  const unmodelled = [...framed, ...scanned]
+    .map(([key]) => key)
+    .filter((key) => !modelled.includes(key) && !PAX_KEYS_WITHOUT_EFFECT.has(key));
+  if (unmodelled.length > 0) {
     throw new Error(
-      `a pax body its records and its lines name differently (${framed ?? 'no path'} vs ${scanned ?? 'no path'}) — tar readers disagree on which file this is`,
+      `a pax ${global ? 'global ' : ''}header carries ${[...new Set(unmodelled)].sort().join(', ')} — a record that can change which files an installer writes, so this reader refuses it rather than ignore it`,
     );
   }
-  return framed;
+  const last = (records, key) => {
+    let value = null;
+    for (const [k, v] of records) if (k === key) value = v;
+    return value;
+  };
+  for (const [key, noun] of [
+    ['path', 'name'],
+    ['size', 'size'],
+  ]) {
+    if (last(framed, key) !== last(scanned, key)) {
+      throw new Error(
+        `a pax body its records and its lines ${noun} differently (${last(framed, key) ?? `no ${key}`} vs ${last(scanned, key) ?? `no ${key}`}) — tar readers disagree on which file this is`,
+      );
+    }
+  }
+  const size = last(framed, 'size');
+  if (size !== null && !/^[0-9]+$/.test(size)) {
+    throw new Error(`a pax size record that is not a plain byte count: ${size}`);
+  }
+  return { path: last(framed, 'path'), size: size === null ? null : Number.parseInt(size, 10) };
 }
 
 /**
@@ -289,10 +352,10 @@ function paxPath(body) {
  * an archive verifies nothing. The types npm actually emits are regular files; directories, GNU long
  * names and pax `path=` overrides are handled because the format permits them.
  *
- * Three refusals exist because tar is more permissive than a verifier may be, and the gap between
- * this reader and tar is exactly where a tampered artifact hides. The aim is a reader that agrees
- * with node-tar (what `npm i` runs) and libarchive on WHICH file each entry is, then refuses the
- * rest rather than guessing:
+ * The refusals below exist because tar is more permissive than a verifier may be, and the gap
+ * between this reader and tar is exactly where a tampered artifact hides. The aim is a reader that
+ * agrees with node-tar (what `npm i` runs) and libarchive on WHICH file each entry is and WHERE it
+ * ends, then refuses the rest rather than guessing:
  *   - A PATH THAT OCCURS TWICE. Extraction keeps the LAST entry at a path, so a reader that returns
  *     both — or that stops at the first — hashes something no consumer receives. No packer emits a
  *     duplicate path, so refusing costs nothing and closes the general form of that substitution.
@@ -307,9 +370,15 @@ function paxPath(body) {
  *     renames nothing), so honouring it would make this reader name an entry differently from every
  *     consumer — and the excluded manifest path is precisely where that disagreement would hide. A
  *     local (`x`) body is read BOTH ways — framed by record length, as libarchive does, and scanned
- *     line by line, as node-tar does — and refused when the two name different files (see paxPath).
- *     A `path=` smuggled inside another record's value is exactly that case: node-tar honours it,
- *     libarchive does not, and no digest here would move, so the refusal is the only honest answer.
+ *     line by line, as node-tar does — and refused when the two name different files. A `path=`
+ *     smuggled inside another record's value is exactly that case: node-tar honours it, libarchive
+ *     does not, and no digest here would move, so the refusal is the only honest answer.
+ *   - A PAX RECORD THIS READER DOES NOT MODEL. node-tar copies EVERY pax key onto the entry header,
+ *     so a header does more than rename: `size` moves the end of the entry and therefore the start
+ *     of the next one, and an entry can be swallowed whole into its predecessor's content. `size` is
+ *     therefore APPLIED here, the way both readers apply it — ignoring it would mean hashing an
+ *     entry no installer writes. Every other key that could reach that far is refused instead (see
+ *     paxOverrides): a `linkpath`, a `GNU.sparse.*`, anything the format gains later.
  * The messages carry no file name: the single caller knows which tarball it handed over and says so.
  */
 function unpack(gzipped) {
@@ -317,6 +386,7 @@ function unpack(gzipped) {
   const entries = [];
   const seen = new Set();
   let override = null;
+  let sizeOverride = null;
   let off = 0;
   let ended = false;
   while (off + 512 <= buf.length) {
@@ -345,27 +415,38 @@ function unpack(gzipped) {
     let sum = 0;
     for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 0x20 : head[i];
     if (sum !== octal(148, 156)) throw new Error(`tar header checksum mismatch`);
-    const size = octal(124, 136);
     const type = String.fromCharCode(head[156]) || '0';
+    const meta = type === 'x' || type === 'g' || type === 'L';
+    // A pax `size` record replaces the header's own byte count — for node-tar (it copies every pax
+    // key onto the header) and for libarchive alike, so it moves both the end of this entry and the
+    // start of the next one. It applies to the entry that FOLLOWS the header, never to the header
+    // block itself, which is framed by its own field.
+    const size = meta ? octal(124, 136) : (sizeOverride ?? octal(124, 136));
+    if (off + 512 + size > buf.length) {
+      throw new Error(`an entry declares ${size} byte(s) of content the archive does not contain`);
+    }
     const body = buf.subarray(off + 512, off + 512 + size);
     off += 512 + Math.ceil(size / 512) * 512;
 
-    if (type === 'x' || type === 'g' || type === 'L') {
+    if (meta) {
       if (type === 'L') {
         // A GNU long-name block: its body is the next entry's name, NUL-terminated.
         override = body.toString('utf8').replace(/\0.*$/s, '');
       } else {
-        const path = paxPath(body); // refuses a body that is not well-formed pax records
+        // Refuses a body that is not well-formed pax records, one the two parses read differently,
+        // and one carrying a record this reader does not model.
+        const pax = paxOverrides(body, { global: type === 'g' });
         if (type === 'g') {
           // A global header renames nothing for node-tar or libarchive, and no packer emits one that
           // tries: refuse a global `path=` rather than apply a rename no consumer will see.
-          if (path !== null) {
+          if (pax.path !== null) {
             throw new Error(
               `a pax global header carries path= — no packer emits one and tar ignores it`,
             );
           }
-        } else if (path !== null) {
-          override = path; // a local pax `path` overrides the next entry's name, as tar does
+        } else {
+          if (pax.path !== null) override = pax.path; // overrides the next entry's name, as tar does
+          if (pax.size !== null) sizeOverride = pax.size;
         }
       }
       continue;
@@ -373,6 +454,7 @@ function unpack(gzipped) {
     const prefix = text(345, 500);
     const name = override ?? (prefix ? `${prefix}/${text(0, 100)}` : text(0, 100));
     override = null;
+    sizeOverride = null;
     if (type === '5') continue; // a directory carries no content of its own
     if (type !== '0' && type !== '\0') {
       throw new Error(`unsupported tar entry type '${type}' at ${name}`);

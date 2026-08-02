@@ -38,9 +38,11 @@
  *       entry's real name) is refused; a `path=` smuggled inside another record's value is refused
  *       when the length-framed and line-scanned readings name different files — including the shape
  *       node-tar really honours, inserted BEFORE an existing entry so that no digest moves and the
- *       disagreement is the entire tamper; and a `..` segment that escapes `package/` is refused.
- *       All of them are the same fault: the reader must not name an entry differently from the
- *       installer, least of all at the excluded manifest path.
+ *       disagreement is the entire tamper; a pax `size`, which moves an entry's END and can swallow
+ *       the entry behind it, is applied the way both readers apply it, so the swallowed file shows up
+ *       as the file-list change it is; and a `..` segment that escapes `package/` is refused. All of
+ *       them are the same fault: the reader must not name — or delimit — an entry differently from
+ *       the installer, least of all at the excluded manifest path.
  *   (Q) THE DOCUMENTED RELEASE SEQUENCE REPEATS — the manifest is gitignored and listed in the
  *       launcher's `files`, so it SURVIVES a release run and the next pack would ship the previous
  *       run's manifest. Running the sequence twice (with the removal step it prescribes) is green
@@ -616,6 +618,27 @@ try {
       disagreeing.err,
       /records and its lines name differently/i,
       `(E) the refusal must name the disagreement: ${disagreeing.err}`,
+    );
+
+    // (e) a pax `size` record, which moves the END of one entry and therefore the START of the next.
+    // node-tar copies every pax key onto the entry header, so a size that covers the following block
+    // swallows that entry whole: the installer writes one file fewer. A reader that IGNORED the
+    // record would still see the swallowed entry and would certify a file list nobody receives.
+    // Reading the record the way both node-tar and libarchive do puts the tamper back where it can
+    // be caught — as the file-list digest it changes.
+    const [firstBlock, secondBlock, ...tailBlocks] = base;
+    const firstContent = firstBlock.length - 512; // the padded content of the entry that swallows
+    ship([
+      tarEntry('PaxHeader', paxRecord('size', firstContent + secondBlock.length), 'x'),
+      firstBlock,
+      secondBlock,
+      ...tailBlocks,
+    ]);
+    const swallowed = verify(fx);
+    assert.notEqual(
+      swallowed.code,
+      0,
+      `(E) an entry swallowed by a pax size must not verify; got ${swallowed.code}`,
     );
 
     // (c) a `..` segment that passes `startsWith('package/')` but escapes it once resolved.

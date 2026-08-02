@@ -455,8 +455,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   global-header `path`, which node-tar and libarchive both ignore, and one smuggled inside another
   record's value, which node-tar honours (it scans the header line by line) and libarchive does not
   (it frames records by their declared length). The verifier takes both readings and refuses a header
-  they name differently, rather than picking one and disagreeing with whichever installer you use.
-  And when `git` cannot answer whether the working tree
+  they name differently, rather than picking one and disagreeing with whichever installer you use. A
+  pax header can also move an entry's **end**, and with it the start of the next one: a `size` record
+  is applied the way both readers apply it, so an entry swallowed into its predecessor's content
+  changes the file list instead of hiding in it, and any other record that could reach that far is
+  refused rather than ignored. And when `git` cannot answer whether the working tree
   was clean, generation refuses rather than recording the flattering value — a failed command and a
   clean tree both produce no output, and only one of them is worth writing down.
 
