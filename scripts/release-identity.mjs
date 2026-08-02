@@ -216,8 +216,9 @@ function sortKeysDeep(value) {
  *     (what `npm i` runs) treat a LONE zero block as a warning and keep reading, so bytes appended
  *     after one are installed. Everything from the marker to the end of the archive must be zero,
  *     and an archive that simply runs out before a marker is refused too.
+ * The messages carry no file name: the single caller knows which tarball it handed over and says so.
  */
-function unpack(gzipped, label) {
+function unpack(gzipped) {
   const buf = gunzipSync(gzipped);
   const entries = [];
   const seen = new Set();
@@ -230,12 +231,12 @@ function unpack(gzipped, label) {
       const tail = buf.subarray(off);
       if (tail.length < 1024) {
         throw new Error(
-          `${label}: the end-of-archive marker is ${tail.length} byte(s), not the two 512-byte zero blocks the format requires`,
+          `the end-of-archive marker is ${tail.length} byte(s), not the two 512-byte zero blocks the format requires`,
         );
       }
       if (!tail.every((b) => b === 0)) {
         throw new Error(
-          `${label}: content after the end-of-archive marker — tar and npm would read past it, so this reader refuses the archive`,
+          `content after the end-of-archive marker — tar and npm would read past it, so this reader refuses the archive`,
         );
       }
       ended = true;
@@ -244,12 +245,12 @@ function unpack(gzipped, label) {
     const text = (from, to) => head.subarray(from, to).toString('utf8').replace(/\0.*$/s, '');
     const octal = (from, to) => {
       const raw = text(from, to).trim();
-      if (!/^[0-7]*$/.test(raw)) throw new Error(`${label}: unsupported numeric header field`);
+      if (!/^[0-7]*$/.test(raw)) throw new Error(`unsupported numeric header field`);
       return raw === '' ? 0 : Number.parseInt(raw, 8);
     };
     let sum = 0;
     for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 0x20 : head[i];
-    if (sum !== octal(148, 156)) throw new Error(`${label}: tar header checksum mismatch`);
+    if (sum !== octal(148, 156)) throw new Error(`tar header checksum mismatch`);
     const size = octal(124, 136);
     const type = String.fromCharCode(head[156]) || '0';
     const body = buf.subarray(off + 512, off + 512 + size);
@@ -266,15 +267,15 @@ function unpack(gzipped, label) {
     override = null;
     if (type === '5') continue; // a directory carries no content of its own
     if (type !== '0' && type !== '\0') {
-      throw new Error(`${label}: unsupported tar entry type '${type}' at ${name}`);
+      throw new Error(`unsupported tar entry type '${type}' at ${name}`);
     }
-    if (!name.startsWith('package/')) throw new Error(`${label}: entry outside package/: ${name}`);
+    if (!name.startsWith('package/')) throw new Error(`entry outside package/: ${name}`);
     const path = name.slice('package/'.length);
-    if (seen.has(path)) throw new Error(`${label}: duplicate entry path: ${name}`);
+    if (seen.has(path)) throw new Error(`duplicate entry path: ${name}`);
     seen.add(path);
     entries.push({ path, body: Buffer.from(body) });
   }
-  if (!ended) throw new Error(`${label}: the archive ends without an end-of-archive marker`);
+  if (!ended) throw new Error(`the archive ends without an end-of-archive marker`);
   return entries;
 }
 
@@ -308,7 +309,7 @@ function loadTarballs(dir) {
     const bytes = readFileSync(join(dir, file));
     let entries;
     try {
-      entries = unpack(bytes, file);
+      entries = unpack(bytes);
     } catch (err) {
       refuse(`${file}: ${err?.message ?? err}`);
     }
