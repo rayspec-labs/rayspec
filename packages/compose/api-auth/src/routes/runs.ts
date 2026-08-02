@@ -57,6 +57,7 @@ import type { AgentSpec, ConvTurn, ErrorClass, RunResult, Usage } from '@rayspec
 import { assertSpecValid, classifyUpstreamError, isErrorClass, NeutralEvent } from '@rayspec/core';
 import { forTenant, schema, type TenantDb } from '@rayspec/db';
 import {
+  CANCELLED_CLASS,
   deleteEnqueuedRunHeader,
   insertEnqueuedRunHeader,
   isRunTainted,
@@ -804,8 +805,8 @@ async function retryAfterForRun(tdb: TenantDb, runId: string): Promise<number | 
   const steps = (await tdb
     .select(schema.journalSteps)
     .where(eq(schema.journalSteps.runId, runId))) as Array<{ status: string; output: unknown }>;
-  // pick the failing LLM step (the one carrying an errorClass) — NOT a trailing tool-error
-  // step, which never holds a Retry-After. Same selection as deriveErrorFromJournal so they agree.
+  // pick the failing LLM step (the one carrying an errorClass) — NOT a tool-error step, which never
+  // holds a Retry-After. Same selection as deriveErrorFromJournal so they agree, cancellation first.
   const failing = pickFailingStep(steps);
   const out = (failing?.output ?? null) as Record<string, unknown> | null;
   const ra = out?.retryAfter;
@@ -853,9 +854,19 @@ async function applyRetryAfter(
  */
 function pickFailingStep<T extends { status: string; output: unknown }>(steps: T[]): T | undefined {
   const errorSteps = steps.filter((s) => s.status === 'error');
-  const withClass = errorSteps.filter((s) =>
-    isErrorClass((s.output as Record<string, unknown> | null)?.errorClass),
-  );
+  const classOf = (s: T) => (s.output as Record<string, unknown> | null)?.errorClass;
+  const withClass = errorSteps.filter((s) => isErrorClass(classOf(s)));
+  // A cancelled run answers with its cancellation, whichever other failure it also recorded. Both
+  // can be present at once: run-core records the cancellation for a run that produced a result
+  // anyway (the signal arrived in the post-backend tail, or the run executes in a process the signal
+  // cannot reach), on top of whatever failing step the run had already journaled. Picking by class
+  // rather than by position is what makes this answer stable — the steps are read with no ORDER BY,
+  // so "the last one" is whatever the database happened to return last, and the two orders disagree
+  // about which failure the run had. The write side already decided this: a cancelled run "records
+  // THE CANCELLATION as its outcome and commits nothing else" (run-core), so a read path that can
+  // report the other failure instead is a disagreement, not a second opinion.
+  const cancelled = withClass.find((s) => classOf(s) === CANCELLED_CLASS);
+  if (cancelled) return cancelled;
   if (withClass.length > 0) return withClass[withClass.length - 1];
   return errorSteps[errorSteps.length - 1];
 }
@@ -1298,8 +1309,9 @@ function deriveErrorFromJournal(
   steps: Array<{ status: string; output: unknown }>,
 ): { error: string | null; errorClass: ErrorClass | null } {
   if (runStatus !== 'error') return { error: null, errorClass: null };
-  // prefer the failing step that actually carries an errorClass (the LLM/model failure)
-  // over a trailing tool-error step — else a tool-error step lands last and masks the real class.
+  // prefer the failing step that actually carries an errorClass (the LLM/model failure) over a
+  // tool-error step, which carries none and would otherwise mask the real class; and among the
+  // classed ones prefer the cancellation, so a cancelled run reports being cancelled.
   const failing = pickFailingStep(steps);
   const out = (failing?.output ?? null) as Record<string, unknown> | null;
   const storedMessage = typeof out?.error === 'string' ? out.error : null;
