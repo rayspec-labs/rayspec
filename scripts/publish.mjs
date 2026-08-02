@@ -11,7 +11,7 @@
  * publishes. This script is the ONLY place that lifts that guard, and it
  * does so TRANSIENTLY and IN MEMORY of the working tree: for the duration of a pack/publish run it
  * rewrites each publish target's `package.json` to
- *   - `version`  → the single release version (default `1.5.0`, coupled to the `v1.5.0` tag),
+ *   - `version`  → the release version DERIVED from the repo-root `package.json` (see below),
  *   - `private`  → `false`,
  *   - `files`    → `["dist"]` if the package does not already declare it (so the tarball ships compiled
  *                  `dist/` only — never `src/`, tests, a stray `.env`, or `.turbo` logs),
@@ -20,12 +20,25 @@
  * disk, and the byte-frozen adapter manifests under `packages/adapters/**` are touched only in this
  * transient, self-reverting way (mirroring the sanctioned private-flip).
  *
+ * WHERE THE VERSION COMES FROM
+ * ----------------------------
+ * There is no default version and no way to override one. The release version is DERIVED from the ONE
+ * authoritative manifest — the repo-root `package.json` `version` — and a PREFLIGHT then refuses,
+ * before the first manifest is stamped and before the first `pnpm` child process, unless
+ *   - every RaySpec manifest already carries that version (the `@rayspec/*` members plus the unscoped
+ *     launcher, including the ones that are never published), and
+ *   - HEAD does not carry an annotated release tag naming a DIFFERENT version, and
+ *   - in `--publish` only: the annotated tag `v<version>` exists and points at HEAD.
+ * `--version <v>` is an ASSERTION against the derived value, never an override: given and unequal, the
+ * run refuses. So no input makes this script pack or publish a version the tree does not carry.
+ *
  * WORKSPACE VERSION COUPLING
  * --------------------------
  * Internal deps are declared `@rayspec/x: "workspace:*"`. Because ALL targets are stamped to the SAME
  * version before anything is packed, pnpm rewrites every `workspace:*` to that exact version in the
- * packed manifest (proven: a `workspace:*` dep resolves to `1.5.0`). One version string, one tag, the
- * whole closure in lockstep — no changesets, no per-package drift.
+ * packed manifest (measured by unpacking a `--pack` tarball: each `workspace:*` dep is rewritten to the
+ * stamped version). One version string, one tag, the whole closure in lockstep — no changesets, no
+ * per-package drift.
  *
  * MODES (default: --dry-run; a real registry write is opt-in and double-gated)
  * ---------------------------------------------------------------------------
@@ -38,28 +51,31 @@
  *                  `RAYSPEC_ALLOW_PUBLISH=1`. Publishes in dependency order (deps before dependents).
  *                  Intended for the founder-run release window only.
  *
- * Other flags: --version <v> (default 1.5.0) · --out <dir> (pack destination) · --json (machine output).
+ * Other flags: --version <v> (asserts the derived version) · --out <dir> (pack destination) ·
+ * --json (machine output).
  *
- * This script performs NO git operations and is never wired into a package lifecycle or CI — it runs
- * only when a human invokes it.
+ * This script performs no git WRITES — it only READS the workspace state (`git ls-files`, tag identity)
+ * and never creates a commit, a tag or a release. It is never wired into a package lifecycle or CI —
+ * it runs only when a human invokes it.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULT_VERSION = '1.5.0';
+// The ONE manifest the release version is read from; every other manifest is checked against it.
+const VERSION_SOURCE = 'package.json';
 // The opt-in gate for a REAL registry write (read via computed access — this is a release-tool env var,
 // not a turbo task input, so it is intentionally not declared in turbo.json).
 const ALLOW_PUBLISH_ENV = 'RAYSPEC_ALLOW_PUBLISH';
 
-/** Parse the tiny flag grammar (no positionals). */
+/** Parse the tiny flag grammar (no positionals). `version: null` = the flag was not given at all. */
 function parseFlags(argv) {
   const flags = {
     mode: 'dry-run',
-    version: DEFAULT_VERSION,
+    version: null,
     out: undefined,
     json: false,
     really: false,
@@ -79,6 +95,19 @@ function parseFlags(argv) {
     }
   }
   return flags;
+}
+
+/** Read-only git in the repo root; returns trimmed stdout, or null when git refuses (e.g. no such ref). */
+function git(...args) {
+  try {
+    return execFileSync('git', args, {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return null;
+  }
 }
 
 /** All workspace package.json paths (excludes node_modules/dist), via git ls-files for determinism. */
@@ -174,10 +203,114 @@ function stampManifest(path, version) {
   return original;
 }
 
+/** The release version, read from the ONE authoritative manifest. No default, no fallback. */
+function deriveVersion() {
+  const json = JSON.parse(readFileSync(join(REPO_ROOT, VERSION_SOURCE), 'utf8'));
+  if (typeof json.version !== 'string' || json.version === '') {
+    console.error(
+      `${VERSION_SOURCE} carries no "version" — the release version is derived from it.`,
+    );
+    process.exit(2);
+  }
+  return json.version;
+}
+
+/**
+ * Every manifest that must already carry the release version: the `@rayspec/*` members plus the
+ * unscoped launcher — including the ones that are never published (the workspace releases in
+ * lockstep, so a member left behind is drift whether or not it ships). The root manifest is the
+ * source of the version, so it agrees by construction. The `@spike/*` example fixtures fall outside
+ * this set BY NAME (loadRayspecPackages never returns them): they are not RaySpec packages, are never
+ * published, and are versioned independently of the release.
+ * Returns EVERY offender, so one run names the whole drift instead of the first manifest of it.
+ */
+function versionMismatches(version, pkgs) {
+  const offenders = [];
+  for (const [name, { path, json }] of pkgs) {
+    if (json.version !== version) {
+      offenders.push({ name, path: relative(REPO_ROOT, path), value: json.version ?? '(none)' });
+    }
+  }
+  return offenders.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/**
+ * The release tag as git sees it: `absent` | `lightweight` | `other-commit` | `at-head`, plus any
+ * ANNOTATED release tag on HEAD that names a DIFFERENT version. `--points-at` peels tag objects, so
+ * it reports exactly the tags whose target commit is HEAD; `v<digit>` is the release-tag shape.
+ */
+function tagIdentity(version) {
+  const name = `v${version}`;
+  const head = git('rev-parse', 'HEAD');
+  const ref = git('rev-parse', '--verify', '--quiet', `refs/tags/${name}`);
+  let state = 'absent';
+  let commit = null;
+  if (ref) {
+    commit = git('rev-list', '-n', '1', `refs/tags/${name}`);
+    if (git('cat-file', '-t', ref) !== 'tag') state = 'lightweight';
+    else state = commit === head ? 'at-head' : 'other-commit';
+  }
+  const otherOnHead = (git('tag', '--points-at', 'HEAD') ?? '')
+    .split('\n')
+    .filter((t) => /^v\d/.test(t) && t !== name)
+    .filter((t) => git('cat-file', '-t', git('rev-parse', t)) === 'tag');
+  return { name, state, commit, head, otherOnHead };
+}
+
+/**
+ * PREFLIGHT — everything that can make a run publish the wrong bytes, checked BEFORE the first
+ * manifest is stamped and BEFORE the first `pnpm` child process, so a refusal leaves the working tree
+ * and the registry untouched. Returns the tag identity for the summary.
+ */
+function preflight(flags, version, pkgs) {
+  if (flags.version !== null && flags.version !== version) {
+    console.error(
+      `--version ${flags.version} does not match the release version ${version} (from ` +
+        `${VERSION_SOURCE}). --version asserts the version the tree carries; it cannot override it.`,
+    );
+    process.exit(2);
+  }
+
+  const offenders = versionMismatches(version, pkgs);
+  if (offenders.length) {
+    console.error(
+      `version mismatch: the release version is ${version} (from ${VERSION_SOURCE}), but ` +
+        `${offenders.length} RaySpec manifest(s) disagree:`,
+    );
+    for (const o of offenders) console.error(`  ${o.path} — ${o.name} is at ${o.value}`);
+    console.error('nothing was packed. Bring the whole workspace to one version first.');
+    process.exit(2);
+  }
+
+  const tag = tagIdentity(version);
+  if (tag.otherOnHead.length) {
+    console.error(
+      `release-tag mismatch: HEAD carries the annotated tag ${tag.otherOnHead.join(', ')}, but the ` +
+        `release version is ${version} (from ${VERSION_SOURCE}). Nothing was packed.`,
+    );
+    process.exit(2);
+  }
+  if (flags.mode === 'publish' && tag.state !== 'at-head') {
+    const detail = {
+      absent: `tag ${tag.name} does not exist`,
+      lightweight: `tag ${tag.name} is a lightweight tag, not an annotated release tag`,
+      'other-commit': `annotated tag ${tag.name} points at ${tag.commit}`,
+    }[tag.state];
+    console.error(
+      `refusing to publish ${version}: ${detail}, and HEAD is ${tag.head}. An irreversible registry ` +
+        'write must stand on the annotated tag of the version it writes.',
+    );
+    process.exit(2);
+  }
+  // In --pack and --dry-run the tag state is REPORTED and never fatal: both write nothing anywhere,
+  // and a pack rehearsal legitimately happens before the tag for the version being prepared exists.
+  return tag;
+}
+
 function main() {
   const flags = parseFlags(process.argv.slice(2));
-  if (!flags.version) {
-    console.error('--version requires a value (e.g. --version 1.5.0)');
+  if (flags.version === undefined) {
+    console.error('--version requires a value (e.g. --version <x.y.z>)');
     process.exit(2);
   }
   if (flags.mode === 'publish' && !(flags.really && process.env[ALLOW_PUBLISH_ENV] === '1')) {
@@ -189,6 +322,8 @@ function main() {
   }
 
   const pkgs = loadRayspecPackages();
+  const version = deriveVersion();
+  const tag = preflight(flags, version, pkgs);
   const publishSet = computePublishSet(pkgs);
   const order = topoOrder(publishSet, pkgs);
   const outDir =
@@ -198,7 +333,7 @@ function main() {
   const results = [];
   try {
     // Phase 1 — stamp EVERY target first, so cross-package workspace:* refs all resolve to `version`.
-    for (const name of order) backups.set(name, stampManifest(pkgs.get(name).path, flags.version));
+    for (const name of order) backups.set(name, stampManifest(pkgs.get(name).path, version));
 
     // Phase 2 — run the requested command per target, in dependency order.
     for (const name of order) {
@@ -223,8 +358,8 @@ function main() {
           encoding: 'utf8',
         });
       }
-      results.push({ name, version: flags.version, ok: true, stdout: stdout.trim() });
-      if (!flags.json) console.log(`[${flags.mode}] ${name}@${flags.version} ✓`);
+      results.push({ name, version, ok: true, stdout: stdout.trim() });
+      if (!flags.json) console.log(`[${flags.mode}] ${name}@${version} ✓`);
     }
   } finally {
     // Phase 3 — ALWAYS restore original bytes. The committed tree is byte-identical after this script.
@@ -233,15 +368,20 @@ function main() {
 
   const summary = {
     mode: flags.mode,
-    version: flags.version,
+    version,
+    versionSource: VERSION_SOURCE,
+    tag: { name: tag.name, state: tag.state, commit: tag.commit, head: tag.head },
     count: order.length,
     order,
     outDir: outDir ?? null,
-    results: results.map(({ name, version, ok }) => ({ name, version, ok })),
+    results: results.map(({ name, version: v, ok }) => ({ name, version: v, ok })),
   };
   if (flags.json) console.log(JSON.stringify(summary, null, 2));
   else {
-    console.log(`\n${flags.mode}: ${order.length} package(s) at ${flags.version}.`);
+    console.log(
+      `\n${flags.mode}: ${order.length} package(s) at ${version} (from ${VERSION_SOURCE}).`,
+    );
+    console.log(`release tag ${tag.name}: ${tag.state}.`);
     if (outDir) console.log(`tarballs → ${outDir}`);
     console.log('working tree restored to committed bytes (private:true).');
   }

@@ -182,6 +182,19 @@ jobs:
       - name: Advisory-issue sync regression
         run: pnpm test:advisory-sync
 
+      # scripts/publish.mjs is the only path to npm, and neither a published version nor a release tag
+      # can be taken back — but nothing on a pull request runs it, so its refusals are unexercised
+      # until a release night. This standalone test drives the REAL script inside a throwaway git repo
+      # (real commits, real annotated/lightweight tags) with the package manager mocked, and holds the
+      # refusals that have to land BEFORE anything is packed: a manifest that disagrees with the
+      # derived release version (every offender named), a --version that contradicts it, a HEAD that
+      # carries an annotated tag for another version, and — in publish mode only — a missing,
+      # lightweight or off-HEAD release tag. Plus the positive control: a coherent checkout packs the
+      # closure in dependency order and leaves the tracked bytes untouched.
+      # DB-free / secret-free / network-free → lane 1.
+      - name: Release-guard regression
+        run: pnpm test:release-guard
+
       # The neutral reference product (examples/acme-notes/**) must carry ZERO product-domain meaning —
       # a forcing function on the fixtures the platform gates/goldens/e2e are pinned against.
       - name: Fixture-neutrality gate

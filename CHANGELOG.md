@@ -613,6 +613,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parser — it is simply no longer the first thing that says it. The reserved names are
   documented under `stores` in the spec reference.
 
+- **The release script has no default version any more: it derives the release version from the
+  repository-root `package.json` and refuses, before it packs anything, if the checkout disagrees
+  with it.** `scripts/publish.mjs` used to fall back to a hard-coded version when `--version` was
+  omitted, so a release run could stamp, pack and publish a version that no manifest in the tree
+  carried — and neither a published npm version nor a release tag can be taken back. There is now no
+  input that produces one: the version comes from the root manifest, and `--version` became an
+  assertion against it — supplied and unequal, the run exits nonzero naming both values. Before the
+  first manifest is stamped and before the first `pnpm` child process starts, the run also refuses
+  when any RaySpec manifest carries a different version — every offender is listed with its path and
+  its value, so one run names the whole drift instead of the first manifest of it — and when HEAD
+  carries an annotated release tag naming another version. The `@spike/*` example fixtures are
+  outside that check: they are not RaySpec packages, are never published, and are versioned
+  independently.
+
+  **What differs per mode.** `--publish` additionally requires the annotated tag `v<version>` to
+  exist and point at HEAD, because that is the irreversible one. `--pack` and `--dry-run` only
+  *report* the tag state — `absent`, `lightweight`, `other-commit` or `at-head`, in the human output
+  and in `--json` — since both write nothing anywhere and a pack rehearsal legitimately happens
+  before the tag for the version being prepared exists. The double gate for a real registry write
+  (`--yes-really-publish` **and** `RAYSPEC_ALLOW_PUBLISH=1`) is unchanged, and the `--json` summary
+  keeps every existing key and gains `versionSource` and `tag`.
+
 ### Fixed
 
 - **A cancelled run reports being cancelled, whatever else it also recorded.** A run can hold two
