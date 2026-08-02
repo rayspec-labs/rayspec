@@ -899,6 +899,30 @@ try {
       0,
       `(H) a prefix ending in '/' must be refused; got ${trailingPrefix.code}`,
     );
+    // (d) an EMPTY prefix with a non-zero byte 475. node-tar's two prefix branches are asymmetric:
+    // above that byte it reads 155 bytes and prepends `prefix + '/'` UNCONDITIONALLY, below it
+    // reads 130 and prepends only a non-empty one. So an empty prefix in the wide branch makes the
+    // path ABSOLUTE, and an installer's strip eats the empty leading component — the file lands a
+    // level deeper. A reader that prepended only-when-non-empty would name it exactly as recorded.
+    // Byte 475 sits at offset 130 INSIDE the prefix field, so no packer can produce this shape: a
+    // real prefix of 130 chars or fewer leaves a NUL there, and a longer one leaves the field
+    // non-empty.
+    const absolutePath = Buffer.from(base[1]);
+    absolutePath.fill(0, 345, 500);
+    absolutePath[475] = 0x41;
+    absolutePath.fill(0x20, 148, 156);
+    let absSum = 0;
+    for (const byte of absolutePath.subarray(0, 512)) absSum += byte;
+    absolutePath.fill(0, 148, 156);
+    absolutePath.write(`${absSum.toString(8).padStart(6, '0')}\0 `, 148, 'utf8');
+    ship([base[0], absolutePath, ...base.slice(2)]);
+    const wideEmpty = verify(fx);
+    assert.notEqual(
+      wideEmpty.code,
+      0,
+      `(H) an empty prefix in the wide branch must not name the entry as recorded; got ${wideEmpty.code}`,
+    );
+
     console.log('ok (H) — a body no installer reads cannot hide entries from this reader');
   }
 

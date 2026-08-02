@@ -474,6 +474,15 @@ function unpack(gzipped) {
      * a POSIX reader would honour what node-tar ignores, and this reader picks neither. A prefix
      * that itself ends in '/' and an empty name are refused for the same reason — the join and the
      * emptiness are normalised differently on the way to disk.
+     *
+     * THE TWO PREFIX BRANCHES ARE ASYMMETRIC, and the asymmetry is load-bearing. node-tar reads 155
+     * bytes and prepends `prefix + '/'` UNCONDITIONALLY when byte 475 is non-zero, and 130 bytes
+     * prepended only when non-empty otherwise. Collapsing that to only-when-non-empty in both
+     * branches is a hole: zero the whole prefix field and set byte 475, and node-tar produces an
+     * ABSOLUTE path whose empty leading component an installer's strip consumes — the file lands a
+     * level deeper while this reader names it exactly as recorded, every digest unchanged. So the
+     * branch is mirrored rather than simplified, and the bare '/' it produces then fails the
+     * `package/` rule below, which is the point.
      */
     const entryName = () => {
       const ustarMagic = head.subarray(257, 265).toString('binary') === 'ustar\u000000';
@@ -482,13 +491,15 @@ function unpack(gzipped) {
           `a header carries a prefix field without the ustar magic — tar readers disagree on whether it names part of the path`,
         );
       }
-      const prefix = text(345, ustarMagic && head[475] !== 0 ? 500 : 475);
+      const widePrefix = ustarMagic && head[475] !== 0;
+      const prefix = text(345, widePrefix ? 500 : 475);
       if (prefix.endsWith('/')) {
         throw new Error(
           `a prefix field ending in '/' — tar readers join it to the name differently`,
         );
       }
-      const resolved = override ?? (prefix ? `${prefix}/${text(0, 100)}` : text(0, 100));
+      const resolved =
+        override ?? (widePrefix || prefix ? `${prefix}/${text(0, 100)}` : text(0, 100));
       if (resolved === '') throw new Error(`an entry with an empty name`);
       return resolved;
     };
