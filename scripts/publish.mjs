@@ -27,10 +27,21 @@
  * before the first manifest is stamped and before the first `pnpm` child process, unless
  *   - every RaySpec manifest already carries that version (the `@rayspec/*` members plus the unscoped
  *     launcher, including the ones that are never published), and
+ *   - every package in the publish set declares the Node requirement (see below), and
  *   - HEAD does not carry an annotated release tag naming a DIFFERENT version, and
  *   - in `--publish` only: the annotated tag `v<version>` exists and points at HEAD.
  * `--version <v>` is an ASSERTION against the derived value, never an override: given and unequal, the
  * run refuses. So no input makes this script pack or publish a version the tree does not carry.
+ *
+ * THE NODE REQUIREMENT
+ * --------------------
+ * `engines.node` is the only thing that makes a CONSUMER's package manager check the Node floor at
+ * install time, so every publish target declares it in its COMMITTED manifest and the preflight
+ * refuses when a target omits it or declares a value other than the repo-root `engines.node` (the one
+ * source of the string — a future Node bump moves one number). The stamping step deliberately does NOT
+ * inject it: injecting it would let a package ship a requirement its committed manifest never carried,
+ * which is exactly what the guard exists to prevent. Members outside the publish set are not checked —
+ * they are never installed by anyone.
  *
  * WORKSPACE VERSION COUPLING
  * --------------------------
@@ -217,6 +228,43 @@ function deriveVersion() {
 }
 
 /**
+ * The Node requirement every publish target must declare, read from the SAME authoritative manifest
+ * as the version. One string in one place, so a Node bump moves one number.
+ */
+function deriveNodeEngine() {
+  const json = JSON.parse(readFileSync(join(REPO_ROOT, VERSION_SOURCE), 'utf8'));
+  const node = json.engines?.node;
+  if (typeof node !== 'string' || node === '') {
+    console.error(
+      `${VERSION_SOURCE} carries no "engines.node" — every publish target is checked against it.`,
+    );
+    process.exit(2);
+  }
+  return node;
+}
+
+/**
+ * Every publish target that does not DECLARE the Node requirement itself, or declares a different
+ * one. A package that ships without `engines.node` gives its consumers no engine check, and the
+ * incompatibility then surfaces as a runtime failure in code that uses Node 22 APIs.
+ * Returns EVERY offender, so one run names the whole gap instead of the first manifest of it.
+ */
+function engineMismatches(engine, names, pkgs) {
+  const offenders = [];
+  for (const name of names) {
+    const entry = pkgs.get(name);
+    const declared = entry?.json.engines?.node;
+    if (declared === engine) continue;
+    offenders.push({
+      name,
+      path: entry ? relative(REPO_ROOT, entry.path) : name,
+      value: typeof declared === 'string' ? declared : '(none)',
+    });
+  }
+  return offenders.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/**
  * Every manifest that must already carry the release version: the `@rayspec/*` members plus the
  * unscoped launcher — including the ones that are never published (the workspace releases in
  * lockstep, so a member left behind is drift whether or not it ships). The root manifest is the
@@ -263,7 +311,7 @@ function tagIdentity(version) {
  * manifest is stamped and BEFORE the first `pnpm` child process, so a refusal leaves the working tree
  * and the registry untouched. Returns the tag identity for the summary.
  */
-function preflight(flags, version, pkgs) {
+function preflight(flags, version, engine, pkgs, publishSet) {
   if (flags.version !== null && flags.version !== version) {
     console.error(
       `--version ${flags.version} does not match the release version ${version} (from ` +
@@ -280,6 +328,20 @@ function preflight(flags, version, pkgs) {
     );
     for (const o of offenders) console.error(`  ${o.path} — ${o.name} is at ${o.value}`);
     console.error('nothing was packed. Bring the whole workspace to one version first.');
+    process.exit(2);
+  }
+
+  const engineOffenders = engineMismatches(engine, publishSet, pkgs);
+  if (engineOffenders.length) {
+    console.error(
+      `engines mismatch: every publish target must declare "engines": { "node": "${engine}" } ` +
+        `(from ${VERSION_SOURCE}), but ${engineOffenders.length} target(s) do not:`,
+    );
+    for (const o of engineOffenders) console.error(`  ${o.path} — ${o.name} declares ${o.value}`);
+    console.error(
+      'nothing was packed. A target that does not declare the requirement ships without an engine ' +
+        'check for its consumers.',
+    );
     process.exit(2);
   }
 
@@ -324,8 +386,9 @@ function main() {
 
   const pkgs = loadRayspecPackages();
   const version = deriveVersion();
-  const tag = preflight(flags, version, pkgs);
+  const nodeEngine = deriveNodeEngine();
   const publishSet = computePublishSet(pkgs);
+  const tag = preflight(flags, version, nodeEngine, pkgs, publishSet);
   const order = topoOrder(publishSet, pkgs);
   const outDir =
     flags.mode === 'pack' ? (flags.out ?? mkdtempSync(join(tmpdir(), 'rayspec-pack-'))) : undefined;

@@ -1016,6 +1016,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   did on the `429`. A `504` still carries none — nothing upstream advises a delay for a deadline this
   platform imposed — and a `502` whose upstream sent no advice still carries no header.
 
+- **Every published RaySpec package now declares `"engines": { "node": ">=22" }`, so installing one
+  under an older Node is reported by your package manager instead of failing later at runtime.** The
+  Node requirement was declared only on the repository-root manifest, which is `private` and never
+  published — so nothing in the packages you actually install said anything about Node, and an
+  install under Node 18 went through silently. The incompatibility then surfaced whenever the code
+  first reached a Node 22 API. All 29 packages of the publish closure carry the field now: the
+  unscoped `rayspec` launcher, `@rayspec/cli`, `@rayspec/server`, the five provider adapters, and
+  every kernel, compose, capability and workflow package they depend on. Installing one under Node
+  18.20.4 makes npm print `npm warn EBADENGINE … required: { node: '>=22' }`, and with
+  `--engine-strict` it refuses outright (`npm error code EBADENGINE`, exit 1); under Node 22 the same
+  install succeeds. Nothing else about the packages changed — same contents, same dependencies, same
+  entrypoints.
+
+  **A future package cannot ship without it.** The requirement string has one source, the
+  repository-root `engines.node`, so a Node bump moves one number. `scripts/publish.mjs` now refuses
+  a pack, dry-run or publish — before the first manifest is stamped and before the first `pnpm` child
+  process — when any package in the publish closure omits `engines.node` or declares a different
+  value, naming every offender with its path and the value it carries. The stamping step deliberately
+  does **not** inject the field: a package that does not declare the requirement in its committed
+  manifest must not ship at all, which is the whole point of the check. Workspace members outside the
+  publish closure (`@rayspec/parity`, `@rayspec/local-boot`) are untouched — nobody installs them.
+
 ### Documentation
 
 - **The declared-route throttle is described by its real reach, and the generated OpenAPI advertises

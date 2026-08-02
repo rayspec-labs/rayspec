@@ -24,6 +24,13 @@
  *       attempts. The `@spike/*` example fixtures are versioned independently and must not count.
  *   (L) THE LAUNCHER IS NOT EXEMPT — the unscoped `rayspec` launcher is the package `npx rayspec`
  *       resolves; it is a publish target like any other and its version is held to the same rule.
+ *   (E) A PUBLISH TARGET THAT DECLARES NO `engines.node` IS NOT PACKABLE — that field is the only
+ *       thing that makes a consumer's package manager check the Node requirement at install time,
+ *       so a target missing it ships an incompatibility that surfaces later as a runtime failure.
+ *       The stamping step never injects it: the guard exists so such a package cannot ship at all.
+ *   (D) A TARGET THAT DECLARES A DIFFERENT REQUIREMENT IS NOT PACKABLE — the requirement string has
+ *       ONE source, the repo-root `engines.node`. A target that disagrees tells consumers a Node
+ *       floor other than the one the workspace is built and tested against.
  *   (A) `--version` IS AN ASSERTION, NEVER AN OVERRIDE — a value that disagrees with the derived
  *       version refuses instead of stamping. There must be no input that packs a version the tree
  *       does not carry.
@@ -58,6 +65,9 @@ import { fileURLToPath } from 'node:url';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'publish.mjs');
 const VERSION = '1.6.2';
+// The Node requirement. The fixture's root manifest is its ONE source, exactly as the repo-root
+// manifest is in the real repo; every publish target has to declare the same string.
+const NODE_ENGINE = '>=22';
 
 // ── the `pnpm` test double ──────────────────────────────────────────────────────────────────────
 // Logs one JSON line per invocation (argv + cwd, i.e. which package was packed) and succeeds. Its
@@ -108,11 +118,13 @@ function gitIn(root, ...args) {
 }
 
 /**
- * Build a throwaway repo: manifests at `rootVersion` (per-package overrides in `versions`), empty
- * `dist/` for every publish target, the REAL script copied in, and the requested tags. A tag with
- * `at: 'previous'` is created on the first commit and a second commit then moves HEAD past it.
+ * Build a throwaway repo: manifests at `rootVersion` (per-package overrides in `versions`), every
+ * publish target declaring the root's `engines.node` (per-package overrides in `engines`; `null`
+ * omits the field), empty `dist/` for every publish target, the REAL script copied in, and the
+ * requested tags. A tag with `at: 'previous'` is created on the first commit and a second commit
+ * then moves HEAD past it.
  */
-function fixture({ rootVersion = VERSION, versions = {}, tags = [] } = {}) {
+function fixture({ rootVersion = VERSION, versions = {}, engines = {}, tags = [] } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'rayspec-release-guard-'));
   workspaces.push(root);
 
@@ -121,15 +133,24 @@ function fixture({ rootVersion = VERSION, versions = {}, tags = [] } = {}) {
 
   mkdirSync(join(root, 'scripts'));
   copyFileSync(SCRIPT, join(root, 'scripts', 'publish.mjs'));
-  manifest('package.json', { name: 'rayspec', version: rootVersion, private: true });
+  manifest('package.json', {
+    name: 'rayspec',
+    version: rootVersion,
+    private: true,
+    engines: { node: NODE_ENGINE },
+  });
 
   for (const m of MEMBERS) {
     mkdirSync(join(root, m.dir), { recursive: true });
     if (m.target) mkdirSync(join(root, m.dir, 'dist'));
+    // Publish targets declare the requirement; the members that never ship deliberately do not —
+    // the same shape the real repo has, so every case also exercises the guard's scope.
+    const engine = m.name in engines ? engines[m.name] : m.target ? NODE_ENGINE : null;
     manifest(join(m.dir, 'package.json'), {
       name: m.name,
       version: versions[m.name] ?? m.pinned ?? rootVersion,
       private: true,
+      ...(engine === null ? {} : { engines: { node: engine } }),
       dependencies: Object.fromEntries(m.deps.map((d) => [d, 'workspace:*'])),
     });
   }
@@ -238,6 +259,38 @@ try {
     );
     assert.match(r.err, /9\.9\.9/, `(L) the launcher's value must be shown: ${r.err}`);
     console.log('ok (L) — the unscoped launcher cannot drift from the release version');
+  }
+
+  // ── (E) a publish target that declares NO engines → refusal naming it ──────────────────────────
+  // The members that never ship (the parity harness, the `@spike/*` fixture) carry no engines in any
+  // case here: the guard is scoped to the publish closure, and (P) shows that packs.
+  {
+    const fx = fixture({ engines: { '@rayspec/core': null } });
+    const r = run(fx, ['--pack', '--out', join(fx.root, 'out')]);
+    assertRefused(r, '(E)');
+    assert.match(
+      r.err,
+      /packages\/kernel\/core\/package\.json/,
+      `(E) the offending target must be named by path: ${r.err}`,
+    );
+    assert.match(r.err, /@rayspec\/core/, `(E) the offending target must be named: ${r.err}`);
+    assert.match(r.err, />=22/, `(E) the required value must be named: ${r.err}`);
+    console.log('ok (E) — a publish target that declares no Node engine cannot be packed');
+  }
+
+  // ── (D) a publish target that declares ANOTHER requirement → refusal naming it ─────────────────
+  {
+    const fx = fixture({ engines: { '@rayspec/cli': '>=20' } });
+    const r = run(fx, ['--pack', '--out', join(fx.root, 'out')]);
+    assertRefused(r, '(D)');
+    assert.match(
+      r.err,
+      /packages\/app\/cli\/package\.json/,
+      `(D) the offending target must be named by path: ${r.err}`,
+    );
+    assert.match(r.err, />=20/, `(D) the divergent value must be shown: ${r.err}`);
+    assert.match(r.err, />=22/, `(D) the required value must be named: ${r.err}`);
+    console.log('ok (D) — a publish target that declares another Node engine cannot be packed');
   }
 
   // ── (A) --version disagreeing with the derived version → refusal, never an override ────────────
