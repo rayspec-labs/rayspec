@@ -67,12 +67,19 @@ export const RUN_CANCELLED_STEP_KEY = 'run:cancelled';
  * a fabricated model step in the ledger. The `type` column's vocabulary is therefore wider than the
  * adapter-facing `StepReport['type']` union — the same shape the `error_class` column already has,
  * where the journal-only `tool_error` value lives outside the neutral enum. Nothing keys behaviour off
- * the type: the read path selects the failing step by `status='error'` plus a recognised `errorClass`.
+ * the type: the read path selects the failing step by `status='error'` plus a recognised `errorClass`,
+ * and among those it recognises {@link CANCELLED_CLASS} first — see `pickFailingStep`, which is how the
+ * read path arrives at the same outcome this module records for a cancelled run.
  */
 export const RUN_CANCELLED_STEP_TYPE = 'cancel';
 
-/** The neutral class a cancelled run reports — a member of the closed enum, validated on read. */
-const CANCELLED_CLASS: ErrorClass = 'cancelled';
+/**
+ * The neutral class a cancelled run reports — a member of the closed enum, validated on read.
+ * Exported because the read path has to recognise this exact value to keep its answer aligned with
+ * this module's rule about what a cancelled run's outcome is; a second copy of the literal there is
+ * the kind of drift the shared-constant rule exists to prevent.
+ */
+export const CANCELLED_CLASS: ErrorClass = 'cancelled';
 
 /**
  * The auth mode recorded on the cancellation step. The step is a platform-side outcome, not a call made

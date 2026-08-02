@@ -272,6 +272,47 @@ describe('POST /v1/runs/:id/cancel — a durable run that has not started', () =
     expect(body.error).toContain('cancel');
   });
 
+  it('a cancelled run that also recorded a failure still reports the cancellation', async () => {
+    const { token, orgId } = await principal('cancelplusfail@example.com', 'CancelPlusFailOrg');
+    const enq = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+      body: { input: 'cancel me', async: true },
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+    });
+    const runId = (await enq.json()).runId as string;
+
+    await jsonRequest(h.app, 'POST', `/v1/runs/${runId}/cancel`, {
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+    });
+
+    // A run can hold BOTH a classed failure and a cancellation. run-core records the cancellation for
+    // a run that produced its answer anyway — the signal reached it in the post-backend tail, or it
+    // executes in a process the signal cannot reach — on top of whatever the run had already
+    // journaled. Written here directly, because reproducing the race is not what this pins: what it
+    // pins is which of the two the read path answers with.
+    await h.db.$client.unsafe(
+      `INSERT INTO journal_steps
+         (run_id, tenant_id, backend, type, idempotency_key, input_hash, output, status,
+          error_class, auth_mode)
+       VALUES ($1, $2, 'echo', 'llm', $3, 'hash', $4::jsonb, 'error', 'upstream_5xx', 'api-key')`,
+      [
+        runId,
+        orgId,
+        `llm:${runId}:0`,
+        JSON.stringify({ error: 'the model call failed', errorClass: 'upstream_5xx' }),
+      ],
+    );
+
+    const read = await jsonRequest(h.app, 'GET', `/v1/runs/${runId}`, {
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+    });
+    const body = (await read.json()) as { status: string; errorClass: string | null };
+    // The write side records the cancellation as the run's outcome and commits nothing else; the read
+    // has to agree, and it must not depend on which of the two rows the database happened to return
+    // last — the selection is by class, not by position.
+    expect(body.status).toBe('error');
+    expect(body.errorClass).toBe('cancelled');
+  });
+
   it('a repeated cancel is idempotent: the second call reports the run was already terminal', async () => {
     const { token } = await principal('cancelrepeat@example.com', 'CancelRepeatOrg');
     const enq = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
