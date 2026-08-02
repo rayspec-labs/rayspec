@@ -986,6 +986,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trust boundary for an outcome its handler's server-side re-validation of the model-chosen category
   is what actually guarantees.
 
+- **Cancelling a run on the `anthropic` backend is now described by how long it actually takes, and
+  the child's death is proved against a real process id.** The reference table said the `claude`
+  child "is torn down", with no qualification, and the adapter said the same to anyone reading its
+  source — which reads as "immediately" and is not what happens. The pinned SDK ends the child's
+  standard input at once and then escalates on timers: a two-second grace, then `SIGTERM`, then five
+  more seconds, then `SIGKILL`. Measured against a real child, standard input closed 1 ms after the
+  abort, a child that honours `SIGTERM` was gone at 2014 ms, and one that ignores it at 7030 ms,
+  while the adapter's own call returned at 2008 ms — so a caller gets its answer while the child may
+  still be exiting. Both escalation timers are `unref()`ed, which costs something real: a host
+  process that exits inside that window loses the `SIGKILL` rung, and a child that ignores `SIGTERM`
+  is then left running — measured still alive twenty seconds after a host that exited 200 ms after
+  the abort, at which point the observation stopped. The adapter's README now lists that limit
+  alongside the four others this backend inherits (every rung is sent to the child's own process id
+  and never to a process group; no signal reaches a run executing in a separate worker process,
+  tracked as #210; a tool call already in flight is not interrupted; work already committed upstream
+  is not undone), and the reference table's `anthropic` row says seconds rather than implying
+  instants. Nothing about how a run behaves changed — what changed is that a reader can now find out
+  what they are getting, and that a test in the adapter package drives the real SDK against a
+  stand-in executable, holds the process id the SDK spawned and watches it disappear, instead of
+  checking that a boolean flipped. That test exercises the SDK's process-level teardown; it says
+  nothing about the vendor binary's own shutdown behaviour.
+
 ### Security
 
 - **The boot no longer writes the two auth secrets into `process.env`, so a spawned child does not
