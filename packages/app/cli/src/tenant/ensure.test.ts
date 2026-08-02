@@ -32,9 +32,16 @@ const INVITE_OUT = '/tmp/rayspec-tenant-ensure-suite-does-not-exist/owner.token'
  * The token the fake provisioning layer hands back. It is 43 base64url characters, the exact shape
  * `mintInviteToken` produces, so the "no 8-character substring of it appears" assertion is a
  * statement about a realistic credential rather than a short literal that could not collide anyway.
+ *
+ * It is DERIVED from a plain-English seed rather than written out as a literal. A hard-coded
+ * high-entropy string next to the word `token` is what a secret scanner is built to find, and a
+ * fabricated fixture is not worth teaching the scanner to ignore — an exception carved for this file
+ * is an exception that no longer fires the day the string beside it is real.
  */
 const state = vi.hoisted(() => ({
-  token: 'Zq7Kx2Lm9PvR4nTbW6yH1sJdF8gCeA3oU5iQwX0rYkM',
+  token: Buffer.from('rayspec-tenant-ensure-suite-fake-invite-token-0')
+    .toString('base64url')
+    .slice(0, 43),
   calls: [] as unknown[],
 }));
 
