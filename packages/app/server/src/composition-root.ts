@@ -117,6 +117,9 @@ import {
   mountFrontend,
   mountUnservableReason,
 } from './serve-static.js';
+// TYPE-ONLY: `tenant-provision.ts` imports `applyMigrations` from THIS module, so a value import back
+// would be a runtime cycle. The shape of the secret pair belongs with the code that consumes it.
+import type { TenantProvisionSecrets } from './tenant-provision.js';
 
 /** The default local port (overridable via PORT). Local DX only — not a reserved well-known port. */
 export const DEFAULT_PORT = 8080;
@@ -816,6 +819,47 @@ function resolveBootSecret(
     warn(bootSecretNormalizationWarning(path ? fileVar : name, raw));
   }
   return normalized;
+}
+
+/**
+ * Read + VALIDATE the TWO secrets the OPERATOR provisioning path uses — `DATABASE_URL` and
+ * `RAYSPEC_API_KEY_PEPPER` — and nothing else. Throws `BootConfigError` naming whatever is missing.
+ *
+ * It resolves through the SAME module-private `resolveBootSecret` `loadServerConfig` uses, so it gets
+ * `DATABASE_URL_FILE` / `RAYSPEC_API_KEY_PEPPER_FILE` with identical precedence (a set `_FILE` wins
+ * outright, a blank one counts as unset, and a non-blank `_FILE` naming a missing / unreadable / empty
+ * / non-regular path ABORTS rather than silently downgrading to the plain variable), identical
+ * whitespace trimming, and the identical value-free normalization warning. Living HERE rather than
+ * exporting that helper is what keeps a second `<VAR>_FILE` convention from ever existing: there is
+ * one resolver, and both loaders are callers of it.
+ *
+ * It deliberately does NOT resolve `RAYSPEC_JWT_SIGNING_KEY`. Provisioning mints no JWT — the org row
+ * and an invite token hashed with the pepper are its entire output — so demanding the platform signing
+ * key would force an automated provisioning job to carry the one secret it can never need, which is a
+ * real exposure in exchange for nothing. `loadServerConfig` is not a substitute for the same reason:
+ * it fail-closes on that key, and it is the input to a full server assembly this path never performs.
+ */
+export function loadTenantProvisionSecrets(
+  env: NodeJS.ProcessEnv = process.env,
+  warn: BootWarnSink = consoleWarn,
+): TenantProvisionSecrets {
+  const missing: string[] = [];
+  const databaseUrl = resolveBootSecret(env, 'DATABASE_URL', warn);
+  if (!databaseUrl) missing.push('DATABASE_URL');
+  const apiKeyPepper = resolveBootSecret(env, 'RAYSPEC_API_KEY_PEPPER', warn);
+  if (!apiKeyPepper || apiKeyPepper.trim().length === 0) missing.push('RAYSPEC_API_KEY_PEPPER');
+  if (missing.length > 0) {
+    throw new BootConfigError(
+      `Refusing to provision — required env var(s) missing: ${missing.join(', ')}. ` +
+        'DATABASE_URL is the Postgres connection string of the database to provision; ' +
+        'RAYSPEC_API_KEY_PEPPER is the api-key pepper the invite token is hashed with, and it must ' +
+        'be the SAME value the target deployment runs with or the invite can never be redeemed. ' +
+        'Each also accepts a <VAR>_FILE variant — DATABASE_URL_FILE, RAYSPEC_API_KEY_PEPPER_FILE — ' +
+        'naming a file to read the value from, which TAKES PRECEDENCE over the plain variable when ' +
+        'set. Fail-closed.',
+    );
+  }
+  return { databaseUrl: databaseUrl as string, apiKeyPepper: apiKeyPepper as string };
 }
 
 /**

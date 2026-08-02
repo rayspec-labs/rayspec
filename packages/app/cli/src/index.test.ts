@@ -242,3 +242,26 @@ describe('main — drain-safe stdout (no truncation)', () => {
     }
   });
 });
+
+/**
+ * The `tenant` group's DISPATCH — the top level routes `tenant` to its own group and maps a usage
+ * problem inside it to exit 2, exactly as it does for `dev`. The group is PRODUCTION-MUTATING, so it
+ * sits at the top level rather than under `dev` (which is documented as local-dev only); these arms
+ * pin that it is reachable and that the top level's enumerations name it, without reaching a database.
+ */
+describe('main — the tenant command group is dispatched from the top level', () => {
+  it('a bare `tenant` is a usage error naming the group (exit 2), and nothing is emitted', async () => {
+    await expect(main(['tenant'])).rejects.toThrow(/missing tenant subcommand/i);
+    expect(outChunks.join('')).toBe('');
+  });
+
+  it('an unknown tenant subcommand is a usage error naming the group', async () => {
+    await expect(main(['tenant', 'frobnicate'])).rejects.toThrow(/unknown tenant subcommand/i);
+    expect(outChunks.join('')).toBe('');
+  });
+
+  it('the top-level enumerations name `tenant` on both the missing and the unknown path', async () => {
+    await expect(main([])).rejects.toThrow(/`tenant`/);
+    await expect(main(['frobnicate'])).rejects.toThrow(/`tenant`/);
+  });
+});

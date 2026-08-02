@@ -18,9 +18,30 @@
  * at issue, conveyed out-of-band). No HTTP / Hono type appears here — pure DB + neutral row shapes.
  */
 import { hashInviteToken } from '@rayspec/auth-core';
-import type { Db } from '@rayspec/db';
+import type { Db, TenantDb } from '@rayspec/db';
 import { forTenant, schema } from '@rayspec/db';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, gt, isNull } from 'drizzle-orm';
+
+/**
+ * Resolve the tenant-scoped handle a write runs on: the caller's transaction when one is supplied,
+ * otherwise a fresh `forTenant` binding — the expression every method here compiled to before the
+ * transaction parameter existed, so an omitted `tx` is byte-for-byte the previous behaviour.
+ *
+ * A supplied transaction bound to a DIFFERENT tenant is refused rather than trusted. `TenantDb` injects
+ * its predicate structurally, so a mismatched handle would write a correctly-scoped row under the
+ * WRONG tenant and look entirely healthy doing it; the tenant id a caller names and the one their
+ * transaction carries must be the same claim.
+ */
+function scopeFor(db: Db, tenantId: string, tx?: TenantDb): TenantDb {
+  if (tx === undefined) return forTenant(db, tenantId);
+  if (tx.tenantId !== tenantId) {
+    throw new Error(
+      'InviteStore: the supplied transaction is bound to a different tenant than the one named. ' +
+        'Fail-closed.',
+    );
+  }
+  return tx;
+}
 
 /** A resolved invite (the redeem lookup result) — enough to validate + attach membership. */
 export interface ResolvedInvite {
@@ -43,6 +64,15 @@ export class InviteStore {
    * ISSUE an invite for `email` + `role`, expiring at `expiresAt`. Tenant-scoped via forTenant (the
    * tenant_id is auto-stamped). Stores only the token HASH; the plaintext is minted + returned to the
    * owner by the route (shown once). Returns the new invite id.
+   *
+   * `tx` lets the insert JOIN a transaction the caller already holds, which is what the operator
+   * provisioning path needs: it writes the owner invite in the SAME transaction as the org row, so an
+   * org and the credential that makes it claimable commit together or not at all. Omitted — every
+   * shipped call site — the handle is the same fresh `forTenant` binding as before.
+   *
+   * `createdBy` is `string | null` because `invites.created_by` is a nullable column carrying no
+   * `.references()`: an invite written by an operator holding the database, rather than by a
+   * principal, has no user to name and a fabricated one would be a lie in the audit trail.
    */
   async create(
     tenantId: string,
@@ -51,10 +81,11 @@ export class InviteStore {
       email: string;
       role: string;
       expiresAt: Date;
-      createdBy: string;
+      createdBy: string | null;
     },
+    tx?: TenantDb,
   ): Promise<{ id: string }> {
-    const rows = (await forTenant(this.db, tenantId)
+    const rows = (await scopeFor(this.db, tenantId, tx)
       .insert(schema.invites, {
         tokenHash: input.tokenHash,
         email: input.email,
@@ -93,14 +124,52 @@ export class InviteStore {
   }
 
   /**
+   * The tenant's OUTSTANDING invite for `role` — still unconsumed and not yet expired — or undefined.
+   *
+   * This is the read that makes an idempotent provisioning run idempotent: a second run finds the
+   * invite the first run minted and reports it instead of minting another, so the caller never has to
+   * supply a secret (or remember one) to make a retry converge. Tenant-scoped through `TenantDb.select`,
+   * which injects the tenant predicate structurally, and it returns NO token material — only the
+   * invite's id, the address it was minted for, and when it lapses.
+   */
+  async findLiveUnconsumed(
+    tenantId: string,
+    role: string,
+    now: Date,
+    tx?: TenantDb,
+  ): Promise<{ id: string; email: string; expiresAt: Date } | undefined> {
+    const rows = (await scopeFor(this.db, tenantId, tx)
+      .select(schema.invites)
+      .where(
+        and(
+          eq(schema.invites.role, role),
+          isNull(schema.invites.consumedAt),
+          gt(schema.invites.expiresAt, now),
+        ),
+      )) as Array<typeof schema.invites.$inferSelect>;
+    const row = rows[0];
+    if (!row) return undefined;
+    return { id: row.id, email: row.email, expiresAt: row.expiresAt };
+  }
+
+  /**
    * CONSUME an invite (the single-use gate) — one ATOMIC tenant-scoped UPDATE stamping `consumed_at`
    * ONLY on a row that is still unconsumed (`consumed_at IS NULL`). The `RETURNING` row set is the
    * ground truth: EXACTLY ONE of N concurrent redeems of the same token wins (its UPDATE matches the
    * still-null row); the rest match zero rows. Returns true iff THIS call consumed the invite. The
    * tenant predicate is injected by the chokepoint (a consume can never touch another tenant's row).
+   *
+   * `tx` exists so a re-issue can REVOKE the outstanding invite inside the same locked transaction
+   * that writes its replacement, keeping "at most one live owner invite" true at every instant rather
+   * than only between calls. Omitted — both shipped call sites — the UPDATE is exactly as before.
    */
-  async consume(tenantId: string, inviteId: string, at: Date = new Date()): Promise<boolean> {
-    const rows = (await forTenant(this.db, tenantId)
+  async consume(
+    tenantId: string,
+    inviteId: string,
+    at: Date = new Date(),
+    tx?: TenantDb,
+  ): Promise<boolean> {
+    const rows = (await scopeFor(this.db, tenantId, tx)
       .update(schema.invites, { consumedAt: at })
       .where(and(eq(schema.invites.id, inviteId), isNull(schema.invites.consumedAt)))
       .returning({ id: schema.invites.id })) as Array<{ id: string }>;

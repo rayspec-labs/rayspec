@@ -4,10 +4,15 @@
  * WHITELISTED global-table module: orgs/memberships have no tenant_id column (orgs.id IS the
  * tenant_id), so they are reached via the injected raw Db, not forTenant(). Org CREATE makes the
  * caller an OWNER membership in one transaction; the last-owner invariant is enforced here.
+ *
+ * `reserveOrgById` is the one method that opens its transaction through `forTenant`. It still reaches
+ * `orgs`/`memberships` unscoped — that does not change — but the org being reserved IS a tenant, and
+ * the callback it hands out writes TENANT-SCOPED rows (the owner invite) that must ride the chokepoint
+ * in the same transaction. See its own docblock.
  */
 import type { Role } from '@rayspec/auth-core';
-import type { Db } from '@rayspec/db';
-import { schema } from '@rayspec/db';
+import type { Db, TenantDb } from '@rayspec/db';
+import { forTenant, schema } from '@rayspec/db';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { ageInDays } from '../cleanup/retention.js';
 
@@ -28,6 +33,20 @@ export class OrgIdInUseError extends Error {
   constructor(orgId: string) {
     super(`org id ${orgId} already exists`);
     this.name = 'OrgIdInUseError';
+  }
+}
+
+/**
+ * A chosen org id whose row is SOFT-DELETED. `orgs.id` is a PRIMARY KEY, so a tombstone permanently
+ * occupies its id: the INSERT conflicts while `findById` (which filters `deleted_at IS NULL`) sees
+ * nothing. Distinct from {@link OrgIdInUseError} so an operator is told to choose a different id
+ * rather than hunting an org they cannot see. `assertProductTenantBootable` already treats a
+ * tombstone as absent, so resolving one here would hand back an org the next deploy refuses.
+ */
+export class OrgTombstonedError extends Error {
+  constructor(orgId: string) {
+    super(`org id ${orgId} names a soft-deleted org`);
+    this.name = 'OrgTombstonedError';
   }
 }
 
@@ -54,9 +73,12 @@ export class OrgStore {
    * `id` is OPTIONAL and gated. Unset (every path but the operator bootstrap) ⇒ the INSERT names
    * name+slug only and the database generates the id via `defaultRandom()`, exactly as before. Set ⇒
    * the org row is created WITH that id — and, because the owner membership is written in the SAME
-   * transaction, a chosen id can never leave a memberless org behind: invites are owner-only and
-   * `invites.tenant_id` is a NOT NULL FK to `orgs(id)`, so an org with no owner is a permanent dead
-   * end, not merely an inconvenience.
+   * transaction, THIS path can never leave a memberless org behind. That matters because an org with
+   * no way to grant the first membership is a permanent dead end rather than an inconvenience: on the
+   * HTTP surface an invite can only be issued by an owner (`org:member:add`), so nobody is left who
+   * could issue one. The operator provisioning path (`reserveOrgById`) reaches the same guarantee by
+   * the other route — it writes an owner INVITE in the same transaction as the org row instead of a
+   * membership — so an org is still never created without the thing that makes it claimable.
    *
    * Passing an id WITHOUT the posture is refused here rather than upstream: an org id is normally
    * server-generated and unguessable, and that unguessability is load-bearing (a deployment binds
@@ -96,6 +118,121 @@ export class OrgStore {
         .insert(schema.memberships)
         .values({ orgId: org.id, userId: input.ownerUserId, role: 'owner', status: 'active' });
       return org;
+    });
+  }
+
+  /**
+   * CREATE-OR-RESOLVE an org under an id the operator chose — the reservation the automated
+   * provisioning path is built on. Unlike `createOrgWithOwner` it creates NO user and NO membership;
+   * what it takes instead is a REQUIRED `claim` callback, invoked inside the same transaction with a
+   * tenant-scoped handle, the org row and the state the caller needs to decide what to write. That is
+   * the invariant stated at the type level: an org id cannot be reserved without the caller being
+   * asked what makes the org claimable.
+   *
+   * IDEMPOTENT WITHOUT A SECOND LEDGER. `orgs.id` is the PRIMARY KEY, so the database itself is the
+   * single-flight point — no mapping table, no operation key beside the id. The INSERT is the SAME
+   * `ON CONFLICT (id) DO NOTHING` statement the bootstrap route uses: a taken id comes back as an
+   * empty RETURNING rather than a 23505 that would poison the transaction. On that resolve branch the
+   * row is then re-read `FOR UPDATE`, which serializes a concurrent second caller behind the winner
+   * (measured: DO NOTHING itself already waits for a conflicting uncommitted insert to commit, and the
+   * follow-up read sees the winner's row) and holds the org while `claim` decides. On the created
+   * branch our own uncommitted insert already holds the row exclusively for the rest of the
+   * transaction, so no extra lock is taken.
+   *
+   * The `deleted_at` filter is deliberately ABSENT from that re-read: a tombstone must be VISIBLE
+   * here. It still occupies its id, so silently treating it as a fresh reservation would hand back an
+   * org that `assertProductTenantBootable` counts as absent — a deployment that provisions green and
+   * then refuses to boot.
+   *
+   * `TenantDb.transaction` (rather than the raw handle) is what carries this: it performs the
+   * transaction-handle cast internally, sets the tenant GUC transaction-locally, hands `claim` a real
+   * tenant-scoped handle so a tenant-scoped write inside it rides the actual chokepoint, and — via the
+   * TenantDb constructor — fail-closes on an id that is not UUID-shaped, the same rule the product
+   * boot gate is held to. `orgs`/`memberships` are global tables, so the reads and the insert here go
+   * through `unscoped()` exactly as the rest of this whitelisted module does.
+   *
+   * RETURNS the org row as the DATABASE holds it, never the operator's spelling of the id or the name
+   * they passed on a resolve: `orgs.id` is a `uuid` column that matches in any letter case and answers
+   * canonically, while a deployment compares its bound tenant as a string (the reason
+   * `resolveLiveTenantOrgId` resolves rather than echoes). `uuidgen` prints upper case on macOS.
+   */
+  async reserveOrgById(
+    input: { readonly id: string; readonly name: string; readonly slug: string },
+    claim: (
+      tx: TenantDb,
+      org: OrgRow,
+      state: { readonly created: boolean; readonly owners: number },
+    ) => Promise<void>,
+  ): Promise<{ readonly org: OrgRow; readonly created: boolean; readonly owners: number }> {
+    // The same fail-closed backstop `createOrgWithOwner` carries, for the same reason: the store is the
+    // single point at which a chosen id is admitted. `claim` is not invoked on this path.
+    if (!this.tenantBootstrapEnabled) {
+      throw new Error(
+        'reserveOrgById: reserving an org under a chosen id requires the tenant-bootstrap operator ' +
+          'posture (RAYSPEC_TENANT_BOOTSTRAP_ENABLED). Fail-closed.',
+      );
+    }
+    // BIND THE CANONICAL SPELLING, not the operator's. `orgs.id` is a `uuid` column, so Postgres
+    // matches an id supplied in any letter case and answers in lower case — and the shape check below
+    // is case-insensitive too, so a SHOUTED id (which is what `uuidgen` prints on macOS) would
+    // otherwise open a transaction whose tenant GUC, and whose handle handed to `claim`, name a
+    // spelling the database never uses, while the row read back names the canonical one. Every
+    // tenant-scoped write inside `claim` compares those as strings. Lower-casing is exact here rather
+    // than approximate: the shape check admits only 8-4-4-4-12 hex, which is the canonical form's own
+    // alphabet. A malformed id still fails closed in the TenantDb constructor, as before.
+    const tenantId = input.id.toLowerCase();
+    return forTenant(this.db, tenantId).transaction(async (ttx) => {
+      const raw = ttx.unscoped();
+      const insertedRows = await raw
+        .insert(schema.orgs)
+        .values({ id: tenantId, name: input.name, slug: input.slug })
+        .onConflictDoNothing({ target: schema.orgs.id })
+        .returning();
+      const created = insertedRows.length > 0;
+
+      let org: OrgRow;
+      if (created) {
+        const row = insertedRows[0] as OrgRow;
+        org = { id: row.id, name: row.name, slug: row.slug };
+      } else {
+        const locked = (await raw
+          .select({
+            id: schema.orgs.id,
+            name: schema.orgs.name,
+            slug: schema.orgs.slug,
+            deletedAt: schema.orgs.deletedAt,
+          })
+          .from(schema.orgs)
+          .where(eq(schema.orgs.id, tenantId))
+          .limit(1)
+          .for('update')) as Array<OrgRow & { deletedAt: Date | null }>;
+        const row = locked[0];
+        // Zero rows means the winner of the conflict rolled back between our INSERT and this read. We
+        // do NOT loop: a retry could spin against a caller that keeps failing, and the id genuinely was
+        // taken at the moment we asked, which is what the operator needs to be told.
+        if (!row) throw new OrgIdInUseError(tenantId);
+        if (row.deletedAt !== null) throw new OrgTombstonedError(tenantId);
+        org = { id: row.id, name: row.name, slug: row.slug };
+      }
+
+      // The active-owner count UNDER THE LOCK, with the predicate `ownerCount` uses. Read here rather
+      // than by the caller so it cannot be answered outside the transaction that holds the row: it is
+      // what lets a resolve refuse to grant ownership of an org that already has an owner.
+      const ownerRows = await raw
+        .select()
+        .from(schema.memberships)
+        .where(
+          and(
+            eq(schema.memberships.orgId, org.id),
+            eq(schema.memberships.role, 'owner'),
+            eq(schema.memberships.status, 'active'),
+            isNull(schema.memberships.deletedAt),
+          ),
+        );
+      const owners = ownerRows.length;
+
+      await claim(ttx, org, { created, owners });
+      return { org, created, owners };
     });
   }
 

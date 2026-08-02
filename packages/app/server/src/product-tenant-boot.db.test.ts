@@ -166,7 +166,9 @@ describe.skipIf(!baseUrl)('Product-YAML boot — the deployment-tenant gate', ()
     await expect(boot(ABSENT_TENANT)).rejects.toThrow(
       new RegExp(`RAYSPEC_PRODUCT_TENANT_ID='${ABSENT_TENANT}' does not name a live org`),
     );
-    // The abort is ACTIONABLE: it names the supported order, not just the defect.
+    // The abort is ACTIONABLE: it names the supported order, not just the defect — the production
+    // command first, and the local-dev alternative after it.
+    await expect(boot(ABSENT_TENANT)).rejects.toThrow(/tenant ensure --org-id/);
     await expect(boot(ABSENT_TENANT)).rejects.toThrow(/dev bootstrap-tenant --org-id/);
     armsRan += 1;
   }, 120_000);
