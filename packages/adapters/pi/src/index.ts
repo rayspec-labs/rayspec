@@ -291,6 +291,20 @@ export interface PiAdapterOptions {
   apiKey: string;
 }
 
+/**
+ * Run a teardown step and swallow whatever it reports. Tearing a session down happens in a `finally`,
+ * where a throw would replace the run's real answer with a failure the caller cannot act on, and would
+ * skip the steps behind it. Mirrors the contract of `onAbortSignal`'s callback, which must not throw
+ * either, and for the same reason.
+ */
+function swallow(step: () => void): void {
+  try {
+    step();
+  } catch {
+    /* best effort — see the teardown in run() */
+  }
+}
+
 export class PiAdapter implements Backend {
   readonly id = 'pi' as const;
   private readonly apiKey: string;
@@ -557,14 +571,20 @@ export class PiAdapter implements Backend {
       }
     } finally {
       // Own + tear down the session no matter what (never leak it) — even on a throwing emit.
-      unlinkCancel();
-      unsubscribe();
+      // Each step is guarded INDIVIDUALLY, and that is the point: only `abort()` used to be, so a
+      // throw from any of the others both escaped `run()` as a rejection — replacing a perfectly good
+      // RunResult, or a real upstream error, with a tidying-up failure the caller can do nothing with
+      // — and abandoned the steps behind it, which are the ones that actually release the SDK's
+      // resources. Tearing down is not an outcome; it must not be able to produce one, and it must not
+      // be able to stop itself half-way.
+      swallow(() => unlinkCancel());
+      swallow(() => unsubscribe());
       try {
         await session.abort();
       } catch {
         /* best effort */
       }
-      session.dispose();
+      swallow(() => session.dispose());
     }
 
     if (status === 'error') {
