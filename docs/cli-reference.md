@@ -330,8 +330,15 @@ attempt got through.
   `org` is `created` on the run that made the organization and `existing` on
   every later one. `ownerHandoff.status` is one of `not_requested` (no
   `--owner-email`), `already_owned` (the organization already has an owner — the
-  command **never** displaces one), `pending` (an earlier run's invite is still
-  live) or `issued` (this run minted one).
+  command does not displace one), `pending` (an earlier run's invite is still
+  live) or `issued` (this run minted one). The one gap in `already_owned`: an
+  invite that is being redeemed at that exact moment is consumed a statement
+  before the membership is written, so a run landing in between sees neither and
+  mints. That produces an additional owner invite, never a displaced owner.
+
+  On a run that resolves an existing organization, `--name` is not applied: the
+  stored name and slug are what comes back. The command creates or resolves; it
+  does not rename.
 
 - **Exit:** `0` on success; `1` on an operational failure (a missing secret, a
   soft-deleted id, an invite-out path that is taken, a migration chain that could

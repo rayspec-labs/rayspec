@@ -267,6 +267,39 @@ describe('tenant ensure — the injected implementations are the ones that run',
       tokenFile: INVITE_OUT,
     });
   });
+
+  it('reports a driver failure as PROVISION_FAILED, keeping the code field to this command’s own namespace', async () => {
+    // A Postgres SQLSTATE and a Node errno both arrive as `err.code`. `errors[].code` is documented as
+    // this command's namespace (ORG_TOMBSTONED / OWNER_INVITE_OUT_EXISTS / ORG_NAME_SLUG_IN_USE …), so
+    // a caller matching on it must never be handed '23505' or 'ECONNREFUSED' instead.
+    for (const foreign of ['23505', 'ECONNREFUSED']) {
+      const result = await runTenantEnsure(['--org-id', ORG_ID, '--name', 'Acme'], {
+        loadSecretsImpl: () => ({ databaseUrl: DB_URL, apiKeyPepper: PEPPER }),
+        provisionImpl: async () => {
+          throw Object.assign(new Error(`driver said ${foreign}`), { code: foreign });
+        },
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors).toEqual([
+        { code: 'PROVISION_FAILED', message: `driver said ${foreign}` },
+      ]);
+    }
+  });
+
+  it('still surfaces the provisioning layer’s OWN code, which the reference documents', async () => {
+    const result = await runTenantEnsure(['--org-id', ORG_ID, '--name', 'Acme'], {
+      loadSecretsImpl: () => ({ databaseUrl: DB_URL, apiKeyPepper: PEPPER }),
+      provisionImpl: async () => {
+        // Shaped like the real TenantProvisionError, which names itself in its constructor.
+        throw Object.assign(new Error('org id names a soft-deleted org'), {
+          name: 'TenantProvisionError',
+          code: 'ORG_TOMBSTONED',
+        });
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.errors[0]?.code).toBe('ORG_TOMBSTONED');
+  });
 });
 
 describe('tenant ensure — usage problems are exit 2, before any provisioning call', () => {
@@ -322,5 +355,28 @@ describe('tenant ensure — usage problems are exit 2, before any provisioning c
   it('a missing / unknown tenant subcommand is a usage error naming the group', async () => {
     await expect(main(['tenant'])).rejects.toThrow(/missing tenant subcommand/i);
     await expect(main(['tenant', 'frobnicate'])).rejects.toThrow(/unknown tenant subcommand/i);
+  });
+
+  it('a malformed --owner-email is refused here, not after the database has been migrated', async () => {
+    // The address used to be validated only inside the reservation — i.e. after applyMigrations had
+    // already run against the target database, which contradicts this parser's own promise that a
+    // usage problem is answered before a connection is opened.
+    for (const bad of ['owner-at-example.com', '@example.com', 'owner@', 'a b@example.com']) {
+      await expect(
+        main([
+          'tenant',
+          'ensure',
+          '--org-id',
+          ORG_ID,
+          '--name',
+          'Acme',
+          '--owner-email',
+          bad,
+          '--owner-invite-out',
+          INVITE_OUT,
+        ]),
+      ).rejects.toThrow(/--owner-email must be an email address/);
+    }
+    expect(state.calls).toHaveLength(0);
   });
 });
