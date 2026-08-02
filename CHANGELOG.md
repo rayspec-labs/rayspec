@@ -483,6 +483,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pnpm release:identity --tarballs <dir>`; both are offline, and neither starts a package manager
   or writes anything to a registry.
 
+- **A Product-YAML deployment can now construct every product-side model call itself, through one
+  optional seam on `assembleServer`: `productAgentBackendsFactory`.** The two spec profiles were not
+  equal here. A backend-profile deployment has always been able to supply an `AgentBackendsFactory`
+  and decide for itself how each model call comes into existence — which is what lets a deployment
+  broker those calls through its own execution boundary instead of holding provider credentials in
+  the serving process. A product-profile deployment had no such seam at all: the boot built the four
+  in-process adapters directly from `OPENAI_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` /
+  `ANTHROPIC_API_KEY` / `CODEX_HOME`, so the only credential boundary available for a product
+  deployment was the whole process. The factory closes that gap for extraction, the conversation
+  responder and the record input-normalizer.
+
+  **It is called once, with the complete set, after composition — never one call at a time.** The
+  boot resolves the sidecar configs and composes the capabilities first, then hands the factory every
+  model call the deployed document actually needs: each declared extractor in document order, then
+  the responder, then the normalizer, each with the agent id, the declared backend and the declared
+  model. Returning a Backend per requirement is the whole contract. There is deliberately no
+  per-requirement fallback: a factory that omits one requirement fails the boot rather than having
+  that one call quietly built in-process against an ambient credential, which is the exact outcome
+  the seam exists to prevent. A returned Backend must also report the `id` the sidecar declared —
+  the seam substitutes construction, not identity, and journal attribution, the native-structured-
+  output boot gate and run-core's capability validation all key on that id.
+
+  **Omitting it changes nothing.** With no factory the boot never executes a byte of the new code:
+  the option is read once, and every builder falls back to the same `makeExtractionBackend` call it
+  made before, with the same two arguments, at the same point in the same loop. The per-backend
+  environment demands, the anthropic billing and reuse-login warnings and their order, the
+  per-extractor abort order, and every error string — including `extraction backend '<x>' is not
+  wired in this boot (wired: openai | anthropic | pi | codex). Fail-closed.` — are unchanged. A
+  deterministic executor mode keeps its exact meaning too: `RAYSPEC_EXTRACTION_MODE`,
+  `RAYSPEC_RESPONDER_MODE` or `RAYSPEC_NORMALIZE_MODE` set to `deterministic` still uses the injected
+  dev/CI Backend, and the factory is never even asked for a Backend that mode would discard.
+
+  **What it does not cover, stated plainly.** Speech-to-text is not part of this seam: the STT
+  adapter is still selected by `STT_PROVIDER` and still needs `DEEPGRAM_API_KEY` in the product
+  process, as does the media-preparation path. A deployment that transcribes audio therefore still
+  has a provider credential in-process, and this change should not be read as discharging the whole
+  credential boundary. The seam is also a **boot** seam: one Backend serves every request tenant the
+  deployment admits, so it is not a place to scope credentials per tenant. And it is
+  **embedder-only** — there is no environment variable naming a module to load, because that would
+  mean loading operator-named code from the environment into the process holding the boot secrets;
+  `rayspec-serve` and `rayspec deploy` cannot install a factory, and a test pins that they cannot.
+
 ### Changed
 
 - **A product deployment whose `RAYSPEC_PRODUCT_TENANT_ID` is malformed or names no live org now

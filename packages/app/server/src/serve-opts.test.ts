@@ -86,6 +86,11 @@ describe('assembleOptsFromEnv — serve.ts wires the RIGHT deployer seams', () =
     expect(opts.registerProductTables).toBe(registerProductStores);
     // The product deploy path builds its own backends from its extraction sidecars — NOT from the YAML.
     expect(opts.agentBackendsFactory).toBeUndefined();
+    // POSTURE: the product-backend factory seam is EMBEDDER-ONLY and has no env source. An env-named
+    // module path would mean loading operator-named code from the environment into the process that
+    // holds the boot secrets — a trust boundary this repo has nowhere. REDs the moment `rayspec-serve`
+    // (or `rayspec deploy`, which reuses this builder) can install a factory without an embedder.
+    expect('productAgentBackendsFactory' in opts).toBe(false);
   });
 });
 
