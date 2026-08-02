@@ -550,7 +550,7 @@ try {
     console.log('ok (T) — an archive whose tail only tar would read is refused, not half-read');
   }
 
-  // ── (E) a pax rename no other reader honours — global path, smuggled path, a `..` escape ────────
+  // ── (E) pax headers: the renames and boundary moves the readers do not agree on, and one they do ─
   {
     const fx = fixture();
     const generated = generate(fx);
@@ -639,6 +639,45 @@ try {
       swallowed.code,
       0,
       `(E) an entry swallowed by a pax size must not verify; got ${swallowed.code}`,
+    );
+
+    // (f) THE OTHER DIRECTION — a header a packer really emits must be READ, not refused. The
+    // records above are what node-tar 6.2.1 writes for a path too long for a ustar header, in its
+    // order, `size` included; only `path` and `size` change what a reader does, and both are
+    // modelled. Without this arm the refusals above could tighten until a genuine long-path archive
+    // stopped verifying and nothing would go red.
+    const longName = `package/dist/${'q'.repeat(140)}.js`;
+    const longBody = Buffer.from('export const q = 1;\n');
+    ship([
+      ...base,
+      tarEntry(
+        'PaxHeader',
+        Buffer.concat([
+          paxRecord('path', longName),
+          paxRecord('ctime', '1785675205.956'),
+          paxRecord('atime', '1785675205.956'),
+          paxRecord('SCHILY.dev', '16777232'),
+          paxRecord('SCHILY.ino', '508639210'),
+          paxRecord('SCHILY.nlink', '1'),
+          paxRecord('mtime', '1785675205.956'),
+          paxRecord('size', `${longBody.length}`),
+          paxRecord('uid', '501'),
+          paxRecord('uname', 'philipp'),
+        ]),
+        'x',
+      ),
+      tarEntry('package/dist/truncated-name.js', longBody),
+    ]);
+    const packerPax = verify(fx);
+    assert.match(
+      packerPax.out + packerPax.err,
+      /file-list digest/i,
+      `(E) a packer-emitted pax header must be READ (and its added file caught by the file list), not refused: ${packerPax.err || packerPax.out}`,
+    );
+    assert.doesNotMatch(
+      packerPax.err,
+      /pax/i,
+      `(E) a packer-emitted pax header must not be refused as a pax fault: ${packerPax.err}`,
     );
 
     // (c) a `..` segment that passes `startsWith('package/')` but escapes it once resolved.
