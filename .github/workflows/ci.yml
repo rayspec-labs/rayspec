@@ -204,9 +204,10 @@ jobs:
       # (isolated on the launcher, the one member that records no tarball integrity), the launcher
       # self-reference holds (embedding the manifest keeps verification green, embedding a different
       # one does not), an archive that carries a path twice or hides an entry behind a lone null block
-      # is refused rather than half-read, a pax extended header that would make this reader and the
-      # node-tar behind `npm i` name an entry differently — or delimit it differently — is refused
-      # while the header a packer really emits is still read, the documented release sequence stays
+      # is refused rather than half-read, a pax extended header or GNU long-name block that would
+      # make this reader and the node-tar behind `npm i` name an entry differently — or delimit it
+      # differently — is refused while the header a packer really emits is still read and applied,
+      # the documented release sequence stays
       # green when it is run a second time, the manifest reproduces byte-identically from the same
       # inputs, an absent tag or
       # workflow run is a null with a reason rather than an invented value, a git failure is never

@@ -40,9 +40,13 @@
  *       node-tar really honours, inserted BEFORE an existing entry so that no digest moves and the
  *       disagreement is the entire tamper; a pax `size`, which moves an entry's END and can swallow
  *       the entry behind it, is applied the way both readers apply it, so the swallowed file shows up
- *       as the file-list change it is; and a `..` segment that escapes `package/` is refused. All of
- *       them are the same fault: the reader must not name — or delimit — an entry differently from
- *       the installer, least of all at the excluded manifest path.
+ *       as the file-list change it is, while a `size` preceding another HEADER is refused; a GNU
+ *       long-name block whose body the readers terminate differently (a NUL, then a newline) is
+ *       refused, spliced before an entry that already exists so the entry list never moves; the
+ *       header a packer really emits is READ, with a colliding entry behind it so a dropped rename
+ *       cannot pass; and a `..` segment that escapes `package/` is refused, as a file and as a
+ *       directory. All of them are the same fault: the reader must not name — or delimit — an entry
+ *       differently from the installer, least of all at the excluded manifest path.
  *   (Q) THE DOCUMENTED RELEASE SEQUENCE REPEATS — the manifest is gitignored and listed in the
  *       launcher's `files`, so it SURVIVES a release run and the next pack would ship the previous
  *       run's manifest. Running the sequence twice (with the removal step it prescribes) is green
@@ -667,6 +671,12 @@ try {
         'x',
       ),
       tarEntry('package/dist/truncated-name.js', longBody),
+      // A real entry at the un-renamed path. It is what makes this arm DISCRIMINATING: if the
+      // rename were silently dropped rather than applied, both entries would land on
+      // `dist/truncated-name.js` and the run would refuse as a duplicate path instead of reporting
+      // the file-list mismatch asserted below — so a reader that stopped honouring a legitimate
+      // pax rename could not pass this case.
+      tarEntry('package/dist/truncated-name.js', Buffer.from('export const t = 2;\n')),
     ]);
     const packerPax = verify(fx);
     assert.match(
@@ -678,6 +688,66 @@ try {
       packerPax.err,
       /pax/i,
       `(E) a packer-emitted pax header must not be refused as a pax fault: ${packerPax.err}`,
+    );
+
+    // (g) a GNU long-name block whose body the two readers terminate differently. node-tar strips
+    // from the first NUL with a pattern that stops at a newline, so a body carrying a NUL and then a
+    // newline keeps the tail and names a DIFFERENT file; a reader that strips to the end of the body
+    // sees the plain name and certifies green. Like (b)/(d), nothing is added or removed — the
+    // entry list this reader records is untouched while the installer writes the entry elsewhere.
+    // The block is spliced BEFORE an entry that already exists, and repeats that entry's own name,
+    // so a reader that drops the tail names it exactly as the manifest recorded it and reports the
+    // launcher verified — nothing added, nothing removed, every digest still matching.
+    const [firstBase, secondBase, ...restBase] = base;
+    ship([
+      firstBase,
+      // The trigger is a NUL followed later by a newline: node-tar's terminator stops at the
+      // newline and keeps the tail, a strip-to-end terminator drops it.
+      tarEntry(
+        '././@LongLink',
+        Buffer.concat([
+          Buffer.from('package/dist/index.js'),
+          Buffer.from([0]),
+          Buffer.from('\npackage/evil-shim'),
+        ]),
+        'L',
+      ),
+      secondBase,
+      ...restBase,
+    ]);
+    const longNameSplit = verify(fx);
+    assert.notEqual(
+      longNameSplit.code,
+      0,
+      `(E) a long-name block the readers terminate differently must be refused; got ${longNameSplit.code}`,
+    );
+    assert.match(
+      longNameSplit.err,
+      /terminate differently/i,
+      `(E) the refusal must name the disagreement: ${longNameSplit.err}`,
+    );
+
+    // (h) a pax `size` record that precedes ANOTHER header rather than a file entry. node-tar clears
+    // its pending pax state only on the non-meta branch while its header decoder takes `size` from
+    // that state unconditionally, so the record sizes the following HEADER for the installer and not
+    // for a reader that frames that header by its own field — and the two part company from there to
+    // the end of the archive. Refused rather than modelled: no packer emits it.
+    ship([
+      ...base,
+      tarEntry('PaxHeader', paxRecord('size', '1024'), 'x'),
+      tarEntry('././@LongLink', Buffer.from('package/dist/renamed.js '), 'L'),
+      tarEntry('package/dist/decoy.js', Buffer.from('export const d = 1;\n')),
+    ]);
+    const sizeBeforeHeader = verify(fx);
+    assert.notEqual(
+      sizeBeforeHeader.code,
+      0,
+      `(E) a pax size preceding another header must be refused; got ${sizeBeforeHeader.code}`,
+    );
+    assert.match(
+      sizeBeforeHeader.err,
+      /precedes another header/i,
+      `(E) the refusal must name it: ${sizeBeforeHeader.err}`,
     );
 
     // (c) a `..` segment that passes `startsWith('package/')` but escapes it once resolved.

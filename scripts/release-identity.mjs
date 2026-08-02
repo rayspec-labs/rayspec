@@ -279,6 +279,28 @@ function paxRecordsByLine(body) {
 }
 
 /**
+ * The name a GNU long-name (`L`) block carries, when every reader agrees on it.
+ *
+ * The body is a path followed by NUL padding, and the readers terminate it differently. node-tar
+ * strips from the first NUL with a pattern whose `.` does NOT match a newline, so a body holding a
+ * NUL and then a newline KEEPS everything after that newline; a reader that strips to the end of the
+ * body drops it. Same divergence class as a pax `path`, so it gets the same answer — both readings,
+ * and a refusal when they name different files. A packer writes a plain path plus NUL padding, where
+ * the two agree exactly.
+ */
+function gnuLongName(body) {
+  const text = body.toString('utf8');
+  const toNewline = text.replace(/\0.*/, ''); // node-tar's rule: `.` stops at a newline
+  const toEnd = text.replace(/\0.*$/s, ''); // strip everything from the first NUL
+  if (toNewline !== toEnd) {
+    throw new Error(
+      `a long-name block its readers terminate differently (${toEnd} vs ${toNewline}) — tar readers disagree on which file this is`,
+    );
+  }
+  return toEnd;
+}
+
+/**
  * The `path` override carried by a pax extended-header body, or null when it carries none — but only
  * a body every reader agrees about, and only one whose other records change nothing this reader
  * models. Anything else is refused.
@@ -378,7 +400,16 @@ function paxOverrides(body, { global }) {
  *     of the next one, and an entry can be swallowed whole into its predecessor's content. `size` is
  *     therefore APPLIED here, the way both readers apply it — ignoring it would mean hashing an
  *     entry no installer writes. Every other key that could reach that far is refused instead (see
- *     paxOverrides): a `linkpath`, a `GNU.sparse.*`, anything the format gains later.
+ *     paxOverrides): a `linkpath`, a `GNU.sparse.*`, anything the format gains later. A `size` that
+ *     precedes another HEADER is refused outright: node-tar clears its pending pax state only on the
+ *     non-meta branch, so the record sizes that header's body for the installer and not for a reader
+ *     that frames it by its own field, and the two would part company for the rest of the archive.
+ *   - A GNU LONG-NAME BLOCK THE READERS TERMINATE DIFFERENTLY. Its body is a NUL-terminated path,
+ *     and node-tar's terminator stops at a newline — a body carrying a NUL and then a newline keeps
+ *     everything after it, where a strip-to-end terminator drops it. Splice such a block before an
+ *     entry, repeating that entry's own name, and a reader that drops the tail names the entry
+ *     exactly as recorded while the installer writes it somewhere else entirely. Both readings are
+ *     taken and a disagreement is refused, as for a pax `path` (see gnuLongName).
  * The messages carry no file name: the single caller knows which tarball it handed over and says so.
  */
 function unpack(gzipped) {
@@ -429,9 +460,19 @@ function unpack(gzipped) {
     off += 512 + Math.ceil(size / 512) * 512;
 
     if (meta) {
+      // A pax `size` sizes the body of the entry that follows — and node-tar lets it size a
+      // following HEADER too: it clears its pending pax state only on the non-meta branch, while
+      // the header decoder takes `size` from that state unconditionally. A reader that framed the
+      // header by its own field would part company with the installer from here to the end of the
+      // archive. No packer emits that, so it is refused rather than modelled.
+      if (sizeOverride !== null) {
+        throw new Error(
+          `a pax size record precedes another header — tar readers do not agree on which body it sizes`,
+        );
+      }
       if (type === 'L') {
         // A GNU long-name block: its body is the next entry's name, NUL-terminated.
-        override = body.toString('utf8').replace(/\0.*$/s, '');
+        override = gnuLongName(body);
       } else {
         // Refuses a body that is not well-formed pax records, one the two parses read differently,
         // and one carrying a record this reader does not model.
