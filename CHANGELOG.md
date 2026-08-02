@@ -446,14 +446,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ships inside, so a tarball whose digest included the manifest could never match the tarball that
   ships. What is recorded for the launcher instead is verifiable on the real artifact — its
   file-list digest over every entry except the manifest — and a launcher carrying some *other*
-  manifest fails verification, so the exclusion is checked rather than trusted.
+  manifest fails verification, so the exclusion is checked rather than trusted. Making that true
+  takes an archive reader stricter than `tar`: it refuses a tarball carrying one path **twice**
+  (extraction keeps the *last* entry, so a forged second copy at the excluded path would be the one
+  installed) and one hiding content **behind a lone null block** (`tar`, and the node-tar an `npm i`
+  runs, treat that as a warning and read on). And when `git` cannot answer whether the working tree
+  was clean, generation refuses rather than recording the flattering value — a failed command and a
+  clean tree both produce no output, and only one of them is worth writing down.
 
   **Verifying is one command.** `pnpm release:identity-verify --tarballs <dir>` recomputes every
-  digest and exits non-zero on the first divergence, naming the package and both values. A tarball
-  whose bytes moved fails on the integrity even when it unpacks to identical content; a tarball
-  whose contents moved fails on the file list even when no integrity is recorded for it. Generating
-  is `pnpm release:identity --tarballs <dir>`; both are offline, and neither starts a package
-  manager or writes anything to a registry.
+  digest and exits non-zero naming every package that diverged and both values. A tarball whose
+  bytes moved fails on the integrity even when it unpacks to identical content; a tarball whose
+  contents moved fails on the file list even when no integrity is recorded for it. Generating is
+  `pnpm release:identity --tarballs <dir>`; both are offline, and neither starts a package manager
+  or writes anything to a registry.
 
 ### Changed
 

@@ -2,7 +2,7 @@
   "name": "rayspec",
   "version": "1.6.2",
   "private": true,
-  "//files": "`rayspec-release-identity.json` is a RELEASE artifact, not a source file: `scripts/release-identity.mjs` writes it into this directory during a release run and it is gitignored, so it is absent from a development checkout (npm silently skips a `files` entry that does not exist). Listing it here is what makes the release identity manifest ship inside the launcher tarball — the installed-package half of its reachability.",
+  "//files": "`rayspec-release-identity.json` is a RELEASE artifact, not a source file: `scripts/release-identity.mjs` writes it into this directory during a release run and it is gitignored, so it is absent from a fresh checkout and npm silently skips a `files` entry that does not exist. Because it SURVIVES a release run, the release sequence removes it before packing — see the repo-root `//release-identity` note; generation refuses when a packed launcher already carries a manifest that is not the one it would write. Listing it here is what makes the release identity manifest ship inside the launcher tarball — the installed-package half of its reachability.",
   "files": [
     "dist",
     "rayspec-release-identity.json"

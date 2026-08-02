@@ -29,8 +29,9 @@
  * --------------------------------------------------------------------
  * `pnpm pack` rewrites each `workspace:*` dependency to the stamped version in the PACKED manifest,
  * and it does not emit that map in a stable key order: two consecutive `--pack` runs of one commit
- * differed in 10 and in 12 of the 29 tarballs across two measured pairs, and in every single case
- * the difference was confined to `package/package.json` and vanished once its keys were sorted. So:
+ * differed in 10 to 12 of the 29 tarballs across four measured pairs (15 of the 29 packed manifests
+ * carry more than one internal dependency, which is the ceiling), and in every single case the
+ * difference was confined to `package/package.json` and vanished once its keys were sorted. So:
  *   - `tarball.integrity` (sha512 SRI) identifies ONE ARTIFACT — the exact tarball this manifest was
  *     generated from, i.e. the file an operator attaches to the release. It is not a reproducible
  *     build claim, and re-packing the same commit will legitimately move it.
@@ -51,7 +52,13 @@
  * IS verifiable on the shipped tarball: its file-list digest over every entry EXCEPT the manifest
  * (`files.excluded`). Verification computes the same exclusion, and — when the tarball carries the
  * manifest — additionally requires those bytes to be byte-identical to the manifest being verified.
- * So the exclusion is not a hole: a launcher carrying some OTHER manifest fails.
+ * So the exclusion is not a hole: a launcher carrying some OTHER manifest fails. That holds because
+ * `unpack` refuses an archive that carries one path twice or that hides content behind a lone null
+ * block: without those two refusals the excluded path is a place to post a second, forged copy that
+ * the file list never sees and extraction is what actually installs.
+ * The launcher is also packed FROM a directory a previous release run may have left a manifest in,
+ * so generation refuses when the packed launcher already carries a manifest that is not the one it
+ * would write — see the `//release-identity` operator sequence, whose first step removes it.
  *
  * HONESTY ABOUT WHAT DOES NOT EXIST
  * ---------------------------------
@@ -114,7 +121,10 @@ const ALGORITHMS = {
     'sha256, hex, over the UTF-8 concatenation of `<path> <file_digest>\\n` for every unpacked ' +
     'entry not listed in `files.excluded`, paths relative to the package root (the leading ' +
     '`package/` of the tarball removed), lines sorted byte-wise ascending.',
-  source_file_digest: 'sha256, hex, over the file bytes as committed at `source.commit`.',
+  source_file_digest:
+    'sha256, hex, over the file bytes in the checkout the manifest was generated from — identical ' +
+    'to the bytes committed at `source.commit` when `source.worktree_clean` is true, and otherwise ' +
+    'the working-tree bytes of a file `source.dirty_paths` names. Reproduce: `shasum -a 256 <path>`.',
 };
 
 /** What the digests do and do not claim — the same idiom the dependency SBOM uses. */
@@ -124,7 +134,7 @@ const SCOPE_NOTE =
   '`tarball.integrity` pins those exact files. `files.list_digest` pins their unpacked content and ' +
   'is the digest that survives a re-pack of the same commit, so it is also the digest that matches ' +
   'a tarball fetched from the registry (a real publish packs again at publish time). Measured: two ' +
-  'consecutive packs of one commit differed in 10 and in 12 of the 29 tarballs across two pairs, ' +
+  'consecutive packs of one commit differed in 10 to 12 of the 29 tarballs across four pairs, ' +
   'and in every case the difference was confined to `package/package.json` and vanished once its ' +
   'keys were sorted — which is exactly what the file digest canonicalises away. Neither digest is ' +
   'a reproducible-build claim about the toolchain.';
@@ -152,18 +162,28 @@ function refuse(...lines) {
   process.exit(2);
 }
 
-/** Read-only git in the repo root; null when git refuses (e.g. no such ref). */
-function git(...args) {
+/**
+ * Read-only git in the repo root, as `{ ok, value }`. The pair exists so that a COMMAND THAT FAILED
+ * is never read as an answer: `git diff` exiting 128 (a corrupt index, a `required` clean filter
+ * whose binary is missing) produces no output, and empty output is what a clean tree also looks like.
+ */
+function gitTry(...args) {
   try {
-    return execFileSync('git', args, {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
+    return {
+      ok: true,
+      value: execFileSync('git', args, {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim(),
+    };
   } catch {
-    return null;
+    return { ok: false, value: null };
   }
 }
+
+/** The output, or null when git refuses (e.g. no such ref) — for the queries where both mean absent. */
+const git = (...args) => gitTry(...args).value;
 
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 const integrity = (buf) => `sha512-${createHash('sha512').update(buf).digest('base64')}`;
@@ -186,15 +206,41 @@ function sortKeysDeep(value) {
  * rather than being skipped — a verifier that silently ignores part of an archive verifies nothing.
  * The types npm actually emits are regular files; directories, GNU long names and pax `path=`
  * overrides are handled because the format permits them.
+ *
+ * Two refusals exist because tar is more permissive than a verifier may be, and the gap between the
+ * two is exactly where a tampered artifact hides:
+ *   - A PATH THAT OCCURS TWICE. Extraction keeps the LAST entry at a path, so a reader that returns
+ *     both — or that stops at the first — hashes something no consumer receives. No packer emits a
+ *     duplicate path, so refusing costs nothing and closes the general form of that substitution.
+ *   - CONTENT PAST THE END-OF-ARCHIVE MARKER. The marker is two zero blocks, but `tar` and node-tar
+ *     (what `npm i` runs) treat a LONE zero block as a warning and keep reading, so bytes appended
+ *     after one are installed. Everything from the marker to the end of the archive must be zero,
+ *     and an archive that simply runs out before a marker is refused too.
  */
 function unpack(gzipped, label) {
   const buf = gunzipSync(gzipped);
   const entries = [];
+  const seen = new Set();
   let override = null;
   let off = 0;
+  let ended = false;
   while (off + 512 <= buf.length) {
     const head = buf.subarray(off, off + 512);
-    if (head.every((b) => b === 0)) break;
+    if (head.every((b) => b === 0)) {
+      const tail = buf.subarray(off);
+      if (tail.length < 1024) {
+        throw new Error(
+          `${label}: the end-of-archive marker is ${tail.length} byte(s), not the two 512-byte zero blocks the format requires`,
+        );
+      }
+      if (!tail.every((b) => b === 0)) {
+        throw new Error(
+          `${label}: content after the end-of-archive marker — tar and npm would read past it, so this reader refuses the archive`,
+        );
+      }
+      ended = true;
+      break;
+    }
     const text = (from, to) => head.subarray(from, to).toString('utf8').replace(/\0.*$/s, '');
     const octal = (from, to) => {
       const raw = text(from, to).trim();
@@ -223,8 +269,12 @@ function unpack(gzipped, label) {
       throw new Error(`${label}: unsupported tar entry type '${type}' at ${name}`);
     }
     if (!name.startsWith('package/')) throw new Error(`${label}: entry outside package/: ${name}`);
-    entries.push({ path: name.slice('package/'.length), body: Buffer.from(body) });
+    const path = name.slice('package/'.length);
+    if (seen.has(path)) throw new Error(`${label}: duplicate entry path: ${name}`);
+    seen.add(path);
+    entries.push({ path, body: Buffer.from(body) });
   }
+  if (!ended) throw new Error(`${label}: the archive ends without an end-of-archive marker`);
   return entries;
 }
 
@@ -417,10 +467,16 @@ function readRoot() {
   return { version: json.version, node: json.engines.node, packageManager: json.packageManager };
 }
 
-/** The working tree as the release sees it: TRACKED files that differ from HEAD (see the docblock). */
+/**
+ * The working tree as the release sees it: TRACKED files that differ from HEAD (see the docblock).
+ * `clean` is null when git could not answer — the one value this must never guess, because the
+ * favourable guess (`true`) is indistinguishable from a clean tree and is the claim a reader trusts.
+ */
 function worktreeState() {
-  const paths = (git('diff', '--name-only', 'HEAD') ?? '').split('\n').filter(Boolean).sort();
-  return { clean: paths.length === 0, paths };
+  const res = gitTry('diff', '--name-only', 'HEAD');
+  if (!res.ok) return { clean: null, paths: [], error: '`git diff --name-only HEAD` failed' };
+  const paths = res.value.split('\n').filter(Boolean).sort();
+  return { clean: paths.length === 0, paths, error: null };
 }
 
 /** Deterministic serialisation: insertion order, 2-space indent, one trailing newline. */
@@ -430,6 +486,12 @@ function buildManifest(members, launcherName, root, env) {
   const head = git('rev-parse', 'HEAD');
   if (!head) refuse('cannot read HEAD — the manifest records the source commit.');
   const tree = worktreeState();
+  if (tree.clean === null) {
+    refuse(
+      `cannot read the working tree state — ${tree.error}. The manifest records whether the tree ` +
+        'was clean at source.commit, and a failed command is not a clean tree.',
+    );
+  }
   return {
     schema: SCHEMA_ID,
     generated_by: 'scripts/release-identity.mjs',
@@ -501,6 +563,21 @@ function generate(flags) {
   const manifest = buildManifest(members, launcher, root, process.env);
   const out = resolve(flags.out ?? join(REPO_ROOT, LAUNCHER_DIR, MANIFEST_NAME));
   const bytes = serialise(manifest);
+  // The launcher is packed from a directory that a PREVIOUS release run may have left a manifest in
+  // (it is gitignored, and the launcher's `files` ships it). Packing is not byte-reproducible, so a
+  // manifest generated now can never equal that one: the release would be unverifiable from the
+  // moment it was packed. Refuse before writing anything, and name the step that was skipped.
+  const carried = members
+    .find((m) => m.name === launcher)
+    ?.entries.find((e) => e.path === MANIFEST_NAME);
+  if (carried && !carried.body.equals(Buffer.from(bytes))) {
+    refuse(
+      `the launcher tarball carries a ${MANIFEST_NAME} that is not the one this run would write, so ` +
+        'the tarballs could never verify against it. The pack picked up the manifest a previous ' +
+        `release run left in ${LAUNCHER_DIR}/. Nothing was written — remove ` +
+        `${LAUNCHER_DIR}/${MANIFEST_NAME}, re-pack the release, then generate again.`,
+    );
+  }
   writeFileSync(out, bytes);
   if (flags.json) {
     process.stdout.write(bytes);
@@ -551,7 +628,9 @@ function verify(flags) {
     }
     if (entry.tarball.integrity === null) {
       // The launcher — it ships this manifest, so only the content invariant can be checked. See
-      // the SELF-REFERENCE section of the docblock.
+      // the SELF-REFERENCE section of the docblock. There is at most ONE entry at this path:
+      // `unpack` refuses an archive that carries a path twice, which is what makes comparing a
+      // single occurrence the same thing as comparing what a consumer extracts.
       const shipped = member.entries.find((e) => e.path === MANIFEST_NAME);
       if (shipped && !shipped.body.equals(manifestBytes)) {
         fail(
@@ -593,9 +672,12 @@ function verify(flags) {
   // from another commit reports that instead of failing on a difference it cannot interpret.
   const head = git('rev-parse', 'HEAD');
   const tree = worktreeState();
-  const comparable = head === manifest.source.commit && tree.clean;
+  const comparable = head === manifest.source.commit && tree.clean === true;
   const sourceEntries = [...(manifest.schemas ?? []), manifest.lockfile, manifest.dependency_sbom];
-  let sourceNote = `not compared: this checkout is ${head ?? 'unknown'}${tree.clean ? '' : ' (dirty)'}, the manifest records ${manifest.source.commit}`;
+  let sourceNote =
+    tree.clean === null
+      ? `not compared: the working tree state is unknown (${tree.error})`
+      : `not compared: this checkout is ${head ?? 'unknown'}${tree.clean ? '' : ' (dirty)'}, the manifest records ${manifest.source.commit}`;
   if (comparable) {
     for (const artifact of sourceEntries) {
       if (!artifact) continue;

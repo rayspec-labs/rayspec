@@ -203,9 +203,12 @@ jobs:
       # identical content, so only the recorded integrity can catch it), an altered file list fails
       # (isolated on the launcher, the one member that records no tarball integrity), the launcher
       # self-reference holds (embedding the manifest keeps verification green, embedding a different
-      # one does not), the manifest reproduces byte-identically from the same inputs, an absent tag or
-      # workflow run is a null with a reason rather than an invented value, and an incomplete closure
-      # refuses. Every case also asserts that neither mode starts a package manager.
+      # one does not), an archive that carries a path twice or hides an entry behind a lone null block
+      # is refused rather than half-read, the documented release sequence stays green when it is run a
+      # second time, the manifest reproduces byte-identically from the same inputs, an absent tag or
+      # workflow run is a null with a reason rather than an invented value, a git failure is never
+      # written down as a clean working tree, and an incomplete closure refuses. The test also asserts
+      # on EVERY child it starts that neither mode started a package manager.
       # DB-free / secret-free / network-free → lane 1.
       - name: Release-identity manifest regression
         run: pnpm test:release-identity

