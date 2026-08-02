@@ -459,9 +459,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pax header can also move an entry's **end**, and with it the start of the next one: a `size` record
   is applied the way both readers apply it, so an entry swallowed into its predecessor's content
   changes the file list instead of hiding in it, and any other record that could reach that far is
-  refused rather than ignored. The same rule covers the older GNU **long-name** block, whose body the
-  readers terminate differently when it carries a NUL and then a newline. And when `git` cannot
-  answer whether the working tree
+  refused rather than ignored. Two more places where a reader can part company with an installer over
+  a NAME get the same treatment: every NUL-terminated string in an archive — the 100-byte name field,
+  the ustar prefix, a GNU **long-name** block's body — is read both ways and refused when they end it
+  in different places (node-tar's terminator stops at a newline); and the ustar **prefix** field is
+  read only under the exact magic node-tar requires, so a header rewritten in place with its path
+  split across `name` and `prefix` under GNU magic — every digest unchanged — is refused instead of
+  certified. And when `git` cannot answer whether the working tree
   was clean, generation refuses rather than recording the flattering value — a failed command and a
   clean tree both produce no output, and only one of them is worth writing down.
 

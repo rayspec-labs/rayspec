@@ -44,9 +44,11 @@
  *       long-name block whose body the readers terminate differently (a NUL, then a newline) is
  *       refused, spliced before an entry that already exists so the entry list never moves; the
  *       header a packer really emits is READ, with a colliding entry behind it so a dropped rename
- *       cannot pass; and a `..` segment that escapes `package/` is refused, as a file and as a
- *       directory. All of them are the same fault: the reader must not name — or delimit — an entry
- *       differently from the installer, least of all at the excluded manifest path.
+ *       cannot pass; a prefix field under non-ustar magic is refused, the cheapest tamper of the set
+ *       (one header rewritten in place, every digest unchanged, the installer writing elsewhere); and
+ *       a `..` segment that escapes `package/` is refused, as a file and as a directory. All of them
+ *       are the same fault: the reader must not name — or delimit — an entry differently from the
+ *       installer, least of all at the excluded manifest path.
  *   (Q) THE DOCUMENTED RELEASE SEQUENCE REPEATS — the manifest is gitignored and listed in the
  *       launcher's `files`, so it SURVIVES a release run and the next pack would ship the previous
  *       run's manifest. Running the sequence twice (with the removal step it prescribes) is green
@@ -748,6 +750,42 @@ try {
       sizeBeforeHeader.err,
       /precedes another header/i,
       `(E) the refusal must name it: ${sizeBeforeHeader.err}`,
+    );
+
+    // (i) the ustar magic gates the prefix field. A ustar header may split a long path across `name`
+    // and `prefix`, but node-tar reads `prefix` only when the magic is exactly `ustar\0` + `00`;
+    // under GNU's `ustar  \0` it takes `name` alone. This is the cheapest tamper of the whole set —
+    // ONE header rewritten IN PLACE, nothing added, removed or reordered, every digest byte-identical
+    // — and a reader that read the prefix unconditionally would name the entry exactly as recorded
+    // while the installer wrote it to the package root.
+    const splitWithGnuMagic = (block) => {
+      const out = Buffer.from(block);
+      const head = out.subarray(0, 512);
+      const full = head.subarray(0, 100).toString('utf8').replace(/\0.*$/s, '');
+      const cut = full.indexOf('/');
+      head.fill(0, 0, 100);
+      head.write(full.slice(cut + 1), 0, 'utf8'); // name = the tail
+      head.fill(0, 345, 500);
+      head.write(full.slice(0, cut), 345, 'utf8'); // prefix = the head
+      head.write('ustar  \0', 257, 'binary'); // GNU magic, not the exact ustar form
+      head.fill(0x20, 148, 156);
+      let sum = 0;
+      for (const byte of head) sum += byte;
+      head.fill(0, 148, 156);
+      head.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 'utf8');
+      return out;
+    };
+    ship([base[0], splitWithGnuMagic(base[1]), ...base.slice(2)]);
+    const gnuMagic = verify(fx);
+    assert.notEqual(
+      gnuMagic.code,
+      0,
+      `(E) a prefix field under non-ustar magic must be refused; got ${gnuMagic.code}`,
+    );
+    assert.match(
+      gnuMagic.err,
+      /prefix field without the ustar magic/i,
+      `(E) the refusal must name it: ${gnuMagic.err}`,
     );
 
     // (c) a `..` segment that passes `startsWith('package/')` but escapes it once resolved.

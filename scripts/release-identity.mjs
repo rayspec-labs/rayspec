@@ -279,22 +279,26 @@ function paxRecordsByLine(body) {
 }
 
 /**
- * The name a GNU long-name (`L`) block carries, when every reader agrees on it.
+ * A NUL-terminated string out of an archive — a header field, or the body of a GNU long-name block —
+ * read only when every reader ends it in the same place.
  *
- * The body is a path followed by NUL padding, and the readers terminate it differently. node-tar
- * strips from the first NUL with a pattern whose `.` does NOT match a newline, so a body holding a
- * NUL and then a newline KEEPS everything after that newline; a reader that strips to the end of the
- * body drops it. Same divergence class as a pax `path`, so it gets the same answer — both readings,
- * and a refusal when they name different files. A packer writes a plain path plus NUL padding, where
- * the two agree exactly.
+ * Tar pads its string fields with NULs, so a reader has to decide where the value stops. node-tar
+ * does it with a pattern whose `.` does NOT match a newline (`decString`), so a value holding a NUL
+ * and then a newline KEEPS everything after that newline; a reader that strips to the end of the
+ * field drops it. Every path this reader produces comes through here — the 100-byte name, the ustar
+ * prefix, a long-name block — because a name is exactly the thing that must not differ from what the
+ * installer writes: splice a long-name block before an existing entry, repeat that entry's own name
+ * and add a NUL and a newline, and nothing is added, removed or reordered while the installer puts
+ * the file somewhere else entirely. Both readings are taken and a disagreement is REFUSED. A packer
+ * writes a plain value plus NUL padding, where the two agree exactly.
  */
-function gnuLongName(body) {
-  const text = body.toString('utf8');
-  const toNewline = text.replace(/\0.*/, ''); // node-tar's rule: `.` stops at a newline
-  const toEnd = text.replace(/\0.*$/s, ''); // strip everything from the first NUL
+function headerString(bytes, field) {
+  const raw = bytes.toString('utf8');
+  const toNewline = raw.replace(/\0.*/, ''); // node-tar's rule: `.` stops at a newline
+  const toEnd = raw.replace(/\0.*$/s, ''); // strip everything from the first NUL
   if (toNewline !== toEnd) {
     throw new Error(
-      `a long-name block its readers terminate differently (${toEnd} vs ${toNewline}) — tar readers disagree on which file this is`,
+      `a ${field} its readers terminate differently (${toEnd} vs ${toNewline}) — tar readers disagree on which file this is`,
     );
   }
   return toEnd;
@@ -404,12 +408,20 @@ function paxOverrides(body, { global }) {
  *     precedes another HEADER is refused outright: node-tar clears its pending pax state only on the
  *     non-meta branch, so the record sizes that header's body for the installer and not for a reader
  *     that frames it by its own field, and the two would part company for the rest of the archive.
- *   - A GNU LONG-NAME BLOCK THE READERS TERMINATE DIFFERENTLY. Its body is a NUL-terminated path,
- *     and node-tar's terminator stops at a newline — a body carrying a NUL and then a newline keeps
- *     everything after it, where a strip-to-end terminator drops it. Splice such a block before an
+ *   - A PREFIX FIELD WITHOUT THE USTAR MAGIC. A ustar header may split a long path across `name` and
+ *     `prefix`, but node-tar reads `prefix` only under the exact `ustar\0` + `00` magic; under GNU's
+ *     `ustar  \0` it takes `name` alone. Reading it unconditionally is the cheapest tamper of the
+ *     set — ONE header rewritten in place, the path split across the two fields, GNU magic, checksum
+ *     fixed: nothing added, removed or reordered, every digest byte-identical, and the installer puts
+ *     the file somewhere else. The field is read the way node-tar reads it, and a non-empty prefix
+ *     under any other magic is refused, because a POSIX reader would honour what node-tar ignores.
+ *   - A STRING FIELD THE READERS TERMINATE DIFFERENTLY. Every name here — the 100-byte field, the
+ *     prefix, a GNU long-name block's body — is NUL-terminated, and node-tar's terminator stops at a
+ *     newline — a value carrying a NUL and then a newline keeps everything after it, where a
+ *     strip-to-end terminator drops it (see headerString). Splice such a block before an
  *     entry, repeating that entry's own name, and a reader that drops the tail names the entry
  *     exactly as recorded while the installer writes it somewhere else entirely. Both readings are
- *     taken and a disagreement is refused, as for a pax `path` (see gnuLongName).
+ *     taken and a disagreement is refused, as for a pax `path`.
  * The messages carry no file name: the single caller knows which tarball it handed over and says so.
  */
 function unpack(gzipped) {
@@ -437,7 +449,7 @@ function unpack(gzipped) {
       ended = true;
       break;
     }
-    const text = (from, to) => head.subarray(from, to).toString('utf8').replace(/\0.*$/s, '');
+    const text = (from, to) => headerString(head.subarray(from, to), 'header field');
     const octal = (from, to) => {
       const raw = text(from, to).trim();
       if (!/^[0-7]*$/.test(raw)) throw new Error(`unsupported numeric header field`);
@@ -472,7 +484,7 @@ function unpack(gzipped) {
       }
       if (type === 'L') {
         // A GNU long-name block: its body is the next entry's name, NUL-terminated.
-        override = gnuLongName(body);
+        override = headerString(body, 'long-name block');
       } else {
         // Refuses a body that is not well-formed pax records, one the two parses read differently,
         // and one carrying a record this reader does not model.
@@ -492,7 +504,22 @@ function unpack(gzipped) {
       }
       continue;
     }
-    const prefix = text(345, 500);
+    // THE PREFIX FIELD IS GATED ON THE MAGIC. A ustar header may split a long path across `name`
+    // and `prefix`, but node-tar reads `prefix` ONLY when bytes 257-264 are exactly `ustar\0` + `00`
+    // (`header.js`), because that is the POSIX form — under GNU's `ustar  \0` it takes `name` alone.
+    // Reading the field unconditionally would let one in-place header edit — real path split across
+    // the two fields, GNU magic, checksum fixed — name the entry as recorded here while the
+    // installer writes it somewhere else, with no entry added, removed or reordered and every
+    // digest unchanged. Which of the two fields is even read must therefore be decided the same way
+    // node-tar decides it, and a non-empty prefix under any other magic is refused outright: POSIX
+    // readers would honour it, node-tar would not, and this reader does not pick between them.
+    const ustarMagic = head.subarray(257, 265).toString('binary') === 'ustar\u000000';
+    const prefix = text(345, ustarMagic && head[475] !== 0 ? 500 : 475);
+    if (!ustarMagic && text(345, 500) !== '') {
+      throw new Error(
+        `a header carries a prefix field without the ustar magic — tar readers disagree on whether it names part of the path`,
+      );
+    }
     const name = override ?? (prefix ? `${prefix}/${text(0, 100)}` : text(0, 100));
     override = null;
     sizeOverride = null;
