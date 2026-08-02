@@ -31,6 +31,29 @@ import { TenantCliError } from './errors.js';
 /** The org id is an org UUID — the same 8-4-4-4-12 shape the tenant chokepoint and the boot gate use. */
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * Is this plausibly an email address? Exactly one `@`, something either side of it, no whitespace, and
+ * within the 254-character limit the platform enforces. Deliberately NOT a copy of the platform's
+ * `normalizeEmail`, which is the authority and is stricter (NFKC, invisible-character rejection): a
+ * SUBSET check can only refuse what the server refuses too, so the two can never disagree in the
+ * direction that would reject a legitimate operator.
+ */
+function isPlausibleEmail(value: string): boolean {
+  if (value.length > 254 || /\s/.test(value)) return false;
+  const at = value.indexOf('@');
+  return at > 0 && at === value.lastIndexOf('@') && at < value.length - 1;
+}
+
+/** Did the provisioning layer itself throw this — i.e. may its `code` name the documented namespace? */
+function isProvisionError(err: unknown): err is { code: string } {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { name?: unknown }).name === 'TenantProvisionError' &&
+    typeof (err as { code?: unknown }).code === 'string'
+  );
+}
+
 export interface TenantEnsureResult {
   readonly ok: boolean;
   readonly command: 'tenant ensure';
@@ -117,6 +140,17 @@ function parseEnsureArgs(args: readonly string[]): {
         'to that file and is never printed, returned or logged',
     );
   }
+  // A DELIBERATELY WEAKER shape check than the platform's `normalizeEmail`, which stays the authority
+  // (it also rejects invisible and control characters, after NFKC). Weaker is the safe direction: this
+  // can only refuse an address the server would refuse too, never one it would accept. It exists
+  // because the alternative is worse than a late error — without it a mistyped address is not caught
+  // until inside the reservation, i.e. AFTER the migration chain has already run against the target
+  // database, which contradicts this parser's own promise that a typo cannot migrate anything.
+  if (ownerEmail !== undefined && !isPlausibleEmail(ownerEmail)) {
+    throw new TenantCliError(
+      `--owner-email must be an email address (one @, text on both sides, no spaces), got ${JSON.stringify(ownerEmail)}`,
+    );
+  }
 
   const rawTtl = (values['invite-ttl-seconds'] as string | undefined)?.trim();
   let inviteTtlSeconds: number | undefined;
@@ -190,10 +224,17 @@ export async function runTenantEnsure(
       errors: [],
     };
   } catch (err) {
-    const code =
-      typeof (err as { code?: unknown }).code === 'string'
-        ? (err as { code: string }).code
-        : 'PROVISION_FAILED';
+    // `errors[].code` is a documented namespace of THIS command's own codes, so only the provisioning
+    // layer's own error may name one. Reading `code` off any thrown value put a Postgres SQLSTATE
+    // ('23505') or a Node errno ('ECONNREFUSED') into the same field the reference documents as
+    // ORG_TOMBSTONED / OWNER_INVITE_OUT_EXISTS / ORG_NAME_SLUG_IN_USE — a caller matching on it would
+    // be reading a namespace nobody promised. Everything else is a plain PROVISION_FAILED; the driver's
+    // own words still reach the operator through `message`.
+    //
+    // Matched by NAME rather than `instanceof`: `@rayspec/server` is loaded dynamically (and is
+    // replaced wholesale in tests), so the constructor identity here is not guaranteed to be the one
+    // that threw, while `TenantProvisionError` sets `this.name` in its constructor.
+    const code = isProvisionError(err) ? err.code : 'PROVISION_FAILED';
     return {
       ok: false,
       command: 'tenant ensure',

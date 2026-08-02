@@ -277,9 +277,15 @@ export async function provisionTenant(
      */
     const claim: Parameters<OrgStore['reserveOrgById']>[1] = async (ttx, org, state) => {
       if (input.ownerEmail === undefined) return;
-      // THE SAFETY PROPERTY that makes an idempotent resolve safe to automate: the command can never
-      // grant ownership of an org that already has an owner. Without it, a run against a live tenant
-      // would be a takeover with a typo as its only precondition.
+      // THE SAFETY PROPERTY that makes an idempotent resolve safe to automate: once an org has a
+      // committed active owner, this command will not hand out ownership of it. Without the check, a
+      // run against a live tenant would be a takeover with a typo as its only precondition.
+      //
+      // The honest limit of "once committed": the redemption route consumes the invite and writes the
+      // membership in two separate statements (routes/invites.ts), so a run landing between them sees
+      // no live invite AND no owner yet, and mints. The result is a second owner invite for an org
+      // that is about to have its first owner — an extra owner, never a displaced one — and it is
+      // bounded by operator authority, since reaching this code at all means holding DATABASE_URL.
       if (state.owners > 0) {
         claimed = { status: 'already_owned', owners: state.owners };
         return;
