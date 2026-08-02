@@ -11,6 +11,9 @@
   "bin": {
     "rayspec": "./dist/bin.js"
   },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -p tsconfig.json --noEmit",
