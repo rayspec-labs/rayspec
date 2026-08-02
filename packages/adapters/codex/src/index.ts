@@ -323,7 +323,11 @@ export class CodexAdapter implements Backend {
     // child down at once instead of at the end of the run. HONEST LIMIT: the abort stops OUR side —
     // the stream and the child — and the MCP bridge is closed in the same teardown; work the codex
     // subprocess had already committed upstream is not undone, and there is no per-turn "cancel" the
-    // SDK exposes beyond this signal.
+    // SDK exposes beyond this signal. The SDK spawns with `{ signal }`, which SIGNALS the DIRECT
+    // child only (SIGTERM): nothing escalates to a forced kill and processes that child spawned
+    // itself are not terminated. A child that ignores SIGTERM keeps its stdout open, the SDK's
+    // readline loop over that stdout never ends, and run() therefore never settles at all — measured
+    // in cancel.integration.test.ts and stated as a limit in this package's README.
     const unlinkCancel = linkAbort(ctx.signal, abort);
     try {
       // The sandbox confinement + tool bridge are allocated HERE (inside try) so a setup throw yields a
@@ -677,7 +681,20 @@ export class CodexAdapter implements Backend {
       } catch {
         /* best-effort */
       }
-      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      await new Promise<void>((resolve) => {
+        httpServer.close(() => resolve());
+        // `close()` stops ACCEPTING at once, but its completion callback waits for every connection
+        // that still has a request in flight, and nothing was dropping those: ANY peer holding a
+        // connection with an incomplete request wedges this await FOREVER, leaving run() pending and
+        // the bridge alive behind a caller that has already stopped waiting. Who that peer can be is
+        // not fully established here. What is certain is that the teardown preceding this one only
+        // SIGNALS the codex child (`abort.abort()` in run()'s finally; nothing escalates to a forced
+        // kill), so the child need not have exited and released its connection yet. A process the
+        // child itself spawned could hold one too, but that is UNVERIFIED — this adapter confines the
+        // child with `networkAccessEnabled: false`, so whether such a process can reach this loopback
+        // bridge at all is untested. Dropping the connections bounds the teardown whoever holds them.
+        httpServer.closeAllConnections();
+      });
     };
 
     return { url, close, toolParts };
