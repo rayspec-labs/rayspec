@@ -32,6 +32,13 @@
  *       `tar` and the node-tar `npm i` runs treat a LONE zero block as a warning and keep reading,
  *       so an entry appended after one is what gets installed. A reader that stopped there would
  *       hash one archive while the consumer receives another.
+ *   (E) A PAX RENAME NO OTHER READER HONOURS IS REFUSED — an entry's name may be overridden by a pax
+ *       header, and this reader applies one only where node-tar and libarchive do. A GLOBAL header's
+ *       `path=` (which they ignore, so extraction keeps the entry's real name) is refused; a `path=`
+ *       smuggled inside another record's value (which a line scan would honour) is read as value
+ *       bytes, so the entry keeps its declared name; and a `..` segment that escapes `package/` is
+ *       refused. All three are the same fault: the reader must not name an entry differently from
+ *       the installer, least of all at the excluded manifest path.
  *   (Q) THE DOCUMENTED RELEASE SEQUENCE REPEATS — the manifest is gitignored and listed in the
  *       launcher's `files`, so it SURVIVES a release run and the next pack would ship the previous
  *       run's manifest. Running the sequence twice (with the removal step it prescribes) is green
@@ -122,8 +129,8 @@ const workspaces = [];
 // Enough of the format for what an npm tarball actually is: regular files, short paths, one fixed
 // mtime so a fixture tarball is a pure function of its contents.
 
-/** One 512-byte ustar header plus the padded body. */
-function tarEntry(path, body) {
+/** One 512-byte ustar header plus the padded body; `type` defaults to a regular file. */
+function tarEntry(path, body, type = '0') {
   const head = Buffer.alloc(512);
   const put = (s, off, len) => head.write(s.slice(0, len), off, 'utf8');
   put(path, 0, 100);
@@ -133,13 +140,21 @@ function tarEntry(path, body) {
   put(`${body.length.toString(8).padStart(11, '0')}\0`, 124, 12);
   put('00000000000\0', 136, 12); // mtime, fixed
   head.fill(' ', 148, 156); // the checksum field reads as spaces while the checksum is summed
-  put('0', 156, 1); // typeflag: regular file
+  put(type, 156, 1); // typeflag
   put('ustar\0', 257, 6);
   put('00', 263, 2);
   let sum = 0;
   for (const byte of head) sum += byte;
   put(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 8);
   return Buffer.concat([head, body, Buffer.alloc((512 - (body.length % 512)) % 512)]);
+}
+
+/** One well-formed pax record `"<len> <key>=<value>\n"`, `len` counting the whole record. */
+function paxRecord(key, value) {
+  const tail = ` ${key}=${value}\n`;
+  let len = tail.length + 1;
+  while (`${len}`.length + tail.length !== len) len = `${len}`.length + tail.length;
+  return Buffer.from(`${len}${tail}`, 'utf8');
 }
 
 /** A gzipped tar of `[path, contents]` pairs, terminated by the two empty blocks the format wants. */
@@ -529,6 +544,64 @@ try {
     );
     assert.match(r.err, /end-of-archive marker/i, `(T) the refusal must name it: ${r.err}`);
     console.log('ok (T) — an archive whose tail only tar would read is refused, not half-read');
+  }
+
+  // ── (E) a pax rename no other reader honours — global path, smuggled path, a `..` escape ────────
+  {
+    const fx = fixture();
+    const generated = generate(fx);
+    const launcher = MEMBERS.find((m) => m.name === LAUNCHER);
+    const base = memberFiles(launcher).map(([p, b]) => tarEntry(p, Buffer.from(b)));
+    const ship = (blocks) =>
+      writeFileSync(
+        join(fx.tarDir, tarballName(LAUNCHER)),
+        gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)])),
+      );
+
+    // (a) a GLOBAL pax header renaming the next entry to the excluded manifest path. node-tar and
+    // libarchive ignore `path` from a global header — they would extract the entry under its real
+    // name — so honouring it here would record a manifest at a path no installer writes.
+    ship([
+      ...base,
+      tarEntry('pax_global_header', paxRecord('path', `package/${MANIFEST_NAME}`), 'g'),
+      tarEntry('package/dist/renamed.js', generated.bytes),
+    ]);
+    const global = verify(fx);
+    assert.notEqual(global.code, 0, `(E) a global-pax rename must be refused; got ${global.code}`);
+    assert.match(global.err, /global header/i, `(E) the refusal must name it: ${global.err}`);
+
+    // (b) a `path=` smuggled inside another record's VALUE. A line scan would honour the inner line;
+    // a length-prefixed parse reads it as value bytes, so the entry keeps its declared name and can
+    // never land at the excluded path — the run must not report the launcher as carrying a manifest.
+    ship([
+      ...base,
+      tarEntry('PaxHeader', paxRecord('comment', `x\n30 path=package/${MANIFEST_NAME}`), 'x'),
+      tarEntry('package/dist/decoy.js', generated.bytes),
+    ]);
+    const smuggled = verify(fx);
+    assert.notEqual(
+      smuggled.code,
+      0,
+      `(E) a smuggled pax path must not verify; got ${smuggled.code}`,
+    );
+    assert.doesNotMatch(
+      smuggled.out,
+      /carries this/i,
+      `(E) a smuggled path must not be read as the manifest entry: ${smuggled.out}`,
+    );
+
+    // (c) a `..` segment that passes `startsWith('package/')` but escapes it once resolved.
+    ship([...base, tarEntry('package/../evil.js', Buffer.from('x\n'))]);
+    const escaped = verify(fx);
+    assert.notEqual(
+      escaped.code,
+      0,
+      `(E) a path escaping package/ must be refused; got ${escaped.code}`,
+    );
+    assert.match(escaped.err, /escapes package\//i, `(E) the refusal must name it: ${escaped.err}`);
+    console.log(
+      'ok (E) — a rename node-tar would not honour is refused, not read at the excluded path',
+    );
   }
 
   // ── (Q) the documented release sequence, run twice ─────────────────────────────────────────────

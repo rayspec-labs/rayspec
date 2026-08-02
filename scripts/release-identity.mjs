@@ -54,9 +54,11 @@
  * (`files.excluded`). Verification computes the same exclusion, and — when the tarball carries the
  * manifest — additionally requires those bytes to be byte-identical to the manifest being verified.
  * So the exclusion is not a hole: a launcher carrying some OTHER manifest fails. That holds because
- * `unpack` refuses an archive that carries one path twice or that hides content behind a lone null
- * block: without those two refusals the excluded path is a place to post a second, forged copy that
- * the file list never sees and extraction is what actually installs.
+ * `unpack` reads WHICH file each entry is the way node-tar and libarchive do, and refuses the rest —
+ * an archive that carries one path twice, that hides content behind a lone null block, or that
+ * renames an entry through a pax `path=` override no other reader honours. Without those refusals the
+ * excluded path is a place to post a second, forged copy that the file list never sees while
+ * extraction installs something else.
  * The launcher is also packed FROM a directory a previous release run may have left a manifest in,
  * so generation refuses when the packed launcher already carries a manifest that is not the one it
  * would write — see the `//release-identity` operator sequence, whose first step removes it.
@@ -202,15 +204,48 @@ function sortKeysDeep(value) {
 }
 
 /**
+ * The `path` override carried by a pax extended-header body, or null when it carries none. A pax
+ * body is a sequence of records `"<len> <key>=<value>\n"`, where `len` counts the WHOLE record —
+ * its own digits, the separating space and the trailing newline included. This walks them exactly,
+ * consuming `len` bytes at a time, and REFUSES a body that does not frame cleanly. That is the point:
+ * a loose line scan would honour a `path=` smuggled inside another record's value, which no other
+ * tar reader does, so the reader and the installer would disagree on the entry's name.
+ */
+function paxPath(body) {
+  let path = null;
+  let off = 0;
+  while (off < body.length) {
+    let space = off;
+    while (space < body.length && body[space] !== 0x20) space++;
+    const digits = body.subarray(off, space).toString('latin1');
+    if (space >= body.length || !/^[0-9]+$/.test(digits)) {
+      throw new Error(`malformed pax record: a record must start with '<length> '`);
+    }
+    const len = Number.parseInt(digits, 10);
+    if (len <= space - off || off + len > body.length || body[off + len - 1] !== 0x0a) {
+      throw new Error(`malformed pax record: declared length ${len} does not frame a record`);
+    }
+    const record = body.subarray(space + 1, off + len - 1).toString('utf8');
+    const eq = record.indexOf('=');
+    if (eq < 0) throw new Error(`malformed pax record: no '<key>=<value>'`);
+    if (record.slice(0, eq) === 'path') path = record.slice(eq + 1);
+    off += len;
+  }
+  return path;
+}
+
+/**
  * The unpacked entries of a gzipped npm tarball, as `{ path, body }` with the leading `package/`
  * removed. Deliberately FAILS CLOSED: an entry type this reader does not model (a symlink, a hard
- * link, a device node), a header whose checksum does not add up, or a path outside `package/` throws
- * rather than being skipped — a verifier that silently ignores part of an archive verifies nothing.
- * The types npm actually emits are regular files; directories, GNU long names and pax `path=`
- * overrides are handled because the format permits them.
+ * link, a device node), a header whose checksum does not add up, or a path outside `package/` (a
+ * `..` segment included) throws rather than being skipped — a verifier that silently ignores part of
+ * an archive verifies nothing. The types npm actually emits are regular files; directories, GNU long
+ * names and pax `path=` overrides are handled because the format permits them.
  *
- * Two refusals exist because tar is more permissive than a verifier may be, and the gap between the
- * two is exactly where a tampered artifact hides:
+ * Three refusals exist because tar is more permissive than a verifier may be, and the gap between
+ * this reader and tar is exactly where a tampered artifact hides. The aim is a reader that agrees
+ * with node-tar (what `npm i` runs) and libarchive on WHICH file each entry is, then refuses the
+ * rest rather than guessing:
  *   - A PATH THAT OCCURS TWICE. Extraction keeps the LAST entry at a path, so a reader that returns
  *     both — or that stops at the first — hashes something no consumer receives. No packer emits a
  *     duplicate path, so refusing costs nothing and closes the general form of that substitution.
@@ -218,6 +253,14 @@ function sortKeysDeep(value) {
  *     (what `npm i` runs) treat a LONE zero block as a warning and keep reading, so bytes appended
  *     after one are installed. Everything from the marker to the end of the archive must be zero,
  *     and an archive that simply runs out before a marker is refused too.
+ *   - A PAX `path=` OVERRIDE NO OTHER READER HONOURS. An entry's name can be overridden by a GNU
+ *     long-name (`L`) block or a pax extended header (`x`), and this reader applies both — but only
+ *     the way node-tar and libarchive do. The pax body is walked as the length-prefixed records the
+ *     format defines, not scanned line by line, so a `path=` smuggled inside another record's value
+ *     is read as value bytes, not as a rename. And a GLOBAL pax header (`g`) carrying `path=` is
+ *     refused outright: node-tar and libarchive DELIBERATELY ignore `path` from a global header (it
+ *     renames nothing), so honouring it would make this reader name an entry differently from every
+ *     consumer — and the excluded manifest path is precisely where that disagreement would hide.
  * The messages carry no file name: the single caller knows which tarball it handed over and says so.
  */
 function unpack(gzipped) {
@@ -259,9 +302,23 @@ function unpack(gzipped) {
     off += 512 + Math.ceil(size / 512) * 512;
 
     if (type === 'x' || type === 'g' || type === 'L') {
-      const raw = body.toString('utf8');
-      const found = type === 'L' ? raw.replace(/\0.*$/s, '') : raw.match(/^\d+ path=(.*)$/m)?.[1];
-      override = found ?? null;
+      if (type === 'L') {
+        // A GNU long-name block: its body is the next entry's name, NUL-terminated.
+        override = body.toString('utf8').replace(/\0.*$/s, '');
+      } else {
+        const path = paxPath(body); // refuses a body that is not well-formed pax records
+        if (type === 'g') {
+          // A global header renames nothing for node-tar or libarchive, and no packer emits one that
+          // tries: refuse a global `path=` rather than apply a rename no consumer will see.
+          if (path !== null) {
+            throw new Error(
+              `a pax global header carries path= — no packer emits one and tar ignores it`,
+            );
+          }
+        } else if (path !== null) {
+          override = path; // a local pax `path` overrides the next entry's name, as tar does
+        }
+      }
       continue;
     }
     const prefix = text(345, 500);
@@ -272,6 +329,7 @@ function unpack(gzipped) {
       throw new Error(`unsupported tar entry type '${type}' at ${name}`);
     }
     if (!name.startsWith('package/')) throw new Error(`entry outside package/: ${name}`);
+    if (name.split('/').includes('..')) throw new Error(`entry escapes package/: ${name}`);
     const path = name.slice('package/'.length);
     if (seen.has(path)) throw new Error(`duplicate entry path: ${name}`);
     seen.add(path);

@@ -447,10 +447,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ships. What is recorded for the launcher instead is verifiable on the real artifact — its
   file-list digest over every entry except the manifest — and a launcher carrying some *other*
   manifest fails verification, so the exclusion is checked rather than trusted. Making that true
-  takes an archive reader stricter than `tar`: it refuses a tarball carrying one path **twice**
-  (extraction keeps the *last* entry, so a forged second copy at the excluded path would be the one
-  installed) and one hiding content **behind a lone null block** (`tar`, and the node-tar an `npm i`
-  runs, treat that as a warning and read on). And when `git` cannot answer whether the working tree
+  takes an archive reader that reads *which file each entry is* the way node-tar and libarchive do,
+  then refuses the rest: a tarball carrying one path **twice** (extraction keeps the *last* entry, so
+  a forged second copy at the excluded path would be the one installed), one hiding content **behind
+  a lone null block** (`tar`, and the node-tar an `npm i` runs, treat that as a warning and read on),
+  and one that **renames an entry through a pax `path=` override** only a lax reader would honour — a
+  global-header `path`, or one smuggled inside another record's value, both of which node-tar and
+  libarchive apply to nothing. And when `git` cannot answer whether the working tree
   was clean, generation refuses rather than recording the flattering value — a failed command and a
   clean tree both produce no output, and only one of them is worth writing down.
 
