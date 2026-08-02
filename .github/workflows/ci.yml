@@ -209,7 +209,9 @@ jobs:
       # differently — is refused while the header a packer really emits is still read and applied,
       # the documented release sequence stays
       # green when it is run a second time, the manifest reproduces byte-identically from the same
-      # inputs, an absent tag or
+      # inputs, the recorded digests reproduce from the algorithms the manifest names, a manifest
+      # carrying a wrong source digest fails against the checkout it claims, one package appearing
+      # twice in the release directory refuses, an absent tag or
       # workflow run is a null with a reason rather than an invented value, a git failure is never
       # written down as a clean working tree, and an incomplete closure refuses. The test also asserts
       # on EVERY child it starts that neither mode started a package manager.

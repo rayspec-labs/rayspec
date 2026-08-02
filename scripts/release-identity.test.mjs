@@ -60,6 +60,17 @@
  *       absolute), and an EMPTY NAME FIELD — node-tar classifies from the name field before the
  *       prefix join, so an empty one stays a file and writes 0 bytes at the prefix's path, emptying
  *       a certified file while the reader sees a directory and records nothing.
+ *   (S) THE DIGESTS ARE THE ONES THE MANIFEST ADVERTISES — recomputed here with node:crypto rather
+ *       than read back from the script, because the manifest's most externally-checkable promise is
+ *       that `openssl dgst -sha512` reproduces a recorded integrity. Swapping the hash inside the
+ *       script while keeping the `sha512-` label left every other case green.
+ *   (A) THE SOURCE HALF OF VERIFICATION IS REAL — a manifest carrying a wrong digest for a
+ *       checked-in artifact fails against the very checkout it names. Forcing `comparable = false`
+ *       used to leave the suite green, i.e. that half was decorative.
+ *   (Y) ONE PACKAGE, TWO TARBALLS IS AMBIGUOUS — a stray second copy of a member refuses instead of
+ *       letting readdir order decide which one the closure records.
+ *   (O) A VALUE-TAKING FLAG WITH NO VALUE REFUSES — `--out` with nothing after it used to fall back
+ *       to the default path, so a mistyped command wrote somewhere nobody asked for and exited 0.
  *   (Q) THE DOCUMENTED RELEASE SEQUENCE REPEATS — the manifest is gitignored and listed in the
  *       launcher's `files`, so it SURVIVES a release run and the next pack would ship the previous
  *       run's manifest. Running the sequence twice (with the removal step it prescribes) is green
@@ -93,6 +104,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   copyFileSync,
@@ -831,6 +843,94 @@ try {
     console.log(
       'ok (E) — pax headers: refused where the readers disagree, read where a packer writes one',
     );
+  }
+
+  // ── (Y) one package, two tarballs — the closure is ambiguous, so generation refuses ────────────
+  {
+    const fx = fixture();
+    // A stray copy of one member, the shape a re-pack or a download leaves behind. Both declare the
+    // same name, so a run that tolerated it would record the package twice and verification would
+    // key by name and let one of the two silently decide the answer.
+    copyFileSync(
+      join(fx.tarDir, tarballName('@rayspec/spec')),
+      join(fx.tarDir, 'rayspec-spec-1.6.2 (1).tgz'),
+    );
+    const r = run(fx, ['--tarballs', fx.tarDir]);
+    assert.notEqual(r.code, 0, `(Y) a duplicated package must refuse; got ${r.code}: ${r.out}`);
+    assert.match(
+      r.err,
+      /both declare @rayspec\/spec/,
+      `(Y) the refusal must name the package and both files: ${r.err}`,
+    );
+    console.log('ok (Y) — two tarballs for one package refuse instead of picking one');
+  }
+
+  // ── (O) a value-taking flag with no value refuses, instead of writing the default ───────────────
+  {
+    const fx = fixture();
+    const r = run(fx, ['--tarballs', fx.tarDir, '--out']);
+    assert.notEqual(r.code, 0, `(O) --out with no value must refuse; got ${r.code}: ${r.out}`);
+    assert.match(r.err, /--out requires a value/, `(O) the refusal must name the flag: ${r.err}`);
+    assert.equal(
+      existsSync(join(fx.root, 'packages/app/rayspec', MANIFEST_NAME)),
+      false,
+      '(O) a mistyped command must not write the manifest to the default path anyway',
+    );
+    console.log('ok (O) — a flag that takes a value says so when it does not get one');
+  }
+
+  // ── (S) the recorded digests are the ones the manifest ADVERTISES ──────────────────────────────
+  {
+    const fx = fixture();
+    const generated = generate(fx);
+    const launcher = entryFor(generated.manifest, '@rayspec/spec'); // any member with an integrity
+    const tgz = readFileSync(join(fx.tarDir, tarballName('@rayspec/spec')));
+
+    // Recomputed here, not read from the script: the manifest's single most externally-checkable
+    // promise is that `openssl dgst -sha512 -binary <tgz> | openssl base64 -A` reproduces this
+    // value. Without this arm the label and the algorithm can drift apart — swapping sha512 for
+    // sha256 inside integrity() while keeping the `sha512-` prefix left every other case green.
+    const expected = `sha512-${createHash('sha512').update(tgz).digest('base64')}`;
+    assert.equal(
+      launcher.tarball.integrity,
+      expected,
+      '(S) tarball.integrity must be the sha512 the manifest says it is',
+    );
+    assert.ok(
+      launcher.tarball.integrity.startsWith('sha512-'),
+      '(S) and it must carry the algorithm label it was computed with',
+    );
+
+    // The same for a source digest: sha256 of the file, per `algorithms.source_file_digest`.
+    const schema = generated.manifest.schemas[0];
+    const onDisk = readFileSync(join(fx.root, schema.path));
+    assert.equal(
+      schema.sha256,
+      createHash('sha256').update(onDisk).digest('hex'),
+      '(S) a schema digest must be the sha256 of the file it names',
+    );
+    console.log('ok (S) — the digests reproduce from the algorithms the manifest names');
+  }
+
+  // ── (A) a changed source artifact fails verification against its own checkout ───────────────────
+  {
+    const fx = fixture();
+    const generated = generate(fx);
+    // The tarballs are untouched and the checkout is exactly the one the manifest names — the only
+    // thing wrong is a digest the manifest RECORDS for a checked-in artifact. That is the failure
+    // this half exists for: a manifest that does not describe the commit it claims. (Editing the
+    // artifact instead would move HEAD and make the comparison skip itself, which is by design.)
+    const doctored = JSON.parse(readFileSync(generated.path, 'utf8'));
+    doctored.schemas[0].sha256 = 'f'.repeat(64);
+    writeFileSync(generated.path, `${JSON.stringify(doctored, null, 2)}\n`);
+    const r = verify(fx);
+    assert.notEqual(r.code, 0, `(A) an edited source artifact must fail; got ${r.code}: ${r.out}`);
+    assert.match(
+      r.out + r.err,
+      /version-1\.0\.schema\.json/,
+      `(A) the failure must name the artifact that moved: ${r.err || r.out}`,
+    );
+    console.log('ok (A) — the source half of verification is real, not decorative');
   }
 
   // ── (H) entries hidden inside a body no installer reads ────────────────────────────────────────
