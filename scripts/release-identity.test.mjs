@@ -32,13 +32,15 @@
  *       `tar` and the node-tar `npm i` runs treat a LONE zero block as a warning and keep reading,
  *       so an entry appended after one is what gets installed. A reader that stopped there would
  *       hash one archive while the consumer receives another.
- *   (E) A PAX RENAME NO OTHER READER HONOURS IS REFUSED — an entry's name may be overridden by a pax
- *       header, and this reader applies one only where node-tar and libarchive do. A GLOBAL header's
- *       `path=` (which they ignore, so extraction keeps the entry's real name) is refused; a `path=`
- *       smuggled inside another record's value (which a line scan would honour) is read as value
- *       bytes, so the entry keeps its declared name; and a `..` segment that escapes `package/` is
- *       refused. All three are the same fault: the reader must not name an entry differently from
- *       the installer, least of all at the excluded manifest path.
+ *   (E) A PAX RENAME THE READERS DO NOT AGREE ON IS REFUSED — an entry's name may be overridden by a
+ *       pax header, and this reader applies one only where every consumer applies the same one. A
+ *       GLOBAL header's `path=` (which node-tar and libarchive ignore, so extraction keeps the
+ *       entry's real name) is refused; a `path=` smuggled inside another record's value is refused
+ *       when the length-framed and line-scanned readings name different files — including the shape
+ *       node-tar really honours, inserted BEFORE an existing entry so that no digest moves and the
+ *       disagreement is the entire tamper; and a `..` segment that escapes `package/` is refused.
+ *       All of them are the same fault: the reader must not name an entry differently from the
+ *       installer, least of all at the excluded manifest path.
  *   (Q) THE DOCUMENTED RELEASE SEQUENCE REPEATS — the manifest is gitignored and listed in the
  *       launcher's `files`, so it SURVIVES a release run and the next pack would ship the previous
  *       run's manifest. Running the sequence twice (with the removal step it prescribes) is green
@@ -590,6 +592,32 @@ try {
       `(E) a smuggled path must not be read as the manifest entry: ${smuggled.out}`,
     );
 
+    // (d) the record node-tar DOES honour, inserted BEFORE AN EXISTING ENTRY. The inner line is a
+    // well-formed record in its own right, so node-tar's line scan renames the entry it precedes
+    // while a length-framed reader sees one `comment` record and no rename. Nothing is added,
+    // removed or reordered, so the entry list — and therefore every digest recorded for this
+    // member — is byte-identical to the clean archive: only the disagreement itself is the tamper.
+    // Reading it either way would report the launcher verified while npm installs different files,
+    // so the run must refuse.
+    const honoured = paxRecord('path', `package/${MANIFEST_NAME}`).toString('utf8').slice(0, -1);
+    const [firstEntry, ...restEntries] = base;
+    ship([
+      firstEntry,
+      tarEntry('PaxHeader', paxRecord('comment', `x\n${honoured}`), 'x'),
+      ...restEntries,
+    ]);
+    const disagreeing = verify(fx);
+    assert.notEqual(
+      disagreeing.code,
+      0,
+      `(E) a pax header the readers name differently must be refused; got ${disagreeing.code}`,
+    );
+    assert.match(
+      disagreeing.err,
+      /records and its lines name differently/i,
+      `(E) the refusal must name the disagreement: ${disagreeing.err}`,
+    );
+
     // (c) a `..` segment that passes `startsWith('package/')` but escapes it once resolved.
     ship([...base, tarEntry('package/../evil.js', Buffer.from('x\n'))]);
     const escaped = verify(fx);
@@ -600,7 +628,7 @@ try {
     );
     assert.match(escaped.err, /escapes package\//i, `(E) the refusal must name it: ${escaped.err}`);
     console.log(
-      'ok (E) — a rename node-tar would not honour is refused, not read at the excluded path',
+      'ok (E) — a pax rename the readers disagree on is refused, not read at the excluded path',
     );
   }
 

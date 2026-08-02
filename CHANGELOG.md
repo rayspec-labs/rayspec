@@ -451,9 +451,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   then refuses the rest: a tarball carrying one path **twice** (extraction keeps the *last* entry, so
   a forged second copy at the excluded path would be the one installed), one hiding content **behind
   a lone null block** (`tar`, and the node-tar an `npm i` runs, treat that as a warning and read on),
-  and one that **renames an entry through a pax `path=` override** only a lax reader would honour — a
-  global-header `path`, or one smuggled inside another record's value, both of which node-tar and
-  libarchive apply to nothing. And when `git` cannot answer whether the working tree
+  and one that **renames an entry through a pax `path=` override** the readers do not agree on — a
+  global-header `path`, which node-tar and libarchive both ignore, and one smuggled inside another
+  record's value, which node-tar honours (it scans the header line by line) and libarchive does not
+  (it frames records by their declared length). The verifier takes both readings and refuses a header
+  they name differently, rather than picking one and disagreeing with whichever installer you use.
+  And when `git` cannot answer whether the working tree
   was clean, generation refuses rather than recording the flattering value — a failed command and a
   clean tree both produce no output, and only one of them is worth writing down.
 

@@ -204,14 +204,12 @@ function sortKeysDeep(value) {
 }
 
 /**
- * The `path` override carried by a pax extended-header body, or null when it carries none. A pax
- * body is a sequence of records `"<len> <key>=<value>\n"`, where `len` counts the WHOLE record —
- * its own digits, the separating space and the trailing newline included. This walks them exactly,
- * consuming `len` bytes at a time, and REFUSES a body that does not frame cleanly. That is the point:
- * a loose line scan would honour a `path=` smuggled inside another record's value, which no other
- * tar reader does, so the reader and the installer would disagree on the entry's name.
+ * The `path` a length-framed reader takes from a pax extended-header body, or null when it carries
+ * none. A pax body is a sequence of records `"<len> <key>=<value>\n"`, where `len` counts the WHOLE
+ * record — its own digits, the separating space and the trailing newline included. This walks them
+ * exactly, consuming `len` bytes at a time, and refuses a body that does not frame cleanly.
  */
-function paxPath(body) {
+function paxPathByRecord(body) {
   let path = null;
   let off = 0;
   while (off < body.length) {
@@ -235,6 +233,55 @@ function paxPath(body) {
 }
 
 /**
+ * The `path` a LINE-SCANNING reader takes from the same body — node-tar's rule, transcribed from the
+ * reader an `npm i` actually runs: the body loses one trailing newline, is split on the rest, and a
+ * line counts as a record when its leading decimal equals the line's own byte length plus the
+ * newline it lost. A line that does not is skipped, key is everything before the first `=`, value is
+ * everything after it, and the LAST `path` wins.
+ */
+function paxPathByLine(body) {
+  let path = null;
+  for (const line of body.toString('utf8').replace(/\n$/, '').split('\n')) {
+    const declared = Number.parseInt(line, 10);
+    if (declared !== Buffer.byteLength(line) + 1) continue;
+    const record = line.slice(`${declared} `.length);
+    const eq = record.indexOf('=');
+    if (eq <= 0) continue;
+    if (record.slice(0, eq) === 'path') path = record.slice(eq + 1);
+  }
+  return path;
+}
+
+/**
+ * The `path` override carried by a pax extended-header body, or null when it carries none — but only
+ * when the readers that matter agree on it.
+ *
+ * WHY TWO READINGS. A record VALUE may contain a newline, and there the two implementations a
+ * consumer runs part ways: libarchive frames records by their declared length, while node-tar — the
+ * reader behind `npm i` — splits the body into lines and keeps each line whose leading number
+ * matches its own length, so a `path=` smuggled inside another record's value renames the entry for
+ * node-tar and for nothing else. Its source says so itself: "XXX Values with \n in them will fail
+ * this. Refactor to not be a naive line-by-line parse."
+ *
+ * Picking either reading would let a tampered archive verify here and install as something else —
+ * insert such a header before an existing entry and the entry list, and therefore every digest this
+ * file records, is untouched while the installer writes different files. So both readings are taken
+ * and a body they name differently is REFUSED. That is the general form: this reader never has to
+ * out-guess an installer, it only has to notice that installers would not agree. No packer emits a
+ * record value containing a newline, so nothing legitimate is turned away.
+ */
+function paxPath(body) {
+  const framed = paxPathByRecord(body);
+  const scanned = paxPathByLine(body);
+  if (framed !== scanned) {
+    throw new Error(
+      `a pax body its records and its lines name differently (${framed ?? 'no path'} vs ${scanned ?? 'no path'}) — tar readers disagree on which file this is`,
+    );
+  }
+  return framed;
+}
+
+/**
  * The unpacked entries of a gzipped npm tarball, as `{ path, body }` with the leading `package/`
  * removed. Deliberately FAILS CLOSED: an entry type this reader does not model (a symlink, a hard
  * link, a device node), a header whose checksum does not add up, or a path outside `package/` (a
@@ -253,14 +300,16 @@ function paxPath(body) {
  *     (what `npm i` runs) treat a LONE zero block as a warning and keep reading, so bytes appended
  *     after one are installed. Everything from the marker to the end of the archive must be zero,
  *     and an archive that simply runs out before a marker is refused too.
- *   - A PAX `path=` OVERRIDE NO OTHER READER HONOURS. An entry's name can be overridden by a GNU
+ *   - A PAX `path=` OVERRIDE THE READERS DO NOT AGREE ON. An entry's name can be overridden by a GNU
  *     long-name (`L`) block or a pax extended header (`x`), and this reader applies both — but only
- *     the way node-tar and libarchive do. The pax body is walked as the length-prefixed records the
- *     format defines, not scanned line by line, so a `path=` smuggled inside another record's value
- *     is read as value bytes, not as a rename. And a GLOBAL pax header (`g`) carrying `path=` is
+ *     where every consumer would apply the same one. A GLOBAL pax header (`g`) carrying `path=` is
  *     refused outright: node-tar and libarchive DELIBERATELY ignore `path` from a global header (it
  *     renames nothing), so honouring it would make this reader name an entry differently from every
- *     consumer — and the excluded manifest path is precisely where that disagreement would hide.
+ *     consumer — and the excluded manifest path is precisely where that disagreement would hide. A
+ *     local (`x`) body is read BOTH ways — framed by record length, as libarchive does, and scanned
+ *     line by line, as node-tar does — and refused when the two name different files (see paxPath).
+ *     A `path=` smuggled inside another record's value is exactly that case: node-tar honours it,
+ *     libarchive does not, and no digest here would move, so the refusal is the only honest answer.
  * The messages carry no file name: the single caller knows which tarball it handed over and says so.
  */
 function unpack(gzipped) {
