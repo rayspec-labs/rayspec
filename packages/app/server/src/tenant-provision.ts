@@ -408,9 +408,17 @@ export async function provisionTenant(
   }
 }
 
-/** A driver rejection as ONE line: the migrator quotes the whole failing statement back at us. */
+/**
+ * A driver rejection as ONE bounded line. The migrator's own message quotes the entire failing
+ * statement — a whole migration file, comments included — so the database's actual complaint is
+ * preferred when it is attached as the cause, and the result is capped: a message an operator has to
+ * scroll past is not more informative than one they can read.
+ */
 function oneLine(err: unknown): string {
-  return (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').trim();
+  const cause = err instanceof Error && err.cause instanceof Error ? err.cause : undefined;
+  const text = (cause ?? (err instanceof Error ? err : undefined))?.message ?? String(err);
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > 300 ? `${flat.slice(0, 300)}…` : flat;
 }
 
 /**
