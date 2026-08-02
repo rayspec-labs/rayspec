@@ -150,6 +150,14 @@ deployment supplies — and returns the mode it has actually bound. It **replace
 is validated against the neutral auth-mode vocabulary, and a backend that does not
 implement it takes exactly the path it always did.
 
+The validation is deliberately one-sided: a preflight's answer is checked, a
+`resolveAuth()` answer is still taken as given. That asymmetry is what keeps the
+older contract byte-identical — validating it now would newly refuse a backend
+that answers off-vocabulary at runtime, where that run completes today. The
+preflight is also unbounded: it holds the run until it returns, and on the durable
+path it does so inside the transaction the worker wraps the run in, so a hanging
+remote preflight pins a pooled connection for its duration.
+
 ### 2. The fail-closed tenant chokepoint
 
 Every query against tenant-owned data goes through a single tenant-scoped database
