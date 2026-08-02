@@ -55,8 +55,9 @@
  * --json (machine output).
  *
  * This script performs no git WRITES — it only READS the workspace state (`git ls-files`, tag identity)
- * and never creates a commit, a tag or a release. It is never wired into a package lifecycle or CI —
- * it runs only when a human invokes it.
+ * and never creates a commit, a tag or a release. No package lifecycle hook and no CI job runs it
+ * against THIS repository — a release run happens only when a human invokes it. CI does execute a copy
+ * of it against a throwaway fixture repo with the package manager stubbed (`scripts/publish.test.mjs`).
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
