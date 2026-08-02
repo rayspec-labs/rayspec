@@ -1179,3 +1179,58 @@ describe('Pi adapter: with no cancellation in play the call is byte-identical', 
     expect(session.prompt.mock.calls[0]).toEqual(['extract fields\n\na transcript']);
   });
 });
+
+describe('Pi adapter: tearing the session down never becomes the run’s answer', () => {
+  // The teardown's own comment promises the session is torn down "no matter what (never leak it)".
+  // Three of its four steps were unguarded, so each could end the run — and abandon the steps after
+  // it. These arms hold the promise to its words: a failure while tidying up is not an outcome the
+  // caller should ever receive, and it must not cost the session either.
+
+  it('a throwing dispose() does not turn a completed run into a rejection', async () => {
+    const session = fakeSession(defaultMessages);
+    session.dispose = vi.fn(() => {
+      throw new Error('dispose exploded');
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    const adapter = new PiAdapter({ apiKey: 'sk-test' });
+    const res = await adapter.run(spec as never, makeCtx(makeFakeJournal().journal));
+
+    // The run succeeded; the only thing that failed was tidying up after it.
+    expect(res.status).toBe('completed');
+    expect(res.errorClass).toBeNull();
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a throwing unsubscribe() still aborts and disposes the session', async () => {
+    const session = fakeSession(defaultMessages);
+    session.subscribe = () => () => {
+      throw new Error('unsubscribe exploded');
+    };
+    createAgentSession.mockResolvedValue({ session });
+
+    const adapter = new PiAdapter({ apiKey: 'sk-test' });
+    const res = await adapter.run(spec as never, makeCtx(makeFakeJournal().journal));
+
+    expect(res.status).toBe('completed');
+    // The steps AFTER the throwing one are the ones that actually release the SDK's resources.
+    expect(session.abort).toHaveBeenCalled();
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a run that failed keeps its own error rather than the teardown’s', async () => {
+    const session = fakeSession(defaultMessages);
+    session.prompt = vi.fn().mockRejectedValue(new Error('the model call failed'));
+    session.dispose = vi.fn(() => {
+      throw new Error('dispose exploded');
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    const adapter = new PiAdapter({ apiKey: 'sk-test' });
+    const res = await adapter.run(spec as never, makeCtx(makeFakeJournal().journal));
+
+    expect(res.status).toBe('error');
+    expect(res.error).toContain('the model call failed');
+    expect(res.error).not.toContain('dispose exploded');
+  });
+});
