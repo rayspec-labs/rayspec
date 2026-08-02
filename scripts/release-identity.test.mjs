@@ -689,6 +689,22 @@ try {
       `(E) a path escaping package/ must be refused; got ${escaped.code}`,
     );
     assert.match(escaped.err, /escapes package\//i, `(E) the refusal must name it: ${escaped.err}`);
+
+    // The same escape as a DIRECTORY entry. Directories are skipped — they carry no content — but
+    // skipping is not a reason to stop looking: the path rules apply to every entry, so the one
+    // entry type this reader does not hash cannot also be the one it does not check.
+    ship([...base, tarEntry('package/../evil/', Buffer.alloc(0), '5')]);
+    const escapedDir = verify(fx);
+    assert.notEqual(
+      escapedDir.code,
+      0,
+      `(E) a DIRECTORY escaping package/ must be refused too; got ${escapedDir.code}`,
+    );
+    assert.match(
+      escapedDir.err,
+      /escapes package\//i,
+      `(E) the refusal must name it: ${escapedDir.err}`,
+    );
     console.log(
       'ok (E) — pax headers: refused where the readers disagree, read where a packer writes one',
     );
