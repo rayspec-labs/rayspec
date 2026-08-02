@@ -209,6 +209,31 @@ export interface JournalSink {
   record(step: StepReport & { authMode: AuthMode }): Promise<string>;
 }
 
+/**
+ * Server-derived run identity handed to a context-aware auth preflight. Every field is minted by the
+ * PLATFORM from values it already holds when the run starts — never model output, never a request
+ * body, never credential material. `credentialBindingRef` is an OPAQUE HANDLE the deployment mints
+ * (a broker lease id, a workload-identity handle) and the backend redeems OUT-OF-BAND: it is not a
+ * credential and the platform never inspects, derives or persists it. The shape is closed and every
+ * member is a plain string identifier, so there is no slot a credential could ride in.
+ */
+export interface RunAuthPreflight {
+  /** The run's id, assigned by the platform before the backend is called. */
+  readonly runId: string;
+  /** The tenant this run is scoped to (the TenantDb chokepoint's tenantId). */
+  readonly tenantId: string;
+  /**
+   * The effective agent's NEUTRAL name (`AgentSpec.name` — what the run header records). NOT the
+   * DECLARED agent id (`agents[].id` in the spec): that is a different string, and it does not reach
+   * the run core today. Threading it here would be a separate change.
+   */
+  readonly agentName: string;
+  /** The model this run executes on (`AgentSpec.model`). */
+  readonly model: string;
+  /** Opaque credential-binding reference. The KEY IS ABSENT unless the deployment supplied one. */
+  readonly credentialBindingRef?: string;
+}
+
 /** The neutral backend contract. */
 export interface Backend {
   readonly id: BackendId;
@@ -218,6 +243,16 @@ export interface Backend {
    * Detects a stray ANTHROPIC_API_KEY for the Anthropic adapter.
    */
   resolveAuth(): Promise<AuthMode>;
+  /**
+   * OPTIONAL context-aware auth preflight. A REMOTE backend cannot answer `resolveAuth()` usefully:
+   * at that moment it has no run identity, so it can only report a mode it has not yet BOUND. A
+   * backend that implements this is asked HERE INSTEAD of `resolveAuth()` for the ONE pre-run
+   * resolution, receives the server-derived run identity, and the `AuthMode` it returns is the run's
+   * authoritative pre-run mode. A return outside the neutral `AuthMode` vocabulary, or a throw, ends
+   * the run CLOSED — before any header transition, any journal row or any model call. Omit this and
+   * the pre-run path is exactly what it has always been: a single `resolveAuth()`.
+   */
+  preflightAuth?(preflight: RunAuthPreflight): Promise<AuthMode>;
   /** Run the spec end-to-end, journaling each step, returning the neutral RunResult. */
   run(spec: AgentSpec, ctx: RunContext): Promise<RunResult>;
 }

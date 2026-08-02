@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A backend can now bind its authentication at the moment the run identity exists, instead of
+  before it: the neutral `Backend` contract gains an optional `preflightAuth()`.** A run's auth mode
+  is resolved once, before the run starts, and threaded onto the run context so every journaled step
+  attributes to one mode — that ordering is what makes the attribution honest by construction, and it
+  is not moving. It is also perfectly workable for a local adapter, which reads its own environment
+  and needs no run identity to know how it authenticates. A **remote** backend cannot work that way:
+  at that instant there is no run id, no tenant and no agent identity, so it cannot select a tenant-
+  or run-scoped credential and can only report a mode it has not actually bound. A backend that
+  implements `preflightAuth()` is asked there instead, at exactly the same point in the run, and is
+  handed the identity the server derived: the run id, the tenant, the agent's neutral name, the model,
+  and — when the deployment supplies one via the new `RunOptions.credentialBindingRef` — an opaque
+  credential-binding reference. The mode it returns is the run's pre-run mode, so it reaches the
+  `running` header while the run is still in flight, every platform-dispatched tool step, and the
+  billing rule that reads the mode.
+
+  **Nothing but identifiers crosses the seam.** The payload is a closed set of plain strings the
+  platform minted from what it already held — never model output, never a request body, never
+  credential bytes. The binding reference is a handle the deployment mints and the backend redeems
+  out-of-band; it is forwarded byte-for-byte and the platform never inspects, derives, logs or
+  persists it. An answer outside the neutral auth-mode vocabulary, or a preflight that throws, ends
+  the run closed — before the header transition, before any journal row and before any model call —
+  so a refused run leaves no `runs` row, no `journal_steps` row and no `run_events` row at all. The
+  refusal names the run, never the value it rejected, so a backend that mistakenly handed back its
+  credential does not get it echoed into an error message.
+
+  **A backend that does not implement it runs byte-identically.** `resolveAuth()` is untouched and
+  remains the contract's one required auth method. A backend that omits `preflightAuth()` — or that
+  carries it as an explicit `undefined` — takes the same single `resolveAuth()` call at the same
+  point it always did, and that answer is still used verbatim and unvalidated, so a backend that
+  honestly reports `unauthenticated` still runs exactly as before. The new validation applies only to
+  a preflight's answer. No adapter in this repository implements the preflight, so every run in the
+  tree resolves its auth mode by the identical code path it used previously, and no existing test
+  needed changing.
+
+  **Two limits worth stating plainly.** The preflight is **not bounded**: the run's wall-clock bound
+  and its cancellation controller are both armed after this point, so a remote preflight that hangs
+  holds the run (and, on the durable path, a worker slot). Bounding it is a separate change. And an
+  `llm` step's auth mode is still whatever the adapter records — the Anthropic adapter deliberately
+  reconciles it mid-run from the live session — so the bound mode is guaranteed on every
+  *platform-dispatched tool* step by construction, and on `llm` steps by the adapter honouring the
+  context, exactly as it was before.
+
 - **The reserved store names are now drift-locked on both sides, and the authoring skill teaches
   them.** The lint rule and the boot registrar already shared one constant; what could still rot was
   everything around it. The lock in `@rayspec/db` derived its expectation from a hand-written list of

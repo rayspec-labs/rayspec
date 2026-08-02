@@ -51,6 +51,7 @@ import { makeDispatchTool } from './dispatch.js';
 import { EventPipeline } from './event-pipeline.js';
 import { makeHandlerDb } from './handlers/store-facade.js';
 import { rehydrateConversation } from './rehydrate.js';
+import { resolvePreRunAuthMode } from './run-auth-preflight.js';
 import {
   armRunCancellation,
   isRunCancelled,
@@ -134,6 +135,15 @@ export interface RunOptions {
    * behaves exactly as it did before this option existed.
    */
   signal?: AbortSignal;
+  /**
+   * OPAQUE credential-binding REFERENCE for a backend that implements `preflightAuth()`: a handle the
+   * DEPLOYMENT mints (a broker lease id, a workload-identity handle) and the backend redeems
+   * out-of-band for a run- or tenant-scoped credential. run-core FORWARDS it byte-for-byte into the
+   * preflight payload and never reads, derives, logs or persists it — it is not, and must never be,
+   * credential material. Absent ⇒ the key is omitted from the payload entirely, and a backend without
+   * `preflightAuth()` never sees it at all.
+   */
+  credentialBindingRef?: string;
 }
 
 /**
@@ -537,8 +547,19 @@ export async function runAgent(
   // — instead of a hard-coded literal scattered across the tool path. resolveAuth() is the
   // backend's own auth resolution (OpenAI = api-key; it also validates disallowed combos and
   // fail-closed throws). The adapter calls resolveAuth() again inside run() to apply any SDK side
-  // effects (e.g. setDefaultOpenAIKey); it is idempotent.
-  const authMode = await backend.resolveAuth();
+  // effects (e.g. setDefaultOpenAIKey); it is idempotent. A backend that implements the optional
+  // context-aware preflight is asked THERE instead — it receives the server-derived run identity and
+  // returns a mode it has actually BOUND; the answer is validated against the neutral vocabulary and a
+  // refusal ends the run before this line's consumers exist.
+  const authMode = await resolvePreRunAuthMode(backend, {
+    runId,
+    tenantId: tdb.tenantId,
+    agentName: spec.name,
+    model: spec.model,
+    ...(opts.credentialBindingRef === undefined
+      ? {}
+      : { credentialBindingRef: opts.credentialBindingRef }),
+  });
 
   // Publish the run header NOW that the run is starting, so the run-read routes resolve this runId
   // while the run is in flight instead of only once it finishes. Additive: this INSERTS a missing
