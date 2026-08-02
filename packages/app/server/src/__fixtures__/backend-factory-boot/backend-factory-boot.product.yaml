@@ -1,0 +1,99 @@
+# A record-ingress doc that declares BOTH an input_normalize step AND an extraction agent, and NO
+# workflow step that runs the agent. One boot of this doc therefore constructs BOTH of the model calls
+# the boot itself owns — the live extraction executor and the record normalizer — while the record
+# workflow stays a plain store_write, so the extraction executor is CONSTRUCTED and never INVOKED.
+# No audio, no media_playback, no stt.* step, no file_input, no conversation_input: the boot demands
+# only RAYSPEC_EXTRACTION_MODE (agents declared) and RAYSPEC_NORMALIZE_MODE (input_normalize declared).
+version: "1.0"
+product:
+  id: factoryboot
+  name: Factory Boot
+  description: A record-ingress product that declares an input-normalize step and an extraction agent, used to exercise the boot's model-construction path.
+requires:
+  capabilities: [record_input, validation, artifact]
+capabilities:
+  - id: record_input
+    tier: B
+    status: available
+    contracts: [record_input.record_submitted]
+    input_normalize:
+      agent: field_normalizer
+      output_contract: intake.normalized
+  - id: validation
+    tier: B
+    status: available
+    contracts: [validation.check]
+  - id: artifact
+    tier: B
+    status: available
+    contracts: [artifact.persist, artifact.handle]
+contracts:
+  intake.request_row:
+    type: object
+  intake.normalized:
+    type: object
+    additional_properties: false
+    properties:
+      title: { type: string }
+      priority: { type: string }
+    required: [title, priority]
+  factoryboot.doc:
+    type: object
+  factoryboot.note:
+    type: object
+    additional_properties: false
+    properties:
+      headline: { type: string }
+    required: [headline]
+stores:
+  - name: intake_requests
+    columns:
+      - { name: request_ref, type: text }
+      - { name: record_id, type: text }
+      - { name: title, type: text }
+    key: [request_ref]
+extractors:
+  - id: note_extractor
+    purpose: Derive a grounded note from a submitted record.
+    extraction:
+      intent: note_extraction
+      input_artifacts:
+        - name: doc
+          ref: factoryboot.doc
+          kind: document
+          required: true
+      output_artifacts:
+        - name: candidate
+          ref: factoryboot.note
+          kind: note_candidate
+          schema_ref: factoryboot.note
+          materialization_target: typed_artifact_ref
+      required_output_shape:
+        schema_ref: factoryboot.note
+        additional_properties: false
+        required_paths: [headline]
+      acceptance_boundary:
+        type: validation_node
+        requires:
+          - validation.check
+      materialization:
+        target: typed_artifact_ref
+        persist_via: artifact.persist
+        handle_ref: artifact.handle
+workflows:
+  - id: log_request
+    trigger:
+      capability: record_input
+      event: record_submitted
+      scope: record
+    steps:
+      - id: log
+        type: store_write
+        use: store.write
+        store: intake_requests
+        values:
+          request_ref: { event: record_id }
+          record_id: { event: record_id }
+          title: { event: title }
+        outputs:
+          row: intake.request_row
