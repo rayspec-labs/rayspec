@@ -195,6 +195,28 @@ jobs:
       - name: Release-guard regression
         run: pnpm test:release-guard
 
+      # scripts/release-identity.mjs emits the release identity manifest — the only artifact that maps
+      # a published closure back to its source commit — and, in --verify, is the thing a third party
+      # uses to REFUTE it. Like the packer, nothing on a pull request runs it. This standalone test
+      # drives the REAL script inside a throwaway git repo against tarballs it builds byte-by-byte, and
+      # holds what the manifest is worth: an altered tarball byte fails (isolated by re-gzipping
+      # identical content, so only the recorded integrity can catch it), an altered file list fails
+      # (isolated on the launcher, the one member that records no tarball integrity), the launcher
+      # self-reference holds (embedding the manifest keeps verification green, embedding a different
+      # one does not), an archive that carries a path twice or hides an entry behind a lone null block
+      # is refused rather than half-read, a pax extended header or GNU long-name block that would
+      # make this reader and the node-tar behind `npm i` name an entry differently — or delimit it
+      # differently — is refused while the header a packer really emits is still read and applied,
+      # the documented release sequence stays
+      # green when it is run a second time, the manifest reproduces byte-identically from the same
+      # inputs, an absent tag or
+      # workflow run is a null with a reason rather than an invented value, a git failure is never
+      # written down as a clean working tree, and an incomplete closure refuses. The test also asserts
+      # on EVERY child it starts that neither mode started a package manager.
+      # DB-free / secret-free / network-free → lane 1.
+      - name: Release-identity manifest regression
+        run: pnpm test:release-identity
+
       # The neutral reference product (examples/acme-notes/**) must carry ZERO product-domain meaning —
       # a forcing function on the fixtures the platform gates/goldens/e2e are pinned against.
       - name: Fixture-neutrality gate

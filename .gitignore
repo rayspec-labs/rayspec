@@ -21,6 +21,11 @@ out/
 # `.js` under its source root (build output goes to `dist/`, already ignored above).
 examples/**/packs/**/*.js
 
+# The release identity manifest is generated per release run by scripts/release-identity.mjs and
+# ships inside the launcher tarball. It records the commit it was generated at, so committing it
+# would make it name its own parent commit and be stale the moment it lands.
+packages/app/rayspec/rayspec-release-identity.json
+
 # Caches
 .turbo/
 .cache/

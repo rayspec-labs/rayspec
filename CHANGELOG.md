@@ -419,6 +419,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   additive nullable `ADD COLUMN`s on `journal_steps`, no table rewrite and no backfill, so a row
   written before it reads back null (unclassified) rather than a fabricated class.
 
+- **A release now ships a machine-readable identity manifest, so you can check for yourself which
+  commit the packages you installed were built from.** A development branch keeps the previous
+  version string until the release cut, which means a commit hash plus a `version` field never
+  identified a published artifact — a `1.7` development snapshot and the released `1.6.2` source
+  both say `1.6.2`. `rayspec-release-identity.json` closes that: it names the version, the source
+  commit and whether the working tree was clean at it, and then, for all 29 packages of the runtime
+  closure, the package name, version, tarball integrity and unpacked file-list digest. It also
+  carries the digests of the three checked-in JSON Schema artifacts (unified, backend, product), of
+  `pnpm-lock.yaml` and of `docs/dependency-sbom.json`, plus the Node and pnpm requirements, the Git
+  tag and the build workflow run. Every digest form is spelled out in the manifest's own
+  `algorithms` block, so a reproduction needs nothing from this repository: `openssl dgst -sha512
+  -binary <file>.tgz | openssl base64 -A` prints a recorded tarball integrity, and `shasum -a 256
+  pnpm-lock.yaml` prints a recorded source digest.
+
+  **Two places, the same bytes.** The manifest is attached to the GitHub release, and it ships
+  inside the installed launcher package — `node_modules/rayspec/rayspec-release-identity.json` after
+  an `npm i rayspec`, and inside the `rayspec` tarball itself.
+
+  **What it does not claim.** Nothing is invented for a field that has no value: with no release
+  workflow in this repository the build workflow run is an explicit `null` naming that reason rather
+  than a plausible-looking run, and a manifest generated before the release tag exists records the
+  tag as `absent`. The manifest is **unsigned**, and says so, with the reason — signing it in CI
+  would mean moving the release build into CI, and the release is deliberately a human-invoked
+  script. And the launcher records **no tarball integrity at all**: it is the package the manifest
+  ships inside, so a tarball whose digest included the manifest could never match the tarball that
+  ships. What is recorded for the launcher instead is verifiable on the real artifact — its
+  file-list digest over every entry except the manifest — and a launcher carrying some *other*
+  manifest fails verification, so the exclusion is checked rather than trusted. Making that true
+  takes an archive reader that reads *which file each entry is* the way node-tar and libarchive do,
+  then refuses the rest: a tarball carrying one path **twice** (extraction keeps the *last* entry, so
+  a forged second copy at the excluded path would be the one installed), one hiding content **behind
+  a lone null block** (`tar`, and the node-tar an `npm i` runs, treat that as a warning and read on),
+  and one that **renames an entry through a pax `path=` override** the readers do not agree on — a
+  global-header `path`, which node-tar and libarchive both ignore, and one smuggled inside another
+  record's value, which node-tar honours (it scans the header line by line) and libarchive does not
+  (it frames records by their declared length). The verifier takes both readings and refuses a header
+  they name differently, rather than picking one and disagreeing with whichever installer you use. A
+  pax header can also move an entry's **end**, and with it the start of the next one: a `size` record
+  is applied the way both readers apply it, so an entry swallowed into its predecessor's content
+  changes the file list instead of hiding in it, and any other record that could reach that far is
+  refused rather than ignored. Two more places where a reader can part company with an installer over
+  a NAME get the same treatment: every NUL-terminated string in an archive — the 100-byte name field,
+  the ustar prefix, a GNU **long-name** block's body — is read both ways and refused when they end it
+  in different places (node-tar's terminator stops at a newline); and the ustar **prefix** field is
+  read only under the exact magic node-tar requires, so a header rewritten in place with its path
+  split across `name` and `prefix` under GNU magic — every digest unchanged — is refused instead of
+  certified. And a **directory that declares a body** is refused: tar gives a directory no content,
+  so those bytes are the next entries to an installer, which writes them, while a reader that took
+  the declared size at face value would record nothing for them — a package whose own files are
+  attacker-chosen, with every digest still matching. Two narrower shapes of the same fault go with
+  it: an **empty name field** joined to a prefix (node-tar decides file-vs-directory before the join,
+  so it writes a 0-byte file where the reader sees a directory — emptying a certified file), and an
+  **empty prefix in the wide branch**, where node-tar prepends a bare `/` and the resulting absolute
+  path installs a level deeper. And when `git` cannot answer whether the working tree
+  was clean, generation refuses rather than recording the flattering value — a failed command and a
+  clean tree both produce no output, and only one of them is worth writing down.
+
+  **Verifying is one command.** `pnpm release:identity-verify --tarballs <dir>` recomputes every
+  digest and exits non-zero naming every package that diverged and both values. A tarball whose
+  bytes moved fails on the integrity even when it unpacks to identical content; a tarball whose
+  contents moved fails on the file list even when no integrity is recorded for it. Generating is
+  `pnpm release:identity --tarballs <dir>`; both are offline, and neither starts a package manager
+  or writes anything to a registry.
+
 ### Changed
 
 - **A product deployment whose `RAYSPEC_PRODUCT_TENANT_ID` is malformed or names no live org now
