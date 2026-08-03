@@ -17,9 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this variable set to a number of milliseconds, a run that is executing re-reads its *own* record on
   that interval and aborts its own controller. That abort is the one the in-process path already
   delivers, so everything after it is the path that already existed: the same terminal `error` header,
-  the same single `cancelled` journal step, the same refusal of every seam the abandoned call reaches
-  for. Measured against an in-process control run through the identical invocation shape, the terminal
-  state and the journal are equal.
+  the same journal, the same refusal of every seam the abandoned call reaches for. What that journal
+  holds follows the invocation shape rather than which process cancelled — measured against an
+  in-process control run through the identical invocation shape, the terminal state and the journal
+  are equal.
 
   **Off by default, and off costs nothing.** Unset — the default, and what any unusable value resolves
   to — no read is issued at all: a run in the durable shape touches its autonomous handle exactly zero
