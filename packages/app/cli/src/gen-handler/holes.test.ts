@@ -12,7 +12,14 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { HandlerHoles } from './holes.js';
-import { HolesError, LOOKUP_HOLE_KEYS, PERSIST_HOLE_KEYS, validateHoles } from './holes.js';
+import {
+  COLUMN_HOLE_KEYS,
+  FK_REVALIDATE_KEYS,
+  HolesError,
+  LOOKUP_HOLE_KEYS,
+  PERSIST_HOLE_KEYS,
+  validateHoles,
+} from './holes.js';
 import { renderHandler } from './templates.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -498,62 +505,222 @@ describe('validateHoles — an UNKNOWN top-level key is named, never ignored', (
   });
 });
 
+describe('validateHoles — an UNKNOWN key INSIDE a fixed-shape hole is named too', () => {
+  // The same rule one level down, for the same reason. These are one-character edits of the committed
+  // hole-set, and each one silently removed a server-side safety while the render still reported
+  // success: dropping the `r` from `lookupFixedFilter` renders an FK re-check WITHOUT the
+  // `active: true` predicate (it starts matching DEACTIVATED lookup rows), and dropping the `s` from
+  // `enumValues` renders a coercion WITHOUT the closed-set membership check (any string the model
+  // emits is persisted into the classification column). Each case carries its own ACCEPT CONTROL, so
+  // the rejection is attributable to the renamed key and to nothing else in the hole-set.
+
+  it('rejects `lookupFixedFilter` mistyped inside fkRevalidate — and names the key it nearly is', () => {
+    expect(() => validateHoles(committed('code-claim.holes.json'))).not.toThrow(); // accept control
+    const h = committed('code-claim.holes.json');
+    h.fkRevalidate = renameKey(
+      h.fkRevalidate as Record<string, unknown>,
+      'lookupFixedFilter',
+      'lookupFixedFilters',
+    );
+    expect(() => validateHoles(h)).toThrow(HolesError);
+    expect(() => validateHoles(h)).toThrow(
+      /holes\.fkRevalidate carries the unknown key\(s\) 'lookupFixedFilters'/,
+    );
+    expect(() => validateHoles(h)).toThrow(/did you mean 'lookupFixedFilter'/);
+  });
+
+  it('rejects `enumValues` mistyped inside a column hole — and names the key it nearly is', () => {
+    // The clamp is dropped from BOTH the control and the edit: `clampValues` ranks by the column's
+    // enumValues, so on the committed file an unrelated rule would notice the missing enumValues and
+    // the column check would not be what fires. A hole-set whose enum column carries no clamp is the
+    // shape where nothing else notices — which is exactly the silent case this closes.
+    const control = committed('code-claim.holes.json');
+    delete control.clampValues;
+    expect(() => validateHoles(control)).not.toThrow(); // accept control
+    const h = committed('code-claim.holes.json');
+    delete h.clampValues;
+    const cols = h.columns as Record<string, unknown>[];
+    const i = cols.findIndex((c) => c.col === 'policy_flag');
+    expect(i).toBeGreaterThan(-1);
+    cols[i] = renameKey(cols[i] as Record<string, unknown>, 'enumValues', 'enumValue');
+    expect(() => validateHoles(h)).toThrow(HolesError);
+    expect(() => validateHoles(h)).toThrow(
+      new RegExp(`holes\\.columns\\[${i}\\] carries the unknown key\\(s\\) 'enumValue'`),
+    );
+    expect(() => validateHoles(h)).toThrow(/did you mean 'enumValues'/);
+  });
+
+  it('tolerates no annotation key one level down either', () => {
+    const inFk = committed('code-claim.holes.json');
+    (inFk.fkRevalidate as Record<string, unknown>).$comment = 'why this handler exists';
+    expect(() => validateHoles(inFk)).toThrow(/holes\.fkRevalidate carries the unknown key/);
+    expect(() => validateHoles(inFk)).toThrow(/'\$comment'/);
+    const inCol = committed('code-claim.holes.json');
+    (inCol.columns as Record<string, unknown>[])[0]!.$comment = 'the FK-checked code';
+    expect(() => validateHoles(inCol)).toThrow(/holes\.columns\[0\] carries the unknown key/);
+    expect(() => validateHoles(inCol)).toThrow(/'\$comment'/);
+  });
+
+  it('rejects a non-object fkRevalidate rather than reading absent fields off it', () => {
+    expect(() => validateHoles(persist({ fkRevalidate: 'category_code' }))).toThrow(
+      /holes\.fkRevalidate must be a plain object/,
+    );
+    expect(() => validateHoles(persist({ fkRevalidate: ['category_code'] }))).toThrow(
+      /holes\.fkRevalidate must be a plain object/,
+    );
+  });
+});
+
 describe('the allow-lists cover the whole hole shape (a new key cannot become silently optional)', () => {
-  // The rejection above is only as good as the two lists it checks against: a hole key added later and
-  // NOT listed would be rejected on every hole-set that carries it — the mirror-image failure. These
-  // two tests hold the lists to the shape from both directions, so the suite goes RED on the omission
-  // rather than shipping a key nobody can pass.
+  // The rejections above are only as good as the lists they check against: a hole key added later and
+  // NOT listed would be rejected on every hole-set that carries it — the mirror-image failure, which
+  // makes a declared, rendered key UNPASSABLE. These two tests hold every list to the shape from both
+  // directions, so the suite goes RED on the omission rather than shipping a key nobody can pass.
   const holesSrc = readFileSync(join(here, 'holes.ts'), 'utf8');
   /** `template` + `exportName` + `store` — the floor every hole-set's observed reads must clear. */
   const SHARED_KEY_COUNT = 3;
 
-  /** The `readonly` members declared by one hole interface, read out of the source of truth itself. */
+  /**
+   * The members declared by one hole interface, read out of the source of truth itself. The `readonly`
+   * modifier is OPTIONAL in the match on purpose: it is a convention no compiler or lint rule enforces
+   * here, so a member declared without it is just as declared, just as renderable — and would slip past
+   * a modifier-bound pattern into exactly the unpassable state this test exists to prevent.
+   */
   function interfaceMembers(name: string): string[] {
     const start = holesSrc.indexOf(`export interface ${name} {`);
     expect(start).toBeGreaterThan(-1);
     const body = holesSrc.slice(start, holesSrc.indexOf('\n}', start));
-    return [...body.matchAll(/^ {2}readonly ([A-Za-z_][A-Za-z0-9_]*)\??:/gm)].map(
+    return [...body.matchAll(/^ {2}(?:readonly )?([A-Za-z_][A-Za-z0-9_]*)\??:/gm)].map(
       (m) => m[1] as string,
     );
   }
 
-  it('each allow-list is EXACTLY the interface that declares the template', () => {
+  it('each allow-list is EXACTLY the interface that declares that hole shape', () => {
     expect([...PERSIST_HOLE_KEYS].sort()).toEqual(interfaceMembers('PersistHandlerHoles').sort());
     expect([...LOOKUP_HOLE_KEYS].sort()).toEqual(interfaceMembers('LookupHandlerHoles').sort());
+    expect([...FK_REVALIDATE_KEYS].sort()).toEqual(interfaceMembers('FkRevalidateHole').sort());
+    expect([...COLUMN_HOLE_KEYS].sort()).toEqual(interfaceMembers('ColumnHole').sort());
     // A sanity floor: the parse found the real members, not an empty match set.
     expect(PERSIST_HOLE_KEYS).toContain('clampValues');
     expect(LOOKUP_HOLE_KEYS).toContain('substringCol');
+    expect(FK_REVALIDATE_KEYS).toContain('lookupFixedFilter');
+    expect(COLUMN_HOLE_KEYS).toContain('enumValues');
   });
 
-  it('every top-level key the validator and the renderers actually READ is allow-listed', () => {
-    // Observed, not asserted from a second hand-written list: each hole-set below is handed to
-    // `validateHoles` and to BOTH renderer targets through a recording proxy, and every top-level key
-    // either of them touches must be on that template's list.
+  /** The committed persist set with every OPTIONAL mechanism dropped (the arms the golden never takes). */
+  function barePersist(): Record<string, unknown> {
+    const h = committed('code-claim.holes.json');
+    delete h.fkRevalidate;
+    delete h.fixedValues;
+    delete h.clampValues;
+    return h;
+  }
+
+  /** The committed lookup set with a NON-EMPTY filterCols and NO substring pair (the other two arms). */
+  function filteredLookup(): Record<string, unknown> {
+    const h = committed('lookup-categories.holes.json');
+    h.filterCols = ['code'];
+    delete h.substringArg;
+    delete h.substringCol;
+    return h;
+  }
+
+  /**
+   * Hand a hole-set to `validateHoles` and to BOTH renderer targets through recording proxies — one per
+   * fixed-shape hole object — and return the keys each shape was actually READ for.
+   */
+  function observeReads(holes: Record<string, unknown>): {
+    top: Set<string>;
+    fk: Set<string>;
+    column: Set<string>;
+  } {
+    const top = new Set<string>();
+    const fk = new Set<string>();
+    const column = new Set<string>();
+    const record = (
+      o: object,
+      into: Set<string>,
+      wrap?: (prop: string, value: unknown) => unknown,
+    ): unknown =>
+      new Proxy(o, {
+        get(target, prop, receiver) {
+          const value = Reflect.get(target, prop, receiver);
+          if (typeof prop !== 'string') return value;
+          into.add(prop);
+          return wrap === undefined ? value : wrap(prop, value);
+        },
+      });
+    const recorded = record(holes, top, (prop, value) => {
+      if (prop === 'fkRevalidate' && typeof value === 'object' && value !== null) {
+        return record(value, fk);
+      }
+      if (prop === 'columns' && Array.isArray(value)) {
+        // The ARRAY itself is not a hole shape (its keys are indices), so only its ELEMENTS record.
+        return new Proxy(value, {
+          get(target, p, receiver) {
+            const v = Reflect.get(target, p, receiver);
+            return typeof v === 'object' && v !== null && typeof p === 'string' && /^\d+$/.test(p)
+              ? record(v, column)
+              : v;
+          },
+        });
+      }
+      return value;
+    });
+    validateHoles(recorded);
+    renderHandler(recorded as HandlerHoles, 'ts');
+    renderHandler(recorded as HandlerHoles, 'js');
+    return { top, fk, column };
+  }
+
+  it('every key the validator and the renderers actually READ is allow-listed', () => {
+    // Observed, not asserted from a second hand-written list. The fixtures span the ARMS the renderers
+    // branch on, not just the committed pair: a persist set without fkRevalidate/fixedValues/clampValues
+    // and a lookup set with a non-empty filterCols and no substring pair take the branches the committed
+    // hole-sets never reach, so a key read only there is observed here too.
     const upsert = {
       ...committed('code-claim.holes.json'),
       mode: 'upsert-by-natural-key',
       idArg: undefined,
       naturalKeyCol: 'category_code',
     };
-    const cases: { holes: Record<string, unknown>; allowed: readonly string[] }[] = [
-      { holes: committed('code-claim.holes.json'), allowed: PERSIST_HOLE_KEYS },
-      { holes: upsert, allowed: PERSIST_HOLE_KEYS },
-      { holes: committed('lookup-categories.holes.json'), allowed: LOOKUP_HOLE_KEYS },
+    const cases: { label: string; holes: Record<string, unknown>; allowed: readonly string[] }[] = [
+      {
+        label: 'committed persist',
+        holes: committed('code-claim.holes.json'),
+        allowed: PERSIST_HOLE_KEYS,
+      },
+      { label: 'persist upsert-by-natural-key', holes: upsert, allowed: PERSIST_HOLE_KEYS },
+      { label: 'persist without fk/fixed/clamp', holes: barePersist(), allowed: PERSIST_HOLE_KEYS },
+      {
+        label: 'committed lookup',
+        holes: committed('lookup-categories.holes.json'),
+        allowed: LOOKUP_HOLE_KEYS,
+      },
+      {
+        label: 'lookup filtered, no substring',
+        holes: filteredLookup(),
+        allowed: LOOKUP_HOLE_KEYS,
+      },
     ];
-    for (const { holes, allowed } of cases) {
-      const read = new Set<string>();
-      const recorded: unknown = new Proxy(holes, {
-        get(target, prop, receiver) {
-          if (typeof prop === 'string') read.add(prop);
-          return Reflect.get(target, prop, receiver);
-        },
-      });
-      validateHoles(recorded);
-      renderHandler(recorded as HandlerHoles, 'ts');
-      renderHandler(recorded as HandlerHoles, 'js');
-      expect([...read].filter((k) => !allowed.includes(k))).toEqual([]);
-      // The proxy really did observe the reads (an empty set would make the filter vacuously green).
-      expect(read.size).toBeGreaterThan(SHARED_KEY_COUNT);
+    for (const { label, holes, allowed } of cases) {
+      const { top, fk, column } = observeReads(holes);
+      expect(
+        [...top].filter((k) => !allowed.includes(k)),
+        label,
+      ).toEqual([]);
+      expect(
+        [...fk].filter((k) => !FK_REVALIDATE_KEYS.includes(k)),
+        label,
+      ).toEqual([]);
+      expect(
+        [...column].filter((k) => !COLUMN_HOLE_KEYS.includes(k)),
+        label,
+      ).toEqual([]);
+      // The proxies really did observe the reads (an empty set would make the filters vacuously green).
+      expect(top.size, label).toBeGreaterThan(SHARED_KEY_COUNT);
+      if (holes.fkRevalidate !== undefined) expect(fk.size, label).toBeGreaterThanOrEqual(3);
+      if (holes.columns !== undefined) expect(column.size, label).toBeGreaterThanOrEqual(4);
     }
   });
 });

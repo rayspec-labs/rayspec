@@ -1369,13 +1369,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the Expense-Claim reference hole-set, `clampValues` written as `clampValue` rendered a handler
   with the whole server-side clamp gone (5207 bytes → 3964), and `fkRevalidate` written as
   `fkRevalidates` rendered one with the foreign-key re-validation gone (→ 4648) — and both runs
-  reported `ok: true` and exited `0`, so the author had no way to notice from the render. The
-  top-level key set is now closed per template, the way the `clampValues` rule check one level down
-  and the spec grammar already are: an unrecognised key fails the hole-set with the standard
+  reported `ok: true` and exited `0`, so the author had no way to notice from the render. The same
+  loss was one level down, where a hole key is just as load-bearing: `lookupFixedFilter` written as
+  `lookupFixedFilters` rendered a foreign-key re-check without its `active: true` predicate (5207
+  bytes → 5186), so the re-check began matching deactivated lookup rows, and — on a hole-set whose
+  enum column carries no clamp, where nothing else notices — `enumValues` written as `enumValue`
+  rendered a coercion without the closed-set membership check (3964 → 3895), so any string the model
+  emitted was persisted into the classification column. Every hole object
+  whose shape is fixed now carries a closed key set — the hole-set itself (per template), each
+  `columns[]` entry, `fkRevalidate`, and each `clampValues` rule, the last of which already was — the
+  way the spec grammar already is: an unrecognised key fails the hole-set with the standard
   malformed-hole-set envelope (`ok: false`, an `errors` entry, exit `1`), names the offending key,
-  and names the known key it is a near-miss of. Nothing unknown is tolerated — there is no reserved
-  annotation prefix. A hole-set that only uses declared keys is unaffected and renders byte-for-byte
-  what it always did.
+  and names the known key it is a near-miss of. The map-valued holes (`fixedValues`, `fixedFilter`,
+  `lookupFixedFilter`, `clampValues`) are keyed by column name, so their keys stay fenced by the
+  snake_case charset and the column rules — which leaves no tolerated annotation prefix at any level.
+  A hole-set that only uses declared keys is unaffected and renders byte-for-byte what it always did.
 
 ### Documentation
 
@@ -1537,13 +1545,14 @@ existing database, and for clients written against the HTTP surface.
 - **The two auth secrets are no longer mirrored into `process.env`.** Code that read
   `RAYSPEC_JWT_SIGNING_KEY` or `RAYSPEC_API_KEY_PEPPER` back out of the environment after boot now finds
   nothing there, and a spawned child no longer inherits them.
-- **`rayspec gen-handler` now refuses a holes file carrying a top-level key its template does not
-  declare**, where it previously ignored the key and rendered anyway. A holes file that only uses
-  declared keys is unaffected and renders identical bytes; one that carried a typo, a key of the other
-  template, or a hand-added comment/metadata key stops with `ok: false` and exit `1`, and the error
-  names the key (and the declared key it is a near-miss of). Fix the key or drop it — a build step that
-  runs `gen-handler` will fail until it is settled, which is the point: that key was configuring
-  nothing.
+- **`rayspec gen-handler` now refuses a holes file carrying a key the hole shape it sits in does not
+  declare**, where it previously ignored the key and rendered anyway. This applies at the top level
+  (per template) and inside each `columns[]` entry, `fkRevalidate`, and `clampValues` rule. A holes
+  file that only uses declared keys is unaffected and renders identical bytes; one that carried a
+  typo, a key of the other template, or a hand-added comment/metadata key at any level stops with
+  `ok: false` and exit `1`, and the error names the key (and the declared key it is a near-miss of).
+  Fix the key or drop it — a build step that runs `gen-handler` will fail until it is settled, which
+  is the point: that key was configuring nothing.
 
 ## [1.6.2] - 2026-07-24
 

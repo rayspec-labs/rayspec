@@ -225,6 +225,33 @@ export const LOOKUP_HOLE_KEYS: readonly string[] = [
   'substringCol',
 ];
 
+/**
+ * The CLOSED key set an `fkRevalidate` hole may carry (the members of `FkRevalidateHole`).
+ *
+ * The nested shapes are closed for the SAME reason the top level is, at the same cost: dropping the
+ * `s` from `lookupFixedFilter` removes the `active: true` predicate from the rendered FK re-check — so
+ * the re-check starts matching DEACTIVATED lookup rows — exactly as dropping the whole `fkRevalidate`
+ * key removes the re-check itself. A hole key is the mechanism it names at every level, so every
+ * FIXED-SHAPE hole object enumerates its keys. (The map-valued holes — `fixedValues`, `fixedFilter`,
+ * `lookupFixedFilter`, `clampValues` — are NOT fixed-shape: their keys are column names, and they are
+ * fenced by `assertSnake` + the column/injected-column rules instead.)
+ */
+export const FK_REVALIDATE_KEYS: readonly string[] = [
+  'codeArg',
+  'lookupStore',
+  'lookupColumn',
+  'lookupFixedFilter',
+];
+
+/** The CLOSED key set one `columns[]` entry may carry (the members of `ColumnHole`). */
+export const COLUMN_HOLE_KEYS: readonly string[] = [
+  'col',
+  'jsonType',
+  'required',
+  'nullable',
+  'enumValues',
+];
+
 /** A fail-closed holes-validation error (a malformed hole-set never reaches a renderer). */
 export class HolesError extends Error {
   constructor(message: string) {
@@ -281,6 +308,37 @@ function nearestKnownKey(key: string, known: readonly string[]): string | undefi
   return bestDistance <= 2 ? best : undefined;
 }
 
+/** Name each unknown key, plus the known key it is a near-miss of when it resembles one. */
+function describeUnknownKeys(unknown: readonly string[], known: readonly string[]): string {
+  return unknown
+    .map((k) => {
+      const near = nearestKnownKey(k, known);
+      return near === undefined ? `'${k}'` : `'${k}' (did you mean '${near}'?)`;
+    })
+    .join(', ');
+}
+
+/**
+ * Reject every key a FIXED-SHAPE hole object does not declare — the nested form of the top-level
+ * unknown-key check below, and of the in-rule clamp check further down. An unknown key configures
+ * NOTHING, so tolerating one would render a program missing the mechanism the author believes they
+ * declared while the render still reports success.
+ */
+function assertNoUnknownKeys(
+  o: Record<string, unknown>,
+  allowed: readonly string[],
+  what: string,
+): void {
+  const unknown = Object.keys(o).filter((k) => !allowed.includes(k));
+  if (unknown.length === 0) return;
+  throw new HolesError(
+    `${what} carries the unknown key(s) ${describeUnknownKeys(unknown, allowed)} — it accepts only ` +
+      `${allowed.join(', ')}. An unknown key configures NOTHING, so it is rejected rather than ` +
+      'ignored: a typo would otherwise drop the mechanism it names while the render still reports ' +
+      'success.',
+  );
+}
+
 /** Assert a string is a safe TS identifier (export symbol). */
 function assertIdent(value: unknown, what: string): asserts value is string {
   if (typeof value !== 'string' || !IDENT_RE.test(value)) {
@@ -319,6 +377,9 @@ function assertFixedFilter(
 function assertColumnHole(c: unknown, what: string): asserts c is ColumnHole {
   if (typeof c !== 'object' || c === null) throw new HolesError(`${what} must be an object`);
   const o = c as Record<string, unknown>;
+  // `enumValues` mistyped drops the closed-set membership check from the rendered coercion, so any
+  // string the model emits is persisted into a classification column. Name the key, never ignore it.
+  assertNoUnknownKeys(o, COLUMN_HOLE_KEYS, what);
   assertSnake(o.col, `${what}.col`);
   if (INJECTED_COLUMNS.has(o.col as string)) {
     throw new HolesError(
@@ -386,12 +447,7 @@ export function validateHoles(holes: unknown): asserts holes is HandlerHoles {
   const allowedKeys = h.template === 'persist' ? PERSIST_HOLE_KEYS : LOOKUP_HOLE_KEYS;
   const unknownKeys = Object.keys(h).filter((k) => !allowedKeys.includes(k));
   if (unknownKeys.length > 0) {
-    const named = unknownKeys
-      .map((k) => {
-        const near = nearestKnownKey(k, allowedKeys);
-        return near === undefined ? `'${k}'` : `'${k}' (did you mean '${near}'?)`;
-      })
-      .join(', ');
+    const named = describeUnknownKeys(unknownKeys, allowedKeys);
     throw new HolesError(
       `holes carries the unknown top-level key(s) ${named} — a '${h.template}' hole-set accepts only ` +
         `${allowedKeys.join(', ')}. An unknown key configures NOTHING, so it is rejected rather than ` +
@@ -445,7 +501,20 @@ export function validateHoles(holes: unknown): asserts holes is HandlerHoles {
       }
     }
     if (h.fkRevalidate !== undefined) {
+      if (
+        typeof h.fkRevalidate !== 'object' ||
+        h.fkRevalidate === null ||
+        Array.isArray(h.fkRevalidate)
+      ) {
+        throw new HolesError(
+          'holes.fkRevalidate must be a plain object of ' +
+            '{ codeArg, lookupStore, lookupColumn, lookupFixedFilter? }',
+        );
+      }
       const fk = h.fkRevalidate as Record<string, unknown>;
+      // `lookupFixedFilter` mistyped drops the fixed predicate from the rendered re-check (it would
+      // then match deactivated lookup rows) — the same silent loss as mistyping `fkRevalidate` itself.
+      assertNoUnknownKeys(fk, FK_REVALIDATE_KEYS, 'holes.fkRevalidate');
       assertSnake(fk.codeArg, 'holes.fkRevalidate.codeArg');
       assertSnake(fk.lookupStore, 'holes.fkRevalidate.lookupStore');
       assertSnake(fk.lookupColumn, 'holes.fkRevalidate.lookupColumn');
