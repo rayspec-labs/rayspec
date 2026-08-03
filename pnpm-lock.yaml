@@ -12,7 +12,7 @@ overrides:
   protobufjs: 7.6.5
   postcss: 8.5.23
   undici: 8.9.0
-  ip-address: 10.2.1
+  ip-address: 10.3.1
 
 importers:
 
@@ -2613,8 +2613,8 @@ packages:
   inherits@2.0.4:
     resolution: {integrity: sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==}
 
-  ip-address@10.2.1:
-    resolution: {integrity: sha512-O81l1g31PlH55F7AChkGM3sdWZX+1KDLnhesJ/V9Ziug5nIOnEPaVb2jLWAo1TbCOSeZPeNbxX4v/ywTuKSn9A==}
+  ip-address@10.3.1:
+    resolution: {integrity: sha512-1e9d3kb97NHJTIJDZW9rKqW2h6+dFa50Dy0fpPSMQp2ADje5gvKsXmdiK6dwY5t76TaTt5+P5N1Y/LoToIxP6g==}
     engines: {node: '>= 12'}
 
   ipaddr.js@1.9.1:
@@ -4698,7 +4698,7 @@ snapshots:
   express-rate-limit@8.5.2(express@5.2.1):
     dependencies:
       express: 5.2.1
-      ip-address: 10.2.1
+      ip-address: 10.3.1
 
   express@5.2.1:
     dependencies:
@@ -4908,7 +4908,7 @@ snapshots:
 
   inherits@2.0.4: {}
 
-  ip-address@10.2.1: {}
+  ip-address@10.3.1: {}
 
   ipaddr.js@1.9.1: {}
 

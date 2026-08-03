@@ -1492,7 +1492,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Five transitive dependencies carrying published advisories are pinned forward:**
   `brace-expansion` to 5.0.9, `postcss` to 8.5.23, `fast-uri` to 3.1.5, `undici` to 8.9.0 and
-  `ip-address` to 10.2.1, closing seven advisories in total (two High, five Medium). Every one is
+  `ip-address` to 10.3.1, closing nine advisories in total (three High, six Medium). Every one is
   held at an exact version through the repository's `pnpm.overrides`, so closing them is a version
   change in one place rather than a resolution change: the dependency graph still resolves to the
   same 485 packages, and no package was added, removed or moved to a different major.
