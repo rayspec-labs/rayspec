@@ -413,14 +413,20 @@ export type StoreEventValue = z.infer<typeof StoreEventValue>;
  * DECIDED (#212 — keep the behavior): exempting literal-data nodes BEFORE the scan was considered and
  * declined. Two reasons. (a) The scan runs over the RAW doc BEFORE the shape parse, so "this path is
  * a store-step const" would be a guess about an unvalidated tree, not a proven fact.
- * (b) The workflow bridge rejects the SAME literal at the SAME node independently, under its own path
- * prefix (`$.workflows…` there, `workflows…` here), so one exemption constant could not serve both:
- * it would have to be duplicated across two walkers whose whole contract is that they mirror each
- * other (parity-tested). The reach is also NARROWER than the note reads: the value patterns are
- * word-boundary anchored and `_` is a word character, so the SEPARATED spellings (`openai review
- * pending`, `llm call`) are rejected while the underscored spelling an author would naturally reach
- * for (`openai_review_pending`, `llm_call`) is accepted today. That boundary is pinned in
- * product-stores.test.ts and stated for authors in the authoring skill and docs/spec-reference.md.
+ * (b) For the GRAPH-neutrality classes (provider names, prompt-/production-execution claims, product-
+ * owned handler paths) the workflow bridge rejects the SAME literal at the SAME node independently,
+ * under its own path prefix (`$.workflows…` there, `workflows…` here), so one exemption constant could
+ * not serve both: it would have to be duplicated across two walkers whose whole contract is that they
+ * mirror each other (parity-tested). Not every rejection is doubled — the document-wide code-like scan
+ * is the parser's alone, so `SELECT name FROM users` is refused here and passes the bridge — but the
+ * classes an exemption would have to carve out are exactly the doubled ones.
+ * The reach is also NARROWER than the limitation note above reads: the provider/prompt/production
+ * tokens are word-boundary anchored and `_` is a word character, so the SEPARATED spellings (`openai
+ * review pending`, `llm call`) are rejected while the underscored spelling an author would naturally
+ * reach for (`openai_review_pending`, `llm_call`) is accepted today. Anchoring is not a blanket rule:
+ * the provider pattern's joined `provider_native`/`native_payload` alternatives carry no `\b` and do
+ * match inside an underscored identifier. That boundary is pinned in product-stores.test.ts and stated
+ * for authors in the authoring skill and docs/spec-reference.md.
  */
 export const StoreFilterConstValue = z
   .object({ const: z.union([z.string(), z.number(), z.boolean()]) })
