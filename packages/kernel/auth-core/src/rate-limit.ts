@@ -201,9 +201,13 @@ export interface SharedRateLimitStore {
 /**
  * The bucket name `RateLimiter.withSharedStore`'s boot probe counts against.
  *
- * DELIBERATELY ABSENT from `DEFAULT_POLICIES` and it must stay absent: the probe carries its budget on
- * the call, so registering the name would make the probe exercise a table lookup instead of the
- * carried policy — and the carried policy is the one thing the probe exists to test.
+ * A RESERVED name: DELIBERATELY ABSENT from `DEFAULT_POLICIES` and it must stay absent. Every question
+ * the probe asks carries its budget on the call, and `checkAsync` prefers a carried policy over the
+ * table, so a registration would not change what the probe measures today. What it would add is a
+ * second source of truth for the probe's budget, under the probe's own name — one that takes over
+ * silently the moment a probe question is added that carries none, answering from the table the very
+ * call whose carried budget is the thing being tested. Keeping the name unregistered means no probe
+ * call can ever be answered that way.
  */
 export const SHARED_STORE_PROBE_BUCKET = 'shared-rate-limit-store-probe';
 

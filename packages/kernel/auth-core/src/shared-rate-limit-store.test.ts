@@ -193,10 +193,31 @@ describe('RateLimiter.withSharedStore — the boot probe is the only door onto t
     expect(store.size()).toBe(0);
   });
 
-  it('keeps the probe bucket OUT of the shared policy table', () => {
-    // The probe carries its budget on the call. Registering the name would make it exercise a table
-    // lookup instead of the carried policy, which is the one thing the probe exists to test.
+  it('reserves the probe bucket name, and a carried budget outranks the table anyway', async () => {
+    // The name must never resolve as a registered bucket, so no probe call can ever be answered from
+    // the table instead of from the budget it carries.
     expect(Object.keys(DEFAULT_POLICIES)).not.toContain(SHARED_STORE_PROBE_BUCKET);
+
+    // Precedence, pinned: with an entry registered for a bucket AND a policy carried on the call, the
+    // CARRIED one is what reaches the store. That is why a registration could not change what the
+    // probe measures today, and why the rule above reserves the name rather than protecting the probe
+    // from a lookup it never performs.
+    const seen: (RateLimitPolicy | undefined)[] = [];
+    const store = correctStore();
+    const watched = withConsume(store, async (key, policy) => {
+      seen.push(policy);
+      return store.consume(key, policy);
+    });
+    const limiter = await RateLimiter.withSharedStore(watched, {
+      generous: { max: 1_000_000, windowMs: 60_000 },
+    });
+    seen.length = 0; // drop the probe's own questions
+    const carried: RateLimitPolicy = { max: 1, windowMs: 60_000 };
+    expect((await limiter.checkAsync('generous', 'a', carried)).allowed).toBe(true);
+    expect((await limiter.checkAsync('generous', 'a', carried)).allowed).toBe(false);
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toBe(carried);
+    expect(seen[1]).toBe(carried);
   });
 
   it('REFUSES a store that ignores the carried budget and allows everything', async () => {
