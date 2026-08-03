@@ -1468,6 +1468,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Two transitive dependencies carrying published advisories are pinned forward:
+  `brace-expansion` to 5.0.9 and `postcss` to 8.5.23.** Both were already held at an exact version
+  through the repository's `pnpm.overrides`, so closing them is a version change in one place rather
+  than a resolution change: the dependency graph still resolves to the same 485 packages, and no
+  package was added, removed or moved to a different major. `brace-expansion` reaches the closure
+  through the pi coding-agent's `minimatch`; neither advisory is reachable from a route this project
+  exposes, but the dependency audit is deliberately deny-by-default — a known advisory on a shipped
+  dependency fails the lane rather than being reasoned away, and the one suppression this repository
+  carries is documented in `osv-scanner.toml` with its reachability argument. The dependency SBOM is
+  regenerated with them.
+
 - **The boot no longer writes the two auth secrets into `process.env`, so a spawned child does not
   inherit them.** `assembleServer` used to mirror the resolved `RAYSPEC_JWT_SIGNING_KEY` and
   `RAYSPEC_API_KEY_PEPPER` onto `process.env` at the top of the boot, because the readers that need
