@@ -716,7 +716,7 @@ describe('the allow-lists cover the whole hole shape (a new key cannot become si
     return { top, fk, column, clamp };
   }
 
-  it('every key the validator and the renderers actually READ is allow-listed', () => {
+  it('the keys actually READ and the allow-lists are the SAME set (neither direction slips)', () => {
     // Observed, not asserted from a second hand-written list. A key read only on an arm no fixture
     // takes is invisible here, so the fixtures below span every arm the renderers branch on a HOLE
     // VALUE for — enumerated so the claim stays checkable against `templates.ts`: both templates and
@@ -754,8 +754,17 @@ describe('the allow-lists cover the whole hole shape (a new key cannot become si
         allowed: LOOKUP_HOLE_KEYS,
       },
     ];
+    const readPersistTop = new Set<string>();
+    const readLookupTop = new Set<string>();
+    const readFk = new Set<string>();
+    const readColumn = new Set<string>();
+    const readClamp = new Set<string>();
     for (const { label, holes, allowed } of cases) {
       const { top, fk, column, clamp } = observeReads(holes);
+      for (const k of top) (holes.template === 'persist' ? readPersistTop : readLookupTop).add(k);
+      for (const k of fk) readFk.add(k);
+      for (const k of column) readColumn.add(k);
+      for (const k of clamp) readClamp.add(k);
       expect(
         [...top].filter((k) => !allowed.includes(k)),
         label,
@@ -778,5 +787,16 @@ describe('the allow-lists cover the whole hole shape (a new key cannot become si
       if (holes.columns !== undefined) expect(column.size, label).toBeGreaterThanOrEqual(4);
       if (holes.clampValues !== undefined) expect(clamp.size, label).toBeGreaterThanOrEqual(1);
     }
+    // The other direction, and the one that matters for a key added LATER: every allow-listed key must
+    // be READ by something. Checking only `read ⊆ allowed` accepts a key that is declared on the
+    // interface and listed here but rendered by nothing — it passes validation, configures nothing, and
+    // renders byte-for-byte the program without it. That is the silent drop this file exists to stop,
+    // so assert set EQUALITY. The fixtures above span every arm, which is what makes equality
+    // reachable rather than aspirational.
+    expect([...readPersistTop].sort()).toEqual([...PERSIST_HOLE_KEYS].sort());
+    expect([...readLookupTop].sort()).toEqual([...LOOKUP_HOLE_KEYS].sort());
+    expect([...readFk].sort()).toEqual([...FK_REVALIDATE_KEYS].sort());
+    expect([...readColumn].sort()).toEqual([...COLUMN_HOLE_KEYS].sort());
+    expect([...readClamp].sort()).toEqual([...CLAMP_HOLE_KEYS].sort());
   });
 });
