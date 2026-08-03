@@ -5,19 +5,20 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.7.0] - 2026-08-03
 
 ### Added
 
 - **A run executing in another process can now be ended promptly instead of burning until it returns:
-  set `RAYSPEC_RUN_CANCEL_POLL_MS`.** Cancellation's durable half — the per-run record every dispatch
-  consults — has always crossed process boundaries; the signal never did. The abort lives in a
-  process-local registry, and nothing re-read the record while a run was waiting for its provider, so
-  a run on another worker held its slot and kept spending until the call came back by itself. With
-  this variable set to a number of milliseconds, a run that is executing re-reads its *own* record on
-  that interval and aborts its own controller. That abort is the one the in-process path already
-  delivers, so everything after it is the path that already existed: the same terminal `error` header,
-  the same journal, the same refusal of every seam the abandoned call reaches for. What that journal
+  set `RAYSPEC_RUN_CANCEL_POLL_MS`.** Cancellation (the `POST /v1/runs/{id}/cancel` entry below) has two
+  halves, and only one of them crosses a process boundary: the per-run record every dispatch consults
+  does, the abort signal does not. The abort lives in a process-local registry, and by default nothing
+  re-reads the record while a run is waiting for its provider, so a run on another worker holds its
+  slot and keeps spending until the call comes back by itself. With this variable set to a number of
+  milliseconds, a run that is executing re-reads its *own* record on that interval and aborts its own
+  controller. That abort is the one the in-process path delivers, so everything after it is that same
+  path: the same terminal `error` header, the same journal, the same refusal of every seam the
+  abandoned call reaches for. What that journal
   holds follows the invocation shape rather than which process cancelled — measured against an
   in-process control run through the identical invocation shape, the terminal state and the journal
   are equal.
@@ -34,9 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and asked again on the next tick: an unreadable record never ends a run. 1000–5000 ms is a sensible
   range; there is no floor, and a shorter interval buys cancellation latency rather than more safety.
 
-  **The rules established for cancellation are unchanged.** A cancelled run is still never
+  **Every rule cancellation establishes still holds with the variable set.** A cancelled run is never
   automatically re-run — the record is what makes it un-dispatchable — and a run that had already
-  fired a non-idempotent tool is still quarantined: its taint marker was committed on the autonomous
+  fired a non-idempotent tool is quarantined: its taint marker was committed on the autonomous
   handle before the side effect, so the run's rollback cannot take it with it. **One observable
   difference, for a cross-process cancellation only**: the run now ENDS where it runs, where without
   the variable it ran to completion. What survives in its journal then follows the invocation shape
@@ -44,12 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same shape. On the durable worker the run executes inside a transaction, so it rolls back and the
   steps journaled there are discarded: the run ends with the single `cancelled` step. On the
   synchronous HTTP path there is no transaction, so the steps it already committed are kept beside
-  the `cancelled` one. Both are measured. `POST /v1/runs/{id}/cancel`'s `signalled`
-  field is unchanged and still means "this process's registry reached it", so it stays `false` for a
-  cross-process cancellation even when that cancellation lands. The message a cancelled run reports is
-  reworded to stay true in both configurations: a model call in flight on another worker "runs on
-  until that process observes the cancellation itself", where it previously said the call runs on
-  until it settles by itself.
+  the `cancelled` one. Both are measured. `POST /v1/runs/{id}/cancel`'s `signalled` field means "this
+  process's registry reached it", so it stays `false` for a cross-process cancellation even when that
+  cancellation lands. And the message a cancelled run reports is worded to stay true in both
+  configurations: a model call in flight on another worker "runs on until that process observes the
+  cancellation itself".
 - **A backend can now bind its authentication at the moment the run identity exists, instead of
   before it: the neutral `Backend` contract gains an optional `preflightAuth()`.** A run's auth mode
   is resolved once, before the run starts, and threaded onto the run context so every journaled step
@@ -158,7 +158,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   There is no migration, no new column and no new table.
 
 - **The reserved store names are now drift-locked on both sides, and the authoring skill teaches
-  them.** The lint rule and the boot registrar already shared one constant; what could still rot was
+  them.** The lint rule and the boot registrar read one shared constant; what could still rot was
   everything around it. The lock in `@rayspec/db` derived its expectation from a hand-written list of
   the platform tables, so a NEW global table added to `schema.ts` and forgotten there would have
   stayed unreserved — it now reads every table the schema module exports, which makes forgetting
@@ -290,8 +290,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **The honest limits.** The counters live in the process, exactly like every other throttle here, so
   a multi-instance deployment grants a caller one budget per instance it reaches; a hard cluster-wide
-  ceiling still belongs in a shared front-line limiter. Per-route buckets also multiply the number of
-  distinct keys the one bounded in-process store tracks, and that store evicts the oldest live window
+  ceiling needs either a shared front-line limiter or, for an embedder, the `SharedRateLimitStore` port
+  described in its own entry below. Per-route buckets also multiply the number of distinct keys the one
+  bounded in-process store tracks, and that store evicts the oldest live window
   when it is full — which hands that caller a fresh budget. A deployment with very many budgeted
   routes and very many principals can therefore see a limit reset early under key pressure, and that
   store is the **single shared one**: it also holds the authentication counters (`login`, `register`,
@@ -405,7 +406,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-user stream cap, is untouched. The counters are the existing in-process limiter, not a new one
   and not a shared store, so **each instance counts on its own**: a multi-instance deployment gives
   a caller one budget per instance it reaches. Treat both numbers as a per-instance floor rather
-  than a cluster-wide ceiling, and keep a shared front-line limit if you need the latter.
+  than a cluster-wide ceiling; for the latter, keep a shared front-line limit in front of the
+  deployment or, as an embedder, give the limiter the `SharedRateLimitStore` described below.
 
 - **A persist handler can cap a model-chosen enum column server-side: the `clampValues` hole.** The
   persist templates already re-checked a model-chosen IDENTIFIER against a store before writing it
@@ -728,11 +730,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **What an operator must do, and in which order.** Because `deploy` also serves the auth surface, a
   product deployment can no longer create its own org through itself, so the tenant has to exist
   first. Against an org that already exists nothing changes — set `RAYSPEC_PRODUCT_TENANT_ID` to its
-  id and deploy. From nothing, the supported order is: boot the auth surface alone
-  (`RAYSPEC_TENANT_BOOTSTRAP_ENABLED=true rayspec-serve`, no spec), run `rayspec dev
-  bootstrap-tenant --base-url <url> --org-id <the uuid>` against it, stop it, then deploy with that
-  id and the gate off. A deployment that used to come up and wait for its org to appear will now
-  refuse to start until it does.
+  id and deploy. From nothing, settle the org first with `rayspec tenant ensure --org-id <the uuid>
+  --name <n>` — see its entry under Added: it talks to `DATABASE_URL` directly, needs no running server
+  and creating twice under the same id yields the same org — then deploy with that id. (The longer route
+  through the auth surface still works: boot it alone with `RAYSPEC_TENANT_BOOTSTRAP_ENABLED=true
+  rayspec-serve` and no spec, run `rayspec dev bootstrap-tenant --base-url <url> --org-id <the uuid>`
+  against it, stop it, then deploy with the gate off.) A deployment that used to come up and wait for
+  its org to appear will now refuse to start until it does.
 
   **The cron tenant is deliberately NOT treated this way, and keeps its current behavior exactly.**
   `RAYSPEC_CRON_TENANT_ID` is still checked for shape only at boot; whether it names an existing org
@@ -800,9 +804,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moment an `orgs` row with that id exists. Which id that is remains the row's to decide: `POST
   /v1/orgs`, `POST /v1/auth/register` and a plain `rayspec dev bootstrap-tenant` all let the database
   generate it, so an operator using those still reads the id back before setting the variable, while
-  an id chosen up front has to be the id its `orgs` row is created with — by hand, or with `rayspec
-  dev bootstrap-tenant --org-id <uuid>` against a server in the tenant-bootstrap operator posture
-  (see the **Added** entry on choosing the org id). Nothing fires under an unknown
+  an id chosen up front has to be the id its `orgs` row is created with — with `rayspec tenant ensure
+  --org-id <uuid> --name <n>`, which needs no running server, or with `rayspec dev bootstrap-tenant
+  --org-id <uuid>` against a server in the tenant-bootstrap operator posture (see the **Added** entries
+  on reserving a tenant and on choosing the org id). Nothing fires under an unknown
   tenant: the existence check moved to the firing itself, where it runs **before** the firing's
   reserve, so a skipped firing dispatches nothing and writes no marker — which leaves that instant
   explicitly re-fireable instead of burning it. Each skipped firing emits exactly one line naming the
@@ -982,10 +987,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after the caller had already been freed. The adapter now re-checks the run's signal immediately
   before the SDK call and does not make it on a run that is already over; no new terminal state is
   invented, because the platform already journals the cancelled run and discards whatever the adapter
-  returns. Cancelling *during* a run is unchanged and already reached the transport: the agent run's
-  controller signal is the one the model request carries, so an in-flight token stream is aborted, not
-  merely abandoned — the adapter's own header comment, the backend table in the spec reference and the
-  note above in this file said otherwise and have been corrected. Nothing changes on a run nobody
+  returns. Cancelling *during* a run reaches the transport: the agent run's controller signal is the one
+  the model request carries, so an in-flight token stream is aborted, not merely abandoned. Nothing changes on a run nobody
   cancels: the session option bag and the prompt call are byte-identical whether the run context
   carries a signal or not, both pinned by tests, and the recorded fixtures and parity suite are
   untouched. The residual limits — the narrow window that remains and why it is a choice rather than an
@@ -1124,11 +1127,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The directory case keeps its existing message verbatim; the spa case has its own, which additionally
   says that an spa mount serves `index.html` for every unmatched deep link and points at building the
   frontend into `frontend.dir` or setting `spa: false`. A frontend-only document is outside this
-  guard's scope: both documented entrypoints branch it to the static profile before the guard runs, and
-  an unservable mount there is still reported the way it always has been — `/health` `503` with
-  `"frontend":"unavailable"`, for the life of the process. The probe itself is unchanged — same fields,
-  same values, same status codes — and a deployment declaring no frontend mounts, or one whose mounts
-  are servable, boots and answers exactly as before.
+  guard's scope: both documented entrypoints branch it to the static profile before the guard runs, so
+  there an unservable mount still boots and then reports `/health` `503` with
+  `"frontend":"unavailable"` for the life of the process. That reporting is the extended probe described
+  under Changed above — this fix neither adds nor alters it, and changes only which mounts a
+  full-platform boot accepts. A deployment whose mounts are servable, or which declares no frontend
+  mount at all, boots and answers as it did before this change.
 
 - **An async run's `runId` resolves while the run is still going, instead of `404` until it ends.**
   `POST /v1/agents/{id}/runs` with `async: true` answers `202` with a `runId` and the
@@ -1333,14 +1337,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   manifest must not ship at all, which is the whole point of the check. Workspace members outside the
   publish closure (`@rayspec/parity`, `@rayspec/local-boot`) are untouched — nobody installs them.
 
+- **The Expense-Claim Auto-Coder example ships the build step its documented live smoke needs.** Its
+  spec points `handlers[].module` at the committed `handlers/*.gen.ts`, which are the byte-goldens the
+  renderer is pinned against — and the runtime loads compiled JavaScript only, so the boot in that
+  example's README fail-closed on TypeScript source instead of serving. `build.mjs` now writes the
+  deployable form: it renders each committed hole-set with `gen-handler --emit js`, marks the output
+  directory as ESM, and copies the spec with its `module:` paths rewritten — so the example boots from
+  `dist/rayspec.yaml` the way the bundled hand-written backend already did. It renders rather than
+  transpiles because for a generated handler the JavaScript target is a first-class render, and a
+  comment-stripping transpile would ship a file the renderer never produced. Repository examples only:
+  no published package, API or runtime behavior changes.
+
+- **Two backends built into `dist/` no longer share one throwaway development database.** The
+  local-boot wrapper derives its database name from the spec file's directory precisely so that
+  side-by-side backends do not collide, but it read only the last path segment — which is `dist` for
+  every built backend, so the second boot silently DROPped and re-created the first one's database. A
+  spec inside a build-output directory is now named after the backend instead, and the derivation is a
+  pure exported function with the collision pinned by a test. Development wrapper only.
+
+- **`RAYSPEC_REQUIRE_MEDIA_TESTS` reaches the suite it gates.** The remux suite carries an
+  un-skippable guard that refuses to self-skip when the variable says the real media proof is
+  required — but `pnpm test` runs the suites through turbo in strict environment mode, and the
+  variable was not among those the test task declares, so it was stripped before any test saw it.
+  Measured with the variable set and ffmpeg unavailable: the suite reported 66 passed and 3 skipped,
+  which is exactly the false green the guard exists to prevent; it now fails. Its two siblings for the
+  database- and provider-backed suites were already declared. Repository tooling only.
+
 ### Documentation
 
 - **The declared-route throttle is described by its real reach, and the generated OpenAPI advertises
-  it.** The reference said "every declared route is rate limited", which overstated twice: a stream
-  `playback` route is authorized by a signed media token, mounts its own middleware and is bounded by
-  the per-user concurrent-stream limit instead, and the sentence's earlier form reached the platform's
-  own `/v1/auth`, `/v1/orgs` and run routes as well. Three things a deployment has to plan around were
-  also missing. Each of those two **tier** allowances is one budget for the whole declared surface, so
+  it.** "Every declared route is rate limited" would overstate twice, and the reference does not say
+  it: a stream `playback` route is authorized by a signed media token, mounts its own middleware and is
+  bounded by the per-user concurrent-stream limit instead, and that phrasing would reach the platform's
+  own `/v1/auth`, `/v1/orgs` and run routes as well. The reference also states three things a
+  deployment has to plan around. Each of those two **tier** allowances is one budget for the whole
+  declared surface, so
   a client spends the same 30 or 600 whether it calls one route or twenty — a route may additionally
   declare its own `rateLimit`, which is counted separately and per route. The strict tier is only as
   precise as `RAYSPEC_TRUSTED_PROXIES`: left unset behind a load balancer every unvalidated request
@@ -1390,6 +1421,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disappear, instead of checking that a boolean flipped. That test exercises the SDK's process-level teardown; it says
   nothing about the vendor binary's own shutdown behaviour.
 
+- **The documented environment surface covers seventeen more variables an operator can set.**
+  `.env.example` is what the CLI reference and the getting-started guide both call the full set, and it
+  omitted every variable in this list, including two that gate irreversible behavior: the GDPR
+  tombstone purge (`RAYSPEC_GDPR_PURGE_ENABLED`, whose absence leaves the purge counting rather than
+  deleting) and its retention window (`RAYSPEC_GDPR_RETENTION_DAYS`, where a value that is not a
+  non-negative number refuses the boot). The rest are the access-token lifetime, the body-refresh
+  opt-in, the daily cleanup schedule, the handler and fs-source roots, the media-prep selector with
+  its ffmpeg/ffprobe binaries and per-child timeout, the conversation and normalize executors, the
+  extraction-config override, the update-mode delta and allowlist paths, and the `.env` auto-load
+  opt-out. Each entry states its default, what an unusable value does, and whether that is a refusal
+  or a fallback. Four variables that only change how this repository's own suites behave are
+  deliberately still absent, as is one the codex adapter writes per run rather than reads.
+
+- **Four reference statements a reader could act on wrongly.** The `/health` documentation described
+  the `frontend` field and the `503` but never the `status` value that accompanies them, so an
+  operator matching the body exactly would meet an undocumented `"degraded"` in production; the
+  `bigint` migration guidance covered only the widening direction, leaving the reviewer's `USING`
+  obligation and the narrowing failure unstated; the handler facade's ordering paragraph gave the
+  `id asc` default without the offset-paging caveat its own SDK docstring carries; and the
+  `gen-handler` section documented a required `--holes` flag whose file format appeared nowhere in
+  `docs/`. The authoring skill also gained the `api[].rateLimit` field, which it had omitted
+  entirely, and its clamp rule now names the mechanism that enforces it. Contributor-facing: the
+  test-suite gates that turn a self-skip into a failure are documented in `CONTRIBUTING.md`, which
+  previously stated the false-green principle without naming the lever.
+
 ### Security
 
 - **The boot no longer writes the two auth secrets into `process.env`, so a spawned child does not
@@ -1433,6 +1489,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tracks advisory drift against a lockfile that has not moved. Repository infrastructure only:
   no published package, API or runtime behavior changes. The report-to-issue sync ships as
   `scripts/sync-advisory-issues.mjs` and runs locally via `pnpm test:advisory-sync`.
+
+### Upgrade notes
+
+Everything below is documented in place above; this is the checklist. Nothing here applies to a
+deployment that only authors specs and deploys them — the items are for embedders, for operators of an
+existing database, and for clients written against the HTTP surface.
+
+- **Three interfaces gained REQUIRED members, so an out-of-repository implementation stops
+  typechecking until it grows them.** `ServerConfig` (`@rayspec/server`) gains
+  `tenantBootstrapEnabled: boolean`; the neutral `DurableExecutor` (`@rayspec/platform`) gains
+  `cancel(jobId: string): Promise<void>`; `CronSchedulerDeps` (`@rayspec/durable-dbos`) gains
+  `tenantExists(tenantId: string): Promise<boolean>`. A deployment that builds its config with
+  `loadServerConfig` needs no change — it fills the new field from the environment; only code that
+  constructs one of these objects itself is affected.
+- **Apply migration `0010_journal_step_error_columns`.** Two additive nullable `ADD COLUMN`s on
+  `journal_steps`; no table rewrite and no backfill.
+- **A product deployment whose `RAYSPEC_PRODUCT_TENANT_ID` is malformed, or names no live org, now
+  refuses to boot** where it previously came up and waited for the org to appear. Settle the org before
+  deploying — `rayspec tenant ensure --org-id <uuid> --name <n>` does it against `DATABASE_URL` with no
+  running server. The cron tenant is deliberately unchanged.
+- **A store read through the handler data facade with no explicit `orderBy` now comes back ordered
+  `id asc`.** A caller that passes its own `orderBy` is unaffected. Code that depended on the previous
+  unordered result should state the order it wants.
+- **A mounted static frontend answers non-content methods with `405`** and an `Allow: GET, HEAD,
+  OPTIONS` header, where such a request previously fell through to the SPA shell with `200`. A client
+  that sent one and read the shell as success will now see the refusal.
+- **`/health` carries one more field and one more status value.** A probe that matches the body exactly
+  should accept `frontend` next to `db`, and `status: "degraded"` with `503` when a covered dependency
+  is not ready.
+- **`errorClass` has a new terminal value, `cancelled`.** A client that enumerates error classes should
+  accept it; a same-key retry replays it rather than starting a new run.
+- **The two auth secrets are no longer mirrored into `process.env`.** Code that read
+  `RAYSPEC_JWT_SIGNING_KEY` or `RAYSPEC_API_KEY_PEPPER` back out of the environment after boot now finds
+  nothing there, and a spawned child no longer inherits them.
 
 ## [1.6.2] - 2026-07-24
 
