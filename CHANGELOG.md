@@ -1385,6 +1385,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prune it with nobody calling anything, the other arms the gate and watches a past-retention tombstone
   actually disappear.
 
+- **A mistyped key in a `gen-handler` holes file is refused instead of quietly rendering a handler
+  without the safety it names.** The holes parser read the keys it knew and ignored the rest, so a
+  single character was enough to lose a server-side mechanism with nothing to show for it: starting
+  from the Expense-Claim reference hole-set, `clampValues` written as `clampValue` rendered a handler
+  with the whole server-side clamp gone (5207 bytes → 3964), and `fkRevalidate` written as
+  `fkRevalidates` rendered one with the foreign-key re-validation gone (→ 4648) — and both runs
+  reported `ok: true` and exited `0`, so the author had no way to notice from the render. The same
+  loss was one level down, where a hole key is just as load-bearing: `lookupFixedFilter` written as
+  `lookupFixedFilters` rendered a foreign-key re-check without its `active: true` predicate (5207
+  bytes → 5186), so the re-check began matching deactivated lookup rows, and — on a hole-set whose
+  enum column carries no clamp, where nothing else notices — `enumValues` written as `enumValue`
+  rendered a coercion without the closed-set membership check (3964 → 3895), so any string the model
+  emitted was persisted into the classification column. Every hole object
+  whose shape is fixed now carries a closed key set — the hole-set itself (per template), each
+  `columns[]` entry, `fkRevalidate`, and each `clampValues` rule, the last of which already was — the
+  way the spec grammar already is: an unrecognised key fails the hole-set with the standard
+  malformed-hole-set envelope (`ok: false`, an `errors` entry, exit `1`), names the offending key,
+  and names the known key it is a near-miss of. The map-valued holes (`fixedValues`, `fixedFilter`,
+  `lookupFixedFilter`, `clampValues`) are keyed by column name, so their keys stay fenced by the
+  snake_case charset and the column rules — which leaves no tolerated annotation prefix at any level.
+  A hole-set that only uses declared keys is unaffected and renders byte-for-byte what it always did.
+
 ### Documentation
 
 - **The declared-route throttle is described by its real reach, and the generated OpenAPI advertises
@@ -1599,6 +1621,15 @@ existing database, and for clients written against the HTTP surface.
   reports changes with it). Deployments booted from a classic `rayspec.yaml` are unaffected: the job is
   wired there whenever the spec declares `deployment.durableWorker: true` and backends are wired, exactly
   as before — a classic spec that declares no durable worker never ran this job and still does not.
+
+- **`rayspec gen-handler` now refuses a holes file carrying a key the hole shape it sits in does not
+  declare**, where it previously ignored the key and rendered anyway. This applies at the top level
+  (per template) and inside each `columns[]` entry, `fkRevalidate`, and `clampValues` rule. A holes
+  file that only uses declared keys is unaffected and renders identical bytes; one that carried a
+  typo, a key of the other template, or a hand-added comment/metadata key at any level stops with
+  `ok: false` and exit `1`, and the error names the key (and the declared key it is a near-miss of).
+  Fix the key or drop it — a build step that runs `gen-handler` will fail until it is settled, which
+  is the point: that key was configuring nothing.
 
 ## [1.6.2] - 2026-07-24
 
