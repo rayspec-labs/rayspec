@@ -373,4 +373,22 @@ describe('assertLimiterHonoursExplicitPolicy — the boot probe that closes the 
       /does not honour an explicit per-call policy/,
     );
   });
+
+  it('refuses a limiter that REPLACES checkAsync — the probe drives check, the middleware does not', () => {
+    // The synchronous probe proves something about the request path only because `checkAsync`
+    // delegates to `check` on a limiter with no shared store. A subclass that replaces `checkAsync`
+    // severs that link: measured before this guard existed, such a limiter passed the probe and then
+    // allowed 5 of 5 requests against a budget of 1. Nothing can be driven synchronously to catch it,
+    // so the boot refuses it and names the supported alternative.
+    class ReplacesCheckAsync extends RateLimiter {
+      override async checkAsync(): Promise<{ allowed: boolean; retryAfterMs: number }> {
+        return { allowed: true, retryAfterMs: 0 };
+      }
+    }
+    expect(() => assertLimiterHonoursExplicitPolicy(new ReplacesCheckAsync())).toThrow(
+      /replaces checkAsync/,
+    );
+    // The ordinary limiter is unaffected — the guard keys on identity with the prototype method.
+    expect(() => assertLimiterHonoursExplicitPolicy(new RateLimiter())).not.toThrow();
+  });
 });

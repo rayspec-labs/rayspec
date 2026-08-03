@@ -167,8 +167,11 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
       ua: c.req.header('user-agent') ?? null,
       ip,
     });
-    await deps.rateLimiter.resetAsync('login', ip); // a clean login resets the counter
     await deps.auditStore.appendMany(result.audit, rid, ipHashOf(c, deps));
+    // AFTER the audit append: on a shared store this call reaches the network and can reject, and a
+    // rejection here must not cost the successful login its audit records. Resetting the counter is
+    // a courtesy to a caller who just authenticated; the ledger is not.
+    await deps.rateLimiter.resetAsync('login', ip); // a clean login resets the counter
     const refreshToken = deliverRefresh(
       c,
       deps,
@@ -218,8 +221,10 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
     if (outcome.reuseDetected) {
       // Reuse → family revoked; audit out-of-band + per-source lock (anti-DoS) + uniform 401.
       await deps.auditStore.appendMany(outcome.audit, rid, ipHashOf(c, deps));
-      await deps.rateLimiter.lockSourceAsync('refresh', ip);
+      // Clear the cookie BEFORE the lock: on a shared store the lock reaches the network and can
+      // reject, and the client must not keep a refresh cookie whose family was just revoked.
       clearRefresh(c);
+      await deps.rateLimiter.lockSourceAsync('refresh', ip);
       throw new ApiError('UNAUTHENTICATED', 'Authentication failed.');
     }
     const result = outcome.result;

@@ -693,8 +693,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the in-process path reports) and throws instead of returning a limiter that answered any of it
   wrongly. The declarative route syntax does not change at all — the same `rateLimit` field, a
   different backing store — and because there is only ever one limiter in the application, supplying
-  a store moves every counter at once: the `login`/`register`/`refresh`/`oauth-token`/`invite-accept`
-  throttles, both declared-route tiers, and every per-route budget.
+  a store moves every counter at once: the `login`/`register`/`refresh`/`oauth-token`/`invite-accept`/
+  `reprocess`/`trigger-fire` throttles, both declared-route tiers, and every per-route budget.
 
   **A deployment that supplies no store is unchanged, and that is asserted rather than assumed.**
   Every rate-limit call site now goes through an `…Async` method, and on a limiter with no shared
