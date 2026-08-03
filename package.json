@@ -67,9 +67,11 @@
       "@esbuild-kit/core-utils>esbuild": ">=0.25.0",
       "hono": "4.12.27",
       "brace-expansion": "5.0.9",
-      "fast-uri": "3.1.4",
+      "fast-uri": "3.1.5",
       "protobufjs": "7.6.5",
-      "postcss": "8.5.23"
+      "postcss": "8.5.23",
+      "undici": "8.9.0",
+      "ip-address": "10.2.1"
     }
   }
 }
