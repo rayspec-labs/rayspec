@@ -25,14 +25,19 @@
  * session does not "fix" a missing reserve that is correctly absent.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * HONEST LIMITATION — runs ONLY when a durable worker is wired (`deployment.durableWorker:true`).
+ * HONEST LIMITATION — runs ONLY when a durable worker is wired. TWO boot shapes wire one:
+ *   - a classic `rayspec.yaml` that declares `deployment.durableWorker:true` (with backends wired), and
+ *   - ANY `*.product.yaml` boot — that profile ALWAYS wires one and cannot opt out: `deployment` is not a
+ *     key the product grammar carries (`ProductSpec` is `.strict()`; only `deployment_overrides` exists).
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * DBOS scheduled-workflows only fire after `DBOS.launch()`, and the ONLY boot path that launches DBOS is
- * the durable-worker wiring in the composition root. So an AUTH-ONLY boot (no durable worker) does NOT run
- * this cleanup — expired OIDC rows + GDPR tombstones would accumulate there until a worker boot. This is
- * the accepted LOCAL posture: the cleanup rides on the durable worker by design (the composition root
- * registers this whenever the executor exists, INDEPENDENT of whether the spec declares cron triggers).
- * A future auth-only-also-cleans path (e.g. a lightweight in-process timer) is a build-on-demand follow-up.
+ * DBOS scheduled-workflows only fire after `DBOS.launch()`, and the only boot paths that launch DBOS are
+ * those two. So a boot with NO durable worker — an AUTH-ONLY boot, or a classic spec that declares no
+ * durable worker — does NOT run this cleanup: expired OIDC rows + GDPR tombstones accumulate there until a
+ * worker boot. This is the accepted LOCAL posture: the cleanup rides on the durable worker by design, and
+ * BOTH per-profile deploy functions register it whenever that executor exists — `deployDeclaredSpec`
+ * (composition-root.ts) and `deployProductYamlSpec` (product-boot.ts) — INDEPENDENT of whether the spec
+ * declares cron triggers.
+ * A future no-worker-also-cleans path (e.g. a lightweight in-process timer) is a build-on-demand follow-up.
  */
 
 import { DBOS } from '@dbos-inc/dbos-sdk';
