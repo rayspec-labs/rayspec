@@ -245,7 +245,12 @@ The holes file is one JSON object whose `template` field selects the shape:
 mode needs, and the optional `fkRevalidate`, `fixedValues` and `clampValues`. A
 `lookup` set adds `filterCols`, `projectCols`, `maxRows`, and the optional
 `fixedFilter` and `substringArg`/`substringCol` pair. Every field is validated
-fail-closed, so a malformed hole-set never reaches a renderer.
+fail-closed, and the top-level key set is **closed per template**: a key the
+selected template does not declare — a typo, or a key belonging to the other
+template — is rejected by name (naming the known key it is a near-miss of), never
+ignored, because an ignored key silently drops the mechanism it was meant to
+configure. There is no tolerated annotation prefix. So a malformed hole-set never
+reaches a renderer.
 
 What each field means, and the coherence rules over combinations of them, is specified
 in [the authoring skill](../.claude/skills/rayspec-author/SKILL.md) — read that before

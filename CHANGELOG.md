@@ -1363,6 +1363,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is exactly the false green the guard exists to prevent; it now fails. Its two siblings for the
   database- and provider-backed suites were already declared. Repository tooling only.
 
+- **A mistyped key in a `gen-handler` holes file is refused instead of quietly rendering a handler
+  without the safety it names.** The holes parser read the keys it knew and ignored the rest, so a
+  single character was enough to lose a server-side mechanism with nothing to show for it: starting
+  from the Expense-Claim reference hole-set, `clampValues` written as `clampValue` rendered a handler
+  with the whole server-side clamp gone (5207 bytes → 3964), and `fkRevalidate` written as
+  `fkRevalidates` rendered one with the foreign-key re-validation gone (→ 4648) — and both runs
+  reported `ok: true` and exited `0`, so the author had no way to notice from the render. The
+  top-level key set is now closed per template, the way the `clampValues` rule check one level down
+  and the spec grammar already are: an unrecognised key fails the hole-set with the standard
+  malformed-hole-set envelope (`ok: false`, an `errors` entry, exit `1`), names the offending key,
+  and names the known key it is a near-miss of. Nothing unknown is tolerated — there is no reserved
+  annotation prefix. A hole-set that only uses declared keys is unaffected and renders byte-for-byte
+  what it always did.
+
 ### Documentation
 
 - **The declared-route throttle is described by its real reach, and the generated OpenAPI advertises
@@ -1523,6 +1537,13 @@ existing database, and for clients written against the HTTP surface.
 - **The two auth secrets are no longer mirrored into `process.env`.** Code that read
   `RAYSPEC_JWT_SIGNING_KEY` or `RAYSPEC_API_KEY_PEPPER` back out of the environment after boot now finds
   nothing there, and a spawned child no longer inherits them.
+- **`rayspec gen-handler` now refuses a holes file carrying a top-level key its template does not
+  declare**, where it previously ignored the key and rendered anyway. A holes file that only uses
+  declared keys is unaffected and renders identical bytes; one that carried a typo, a key of the other
+  template, or a hand-added comment/metadata key stops with `ok: false` and exit `1`, and the error
+  names the key (and the declared key it is a near-miss of). Fix the key or drop it — a build step that
+  runs `gen-handler` will fail until it is settled, which is the point: that key was configuring
+  nothing.
 
 ## [1.6.2] - 2026-07-24
 

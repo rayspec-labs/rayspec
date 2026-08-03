@@ -1156,6 +1156,14 @@ against a strict charset (`exportName` = a TS identifier; store/column names = s
 `[a-z][a-z0-9_]*`) — so a name can never carry an injection. A persist `column.col` may NEVER be an
 injected column (`id`/`tenant_id`/`created_at`/`deleted_at`/`retention_days`/`region`).
 
+The TOP-LEVEL KEY SET of a hole-set is **CLOSED per template**: the two blocks below are the COMPLETE
+lists, and `validateHoles` rejects any other top-level key by name (naming the known key it is a
+near-miss of) instead of ignoring it — a key the renderer never reads would otherwise drop the whole
+mechanism it names while the render still reports success. So: do not invent hole keys, do not carry
+a key of the other template, and do not annotate a hole-set with a comment/metadata key — there is no
+tolerated prefix. If a hole-set needs something these keys cannot express, that is an out-of-It.2
+signal (see the list at the end of this contract), not a key to add.
+
 ### Template T1 — PERSIST handler holes (`template: "persist"`)
 
 ```jsonc

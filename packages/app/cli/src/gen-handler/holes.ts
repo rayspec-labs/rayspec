@@ -193,6 +193,38 @@ export interface LookupHandlerHoles {
 /** The discriminated hole-set the renderer accepts. (T3 shape-map is an internal helper, not a top-level template.) */
 export type HandlerHoles = PersistHandlerHoles | LookupHandlerHoles;
 
+/** The top-level keys BOTH templates carry (the discriminator plus the two names every render needs). */
+const SHARED_HOLE_KEYS = ['template', 'exportName', 'store'] as const;
+
+/**
+ * The CLOSED top-level key set a `persist` hole-set may carry — the members of `PersistHandlerHoles`,
+ * in declaration order. `validateHoles` rejects anything else (see the unknown-key check below), so
+ * this list and the interface must stay the same set; `holes.test.ts` asserts exactly that, so a hole
+ * key added to the interface without being listed here fails the suite.
+ */
+export const PERSIST_HOLE_KEYS: readonly string[] = [
+  ...SHARED_HOLE_KEYS,
+  'columns',
+  'mode',
+  'idArg',
+  'naturalKeyCol',
+  'fkRevalidate',
+  'fixedValues',
+  'clampValues',
+  'successStatus',
+];
+
+/** The CLOSED top-level key set a `lookup` hole-set may carry (the members of `LookupHandlerHoles`). */
+export const LOOKUP_HOLE_KEYS: readonly string[] = [
+  ...SHARED_HOLE_KEYS,
+  'filterCols',
+  'fixedFilter',
+  'projectCols',
+  'maxRows',
+  'substringArg',
+  'substringCol',
+];
+
 /** A fail-closed holes-validation error (a malformed hole-set never reaches a renderer). */
 export class HolesError extends Error {
   constructor(message: string) {
@@ -212,6 +244,42 @@ const SNAKE_RE = /^[a-z][a-z0-9_]*$/;
  * without escaping.
  */
 const STATUS_LABEL_RE = /^[A-Za-z0-9 _-]+$/;
+
+/**
+ * The edit distance between two key names (insert/delete/substitute), used ONLY to suggest the known
+ * key an unknown one is a near-miss of. The two typos this exists for are a single character each —
+ * a dropped `s` (`clampValues` → `clampValue`) and an added one (`fkRevalidate` → `fkRevalidates`).
+ */
+function editDistance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      row[j] = Math.min(
+        (prev[j] as number) + 1,
+        (row[j - 1] as number) + 1,
+        (prev[j - 1] as number) + cost,
+      );
+    }
+    prev = row;
+  }
+  return prev[b.length] as number;
+}
+
+/** The known key an unknown one is a near-miss of (≤ 2 edits), or `undefined` when it resembles none. */
+function nearestKnownKey(key: string, known: readonly string[]): string | undefined {
+  let best: string | undefined;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const candidate of known) {
+    const d = editDistance(key, candidate);
+    if (d < bestDistance) {
+      bestDistance = d;
+      best = candidate;
+    }
+  }
+  return bestDistance <= 2 ? best : undefined;
+}
 
 /** Assert a string is a safe TS identifier (export symbol). */
 function assertIdent(value: unknown, what: string): asserts value is string {
@@ -308,6 +376,30 @@ export function validateHoles(holes: unknown): asserts holes is HandlerHoles {
       `holes.template must be 'persist' or 'lookup', got ${JSON.stringify(h.template)}`,
     );
   }
+  // UNKNOWN TOP-LEVEL KEYS are named, never ignored — the same posture the in-rule clamp check applies
+  // one level down, and the spec grammar applies with `.strict()`. A hole key IS the mechanism it
+  // configures: a hole-set carrying `clampValue` declares no clamp and one carrying `fkRevalidates`
+  // declares no FK re-check, so a tolerant parser would render a DIFFERENT program — one missing a
+  // server-side safety the author believes they declared — and still report success. The allow-list is
+  // PER TEMPLATE (a key of the other template means nothing to this renderer), and the near-miss is
+  // named because a one-character typo is the case this fires on.
+  const allowedKeys = h.template === 'persist' ? PERSIST_HOLE_KEYS : LOOKUP_HOLE_KEYS;
+  const unknownKeys = Object.keys(h).filter((k) => !allowedKeys.includes(k));
+  if (unknownKeys.length > 0) {
+    const named = unknownKeys
+      .map((k) => {
+        const near = nearestKnownKey(k, allowedKeys);
+        return near === undefined ? `'${k}'` : `'${k}' (did you mean '${near}'?)`;
+      })
+      .join(', ');
+    throw new HolesError(
+      `holes carries the unknown top-level key(s) ${named} — a '${h.template}' hole-set accepts only ` +
+        `${allowedKeys.join(', ')}. An unknown key configures NOTHING, so it is rejected rather than ` +
+        'ignored: a typo would otherwise drop the mechanism it names while the render still reports ' +
+        'success.',
+    );
+  }
+
   assertIdent(h.exportName, 'holes.exportName');
   assertSnake(h.store, 'holes.store');
 

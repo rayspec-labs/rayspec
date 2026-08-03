@@ -7,8 +7,31 @@
  * injected-column write, a missing required field, a cross-field violation) and PASSES the clean
  * reference hole-sets.
  */
+import { readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { HolesError, validateHoles } from './holes.js';
+import type { HandlerHoles } from './holes.js';
+import { HolesError, LOOKUP_HOLE_KEYS, PERSIST_HOLE_KEYS, validateHoles } from './holes.js';
+import { renderHandler } from './templates.js';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(here, '../../../../..');
+const HOLES_DIR = join(REPO_ROOT, 'examples/expense-claim-coder/holes');
+
+/** The committed reference hole-set, read VERBATIM off disk (the accept control for the edits below). */
+function committed(name: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(join(HOLES_DIR, name), 'utf8')) as Record<string, unknown>;
+}
+
+/**
+ * Rename exactly ONE top-level key, keeping its value and its position — the object equivalent of the
+ * one-line diff an author makes by mistyping a key in the committed file.
+ */
+function renameKey(o: Record<string, unknown>, from: string, to: string): Record<string, unknown> {
+  expect(Object.hasOwn(o, from)).toBe(true);
+  return Object.fromEntries(Object.entries(o).map(([k, v]) => [k === from ? to : k, v]));
+}
 
 /** A minimal valid persist hole-set (update-by-id). */
 function persist(over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -406,5 +429,131 @@ describe('validateHoles — fail-closed on malformed hole-sets', () => {
         }),
       ),
     ).not.toThrow();
+  });
+});
+
+describe('validateHoles — an UNKNOWN top-level key is named, never ignored', () => {
+  // A hole key is the whole configuration of the mechanism it names, so a key the validator does not
+  // recognise cannot be treated as decoration: mistyping `clampValues` drops the entire server-side
+  // clamp, mistyping `fkRevalidate` drops the entire FK re-check, and a tolerant parser renders a
+  // DIFFERENT program while still reporting success. Every case below starts from the VERBATIM
+  // committed hole-set, which is asserted to validate in the same run — so a broken fixture cannot
+  // make the rejections look real.
+
+  it('ACCEPT CONTROL: both committed hole-sets validate exactly as they are on disk', () => {
+    expect(() => validateHoles(committed('code-claim.holes.json'))).not.toThrow();
+    expect(() => validateHoles(committed('lookup-categories.holes.json'))).not.toThrow();
+  });
+
+  it('rejects `clampValues` mistyped as `clampValue` — and names the key it nearly is', () => {
+    const typo = renameKey(committed('code-claim.holes.json'), 'clampValues', 'clampValue');
+    expect(() => validateHoles(typo)).toThrow(HolesError);
+    expect(() => validateHoles(typo)).toThrow(/'clampValue'/);
+    expect(() => validateHoles(typo)).toThrow(/did you mean 'clampValues'/);
+  });
+
+  it('rejects `fkRevalidate` mistyped as `fkRevalidates` — and names the key it nearly is', () => {
+    const typo = renameKey(committed('code-claim.holes.json'), 'fkRevalidate', 'fkRevalidates');
+    expect(() => validateHoles(typo)).toThrow(HolesError);
+    expect(() => validateHoles(typo)).toThrow(/'fkRevalidates'/);
+    expect(() => validateHoles(typo)).toThrow(/did you mean 'fkRevalidate'/);
+  });
+
+  it('rejects an unknown key on a lookup hole-set too', () => {
+    const typo = renameKey(committed('lookup-categories.holes.json'), 'maxRows', 'maxRow');
+    expect(() => validateHoles(typo)).toThrow(/'maxRow'/);
+    expect(() => validateHoles(typo)).toThrow(/did you mean 'maxRows'/);
+  });
+
+  it('the allow-list is PER TEMPLATE — a key of the other template is unknown here', () => {
+    // `clampValues` is a real persist key and `maxRows` a real lookup key; neither means anything to
+    // the template it is not part of, and the renderer for that template never reads it.
+    expect(() =>
+      validateHoles(lookup({ clampValues: { policy_flag: { max: 'review' } } })),
+    ).toThrow(/'clampValues'/);
+    expect(() => validateHoles(persist({ maxRows: 200 }))).toThrow(/'maxRows'/);
+  });
+
+  it('names EVERY unknown key in one message, not just the first', () => {
+    const two = persist({ clampValue: { policy_flag: { max: 'review' } }, note: 'why' });
+    expect(() => validateHoles(two)).toThrow(/'clampValue'/);
+    expect(() => validateHoles(two)).toThrow(/'note'/);
+  });
+
+  it('tolerates no annotation key either — nothing unknown is carried through', () => {
+    // There is no reserved comment/annotation prefix: a hole-set is the renderer's whole input, and a
+    // key the renderer never reads is indistinguishable from a key it was meant to read.
+    expect(() => validateHoles(persist({ $comment: 'why this handler exists' }))).toThrow(
+      /'\$comment'/,
+    );
+    expect(() => validateHoles(persist({ _note: 'x' }))).toThrow(/'_note'/);
+  });
+
+  it('an unknown key is rejected BEFORE any per-field message, so the typo is what the author reads', () => {
+    // The typo is the cause; a downstream complaint about the field it displaced would send the author
+    // to the wrong line.
+    expect(() => validateHoles(persist({ exportNam: 'codeClaim', exportName: undefined }))).toThrow(
+      /'exportNam'/,
+    );
+  });
+});
+
+describe('the allow-lists cover the whole hole shape (a new key cannot become silently optional)', () => {
+  // The rejection above is only as good as the two lists it checks against: a hole key added later and
+  // NOT listed would be rejected on every hole-set that carries it — the mirror-image failure. These
+  // two tests hold the lists to the shape from both directions, so the suite goes RED on the omission
+  // rather than shipping a key nobody can pass.
+  const holesSrc = readFileSync(join(here, 'holes.ts'), 'utf8');
+  /** `template` + `exportName` + `store` — the floor every hole-set's observed reads must clear. */
+  const SHARED_KEY_COUNT = 3;
+
+  /** The `readonly` members declared by one hole interface, read out of the source of truth itself. */
+  function interfaceMembers(name: string): string[] {
+    const start = holesSrc.indexOf(`export interface ${name} {`);
+    expect(start).toBeGreaterThan(-1);
+    const body = holesSrc.slice(start, holesSrc.indexOf('\n}', start));
+    return [...body.matchAll(/^ {2}readonly ([A-Za-z_][A-Za-z0-9_]*)\??:/gm)].map(
+      (m) => m[1] as string,
+    );
+  }
+
+  it('each allow-list is EXACTLY the interface that declares the template', () => {
+    expect([...PERSIST_HOLE_KEYS].sort()).toEqual(interfaceMembers('PersistHandlerHoles').sort());
+    expect([...LOOKUP_HOLE_KEYS].sort()).toEqual(interfaceMembers('LookupHandlerHoles').sort());
+    // A sanity floor: the parse found the real members, not an empty match set.
+    expect(PERSIST_HOLE_KEYS).toContain('clampValues');
+    expect(LOOKUP_HOLE_KEYS).toContain('substringCol');
+  });
+
+  it('every top-level key the validator and the renderers actually READ is allow-listed', () => {
+    // Observed, not asserted from a second hand-written list: each hole-set below is handed to
+    // `validateHoles` and to BOTH renderer targets through a recording proxy, and every top-level key
+    // either of them touches must be on that template's list.
+    const upsert = {
+      ...committed('code-claim.holes.json'),
+      mode: 'upsert-by-natural-key',
+      idArg: undefined,
+      naturalKeyCol: 'category_code',
+    };
+    const cases: { holes: Record<string, unknown>; allowed: readonly string[] }[] = [
+      { holes: committed('code-claim.holes.json'), allowed: PERSIST_HOLE_KEYS },
+      { holes: upsert, allowed: PERSIST_HOLE_KEYS },
+      { holes: committed('lookup-categories.holes.json'), allowed: LOOKUP_HOLE_KEYS },
+    ];
+    for (const { holes, allowed } of cases) {
+      const read = new Set<string>();
+      const recorded: unknown = new Proxy(holes, {
+        get(target, prop, receiver) {
+          if (typeof prop === 'string') read.add(prop);
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+      validateHoles(recorded);
+      renderHandler(recorded as HandlerHoles, 'ts');
+      renderHandler(recorded as HandlerHoles, 'js');
+      expect([...read].filter((k) => !allowed.includes(k))).toEqual([]);
+      // The proxy really did observe the reads (an empty set would make the filter vacuously green).
+      expect(read.size).toBeGreaterThan(SHARED_KEY_COUNT);
+    }
   });
 });
