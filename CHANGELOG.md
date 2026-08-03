@@ -1532,6 +1532,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per credential configuration, so the one-credential behavior the guide now describes cannot drift
   away from it unnoticed.
 
+- **The expense-claim auto-coder's smoke script no longer carries its own copy of the boot
+  sequence.** Its `Prereqs:` header restated the setup and pointed `RAYSPEC_SPEC_PATH` at the
+  committed `rayspec.yaml`, whose `handlers[].module` entries are TypeScript source — the loader
+  refuses those fail-closed, so that boot aborted at deploy with exit 1 and nothing was served, which
+  means the `Run:` line under it could never fire. Holding a second copy is what let it drift out of
+  step with `examples/expense-claim-coder/README.md`, so the header no longer holds one: it states
+  what the script assumes — the built `dist/` backend already being served — and sends the reader to
+  the README's "Run the live smoke", now the single place that sequence lives, as the sibling example
+  scripts already do. The script keeps its own usage line, and its unreachable-server message names
+  the same section.
+
 ### Security
 
 - **Six dependencies carrying published advisories are pinned forward:**
