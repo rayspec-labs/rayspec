@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { HandlerHoles } from './holes.js';
 import {
+  CLAMP_HOLE_KEYS,
   COLUMN_HOLE_KEYS,
   FK_REVALIDATE_KEYS,
   HolesError,
@@ -600,11 +601,13 @@ describe('the allow-lists cover the whole hole shape (a new key cannot become si
     expect([...LOOKUP_HOLE_KEYS].sort()).toEqual(interfaceMembers('LookupHandlerHoles').sort());
     expect([...FK_REVALIDATE_KEYS].sort()).toEqual(interfaceMembers('FkRevalidateHole').sort());
     expect([...COLUMN_HOLE_KEYS].sort()).toEqual(interfaceMembers('ColumnHole').sort());
+    expect([...CLAMP_HOLE_KEYS].sort()).toEqual(interfaceMembers('ClampHole').sort());
     // A sanity floor: the parse found the real members, not an empty match set.
     expect(PERSIST_HOLE_KEYS).toContain('clampValues');
     expect(LOOKUP_HOLE_KEYS).toContain('substringCol');
     expect(FK_REVALIDATE_KEYS).toContain('lookupFixedFilter');
     expect(COLUMN_HOLE_KEYS).toContain('enumValues');
+    expect(CLAMP_HOLE_KEYS).toContain('max');
   });
 
   /** The committed persist set with every OPTIONAL mechanism dropped (the arms the golden never takes). */
@@ -616,12 +619,39 @@ describe('the allow-lists cover the whole hole shape (a new key cannot become si
     return h;
   }
 
-  /** The committed lookup set with a NON-EMPTY filterCols and NO substring pair (the other two arms). */
-  function filteredLookup(): Record<string, unknown> {
+  /**
+   * The committed lookup set with a NON-EMPTY filterCols, NO substring pair and NO fixed predicate —
+   * the lookup analogue of `barePersist()`. `renderLookupHandler` branches on `fixedFilter` presence
+   * for the base filter literal, and the committed set carries one, so without this fixture that arm
+   * is rendered by nothing.
+   */
+  function bareLookup(): Record<string, unknown> {
     const h = committed('lookup-categories.holes.json');
     h.filterCols = ['code'];
+    delete h.fixedFilter;
     delete h.substringArg;
     delete h.substringCol;
+    return h;
+  }
+
+  /**
+   * The committed persist set widened to the remaining renderer arms: one column per `jsonType` (the
+   * coercion switch renders a different block for each, and all four committed columns are `text`),
+   * the optional/nullable missing-value tails (every committed column is `required`), and an
+   * `fkRevalidate` WITHOUT `lookupFixedFilter` (the unfiltered FK re-check literal).
+   */
+  function everyColumnArm(): Record<string, unknown> {
+    const h = committed('code-claim.holes.json');
+    h.columns = [
+      ...(h.columns as Record<string, unknown>[]),
+      { col: 'receipt_ref', jsonType: 'uuid', required: false, nullable: true },
+      { col: 'coded_at', jsonType: 'timestamp', required: false, nullable: false },
+      { col: 'line_count', jsonType: 'integer', required: true, nullable: false },
+      { col: 'amount_cents', jsonType: 'bigint', required: false, nullable: true },
+      { col: 'is_billable', jsonType: 'boolean', required: false, nullable: false },
+      { col: 'audit_note', jsonType: 'jsonb', required: false, nullable: true },
+    ];
+    delete (h.fkRevalidate as Record<string, unknown>).lookupFixedFilter;
     return h;
   }
 
@@ -633,10 +663,12 @@ describe('the allow-lists cover the whole hole shape (a new key cannot become si
     top: Set<string>;
     fk: Set<string>;
     column: Set<string>;
+    clamp: Set<string>;
   } {
     const top = new Set<string>();
     const fk = new Set<string>();
     const column = new Set<string>();
+    const clamp = new Set<string>();
     const record = (
       o: object,
       into: Set<string>,
@@ -665,19 +697,33 @@ describe('the allow-lists cover the whole hole shape (a new key cannot become si
           },
         });
       }
+      if (prop === 'clampValues' && typeof value === 'object' && value !== null) {
+        // The MAP itself is not a hole shape (its keys are column names), so only its RULES record.
+        return new Proxy(value as object, {
+          get(target, p, receiver) {
+            const v = Reflect.get(target, p, receiver);
+            return typeof v === 'object' && v !== null && typeof p === 'string'
+              ? record(v, clamp)
+              : v;
+          },
+        });
+      }
       return value;
     });
     validateHoles(recorded);
     renderHandler(recorded as HandlerHoles, 'ts');
     renderHandler(recorded as HandlerHoles, 'js');
-    return { top, fk, column };
+    return { top, fk, column, clamp };
   }
 
   it('every key the validator and the renderers actually READ is allow-listed', () => {
-    // Observed, not asserted from a second hand-written list. The fixtures span the ARMS the renderers
-    // branch on, not just the committed pair: a persist set without fkRevalidate/fixedValues/clampValues
-    // and a lookup set with a non-empty filterCols and no substring pair take the branches the committed
-    // hole-sets never reach, so a key read only there is observed here too.
+    // Observed, not asserted from a second hand-written list. A key read only on an arm no fixture
+    // takes is invisible here, so the fixtures below span every arm the renderers branch on a HOLE
+    // VALUE for — enumerated so the claim stays checkable against `templates.ts`: both templates and
+    // both emit targets; both persist modes; fkRevalidate/fixedValues/clampValues each present AND
+    // absent; fkRevalidate.lookupFixedFilter present AND absent; every `jsonType` arm of the coercion
+    // switch plus the enum-text arm; the required / nullable / drop tails; and on the lookup side
+    // fixedFilter present AND absent and the substring pair present AND absent.
     const upsert = {
       ...committed('code-claim.holes.json'),
       mode: 'upsert-by-natural-key',
@@ -693,18 +739,23 @@ describe('the allow-lists cover the whole hole shape (a new key cannot become si
       { label: 'persist upsert-by-natural-key', holes: upsert, allowed: PERSIST_HOLE_KEYS },
       { label: 'persist without fk/fixed/clamp', holes: barePersist(), allowed: PERSIST_HOLE_KEYS },
       {
+        label: 'persist over every column arm, unfiltered FK re-check',
+        holes: everyColumnArm(),
+        allowed: PERSIST_HOLE_KEYS,
+      },
+      {
         label: 'committed lookup',
         holes: committed('lookup-categories.holes.json'),
         allowed: LOOKUP_HOLE_KEYS,
       },
       {
-        label: 'lookup filtered, no substring',
-        holes: filteredLookup(),
+        label: 'lookup filtered, no fixed predicate, no substring',
+        holes: bareLookup(),
         allowed: LOOKUP_HOLE_KEYS,
       },
     ];
     for (const { label, holes, allowed } of cases) {
-      const { top, fk, column } = observeReads(holes);
+      const { top, fk, column, clamp } = observeReads(holes);
       expect(
         [...top].filter((k) => !allowed.includes(k)),
         label,
@@ -717,10 +768,15 @@ describe('the allow-lists cover the whole hole shape (a new key cannot become si
         [...column].filter((k) => !COLUMN_HOLE_KEYS.includes(k)),
         label,
       ).toEqual([]);
+      expect(
+        [...clamp].filter((k) => !CLAMP_HOLE_KEYS.includes(k)),
+        label,
+      ).toEqual([]);
       // The proxies really did observe the reads (an empty set would make the filters vacuously green).
       expect(top.size, label).toBeGreaterThan(SHARED_KEY_COUNT);
       if (holes.fkRevalidate !== undefined) expect(fk.size, label).toBeGreaterThanOrEqual(3);
       if (holes.columns !== undefined) expect(column.size, label).toBeGreaterThanOrEqual(4);
+      if (holes.clampValues !== undefined) expect(clamp.size, label).toBeGreaterThanOrEqual(1);
     }
   });
 });

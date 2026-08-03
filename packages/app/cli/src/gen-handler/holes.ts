@@ -252,6 +252,16 @@ export const COLUMN_HOLE_KEYS: readonly string[] = [
   'enumValues',
 ];
 
+/**
+ * The CLOSED key set one `clampValues` rule may carry (the members of `ClampHole`).
+ *
+ * The rule's key check predates the others and was written against an inline literal; it is a list
+ * here for the reason the other three are: the list and the interface are held to the same set by
+ * `holes.test.ts`, so a rule key added to `ClampHole` and rendered — but not listed — fails the suite
+ * instead of shipping as a key no hole-set can pass.
+ */
+export const CLAMP_HOLE_KEYS: readonly string[] = ['max'];
+
 /** A fail-closed holes-validation error (a malformed hole-set never reaches a renderer). */
 export class HolesError extends Error {
   constructor(message: string) {
@@ -616,7 +626,9 @@ export function validateHoles(holes: unknown): asserts holes is HandlerHoles {
         // A clamp is an UNCONDITIONAL bound. An unrecognized key (a conditional/predicate form) would
         // be silently dropped by the renderer, leaving the author believing the bound is narrower than
         // what actually ships — so name it rather than ignore it.
-        const unsupported = Object.keys(rule as Record<string, unknown>).filter((k) => k !== 'max');
+        const unsupported = Object.keys(rule as Record<string, unknown>).filter(
+          (k) => !CLAMP_HOLE_KEYS.includes(k),
+        );
         if (unsupported.length > 0) {
           throw new HolesError(
             `holes.clampValues.${col} carries the unsupported key(s) ` +
