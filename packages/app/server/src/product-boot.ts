@@ -37,6 +37,7 @@ import { PiAdapter } from '@rayspec/adapter-pi';
 import type { AgentRuntimeRegistry } from '@rayspec/agent-runtime';
 import {
   type AppDeps,
+  type CleanupResult,
   createAuthApp,
   createMediaTokenService,
   type DeclarativeEngine,
@@ -44,6 +45,7 @@ import {
   deploy,
   eraseTenant,
   type PlannedMigration,
+  runScheduledCleanup,
   type SessionReprocessor,
 } from '@rayspec/api-auth';
 import { AUDIO_SESSIONS_STORE, chunkKey, remuxChunks } from '@rayspec/audio-runtime';
@@ -71,7 +73,12 @@ import {
   type QueryFn,
   scanMigrationSql,
 } from '@rayspec/db';
-import { DbosDurableExecutor, DbosWorkflowExecutor, type ResolvedRun } from '@rayspec/durable-dbos';
+import {
+  DbosDurableExecutor,
+  DbosWorkflowExecutor,
+  type ResolvedRun,
+  SystemCleanupScheduler,
+} from '@rayspec/durable-dbos';
 import type { BlobStoreFactory, DurableExecutorIdentity, FsSourceFactory } from '@rayspec/platform';
 import {
   makeFsBlobStoreFactory,
@@ -151,6 +158,14 @@ export interface DeployedProductBoot {
   /** Read the LIVE durable executor identity for /recovery-scope (undefined when none was wired). */
   durableExecutorIdentity?: () => DurableExecutorIdentity;
   eraseTenantNow?: BootedServer['eraseTenantNow'];
+  /**
+   * The on-demand SYSTEM-cleanup seam (OIDC prune + the operator-gated GDPR purge), bound to the SAME
+   * `SystemCleanupScheduler` whose daily scheduled-workflow this boot registered. Surfaced so the
+   * composition root propagates it onto `BootedServer` exactly as the classic backend profile does —
+   * a product deployment is a durable-worker deployment, so the documented "wired whenever a durable
+   * worker is launched" rule covers it too.
+   */
+  runCleanupNow?: BootedServer['runCleanupNow'];
 }
 
 export interface DeployProductYamlOpts {
@@ -2663,6 +2678,35 @@ export async function deployProductYamlSpec(
   );
   executor.attachPreLaunchHook(() => wfExecutor.registerWorkflowJob());
 
+  // ── 6a2. Wire the SYSTEM cleanup scheduled-workflow (BEFORE launch) ──────────────────────────
+  // Platform housekeeping (OIDC prune LIVE + the operator-gated GDPR purge) runs on a daily DBOS
+  // scheduled-workflow WHENEVER a durable worker is wired — and a Product-YAML boot ALWAYS wires one
+  // (the executor built just above). This mirrors the classic backend profile's block in
+  // composition-root.ts: `registerScheduledWorkflow` MUST run in the pre-launch window (DBOS's
+  // `registerScheduled` is static + pre-launch by design), so it is attached as a pre-launch hook on
+  // the SAME executor. The concrete cleanup logic is INJECTED (`runScheduledCleanup` over the same
+  // pool this boot's worker runs on + the gate/retention config) so @rayspec/durable-dbos stays
+  // api-auth-free. The GDPR purge is DRY-RUN unless the operator gate is explicitly ON.
+  const cleanupScheduler = new SystemCleanupScheduler({
+    runCleanup: () =>
+      runScheduledCleanup({
+        db,
+        config: {
+          gdprPurgeEnabled: config.cleanup.gdprPurgeEnabled,
+          gdprRetentionDays: config.cleanup.gdprRetentionDays,
+        },
+      }),
+    schedule: config.cleanup.schedule,
+    executor,
+  });
+  executor.attachPreLaunchHook(() => cleanupScheduler.registerScheduledWorkflow());
+  // The on-demand cleanup delegate (control seam) — goes through the EXACT same `runCleanup` path the
+  // daily workflow fires on. Cast the engine-local outcome back to the api-auth CleanupResult (the
+  // injected runScheduledCleanup returns exactly that — the scheduler's narrower type is a structural
+  // subset, so this is the runtime value, not a type hole).
+  const runCleanupNow: BootedServer['runCleanupNow'] = () =>
+    cleanupScheduler.runCleanupNow() as Promise<CleanupResult>;
+
   // ── 6b. the OPERATIONAL session-reprocess seam (audio products only) ──────────────────────────
   // Re-drives a session's declared finalized-session workflow as a FRESH durable run — a DISTINCT
   // idempotency key via the dispatcher's forceKey seam — over the session's CURRENT store state (the
@@ -2913,6 +2957,7 @@ export async function deployProductYamlSpec(
     durableExecutorShutdown,
     durableExecutorIdentity,
     eraseTenantNow,
+    runCleanupNow,
   };
 }
 
