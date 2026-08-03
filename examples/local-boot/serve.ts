@@ -214,6 +214,27 @@ export function readUpdateMigrations(env: UpdateMigrationEnv): PlannedMigration[
 }
 
 /**
+ * The throwaway dev DB name for a spec path, sanitized to a safe pg identifier.
+ *
+ * It is DERIVED from the spec file's directory so that concurrently-authored backends never collide on
+ * one shared dev DB — each boots into its own, and a re-boot of the same backend lands on the same one.
+ *
+ * A spec inside a build-output directory is named after the BACKEND rather than the output directory.
+ * The bundled build steps write `<backend>/dist/rayspec.yaml`, so reading the last segment alone would
+ * give every built backend the single name `rayspec_local_dist` — reintroducing exactly the collision
+ * this derivation exists to prevent, and silently, because the second boot would DROP and re-create the
+ * first backend's database.
+ *
+ * Exported so a test can pin the derivation without booting anything.
+ */
+export function devDatabaseName(specPath: string): string {
+  const segments = resolve(specPath).split('/');
+  const dir = segments.slice(-2, -1)[0] ?? 'spec';
+  const named = dir === 'dist' ? `${segments.slice(-3, -2)[0] ?? 'spec'}_dist` : dir;
+  return `rayspec_local_${named.replace(/[^a-z0-9_]/gi, '_').toLowerCase()}`;
+}
+
+/**
  * Build the `assembleServer` opts for the wrapper's boot: the deployer-seam opts derived from the
  * ambient env + the parsed spec via the SHIPPED `assembleOptsFromEnv` (the SAME builder the
  * `rayspec-serve` bin and the `rayspec deploy` CLI use), plus the wrapper's UPDATE-mode
@@ -316,13 +337,9 @@ async function main(): Promise<void> {
     (process.env.RAYSPEC_BOOT_UPDATE ?? '').trim().toLowerCase(),
   );
 
-  // A dev DB name DERIVED from the spec file's directory name keeps concurrently-authored backends from
-  // colliding on one shared dev DB (each backend boots into its own fresh throwaway DB). The name is
-  // sanitized to a safe pg identifier; an explicit RAYSPEC_DEV_DB overrides. Update mode reuses the
-  // SAME derivation so it lands on the backend's existing dev DB.
-  const specDirName = resolve(specPath).split('/').slice(-2, -1)[0] ?? 'spec';
-  const derivedDbName = `rayspec_local_${specDirName.replace(/[^a-z0-9_]/gi, '_').toLowerCase()}`;
-  const devDbName = process.env.RAYSPEC_DEV_DB || derivedDbName;
+  // An explicit RAYSPEC_DEV_DB overrides the derivation. Update mode reuses the SAME derivation so it
+  // lands on the backend's existing dev DB.
+  const devDbName = process.env.RAYSPEC_DEV_DB || devDatabaseName(specPath);
 
   // 1. Dev DATABASE. FIRST-DEPLOY: DROP+CREATE fresh → the migration chain bootstraps it clean.
   //    UPDATE: point at the EXISTING dev DB (NO DROP) so the seeded data survives the redeploy — the

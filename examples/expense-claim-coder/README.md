@@ -101,6 +101,24 @@ re-validation of the untrusted model arg are load-bearing, the `policy_flag` bou
 **Live (model-driven, end-to-end):** `smoke.sh` drives a real OpenAI run through the deployed backend
 and asserts the WRITTEN row.
 
+## Build it (the deployable form)
+
+The committed `handlers/*.gen.ts` are the **byte-goldens** the renderer is pinned against, not a
+deployment artifact: the serve/deploy runtime loads each `handlers[].module` with a plain dynamic import
+and refuses TypeScript source, and `rayspec doctor` says so up front (the `typescript_handler_module`
+advisory). `build.mjs` writes the deployable form under `dist/`:
+
+```sh
+pnpm build                                        # the build step spawns the built CLI
+node examples/expense-claim-coder/build.mjs       # --out=<dir> builds elsewhere
+```
+
+It renders each committed hole-set as plain ESM with `gen-handler --emit js`, marks `dist/` as ESM with
+a `{"type":"module"}` manifest, and copies the spec with its `module:` paths rewritten to the rendered
+`.gen.js`. It renders rather than transpiles because for a generated handler the JavaScript form is a
+first-class render target — the same program with the type-only SDK import erased and every safety
+annotation intact — so `dist/` holds bytes the renderer itself produced.
+
 ## Run the live smoke
 
 From the repo root, with a local Postgres up and a filled repo-root `.env` (DATABASE_URL,
@@ -108,17 +126,19 @@ RAYSPEC_API_KEY_PEPPER, RAYSPEC_JWT_SIGNING_KEY, OPENAI_API_KEY):
 
 ```sh
 pnpm db:up                                                          # Docker Postgres on :5433
-RAYSPEC_SPEC_PATH="$PWD/examples/expense-claim-coder/rayspec.yaml" \
-  pnpm --filter @rayspec/local-boot serve                         # boot the authored backend
+node examples/expense-claim-coder/build.mjs                         # dist/ (see above)
+RAYSPEC_SPEC_PATH="$PWD/examples/expense-claim-coder/dist/rayspec.yaml" \
+  pnpm --filter @rayspec/local-boot serve                         # boot the built backend
 # in another shell:
 BASE=http://127.0.0.1:8788 bash examples/expense-claim-coder/smoke.sh
 ```
 
-The wrapper provisions a FRESH throwaway dev DB (`rayspec_local_expense_claim_coder`, derived from the
-spec directory name — an explicit `RAYSPEC_DEV_DB` overrides it; DROP+CREATE on every boot), runs the
-real `deploy()` pipeline, resolves the `kind:'tool'` handlers via the path-jailed
+The wrapper provisions a FRESH throwaway dev DB, derived from the spec's directory — so booting `dist/`
+uses `rayspec_local_expense_claim_coder_dist`, one database per backend rather than one shared by every
+built backend (an explicit `RAYSPEC_DEV_DB` overrides it; DROP+CREATE on every
+boot). It runs the real `deploy()` pipeline, resolves the `kind:'tool'` handlers via the path-jailed
 loader, builds the tenant-bound `HandlerDb` facade, and wires the OpenAI backend. `RAYSPEC_HANDLER_ROOT`
-defaults to the spec directory, so the relative `handlers/*.gen.ts` paths resolve.
+defaults to the spec directory, so the relative `handlers/*.gen.js` paths inside `dist/` resolve.
 
 > **Trusted-author, NOT sandboxed.** The generated handlers run in-process; `gate:handler-imports` +
 > `gate:extension-capability` are TRIPWIRES, not a sandbox; per-tenant execution sandboxing lives in
