@@ -518,6 +518,18 @@ contracts:
 });
 
 describe('the store-step {const:} literals — graph-neutrality over-rejection (GLI-1, INTENDED)', () => {
+  /** The store_write `status` literal — the ONE mutated variable in every arm below. */
+  const withStatus = (literal: string) =>
+    FIELDLOG_YAML.replace('status: { const: processed }', `status: { const: ${literal} }`);
+
+  /** The literal is rejected with `code`, and the error points at the const NODE (not the step). */
+  function expectConstRejected(literal: string, code: string): void {
+    const errors = parseErrors(withStatus(literal));
+    const hit = errors.find((e) => e.code === code);
+    expect(hit, JSON.stringify(errors, null, 2)).toBeTruthy();
+    expect(hit?.path).toBe('workflows[0].steps[1].values.status.const');
+  }
+
   it('a store_write {const:} BUSINESS string containing a provider name is rejected fail-closed by the graph guard — pinned so a future narrowing of the guard goes red', () => {
     // Store-step {const:} literals live in the `workflows` graph subtree, so the security-adjacent
     // neutrality guardrails scan them like every other graph string. A business constant naming a
@@ -531,5 +543,39 @@ describe('the store-step {const:} literals — graph-neutrality over-rejection (
       (e) => e.code === 'provider_native_leak' && /values\.status/.test(e.path ?? ''),
     );
     expect(hit, JSON.stringify(errors, null, 2)).toBeTruthy();
+  });
+
+  it('the ACCEPTED side of the boundary: an UNDERSCORED identifier and a plain spaced business phrase parse CLEAN — the value patterns are word-boundary anchored and `_` is a word character', () => {
+    // The over-rejection is NARROWER than the guard reads: `\bopenai\b` and `\bllm\s+call\b` cannot
+    // match inside an underscored token, so `openai_review_pending` / `llm_call` are legal constants,
+    // and an ordinary business phrase carrying no banned token is legal too. Pinned because the
+    // author-facing note (the authoring skill + docs/spec-reference.md) states exactly this phrasing
+    // rule — a widening of the guard would silently make that note false.
+    for (const [literal, value] of [
+      ['openai_review_pending', 'openai_review_pending'],
+      ['llm_call', 'llm_call'],
+      ['"awaiting review"', 'awaiting review'],
+    ] as const) {
+      const steps = parseOk(withStatus(literal)).workflows[0]?.steps ?? [];
+      expect(steps[1]?.values?.status).toEqual({ const: value });
+    }
+  });
+
+  it('the REJECTED side of the SAME boundary: the spaced and hyphenated forms of that identifier ARE provider_native_leak, at the const node', () => {
+    expectConstRejected('"openai review pending"', 'provider_native_leak');
+    expectConstRejected('"openai-review-pending"', 'provider_native_leak');
+  });
+
+  it('a prompt/LLM-execution phrase as a {const:} is prompt_execution_claim, at the const node', () => {
+    expectConstRejected('"awaiting llm call"', 'prompt_execution_claim');
+  });
+
+  it('a production-execution claim as a {const:} is production_execution_claim, at the const node', () => {
+    expectConstRejected('production_ready', 'production_execution_claim');
+  });
+
+  it('a code-like {const:} — a module path or an SQL fragment — is no_code_in_yaml, at the const node', () => {
+    expectConstRejected('"index.js rebuild"', 'no_code_in_yaml');
+    expectConstRejected('"SELECT name FROM users"', 'no_code_in_yaml');
   });
 });

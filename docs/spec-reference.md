@@ -1538,6 +1538,24 @@ workflows:
     (`{ artifact: … }`) — an artifact is a write-only source, never an
     equality-filter scalar. An `{ event: … }` source must name an actual **payload
     key of the trigger event** (e.g. `session_id` for `audio_input.session_finalized`).
+  - A `{ const: … }` literal is a **graph string**. It sits inside `workflows`, so
+    the neutrality scan that keeps provider names, prompt/production-execution
+    claims and code-like text out of the executable graph reads it like any other
+    graph string, and a business constant carrying one of those tokens is rejected
+    at the const node itself (e.g. `workflows[0].steps[1].values.status.const`).
+    The value patterns are word-boundary anchored and `_` counts as a word
+    character, so an unseparated token can pass where its separated spelling
+    cannot: `openai_review_pending` and `llm_call` are accepted, while
+    `openai review pending`, `openai-review-pending` and `awaiting llm call` are
+    refused. Anchoring is not a general escape, though — where a pattern already
+    spells the joined form it still matches, so `production_ready` is refused,
+    and so is a code-like literal such as `index.js rebuild`. The scan is
+    section-aware rather than airtight — the same text is legal as a store column
+    `enum` member, which the graph scan does not reach (only the document-wide
+    code-like check does, so a `.js` path or an SQL fragment is still refused
+    there). Where a constant cannot be rephrased, carry the value as data rather
+    than as YAML meaning: an `{ event: … }` payload key or an `{ artifact: … }`
+    ref keeps the string out of the document entirely.
 
 ## `grounding`
 
