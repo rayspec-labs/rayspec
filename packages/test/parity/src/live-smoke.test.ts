@@ -29,7 +29,7 @@ import { RunResult } from '@rayspec/core';
 import { describe, expect, it } from 'vitest';
 import { captureRun } from './harness.js';
 import { runResultShape, scenarioShape } from './index.js';
-import { liveTestEnabled } from './live-gate.js';
+import { liveGateFailure, liveTestEnabled } from './live-gate.js';
 import { scenariosForModel } from './scenarios.js';
 
 const openaiKey = process.env.OPENAI_API_KEY;
@@ -67,37 +67,16 @@ const LIVE_CRED_PRESENT: Record<string, boolean> = {
 const liveOptIn = process.env.RAYSPEC_REQUIRE_LIVE_TESTS === 'true';
 
 // A live run must never report success while exercising zero providers. When RAYSPEC_REQUIRE_LIVE_TESTS
-// is set, a missing/blind backend is a HARD FAIL:
-//   • RAYSPEC_LIVE_BACKENDS names the backends this run MUST exercise (comma-separated). An unknown
-//     name is a typo that would silently shrink coverage → fail. Any named backend whose credential is
-//     absent → fail, naming the specific backend(s). (Under partial creds the runnable blocks still run
-//     and the not-required blocks legitimately self-skip.)
-//   • With RAYSPEC_LIVE_BACKENDS empty (e.g. a bare local `pnpm test`), fall back to the coarse guard:
-//     fail only when NOT ONE cred is present, so partial local creds still skip the missing blocks.
-if (liveOptIn) {
-  const required = (process.env.RAYSPEC_LIVE_BACKENDS ?? '')
-    .split(',')
-    .map((name) => name.trim())
-    .filter((name) => name.length > 0);
-
-  if (required.length > 0) {
-    const unknown = required.filter((name) => !Object.hasOwn(LIVE_CRED_PRESENT, name));
-    if (unknown.length > 0) {
-      throw new Error(
-        `packages/test/parity/src/live-smoke.test.ts: RAYSPEC_LIVE_BACKENDS names unknown backend(s) [${unknown.join(', ')}] — supported: ${Object.keys(LIVE_CRED_PRESENT).join(', ')}. A typo must not silently shrink live coverage.`,
-      );
-    }
-    const missing = required.filter((name) => !LIVE_CRED_PRESENT[name]);
-    if (missing.length > 0) {
-      throw new Error(
-        `packages/test/parity/src/live-smoke.test.ts: RAYSPEC_REQUIRE_LIVE_TESTS is set and RAYSPEC_LIVE_BACKENDS requires [${required.join(', ')}], but the credential is absent for [${missing.join(', ')}] — refusing to green-skip a required live backend (openai/pi need OPENAI_API_KEY, anthropic needs CLAUDE_CODE_OAUTH_TOKEN, codex needs ~/.codex/auth.json).`,
-      );
-    }
-  } else if (!(hasOpenAI || hasAnthropic || hasCodex)) {
-    throw new Error(
-      'packages/test/parity/src/live-smoke.test.ts: RAYSPEC_REQUIRE_LIVE_TESTS is set but NO live provider creds (OPENAI_API_KEY / CLAUDE_CODE_OAUTH_TOKEN / ~/.codex/auth.json) are present — refusing to silently skip the entire live parity suite.',
-    );
-  }
+// is set, a missing/blind backend is a HARD FAIL. The decision itself is `liveGateFailure` — a pure
+// function in ./live-gate.ts, so which credential configurations are refused is pinned by
+// live-gate.test.ts rather than only by whether this collection happens to throw on someone's box.
+const liveGateRefusal = liveGateFailure(
+  liveOptIn,
+  process.env.RAYSPEC_LIVE_BACKENDS,
+  LIVE_CRED_PRESENT,
+);
+if (liveGateRefusal !== null) {
+  throw new Error(liveGateRefusal);
 }
 
 /**

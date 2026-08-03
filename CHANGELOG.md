@@ -1510,6 +1510,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test-suite gates that turn a self-skip into a failure are documented in `CONTRIBUTING.md`, which
   previously stated the false-green principle without naming the lever.
 
+- **The contributing guide's live-test promise is now the one the suites actually keep, and it names
+  the variable that closes the gap.** The guide said `RAYSPEC_REQUIRE_LIVE_TESTS=true` turns a
+  provider-backed skip into a collection-time failure the way `RAYSPEC_REQUIRE_DB_TESTS=true` does for
+  the database-backed suites, and then offered a run "where nothing skips". For the cross-backend
+  parity smoke that holds only when **no** provider credential at all is present: hold exactly one and
+  the guard is satisfied, the blocks whose credential is absent skip themselves, and the run exits 0 —
+  measured collection-only, a single credential collects one of that file's five live blocks and the
+  other four never run. (The server intake smokes and the Deepgram live test do fail on their own
+  missing credential, which is what made the blanket claim look true — but the opt-in does not gate
+  them at all: they call a real provider whenever their own credential is present, so a filled-in
+  repo-root `.env` is enough for them to spend.) `RAYSPEC_LIVE_BACKENDS` is what
+  makes it true — a comma-separated list drawn from `openai`, `pi`, `anthropic` and `codex` naming the
+  backends a run must exercise, where a named backend whose credential is absent, or a name outside
+  those four, fails collection instead of skipping — and it appeared in no document a contributor
+  reads. It is now documented beside the other require-gates, with its value form, the four names and
+  the credential each one needs, and the guide no longer promises a no-skip run it cannot deliver on a
+  partial credential set. **No behavior changed**: the same credential configurations are refused,
+  with byte-identical messages, and the continuous-integration live lane still names its backends
+  explicitly. The decision itself is now a pure function the parity package tests directly, one case
+  per credential configuration, so the one-credential behavior the guide now describes cannot drift
+  away from it unnoticed.
+
 ### Security
 
 - **Six dependencies carrying published advisories are pinned forward:**

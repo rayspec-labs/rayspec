@@ -7,7 +7,7 @@
  * `pnpm gate:parity`) turns the second case below RED.
  */
 import { describe, expect, it } from 'vitest';
-import { liveTestEnabled } from './live-gate.js';
+import { liveGateFailure, liveTestEnabled } from './live-gate.js';
 
 describe('liveTestEnabled — the live opt-in gate', () => {
   it('runs only when opted in AND the credential is present', () => {
@@ -24,5 +24,109 @@ describe('liveTestEnabled — the live opt-in gate', () => {
 
   it('SKIPS when neither the opt-in nor the credential is present', () => {
     expect(liveTestEnabled(false, false)).toBe(false);
+  });
+});
+
+/**
+ * The collection-time refusal the live smoke applies on top of the per-block gate above.
+ *
+ * These cases pin WHICH credential configurations are rejected and which are accepted, so neither
+ * branch can change without a red test. The one that is easy to change by accident is the fallback:
+ * with `RAYSPEC_LIVE_BACKENDS` empty the refusal fires only when NOT ONE credential is present, so a
+ * box holding a single provider credential is ACCEPTED and the blocks whose credential is absent
+ * self-skip. That is deliberate — it keeps a partial local credential set usable — and it is the
+ * reason `RAYSPEC_LIVE_BACKENDS` is what makes a "nothing skips" run true. Widening or narrowing that
+ * fallback (requiring every backend, or dropping the check) turns the one-credential cases below RED.
+ *
+ * The messages are asserted in full because they are the operator-facing contract: each one names the
+ * variable to set and the credential each backend needs.
+ */
+const SUPPORTED = 'openai, pi, anthropic, codex';
+
+/**
+ * The credential map exactly as the live smoke builds it, in its declared key order. `pi` runs on the
+ * SAME credential as `openai`, so it is never independently present — passing `openai` sets both.
+ */
+function creds(present: {
+  openai?: boolean;
+  anthropic?: boolean;
+  codex?: boolean;
+}): Record<string, boolean> {
+  return {
+    openai: present.openai === true,
+    pi: present.openai === true,
+    anthropic: present.anthropic === true,
+    codex: present.codex === true,
+  };
+}
+
+describe('liveGateFailure — which credential configurations the live suite refuses', () => {
+  it('refuses nothing without the opt-in, whatever the credentials or the backend list say', () => {
+    expect(liveGateFailure(false, undefined, creds({}))).toBeNull();
+    expect(liveGateFailure(false, 'openai,anthropic', creds({}))).toBeNull();
+  });
+
+  describe('with RAYSPEC_LIVE_BACKENDS empty — the coarse fallback', () => {
+    it('REFUSES when not one provider credential is present', () => {
+      expect(liveGateFailure(true, undefined, creds({}))).toBe(
+        'packages/test/parity/src/live-smoke.test.ts: RAYSPEC_REQUIRE_LIVE_TESTS is set but NO live provider creds (OPENAI_API_KEY / CLAUDE_CODE_OAUTH_TOKEN / ~/.codex/auth.json) are present — refusing to silently skip the entire live parity suite.',
+      );
+    });
+
+    it('REFUSES the same way for an empty string and for separators only', () => {
+      const zeroCreds = creds({});
+      const noCredsMessage = liveGateFailure(true, undefined, zeroCreds);
+      expect(liveGateFailure(true, '', zeroCreds)).toBe(noCredsMessage);
+      expect(liveGateFailure(true, ' , , ', zeroCreds)).toBe(noCredsMessage);
+    });
+
+    it('ACCEPTS a box holding exactly ONE credential — the rest green-skip', () => {
+      expect(liveGateFailure(true, undefined, creds({ codex: true }))).toBeNull();
+      expect(liveGateFailure(true, undefined, creds({ openai: true }))).toBeNull();
+      expect(liveGateFailure(true, undefined, creds({ anthropic: true }))).toBeNull();
+    });
+
+    it('ACCEPTS a box holding every credential', () => {
+      expect(
+        liveGateFailure(true, undefined, creds({ openai: true, anthropic: true, codex: true })),
+      ).toBeNull();
+    });
+  });
+
+  describe('with RAYSPEC_LIVE_BACKENDS naming backends — the strict path', () => {
+    it('REFUSES a named backend whose credential is absent, naming that backend', () => {
+      expect(liveGateFailure(true, 'openai', creds({ codex: true }))).toBe(
+        'packages/test/parity/src/live-smoke.test.ts: RAYSPEC_REQUIRE_LIVE_TESTS is set and RAYSPEC_LIVE_BACKENDS requires [openai], but the credential is absent for [openai] — refusing to green-skip a required live backend (openai/pi need OPENAI_API_KEY, anthropic needs CLAUDE_CODE_OAUTH_TOKEN, codex needs ~/.codex/auth.json).',
+      );
+    });
+
+    it('REFUSES a partial credential set, naming every missing backend', () => {
+      expect(liveGateFailure(true, 'openai,pi,anthropic', creds({ openai: true }))).toBe(
+        'packages/test/parity/src/live-smoke.test.ts: RAYSPEC_REQUIRE_LIVE_TESTS is set and RAYSPEC_LIVE_BACKENDS requires [openai, pi, anthropic], but the credential is absent for [anthropic] — refusing to green-skip a required live backend (openai/pi need OPENAI_API_KEY, anthropic needs CLAUDE_CODE_OAUTH_TOKEN, codex needs ~/.codex/auth.json).',
+      );
+    });
+
+    it('trims surrounding whitespace and drops empty entries before deciding', () => {
+      expect(liveGateFailure(true, ' openai , ', creds({ codex: true }))).toBe(
+        liveGateFailure(true, 'openai', creds({ codex: true })),
+      );
+    });
+
+    it('REFUSES an unknown name, listing the supported ones', () => {
+      expect(liveGateFailure(true, 'opanai', creds({ openai: true }))).toBe(
+        `packages/test/parity/src/live-smoke.test.ts: RAYSPEC_LIVE_BACKENDS names unknown backend(s) [opanai] — supported: ${SUPPORTED}. A typo must not silently shrink live coverage.`,
+      );
+    });
+
+    it('reports the unknown name before the missing credential', () => {
+      expect(liveGateFailure(true, 'opanai,anthropic', creds({}))).toBe(
+        `packages/test/parity/src/live-smoke.test.ts: RAYSPEC_LIVE_BACKENDS names unknown backend(s) [opanai] — supported: ${SUPPORTED}. A typo must not silently shrink live coverage.`,
+      );
+    });
+
+    it('ACCEPTS when every named backend has its credential — the one-credential box, narrowed', () => {
+      expect(liveGateFailure(true, 'codex', creds({ codex: true }))).toBeNull();
+      expect(liveGateFailure(true, 'openai,pi', creds({ openai: true }))).toBeNull();
+    });
   });
 });
