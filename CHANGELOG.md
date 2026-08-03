@@ -1446,6 +1446,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test-suite gates that turn a self-skip into a failure are documented in `CONTRIBUTING.md`, which
   previously stated the false-green principle without naming the lever.
 
+- **The expense-claim auto-coder's smoke script now prescribes a boot that works.** Its own
+  `Prereqs:` header still pointed `RAYSPEC_SPEC_PATH` at the committed `rayspec.yaml`, whose
+  `handlers[].module` entries are TypeScript source — the loader refuses those fail-closed, so that
+  boot aborts at deploy with exit 1 and nothing is served, which means the `Run:` line under it can
+  never fire. The header now carries the `node examples/expense-claim-coder/build.mjs` step and the
+  `dist/rayspec.yaml` that step produces — the sequence `examples/expense-claim-coder/README.md`
+  already documents under "Run the live smoke" — plus the repo-root `.env` keys the boot reads and a
+  note on why the built spec is the one to boot. A reader who follows the script's own header now
+  gets a served backend and a smoke run that reaches it.
+
 ### Security
 
 - **The boot no longer writes the two auth secrets into `process.env`, so a spawned child does not

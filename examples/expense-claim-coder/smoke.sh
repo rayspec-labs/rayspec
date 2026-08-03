@@ -18,9 +18,16 @@
 #   attempt) → UNAUTH (→ 401).
 #
 #   Prereqs:  pnpm db:up                                              # Docker Postgres on :5433
-#             RAYSPEC_SPEC_PATH=<abs path>/examples/expense-claim-coder/rayspec.yaml \
-#               pnpm --filter @rayspec/local-boot serve              # boot the authored backend
+#             node examples/expense-claim-coder/build.mjs            # renders dist/ (needs `pnpm build`)
+#             RAYSPEC_SPEC_PATH=<abs path>/examples/expense-claim-coder/dist/rayspec.yaml \
+#               pnpm --filter @rayspec/local-boot serve              # boot the built backend
 #   Run:      BASE=http://127.0.0.1:8788 bash examples/expense-claim-coder/smoke.sh
+#   Env:      the boot reads the repo-root .env — DATABASE_URL, RAYSPEC_API_KEY_PEPPER,
+#             RAYSPEC_JWT_SIGNING_KEY, OPENAI_API_KEY.
+#
+# The spec path is the BUILT one. The committed handlers/*.gen.ts are the renderer's byte-goldens, and
+# the loader refuses TypeScript source fail-closed, so booting the committed rayspec.yaml aborts at
+# deploy; build.mjs renders the deployable dist/ (see README.md, "Run the live smoke").
 #
 # LOCAL/internal-only — NOT a production client. The separate hardening layer (RLS/KMS/per-tenant
 # sandbox/DPoP) gates external exposure and is not built into the core. The generated handlers are
