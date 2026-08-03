@@ -639,6 +639,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mean loading operator-named code from the environment into the process holding the boot secrets;
   `rayspec-serve` and `rayspec deploy` cannot install a factory, and a test pins that they cannot.
 
+- **An embedder can now give the rate limiter a SHARED store, so several serving instances enforce
+  one combined limit instead of one budget each.** `@rayspec/auth-core` exports a
+  `SharedRateLimitStore` port whose single `consume` returns the decision AND the retry hint from one
+  operation — that is the load-bearing clause, because a store that decides first and advises second
+  lets two instances each see the last token before either has taken it. A limiter over such a store
+  is built by `RateLimiter.withSharedStore(store)`, and there is no other way to build one: the
+  factory probes the store as it constructs the limiter (a budget of one must allow then refuse, that
+  refusal must advise a non-zero wait, and a locked key must stay refused with the same lock constant
+  the in-process path reports) and throws instead of returning a limiter that answered any of it
+  wrongly. The declarative route syntax does not change at all — the same `rateLimit` field, a
+  different backing store — and because there is only ever one limiter in the application, supplying
+  a store moves every counter at once: the `login`/`register`/`refresh`/`oauth-token`/`invite-accept`
+  throttles, both declared-route tiers, and every per-route budget.
+
+  **A deployment that supplies no store is unchanged, and that is asserted rather than assumed.**
+  Every rate-limit call site now goes through an `…Async` method, and on a limiter with no shared
+  store each of those is a call to the synchronous method it always called — same arguments, same
+  returned decision object by identity. `createAuthApp` keeps its synchronous signature. The
+  synchronous methods themselves now refuse to answer on a limiter that DOES carry a shared store,
+  rather than quietly falling back to the in-process counters and handing that instance a private
+  budget; and a boot that finds a budgeted route about to mount on a shared limiter that never went
+  through the factory aborts instead of serving an unenforced limit.
+
+  **What ships is the port, not a deployment.** The server in this repository configures no shared
+  store: there is no environment variable and no configuration field that selects one, no table, and
+  no migration. The only implementation of the port in the tree is a Postgres one under test-support,
+  which exists to prove the contract against real concurrent connections — it has no sweeper and no
+  counterpart to the in-process store's entry bound, and is not a deployable store.
+
 ### Changed
 
 - **A product deployment whose `RAYSPEC_PRODUCT_TENANT_ID` is malformed or names no live org now

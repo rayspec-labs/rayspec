@@ -113,7 +113,7 @@ export function registerInviteRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): v
   app.post('/v1/invites/accept', async (c) => {
     const rid = c.get('requestId');
     const ip = clientIpFromContext(c, deps.trustedProxies ?? []);
-    const { allowed, retryAfterMs } = deps.rateLimiter.check('invite-accept', ip);
+    const { allowed, retryAfterMs } = await deps.rateLimiter.checkAsync('invite-accept', ip);
     if (!allowed) throw new ApiError('RATE_LIMITED', 'Too many requests.', { retryAfterMs });
 
     const body = AcceptInviteRequest.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
