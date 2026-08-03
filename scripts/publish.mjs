@@ -63,7 +63,9 @@
  *                  `RAYSPEC_ALLOW_PUBLISH=1`. Publishes in dependency order (deps before dependents).
  *                  Intended for the founder-run release window only.
  *
- * Other flags: --version <v> (asserts the derived version) · --out <dir> (pack destination) ·
+ * Other flags: --version <v> (asserts the derived version) · --out <dir> (pack destination; a
+ * relative path is resolved against the current working directory once, before anything is packed,
+ * so every target lands in that ONE directory and the run prints the absolute path) ·
  * --json (machine output).
  *
  * This script performs no git WRITES — it only READS the workspace state (`git ls-files`, tag identity)
@@ -410,8 +412,18 @@ function main() {
   const publishSet = computePublishSet(pkgs);
   const tag = preflight(flags, version, nodeEngine, pkgs, publishSet);
   const order = topoOrder(publishSet, pkgs);
+  // Resolved ONCE, here, so every target is handed the same absolute destination: each `pnpm pack`
+  // child runs with its cwd set to the package directory, so a relative destination passed on
+  // unresolved would resolve once PER TARGET and scatter the closure one tarball per package while
+  // this run reported a single directory holding none of them. Resolution is against the process
+  // cwd, the ordinary meaning of a path typed on a command line. The no-`--out` default is a temp
+  // directory, already absolute.
   const outDir =
-    flags.mode === 'pack' ? (flags.out ?? mkdtempSync(join(tmpdir(), 'rayspec-pack-'))) : undefined;
+    flags.mode === 'pack'
+      ? flags.out === undefined
+        ? mkdtempSync(join(tmpdir(), 'rayspec-pack-'))
+        : resolve(flags.out)
+      : undefined;
 
   const backups = new Map();
   const results = [];
