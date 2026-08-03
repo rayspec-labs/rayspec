@@ -1363,6 +1363,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is exactly the false green the guard exists to prevent; it now fails. Its two siblings for the
   database- and provider-backed suites were already declared. Repository tooling only.
 
+- **A deployment booted from a `*.product.yaml` document now runs the daily platform housekeeping job
+  it was always documented to run.** The job — one platform-wide pass that hard-deletes expired
+  `oidc_models` rows and then runs the operator-gated GDPR tombstone purge — rides the durable worker,
+  and the rule has always been that it is wired whenever a durable worker is launched, independently
+  of whether the spec declares cron triggers. A product deployment does launch one, but only the
+  classic `rayspec.yaml` boot registered the job; the product boot never constructed the scheduler at
+  all, so on that deployment shape the daily pass simply never happened. Nothing said so: no boot line
+  mentions the cleanup, the only symptom is a table that quietly never shrinks, and
+  `RAYSPEC_CLEANUP_SCHEDULE`, `RAYSPEC_GDPR_PURGE_ENABLED` and `RAYSPEC_GDPR_RETENTION_DAYS` were all
+  resolved and fail-closed-validated at boot and then never read. The product boot now registers the
+  same scheduled workflow in the same pre-launch window, over the same pool that boot's worker already
+  runs on, and surfaces the same on-demand seam the classic profile has always had, so an operator can
+  run the pass immediately instead of waiting for the next daily instant. The gate keeps its meaning
+  exactly: unset — the default — the purge counts what it would delete and deletes nothing, while the
+  OIDC prune is ungated and always deletes. **This changes what a running product deployment does: see
+  the upgrade note.** The classic boot is untouched, and both boot shapes are now pinned by tests that
+  assert against the booted server — one seeds an expired token row and waits for the schedule loop to
+  prune it with nobody calling anything, the other arms the gate and watches a past-retention tombstone
+  actually disappear.
+
 ### Documentation
 
 - **The declared-route throttle is described by its real reach, and the generated OpenAPI advertises
@@ -1523,6 +1543,20 @@ existing database, and for clients written against the HTTP surface.
 - **The two auth secrets are no longer mirrored into `process.env`.** Code that read
   `RAYSPEC_JWT_SIGNING_KEY` or `RAYSPEC_API_KEY_PEPPER` back out of the environment after boot now finds
   nothing there, and a spawned child no longer inherits them.
+- **A deployment booted from a `*.product.yaml` document starts running the daily system cleanup, and
+  one half of it deletes data.** The job did not run there before, so on such a deployment both halves
+  are new behavior. The OIDC prune is ungated and starts hard-deleting expired `oidc_models` rows on
+  the first scheduled instant after the upgrade; on a deployment that has been up for a while that
+  first pass can clear a large accumulated backlog in one go — these are already-expired OAuth
+  artifacts, but the delete is real. The GDPR tombstone purge runs only if `RAYSPEC_GDPR_PURGE_ENABLED`
+  is exactly `true`: if you have that gate armed on a product deployment today you have been getting
+  nothing from it, and after this upgrade you get the irreversible hard-delete the gate asks for — every
+  user and membership tombstone older than `RAYSPEC_GDPR_RETENTION_DAYS` (default 30) goes on the first
+  pass. Confirm that is what you want before upgrading; leaving the variable unset, or set to anything
+  other than `true`, keeps the purge as a dry run that counts and deletes nothing.
+  `RAYSPEC_CLEANUP_SCHEDULE` (default `0 3 * * *`) now actually decides when that pass happens on this
+  deployment shape, and the on-demand seam lets you run it once under supervision first. Deployments
+  booted from a classic `rayspec.yaml` are unaffected — they have always run this job.
 
 ## [1.6.2] - 2026-07-24
 
