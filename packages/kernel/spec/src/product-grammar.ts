@@ -417,10 +417,10 @@ export type StoreEventValue = z.infer<typeof StoreEventValue>;
  * prefix (`$.workflows…` there, `workflows…` here), so one exemption constant could not serve both:
  * it would have to be duplicated across two walkers whose whole contract is that they mirror each
  * other (parity-tested). The reach is also NARROWER than the note reads: the value patterns are
- * word-boundary anchored and `_` is a word character, so `openai_review_pending` and `llm_call` are
- * accepted today while their separated spellings are not — the reported example, an underscored
- * identifier, does not in fact reproduce. That boundary is pinned in product-stores.test.ts and
- * stated for authors in the authoring skill and docs/spec-reference.md.
+ * word-boundary anchored and `_` is a word character, so the SEPARATED spellings (`openai review
+ * pending`, `llm call`) are rejected while the underscored spelling an author would naturally reach
+ * for (`openai_review_pending`, `llm_call`) is accepted today. That boundary is pinned in
+ * product-stores.test.ts and stated for authors in the authoring skill and docs/spec-reference.md.
  */
 export const StoreFilterConstValue = z
   .object({ const: z.union([z.string(), z.number(), z.boolean()]) })
