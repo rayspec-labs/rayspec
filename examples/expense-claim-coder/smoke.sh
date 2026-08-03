@@ -17,17 +17,11 @@
 #   IDEMPOTENCY (still one row) → TENANT isolation (org-2 → 404; org A's claim UNCHANGED after B's
 #   attempt) → UNAUTH (→ 401).
 #
-#   Prereqs:  pnpm db:up                                              # Docker Postgres on :5433
-#             node examples/expense-claim-coder/build.mjs            # renders dist/ (needs `pnpm build`)
-#             RAYSPEC_SPEC_PATH=<abs path>/examples/expense-claim-coder/dist/rayspec.yaml \
-#               pnpm --filter @rayspec/local-boot serve              # boot the built backend
-#   Run:      BASE=http://127.0.0.1:8788 bash examples/expense-claim-coder/smoke.sh
-#   Env:      the boot reads the repo-root .env — DATABASE_URL, RAYSPEC_API_KEY_PEPPER,
-#             RAYSPEC_JWT_SIGNING_KEY, OPENAI_API_KEY.
+# Assumes the BUILT backend is already being served on $BASE — `dist/rayspec.yaml`, what `build.mjs`
+# renders, because the loader refuses the committed spec's TypeScript handler modules fail-closed.
+# README.md, "Run the live smoke", is where that sequence lives, repo-root `.env` keys included.
 #
-# The spec path is the BUILT one. The committed handlers/*.gen.ts are the renderer's byte-goldens, and
-# the loader refuses TypeScript source fail-closed, so booting the committed rayspec.yaml aborts at
-# deploy; build.mjs renders the deployable dist/ (see README.md, "Run the live smoke").
+# Usage:  BASE=http://127.0.0.1:8788 bash examples/expense-claim-coder/smoke.sh   # 8788 is the default
 #
 # LOCAL/internal-only — NOT a production client. The separate hardening layer (RLS/KMS/per-tenant
 # sandbox/DPoP) gates external exposure and is not built into the core. The generated handlers are
@@ -82,7 +76,7 @@ if [ "$HAS_JQ" != "1" ]; then
   fail "jq is REQUIRED for the row assertions (the written-row checks read nested fields). Install jq and re-run."
 fi
 if ! curl -sS -o /dev/null "$BASE/v1/auth/me" 2>/dev/null; then
-  fail "cannot reach $BASE — is the server running?  (RAYSPEC_SPEC_PATH=… pnpm --filter @rayspec/local-boot serve)"
+  fail "cannot reach $BASE — is the built backend being served?  (README.md, \"Run the live smoke\")"
 fi
 ok "server reachable"
 

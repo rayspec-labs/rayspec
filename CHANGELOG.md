@@ -1446,15 +1446,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test-suite gates that turn a self-skip into a failure are documented in `CONTRIBUTING.md`, which
   previously stated the false-green principle without naming the lever.
 
-- **The expense-claim auto-coder's smoke script now prescribes a boot that works.** Its own
-  `Prereqs:` header still pointed `RAYSPEC_SPEC_PATH` at the committed `rayspec.yaml`, whose
-  `handlers[].module` entries are TypeScript source — the loader refuses those fail-closed, so that
-  boot aborts at deploy with exit 1 and nothing is served, which means the `Run:` line under it can
-  never fire. The header now carries the `node examples/expense-claim-coder/build.mjs` step and the
-  `dist/rayspec.yaml` that step produces — the sequence `examples/expense-claim-coder/README.md`
-  already documents under "Run the live smoke" — plus the repo-root `.env` keys the boot reads and a
-  note on why the built spec is the one to boot. A reader who follows the script's own header now
-  gets a served backend and a smoke run that reaches it.
+- **The expense-claim auto-coder's smoke script no longer carries its own copy of the boot
+  sequence.** Its `Prereqs:` header restated the setup and pointed `RAYSPEC_SPEC_PATH` at the
+  committed `rayspec.yaml`, whose `handlers[].module` entries are TypeScript source — the loader
+  refuses those fail-closed, so that boot aborted at deploy with exit 1 and nothing was served, which
+  means the `Run:` line under it could never fire. Holding a second copy is what let it drift out of
+  step with `examples/expense-claim-coder/README.md`, so the header no longer holds one: it states
+  what the script assumes — the built `dist/` backend already being served — and sends the reader to
+  the README's "Run the live smoke", now the single place that sequence lives, as the sibling example
+  scripts already do. The script keeps its own usage line, and its unreachable-server message names
+  the same section.
 
 ### Security
 
