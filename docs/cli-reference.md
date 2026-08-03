@@ -516,8 +516,17 @@ to obtain an org-scoped token.
   database).
 - **Flags:**
   - `--base-url <url>` — **required**. The running backend's base URL.
-  - `--email`, `--password`, `--org-name` — optional; sensible defaults are used
-    when omitted.
+  - `--email` — optional; defaults to `owner-<epoch-ms>@rayspec.local`, a fresh
+    address on every run, so a repeat never collides with the user the previous
+    run registered. Pin it only if you want a predictable owner — a second run
+    with the same address is a `409` and the command reports `REGISTER_FAILED`.
+  - `--password` — optional; defaults to the literal
+    `correct-horse-battery-staple-9`. It is a **development** default, not a
+    secret: it is the same on every machine, so pass `--password` yourself
+    whenever the account is meant to outlive the walkthrough. Whatever value is
+    used is the one `POST /v1/auth/login` will want later — this command never
+    prints it back.
+  - `--org-name` — optional; defaults to `My Workspace`.
   - `--org-id <uuid>` — optional. Create the organization under **this** id
     instead of a server-generated one, so you can put the id in
     `RAYSPEC_PRODUCT_TENANT_ID` before the product deployment exists. Requires the
