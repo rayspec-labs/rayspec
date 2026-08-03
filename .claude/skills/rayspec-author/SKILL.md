@@ -1156,6 +1156,19 @@ against a strict charset (`exportName` = a TS identifier; store/column names = s
 `[a-z][a-z0-9_]*`) — so a name can never carry an injection. A persist `column.col` may NEVER be an
 injected column (`id`/`tenant_id`/`created_at`/`deleted_at`/`retention_days`/`region`).
 
+Every hole object whose shape is FIXED has a **CLOSED key set**: the hole-set itself (per template),
+each `columns[]` entry, `fkRevalidate`, and each `clampValues` rule — the blocks below are the
+COMPLETE lists. `validateHoles` rejects any other key by name (naming the known key it is a near-miss
+of) instead of ignoring it, because a key the renderer never reads drops the whole mechanism it names
+while the render still reports success — mistyping `fkRevalidate` drops the FK re-check, mistyping
+`lookupFixedFilter` INSIDE it drops that re-check's fixed predicate, and mistyping `enumValues` on a
+column drops the closed-set membership check from the coercion. The map-valued holes (`fixedValues`,
+`fixedFilter`, `lookupFixedFilter`, `clampValues`) are keyed by COLUMN NAME, so their keys are fenced
+by the snake_case charset and the column rules instead. So: do not invent hole keys, do not carry a
+key of the other template, and do not annotate a hole-set with a comment/metadata key at any level —
+there is no tolerated prefix. If a hole-set needs something these keys cannot express, that is an
+out-of-It.2 signal (see the list at the end of this contract), not a key to add.
+
 ### Template T1 — PERSIST handler holes (`template: "persist"`)
 
 ```jsonc

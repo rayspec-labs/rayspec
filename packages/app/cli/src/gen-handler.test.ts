@@ -163,6 +163,19 @@ describe('runGenHandler — fail-closed', () => {
     expect(result.errors[0]?.message).toMatch(/store/);
   });
 
+  it('ok:false naming an UNKNOWN top-level key (a typo is not silently dropped)', async () => {
+    // A key the validator does not recognise configures nothing, so a one-character typo would
+    // otherwise render a handler MISSING the mechanism the key names while the envelope reports
+    // success. It fails closed through the same malformed-hole-set envelope as any other bad field.
+    const holes = writeHoles('h.json', { ...PERSIST, clampValue: { policy_flag: { max: 'ok' } } });
+    const result = await runGenHandler(['--holes', holes, '--out', 'out']);
+    expect(result.ok).toBe(false);
+    expect(result.errors[0]?.code).toBe('invalid_holes');
+    expect(result.errors[0]?.message).toContain("'clampValue'");
+    expect(result.errors[0]?.message).toContain("did you mean 'clampValues'");
+    expect(result.file).toBeUndefined();
+  });
+
   it('ok:false on non-JSON holes', async () => {
     writeFileSync(join(tmp, 'h.json'), 'not json{', 'utf8');
     const result = await runGenHandler(['--holes', 'h.json', '--out', 'out']);
