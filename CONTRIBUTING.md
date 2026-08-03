@@ -116,17 +116,23 @@ dependency.
   `DATABASE_URL` into a collection-time failure instead of a skip, and
   `RAYSPEC_REQUIRE_MEDIA_TESTS=true` does the same for the ffmpeg-backed suites. CI needs
   neither — a run with `CI=true` already requires the database-backed ones.
-- `RAYSPEC_REQUIRE_LIVE_TESTS=true` is the opt-in for the provider-backed suites; nothing
-  calls a real provider without it. It is weaker than the two above, and the cross-backend
-  parity smoke is where that shows: there it fails only when **no** provider credential at
-  all is present, so a box holding one is green with the blocks whose credential is absent
-  skipped. (The server intake smokes and the Deepgram live test do fail on their own
-  missing credential.) `RAYSPEC_LIVE_BACKENDS` is what closes that gap — a comma-separated
-  list drawn from `openai`, `pi`, `anthropic` and `codex`, naming the backends the run must
-  exercise. Any name in it whose credential is absent, and any name outside those four,
-  fails collection rather than skipping. `openai` and `pi` both run on `OPENAI_API_KEY`,
-  `anthropic` on `CLAUDE_CODE_OAUTH_TOKEN`, and `codex` on `~/.codex/auth.json`. CI's live
-  lane sets both variables and names its backends explicitly.
+- `RAYSPEC_REQUIRE_LIVE_TESTS=true` is the opt-in the cross-backend parity smoke requires
+  before any live call: without it every live block there self-skips, whatever credentials
+  are around. It does not reach the other provider-backed tests. The server intake smokes
+  run whenever `DATABASE_URL` and `OPENAI_API_KEY` are both present, and the Deepgram live
+  test whenever `DEEPGRAM_API_KEY` is; both packages load the repo-root `.env` themselves,
+  so a filled-in `.env` alone is enough for those to call a real provider and spend. What
+  the opt-in adds for them is a collection-time failure when their credential is absent,
+  instead of a skip.
+- For the parity smoke the opt-in is weaker than the two gates above: it fails only when
+  **no** provider credential at all is present, so a box holding one is green with the
+  blocks whose credential is absent skipped. `RAYSPEC_LIVE_BACKENDS` is what closes that
+  gap — a comma-separated list drawn from `openai`, `pi`, `anthropic` and `codex`, naming
+  the backends the run must exercise. Any name in it whose credential is absent, and any
+  name outside those four, fails collection rather than skipping. `openai` and `pi` both
+  run on `OPENAI_API_KEY`, `anthropic` on `CLAUDE_CODE_OAUTH_TOKEN`, and `codex` on
+  `~/.codex/auth.json`. CI's live lane sets both variables and names its backends
+  explicitly.
 - For a run where nothing skips for want of configuration, put those variables and
   `DATABASE_URL`/`SHADOW_DATABASE_URL` in the **environment** rather than only in a
   `.env` file. `pnpm test` drives the suites through turbo in strict env mode, so a

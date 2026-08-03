@@ -1454,7 +1454,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the guard is satisfied, the blocks whose credential is absent skip themselves, and the run exits 0 —
   measured collection-only, a single credential collects one of that file's five live blocks and the
   other four never run. (The server intake smokes and the Deepgram live test do fail on their own
-  missing credential, which is what made the blanket claim look true.) `RAYSPEC_LIVE_BACKENDS` is what
+  missing credential, which is what made the blanket claim look true — but the opt-in does not gate
+  them at all: they call a real provider whenever their own credential is present, so a filled-in
+  repo-root `.env` is enough for them to spend.) `RAYSPEC_LIVE_BACKENDS` is what
   makes it true — a comma-separated list drawn from `openai`, `pi`, `anthropic` and `codex` naming the
   backends a run must exercise, where a named backend whose credential is absent, or a name outside
   those four, fails collection instead of skipping — and it appeared in no document a contributor
