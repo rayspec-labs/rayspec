@@ -1363,6 +1363,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is exactly the false green the guard exists to prevent; it now fails. Its two siblings for the
   database- and provider-backed suites were already declared. Repository tooling only.
 
+- **A relative `--out` no longer scatters the release tarballs one per package directory.**
+  `scripts/publish.mjs --pack` handed `--out` to each `pnpm pack` child exactly as it was typed, and
+  those children run with their working directory set to the package being packed — so a relative
+  destination resolved once per target: the 29-package closure landed in 29 separate
+  `packages/**/release/v<version>/` directories while the run printed the single unresolved path as
+  if the tarballs were all there. `release/` is gitignored at any depth, so nothing about that showed
+  up in `git status`. The documented release sequence passes exactly such a relative path and then
+  hands the same string to `release:identity` and `release:identity-verify`, which resolve it against
+  the repository root — so pointed at a directory the pack never wrote, those two would build and
+  verify a release-identity manifest over whatever an earlier run happened to have left there and
+  report `0 failure(s)` for tarballs that are not the ones just packed. The destination is now
+  resolved to an absolute path once, before the first target is packed, so every target lands in that
+  one directory and the `tarballs → …` line names it. An absolute `--out`, and the temporary
+  directory used when `--out` is omitted, are unchanged. Measured on a tree with no `release`
+  directory anywhere: `node scripts/publish.mjs --pack --out release/v1.7.0` from the repository root
+  puts 29 `.tgz` in `<repository-root>/release/v1.7.0/` and `find packages -name '*.tgz' -path
+  '*/release/*'` finds none, where before it found 29 and the repository root held none; the
+  documented steps that follow then run verbatim. Repository release tooling only: no published
+  package, API or runtime behavior changes.
+
 ### Documentation
 
 - **The declared-route throttle is described by its real reach, and the generated OpenAPI advertises

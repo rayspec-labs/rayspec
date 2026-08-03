@@ -42,6 +42,13 @@
  *   (R) PACK AND DRY-RUN REPORT THE TAG, THEY DO NOT ENFORCE IT — both write nothing anywhere, and
  *       a pack rehearsal legitimately runs before the tag exists. Blocking it would push operators
  *       to tag first and check later.
+ *   (O) A RELATIVE `--out` LANDS IN ONE DIRECTORY — every target is packed by a child whose cwd is
+ *       that target's own directory, so a destination passed on unresolved resolves once PER TARGET:
+ *       the closure scatters one tarball per package directory while the run reports a single
+ *       destination that holds none of them. The documented release sequence passes a
+ *       repository-relative destination and then hands the same string to the release-identity
+ *       manifest and its verifier, which resolve it against the repository root — so a scattered
+ *       pack leaves those two reading whatever that directory happened to already hold.
  *   (P) THE POSITIVE CONTROL — a coherent checkout packs: the derived version is the reported one,
  *       every target is packed exactly once in dependency order, and the tree is byte-identical
  *       afterwards.
@@ -55,7 +62,9 @@ import {
   copyFileSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -72,10 +81,22 @@ const NODE_ENGINE = '>=22';
 // ── the `pnpm` test double ──────────────────────────────────────────────────────────────────────
 // Logs one JSON line per invocation (argv + cwd, i.e. which package was packed) and succeeds. Its
 // mere existence in the log is the assertion target: every refusal case requires an EMPTY log.
+// For `pack` it also does the one thing real `pnpm pack` does that is observable on disk: it writes
+// one `<name>-<version>.tgz` into `--pack-destination`, resolving that destination against ITS OWN
+// cwd — the package directory it was spawned in. Without that, WHERE a pack lands is invisible here
+// and case (O) could not tell one destination apart from one per target.
 const FAKE_PNPM = `#!/usr/bin/env node
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 const argv = process.argv.slice(2);
 appendFileSync(process.env.FAKE_PNPM_LOG, JSON.stringify({ argv, cwd: process.cwd() }) + '\\n');
+const destIdx = argv.indexOf('--pack-destination');
+if (argv[0] === 'pack' && destIdx !== -1) {
+  const dest = resolve(process.cwd(), argv[destIdx + 1]);
+  mkdirSync(dest, { recursive: true });
+  const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'));
+  writeFileSync(join(dest, pkg.name.replace('@', '').replace('/', '-') + '-' + pkg.version + '.tgz'), '');
+}
 process.stdout.write('fake pnpm: ' + argv.join(' ') + '\\n');
 `;
 
@@ -450,6 +471,43 @@ try {
       `(U) the refusal must name the unbuilt target: ${r.err}`,
     );
     console.log('ok (U) — an unbuilt target stops the run before the first target is packed');
+  }
+
+  // ── (O) a relative --out lands in ONE directory, and the run names it ──────────────────────────
+  // This is the shape the documented release sequence uses: a repository-relative destination, run
+  // from the repository root.
+  {
+    const fx = fixture({ tags: [{ name: 'v1.6.2', annotated: true }] });
+    const rel = join('release', `v${VERSION}`);
+    const r = run(fx, ['--pack', '--out', rel]);
+    assert.equal(r.code, 0, `(O) a relative --out must pack; got ${r.code}: ${r.err}`);
+    assert.equal(r.calls.length, TARGETS.length, '(O) every target must still be packed');
+
+    const strays = readdirSync(join(fx.root, 'packages'), { recursive: true })
+      .map(String)
+      .filter((p) => p.endsWith('.tgz'))
+      .sort();
+    assert.deepEqual(
+      strays,
+      [],
+      `(O) no tarball may be written under packages/: ${JSON.stringify(strays)}`,
+    );
+
+    // The same run's own count, in the one place it says the tarballs are.
+    const dest = join(realpathSync(fx.root), rel);
+    const landed = readdirSync(dest)
+      .filter((f) => f.endsWith('.tgz'))
+      .sort();
+    assert.equal(
+      landed.length,
+      TARGETS.length,
+      `(O) every target must land in ${dest}: ${JSON.stringify(landed)}`,
+    );
+    assert.ok(
+      r.out.includes(`tarballs → ${dest}`),
+      `(O) the destination line must name the resolved absolute path: ${r.out}`,
+    );
+    console.log('ok (O) — a relative --out resolves once, to the one destination the run reports');
   }
 
   // ── (P) the positive control: a coherent checkout packs, in dependency order, and restores ─────
