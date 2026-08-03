@@ -153,8 +153,10 @@ A backend-profile document can serve a built web UI itself, in one of two forms.
   branches away from it entirely, so there is provably no authenticated surface
   behind the assets. `/health` runs no database probe; it reports whether the declared
   mounts can be served — `200 {"status":"ok","frontend":"ok"}`, or `503` with
-  `"frontend":"unavailable"`. This is the form for serving a built single-page app
-  directly, with no reverse proxy in front.
+  `"status":"degraded"` and `"frontend":"unavailable"`. A `503` names every dependency
+  the boot covers rather than only the failing one, so one read of the body says which
+  one is at fault. This is the form for serving a built single-page app directly, with
+  no reverse proxy in front.
 
 Because a static profile runs with no proxy in front, the app emits the two response
 security headers a proxy would normally add — `Content-Security-Policy` and

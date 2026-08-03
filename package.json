@@ -1,6 +1,6 @@
 {
   "name": "rayspec",
-  "version": "1.6.2",
+  "version": "1.7.0",
   "private": true,
   "license": "FSL-1.1-ALv2",
   "description": "RaySpec — file-deployable AI infrastructure platform",

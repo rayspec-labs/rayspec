@@ -1,6 +1,6 @@
 {
   "name": "@rayspec/adapter-codex",
-  "version": "1.6.2",
+  "version": "1.7.0",
   "private": true,
   "license": "FSL-1.1-ALv2",
   "type": "module",

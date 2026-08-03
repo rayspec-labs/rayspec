@@ -7,7 +7,7 @@
   "type": "module",
   "main": "./dist/index.js",
   "dependencies": {
-    "@rayspec/handler-sdk": "1.6.2",
-    "@rayspec/platform": "1.6.2"
+    "@rayspec/handler-sdk": "1.7.0",
+    "@rayspec/platform": "1.7.0"
   }
 }

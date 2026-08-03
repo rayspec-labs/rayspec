@@ -236,6 +236,22 @@ the injected tenant-bound handle — so a generated handler cannot escape tenanc
   A malformed holes set is `ok: false` with an `errors` entry (exit `1`); a
   missing/invalid flag is a usage error (exit `2`).
 
+### The holes contract
+
+The holes file is one JSON object whose `template` field selects the shape:
+`"persist"` (a write handler) or `"lookup"` (a read handler). Both carry
+`exportName` and `store`. A `persist` set adds `columns`, `successStatus`, `mode`
+(`update-by-id` or `upsert-by-natural-key`) with the `idArg` or `naturalKeyCol` that
+mode needs, and the optional `fkRevalidate`, `fixedValues` and `clampValues`. A
+`lookup` set adds `filterCols`, `projectCols`, `maxRows`, and the optional
+`fixedFilter` and `substringArg`/`substringCol` pair. Every field is validated
+fail-closed, so a malformed hole-set never reaches a renderer.
+
+What each field means, and the coherence rules over combinations of them, is specified
+in [the authoring skill](../.claude/skills/rayspec-author/SKILL.md) — read that before
+writing a holes file. This reference deliberately does not restate the contract, so it
+has exactly one specification.
+
 ### Which target to emit
 
 `deploy` loads every `handlers[].module` as **compiled JavaScript only** — it

@@ -83,16 +83,17 @@ over `package.json` after copying the pack out:
   "type": "module",
   "main": "./dist/index.js",
   "dependencies": {
-    "@rayspec/handler-sdk": "1.6.2",
-    "@rayspec/platform": "1.6.2"
+    "@rayspec/handler-sdk": "1.7.0",
+    "@rayspec/platform": "1.7.0"
   }
 }
 ```
 
 The pinned version **must equal the platform version the deployment runs** — the entry imports
 `defineExtension` from that exact build, and the `@rayspec` closure (`core`, `db`, `handler-sdk`,
-`platform`, `spec`) is released in lockstep under one version. `1.6.2` is the released version this
-recipe was verified against; check the registry for the current one.
+`platform`, `spec`) is released in lockstep under one version. `1.7.0` is the current release and what
+the pins above name; the recipe itself was verified against `1.6.2`, the release before it. Check the
+registry for the current version.
 
 `@rayspec/platform` is a **runtime** dependency: the entry imports `defineExtension` as a VALUE, and
 `tsc` transpiles rather than bundles, so the bare specifier survives into `dist/index.js` and is
