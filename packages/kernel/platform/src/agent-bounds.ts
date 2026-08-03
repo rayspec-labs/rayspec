@@ -1,18 +1,20 @@
 /**
  * Agent-run bounds — the optional upper bounds an operator can put on an agent run.
  *
- * Three variables, all OFF unless set, so a deployment that sets none behaves exactly as it did
+ * Four variables, all OFF unless set, so a deployment that sets none behaves exactly as it did
  * before they existed:
  *
  *   RAYSPEC_AGENT_REQUEST_TIMEOUT_MS  per HTTP request the model client makes (the OpenAI adapter
  *                                     carries it onto the client it registers)
  *   RAYSPEC_AGENT_MAX_ATTEMPTS        how many attempts that client makes for one request
  *   RAYSPEC_AGENT_RUN_MAX_MS          wall clock run-core waits for one whole run
+ *   RAYSPEC_RUN_CANCEL_POLL_MS        how often an executing run re-reads its own cancellation
+ *                                     marker, so a cancellation issued in another process reaches it
  *
  * The parsing rule is the one `resolveBootTimeoutMs` uses for RAYSPEC_BOOT_TIMEOUT_MS: trim, parse,
- * and fall back to the default on anything unusable. Here the default is "no bound", so an absent or
+ * and fall back to the default on anything unusable. Here the default is "off", so an absent or
  * non-numeric value — and any value outside 1 … {@link MAX_BOUND} after flooring — leaves the run
- * exactly as unbounded as it is today.
+ * exactly as unbounded, and as unwatched, as it is today.
  */
 
 /**
@@ -22,7 +24,7 @@
  * `TimeoutOverflowWarning: … does not fit into a 32-bit signed integer. Timeout duration was set to
  * 1.`). Accepting such a value would therefore INVERT the bound it configures: a ceiling meant to be
  * generous would abandon every run after a millisecond. The same ceiling is applied to the attempt
- * COUNT, which no timer holds, so that one rule covers all three variables — and a request-attempt
+ * COUNT, which no timer holds, so that one rule covers all four variables — and a request-attempt
  * count above two billion is not a configuration anyone means.
  */
 const MAX_BOUND = 2_147_483_647;
@@ -34,8 +36,9 @@ const MAX_BOUND = 2_147_483_647;
  * The floor runs BEFORE the range check, so the number that is range-checked is exactly the number
  * the caller gets. Checking first would let any 0 < v < 1 (`0.5`, `0.001`) pass the check and then
  * floor to 0 — the sentinel this contract calls "not set", but as a NUMBER, so every consumer would
- * take it as a live bound of zero: a run ceiling of 0ms, or an attempt count of 0 that maps to a
- * negative retry count.
+ * take it as a live bound of zero: a run ceiling of 0ms, an attempt count of 0 that maps to a
+ * negative retry count, or a cancellation poll that re-reads its marker as fast as the event loop
+ * will hand it a turn.
  *
  * Out-of-range collapses to "not set" rather than clamping to {@link MAX_BOUND}: a ceiling above
  * 24.8 days and no ceiling at all express the same intent, so treating them alike keeps the contract
@@ -76,6 +79,21 @@ export function resolveAgentMaxAttempts(env: NodeJS.ProcessEnv = process.env): n
  */
 export function resolveRunMaxMs(env: NodeJS.ProcessEnv = process.env): number | undefined {
   return positiveInt(env.RAYSPEC_AGENT_RUN_MAX_MS);
+}
+
+/**
+ * How often a run that is EXECUTING re-reads its own persisted cancellation marker, in milliseconds
+ * (`RAYSPEC_RUN_CANCEL_POLL_MS`). Undefined ⇒ it is never re-read while the run waits, which is the
+ * behaviour before this variable existed: a cancellation reaches an executing run only through the
+ * process-local signal, so a run executing in ANOTHER process is not interrupted by it.
+ *
+ * There is deliberately NO floor and NO clamp: the parser above is the whole rule. A floor would
+ * silently substitute a longer interval than the operator wrote — the same surprise the out-of-range
+ * rule refuses to inflict — and would quietly disable the feature for anyone who asked for something
+ * shorter than it.
+ */
+export function resolveRunCancelPollMs(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  return positiveInt(env.RAYSPEC_RUN_CANCEL_POLL_MS);
 }
 
 /**

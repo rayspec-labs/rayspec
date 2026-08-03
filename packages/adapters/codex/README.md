@@ -33,9 +33,10 @@ bridge is **bounded**: it no longer waits on connections that outlive the turn. 
 - Whether the real `codex` CLI exits on that signal and reaps its own children is **not verified
   here**. The cancellation tests drive the real SDK against a stand-in executable, so the points
   above are stated as limits rather than measured against the shipped CLI.
-- A run already executing in a **separate worker process** receives no in-process signal at all.
-  That limit is shared by all four backends and is tracked in
-  [#210](https://github.com/rayspec-labs/rayspec/issues/210).
+- A run already executing in a **separate worker process** receives no in-process signal by
+  default; setting `RAYSPEC_RUN_CANCEL_POLL_MS` makes that process re-read the cancellation record
+  and raise the abort itself, which is the signal this adapter acts on. Both behaviours are shared
+  by all four backends.
 - A tool call already in flight is not interrupted, and work already committed upstream is not
   undone.
 
