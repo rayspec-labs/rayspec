@@ -19,7 +19,7 @@
 #
 # Assumes the BUILT backend is already being served on $BASE — `dist/rayspec.yaml`, what `build.mjs`
 # renders, because the loader refuses the committed spec's TypeScript handler modules fail-closed.
-# README.md, "Run the live smoke", is where that sequence lives, repo-root `.env` keys included.
+# examples/expense-claim-coder/README.md, "Run the live smoke", is where that sequence lives, repo-root `.env` keys included.
 #
 # Usage:  BASE=http://127.0.0.1:8788 bash examples/expense-claim-coder/smoke.sh   # 8788 is the default
 #
@@ -76,7 +76,7 @@ if [ "$HAS_JQ" != "1" ]; then
   fail "jq is REQUIRED for the row assertions (the written-row checks read nested fields). Install jq and re-run."
 fi
 if ! curl -sS -o /dev/null "$BASE/v1/auth/me" 2>/dev/null; then
-  fail "cannot reach $BASE — is the built backend being served?  (README.md, \"Run the live smoke\")"
+  fail "cannot reach $BASE — is the built backend being served?  (examples/expense-claim-coder/README.md, \"Run the live smoke\")"
 fi
 ok "server reachable"
 
