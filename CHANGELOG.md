@@ -1564,16 +1564,16 @@ existing database, and for clients written against the HTTP surface.
   (default `0 3 * * *`) now actually decides when that pass happens on this
   deployment shape — and because the expression is handed to the worker's scheduler as written, a value
   that scheduler cannot parse now aborts the boot of a product deployment that previously ignored it.
-  It must be a 5-field crontab: shorthand such as `@daily`, a 4-field expression, or an out-of-range
-  field is refused, and the refusal is the scheduler's own error, which names neither the variable nor
-  the cleanup. Check the value before upgrading. Registering the job also adds one durable workflow to
-  this deployment, which rotates the DBOS application version the product boot runs under: runs a
-  pre-upgrade process enqueued or left in flight carry the old version and are neither dequeued nor
-  recovered by the new one, so let the durable queues drain before restarting into this release (the
-  `applicationVersion` that `/recovery-scope` reports changes with it). Deployments booted from a
-  classic `rayspec.yaml` are unaffected: the job is wired there whenever the spec declares
-  `deployment.durableWorker: true` and backends are wired, exactly as before — a classic spec that
-  declares no durable worker never ran this job and still does not.
+  The scheduler takes the standard 5-field crontab and the 6-field form that prepends a seconds field;
+  shorthand such as `@daily`, a 4-field expression, or an out-of-range field is refused, and the refusal
+  is the scheduler's own error, which names neither the variable nor the cleanup. Check the value before
+  upgrading. Registering the job also adds one durable workflow to this deployment, which rotates the
+  DBOS application version the product boot runs under: runs a pre-upgrade process enqueued or left in
+  flight carry the old version and are neither dequeued nor recovered by the new one, so let the durable
+  queues drain before restarting into this release (the `applicationVersion` that `/recovery-scope`
+  reports changes with it). Deployments booted from a classic `rayspec.yaml` are unaffected: the job is
+  wired there whenever the spec declares `deployment.durableWorker: true` and backends are wired, exactly
+  as before — a classic spec that declares no durable worker never ran this job and still does not.
 
 ## [1.6.2] - 2026-07-24
 
