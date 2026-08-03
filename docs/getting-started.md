@@ -246,8 +246,14 @@ server's auth API:
 
 ```bash
 $RAYSPEC dev bootstrap-tenant --base-url http://localhost:8080 \
-  --email owner@example.com --org-name "Acme"
+  --email owner@example.com --password 'a-long-passphrase' --org-name "Acme"
 ```
+
+`--password` is passed explicitly so you know the owner's credential: the by-hand
+`register`/`login` calls below use the same value, and so does the recovery step when
+your token expires. Omit it and the command uses a default this page never prints — see
+[`dev bootstrap-tenant`](./cli-reference.md#dev-bootstrap-tenant) for what each omitted
+flag falls back to.
 
 It emits the new org id and an org-scoped token:
 
@@ -468,9 +474,22 @@ curl -s http://localhost:8080/sessions -H 'authorization: Bearer <ORG_TOKEN>'
 
 > **If a call below suddenly answers `401`, your token expired.** `<ORG_TOKEN>` is the
 > access token from step 4, and step 4 printed its lifetime: `expiresIn: 480` — eight
-> minutes. The rest of this page takes longer than that to read. Mint a fresh one the
-> same way (`dev bootstrap-tenant` again, or `login` + `switch`) and carry on; nothing
-> you have done so far is lost.
+> minutes. The rest of this page takes longer than that to read. Mint a fresh one by
+> logging in again with the address and password from step 4 — you are a member of exactly
+> one organization, so `login` hands back a token already scoped to it:
+>
+> ```bash
+> curl -s -X POST http://localhost:8080/v1/auth/login \
+>   -H 'content-type: application/json' \
+>   -d '{"email":"owner@example.com","password":"a-long-passphrase"}'
+> # → {"accessToken":"<ORG_TOKEN>","tokenType":"Bearer","expiresIn":480,"activeOrgId":"<ORG_ID>"}
+> ```
+>
+> Carry on with the new `<ORG_TOKEN>`; nothing you have done so far is lost. Do **not**
+> re-run `dev bootstrap-tenant` to refresh a token: with the same `--email` it answers
+> `409` because that user already exists, and without one it registers a *different* owner
+> and creates a *different* organization — a token for an org this deployment is not bound
+> to, which is the one thing `RAYSPEC_PRODUCT_TENANT_ID` below must keep matching.
 
 ### Record a session and start the workflow
 

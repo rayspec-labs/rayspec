@@ -1429,6 +1429,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **The getting-started walkthrough's token-expiry recovery can now be carried out by a reader who
+  followed the page literally.** The page provisions the first tenant with a pinned owner address and
+  never passed `--password`, then promised — in a paragraph added this release — that an expired
+  8-minute token could be refreshed by running `dev bootstrap-tenant` again or by `login`. Neither
+  half worked for that reader. A repeat with the pinned address is a `409` and the command reports
+  `REGISTER_FAILED`; a repeat without one takes a per-run default address, so it succeeds but
+  registers a different owner and creates a *different* organization — a token scoped to an org the
+  deployment is not bound to, which is exactly what `RAYSPEC_PRODUCT_TENANT_ID` must keep matching.
+  And `login` needed a password the reader never chose: the walkthrough's own by-hand `register`
+  curl prints one, but that value belongs to the illustrative calls, not to the CLI invocation, and
+  the command's actual default appeared in no published document. The walkthrough now passes
+  `--password` explicitly, the recovery paragraph is a `login` call the reader can copy, and it says
+  plainly not to re-run `dev bootstrap-tenant` for a fresh token, with the reason. `dev
+  bootstrap-tenant` in the CLI reference states what each optional flag falls back to — the
+  timestamped default address, the default organization name, and the development default password —
+  instead of promising "sensible defaults".
+
 - **The declared-route throttle is described by its real reach, and the generated OpenAPI advertises
   it.** "Every declared route is rate limited" would overstate twice, and the reference does not say
   it: a stream `playback` route is authorized by a signed media token, mounts its own middleware and is
