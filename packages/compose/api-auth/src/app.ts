@@ -277,7 +277,7 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
       // Trusted-proxy client identity: the socket peer unless a configured trusted proxy set the
       // forwarding header — a direct caller cannot spoof its throttle identity via X-Forwarded-For.
       const ip = clientIpFromContext(c, deps.trustedProxies ?? []);
-      const { allowed, retryAfterMs } = deps.rateLimiter.check('oauth-token', ip);
+      const { allowed, retryAfterMs } = await deps.rateLimiter.checkAsync('oauth-token', ip);
       if (!allowed) throw new ApiError('RATE_LIMITED', 'Too many requests.', { retryAfterMs });
       // Only body-bearing methods need the size bound; GET/HEAD/OPTIONS carry no token body.
       const method = c.req.method.toUpperCase();

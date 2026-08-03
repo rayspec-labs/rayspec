@@ -57,7 +57,7 @@ export function registerTriggerRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): 
       // are NOT deduped), so an unthrottled caller could re-fire without bound. Throttle the fires of
       // one (tenant, trigger) via the SAME limiter, keyed by the server-derived tenant + the trigger
       // name — BEFORE the firer runs, so an over-quota call dispatches nothing.
-      const { allowed, retryAfterMs } = deps.rateLimiter.check(
+      const { allowed, retryAfterMs } = await deps.rateLimiter.checkAsync(
         'trigger-fire',
         `${tenantId}:${name}`,
       );

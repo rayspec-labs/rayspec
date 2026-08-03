@@ -1,9 +1,15 @@
 /**
  * Rate limiter: credential-stuffing + argon2id-DoS + the refresh-reuse
- * anti-DoS lock. In-process fixed-window counter NOW, behind a pluggable interface so a
- * Redis/Postgres store can replace it later without touching call sites (deployment topology is
- * not yet pinned — Open decisions).
+ * anti-DoS lock. In-process fixed-window counter by DEFAULT, behind a pluggable interface so a
+ * Redis/Postgres store can replace it without touching call sites.
+ *
+ * TWO store contracts live here, and the difference between them is the whole point. `RateLimitStore`
+ * is the SYNCHRONOUS in-process one: it is the default, it is what every construction in this
+ * repository gets, and nothing about it changes. `SharedRateLimitStore` is the OPTIONAL asynchronous
+ * one an embedder can supply for cluster-wide enforcement, reachable only through
+ * `RateLimiter.withSharedStore`. A limiter holds one or the other, never both at once.
  */
+import { randomUUID } from 'node:crypto';
 
 /** The store contract — swap in Redis/Postgres later. */
 export interface RateLimitStore {
@@ -149,16 +155,197 @@ export const DEFAULT_POLICIES: Record<string, RateLimitPolicy> = {
 export const REUSE_LOCK_MS = 5 * 60_000;
 
 /**
+ * One rate-limit answer: whether the call passes, and how long the caller should wait if it does not.
+ * `retryAfterMs` is meaningful only when `allowed` is false; an allowed call reports zero.
+ */
+export interface RateLimitDecision {
+  allowed: boolean;
+  retryAfterMs: number;
+}
+
+/**
+ * The OPTIONAL shared-store port — the seam a deployment crosses to turn every counter in this
+ * process into a cluster-wide one. It is not implemented here and nothing in the shipped server
+ * supplies it; a limiter with no shared store behaves exactly as it always has.
+ *
+ * ATOMIC CONSUME. `consume` both makes the decision and reports the retry hint, in ONE operation, and
+ * that is the contract's load-bearing clause. Splitting it — decide, then ask how long to wait — would
+ * let two instances each observe "one token left" before either had taken it, which is the very defect
+ * a shared store exists to remove, and would let the hint describe a window state that no longer holds
+ * by the time the caller reads it. An implementation that cannot make its decision and its advice one
+ * operation cannot satisfy this port.
+ *
+ * `policy` is the budget for THIS call, already resolved by the facade: either the one the caller
+ * carried or the limiter's registered entry for the bucket. It is `undefined` when the bucket has
+ * neither, and that case is NOT an error — it is the in-process store's fail-open behaviour, which an
+ * implementation must reproduce: allow, advise zero, and create no counter. The lock, however, is
+ * still checked first, exactly as `RateLimiter.check` checks it before looking a policy up, so a
+ * locked key in an unregistered bucket is still refused.
+ *
+ * A refusal caused by a LOCK must report `REUSE_LOCK_MS`, matching what the in-process path reports —
+ * not the true remaining lock time. The lock duration is a constant of this module; reporting the
+ * remainder instead would create a second observable on which two backends could disagree, and would
+ * let a caller poll a locked key to learn how much of its lock is left.
+ */
+export interface SharedRateLimitStore {
+  /** Count one hit against `key` under `policy` and return the decision AND its retry hint together. */
+  consume(key: string, policy: RateLimitPolicy | undefined): Promise<RateLimitDecision>;
+  /** Force a temporary lock for `key` until now+ms (the refresh-reuse anti-DoS lock). */
+  lock(key: string, ms: number): Promise<void>;
+  /** Reset a key — its window AND its lock, matching the in-process `reset`. */
+  reset(key: string): Promise<void>;
+  /** Clear ALL state (test isolation); not used on the hot path. */
+  clearAll(): Promise<void>;
+}
+
+/**
+ * The bucket name `RateLimiter.withSharedStore`'s boot probe counts against.
+ *
+ * A RESERVED name: DELIBERATELY ABSENT from `DEFAULT_POLICIES` and it must stay absent. Every question
+ * the probe asks carries its budget on the call, and `checkAsync` prefers a carried policy over the
+ * table, so a registration would not change what the probe measures today. What it would add is a
+ * second source of truth for the probe's budget, under the probe's own name — one that takes over
+ * silently the moment a probe question is added that carries none, answering from the table the very
+ * call whose carried budget is the thing being tested. Keeping the name unregistered means no probe
+ * call can ever be answered that way.
+ */
+export const SHARED_STORE_PROBE_BUCKET = 'shared-rate-limit-store-probe';
+
+/**
  * The limiter facade used by the HTTP layer. `check(bucket, id)` returns whether the call is
  * allowed; `lockSource`/`isLocked` back the refresh-reuse anti-DoS lock.
+ *
+ * TWO FACADES, ONE OBJECT. The synchronous methods are the original ones and their bodies are
+ * untouched. Four of them — `check`, `lockSource`, `reset` and `clearAll` — have an `…Async` twin
+ * beside them, and the HTTP layer calls THOSE. On a limiter with no shared store, which is every
+ * construction in this repository, each twin is a call to its synchronous partner and nothing else,
+ * so the served behaviour is unchanged down to the returned object's identity. On a limiter built by
+ * `withSharedStore` the twins go to that store instead and every synchronous method refuses to answer:
+ * falling back to the in-process store there would hand this instance a PRIVATE budget, which is
+ * precisely the defect a shared store exists to remove. `isLocked` gets no twin because it has no
+ * caller outside this module — a shared limiter's lock state is reported by the decision `checkAsync`
+ * returns, which is the operation that acts on it.
  */
 export class RateLimiter {
   private readonly store: RateLimitStore;
   private readonly policies: Record<string, RateLimitPolicy>;
+  /** The optional shared store. Set by `withSharedStore` only — the constructor never takes one. */
+  private shared: SharedRateLimitStore | undefined;
+  /** True once the shared store has answered the boot probe correctly. */
+  private probed = false;
 
   constructor(store: RateLimitStore = new InMemoryRateLimitStore(), policies = DEFAULT_POLICIES) {
     this.store = store;
     this.policies = policies;
+  }
+
+  /** The shared store this limiter decides through, or `undefined` for an in-process limiter. */
+  get sharedStore(): SharedRateLimitStore | undefined {
+    return this.shared;
+  }
+
+  /** True when a shared store is present AND answered the boot probe below. */
+  get sharedStoreProbed(): boolean {
+    return this.probed;
+  }
+
+  /**
+   * Build a limiter that decides through a SHARED store — the only door onto that port.
+   *
+   * The constructor deliberately does not take a shared store. A store this limiter cannot interrogate
+   * is worse than no store: the buckets a declared per-route budget uses are unregistered by design and
+   * carry their policy on the call, so a store that quietly ignores that argument would leave every
+   * budgeted route unlimited while the boot and the served OpenAPI document both claimed a limit. A
+   * factory that ALWAYS probes before handing the limiter back makes that state unreachable.
+   *
+   * The probe runs THROUGH THIS FACADE rather than against the store directly, so it proves the wiring
+   * as well as the store: a `checkAsync` that dropped its policy, or a `lockSourceAsync` that keyed
+   * differently from `checkAsync`, fails here too. It asks four questions, all of which have a
+   * behavioural consequence if answered wrongly: a budget of one allows once and then refuses; that
+   * refusal advises a non-zero wait (a zero would degrade every `429` in the deployment to the minimum
+   * whole second no matter how much of the window is left); a locked key is refused; and a locked
+   * refusal advises exactly `REUSE_LOCK_MS`, the same constant the in-process path reports.
+   *
+   * THE PROBE KEY IS PER BOOT. It has to be. With a fixed key the probe is self-racing on exactly the
+   * substrate it validates: a budget of one is a single token, so two instances booting against one
+   * shared store at the same moment consume each other's and a perfectly healthy instance aborts its
+   * boot. A fresh id per boot removes the interference without weakening any of the four questions.
+   * The key is reset before AND after, so a probe leaves neither a counter nor a lock behind — the
+   * trailing reset runs BEFORE the assertions, so a FAILED probe cleans up too.
+   */
+  static async withSharedStore(
+    store: SharedRateLimitStore,
+    policies?: Record<string, RateLimitPolicy>,
+  ): Promise<RateLimiter> {
+    const limiter = new RateLimiter(new InMemoryRateLimitStore(), policies ?? DEFAULT_POLICIES);
+    limiter.shared = store;
+    const bucket = SHARED_STORE_PROBE_BUCKET;
+    const id = `boot:${randomUUID()}`;
+    const budgetOfOne: RateLimitPolicy = { max: 1, windowMs: 60_000 };
+
+    await limiter.resetAsync(bucket, id);
+    const first = await limiter.checkAsync(bucket, id, budgetOfOne);
+    const second = await limiter.checkAsync(bucket, id, budgetOfOne);
+    await limiter.lockSourceAsync(bucket, id);
+    const locked = await limiter.checkAsync(bucket, id, { max: 1_000_000, windowMs: 1_000 });
+    await limiter.resetAsync(bucket, id);
+
+    if (!(first.allowed && !second.allowed)) {
+      throw new Error(
+        'RateLimiter.withSharedStore: the shared store does not honour an explicit per-call policy ' +
+          `(a budget of 1 allowed ${String(first.allowed)} then ${String(second.allowed)}, expected ` +
+          'true then false). Both halves matter: a store that refuses everything would satisfy the ' +
+          'second half alone and leave the probe vacuous in the case it exists to catch.',
+      );
+    }
+    if (!(second.retryAfterMs > 0)) {
+      throw new Error(
+        'RateLimiter.withSharedStore: the shared store refused with a zero retry hint ' +
+          `(${String(second.retryAfterMs)}ms). The decision and the hint must come from one operation, ` +
+          'and a zero hint degrades every 429 in the deployment to the minimum whole second no matter ' +
+          'how much of the window is actually left.',
+      );
+    }
+    if (locked.allowed) {
+      throw new Error(
+        'RateLimiter.withSharedStore: the shared store allowed a locked key. The refresh-reuse ' +
+          'anti-DoS lock short-circuits before any budget is consulted, so a carried budget must ' +
+          'never buy a caller past it.',
+      );
+    }
+    if (locked.retryAfterMs !== REUSE_LOCK_MS) {
+      throw new Error(
+        `RateLimiter.withSharedStore: the shared store advised ${String(locked.retryAfterMs)}ms on a ` +
+          `locked refusal, expected exactly ${String(REUSE_LOCK_MS)}ms. Reporting anything else — the ` +
+          'true remainder included — makes the two backends disagree on an observable and lets a ' +
+          'caller poll a locked key to learn how much of its lock is left.',
+      );
+    }
+    limiter.probed = true;
+    return limiter;
+  }
+
+  /**
+   * Refuse a SYNCHRONOUS call on a limiter whose store is shared, naming the twin to call instead.
+   *
+   * On every `new RateLimiter(...)` in this repository there is no shared store, so this returns
+   * immediately and the body below it is unchanged. It is only a shared limiter that reaches the
+   * throw, and the throw is the correct answer: the alternative — answering from the in-process store
+   * — would silently give that instance its own budget, which is the defect the shared store was
+   * introduced to remove.
+   */
+  private assertSyncUsable(
+    method: 'check' | 'lockSource' | 'isLocked' | 'reset' | 'clearAll',
+  ): void {
+    if (!this.shared) return;
+    // `isLocked` has no async twin of its own: a shared limiter reports its lock state through the
+    // decision `checkAsync` returns, which is the operation that acts on the lock.
+    const twin = method === 'isLocked' ? 'checkAsync' : `${method}Async`;
+    throw new Error(
+      `RateLimiter.${method}: this limiter decides through a SHARED store, whose answers are ` +
+        `asynchronous. Call ${twin} instead. Answering from the in-process store here would give ` +
+        'this instance a private budget, which is exactly what a shared store exists to prevent.',
+    );
   }
 
   /**
@@ -178,11 +365,8 @@ export class RateLimiter {
    * is a parameter here rather than a second method: a parallel method would have to re-implement both
    * this lock check and the `${bucket}:${id}` key construction, and the two would silently drift.
    */
-  check(
-    bucket: string,
-    id: string,
-    policy?: RateLimitPolicy,
-  ): { allowed: boolean; retryAfterMs: number } {
+  check(bucket: string, id: string, policy?: RateLimitPolicy): RateLimitDecision {
+    this.assertSyncUsable('check');
     const key = `${bucket}:${id}`;
     if (this.store.isLocked(key)) return { allowed: false, retryAfterMs: REUSE_LOCK_MS };
     const effective = policy ?? this.policies[bucket];
@@ -195,21 +379,67 @@ export class RateLimiter {
 
   /** Lock a source bucket (the refresh-reuse anti-DoS per-source lock). */
   lockSource(bucket: string, id: string, ms = REUSE_LOCK_MS): void {
+    this.assertSyncUsable('lockSource');
     this.store.lock(`${bucket}:${id}`, ms);
   }
 
   /** True if a source bucket is locked. */
   isLocked(bucket: string, id: string): boolean {
+    this.assertSyncUsable('isLocked');
     return this.store.isLocked(`${bucket}:${id}`);
   }
 
   /** Reset a bucket (e.g. on a successful authentication). */
   reset(bucket: string, id: string): void {
+    this.assertSyncUsable('reset');
     this.store.reset(`${bucket}:${id}`);
   }
 
   /** Clear ALL state (test isolation). No-op if the store does not support it. */
   clearAll(): void {
+    this.assertSyncUsable('clearAll');
     if (this.store instanceof InMemoryRateLimitStore) this.store.clearAll();
+  }
+
+  /**
+   * The asynchronous twin of `check` — what the HTTP layer calls.
+   *
+   * With no shared store this IS `check`: the call is forwarded through `this.check`, so a caller that
+   * has replaced the instance property (as the throttle tests do) still sees exactly one call with
+   * exactly the arguments it was given, and the decision object it returns is the one handed back.
+   * Dynamic dispatch is the point — resolving the method statically would push a second, invisible
+   * decision through the underlying store on every request.
+   *
+   * With a shared store the budget is resolved HERE, in the same order `check` resolves it, and passed
+   * on: a carried policy wins, otherwise the registered entry for the bucket, otherwise `undefined`.
+   * That `undefined` is forwarded rather than short-circuited, because `check` takes the LOCK before it
+   * looks a policy up — so a locked key in an unregistered bucket is still refused, and a facade that
+   * answered "allowed" first would diverge from the in-process path on exactly that invariant.
+   */
+  async checkAsync(
+    bucket: string,
+    id: string,
+    policy?: RateLimitPolicy,
+  ): Promise<RateLimitDecision> {
+    if (!this.shared) return this.check(bucket, id, policy);
+    return this.shared.consume(`${bucket}:${id}`, policy ?? this.policies[bucket]);
+  }
+
+  /** The asynchronous twin of `lockSource`. Without a shared store it IS `lockSource`. */
+  async lockSourceAsync(bucket: string, id: string, ms = REUSE_LOCK_MS): Promise<void> {
+    if (!this.shared) return this.lockSource(bucket, id, ms);
+    return this.shared.lock(`${bucket}:${id}`, ms);
+  }
+
+  /** The asynchronous twin of `reset`. Without a shared store it IS `reset`. */
+  async resetAsync(bucket: string, id: string): Promise<void> {
+    if (!this.shared) return this.reset(bucket, id);
+    return this.shared.reset(`${bucket}:${id}`);
+  }
+
+  /** The asynchronous twin of `clearAll`. Without a shared store it IS `clearAll`. */
+  async clearAllAsync(): Promise<void> {
+    if (!this.shared) return this.clearAll();
+    return this.shared.clearAll();
   }
 }

@@ -68,7 +68,7 @@ export function registerReprocessRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       // session's workflow without bound. Throttle the reprocesses of ONE (tenant, session) via the
       // SAME limiter the OAuth token endpoint uses, keyed by the server-derived tenant + the session —
       // BEFORE the reprocessor runs, so an over-quota call enqueues nothing.
-      const { allowed, retryAfterMs } = deps.rateLimiter.check(
+      const { allowed, retryAfterMs } = await deps.rateLimiter.checkAsync(
         'reprocess',
         `${tenantId}:${sessionId}`,
       );
