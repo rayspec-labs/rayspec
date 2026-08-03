@@ -21,6 +21,7 @@ import { describe, expect, it } from 'vitest';
 import type { RateLimitDecision, RateLimitPolicy, SharedRateLimitStore } from './rate-limit.js';
 import {
   DEFAULT_POLICIES,
+  InMemoryRateLimitStore,
   RateLimiter,
   REUSE_LOCK_MS,
   SHARED_STORE_PROBE_BUCKET,
@@ -313,5 +314,33 @@ describe('a shared limiter refuses every SYNCHRONOUS method rather than answerin
     // `isLocked` has no async twin of its own: a shared limiter reports its lock state through the
     // decision `checkAsync` returns, which is the operation that acts on it.
     expect(() => limiter.isLocked('login', 'a')).toThrow(/checkAsync/);
+  });
+});
+
+describe('the shared path forwards an UNDEFINED policy instead of short-circuiting fail-open', () => {
+  it('a LOCKED key in an UNREGISTERED bucket still refuses — the invariant the in-memory path pins', async () => {
+    // `check` does the lock short-circuit BEFORE it looks a policy up, so a locked key in a bucket
+    // nobody registered still refuses. `checkAsync` reproduces that only because it hands the store the
+    // `undefined` policy rather than returning `{allowed:true}` first. Three docblocks state that and
+    // nothing tested it: adding the fail-open short-circuit to the shared arm left the whole package
+    // green. This arm is what makes the divergence visible.
+    const store = correctStore();
+    // A custom table WITHOUT `refresh`, so the bucket is genuinely unregistered on this limiter.
+    const limiter = await RateLimiter.withSharedStore(store, {
+      custom: { max: 5, windowMs: 1000 },
+    });
+    await limiter.lockSourceAsync('refresh', '203.0.113.9');
+    const decision = await limiter.checkAsync('refresh', '203.0.113.9');
+    expect(decision.allowed).toBe(false);
+    expect(decision.retryAfterMs).toBe(REUSE_LOCK_MS);
+    // And the in-memory twin agrees, which is the point — the two backends must not diverge here.
+    const inMemory = new RateLimiter(new InMemoryRateLimitStore(), {
+      custom: { max: 5, windowMs: 1000 },
+    });
+    inMemory.lockSource('refresh', '203.0.113.9');
+    expect(inMemory.check('refresh', '203.0.113.9')).toEqual({
+      allowed: false,
+      retryAfterMs: REUSE_LOCK_MS,
+    });
   });
 });

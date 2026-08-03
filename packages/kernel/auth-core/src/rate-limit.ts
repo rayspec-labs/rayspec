@@ -7,7 +7,9 @@
  * is the SYNCHRONOUS in-process one: it is the default, it is what every construction in this
  * repository gets, and nothing about it changes. `SharedRateLimitStore` is the OPTIONAL asynchronous
  * one an embedder can supply for cluster-wide enforcement, reachable only through
- * `RateLimiter.withSharedStore`. A limiter holds one or the other, never both at once.
+ * `RateLimiter.withSharedStore`. A limiter DECIDES through one or the other, never both at once (a
+ * shared limiter still carries an in-process store; it is simply unreachable, because every
+ * synchronous method refuses on it).
  */
 import { randomUUID } from 'node:crypto';
 
@@ -189,7 +191,12 @@ export interface RateLimitDecision {
  */
 export interface SharedRateLimitStore {
   /** Count one hit against `key` under `policy` and return the decision AND its retry hint together. */
-  consume(key: string, policy: RateLimitPolicy | undefined): Promise<RateLimitDecision>;
+  /**
+   * `policy` is READONLY and must be treated as such: on a default-constructed limiter the object
+   * handed over IS the module-level `DEFAULT_POLICIES` entry by reference, so a store that mutated
+   * it would mutate the table every limiter in the process reads.
+   */
+  consume(key: string, policy: Readonly<RateLimitPolicy> | undefined): Promise<RateLimitDecision>;
   /** Force a temporary lock for `key` until now+ms (the refresh-reuse anti-DoS lock). */
   lock(key: string, ms: number): Promise<void>;
   /** Reset a key — its window AND its lock, matching the in-process `reset`. */
@@ -215,7 +222,8 @@ export const SHARED_STORE_PROBE_BUCKET = 'shared-rate-limit-store-probe';
  * The limiter facade used by the HTTP layer. `check(bucket, id)` returns whether the call is
  * allowed; `lockSource`/`isLocked` back the refresh-reuse anti-DoS lock.
  *
- * TWO FACADES, ONE OBJECT. The synchronous methods are the original ones and their bodies are
+ * TWO FACADES, ONE OBJECT. Each synchronous method now opens with the shared-store guard; below that
+ * line it is the original method and its body is
  * untouched. Four of them — `check`, `lockSource`, `reset` and `clearAll` — have an `…Async` twin
  * beside them, and the HTTP layer calls THOSE. On a limiter with no shared store, which is every
  * construction in this repository, each twin is a call to its synchronous partner and nothing else,

@@ -23,7 +23,9 @@
  * what makes them one operation rather than two. `now()` is fixed for the whole statement, so every
  * arm and the returned hint read one clock.
  *
- * The hint column is cast `::integer` and never `::bigint`: the driver returns `bigint` as a JavaScript
+ * The hint column is cast `::integer` rather than `::bigint` as belt and braces — the `Number(...)`
+ * coercion at the store boundary already carries the contract on its own (measured: switching the
+ * cast to `::bigint` keeps every arm green). It matters because the driver returns `bigint` as a JavaScript
  * STRING and `integer` as a NUMBER, and the repository asserts that `error.details.retryAfterMs` is a
  * number. It is clamped to `LEAST(window, GREATEST(1, …))` so a refusal never advises zero (which would
  * degrade every `429` to the minimum whole second) and never advises longer than the window it is

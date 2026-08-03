@@ -49,8 +49,8 @@
  * see the chain rationale in `register-declared-routes.ts`.
  */
 
-import type { RateLimiter, RateLimitPolicy } from '@rayspec/auth-core';
-import { errorEnvelope } from '@rayspec/auth-core';
+import type { RateLimitPolicy } from '@rayspec/auth-core';
+import { errorEnvelope, RateLimiter } from '@rayspec/auth-core';
 import type { ApiRouteRateLimit } from '@rayspec/spec';
 import { MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS } from '@rayspec/spec';
 import type { Context, MiddlewareHandler } from 'hono';
@@ -61,7 +61,7 @@ import { principalActor } from './principal-actor.js';
 /**
  * The two bucket names a declared route throttles through. Each MUST discharge the fail-open trap in
  * the module header in ONE of its two safe ways: either the name is REGISTERED in auth-core's
- * `DEFAULT_POLICIES` (what the two default tiers below do), or the budget is CARRIED on the `check`
+ * `DEFAULT_POLICIES` (what the two default tiers below do), or the budget is CARRIED on the decision
  * call as an explicit policy (what a per-route budget does, which is why the
  * `ROUTE_BUDGET_BUCKET_PREFIX` names are deliberately absent from that table and must stay absent).
  * A name that does neither silently permits everything. Overriding these selects a differently-tuned
@@ -80,7 +80,7 @@ export const DEFAULT_ROUTE_RATE_TIERS: RouteRateTiers = {
   principal: 'declared-route-principal',
 };
 
-/** The `(bucket, id)` pair a request throttles against — what `RateLimiter.check` consumes. */
+/** The `(bucket, id)` pair a request throttles against — what the limiter's decision call consumes. */
 export interface RouteRateTarget {
   bucket: string;
   id: string;
@@ -282,6 +282,25 @@ export function assertLimiterHonoursExplicitPolicy(limiter: RateLimiter): void {
       );
     }
     return;
+  }
+  // The probe below drives `check`, but the middleware decides through `checkAsync`. On a limiter with
+  // no shared store those are the same decision — `checkAsync` delegates to `check` — and that
+  // delegation is the entire reason driving the synchronous method proves anything about the
+  // asynchronous one. A limiter that REPLACES `checkAsync` breaks that link, and the probe would then
+  // be interrogating a method the request path no longer calls: measured, a subclass overriding only
+  // `checkAsync` passes this probe and then allows 5 of 5 requests against a budget of 1. Nothing can
+  // be driven synchronously to close that, so refuse it — the supported way to supply a different
+  // decision is `RateLimiter.withSharedStore`, which is probed at construction.
+  if (limiter.checkAsync !== RateLimiter.prototype.checkAsync) {
+    throw new Error(
+      'assertLimiterHonoursExplicitPolicy: the injected rate limiter replaces checkAsync, which is ' +
+        'the method the declared-route middleware calls, so driving the synchronous check here would ' +
+        'prove nothing about the decision a request actually receives. A declared per-route rateLimit ' +
+        'carries its budget on the call instead of registering a bucket, so a decision path that ' +
+        'ignores it would leave every budgeted route silently unlimited. Supply alternative behaviour ' +
+        'through RateLimiter.withSharedStore, which is probed at construction, rather than by ' +
+        'overriding checkAsync. Fail-closed at boot rather than ship an unenforced limit.',
+    );
   }
   const probePolicy: RateLimitPolicy = { max: 1, windowMs: 60_000 };
   limiter.reset(PROBE_BUCKET, PROBE_ID);
