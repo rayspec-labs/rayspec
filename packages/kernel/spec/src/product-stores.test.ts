@@ -578,4 +578,47 @@ describe('the store-step {const:} literals — graph-neutrality over-rejection (
     expectConstRejected('"index.js rebuild"', 'no_code_in_yaml');
     expectConstRejected('"SELECT name FROM users"', 'no_code_in_yaml');
   });
+
+  it('only the PROVIDER-name pattern is hyphen-sensitive: the hyphenated spellings of the prompt/production phrases parse CLEAN', () => {
+    // The provider pattern is `\b`-delimited on both sides, and `-` is a word boundary, so
+    // `openai-review-pending` trips it (pinned above). The prompt- and production-claim patterns
+    // instead demand `\s+` between their words, so their hyphenated spellings match nothing. An
+    // author-facing note that says "the separated spelling cannot pass" is therefore true of the
+    // provider name and of nothing else — this arm is what keeps that distinction from rotting.
+    for (const literal of ['llm-call', 'agent-call', 'prompt-execution', 'production-ready']) {
+      const steps = parseOk(withStatus(literal)).workflows[0]?.steps ?? [];
+      expect(steps[1]?.values?.status, literal).toEqual({ const: literal });
+    }
+  });
+
+  it('word-boundary anchoring is NOT universal: the joined provider-blob tokens match inside an underscored identifier', () => {
+    // `provider_native` and `native_payload` are alternatives of the provider pattern that carry no
+    // `\b` of their own, so they match mid-token. A fully underscored constant is therefore not
+    // automatically safe, which is the caveat the author-facing wording has to keep.
+    expectConstRejected('my_provider_native_flag', 'provider_native_leak');
+    expectConstRejected('native_payload_thing', 'provider_native_leak');
+  });
+
+  it('the FILTER side is scanned too, and reports at the filter const node — not the values one', () => {
+    // The guard reads `store_read` filters exactly as it reads `store_write` values; only the path
+    // differs. The author-facing note quotes a path shape, so both shapes are pinned.
+    const errors = parseErrors(
+      FIELDLOG_YAML.replace(
+        'item_code: { const: mic_kit }',
+        'item_code: { const: sent to deepgram }',
+      ),
+    );
+    const hit = errors.find((e) => e.code === 'provider_native_leak');
+    expect(hit, JSON.stringify(errors, null, 2)).toBeTruthy();
+    expect(hit?.path).toBe('workflows[0].steps[0].filter.item_code.const');
+  });
+
+  it('the code-like arrow rule is delimited on both sides: `x=>y` is refused, a SPACED arrow is not', () => {
+    // The code-like alternation is wrapped in `\b(...)\b`, so a space-separated arrow never matches.
+    // The guardrail bullet in the authoring skill used to state this as "a value containing `=>`",
+    // which over-promises; this arm holds the real, narrower rule.
+    expectConstRejected('x=>y', 'no_code_in_yaml');
+    const steps = parseOk(withStatus('"customer => vendor"')).workflows[0]?.steps ?? [];
+    expect(steps[1]?.values?.status).toEqual({ const: 'customer => vendor' });
+  });
 });

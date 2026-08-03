@@ -1669,7 +1669,7 @@ capabilities: []              # Tier-B capability REFERENCES (declaration, not i
 artifacts: []                # product-owned artifact KINDS + their response contract — see below.
 stores: []                   # declared TYPED product stores — the store_read/write target — see below.
 contracts: {}                # named dict of reusable JSON-Schema-like payloads (CLOSED vocab — see below).
-agents: []                   # declarative EXTRACTION contracts (NOT backend-profile backend/model/instructions agents).
+extractors: []               # declarative EXTRACTION contracts (NOT backend-profile backend/model/instructions agents).
 workflows: []                # COMPOSITION over Tier A/B primitives (steps typed from a closed set).
 grounding:                   # evidence-validation POLICY (mechanics are Tier B; only policy here).
 views: []                    # declarative READ/command contracts (GET/POST reads — NOT route handlers).
@@ -1688,22 +1688,29 @@ offending key/value is a `no_code_in_yaml` / `provider_native_leak` / `invalid_c
   `javascript`, `module`, `module_path`, `resolver`, `route_handler`, `shell`, `sql`, `typescript`.
 - **Banned provider-native WIRE-BLOB keys EVERYWHERE:** `api_key`, `api_key_env`, `body`,
   `deepgram_request`, `headers`, `native_payload`, `provider_payload`, `raw_provider_payload`.
-- **Banned INSIDE the executable graph (`workflows`/`agents`):** provider/model POLICY keys
+- **Banned INSIDE the executable graph (`workflows`/`extractors`):** provider/model POLICY keys
   (`backend`, `model`, `provider`, `default_provider`, `default_model`, `provider_policy`,
   `credential_env`, `adapter_visibility`, …), PROMPT keys (`prompt`, `system_prompt`, `user_prompt`,
   `prompt_template`), and provider NAMES / code-like / prompt-execution string VALUES (a value naming
-  `deepgram`/`openai`/`anthropic`, or containing `=>`/`import`/`SELECT … FROM`/a `.ts` path, is code).
+  `deepgram`/`openai`/`anthropic`/`gemini`/`pi`, or carrying `import`/`SELECT … FROM`/a `.ts` path, or
+  a token-adjacent `=>` such as `x=>y`, is code — the code-like alternation is delimited on both
+  sides, so a space-separated `a => b` is not matched).
   Provider/model POLICY is legal ONLY on `capabilities[].provider_policy` and in
   `deployment_overrides` (SELECTION by policy — never a request/response blob).
 - **The graph string scans also read `{ const: … }` BUSINESS literals.** A store-step `filter`/`values`
   const lives inside `workflows`, so a status text is scanned like any other graph string and is
-  rejected at the const node itself (`workflows[N].steps[M].values.<col>.const`). The value patterns
+  rejected at the const node itself — `workflows[N].steps[M].values.<col>.const` for a `store_write`,
+  `workflows[N].steps[M].filter.<col>.const` for a `store_read`. The provider/prompt/production tokens
   are **word-boundary anchored** and `_` is a word character, so an unseparated token can pass where
-  its spaced/hyphenated spelling cannot: `openai_review_pending` and `llm_call` are ACCEPTED, while
-  `openai review pending`, `openai-review-pending` and `awaiting llm call` are rejected. That is not a
-  general escape — where a pattern already spells the joined form it still matches (`production_ready`),
-  as does a code-like literal (`index.js rebuild`). Rephrase the constant, or carry the value as DATA
-  through `{ event: … }` / `{ artifact: … }` so the string never enters the document.
+  its SPACED spelling cannot: `openai_review_pending` and `llm_call` are ACCEPTED, while
+  `openai review pending` and `awaiting llm call` are rejected. A hyphen behaves like a space for the
+  provider NAME only (`openai-review-pending` is rejected); the prompt/production phrases need real
+  whitespace, so `llm-call` and `production-ready` are ACCEPTED. None of that is a general escape —
+  where a pattern already spells the joined form it still matches (`production_ready`), the provider
+  pattern's joined `provider_native`/`native_payload` alternatives match even inside an underscored
+  identifier, and a code-like literal (`index.js rebuild`) is refused outright. Rephrase the constant,
+  or carry the value as DATA through `{ event: … }` — or, on a `store_write` value only,
+  `{ artifact: … }` — so the string never enters the document.
 
 ### `capabilities[]` — Tier-B references (declaration, not implementation)
 
@@ -1784,9 +1791,11 @@ deployment (the workflow only reads it); the workflow's write target is UPSERTed
 - **FORBIDDEN:** functions, transforms, computed expressions, provider-native shapes (it declares a
   data SHAPE, never behavior).
 
-### `agents[]` — declarative EXTRACTION contracts (NOT backend-profile agents), and the out-of-YAML extraction homing
+### `extractors[]` — declarative EXTRACTION contracts (NOT backend-profile agents), and the out-of-YAML extraction homing
 
-A product-profile `agent` is a declarative **extraction CONTRACT**, not a backend/model/instructions wrapper:
+A product-profile `extractor` is a declarative **extraction CONTRACT**, not a backend/model/instructions
+wrapper. The section key is `extractors:` — the product profile is `.strict()`, so an `agents:` key
+written here is rejected as an unknown field (that name belongs to the backend profile):
 ```yaml
 - id: <string>
   purpose: <string>

@@ -1344,8 +1344,9 @@ stores:
   name, and a view's `source: { kind: store, ref: … }`, which names the transcript
   sink store when it resolves to neither a declared store nor a collection.
 - `description` — optional.
-- `columns` — at least one, using the same `{name, type, nullable, unique}` shape
-  and the same closed type vocabulary as the backend profile.
+- `columns` — at least one, using the same `{name, type, nullable, unique, enum}`
+  shape and the same closed type vocabulary as the backend profile. `enum` is
+  optional and, as in the backend profile, valid only on a `text` column.
 - `key` — required, **exactly one** column: the conflict/idempotency identity.
   Every write to the store is an upsert on this key, because the durable engine's
   at-least-once execution may re-run a step; the key column must be a declared,
@@ -1552,14 +1553,20 @@ workflows:
     the neutrality scan that keeps provider names, prompt/production-execution
     claims and code-like text out of the executable graph reads it like any other
     graph string, and a business constant carrying one of those tokens is rejected
-    at the const node itself (e.g. `workflows[0].steps[1].values.status.const`).
-    The value patterns are word-boundary anchored and `_` counts as a word
-    character, so an unseparated token can pass where its separated spelling
-    cannot: `openai_review_pending` and `llm_call` are accepted, while
-    `openai review pending`, `openai-review-pending` and `awaiting llm call` are
-    refused. Anchoring is not a general escape, though — where a pattern already
-    spells the joined form it still matches, so `production_ready` is refused,
-    and so is a code-like literal such as `index.js rebuild`. The scan is
+    at the const node itself (`workflows[0].steps[1].values.status.const` for a
+    `store_write` value, `workflows[0].steps[0].filter.item_code.const` for a
+    `store_read` filter). The provider/prompt/production tokens are word-boundary
+    anchored and `_` counts as a word character, so an unseparated token can pass
+    where its spaced spelling cannot: `openai_review_pending` and `llm_call` are
+    accepted, while `openai review pending` and `awaiting llm call` are refused.
+    A hyphen separates for the provider NAME only — `openai-review-pending` is
+    refused, while the prompt and production phrases need real whitespace, so
+    `llm-call` and `production-ready` are accepted. Anchoring is not a general
+    escape, though — where a pattern already spells the joined form it still
+    matches, so `production_ready` is refused; the provider pattern's joined
+    `provider_native`/`native_payload` alternatives carry no word boundary and
+    match even inside an underscored identifier; and a code-like literal such as
+    `index.js rebuild` is refused outright. The scan is
     section-aware rather than airtight — the same text is legal as a store column
     `enum` member, which the graph scan does not reach (only the document-wide
     code-like check does, so a `.js` path or an SQL fragment is still refused
