@@ -1,7 +1,7 @@
 /**
  * Agent-run bounds resolved from the environment — the parsing contract.
  *
- * Each of the three variables is OPTIONAL and OFF by default: an absent, non-numeric, or
+ * Each of the four variables is OPTIONAL and OFF by default: an absent, non-numeric, or
  * out-of-range value resolves to `undefined`, which every consumer treats as "no bound" — the
  * behaviour that applied before these variables existed.
  */
@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   resolveAgentMaxAttempts,
   resolveAgentRequestTimeoutMs,
+  resolveRunCancelPollMs,
   resolveRunMaxMs,
 } from './agent-bounds.js';
 
@@ -139,6 +140,42 @@ describe('resolveRunMaxMs (RAYSPEC_AGENT_RUN_MAX_MS)', () => {
     } finally {
       if (saved === undefined) delete process.env.RAYSPEC_AGENT_RUN_MAX_MS;
       else process.env.RAYSPEC_AGENT_RUN_MAX_MS = saved;
+    }
+  });
+});
+
+describe('resolveRunCancelPollMs (RAYSPEC_RUN_CANCEL_POLL_MS)', () => {
+  it('is undefined when the variable is unset', () => {
+    expect(resolveRunCancelPollMs(env({}))).toBeUndefined();
+  });
+
+  it('reads a positive integer', () => {
+    expect(resolveRunCancelPollMs(env({ RAYSPEC_RUN_CANCEL_POLL_MS: '2000' }))).toBe(2_000);
+  });
+
+  it('accepts a very short interval — there is no floor', () => {
+    // Deliberate: a floor would silently disable the feature for an operator who asked for a shorter
+    // interval than the floor, which is the opposite of what they configured. The parser's contract is
+    // the whole rule, exactly as it is for the other three variables.
+    expect(resolveRunCancelPollMs(env({ RAYSPEC_RUN_CANCEL_POLL_MS: '1' }))).toBe(1);
+  });
+
+  it('is undefined for an empty, non-numeric, zero, sub-1, or negative value', () => {
+    for (const v of ['', '   ', 'abc', 'NaN', 'Infinity', '0', '0.5', '0.9', '0.001', '-1']) {
+      expect(resolveRunCancelPollMs(env({ RAYSPEC_RUN_CANCEL_POLL_MS: v }))).toBeUndefined();
+    }
+  });
+
+  it('defaults to process.env when no environment is passed', () => {
+    const saved = process.env.RAYSPEC_RUN_CANCEL_POLL_MS;
+    try {
+      delete process.env.RAYSPEC_RUN_CANCEL_POLL_MS;
+      expect(resolveRunCancelPollMs()).toBeUndefined();
+      process.env.RAYSPEC_RUN_CANCEL_POLL_MS = '1234';
+      expect(resolveRunCancelPollMs()).toBe(1_234);
+    } finally {
+      if (saved === undefined) delete process.env.RAYSPEC_RUN_CANCEL_POLL_MS;
+      else process.env.RAYSPEC_RUN_CANCEL_POLL_MS = saved;
     }
   });
 });

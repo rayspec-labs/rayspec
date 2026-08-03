@@ -11,11 +11,16 @@
  *     The mechanism mirrors the taint marker exactly (same table, same atomic primitive, same
  *     tenant-scoped-by-construction read) — no new table, no migration.
  *  2. A PROCESS-LOCAL SIGNAL — the AbortSignal run-core hands the adapter on `ctx.signal`. This is what
- *     frees the WORK rather than only the caller waiting on it. It is process-local, and honestly so:
- *     a run executing on ANOTHER worker process does not receive it. For that run the marker (1) and
- *     the engine's own cancellation are what apply, and the engine's cancellation is COOPERATIVE — the
- *     whole run executes inside one engine step, so cancelling it flips the workflow's status but does
- *     not by itself interrupt an in-flight model call.
+ *     frees the WORK rather than only the caller waiting on it. Its DELIVERY is process-local, and
+ *     honestly so: an abort raised here never crosses to another worker process, and a run executing
+ *     there does not receive it. What DOES cross is the marker (1) — and with
+ *     `RAYSPEC_RUN_CANCEL_POLL_MS` configured an executing run re-reads that marker on an interval and
+ *     aborts its OWN controller, so the identical signal is delivered inside the run's own process
+ *     (see {@link armRunCancellation}). With the variable unset — the default — nothing re-reads the
+ *     marker while the run waits, so for a run on another worker only the marker and the engine's own
+ *     cancellation apply, and the engine's cancellation is COOPERATIVE — the whole run executes inside
+ *     one engine step, so cancelling it flips the workflow's status but does not by itself interrupt
+ *     an in-flight model call.
  *  3. A JOURNALED TERMINAL OUTCOME — a cancelled run ends like any other run ends: one journal step
  *     carrying the neutral `cancelled` class plus a terminal run header, so `GET /v1/runs/{id}` reports
  *     the outcome instead of a run that simply stopped moving. The CANCEL surface writes it whenever it
@@ -92,7 +97,8 @@ const CANCELLED_AUTH_MODE: AuthMode = 'unauthenticated';
 export function runCancelledMessage(runId: string): string {
   return (
     `run ${runId} was cancelled. Cancelling ends the run and stops the platform waiting for it; a ` +
-    'model call already in flight on another worker process runs on until it settles by itself.'
+    'model call already in flight on another worker process runs on until that process observes the ' +
+    'cancellation itself.'
   );
 }
 
@@ -168,8 +174,11 @@ export async function isRunCancelled(tdb: TenantDb, runId: string): Promise<bool
  *
  * PROCESS-LOCAL, stated exactly: a deployment that runs the HTTP surface and the durable worker in one
  * process (the shipped shape) reaches every executing run through it. A worker in a SEPARATE process
- * does not appear here — for those runs the persisted marker plus the engine's own cooperative
- * cancellation are what apply, and neither interrupts a model call already in flight.
+ * does not appear here, so {@link signalRunCancelled} answers false for its runs however those runs
+ * end up being cancelled. What reaches them is the persisted marker: with `RAYSPEC_RUN_CANCEL_POLL_MS`
+ * configured, the run's own process re-reads it and aborts the controller IT holds — an entry in ITS
+ * copy of this map, never one here. With the variable unset the marker plus the engine's own
+ * cooperative cancellation are all that apply, and neither interrupts a model call already in flight.
  */
 const liveRuns = new Map<string, AbortController>();
 
@@ -182,14 +191,117 @@ export interface RunCancellation {
 }
 
 /**
+ * What a run needs in order to WATCH its own cancellation marker while it executes: a handle to read
+ * the marker through, and how long to wait between reads.
+ *
+ * THE HANDLE RULE, and it is why this is a parameter rather than something the watch mints itself:
+ * `tdb` MUST be an AUTONOMOUS-COMMIT handle, NEVER the run's own transaction. That is not a new
+ * obligation — it is the contract `opts.taintDb ?? tdb` already states in run-core: a call site that
+ * runs `runAgent` inside a transaction MUST supply `taintDb`, and one that omits it is thereby
+ * asserting that its `tdb` commits immediately. The taint marker already bets the whole quarantine
+ * guarantee on that contract; the watch inherits it and adds no new obligation to any call site.
+ *
+ * WHY IT IS LOAD-BEARING HERE. A read that FAILS inside the run's own transaction aborts that
+ * transaction SERVER-SIDE: the run's next valid statement comes back 25P02 and the transaction
+ * rejects, so the run's own row never lands. A JavaScript `catch` cannot un-abort a Postgres
+ * transaction, so swallowing the error would not save the run — on the durable path the poisoned run
+ * rolls back, the executor finds no cancellation marker and rethrows, and a transient blip has
+ * converted a healthy run into a failed one. The same failing read on an autonomous handle leaves the
+ * run's transaction committing normally. Two further reasons point the same way: the ABANDONMENT
+ * contract says nothing bound to a given-up-on run's handle may issue a statement, and a timer is the
+ * one seam that can fire with no call chain to consult that flag; and a statement issued on a spent
+ * handle does not throw — it runs silently on a connection that has already gone back to the pool.
+ */
+export interface RunCancelPoll {
+  /** The AUTONOMOUS-COMMIT handle the marker is read through — never the run's own transaction. */
+  readonly tdb: TenantDb;
+  /** Milliseconds between the END of one read and the start of the next. */
+  readonly intervalMs: number;
+}
+
+/**
+ * WATCH the persisted marker for a run that is ALREADY EXECUTING and abort `controller` the moment it
+ * appears. Returns the stop function; calling it more than once, or after the watch has already
+ * stopped itself, does nothing.
+ *
+ * CHAINED `setTimeout`, never `setInterval`: at most ONE read per run is in flight, structurally, and
+ * the interval is measured from the END of the previous read — so a database that has slowed down
+ * receives FEWER reads rather than a growing backlog of overlapping ones. The first tick is DELAYED
+ * rather than immediate: on the durable path the executor read this very marker moments earlier,
+ * before it dispatched the run.
+ *
+ * A FAILED READ IS SWALLOWED and treated as no answer in either direction — deliberately the OPPOSITE
+ * of the executor's bounded-retry reader, which rethrows so that a run is never DISPATCHED off an
+ * unresolved read. Here the run is already executing: ending it on an unreadable marker would destroy
+ * work in progress, and for a run that has already fired a non-idempotent tool it would quarantine
+ * that run for nothing. The next tick asks again.
+ */
+function startCancelPoll(
+  runId: string,
+  controller: AbortController,
+  poll: RunCancelPoll,
+): () => void {
+  let watching = true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  function schedule(): void {
+    timer = setTimeout(() => void tick(), poll.intervalMs);
+    // The optional-call form `withRunBound` uses: an unref'd timer can never on its own hold the
+    // process open, and a runtime whose timer handle lacks `unref` is simply left alone.
+    timer.unref?.();
+  }
+
+  async function tick(): Promise<void> {
+    let cancelled = false;
+    try {
+      cancelled = await isRunCancelled(poll.tdb, runId);
+    } catch {
+      // No answer in either direction — see above. Ask again on the next tick.
+    }
+    // Re-checked AFTER the await: the watch may have been stopped while this read was in flight, and
+    // a late answer must not act on a run that has already ended.
+    if (!watching) return;
+    if (cancelled) {
+      // Abort THIS arming's own controller. Never `signalRunCancelled(runId)`, whose body past the
+      // map lookup is exactly `controller.abort()` — going through the map would add the hazard
+      // `dispose` below already guards against: two executions of one runId can overlap and the later
+      // one owns the entry, so a stale watch would abort the NEWER execution and leave its own
+      // run going.
+      controller.abort();
+      return;
+    }
+    schedule();
+  }
+
+  schedule();
+  return () => {
+    watching = false;
+    if (timer !== undefined) clearTimeout(timer);
+  };
+}
+
+/**
  * ARM a run's cancellation: mint the run's AbortController, LINK a caller-supplied signal into it (so
  * `RunOptions.signal` and the cancel surface are the same one mechanism, not two), and register it
  * under `runId` so {@link signalRunCancelled} can reach it.
  *
  * An `external` signal that is ALREADY aborted aborts the run's controller immediately, so a run started
  * with a spent signal never calls the backend at all.
+ *
+ * `poll`, when supplied, additionally WATCHES the persisted marker while the run executes, so a
+ * cancellation issued in ANOTHER process reaches this run — see {@link startCancelPoll} for what the
+ * watch does and {@link RunCancelPoll} for the handle it must read through. It is absent unless
+ * `RAYSPEC_RUN_CANCEL_POLL_MS` is set, and it is not started for a run whose controller has ALREADY
+ * aborted: such a run never calls the backend, so watching it would be pure waste. The watch is linked
+ * to the controller's own `abort`, so ANY abort stops it — its own, the cancel surface's, or a
+ * caller's signal — and stops it before run-core drains the run's event pipeline; `dispose` stops it
+ * as well, for a run that simply ended.
  */
-export function armRunCancellation(runId: string, external?: AbortSignal): RunCancellation {
+export function armRunCancellation(
+  runId: string,
+  external?: AbortSignal,
+  poll?: RunCancelPoll,
+): RunCancellation {
   const controller = new AbortController();
   let onExternal: (() => void) | undefined;
   if (external) {
@@ -200,9 +312,15 @@ export function armRunCancellation(runId: string, external?: AbortSignal): RunCa
     }
   }
   liveRuns.set(runId, controller);
+  const stopPoll =
+    poll !== undefined && !controller.signal.aborted
+      ? startCancelPoll(runId, controller, poll)
+      : undefined;
+  if (stopPoll) controller.signal.addEventListener('abort', stopPoll, { once: true });
   return {
     signal: controller.signal,
     dispose() {
+      stopPoll?.();
       // Only remove OUR registration: two executions of the same runId can overlap (a recovery
       // re-dispatch racing an in-flight run), and the later one owns the entry.
       if (liveRuns.get(runId) === controller) liveRuns.delete(runId);

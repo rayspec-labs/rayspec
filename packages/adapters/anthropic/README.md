@@ -47,10 +47,13 @@ surrounding platform, or of cancellation in general, rather than of this SDK.
 - **Only the child itself is signalled.** Every rung of the ladder is sent to the pid the
   SDK spawned, never to a process group — the SDK spawns without `detached`. Any process
   that child starts in turn is therefore not reached by cancelling the run.
-- **A run executing in a separate worker process receives no signal at all.** The signal
-  is an in-process one, so it only reaches a run executing in the process that holds it.
-  This limit is shared by all four backends and is tracked as
-  [#210](https://github.com/rayspec-labs/rayspec/issues/210).
+- **A run executing in a separate worker process receives no signal by default.** The
+  signal is delivered in-process, so it only reaches a run executing in the process that
+  holds it. Setting `RAYSPEC_RUN_CANCEL_POLL_MS` makes that run's own process re-read its
+  cancellation record on the configured interval and raise the abort there, so this
+  adapter is handed the signal after all and every rung above applies as usual; leave it
+  unset and the run keeps going until it returns on its own. Both behaviours are shared by
+  all four backends.
 - **A tool call already in flight is not interrupted.** The run-level signal is not
   composed into the per-tool abort, so a handler that had already started runs to its own
   tool timeout. Its result is discarded, and a non-idempotent tool's taint marker keeps

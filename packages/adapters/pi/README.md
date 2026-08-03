@@ -47,10 +47,12 @@ abandoned. What that leaves, honestly:
   in its teardown — so a compaction request that was in flight when the cancel arrived runs until
   the teardown reaches it. (The adapter never performs a branch or fork operation, so it never
   starts a branch summary itself.)
-- **A run executing in a separate worker process receives no in-process signal at all.** The run
-  is recorded cancelled and never dispatched again, but the work in that process stops when it
-  stops. This is shared by all four backends and is not adapter-specific — see
-  [#210](https://github.com/rayspec-labs/rayspec/issues/210).
+- **A run executing in a separate worker process receives no in-process signal by default.** The
+  run is recorded cancelled and never dispatched again, but the work in that process stops when it
+  stops. Setting `RAYSPEC_RUN_CANCEL_POLL_MS` makes that process re-read the cancellation record on
+  the configured interval and raise the abort itself — the same signal this adapter wires to its
+  session, so the stop applies there as it does in-process. Both behaviours are shared by all four
+  backends and are not adapter-specific.
 - **A host tool already in flight is not interrupted, and the adapter's own `run()` stays pending
   until it returns.** The run-level signal is not composed into the per-tool abort; a handler that
   had already started runs to its own tool timeout. Its result is discarded, and a non-idempotent

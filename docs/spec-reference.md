@@ -813,11 +813,21 @@ different runs:
   adapter passes to its SDK call, child process, or session — this is what frees the
   work rather than only the caller waiting on it. The signal goes out before anything
   else is written, so it is never delayed by the run it is ending;
-- a run **executing on another worker process** gets no signal. The durable engine's own
-  cancellation is cooperative and the whole run occupies one engine step, so the model
-  call in flight is not interrupted: the run stops when it stops. A run that reaches its
-  own end writes the cancellation as its outcome rather than its own, and it is never
-  dispatched again.
+- a run **executing on another worker process** gets no signal by default. The durable
+  engine's own cancellation is cooperative and the whole run occupies one engine step, so
+  the model call in flight is not interrupted: the run stops when it stops. A run that
+  reaches its own end writes the cancellation as its outcome rather than its own, and it
+  is never dispatched again. Setting **`RAYSPEC_RUN_CANCEL_POLL_MS`** changes this case:
+  a run that is executing re-reads its own cancellation record on that interval and ends
+  itself where it runs, with the same terminal state and the same journal as a run
+  cancelled in this process. Two honest consequences. What the run leaves in its journal
+  follows the **invocation shape**, not which process cancelled: the durable worker runs
+  the agent inside a transaction, so that transaction **rolls back**, the steps journaled
+  in it do not survive, and the run ends with the single `cancelled` step; a synchronous
+  run has no transaction, so the steps it already committed stay beside the `cancelled`
+  one. Without the variable it runs to completion and keeps them either way. And the
+  response field `signalled` still means "this process's registry reached it", so it stays
+  `false` for a cross-process cancellation even when that cancellation does land.
 
 The cancel request itself never waits for the run it ends. An executing run holds its
 own header row for as long as it runs, so the terminal record is written by whichever

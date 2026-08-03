@@ -44,6 +44,7 @@ import {
   RunAbandonedError,
   type RunAbandonReason,
   RunBoundTimeoutError,
+  resolveRunCancelPollMs,
   resolveRunMaxMs,
   withRunBound,
 } from './agent-bounds.js';
@@ -627,7 +628,22 @@ export async function runAgent(
   // by naming it. A caller-supplied `opts.signal` is LINKED into the same controller, so the two ways
   // in (by id, and by a signal the caller already holds) are one mechanism. Released the moment the
   // wait for the backend ends, below — a run that has finished is no longer cancellable.
-  const cancellation = armRunCancellation(runId, opts.signal);
+  //
+  // ACROSS A PROCESS BOUNDARY (RAYSPEC_RUN_CANCEL_POLL_MS, off unless set). That registration is
+  // process-local, so a cancellation issued where this run is NOT executing reaches only the persisted
+  // marker — and nothing re-reads that marker while we wait below, so the run burns its provider call
+  // out. With the variable set the run WATCHES its own marker on the interval and aborts the very
+  // controller armed here, so what follows is the path that already existed: the same race below, the
+  // same abandonment flag, the same inert seams, the same terminal record. The watch reads through
+  // `opts.taintDb ?? tdb` — the AUTONOMOUS-COMMIT contract stated on that option — because a read that
+  // failed inside the run's own transaction would abort it server-side and take the run down with it,
+  // and because a timer is the one seam that can fire with no call chain to consult `abandoned`.
+  const cancelPollMs = resolveRunCancelPollMs();
+  const cancellation = armRunCancellation(
+    runId,
+    opts.signal,
+    cancelPollMs === undefined ? undefined : { tdb: opts.taintDb ?? tdb, intervalMs: cancelPollMs },
+  );
   const ctx: RunContext = {
     runId,
     tenantId: tdb.tenantId,

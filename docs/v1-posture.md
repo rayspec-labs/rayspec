@@ -129,18 +129,21 @@ deployment-level cuts in the README's
 [separate hardening layer](../SECURITY.md#the-separate-hardening-layer-not-in-the-core)
 that the core deliberately leaves out.
 
-- **Cancellation reaches in-flight work only inside the process running it.**
-  `POST /v1/runs/{id}/cancel` ends a run: the caller is freed, the run is journaled
-  terminal with `errorClass: cancelled`, and a run that already fired a
+- **Cancellation reaches in-flight work across a process boundary only when it is
+  switched on.** `POST /v1/runs/{id}/cancel` ends a run: the caller is freed, the run
+  is journaled terminal with `errorClass: cancelled`, and a run that already fired a
   non-idempotent tool stays quarantined rather than becoming silently re-runnable.
   The abort reaches the backend too — the run context carries the signal and each
-  adapter wires it to the SDK call, session or child process it owns. What is still
-  staged is crossing a process boundary: a run executing on a *different* worker
-  receives no signal, so it keeps going until it returns on its own, and the record
-  of its cancellation is what makes it non-re-dispatchable rather than anything
-  stopping the work. How far the stop reaches inside a single process also varies by
-  backend; the per-backend table in `spec-reference.md` and each adapter README
-  state the residual limits.
+  adapter wires it to the SDK call, session or child process it owns. That abort is
+  delivered in-process, so by default a run executing on a *different* worker
+  receives none: it keeps going until it returns on its own, and the record of its
+  cancellation is what makes it non-re-dispatchable rather than anything stopping the
+  work. Setting **`RAYSPEC_RUN_CANCEL_POLL_MS`** lifts that: the run's own process
+  re-reads its cancellation record on that interval and raises the abort there, so
+  the run ends where it runs. It is **off by default** — a deployment that wants
+  cross-process cancellation opts into the per-run reads it costs. How far the stop
+  reaches inside a single process also varies by backend; the per-backend table in
+  `spec-reference.md` and each adapter README state the residual limits.
 - **Deletes are soft; the hard-delete purge is off by default.** A delete takes
   effect immediately as a soft-delete: it stamps a tombstone, scrubs personal data,
   and revokes the subject's credentials at once. The irreversible hard-delete
