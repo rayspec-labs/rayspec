@@ -36,9 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   automatically re-run — the record is what makes it un-dispatchable — and a run that had already
   fired a non-idempotent tool is still quarantined: its taint marker was committed on the autonomous
   handle before the side effect, so the run's rollback cannot take it with it. **One observable
-  difference, for a cross-process cancellation only**: the run's transaction rolls back, so steps it
-  journaled before the cancellation are discarded and it ends with the single `cancelled` step, where
-  without the variable it runs to completion and keeps them. `POST /v1/runs/{id}/cancel`'s `signalled`
+  difference, for a cross-process cancellation only**: the run now ENDS where it runs, where without
+  the variable it ran to completion. What survives in its journal then follows the invocation shape
+  rather than which process cancelled — it is exactly what an in-process cancellation leaves in that
+  same shape. On the durable worker the run executes inside a transaction, so it rolls back and the
+  steps journaled there are discarded: the run ends with the single `cancelled` step. On the
+  synchronous HTTP path there is no transaction, so the steps it already committed are kept beside
+  the `cancelled` one. Both are measured. `POST /v1/runs/{id}/cancel`'s `signalled`
   field is unchanged and still means "this process's registry reached it", so it stays `false` for a
   cross-process cancellation even when that cancellation lands. The message a cancelled run reports is
   reworded to stay true in both configurations: a model call in flight on another worker "runs on
@@ -1346,13 +1350,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is then left running — measured still alive twenty seconds after a host that exited 200 ms after
   the abort, at which point the observation stopped. The adapter's README now lists that limit
   alongside the four others this backend inherits (every rung is sent to the child's own process id
-  and never to a process group; no signal reaches a run executing in a separate worker process,
-  tracked as #210; a tool call already in flight is not interrupted; work already committed upstream
-  is not undone), and the reference table's `anthropic` row says seconds rather than implying
-  instants. Nothing about how a run behaves changed — what changed is that a reader can now find out
-  what they are getting, and that a test in the adapter package drives the real SDK against a
-  stand-in executable, holds the process id the SDK spawned and watches it disappear, instead of
-  checking that a boolean flipped. That test exercises the SDK's process-level teardown; it says
+  and never to a process group; no signal reaches a run executing in a separate worker process
+  unless `RAYSPEC_RUN_CANCEL_POLL_MS` is set; a tool call already in flight is not interrupted; work
+  already committed upstream is not undone), and the reference table's `anthropic` row says seconds
+  rather than implying instants. Nothing about how a run behaves changed — what changed is that a
+  reader can now find out what they are getting, and that a test in the adapter package drives the
+  real SDK against a stand-in executable, holds the process id the SDK spawned and watches it
+  disappear, instead of checking that a boolean flipped. That test exercises the SDK's process-level teardown; it says
   nothing about the vendor binary's own shutdown behaviour.
 
 ### Security

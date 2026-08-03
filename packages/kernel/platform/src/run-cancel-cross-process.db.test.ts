@@ -28,6 +28,12 @@
  * surface does, outside the run's transaction), or a cancelled run's rollback leaves no `runs` row at
  * all and the terminal comparison compares two absences.
  *
+ * ONE ARM IS DELIBERATELY NOT THE DURABLE SHAPE. What a cancelled run leaves in its journal is
+ * decided by whether it ran inside a transaction, not by which process cancelled it, so the last
+ * test runs the SYNCHRONOUS shape — `runAgent` on a plain tenant handle, no transaction, no
+ * `taintDb`, as the run surface invokes it — and pins that its committed steps SURVIVE beside the
+ * cancellation. Both shapes are documented; neither claim rests on the other's measurement.
+ *
  * This file never skips: `makeTestDb()` throws without DATABASE_URL, and the ran-guard at the bottom
  * fails loudly if the arms above did not execute.
  */
@@ -37,9 +43,16 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TenantDb } from '@rayspec/db';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { isRunCancelled, markRunCancelled, signalRunCancelled } from './run-cancel.js';
+import {
+  isRunCancelled,
+  markRunCancelled,
+  recordRunCancelled,
+  signalRunCancelled,
+} from './run-cancel.js';
+import { runAgent } from './run-core.js';
 import { isRunTainted } from './run-taint.js';
 import {
+  CROSS_PROCESS_SPEC,
   type CrossProcessRunConfig,
   type CrossProcessRunOutcome,
   GatedRunBackend,
@@ -450,10 +463,64 @@ describe('a poll read that FAILS can neither end a run nor fail one', () => {
   });
 });
 
+describe('what a cancelled run leaves in its journal follows the INVOCATION SHAPE', () => {
+  it('the synchronous shape has no transaction to roll back, so it KEEPS the steps it committed', async () => {
+    testsRan += 1;
+    // Every arm above runs the DURABLE shape — `runAgent` inside `tdb.transaction()` — where the
+    // rollback is what leaves a cancelled run with the single `cancelled` step. The SYNCHRONOUS HTTP
+    // path runs `runAgent` on a plain tenant handle with no transaction and no `taintDb` (the run
+    // surface's `forTenant(deps.db, tenantId)`), so there is nothing to roll back and the steps it
+    // journaled are already committed when the cancellation lands. Both shapes are documented; this
+    // pins the one the durable arms cannot reach, so neither claim can quietly stop being true.
+    process.env[POLL_ENV] = '25';
+    const cfg = config('sync-shape-keeps-steps');
+    const backend = new GatedRunBackend(cfg);
+    let inGate = false;
+    backend.onGate = () => {
+      inGate = true;
+    };
+    const tdb = forTenant(db, TENANT_A);
+
+    const ended = runAgent(tdb, backend, CROSS_PROCESS_SPEC, { runId: cfg.runId }).then(
+      () => 'resolved',
+      (err: unknown) => (err instanceof Error ? err.name : String(err)),
+    );
+    await waitFor(() => inGate);
+    // The cancellation as the OTHER process issues it: the marker, then the cancel surface's record.
+    // Nothing in this process signals the run — the poll is what has to reach it.
+    const cancelDb = forTenant(db, TENANT_A);
+    await markRunCancelled(cancelDb, cfg.runId);
+
+    expect(await ended).toBe('RunCancelledError');
+    expect(backend.sawAbort).toBe(true);
+    await recordRunCancelled(cancelDb, cfg.runId);
+
+    // Terminal exactly as the durable shape is — and the `llm` step it committed before the
+    // cancellation is STILL THERE beside the cancellation, which is the difference.
+    expect(await terminalShape(cfg.runId)).toEqual({
+      headerStatus: 'error',
+      steps: [
+        {
+          type: 'cancel',
+          status: 'error',
+          error_class: 'cancelled',
+          idempotency_key: 'run:cancelled',
+        },
+        {
+          type: 'llm',
+          status: 'ok',
+          error_class: null,
+          idempotency_key: 'llm:cross-process:0',
+        },
+      ],
+    });
+  });
+});
+
 // The ran-guard: registered LAST + no beforeAll dependency, so a beforeAll throw that skipped the
 // arms above can never read as a passing (green) file.
 describe('cross-process cancellation — ran-guard (not skippable-as-green)', () => {
-  it('the cross-process arms ACTUALLY RAN (all six)', () => {
-    expect(testsRan).toBe(6);
+  it('the cross-process arms ACTUALLY RAN (all seven)', () => {
+    expect(testsRan).toBe(7);
   });
 });

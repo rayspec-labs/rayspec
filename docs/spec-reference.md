@@ -798,12 +798,14 @@ different runs:
   is never dispatched again. Setting **`RAYSPEC_RUN_CANCEL_POLL_MS`** changes this case:
   a run that is executing re-reads its own cancellation record on that interval and ends
   itself where it runs, with the same terminal state and the same journal as a run
-  cancelled in this process. Two honest consequences. The run's transaction **rolls
-  back**, so steps it journaled before the cancellation do not survive — a cancelled run
-  ends with the single `cancelled` step, where without the variable it runs to completion
-  and keeps them. And the response field `signalled` still means "this process's registry
-  reached it", so it stays `false` for a cross-process cancellation even when that
-  cancellation does land.
+  cancelled in this process. Two honest consequences. What the run leaves in its journal
+  follows the **invocation shape**, not which process cancelled: the durable worker runs
+  the agent inside a transaction, so that transaction **rolls back**, the steps journaled
+  in it do not survive, and the run ends with the single `cancelled` step; a synchronous
+  run has no transaction, so the steps it already committed stay beside the `cancelled`
+  one. Without the variable it runs to completion and keeps them either way. And the
+  response field `signalled` still means "this process's registry reached it", so it stays
+  `false` for a cross-process cancellation even when that cancellation does land.
 
 The cancel request itself never waits for the run it ends. An executing run holds its
 own header row for as long as it runs, so the terminal record is written by whichever
