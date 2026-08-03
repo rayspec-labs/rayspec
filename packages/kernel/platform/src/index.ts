@@ -44,14 +44,15 @@ export type {
 // imports `isHttpResponse`; a handler may import `httpResponse`). Re-exported here so a platform
 // consumer needs no direct @rayspec/handler-sdk dep (mirrors the blob CONTRACT re-export above).
 export { httpResponse, isHttpResponse } from '@rayspec/handler-sdk';
-// The optional agent-run bounds resolved from the environment. run-core consumes the run-level one
-// itself; the composition root reads the two request-level ones and hands them to the adapter.
+// The optional agent-run bounds resolved from the environment. run-core consumes the two run-level
+// ones itself; the composition root reads the two request-level ones and hands them to the adapter.
 export {
   RunAbandonedError,
   type RunAbandonReason,
   RunBoundTimeoutError,
   resolveAgentMaxAttempts,
   resolveAgentRequestTimeoutMs,
+  resolveRunCancelPollMs,
   resolveRunMaxMs,
   runBoundTimeoutMessage,
   withRunBound,
@@ -159,6 +160,7 @@ export {
   type RunCancellation,
   type RunCancellationOutcome,
   RunCancelledError,
+  type RunCancelPoll,
   recordRunCancelled,
   runCancelledMessage,
   signalRunCancelled,

@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A run executing in another process can now be ended promptly instead of burning until it returns:
+  set `RAYSPEC_RUN_CANCEL_POLL_MS`.** Cancellation's durable half — the per-run record every dispatch
+  consults — has always crossed process boundaries; the signal never did. The abort lives in a
+  process-local registry, and nothing re-read the record while a run was waiting for its provider, so
+  a run on another worker held its slot and kept spending until the call came back by itself. With
+  this variable set to a number of milliseconds, a run that is executing re-reads its *own* record on
+  that interval and aborts its own controller. That abort is the one the in-process path already
+  delivers, so everything after it is the path that already existed: the same terminal `error` header,
+  the same single `cancelled` journal step, the same refusal of every seam the abandoned call reaches
+  for. Measured against an in-process control run through the identical invocation shape, the terminal
+  state and the journal are equal.
+
+  **Off by default, and off costs nothing.** Unset — the default, and what any unusable value resolves
+  to — no read is issued at all: a run in the durable shape touches its autonomous handle exactly zero
+  times. Set, the cost is one indexed `idempotency_keys` lookup per in-flight run, per interval, per
+  worker process, issued on the run's autonomous-commit handle — the worker's second connection, the
+  one the taint marker already uses — and never inside the run's own transaction, because a read that
+  failed there would abort that transaction server-side and take a healthy run down with it. The reads
+  are chained rather than periodic, so at most one is ever in flight per run and a database that has
+  slowed down receives fewer of them rather than a backlog. A read that fails is treated as no answer
+  and asked again on the next tick: an unreadable record never ends a run. 1000–5000 ms is a sensible
+  range; there is no floor, and a shorter interval buys cancellation latency rather than more safety.
+
+  **The rules established for cancellation are unchanged.** A cancelled run is still never
+  automatically re-run — the record is what makes it un-dispatchable — and a run that had already
+  fired a non-idempotent tool is still quarantined: its taint marker was committed on the autonomous
+  handle before the side effect, so the run's rollback cannot take it with it. **One observable
+  difference, for a cross-process cancellation only**: the run's transaction rolls back, so steps it
+  journaled before the cancellation are discarded and it ends with the single `cancelled` step, where
+  without the variable it runs to completion and keeps them. `POST /v1/runs/{id}/cancel`'s `signalled`
+  field is unchanged and still means "this process's registry reached it", so it stays `false` for a
+  cross-process cancellation even when that cancellation lands. The message a cancelled run reports is
+  reworded to stay true in both configurations: a model call in flight on another worker "runs on
+  until that process observes the cancellation itself", where it previously said the call runs on
+  until it settles by itself.
 - **A backend can now bind its authentication at the moment the run identity exists, instead of
   before it: the neutral `Backend` contract gains an optional `preflightAuth()`.** A run's auth mode
   is resolved once, before the run starts, and threaded onto the run context so every journaled step
@@ -296,9 +331,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an abort signal, which run-core races the backend call against and puts on the run context, so the
   backend adapter can stop the work — this is the half that frees the run rather than only the caller
   waiting on it, and it is delivered before anything is written, so it is never queued behind the run it
-  is ending. A run executing on **another worker process** gets no signal: the durable engine's own
-  cancellation is cooperative and the whole run occupies a single engine step, so the model call already
-  in flight is not interrupted and the run stops when it stops. It is still recorded cancelled — a run
+  is ending. A run executing on **another worker process** gets no signal by default: the durable
+  engine's own cancellation is cooperative and the whole run occupies a single engine step, so the model
+  call already in flight is not interrupted and the run stops when it stops. (Setting
+  `RAYSPEC_RUN_CANCEL_POLL_MS` makes such a run observe its own cancellation record and end itself
+  where it runs — see the entry for it above.) It is still recorded cancelled — a run
   that finishes under a cancellation records the cancellation instead of its own outcome, and persists
   no output; a run that ends by *failing* has no result to record with and rolls back everything it
   wrote, so the worker records the cancellation once that rollback has happened — and it is never
