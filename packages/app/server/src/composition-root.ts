@@ -1704,6 +1704,9 @@ export async function assembleServer(
     durableExecutorShutdown = deployed.durableExecutorShutdown;
     durableExecutorIdentity = deployed.durableExecutorIdentity;
     eraseTenantNow = deployed.eraseTenantNow;
+    // A product deployment launches a durable worker too, so it registers the daily system cleanup in
+    // the same pre-launch window — propagate its on-demand seam exactly as the classic branch does below.
+    runCleanupNow = deployed.runCleanupNow;
   } else if (config.specPath) {
     // 6b. A classic rayspec.yaml → run the REAL deploy() GitOps pipeline (validate → diff → lint/gate
     //    → migrate → roll out → drift). Product-agnostic: the spec is the injected deployer artifact.
