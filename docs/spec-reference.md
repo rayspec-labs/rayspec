@@ -825,7 +825,10 @@ different runs:
   the agent inside a transaction, so that transaction **rolls back**, the steps journaled
   in it do not survive, and the run ends with the single `cancelled` step; a synchronous
   run has no transaction, so the steps it already committed stay beside the `cancelled`
-  one. Without the variable it runs to completion and keeps them either way. And the
+  one. On the durable shape that discard includes the journal step for a non-idempotent
+  tool that already fired — the **quarantine evidence itself is unaffected**, because the
+  taint marker is written on the autonomous handle and commits independently of the run's
+  transaction, so such a run stays tainted and is never re-runnable-as-untainted. Without the variable it runs to completion and keeps them either way. And the
   response field `signalled` still means "this process's registry reached it", so it stays
   `false` for a cross-process cancellation even when that cancellation does land.
 

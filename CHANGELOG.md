@@ -23,8 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are equal.
 
   **Off by default, and off costs nothing.** Unset — the default, and what any unusable value resolves
-  to — no read is issued at all: a run in the durable shape touches its autonomous handle exactly zero
-  times. Set, the cost is one indexed `idempotency_keys` lookup per in-flight run, per interval, per
+  to — no read is issued at all. (The handle itself is not otherwise idle: the dispatch chokepoint
+  writes the `run_taint` marker through the same one before a non-idempotent tool fires. What is
+  unchanged is that the cancellation path adds no read to it.) Set, the cost is one indexed `idempotency_keys` lookup per in-flight run, per interval, per
   worker process, issued on the run's autonomous-commit handle — the worker's second connection, the
   one the taint marker already uses — and never inside the run's own transaction, because a read that
   failed there would abort that transaction server-side and take a healthy run down with it. The reads
