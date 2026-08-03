@@ -1695,6 +1695,15 @@ offending key/value is a `no_code_in_yaml` / `provider_native_leak` / `invalid_c
   `deepgram`/`openai`/`anthropic`, or containing `=>`/`import`/`SELECT … FROM`/a `.ts` path, is code).
   Provider/model POLICY is legal ONLY on `capabilities[].provider_policy` and in
   `deployment_overrides` (SELECTION by policy — never a request/response blob).
+- **The graph string scans also read `{ const: … }` BUSINESS literals.** A store-step `filter`/`values`
+  const lives inside `workflows`, so a status text is scanned like any other graph string and is
+  rejected at the const node itself (`workflows[N].steps[M].values.<col>.const`). The value patterns
+  are **word-boundary anchored** and `_` is a word character, so an unseparated token can pass where
+  its spaced/hyphenated spelling cannot: `openai_review_pending` and `llm_call` are ACCEPTED, while
+  `openai review pending`, `openai-review-pending` and `awaiting llm call` are rejected. That is not a
+  general escape — where a pattern already spells the joined form it still matches (`production_ready`),
+  as does a code-like literal (`index.js rebuild`). Rephrase the constant, or carry the value as DATA
+  through `{ event: … }` / `{ artifact: … }` so the string never enters the document.
 
 ### `capabilities[]` — Tier-B references (declaration, not implementation)
 
@@ -1861,8 +1870,9 @@ UPSERTs on the key. Value sources: `{ event: <field> }` (a scalar from the trigg
 `record_input` these are the submitted business fields; for `file_input` they are the SERVER-DERIVED
 byte metadata only, and a NULL payload value fail-closes the write terminally — persist only
 always-present fields, see the file-product notes above; for `conversation_input` they are the turn facts
-`message`/`turn_seq`/`role` + the server-derived `conversation_id`/`message_id`), `{ const: … }`, or
-`{ artifact: <contract ref> }`
+`message`/`turn_seq`/`role` + the server-derived `conversation_id`/`message_id`), `{ const: … }` (a
+GRAPH string — the NO-CODE guardrails scan it; see the phrasing rule above before writing a business
+constant), or `{ artifact: <contract ref> }`
 (an upstream produced artifact — e.g. an agent output or a `store_read`'s rows, written to a `jsonb`
 column). NOT supported (v1): comparison/range/LIKE/IN filters, joins, multi-store transactions,
 deletes/updates (a write is an UPSERT-only).

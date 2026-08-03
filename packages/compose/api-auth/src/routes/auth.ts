@@ -15,6 +15,7 @@ import {
   LoginRequest,
   type MeResponse,
   normalizeEmail,
+  type RateLimitDecision,
   RefreshRequest,
   RegisterRequest,
   type TokenResponse,
@@ -46,7 +47,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
   app.post('/v1/auth/register', async (c) => {
     const rid = c.get('requestId');
     const ip = clientIp(c, deps);
-    enforceRate(deps, 'register', ip);
+    enforceRate(await deps.rateLimiter.checkAsync('register', ip));
     // Drain the body under the configured byte cap (413 for an over-cap body BEFORE any work), then
     // parse exactly as before (a malformed body still throws through to the error envelope).
     const rawBody = await readBoundedRequestBytes(c, deps.maxJsonBodyBytes);
@@ -102,7 +103,8 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
     app.post('/v1/auth/bootstrap-tenant', async (c) => {
       const rid = c.get('requestId');
       const ip = clientIp(c, deps);
-      enforceRate(deps, 'register', ip); // the same bucket as register — it IS a registration
+      // The same bucket as register — it IS a registration.
+      enforceRate(await deps.rateLimiter.checkAsync('register', ip));
       const rawBody = await readBoundedRequestBytes(c, deps.maxJsonBodyBytes);
       const body = BootstrapTenantRequest.parse(JSON.parse(new TextDecoder().decode(rawBody)));
       const email = normalizeEmail(body.email);
@@ -155,7 +157,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
   app.post('/v1/auth/login', async (c) => {
     const rid = c.get('requestId');
     const ip = clientIp(c, deps);
-    enforceRate(deps, 'login', ip);
+    enforceRate(await deps.rateLimiter.checkAsync('login', ip));
     // Drain the body under the configured byte cap (413 for an over-cap body BEFORE any work), then
     // parse exactly as before (a malformed body still throws through to the error envelope).
     const rawBody = await readBoundedRequestBytes(c, deps.maxJsonBodyBytes);
@@ -165,7 +167,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
       ua: c.req.header('user-agent') ?? null,
       ip,
     });
-    deps.rateLimiter.reset('login', ip); // a clean login resets the counter
+    await deps.rateLimiter.resetAsync('login', ip); // a clean login resets the counter
     await deps.auditStore.appendMany(result.audit, rid, ipHashOf(c, deps));
     const refreshToken = deliverRefresh(
       c,
@@ -188,7 +190,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
   app.post('/v1/auth/refresh', async (c) => {
     const rid = c.get('requestId');
     const ip = clientIp(c, deps);
-    enforceRate(deps, 'refresh', ip);
+    enforceRate(await deps.rateLimiter.checkAsync('refresh', ip));
 
     const cookieSecret = readRefreshCookie(c.req.header('cookie'));
     // Drain the body under the configured byte cap (413 for an over-cap body BEFORE any work). The
@@ -216,7 +218,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
     if (outcome.reuseDetected) {
       // Reuse → family revoked; audit out-of-band + per-source lock (anti-DoS) + uniform 401.
       await deps.auditStore.appendMany(outcome.audit, rid, ipHashOf(c, deps));
-      deps.rateLimiter.lockSource('refresh', ip);
+      await deps.rateLimiter.lockSourceAsync('refresh', ip);
       clearRefresh(c);
       throw new ApiError('UNAUTHENTICATED', 'Authentication failed.');
     }
@@ -326,8 +328,17 @@ function clientIp(c: Context<AppEnv>, deps: AppDeps): string {
   return clientIpFromContext(c, deps.trustedProxies ?? []);
 }
 
-function enforceRate(deps: AppDeps, bucket: string, id: string): void {
-  const { allowed, retryAfterMs } = deps.rateLimiter.check(bucket, id);
+/**
+ * Throw the shared `RATE_LIMITED` envelope for a refusal.
+ *
+ * It takes the DECISION rather than the limiter deliberately. The limiter is asked asynchronously, so
+ * a helper that asked it itself would have to be `async` — and a call site that then forgot to `await`
+ * would carry on serving the request while an unhandled rejection surfaced elsewhere, which is a
+ * silently unthrottled auth route. Nothing in the lint configuration catches a floating promise. Taking
+ * the already-resolved decision makes that same mistake a type error at the call site instead.
+ */
+function enforceRate(decision: RateLimitDecision): void {
+  const { allowed, retryAfterMs } = decision;
   if (!allowed) {
     throw new ApiError('RATE_LIMITED', 'Too many requests.', { retryAfterMs });
   }

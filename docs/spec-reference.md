@@ -496,6 +496,28 @@ as a note for an embedder composing its own application rather than as
 operational advice.) This limitation is documented rather than fixed here; the
 store's bound is unchanged by this release.
 
+There is a second embedder seam, and it is worth naming precisely because it
+changes which of the limitations above still apply. `@rayspec/auth-core` exports
+an optional `SharedRateLimitStore` port — one `consume` that returns the decision
+and the retry hint together, so two instances cannot both grant the last token —
+and `RateLimiter.withSharedStore(store)` is the only way to build a limiter over
+one. That factory probes the store while constructing the limiter: a budget of
+one must allow and then refuse, that refusal must advise a non-zero wait, and a
+locked key must stay refused. It throws rather than hand back a limiter that
+answered wrongly, and a boot that finds a route with a declared `rateLimit` about
+to mount on a shared limiter which never went through the factory aborts too,
+rather than serve a limit nothing enforces. An embedder that does supply a store
+moves **every** counter in the application at the same moment — the
+authentication throttles, both declared-route tiers, and every per-route budget —
+because there is only ever the one limiter; the per-instance boundary, the
+key-multiplication concern and the 100 000-entry cap are all properties of the
+in-process store and retire together with it. Be plain about what that means for
+this server, though: it configures none. There is no environment variable and no
+configuration field that selects a shared store, and the only implementation of
+the port in this repository lives in test-support, where it exists to prove the
+port's contract against real concurrent connections. Everything above therefore
+describes the deployment you actually get.
+
 **The strict tier is only as precise as `RAYSPEC_TRUSTED_PROXIES`.** The client
 source is the socket peer unless that variable lists the peer as a trusted proxy,
 in which case the forwarding header is believed. That default is deliberate — it
@@ -1526,6 +1548,24 @@ workflows:
     (`{ artifact: … }`) — an artifact is a write-only source, never an
     equality-filter scalar. An `{ event: … }` source must name an actual **payload
     key of the trigger event** (e.g. `session_id` for `audio_input.session_finalized`).
+  - A `{ const: … }` literal is a **graph string**. It sits inside `workflows`, so
+    the neutrality scan that keeps provider names, prompt/production-execution
+    claims and code-like text out of the executable graph reads it like any other
+    graph string, and a business constant carrying one of those tokens is rejected
+    at the const node itself (e.g. `workflows[0].steps[1].values.status.const`).
+    The value patterns are word-boundary anchored and `_` counts as a word
+    character, so an unseparated token can pass where its separated spelling
+    cannot: `openai_review_pending` and `llm_call` are accepted, while
+    `openai review pending`, `openai-review-pending` and `awaiting llm call` are
+    refused. Anchoring is not a general escape, though — where a pattern already
+    spells the joined form it still matches, so `production_ready` is refused,
+    and so is a code-like literal such as `index.js rebuild`. The scan is
+    section-aware rather than airtight — the same text is legal as a store column
+    `enum` member, which the graph scan does not reach (only the document-wide
+    code-like check does, so a `.js` path or an SQL fragment is still refused
+    there). Where a constant cannot be rephrased, carry the value as data rather
+    than as YAML meaning: an `{ event: … }` payload key or an `{ artifact: … }`
+    ref keeps the string out of the document entirely.
 
 ## `grounding`
 

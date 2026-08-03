@@ -18,13 +18,18 @@
  * It runs BEFORE `requireAuth()` on purpose: an unauthenticated caller must stay throttled, and a
  * caller that only ever collects `401`s is exactly the load the strict bucket exists to bound.
  *
- * ONE LIMITER. This reuses the shared injected `deps.rateLimiter` — there is no second limiter and no
- * external store, so the counters are IN-PROCESS and PER INSTANCE: a deployment running N instances
- * grants each caller N budgets. That is a documented limitation, not an oversight (see the declared-
- * route throttling section of the spec reference), and it is the same posture every other throttle in
- * this codebase already has. The per-route budgets built by `declaredRouteBudget` below share that
- * limiter, that store and therefore that limitation exactly: a declared `rateLimit` is a per-instance
- * budget too, and it additionally multiplies the number of distinct keys the one bounded store tracks.
+ * ONE LIMITER. This reuses the shared injected `deps.rateLimiter` — there is no second limiter, and,
+ * unless the limiter it was given was built through `RateLimiter.withSharedStore`, no external store
+ * either, so the counters are IN-PROCESS and PER INSTANCE: a deployment running N instances grants
+ * each caller N budgets. That is a documented limitation, not an oversight (see the declared-route
+ * throttling section of the spec reference), and it is the same posture every other throttle in this
+ * codebase already has. The per-route budgets built by `declaredRouteBudget` below share that limiter,
+ * that store and therefore that limitation exactly: a declared `rateLimit` is a per-instance budget
+ * too, and it additionally multiplies the number of distinct keys the one bounded store tracks.
+ * An embedder that DOES hand `createAuthApp` a limiter over a shared store moves all of that at once:
+ * the refusal below asks `checkAsync`, which on such a limiter asks the shared store, so the tiers and
+ * every per-route budget become cluster-wide together and the bounded in-process key store stops being
+ * the thing they are counted in. The shipped server supplies no such store.
  *
  * FAIL-OPEN TRAP. `RateLimiter.check` returns `allowed` for a bucket name that has no entry in the
  * limiter's policy table — an unregistered bucket silently permits everything. There are exactly two
@@ -144,7 +149,7 @@ export function routeRateLimit(
 ): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const { bucket, id } = routeRateTarget(c, deps, tiers);
-    const { allowed, retryAfterMs } = deps.rateLimiter.check(bucket, id, policy);
+    const { allowed, retryAfterMs } = await deps.rateLimiter.checkAsync(bucket, id, policy);
     if (!allowed) {
       return c.json(
         errorEnvelope('RATE_LIMITED', 'Too many requests.', c.get('requestId') ?? 'unknown', {
@@ -257,8 +262,27 @@ const PROBE_ID = 'boot';
  * everything — including one whose probe key happens to be locked — and the probe would then be
  * vacuous in exactly the case it exists to catch. The reserved key is `reset` before AND after, so a
  * probe leaves no counter and no lock behind for a later call to trip over.
+ *
+ * A limiter over a SHARED store cannot be asked any of this here, because it answers asynchronously
+ * and this runs inside synchronous route registration. `RateLimiter.withSharedStore` asks it the
+ * equivalent questions at construction instead, so all that is left to check is that it WAS asked: a
+ * limiter carrying a shared store it never probed reached this boot by some other door, which means
+ * the same store-ignores-the-carried-policy hole is wide open and every budgeted route would mount
+ * unlimited. Fail closed on that, then return — there is nothing further to drive synchronously.
  */
 export function assertLimiterHonoursExplicitPolicy(limiter: RateLimiter): void {
+  if (limiter.sharedStore) {
+    if (!limiter.sharedStoreProbed) {
+      throw new Error(
+        'assertLimiterHonoursExplicitPolicy: the injected rate limiter carries a shared store but ' +
+          'was not probed, so it did not come through RateLimiter.withSharedStore and the equivalent ' +
+          'asynchronous probe never ran. A declared per-route rateLimit carries its budget on the call ' +
+          'instead of registering a bucket, so a store that ignores it would leave every budgeted ' +
+          'route silently unlimited. Fail-closed at boot rather than ship an unenforced limit.',
+      );
+    }
+    return;
+  }
   const probePolicy: RateLimitPolicy = { max: 1, windowMs: 60_000 };
   limiter.reset(PROBE_BUCKET, PROBE_ID);
   const first = limiter.check(PROBE_BUCKET, PROBE_ID, probePolicy);
