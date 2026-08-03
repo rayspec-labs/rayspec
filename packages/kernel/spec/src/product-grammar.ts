@@ -409,6 +409,18 @@ export type StoreEventValue = z.infer<typeof StoreEventValue>;
  * and MUST NOT be weakened for literal convenience — rephrase the constant, or carry the value as
  * DATA through an `{event:}` / `{artifact:}` source instead of YAML meaning. Pinned by a lint test
  * (product-stores.test.ts GLI-1) so an accidental narrowing of the guard goes red.
+ *
+ * DECIDED (#212 — keep the behavior): exempting literal-data nodes BEFORE the scan was considered and
+ * declined. Two reasons. (a) The scan runs over the RAW doc BEFORE the shape parse, so "this path is
+ * a store-step const" would be a guess about an unvalidated tree, not a proven fact.
+ * (b) The workflow bridge rejects the SAME literal at the SAME node independently, under its own path
+ * prefix (`$.workflows…` there, `workflows…` here), so one exemption constant could not serve both:
+ * it would have to be duplicated across two walkers whose whole contract is that they mirror each
+ * other (parity-tested). The reach is also NARROWER than the note reads: the value patterns are
+ * word-boundary anchored and `_` is a word character, so `openai_review_pending` and `llm_call` are
+ * accepted today while their separated spellings are not — the reported example, an underscored
+ * identifier, does not in fact reproduce. That boundary is pinned in product-stores.test.ts and
+ * stated for authors in the authoring skill and docs/spec-reference.md.
  */
 export const StoreFilterConstValue = z
   .object({ const: z.union([z.string(), z.number(), z.boolean()]) })
