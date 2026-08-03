@@ -920,6 +920,15 @@ When set, the FK targets a NAMED column of the parent and becomes a **tenant-sco
 - method: <HttpMethod>     # one of: GET | POST | PUT | PATCH | DELETE
   path: <string>           # e.g. '/tickets' or '/tickets/{id}' — {param} path params are supported.
   action: <RouteAction>    # a discriminated union on `kind` (It.1/It.2 use store | agent)
+  rateLimit:               # OPTIONAL opt-in per-route request budget, counted per tenant AND
+                           #   principal for THIS route alone and enforced IN ADDITION to the two
+                           #   shared declared-route tiers. STRICT: exactly these two members, both
+                           #   REQUIRED, no other key. OMIT the key ⇒ NO per-route limit; there is
+                           #   deliberately NO default (one would stamp the key onto every route).
+    windowSeconds: <int>   #   the window length in seconds; a whole positive count, and at most
+                           #     86400 (one day) — the counters live in the serving process, so a
+                           #     longer window is a lint error and the boot guard refuses it too
+    max: <int>             #   the hits allowed inside that window; a whole positive count
 ```
 
 `RouteAction` (It.1/It.2 use these two kinds):
@@ -1128,7 +1137,9 @@ See `examples/expense-claim-coder/PRD.md` (the input) and `examples/expense-clai
 (the golden output) — 2 stores (a `expense_categories` catalog + `expense_claims`), a `lookup_categories`
 tool + a `code_claim` persist tool, and a tool-using `expense_coder` agent with NO `outputSchema`. The
 `examples/expense-claim-coder/holes/*.holes.json` are the derived holes; `handlers/*.gen.ts` are the
-deterministic render. Use it as your It.2 template.
+deterministic render, and `build.mjs` writes the deployable ESM form the runtime loads (a `.ts` handler
+module is refused at load time — see the `typescript_handler_module` advisory). Use it as your It.2
+template.
 
 ---
 
@@ -1209,8 +1220,9 @@ What the persist renderer GUARANTEES (the safety baked in — you do not write a
     `clamped: [{ column, proposed, applied }]` — the model's original choice next to the value actually
     written. That result is what `dispatchTool` journals, so both survive the run.
     **The tool's `outputSchema` MUST therefore declare `clamped`** (`{ type: array, items: { type:
-    object, additionalProperties: true } }`) alongside `status`/`id`/`detail`; without it, `dispatchTool`
-    rejects the tool result the FIRST time a bound fires and the model retries to MaxTurns. The key is
+    object, additionalProperties: true } }`) alongside `status`/`id`/`detail`; a persist `outputSchema`
+    is closed (`additionalProperties:false`, above), so without it `dispatchTool` rejects the tool
+    result the FIRST time a bound fires and the model retries to MaxTurns. The key is
     absent (never an empty array) on a write where no bound fired.
   - `validateHoles` fail-closes on a clamp that cannot mean what it says: a key that is not one of
     `columns`, a key on a column with no `enumValues` (no order to rank by), a `max` outside that

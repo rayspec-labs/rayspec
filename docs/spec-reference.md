@@ -177,6 +177,21 @@ stores:
     rewrites the whole table under an `ACCESS EXCLUSIVE` lock and rebuilds the
     column's indexes. On a large, hot table that is an outage, and whether to
     take it is an operator's call, not a generator's.
+
+    **The other direction, and every other type change.** Any other declared type
+    change — `bigint` back to `integer` included — is emitted as the same single
+    `ALTER … SET DATA TYPE <new type>`, classified destructive, and blocked by the
+    migration gate unless a reviewed allowlist entry covers that exact statement.
+    A `USING` clause is supplied only where it is safe regardless of stored data —
+    a `text` target, where the assignment cast is total — and nowhere else; every
+    other target is emitted with the implicit cast alone, and the diff records a
+    note leaving a `USING` to the reviewer. What does not carry over is the
+    value-preservation reassurance above: that is specific to `int4 → int8`.
+    Applying a narrowing `ALTER` to a populated table FAILS on any row the new
+    type cannot hold, because that is data the implicit cast cannot convert — the
+    gate is what makes an operator look before that happens, and a `USING`
+    expression deciding what to do with such a row belongs in a hand-edited
+    migration.
   - `nullable` — optional boolean, default `false`.
   - `unique` — optional boolean, default `false`. When `true`, the value is
     **unique WITHIN a tenant**: the generated unique index is tenant-scoped (a
@@ -731,8 +746,9 @@ rides the terminal event instead, and the durable re-read below reports that sam
 classified outcome afterwards.
 
 A run that does not merely fail but **throws** — the held request hitting its
-timeout, or a configured per-run wall-clock ceiling — produces no run result at
-all. On the JSON path that answers `504 GATEWAY_TIMEOUT` with the platform's
+timeout, or the per-run wall-clock ceiling configured by `RAYSPEC_AGENT_RUN_MAX_MS`
+(see [`.env.example`](../.env.example) for the environment surface) — produces no run
+result at all. On the JSON path that answers `504 GATEWAY_TIMEOUT` with the platform's
 standard error envelope, carrying the neutral `timeout` class in
 `details.errorClass`. Under `Accept: text/event-stream` the same throw cannot
 change a status line already sent, so it ends the stream with a terminal `error`
@@ -1040,7 +1056,13 @@ the same default the `list` op applies — so a handler never receives rows in a
 unspecified physical order. That default is the injected `id`, a random UUID, so it
 is a **stable** order and not a chronological one: order by `created_at` if you want
 oldest or newest first. An `orderBy` you do pass is used verbatim, with nothing
-appended to it. One authorization consequence to know: **a `handler`-kind route is gated
+appended to it. That matters for offset paging: the default `id asc` is a unique key,
+so paging over it is stable, but an ordering of your own on a non-unique column is not
+a total order, and Postgres may break the ties differently between two page queries —
+a row can then repeat or be skipped. Pair such an ordering with a unique tiebreaker (a
+trailing `id` column).
+
+One authorization consequence to know: **a `handler`-kind route is gated
 on the `store:write` permission by default**, not `store:read`. The platform cannot
 statically prove a handler is read-only, so it fail-closes to the stronger gate — a
 handler that only reads is over-protected, never under. An author who knows a handler
@@ -1135,9 +1157,12 @@ frontend:
 **Readiness.** Declaring a mount adds a `frontend` field to the `/health` response,
 valued `"ok"` or `"unavailable"`. It reports whether the mounts can be served — the
 directory is readable and traversable, and an `spa: true` mount's `index.html` is a
-readable file — and `/health` answers `503` when one cannot. The check runs once at
-boot and the probe answers from that cached value, so polling it costs no disk access.
-A document declaring no mounts carries no such field and answers exactly as before.
+readable file — and `/health` answers `503` when one cannot. The body's `status` field
+carries that same verdict: `"ok"` on the `200`, `"degraded"` on the `503`. A `503`
+body carries every field this boot covers rather than only the failing one, so one
+read of it names which dependency is at fault. The check runs once at boot and the
+probe answers from that cached value, so polling it costs no disk access. A document
+declaring no mounts carries no such field and answers exactly as before.
 
 **Precedence and safety.** Static mounts are the last thing served: every API route,
 `/health`, `/v1/*`, and `/oidc/*` always wins over a static mount (a path under a

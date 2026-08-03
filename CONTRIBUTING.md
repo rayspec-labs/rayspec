@@ -111,6 +111,19 @@ dependency.
 - Database-backed tests require Postgres. They must not silently no-op when a
   database is absent in an environment that expects one — a security-relevant test
   that skips itself is a false green.
+- Make that a hard failure while you work, rather than trusting a green run.
+  `RAYSPEC_REQUIRE_DB_TESTS=true` turns a database-backed suite that finds no
+  `DATABASE_URL` into a collection-time failure instead of a skip;
+  `RAYSPEC_REQUIRE_LIVE_TESTS=true` and `RAYSPEC_REQUIRE_MEDIA_TESTS=true` do the same
+  for the provider-backed and the ffmpeg-backed suites. CI needs none of them — a run
+  with `CI=true` already requires the database-backed ones.
+- For a run where nothing skips, put those variables and
+  `DATABASE_URL`/`SHADOW_DATABASE_URL` in the **environment** rather than only in a
+  `.env` file. `pnpm test` drives the suites through turbo in strict env mode, so a
+  task sees only the variables `turbo.json` declares for it; most database-backed
+  packages additionally load a repo-root `.env` themselves, but `@rayspec/cli` and the
+  local-boot wrapper do not — so a `.env` alone leaves those two skipping while the
+  rest run.
 
 ---
 
