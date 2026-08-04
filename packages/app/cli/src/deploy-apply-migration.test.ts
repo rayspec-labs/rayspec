@@ -32,6 +32,9 @@ vi.mock('@rayspec/server', () => {
   class DeployError extends Error {}
   class ProductBootError extends Error {}
   return {
+    // The trace-export default the deploy path applies before the boot — a no-op stand-in here, since
+    // nothing in this suite is about it (its own arms live in deploy-agent-tracing.test.ts).
+    applyDeployAgentTracing: () => 'off',
     assembleOptsFromEnv: () => ({}),
     assembleServer: vi.fn(async () => {
       h.captured = {

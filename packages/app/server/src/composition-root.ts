@@ -112,6 +112,7 @@ import {
   type ProductAgentBackendsFactory,
   planUpdateBoot,
 } from './product-boot.js';
+import { installEnvProxyDispatcher } from './proxy-dispatcher.js';
 import {
   type FrontendReadiness,
   frontendMountsReadiness,
@@ -376,6 +377,15 @@ export interface BootedServer {
     /** The resolved tenant data-erasure gate — `ServerConfig.erasureEnabled`. */
     erasureEnabled: boolean;
   };
+  /**
+   * The EFFECTIVE agent trace-export posture this boot runs under — whether agent traces, which carry
+   * prompts and tool arguments, are exported to OpenAI. Resolved through the SDK's OWN switch
+   * (`effectiveAgentTracing`), never from `RAYSPEC_AGENT_TRACING` alone, so it reports what will
+   * actually happen on EVERY entry point — including the ones that do not change the SDK default. The
+   * boot banner states it in both directions; an embedder that assembles the server itself reads the
+   * same value.
+   */
+  agentTracing: AgentTracingPosture;
   /** Close the underlying DB pool (the entrypoint wires this to SIGINT/SIGTERM). */
   close: () => Promise<void>;
 }
@@ -1158,6 +1168,90 @@ export function parseAccessTokenTtlSeconds(env: NodeJS.ProcessEnv): number {
   return n;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Agent trace export — the RESOLVED posture the boot banner states.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The resolved agent trace-export posture:
+ *  - `'openai'` — agent traces (which carry prompts and tool arguments) are exported to OpenAI;
+ *  - `'off'`    — no trace leaves this process.
+ */
+export type AgentTracingPosture = 'openai' | 'off';
+
+/**
+ * The SDK's OWN trace kill-switch. `@openai/agents-core` reads it through a lazy getter
+ * (`tracing.disabled` in `dist/config.js`) that calls `isEnabled('OPENAI_AGENTS_DISABLE_TRACING')`
+ * over live `process.env`, treating the exact strings `'true'` and `'1'` as enabled — so setting it
+ * at boot, before the trace provider is first constructed, turns the export off for the process.
+ */
+const SDK_DISABLE_TRACING_ENV = 'OPENAI_AGENTS_DISABLE_TRACING';
+
+/**
+ * Resolve `RAYSPEC_AGENT_TRACING` — the AFFIRMATIVE switch for the agent trace export.
+ *
+ *  - `openai`        ⇒ export agent traces to OpenAI;
+ *  - `off`           ⇒ do not;
+ *  - unset OR BLANK  ⇒ `off`. Blank counts as unset DELIBERATELY: a `RAYSPEC_AGENT_TRACING=`
+ *    (or an unsubstituted `${…}`) states no intention, and the unstated intention here resolves to the
+ *    protective posture rather than to a refused boot — the resolved posture is on the banner either
+ *    way, so a blank value cannot quietly do the surprising thing;
+ *  - anything else   ⇒ fail-closed by NAME, in the house form (mirrors `RAYSPEC_MEDIA_PREP`). A typo
+ *    must not read as "not `openai`, so off": silence is the whole defect class here.
+ *
+ * It is an AFFIRMATIVE switch, not a negation of the SDK's own: the operator states an intention, and
+ * the repository is not bound to a third-party SDK's variable name.
+ */
+export function resolveAgentTracing(env: NodeJS.ProcessEnv): AgentTracingPosture {
+  const raw = env.RAYSPEC_AGENT_TRACING?.trim();
+  if (raw === undefined || raw === '' || raw === 'off') return 'off';
+  if (raw === 'openai') return 'openai';
+  throw new BootConfigError(
+    `Boot aborted — RAYSPEC_AGENT_TRACING='${raw}' is not supported (wired: openai | off; unset ⇒ ` +
+      'off). It selects whether agent traces — which carry prompts and tool arguments — are exported ' +
+      'to OpenAI. Fail-closed.',
+  );
+}
+
+/**
+ * Apply the `rayspec deploy` path's trace-export DEFAULT to the ambient environment, and return the
+ * posture it selected. Call it BEFORE any agent module can construct a trace provider.
+ *
+ * Scope is deliberate. `deploy` is the strongest available signal that the code running here belongs
+ * to someone other than the operator, and exporting a third party's prompts and tool arguments to a
+ * third party unasked is what this closes. A developer tracing their OWN agent through `rayspec-serve`
+ * or the local dev wrapper sees their own prompts — that was never the risk case, and this does not
+ * touch it.
+ *
+ * Selecting `openai` sets nothing: the SDK's default is already to export, and an operator who ALSO
+ * set the SDK's own kill-switch keeps it (the banner then honestly reports `off`). Writing
+ * `OPENAI_AGENTS_DISABLE_TRACING` onto `process.env` is intentional — unlike a boot secret this value
+ * SHOULD be inherited by child processes, so an agent CLI this deployment spawns does not export what
+ * the parent just declined to.
+ */
+export function applyDeployAgentTracing(env: NodeJS.ProcessEnv = process.env): AgentTracingPosture {
+  const selected = resolveAgentTracing(env);
+  if (selected === 'off') env[SDK_DISABLE_TRACING_ENV] = '1';
+  return selected;
+}
+
+/**
+ * The EFFECTIVE trace-export posture — what the SDK will actually do, resolved through the SDK's own
+ * switch rather than through ours. The banner states THIS, so it stays honest on the entry points that
+ * do not change the default (`rayspec-serve`, the local dev wrapper) and on a `deploy` whose operator
+ * set the SDK variable directly.
+ *
+ * It mirrors `@openai/agents-core`'s own resolution for a server process: the export is off when
+ * `OPENAI_AGENTS_DISABLE_TRACING` is exactly `'true'` or `'1'`, and off under `NODE_ENV=test` (that
+ * SDK disables tracing in tests by default). The browser arm of that resolution cannot apply here.
+ */
+export function effectiveAgentTracing(env: NodeJS.ProcessEnv = process.env): AgentTracingPosture {
+  const disable = env[SDK_DISABLE_TRACING_ENV];
+  if (disable === 'true' || disable === '1') return 'off';
+  if (env.NODE_ENV === 'test') return 'off';
+  return 'openai';
+}
+
 /** Parse PORT, fail closed on a non-numeric/out-of-range value (default DEFAULT_PORT when unset). */
 function parsePort(raw: string | undefined): number {
   if (raw === undefined || raw.trim() === '') return DEFAULT_PORT;
@@ -1598,6 +1692,21 @@ export async function assembleServer(
     bootWarn?: BootWarnSink;
   } = {},
 ): Promise<BootedServer> {
+  // Put a proxy-aware global dispatcher back BEFORE anything in this process can issue a model call.
+  // Importing this boot closure pulls in undici v8, whose module-import-time side effect overwrites the
+  // global-dispatcher slot Node's built-in `fetch` reads — including the `EnvHttpProxyAgent` that
+  // NODE_USE_ENV_PROXY=1 installed there at startup (issue #287; see proxy-dispatcher.ts).
+  //
+  // THIS is the seam every boot shape reaches: the classic `rayspec.yaml` deploy, the `*.product.yaml`
+  // deploy (which routes through `deployProductYamlSpec` from inside this function) and the auth-only
+  // boot, on BOTH entrypoints — the `rayspec deploy` CLI and the `rayspec-serve` bin each call exactly
+  // `assembleServer(config, assembleOptsFromEnv(config))`. It runs before the app is assembled, so it
+  // cannot be reached after a run has started.
+  //
+  // Gated: with no proxy opt-in the call touches nothing (it does not even load undici), so a
+  // deployment without proxy configuration boots exactly as it did before.
+  await installEnvProxyDispatcher();
+
   // Hand the two boot secrets to auth-core IN-PROCESS. Its lazy readers — assertBootSecrets (inside
   // createAuthApp) and getApiKeyPepper (the api-key / session-secret / invite-token hashing paths) —
   // then see exactly what loadServerConfig resolved and normalized, including when the caller passed
@@ -1849,6 +1958,9 @@ export async function assembleServer(
     // deploy branches hand to `SystemCleanupScheduler` / `eraseTenant`, so the banner reports what this
     // boot will actually do rather than re-reading (and re-interpreting) the environment.
     housekeeping: { cleanup: config.cleanup, erasureEnabled: config.erasureEnabled },
+    // The EFFECTIVE trace-export posture, read off the SDK's own switch rather than off ours — so the
+    // banner is honest on the entry points that never change the SDK default.
+    agentTracing: effectiveAgentTracing(),
     close: async () => {
       // Drain the durable worker FIRST (finish in-flight jobs, stop dequeuing) so a
       // shutdown does not orphan a job, THEN end the app DB pool. Swallow a worker-shutdown error so

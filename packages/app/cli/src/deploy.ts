@@ -430,6 +430,7 @@ export async function serveDeployment(
   // Dynamic imports: keep DBOS/Hono/the adapters + product-yaml OUT of `rayspec doctor`'s load path.
   const { serve } = await import('@hono/node-server');
   const {
+    applyDeployAgentTracing,
     assembleOptsFromEnv,
     assembleServer,
     assembleStaticServer,
@@ -483,6 +484,16 @@ export async function serveDeployment(
       process.on('SIGTERM', () => shutdownStatic('SIGTERM'));
       return;
     }
+
+    // The agent trace export is DEFAULTED OFF on this path, and only on this path. `@openai/agents`
+    // exports traces to OpenAI by default and those traces carry prompts and tool arguments; `deploy`
+    // is the strongest available signal that the workload running here is somebody else's, so on it the
+    // export becomes an affirmative choice — RAYSPEC_AGENT_TRACING=openai — instead of a default.
+    // `rayspec-serve` and the local dev wrapper are untouched: a developer tracing their own agent sees
+    // their own prompts, which was never the risk case. It runs BEFORE assembleServer so no agent
+    // module has constructed a trace provider yet, and an unsupported value fail-closes by name through
+    // the BootConfigError arm below. The banner reports the EFFECTIVE posture either way.
+    applyDeployAgentTracing();
 
     const config = loadServerConfig();
     // Build the deployer-seam opts from the SAME shared builder rayspec-serve uses: the sanctioned

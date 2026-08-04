@@ -16,7 +16,11 @@
  */
 import { describe, expect, it } from 'vitest';
 import { bootBanner } from './banner.js';
-import { type BootedServer, parseCleanupSettings } from './composition-root.js';
+import {
+  type BootedServer,
+  effectiveAgentTracing,
+  parseCleanupSettings,
+} from './composition-root.js';
 
 const BASE = 'http://127.0.0.1:8080';
 
@@ -37,6 +41,7 @@ function booted(over: Partial<BootedServer> = {}): BootedServer {
     deployMode: 'auth-only',
     drift: [],
     housekeeping: { cleanup: parseCleanupSettings({}), erasureEnabled: false },
+    agentTracing: 'off',
     close: async () => {},
     ...over,
   };
@@ -122,5 +127,33 @@ describe('bootBanner — the resolved daily-cleanup crontab', () => {
     // The default crontab still RESOLVES on this boot; it must not be printed, because nothing fires it.
     expect(booted().housekeeping.cleanup.schedule).toBe('0 3 * * *');
     expect(banner).not.toContain('0 3 * * *');
+  });
+});
+
+/**
+ * The resolved agent trace-export posture. Both arms resolve their environment through
+ * `effectiveAgentTracing` — the SAME resolver the boot calls — and feed its OUTPUT to the banner, so
+ * neither arm can pass because the resolver stopped resolving anything. The whole point of the line is
+ * that BOTH directions are stated: nobody loses tracing silently, and nobody exports prompts and tool
+ * arguments to a third party silently.
+ */
+describe('bootBanner — the resolved agent trace-export posture', () => {
+  it('states OFF, and names the variable, when nothing exports', () => {
+    const agentTracing = effectiveAgentTracing({ OPENAI_AGENTS_DISABLE_TRACING: '1' });
+    expect(agentTracing).toBe('off'); // accept control — the boot resolver produced this
+    const banner = bootBanner(booted({ agentTracing }), BASE);
+    expect(banner).toContain('Trace export:          OFF');
+    expect(banner).toContain('RAYSPEC_AGENT_TRACING');
+    expect(banner).not.toContain('EXPORTING TO OPENAI');
+  });
+
+  it('states EXPORTING TO OPENAI — never silence — when the export is live', () => {
+    const agentTracing = effectiveAgentTracing({});
+    expect(agentTracing).toBe('openai'); // reject control — an untouched environment still exports
+    const banner = bootBanner(booted({ agentTracing }), BASE);
+    expect(banner).toContain('Trace export:          EXPORTING TO OPENAI');
+    expect(banner).toContain('prompts and tool arguments');
+    expect(banner).toContain('RAYSPEC_AGENT_TRACING');
+    expect(banner).not.toContain('Trace export:          OFF');
   });
 });
