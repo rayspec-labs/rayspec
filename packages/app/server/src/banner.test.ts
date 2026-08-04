@@ -90,6 +90,8 @@ describe('bootBanner — the resolved tenant data-erasure gate', () => {
     );
     expect(banner).toContain('Tenant data erasure:   NOT WIRED');
     expect(banner).not.toContain('Tenant data erasure:   ARMED');
+    // the line still NAMES the variable, so the block names all three on every boot it prints
+    expect(banner).toContain('RAYSPEC_ERASURE_ENABLED');
   });
 });
 
@@ -105,12 +107,15 @@ describe('bootBanner — the resolved daily-cleanup crontab', () => {
     });
     const banner = bootBanner(server, BASE);
     expect(banner).toContain("Daily cleanup:         '15 4 * * *'");
+    expect(banner).toContain('RAYSPEC_CLEANUP_SCHEDULE');
     expect(banner).toContain('GDPR retention 90 days');
   });
 
   it('says NOT SCHEDULED — and prints no crontab — on a boot that wires no durable worker', () => {
     const banner = bootBanner(booted(), BASE);
     expect(banner).toContain('Daily cleanup:         NOT SCHEDULED');
+    // the line still NAMES the variable, so the block names all three on every boot it prints
+    expect(banner).toContain('RAYSPEC_CLEANUP_SCHEDULE');
     // The default crontab still RESOLVES on this boot; it must not be printed, because nothing fires it.
     expect(booted().housekeeping.cleanup.schedule).toBe('0 3 * * *');
     expect(banner).not.toContain('0 3 * * *');

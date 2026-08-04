@@ -87,10 +87,12 @@ export function bootBanner(server: BootedServer, base: string): string {
   }
 
   // The RESOLVED housekeeping posture — the two irreversible-deletion operator gates and the daily
-  // cleanup crontab. Printed on EVERY boot because BOTH directions matter: an operator who armed a
-  // gate gets the confirmation that irreversible deletion is now live, and one whose `TRUE`/`1` the
-  // strict comparison rejected sees DRY-RUN instead of silence. `server.housekeeping` carries what the
-  // boot RESOLVED, so the supplied string is never echoed back as though it had been accepted.
+  // cleanup crontab. Printed on every boot this banner covers, because BOTH directions matter: an
+  // operator who armed a gate gets the confirmation that irreversible deletion is now live, and one
+  // whose `TRUE`/`1` the strict comparison rejected sees DRY-RUN instead of silence. Every line names
+  // the variable that governs it, including the lines that report the setting has nothing to act on.
+  // `server.housekeeping` carries what the boot RESOLVED, so the supplied string is never echoed back
+  // as though it had been accepted.
   const { cleanup, erasureEnabled } = server.housekeeping;
   lines.push('');
   lines.push('  Housekeeping (resolved):');
@@ -107,7 +109,7 @@ export function bootBanner(server: BootedServer, base: string): string {
   // stores) — there is nothing there for the gate to act on, so say that instead of a gate posture.
   if (server.eraseTenantNow === undefined) {
     lines.push(
-      '    Tenant data erasure:   NOT WIRED — this boot deployed no product stores, so there is nothing to erase',
+      '    Tenant data erasure:   NOT WIRED — this boot deployed no product stores, so there is nothing for RAYSPEC_ERASURE_ENABLED to act on',
     );
   } else if (erasureEnabled) {
     lines.push(
@@ -123,11 +125,11 @@ export function bootBanner(server: BootedServer, base: string): string {
   // it would advertise a schedule that never fires, so the banner reports the absence instead.
   if (server.runCleanupNow === undefined) {
     lines.push(
-      '    Daily cleanup:         NOT SCHEDULED — this boot wires no durable worker, so no cleanup fires here',
+      '    Daily cleanup:         NOT SCHEDULED — this boot wires no durable worker, so RAYSPEC_CLEANUP_SCHEDULE fires nothing here',
     );
   } else {
     lines.push(
-      `    Daily cleanup:         '${cleanup.schedule}'   (GDPR retention ${cleanup.gdprRetentionDays} days)`,
+      `    Daily cleanup:         '${cleanup.schedule}'   (RAYSPEC_CLEANUP_SCHEDULE; GDPR retention ${cleanup.gdprRetentionDays} days)`,
     );
   }
   lines.push(RULE);
@@ -139,7 +141,8 @@ export function bootBanner(server: BootedServer, base: string): string {
  * Build the boot banner for a STATIC-PROFILE (frontend-only) server. Distinct from `bootBanner`: this
  * boot mounts NO auth/OIDC/runs/API route and opens no database, so the banner honestly advertises ONLY
  * the served static frontend(s) + the mount-readiness `/health` — it never claims the platform
- * auth/run routes a static boot does not have.
+ * auth/run routes a static boot does not have. It carries no `Housekeeping (resolved):` block either:
+ * a static boot schedules no cleanup and wires no erasure, so there is no resolved posture to state.
  */
 export function staticBootBanner(server: StaticBootedServer, base: string): string {
   const lines: string[] = [];
