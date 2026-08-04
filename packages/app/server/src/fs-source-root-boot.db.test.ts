@@ -1,8 +1,10 @@
 /**
- * The RAYSPEC_FS_SOURCE_ROOT boot refusal, on GROUND TRUTH through the REAL composition root, in BOTH
- * boot profiles that build the read-only fs-source factory:
+ * The RAYSPEC_FS_SOURCE_ROOT boot refusal — and its SCOPE — on GROUND TRUTH through the REAL
+ * composition root, in BOTH boot profiles that build the read-only fs-source factory:
  *   - the BACKEND spec path (`composition-root.ts` `deployDeclaredSpec`), and
  *   - the PRODUCT-YAML path (`product-boot.ts` `deployProductYamlSpec`).
+ * plus the profile that builds NEITHER — the AUTH-ONLY boot, which wires no handlers, so it can never
+ * hand out `init.fsSource`, never reaches the check, and SERVES whatever the variable points at.
  *
  * `makeFsSourceFactory` takes a plain `root: string` and legitimately cannot know which variable the
  * server resolved it from, so its refusal names the resolved path and nothing else. Each boot re-raises
@@ -22,6 +24,10 @@
  *       under `isProcessEntrypoint()`), so the branch membership is pinned against its comment-stripped
  *       SOURCE as ONE shape — the same way boot-timeout.test.ts and serve-bind.test.ts pin the
  *       entrypoint's other wiring — while the CLASS of each refusal is measured at runtime above.
+ *   (e) SCOPE: the SAME two bad roots on an AUTH-ONLY boot (no RAYSPEC_SPEC_PATH) SERVE — `/health`
+ *       answers 200 `{status:'ok'}` — because that boot builds no fs-source at all. This is the
+ *       behaviour `.env.example` documents; without it the entry's wording and the code could drift
+ *       apart again unobserved.
  *
  * DB ISOLATION: two whole throwaway DATABASEs named with process.pid (a backend one and a Product-YAML
  * one), exactly as the neighbouring boot suites. Skips without DATABASE_URL; the un-skippable ran-guard
@@ -101,6 +107,19 @@ describe.skipIf(!baseUrl)('RAYSPEC_FS_SOURCE_ROOT — the boot refusal names the
     return assembleServer(config, {
       registerProductTables: (tables) => registerScopedTables([...tables.values()]),
     });
+  }
+
+  /**
+   * Boot the REAL composition root with NO spec — the AUTH-ONLY profile — and RAYSPEC_FS_SOURCE_ROOT
+   * pointed at `root`. `loadServerConfig` still reads/trims/resolves the variable on this boot; what
+   * the profile never reaches is the factory build the two spec-deploy paths run.
+   */
+  async function bootAuthOnly(dbUrl: string, root: string): Promise<BootedServer> {
+    process.env.DATABASE_URL = dbUrl;
+    delete process.env.RAYSPEC_SPEC_PATH;
+    process.env.RAYSPEC_FS_SOURCE_ROOT = root;
+    const config = loadServerConfig();
+    return assembleServer(config);
   }
 
   /** The rejected boot's error — and the fail-closed half: no server, and no directory created. */
@@ -247,6 +266,43 @@ api:
     armsRan += 1;
   }, 180_000);
 
+  // ── (e) the AUTH-ONLY boot — the SAME two bad roots, and it SERVES ────────────────────────────
+  // The refusal above is the SPEC-DEPLOY boot's, because that is the only boot that BUILDS the
+  // fs-source. An auth-only boot wires no handlers, so it can never hand out `init.fsSource` and never
+  // reaches `makeFsSourceFactory` — the value is resolved by `loadServerConfig` and then checked by
+  // nobody. That is the documented scope of the check (`.env.example`), so it is pinned here: flip
+  // either arm to expect a refusal and it goes RED against the shipped behaviour.
+
+  it('AUTH-ONLY: a MISSING root does NOT abort the spec-less boot — it serves', async () => {
+    const server = await bootAuthOnly(specDbUrl, missingRoot);
+    try {
+      expect(server.deployMode).toBe('auth-only');
+      expect(server.declaredRoutes).toEqual([]);
+      const res = await server.app.request('/health');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ status: 'ok' });
+      // The one fail-closed half that still applies: the boot that checked nothing created nothing.
+      expect(existsSync(missingRoot)).toBe(false);
+    } finally {
+      await server.close();
+    }
+    armsRan += 1;
+  }, 180_000);
+
+  it('AUTH-ONLY: a root naming a REGULAR FILE does NOT abort the spec-less boot — it serves', async () => {
+    const server = await bootAuthOnly(specDbUrl, fileRoot);
+    try {
+      expect(server.deployMode).toBe('auth-only');
+      expect(server.declaredRoutes).toEqual([]);
+      const res = await server.app.request('/health');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ status: 'ok' });
+    } finally {
+      await server.close();
+    }
+    armsRan += 1;
+  }, 180_000);
+
   // ── (b)+(c) the Product-YAML rejects (they throw at step 3, before any DBOS launch) ────────────
 
   it('REJECT: a MISSING root aborts the Product-YAML boot naming RAYSPEC_FS_SOURCE_ROOT and the path', async () => {
@@ -315,8 +371,9 @@ describe('the entrypoint prints both refusal classes message-only, with no stack
 // otherwise SILENTLY SKIP the whole refusal proof and read GREEN.
 describe('fs-source-root refusal ran-guard', () => {
   it('the accept + reject arms ran under a required DB run', () => {
-    // 2 accept controls (backend + Product-YAML) + 4 rejects (missing / regular file, in both).
-    if (dbRequired) expect(armsRan).toBeGreaterThanOrEqual(6);
+    // 2 accept controls (backend + Product-YAML) + 4 rejects (missing / regular file, in both) +
+    // 2 auth-only serves (the same two bad roots on the boot that builds no fs-source).
+    if (dbRequired) expect(armsRan).toBeGreaterThanOrEqual(8);
     else expect(true).toBe(true);
   });
 });
