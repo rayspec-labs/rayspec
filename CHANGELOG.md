@@ -713,6 +713,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which exists to prove the contract against real concurrent connections — it has no sweeper and no
   counterpart to the in-process store's entry bound, and is not a deployable store.
 
+- **The platform boot banner now states the resolved housekeeping posture, so an operator can see which
+  way the two irreversible-deletion gates are set and which crontab the cleanup will fire on.** The
+  banner said nothing about any of the three: `RAYSPEC_GDPR_PURGE_ENABLED`, `RAYSPEC_ERASURE_ENABLED`
+  and `RAYSPEC_CLEANUP_SCHEDULE` were resolved at startup and handed straight to the cleanup scheduler
+  and the erasure seam, so the first runtime statement of the purge mode was the cleanup job's own
+  summary line — written when the job runs, at 03:00 by default. Every boot that mounts the platform
+  surface now prints a `Housekeeping (resolved):` block that reports what this boot will actually do
+  and names the variable behind every value it prints: the GDPR tombstone purge reads `ARMED` or
+  `DRY-RUN`, the tenant data erasure reads `ARMED`, `DRY-RUN` or `NOT WIRED`, and the daily cleanup
+  prints either the crontab it is scheduled on together with the `RAYSPEC_GDPR_RETENTION_DAYS` window
+  in days, or `NOT SCHEDULED`.
+
+  **Resolved values only, so a typo reads as the dry-run it produced rather than as the string that was
+  supplied.** Both gates arm on the exact string `true` and on nothing else, and that comparison is
+  unchanged; what changes is that `RAYSPEC_GDPR_PURGE_ENABLED=TRUE` now renders the `DRY-RUN` line
+  instead of saying nothing at all, and the banner is never handed the raw value, so it cannot echo one
+  back as though it had been accepted. Where a line would otherwise advertise something that cannot
+  happen, it says so instead, while still naming the variable it is about: a boot that launches no
+  durable worker reports the cleanup as `NOT SCHEDULED` rather than printing a crontab that will never
+  fire, and a boot that deployed no product stores reports that there is nothing to erase rather than a
+  gate posture.
+
+  **The static (frontend-only) profile is unchanged.** That boot prints its own banner, opens no
+  database, schedules no cleanup and wires no erasure, so it has no resolved housekeeping posture to
+  state and carries no such block.
+
+  **For embedders.** `BootedServer` gains one additive field, `housekeeping`, carrying the resolved
+  `cleanup` settings and the resolved `erasureEnabled` gate — the same values the boot hands to the
+  cleanup scheduler and the erasure seam. `bootBanner`'s signature is unchanged.
+
 ### Changed
 
 - **A product deployment whose `RAYSPEC_PRODUCT_TENANT_ID` is malformed or names no live org now
@@ -1427,6 +1457,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documented steps that follow then run verbatim. Repository release tooling only: no published
   package, API or runtime behavior changes.
 
+- **A boot that refuses because `RAYSPEC_FS_SOURCE_ROOT` does not name an existing directory now tells
+  the operator which variable to fix, and tells them without a stack trace.** The read-only fs-source
+  root is validated once, at boot: a path that does not exist, and a path naming a regular file, both
+  abort. That refusal is raised inside `@rayspec/platform`, which is handed a plain root path and never
+  learns which variable produced it, so the message named the resolved path and nothing else — unlike
+  the environment refusals those two boot paths raise themselves (`RAYSPEC_GDPR_RETENTION_DAYS`,
+  `RAYSPEC_ACCESS_TOKEN_TTL_SECONDS`, `RAYSPEC_CRON_TENANT_ID`, `RAYSPEC_BLOB_ROOT`,
+  `RAYSPEC_MEDIA_PREP`), which each name the variable they refuse on. It was also outside the small set
+  of classes the `rayspec-serve` entrypoint recognises as operator-actionable, so it printed as
+  `boot failed:` followed by a Node stack trace of absolute filesystem paths. Both boot paths now catch
+  that refusal where the variable *is* known and re-raise it in their own house wording: a spec boot
+  aborts with `Boot aborted —
+  RAYSPEC_FS_SOURCE_ROOT='<resolved path>' does not exist or is not a directory. … Fail-closed.`, and a
+  Product-YAML boot with the same sentence behind that boot's own `Boot aborted (Product-YAML) —`
+  prefix. Both classes are ones `rayspec-serve` prints message-only, so the refusal now arrives as that
+  one line and nothing else. Nothing about the decision changed: the same two conditions refuse, the
+  process still exits non-zero, serves nothing, and never creates the directory it refused — measured
+  on the real entrypoint, which exits `1` and leaves the missing path absent. `makeFsSourceFactory`
+  keeps its `(root: string)` signature and its own message, so an embedder calling it directly sees
+  exactly what it saw before.
+
 - **A product-boot refusal through `rayspec deploy` no longer carries a stack trace — it is the
   diagnosis alone, the way the same refusal through `rayspec-serve` already was.** Both entrypoints
   assemble the same deployment and raise the same refusals, but only the `rayspec-serve` entrypoint
@@ -1580,6 +1631,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the README's "Run the live smoke", now the single place that sequence lives, as the sibling example
   scripts already do. The script keeps its own usage line, and its unreachable-server message names
   the same section.
+
+- **The same smoke script no longer announces a `404` on a declared agent route, and the spec
+  reference now states what such a route does with a path parameter.** Just before its
+  write-isolation check the script posts `POST /claims/{id}/code` as a second organization and
+  printed `expect 404 — cannot code A's claim`, with comments attributing that refusal to a tenant
+  predicate resolving `{id}` — while its own case arm absorbed a `200` silently, so the announced
+  expectation and the accepted status disagreed. No such resolution exists to refuse anything: an
+  `agent` action declares `agent` and an optional `persistTo` and nothing else, so a route names no
+  store its path parameter could address; the route registers the tier throttle, authentication,
+  tenant resolution and `agent:run`, then hands the request to the run surface, which prepends the
+  matched parameters to the run input as a labelled `Route parameters:` block and otherwise leaves
+  them as text for the agent. The script now announces the run result it accepts, says why `{id}` is
+  not resolved, and keeps the write-isolation re-read as the hard assertion it always was — which
+  holds because every store the run touches goes through the tenant-scoped data layer bound to the
+  *caller's* organization, so another organization's id matches no row there exactly as an invented
+  one would. `docs/spec-reference.md` gains a "The path parameter" subsection saying the same for
+  every agent route, including the contrast a reader needs: a `store` route's `get` and the run
+  routes do answer `404` on an id outside the caller's tenant. **No behavior changed** — the
+  correction is in the example script and the reference.
 
 ### Security
 

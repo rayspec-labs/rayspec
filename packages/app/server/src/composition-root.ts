@@ -82,6 +82,7 @@ import {
   type DurableExecutor,
   type DurableExecutorIdentity,
   ExtensionLoadError,
+  FsSourceConfigError,
   type FsSourceFactory,
   invokeTriggerHandler,
   type LoadedExtensions,
@@ -358,6 +359,23 @@ export interface BootedServer {
     tenantId: string,
     opts?: { dryRun?: boolean; journalScrub?: boolean },
   ) => Promise<EraseResult>;
+  /**
+   * The RESOLVED housekeeping posture this boot runs under — the two irreversible-deletion operator
+   * gates and the daily cleanup crontab, exactly as `loadServerConfig` resolved them. RESOLVED, never
+   * the raw environment strings: a `TRUE` the strict comparison rejected reads here as the DISABLED
+   * value it actually produced, so nothing downstream can echo it back as though it were accepted.
+   * The boot banner states it (an operator otherwise learns the mode only when the job fires); an
+   * embedder that assembles the server itself reads the same values.
+   *
+   * It carries the SETTINGS only. Whether the cleanup is actually SCHEDULED is `runCleanupNow`'s
+   * presence, and whether there is anything to erase is `eraseTenantNow`'s.
+   */
+  housekeeping: {
+    /** The resolved cleanup knobs (crontab / GDPR gate / retention) — `ServerConfig.cleanup`. */
+    cleanup: CleanupSettings;
+    /** The resolved tenant data-erasure gate — `ServerConfig.erasureEnabled`. */
+    erasureEnabled: boolean;
+  };
   /** Close the underlying DB pool (the entrypoint wires this to SIGINT/SIGTERM). */
   close: () => Promise<void>;
 }
@@ -1787,6 +1805,10 @@ export async function assembleServer(
     ...(fireCronNow ? { fireCronNow } : {}),
     ...(runCleanupNow ? { runCleanupNow } : {}),
     ...(eraseTenantNow ? { eraseTenantNow } : {}),
+    // The RESOLVED housekeeping posture, straight off the validated config — the SAME values both
+    // deploy branches hand to `SystemCleanupScheduler` / `eraseTenant`, so the banner reports what this
+    // boot will actually do rather than re-reading (and re-interpreting) the environment.
+    housekeeping: { cleanup: config.cleanup, erasureEnabled: config.erasureEnabled },
     close: async () => {
       // Drain the durable worker FIRST (finish in-flight jobs, stop dequeuing) so a
       // shutdown does not orphan a job, THEN end the app DB pool. Swallow a worker-shutdown error so
@@ -2176,10 +2198,23 @@ async function deployDeclaredSpec(
   // RAYSPEC_FS_SOURCE_ROOT. Purely deploy-config-gated (no route KIND requires it, unlike the stream→blob
   // guard): build the factory when a root is configured, else leave it undefined (a handler that reads
   // `init.fsSource` then fail-closes loudly). `makeFsSourceFactory` fail-closes at build if the root is
-  // missing / not a directory. Injected into the engine in buildApp (below), like blobFactory.
-  const fsSourceFactory: FsSourceFactory | undefined = config.fsSourceRoot
-    ? makeFsSourceFactory(config.fsSourceRoot)
-    : undefined;
+  // missing / not a directory — it takes a plain `root` and knows nothing about the environment, so that
+  // refusal is re-raised HERE in the house form: it names the VARIABLE the operator has to fix, and a
+  // BootConfigError is one of the classes the entrypoint prints message-only (serve.ts). Injected into
+  // the engine in buildApp (below), like blobFactory.
+  let fsSourceFactory: FsSourceFactory | undefined;
+  if (config.fsSourceRoot) {
+    try {
+      fsSourceFactory = makeFsSourceFactory(config.fsSourceRoot);
+    } catch (err) {
+      if (!(err instanceof FsSourceConfigError)) throw err;
+      throw new BootConfigError(
+        `Boot aborted — RAYSPEC_FS_SOURCE_ROOT='${config.fsSourceRoot}' does not exist or is not a ` +
+          'directory. It is the READ-ONLY source root `init.fsSource` reads under; point it at an ' +
+          'existing directory on the box (nothing here creates it). Fail-closed.',
+      );
+    }
+  }
 
   // ── The MEDIA-TOKEN service (playback's 2nd auth path) deploy guard + build ──
   // A `kind:'stream', mode:'playback'` route is authenticated by a signed `?token=` media-JWT (HS256,

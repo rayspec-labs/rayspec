@@ -81,6 +81,7 @@ import {
 } from '@rayspec/durable-dbos';
 import type { BlobStoreFactory, DurableExecutorIdentity, FsSourceFactory } from '@rayspec/platform';
 import {
+  FsSourceConfigError,
   makeFsBlobStoreFactory,
   makeFsSourceFactory,
   makeHandlerDb,
@@ -2538,10 +2539,22 @@ export async function deployProductYamlSpec(
   // The READ-ONLY fs-source (`init.fsSource`) — purely deploy-config-gated (no capability KIND demands
   // it, unlike the blob byte-movers above): build the factory when RAYSPEC_FS_SOURCE_ROOT is configured,
   // else leave it undefined (`init.fsSource` absent; a handler that needs it fail-closes loudly).
-  // `makeFsSourceFactory` fail-closes at build if the root is missing / not a directory.
-  const fsSourceFactory: FsSourceFactory | undefined = config.fsSourceRoot
-    ? makeFsSourceFactory(config.fsSourceRoot)
-    : undefined;
+  // `makeFsSourceFactory` fail-closes at build if the root is missing / not a directory — it takes a
+  // plain `root` and knows nothing about the environment, so that refusal is re-raised here as the
+  // NAMED ProductBootError every other env refusal in this boot throws.
+  let fsSourceFactory: FsSourceFactory | undefined;
+  if (config.fsSourceRoot) {
+    try {
+      fsSourceFactory = makeFsSourceFactory(config.fsSourceRoot);
+    } catch (e) {
+      if (!(e instanceof FsSourceConfigError)) throw e;
+      throw new ProductBootError(
+        `RAYSPEC_FS_SOURCE_ROOT='${config.fsSourceRoot}' does not exist or is not a directory. It is ` +
+          'the READ-ONLY source root `init.fsSource` reads under; point it at an existing directory ' +
+          'on the box (nothing here creates it). Fail-closed.',
+      );
+    }
+  }
   if (withAudio) {
     if (!config.mediaSigningKey) {
       throw new ProductBootError(

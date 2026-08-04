@@ -85,6 +85,54 @@ export function bootBanner(server: BootedServer, base: string): string {
     }
     lines.push('    (webhook/event/manual trigger kinds are RESERVED per-kind — not fired.)');
   }
+
+  // The RESOLVED housekeeping posture — the two irreversible-deletion operator gates and the daily
+  // cleanup crontab. Printed on every boot this banner covers, because BOTH directions matter: an
+  // operator who armed a gate gets the confirmation that irreversible deletion is now live, and one
+  // whose `TRUE`/`1` the strict comparison rejected sees DRY-RUN instead of silence. Every line names
+  // the variable behind every value it prints — the crontab line prints two settings and so names two —
+  // including the lines that report the setting has nothing to act on.
+  // `server.housekeeping` carries what the boot RESOLVED, so the supplied string is never echoed back
+  // as though it had been accepted.
+  const { cleanup, erasureEnabled } = server.housekeeping;
+  lines.push('');
+  lines.push('  Housekeeping (resolved):');
+  if (cleanup.gdprPurgeEnabled) {
+    lines.push(
+      "    GDPR tombstone purge:  ARMED — RAYSPEC_GDPR_PURGE_ENABLED is exactly 'true'; when the cleanup runs it DELETES irreversibly",
+    );
+  } else {
+    lines.push(
+      "    GDPR tombstone purge:  DRY-RUN — counts what it would delete, deletes nothing (set RAYSPEC_GDPR_PURGE_ENABLED to exactly 'true' to arm)",
+    );
+  }
+  // `eraseTenantNow` is undefined for an auth-only / no-product boot (a spec with zero product
+  // stores) — there is nothing there for the gate to act on, so say that instead of a gate posture.
+  if (server.eraseTenantNow === undefined) {
+    lines.push(
+      '    Tenant data erasure:   NOT WIRED — this boot deployed no product stores, so there is nothing for RAYSPEC_ERASURE_ENABLED to act on',
+    );
+  } else if (erasureEnabled) {
+    lines.push(
+      "    Tenant data erasure:   ARMED — RAYSPEC_ERASURE_ENABLED is exactly 'true'; an erasure call DELETES irreversibly",
+    );
+  } else {
+    lines.push(
+      "    Tenant data erasure:   DRY-RUN — counts what it would delete, deletes nothing (set RAYSPEC_ERASURE_ENABLED to exactly 'true' to arm)",
+    );
+  }
+  // `runCleanupNow` is undefined for an auth-only / no-durable-worker boot (DBOS is not launched
+  // there, so the cleanup workflow is not wired). The crontab still RESOLVES on such a boot — printing
+  // it would advertise a schedule that never fires, so the banner reports the absence instead.
+  if (server.runCleanupNow === undefined) {
+    lines.push(
+      '    Daily cleanup:         NOT SCHEDULED — this boot wires no durable worker, so RAYSPEC_CLEANUP_SCHEDULE fires nothing here',
+    );
+  } else {
+    lines.push(
+      `    Daily cleanup:         '${cleanup.schedule}'   (RAYSPEC_CLEANUP_SCHEDULE; RAYSPEC_GDPR_RETENTION_DAYS = ${cleanup.gdprRetentionDays} days)`,
+    );
+  }
   lines.push(RULE);
   lines.push('');
   return lines.join('\n');
@@ -94,7 +142,8 @@ export function bootBanner(server: BootedServer, base: string): string {
  * Build the boot banner for a STATIC-PROFILE (frontend-only) server. Distinct from `bootBanner`: this
  * boot mounts NO auth/OIDC/runs/API route and opens no database, so the banner honestly advertises ONLY
  * the served static frontend(s) + the mount-readiness `/health` — it never claims the platform
- * auth/run routes a static boot does not have.
+ * auth/run routes a static boot does not have. It carries no `Housekeeping (resolved):` block either:
+ * a static boot schedules no cleanup and wires no erasure, so there is no resolved posture to state.
  */
 export function staticBootBanner(server: StaticBootedServer, base: string): string {
   const lines: string[] = [];
