@@ -1681,8 +1681,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there, and the reader weighing the trust boundary the note describes had nothing to follow. The
   target is now `../../SECURITY.md`, which resolves to the repository root `SECURITY.md`, the only
   `SECURITY.md` tracked here. Resolving every relative `*.md` link in every committed `.md` file
-  confirms this was the only target that did not exist: the other 80, across 12 files, each resolve
-  to a file present in the tree.
+  confirms this was the only target that did not exist: of the 81 such links across 12 files, the
+  other 80 each resolve to a file present in the tree.
 
 ### Security
 
