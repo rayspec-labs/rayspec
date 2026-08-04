@@ -434,12 +434,14 @@ export async function serveDeployment(
     assembleServer,
     assembleStaticServer,
     BootConfigError,
+    BootTimeoutError,
     bootBanner,
     bootBaseUrl,
     DeployError,
     detectStaticProfile,
     loadServerConfig,
     loadStaticServerConfig,
+    ProductBootError,
     staticBootBanner,
   } = await import('@rayspec/server');
   const { sealProductStores } = await import('@rayspec/db/composition');
@@ -521,7 +523,23 @@ export async function serveDeployment(
           'hook → @rayspec/db/composition registerProductStores; a verify-not-register failure ' +
           'means the built tables did not reach the deny-by-default chokepoint Set.)',
       );
-    } else if (err instanceof BootConfigError) {
+    } else if (
+      err instanceof BootConfigError ||
+      err instanceof ProductBootError ||
+      err instanceof BootTimeoutError
+    ) {
+      // A fail-closed CONFIG abort (a missing secret / a missing agent credential) or a product-boot
+      // refusal (a RAYSPEC_PRODUCT_TENANT_ID that is not a valid org UUID or names no live org, an
+      // unsupported RAYSPEC_MEDIA_PREP, …) — an operator-actionable message, not an unexpected crash.
+      // Print the message only, no stack: absolute paths from the machine that BUILT the artifact tell
+      // the operator nothing and bury the one line that does. Anything else is genuinely unexpected and
+      // keeps its stack below.
+      //
+      // This list is meant to stay IDENTICAL to the rayspec-serve entrypoint's
+      // (packages/app/server/src/serve.ts): both boot the same spec and must give the same refusal the
+      // same treatment. BootTimeoutError is named for that parity alone — withBootTimeout is wired only
+      // in serve.ts, so no boot timeout can reach THIS catch; listing it keeps the two lists comparable
+      // as wholes instead of leaving a difference that has to be re-justified on every change.
       console.error(`[rayspec deploy] ${err.message}`);
     } else {
       console.error(
