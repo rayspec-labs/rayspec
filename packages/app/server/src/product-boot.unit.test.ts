@@ -38,6 +38,38 @@ import {
   WIRED_EXTRACTION_BACKENDS,
 } from './product-boot.js';
 
+/**
+ * The two `@openai/agents` registration entry points, spied so the boot-side wiring can be observed
+ * through what the adapter REALLY registers — the technique packages/adapters/openai/src/auth.test.ts
+ * uses, which pins the adapter's half of the same contract. Everything else in the SDK stays the real
+ * module. `vi.hoisted` holds the spies, because this file imports its subject statically and the mock
+ * factory therefore runs before any plain top-level const exists.
+ */
+const openaiRegistration = vi.hoisted(() => ({
+  setDefaultOpenAIKey: vi.fn(),
+  setDefaultOpenAIClient: vi.fn(),
+}));
+
+vi.mock('@openai/agents', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@openai/agents')>();
+  return {
+    ...actual,
+    setDefaultOpenAIKey: (...args: unknown[]) => openaiRegistration.setDefaultOpenAIKey(...args),
+    setDefaultOpenAIClient: (...args: unknown[]) =>
+      openaiRegistration.setDefaultOpenAIClient(...args),
+  };
+});
+
+/** The client handed to setDefaultOpenAIClient by the single registration a case performed. */
+function registeredClient(): { timeout: number; maxRetries: number; apiKey: string | null } {
+  expect(openaiRegistration.setDefaultOpenAIClient).toHaveBeenCalledTimes(1);
+  return openaiRegistration.setDefaultOpenAIClient.mock.calls[0]?.[0] as {
+    timeout: number;
+    maxRetries: number;
+    apiKey: string | null;
+  };
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const ACME_YAML = resolve(here, '../../../../examples/acme-notes/acme-notes.product.yaml');
 const fakeBlob = {} as never; // fail-closed cases throw before touching the blob store
@@ -150,6 +182,25 @@ describe('nonRealProviderBanner — loud marker for non-real providers', () => {
     expect(nonRealProviderBanner({ STT_PROVIDER: 'deepgram' }, false, 'live', 'live')).toBeNull();
     expect(nonRealProviderBanner({ STT_PROVIDER: 'deepgram' }, false, 'live', '')).toBeNull();
   });
+  it('warns loudly on RAYSPEC_NORMALIZE_MODE=deterministic (the mirror of the responder arm)', () => {
+    const b = nonRealProviderBanner(
+      { STT_PROVIDER: 'deepgram' },
+      false,
+      'live',
+      'live',
+      'deterministic',
+    );
+    expect(b).toContain('NON-REAL PROVIDER');
+    expect(b).toContain('RAYSPEC_NORMALIZE_MODE=deterministic');
+  });
+  it('a live normalize mode (or a record input with no normalize step passing "") trips no arm', () => {
+    expect(
+      nonRealProviderBanner({ STT_PROVIDER: 'deepgram' }, false, 'live', 'live', 'live'),
+    ).toBeNull();
+    expect(
+      nonRealProviderBanner({ STT_PROVIDER: 'deepgram' }, false, 'live', 'live', ''),
+    ).toBeNull();
+  });
 });
 
 describe('buildLiveAgent (fail-closed)', () => {
@@ -239,6 +290,39 @@ describe('makeExtractionBackend — the boot-side backend factory (fail-closed p
   it("constructs the OpenAIAdapter for 'openai' (demands OPENAI_API_KEY)", () => {
     expect(makeExtractionBackend({ OPENAI_API_KEY: 'sk-x' }, 'openai').id).toBe('openai');
     expect(() => makeExtractionBackend({}, 'openai')).toThrow(/OPENAI_API_KEY is required/);
+  });
+  it('carries BOTH agent request bounds from the env onto the client the openai backend registers', async () => {
+    // The env-to-adapter wire: the resolvers are pinned in @rayspec/platform and what the adapter
+    // registers is pinned in its own suite, but nothing observed the join — a dropped spread or a
+    // misspelled key here leaves every suite green while the documented bounds stop applying.
+    openaiRegistration.setDefaultOpenAIKey.mockClear();
+    openaiRegistration.setDefaultOpenAIClient.mockClear();
+    const backend = makeExtractionBackend(
+      {
+        OPENAI_API_KEY: 'sk-bounded',
+        RAYSPEC_AGENT_REQUEST_TIMEOUT_MS: '45000',
+        RAYSPEC_AGENT_MAX_ATTEMPTS: '2',
+      },
+      'openai',
+    );
+    // Registration happens in resolveAuth() — the one pre-run auth call — not in the constructor.
+    expect(await backend.resolveAuth()).toBe('api-key');
+    const client = registeredClient();
+    expect(client.timeout).toBe(45_000); // RAYSPEC_AGENT_REQUEST_TIMEOUT_MS, verbatim
+    expect(client.maxRetries).toBe(1); // RAYSPEC_AGENT_MAX_ATTEMPTS=2 ⇒ the first try plus one retry
+    expect(client.apiKey).toBe('sk-bounded');
+    expect(openaiRegistration.setDefaultOpenAIKey).not.toHaveBeenCalled();
+  });
+  it('registers the API KEY and NO client when neither agent request bound is set', async () => {
+    // The other half of the promise: with both variables unset the boot registers auth exactly as it
+    // did before they existed — the key alone, no client and so no bound of any kind.
+    openaiRegistration.setDefaultOpenAIKey.mockClear();
+    openaiRegistration.setDefaultOpenAIClient.mockClear();
+    const backend = makeExtractionBackend({ OPENAI_API_KEY: 'sk-unbounded' }, 'openai');
+    expect(await backend.resolveAuth()).toBe('api-key');
+    expect(openaiRegistration.setDefaultOpenAIKey).toHaveBeenCalledTimes(1);
+    expect(openaiRegistration.setDefaultOpenAIKey).toHaveBeenCalledWith('sk-unbounded');
+    expect(openaiRegistration.setDefaultOpenAIClient).not.toHaveBeenCalled();
   });
   it("constructs the AnthropicAdapter for 'anthropic' (subscription token + config root)", () => {
     const ok = { CLAUDE_CODE_OAUTH_TOKEN: 'tok', RAYSPEC_ANTHROPIC_CONFIG_ROOT: '/tmp/anthro' };
