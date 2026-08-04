@@ -754,7 +754,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packed tarball — so a published install reports the version it actually is, from any directory, with
   no dependency on the source layout. This is the top-level flag only: it reports the CLI itself, not
   the versions of the packages installed around it. Every other leading `--flag`, and every unknown
-  subcommand, is still the same exit-`2` usage error on stderr.
+  subcommand, is still the same exit-`2` usage error on stderr — and so is a token after the flag:
+  `rayspec --version --nope` is refused rather than answered, because a branch that sits ahead of the
+  leading-dash check would otherwise be a hole in the grammar that check enforces.
 
 ### Changed
 

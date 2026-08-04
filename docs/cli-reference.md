@@ -27,20 +27,6 @@ A bad, missing, or out-of-jail **spec path** given to `doctor`, `plan`, or
 `openapi` is *not* a usage error — it is caught and returned as an `ok: false`
 result on **stdout** (exit `1`), the same channel as an invalid spec.
 
-### The `--version` flag
-
-One flag stands outside the subcommand grammar. `rayspec --version` (or `-v`)
-reports the CLI's own version on **stdout** and exits `0`:
-
-```json
-{ "ok": true, "version": "1.7.0" }
-```
-
-The value is read from the CLI package's own manifest at run time, so it names
-the version you actually have installed. Every *other* leading `--flag` remains a
-usage error (the exit-`2` row above): with no subcommand there is nothing to
-dispatch it to.
-
 The commands split into three groups:
 
 - A **read-only diagnostic floor** — `doctor`, `plan`, `openapi`, `gen-handler`.
@@ -52,6 +38,21 @@ The commands split into three groups:
 - A clearly separated **local-dev, mutating `dev` group** — `dev gen-secrets`,
   `dev db`, `dev bootstrap-tenant`. These deliberately write a secrets file,
   create a database, or provision a tenant.
+
+### The `--version` flag
+
+One flag stands outside the subcommand grammar. `rayspec --version` (or `-v`)
+reports the CLI's own version on **stdout** and exits `0`:
+
+```json
+{ "ok": true, "version": "1.7.0" }
+```
+
+The value is read from the CLI package's own manifest at run time, so it names
+the version you actually have installed. It takes no arguments: a token after it is
+refused as a usage error (exit `2`) rather than ignored. Every *other* leading
+`--flag` remains a usage error too (the exit-`2` row above): with no subcommand there
+is nothing to dispatch it to.
 
 ### The spec-path jail
 

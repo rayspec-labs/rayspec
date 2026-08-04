@@ -230,6 +230,12 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   // otherwise it is rejected as "expected a subcommand" (exit 2) and an installed CLI cannot be asked
   // which version it is. It emits the ordinary single-JSON-object envelope on stdout and exits 0.
   if (command === '--version' || command === '-v') {
+    // It answers the flag and nothing else, so a trailing token is refused rather than ignored: this
+    // branch sits BEFORE the leading-dash check, and swallowing what follows would make it a hole in
+    // the very grammar that check enforces (`rayspec --version --nope` would report success).
+    if (rest.length > 0) {
+      throw new CliError(`\`${command}\` takes no arguments, got ${rest.join(' ')}`);
+    }
     await emit({ ok: true, version: readCliVersion() });
     return 0;
   }
