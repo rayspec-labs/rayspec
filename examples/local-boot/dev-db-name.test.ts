@@ -87,11 +87,13 @@ describe('devDatabaseName', () => {
     // collision improbable, it does not make one impossible.
     const a = devDatabaseName(`/repo/examples/${'a'.repeat(60)}_alpha/rayspec.yaml`);
     const b = devDatabaseName(`/repo/examples/${'a'.repeat(60)}_beta/rayspec.yaml`);
-    const shared = `rayspec_local_${'a'.repeat(40)}_`;
+    const shared = `rayspec_local_${'a'.repeat(31)}_`;
     for (const name of [a, b]) {
       expect(name.startsWith(shared)).toBe(true);
       expect(name.slice(shared.length)).toMatch(/^[0-9a-f]{8}$/);
-      expect(Buffer.byteLength(name, 'utf8')).toBe(PG_MAX_IDENTIFIER_BYTES);
+      // 54 bytes, not 63: the cap reserves the 9 bytes `_dbos_sys` needs, so the companion the boot
+      // drops beside this database survives truncation as its own identifier.
+      expect(Buffer.byteLength(name, 'utf8')).toBe(PG_MAX_IDENTIFIER_BYTES - '_dbos_sys'.length);
     }
     expect(a).not.toBe(b);
   });
@@ -111,5 +113,34 @@ describe('devDatabaseName', () => {
     expect(devDatabaseName(`/repo/examples/${longestThatFits}/rayspec.yaml`)).toBe(
       `rayspec_local_${longestThatFits}`,
     );
+  });
+
+  it('leaves room for the DBOS companion suffix, so dropping it cannot re-target the app database', () => {
+    // serve.ts drops `<devDbName>_dbos_sys` just before creating `<devDbName>`, so that a fresh-empty
+    // app database never pairs with stale DBOS workflow state. Postgres truncates at 63 bytes, so a
+    // 63-byte app name makes those two identifiers EQUAL — the drop would then name the app database
+    // (already dropped one statement earlier), and the stale companion would survive untouched.
+    // A capped name must therefore stay short enough that the whole suffix survives.
+    const capped = devDatabaseName(`/repo/examples/${'d'.repeat(120)}_alpha/rayspec.yaml`);
+    const companion = `${capped}_dbos_sys`;
+    expect(Buffer.byteLength(companion, 'utf8')).toBeLessThanOrEqual(PG_MAX_IDENTIFIER_BYTES);
+    expect(companion.slice(0, PG_MAX_IDENTIFIER_BYTES)).not.toBe(capped);
+  });
+
+  it('keeps two capped siblings apart in their companion names as well', () => {
+    const a = devDatabaseName(`/repo/examples/${'e'.repeat(120)}_alpha/rayspec.yaml`);
+    const b = devDatabaseName(`/repo/examples/${'e'.repeat(120)}_beta/rayspec.yaml`);
+    expect(a).not.toBe(b);
+    expect(`${a}_dbos_sys`.slice(0, PG_MAX_IDENTIFIER_BYTES)).not.toBe(
+      `${b}_dbos_sys`.slice(0, PG_MAX_IDENTIFIER_BYTES),
+    );
+  });
+
+  it('bounds a non-ASCII directory name by BYTES, not by characters', () => {
+    // The bound rests on the sanitizer mapping every surviving character to one ASCII byte. A name
+    // made of multi-byte characters must not slip past the cap by being short in characters.
+    const name = devDatabaseName(`/repo/examples/${'\u00e4'.repeat(80)}/rayspec.yaml`);
+    expect(Buffer.byteLength(name, 'utf8')).toBeLessThanOrEqual(PG_MAX_IDENTIFIER_BYTES);
+    expect(name).toMatch(/^[a-z0-9_]+$/);
   });
 });

@@ -220,6 +220,19 @@ describe('run — the top-level --version flag', () => {
     expect(err).toContain('rayspec — RaySpec CLI');
   });
 
+  // `--version` is answered before the leading-dash check, so it must not become a hole in the
+  // grammar the exit-2 row describes: a token after it is refused rather than silently ignored.
+  for (const extra of ['--nope', 'extra'] as const) {
+    it(`\`--version ${extra}\` → exit 2, nothing on stdout`, async () => {
+      await run(['--version', extra]);
+      expect(process.exitCode).toBe(2);
+      expect(outChunks.join('')).toBe('');
+      const err = errChunks.join('');
+      expect(JSON.parse(err.split('\n')[0] as string)).toMatchObject({ ok: false });
+      expect(err).toContain('rayspec — RaySpec CLI');
+    });
+  }
+
   it('an unknown subcommand → exit 2, the usage envelope on stderr, nothing on stdout', async () => {
     await run(['frobnicate']);
     expect(process.exitCode).toBe(2);
@@ -327,5 +340,19 @@ describe('main — the tenant command group is dispatched from the top level', (
   it('the top-level enumerations name `tenant` on both the missing and the unknown path', async () => {
     await expect(main([])).rejects.toThrow(/`tenant`/);
     await expect(main(['frobnicate'])).rejects.toThrow(/`tenant`/);
+  });
+});
+
+describe('docs/cli-reference.md — the --version example does not go stale', () => {
+  it("the version in the reference's example equals the CLI's own manifest version", () => {
+    const manifest = JSON.parse(
+      readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as { version: string };
+    const doc = readFileSync(new URL('../../../../docs/cli-reference.md', import.meta.url), 'utf8');
+    // The reference prints one worked example of the envelope. Nothing regenerates it, so without
+    // this lock a release bump leaves the document naming a version the CLI no longer reports.
+    const shown = /\{\s*"ok":\s*true,\s*"version":\s*"([^"]+)"\s*\}/.exec(doc);
+    expect(shown, 'the --version example was not found in docs/cli-reference.md').not.toBeNull();
+    expect((shown as RegExpExecArray)[1]).toBe(manifest.version);
   });
 });

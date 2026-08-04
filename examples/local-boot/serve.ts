@@ -220,6 +220,13 @@ const MAX_IDENTIFIER_BYTES = 63;
 const DEV_DB_PREFIX = 'rayspec_local_';
 /** Hex characters of the spec-path digest appended to a name that had to be capped. */
 const DIGEST_CHARS = 8;
+/**
+ * The companion database a durableWorker spec auto-creates beside the app database. The boot drops
+ * `<devDbName>${DBOS_SYS_SUFFIX}` before creating `<devDbName>`, so a capped name must leave this
+ * suffix room to survive Postgres's 63-byte truncation — at 63 bytes the two identifiers are equal
+ * and that drop would name the app database instead of the companion.
+ */
+const DBOS_SYS_SUFFIX = '_dbos_sys';
 
 /**
  * The throwaway dev DB name for a spec path, sanitized to a safe pg identifier.
@@ -240,7 +247,19 @@ const DIGEST_CHARS = 8;
  * digest of the RESOLVED spec path, so the result is always ≤ 63 bytes and what keeps two capped
  * siblings apart is that digest rather than how much of their directory names happens to fit. A name
  * that already fits is returned UNCHANGED — an existing backend keeps the database it has been
- * booting into.
+ * booting into. (The one name that does change is a spec at a filesystem root, which used to derive
+ * the empty-segment `rayspec_local_`; that name was shared by every such spec, so there was no single
+ * backend's database to keep.)
+ *
+ * The cap also reserves room for `DBOS_SYS_SUFFIX`. The boot drops `<name>_dbos_sys` immediately
+ * before creating `<name>`, so that a fresh-empty app database never pairs with stale DBOS workflow
+ * state. Truncation makes those two identifiers EQUAL at exactly 63 bytes, which is the length a cap
+ * that only respected `MAX_IDENTIFIER_BYTES` would produce every time — the drop would then name the
+ * app database, already dropped one statement earlier, and the stale companion would survive. Capping
+ * `MAX_IDENTIFIER_BYTES - DBOS_SYS_SUFFIX.length` bytes short keeps both identifiers whole and
+ * distinct. A name that already FITS but is longer than that stays as it is and keeps the aliasing:
+ * changing it would orphan the database that backend has been booting into, which is the cost this
+ * derivation exists to avoid.
  *
  * What that buys is a BOUND, not a guarantee of distinctness, and the wrapper does not claim one.
  * `DIGEST_CHARS` hex characters are 32 bits, so two capped names still collide when their spec paths'
@@ -265,7 +284,8 @@ export function devDatabaseName(specPath: string): string {
   const full = `${DEV_DB_PREFIX}${sanitized}`;
   if (full.length <= MAX_IDENTIFIER_BYTES) return full;
   const digest = createHash('sha256').update(resolved).digest('hex').slice(0, DIGEST_CHARS);
-  const cap = MAX_IDENTIFIER_BYTES - DEV_DB_PREFIX.length - 1 - DIGEST_CHARS;
+  const cap =
+    MAX_IDENTIFIER_BYTES - DBOS_SYS_SUFFIX.length - DEV_DB_PREFIX.length - 1 - DIGEST_CHARS;
   return `${DEV_DB_PREFIX}${sanitized.slice(0, cap)}_${digest}`;
 }
 
