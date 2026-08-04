@@ -1016,8 +1016,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   startup: `22.12.0`, `22.19.0`, `22.20.0` and `23.11.1` install nothing; `22.21.1`, `24.0.0` and
   `25.6.1` install an `EnvHttpProxyAgent`. On a Node without the feature the boot installs nothing
   either — a deployment carrying those variables in anticipation of a newer runtime keeps the
-  direct egress it had. Second, `NODE_USE_ENV_PROXY` must be exactly `1`, the only value Node itself
-  accepts. Third, at least one non-empty `HTTP_PROXY` / `HTTPS_PROXY` / `http_proxy` / `https_proxy`,
+  direct egress it had. Second, `NODE_USE_ENV_PROXY` carries a value **that** runtime accepts, which is
+  not the same value everywhere: the strict "must be `1`" comparison arrived on the 24 line at
+  **24.5.0**, and the 24 releases before it arm on any non-empty value. Measured the same way, with `HTTP_PROXY` set —
+  `24.0.0`, `24.1.0`, `24.2.0`, `24.3.0`, `24.4.0` and `24.4.1` install an `EnvHttpProxyAgent` for
+  `NODE_USE_ENV_PROXY=true`, `=0` or `=2`, while `22.21.0`, `22.21.1`, `24.5.0` and `25.6.1` install
+  nothing for any of them and only `=1` arms them; a blank value arms none of them. The boot follows
+  whichever rule the running Node applies rather than picking one and calling it Node's, so a
+  deployment on 24.0–24.4 that spells the opt-in `true` — proxied by stock Node, and therefore
+  broken by the clobber — is restored too. Third, at least one non-empty `HTTP_PROXY` / `HTTPS_PROXY` / `http_proxy` / `https_proxy`,
   which is also what Node requires before it installs anything. Below that bar the boot does not so
   much as load undici, and the two global-dispatcher symbols come out of it as the same objects they
   went in as. `NO_PROXY` keeps working: the dispatcher reads it itself, and a host excluded there is

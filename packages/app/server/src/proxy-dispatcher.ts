@@ -24,11 +24,12 @@
  * operator excluded from proxying keeps its direct route.
  *
  * WHEN. Only when the RUNNING Node would itself have installed that dispatcher at startup — see
- * `envProxyRequested`, which asks Node's question in Node's own terms: the opt-in, a named proxy, AND
- * a runtime that implements the opt-in at all. Miss any one of the three and the boot touches nothing:
- * honouring the proxy variables more widely than Node does would newly route egress through a proxy
- * for deployments that merely happen to carry them. This restores the behaviour Node documents, on the
- * versions that document it; it adds none Node would not give, on any version.
+ * `envProxyRequested`, which asks Node's question in Node's own terms: a runtime that implements the
+ * opt-in at all, the opt-in carrying a value THAT runtime accepts (the accepted set is not the same on
+ * every version — see `nodeAcceptsAnyEnvProxyOptIn`), and a named proxy. Miss any one of the three and
+ * the boot touches nothing: honouring the proxy variables more widely than Node does would newly route
+ * egress through a proxy for deployments that merely happen to carry them. This restores the behaviour
+ * the running Node gives; it adds none that Node would not, on any version.
  *
  * The fix belongs HERE — the boot path — rather than in the adapter that pulls undici in: the
  * clobbering is a property of importing that closure at all, so the process that OWNS the closure is
@@ -69,13 +70,49 @@ export const PROXY_URL_ENV_VARS = [
  * engines range from one test run, rather than being re-measured by whichever Node happens to run CI.
  */
 export function nodeSupportsEnvProxy(nodeVersion: string = process.versions.node): boolean {
-  const parts = nodeVersion.split('.').map((part) => Number.parseInt(part, 10));
-  const major = parts[0];
-  const minor = parts[1];
-  if (major === undefined || Number.isNaN(major)) return false;
+  const { major, minor } = parseNodeVersion(nodeVersion);
+  if (Number.isNaN(major)) return false;
   if (major >= 24) return true;
   if (major !== 22) return false;
-  return minor !== undefined && !Number.isNaN(minor) && minor >= 21;
+  return !Number.isNaN(minor) && minor >= 21;
+}
+
+/** `NaN` for a component this cannot read; every rule below treats `NaN` as the do-less answer. */
+function parseNodeVersion(nodeVersion: string): { major: number; minor: number } {
+  const parts = nodeVersion.split('.').map((part) => Number.parseInt(part, 10));
+  return { major: parts[0] ?? Number.NaN, minor: parts[1] ?? Number.NaN };
+}
+
+/**
+ * Does the RUNNING Node accept ANY non-empty `NODE_USE_ENV_PROXY`, rather than only the exact `1`?
+ *
+ * Node's own opt-in rule is NOT the same on every version that has the feature, and the difference
+ * falls inside the range this repository declares supported: the strict "must be `1`" comparison
+ * arrived on the 24 line at 24.5.0, and the 24 releases before it arm on any non-empty value.
+ *
+ * MEASURED, environment set at process startup, `HTTP_PROXY=http://127.0.0.1:3128` in every row,
+ * reading `Symbol.for('undici.globalDispatcher.1')`:
+ *
+ *     NODE_USE_ENV_PROXY   24.0.0 24.1.0 24.2.0 24.3.0 24.4.0 24.4.1 | 24.5.0 25.6.1 22.21.0 22.21.1
+ *     '1'                  agent  agent  agent  agent  agent  agent  | agent  agent  agent   agent
+ *     'true' / '0' / '2'    agent  agent  agent  agent  agent  agent  | <none> <none> <none>  <none>
+ *     '01' / ' 1' / '1 '   agent   —      —      —     agent  agent  | <none> <none> <none>  <none>
+ *     ''                   <none> <none> <none> <none> <none> <none> | <none> <none> <none>  <none>
+ *
+ * (`agent` = `EnvHttpProxyAgent`, `<none>` = `<undefined>`, `—` = not measured at that minor.)
+ * So on 24.0–24.4 the rule is "present and non-empty"; from 24.5.0, and on the whole 22 line, which
+ * received the feature at 22.21.0 with the strict semantics already in it, the rule is "exactly `1`".
+ *
+ * The gate mirrors whichever rule the RUNNING Node applies, because the promise this module makes is
+ * that it installs where that Node installed — nothing wider. Being uniformly strict would be the
+ * cheaper code, but it would leave a deployment on 24.0–24.4 carrying `NODE_USE_ENV_PROXY=true`
+ * proxy-aware at startup and direct-connecting after the boot closure loads, which is issue #287
+ * itself. An unreadable minor falls to STRICT: the failure direction of a wrong guess here is routing
+ * somebody's egress through a proxy they did not ask for, so the unknown case installs less, never more.
+ */
+function nodeAcceptsAnyEnvProxyOptIn(nodeVersion: string): boolean {
+  const { major, minor } = parseNodeVersion(nodeVersion);
+  return major === 24 && minor < 5;
 }
 
 /**
@@ -83,9 +120,9 @@ export function nodeSupportsEnvProxy(nodeVersion: string = process.versions.node
  *
  * Three conditions, all of them Node's own:
  *  - the runtime implements `NODE_USE_ENV_PROXY` — see `nodeSupportsEnvProxy`;
- *  - `NODE_USE_ENV_PROXY` is the exact string `1`. Measured on Node 22.21.1: `0`, `true`, `01`, `2`,
- *    ` 1`, `1 ` and blank all leave Node's proxy support off, so this compares strictly, with no
- *    truthy-coercion of an ambiguous value;
+ *  - `NODE_USE_ENV_PROXY` carries a value THAT runtime accepts — see `nodeAcceptsAnyEnvProxyOptIn`.
+ *    Nothing here coerces: where Node compares strictly this compares strictly, and where Node takes
+ *    any non-empty value so does this. Blank is "no opt-in" on every version;
  *  - at least one of the four proxy-URL variables is non-empty. With the opt-in set and none of them
  *    present Node installs nothing, and an EMPTY value counts as absent there too.
  *
@@ -96,7 +133,9 @@ export function envProxyRequested(
   nodeVersion: string = process.versions.node,
 ): boolean {
   if (!nodeSupportsEnvProxy(nodeVersion)) return false;
-  if (env.NODE_USE_ENV_PROXY !== '1') return false;
+  const optIn = env.NODE_USE_ENV_PROXY;
+  if (optIn === undefined || optIn === '') return false;
+  if (optIn !== '1' && !nodeAcceptsAnyEnvProxyOptIn(nodeVersion)) return false;
   return PROXY_URL_ENV_VARS.some((name) => {
     const value = env[name];
     return value !== undefined && value !== '';

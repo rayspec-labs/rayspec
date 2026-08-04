@@ -4,9 +4,11 @@
  * The end-to-end counterproof for this defect is a proxy-only deployment running an agent; what THIS
  * file pins is the part a normal CI run can execute:
  *
- *   - the GATE, in all three of its directions. The opt-in is compared exactly the way Node compares
- *     it; the RUNTIME condition is pinned across the whole declared engines range (`node >= 22`), where
- *     `NODE_USE_ENV_PROXY` exists only from 22.21.0 and on the 24 line; and the closed direction asserts
+ *   - the GATE, in all three of its directions. The opt-in is compared exactly the way the RUNNING Node
+ *     compares it — strictly from 22.21.0 and from 24.5.0, and on any non-empty value across the
+ *     24.0–24.4 window, which is Node's own split and not this repository's; the RUNTIME condition is
+ *     pinned across the whole declared engines range (`node >= 22`), where `NODE_USE_ENV_PROXY` exists
+ *     only from 22.21.0 and on the 24 line; and the closed direction asserts
  *     the two global-dispatcher symbols are the SAME OBJECTS afterwards — not merely "still a
  *     dispatcher" — so a deployment with no proxy configuration is untouched.
  *   - NO_PROXY still bypassing. This is the discrimination control: a "fix" that forced everything
@@ -26,11 +28,20 @@ import {
 } from './proxy-dispatcher.js';
 
 /**
- * A Node that DOES implement `NODE_USE_ENV_PROXY`. Injected into every gate assertion below so the
- * suite pins the rule itself rather than whatever Node happens to run it — the repository supports
- * `node >= 22`, and half of that range has no env-proxy support at all.
+ * A Node that DOES implement `NODE_USE_ENV_PROXY`, and that compares the opt-in STRICTLY. Injected
+ * into every gate assertion below so the suite pins the rule itself rather than whatever Node happens
+ * to run it — the repository supports `node >= 22`, and half of that range has no env-proxy support at
+ * all while another slice of it accepts the opt-in more loosely.
+ *
+ * The exact version matters: `24.5.0` is where the strict "must be `1`" semantics landed on the 24
+ * line, so it is a version against which "only the exact string Node accepts" is a true statement.
+ * Pinning that arm at `24.0.0` would assert the opposite of what stock `24.0.0` does.
  */
-const NODE_WITH_ENV_PROXY = '24.0.0';
+const NODE_WITH_ENV_PROXY = '24.5.0';
+/** Every version measured to compare the opt-in strictly. */
+const NODES_STRICT_OPT_IN = ['22.21.0', '22.21.1', '22.23.2', '24.5.0', '25.6.1', '26.0.0'];
+/** Every version measured to arm on ANY non-empty opt-in — the 24.0–24.4 window. */
+const NODES_LENIENT_OPT_IN = ['24.0.0', '24.1.0', '24.2.0', '24.3.0', '24.4.0', '24.4.1'];
 /** A Node inside the declared engines range that does NOT implement it. */
 const NODE_WITHOUT_ENV_PROXY = '22.20.0';
 
@@ -162,24 +173,61 @@ describe('envProxyRequested — would THIS Node have installed its env-proxy dis
     ).toBe(false);
   });
 
-  it('accepts the opt-in ONLY as the exact string Node accepts', () => {
-    // Measured on Node 22.21.1: `1` installs the agent; `0`, `true`, `01`, `2`, ` 1`, `1 ` and blank
-    // all leave Node's own proxy support off. Nothing here coerces an ambiguous value.
-    expect(
-      envProxyRequested(
-        { NODE_USE_ENV_PROXY: '1', HTTP_PROXY: 'http://p:3128' },
-        NODE_WITH_ENV_PROXY,
-      ),
-    ).toBe(true);
-    for (const raw of ['0', 'true', 'TRUE', 'yes', 'on', '01', '2', ' 1', '1 ', '']) {
+  it('accepts the opt-in ONLY as the exact string `1` on the versions that compare it strictly', () => {
+    // MEASURED on stock 22.21.0, 22.21.1, 24.5.0 and 25.6.1 with HTTP_PROXY set: `1` installs the
+    // agent; `0`, `true`, `01`, `2`, ` 1`, `1 `, `yes` and blank all leave Node's own proxy support
+    // off. Nothing here coerces an ambiguous value on those runtimes.
+    for (const version of NODES_STRICT_OPT_IN) {
       expect(
-        envProxyRequested(
-          { NODE_USE_ENV_PROXY: raw, HTTP_PROXY: 'http://p:3128' },
-          NODE_WITH_ENV_PROXY,
-        ),
-        `NODE_USE_ENV_PROXY='${raw}' must not arm the gate`,
-      ).toBe(false);
+        envProxyRequested({ NODE_USE_ENV_PROXY: '1', HTTP_PROXY: 'http://p:3128' }, version),
+        `NODE_USE_ENV_PROXY='1' should arm the gate on node ${version}`,
+      ).toBe(true);
+      for (const raw of ['0', 'true', 'TRUE', 'yes', 'on', '01', '2', ' 1', '1 ', '']) {
+        expect(
+          envProxyRequested({ NODE_USE_ENV_PROXY: raw, HTTP_PROXY: 'http://p:3128' }, version),
+          `NODE_USE_ENV_PROXY='${raw}' must not arm the gate on node ${version}`,
+        ).toBe(false);
+      }
     }
+  });
+
+  it('accepts ANY non-empty opt-in on Node 24.0–24.4, because stock Node does there', () => {
+    // The strict `=1` rule is NOT Node's rule on every version that has the feature: it arrived on the
+    // 24 line at 24.5.0, and the 24 releases before it arm on any non-empty value.
+    //
+    // MEASURED, environment set at process startup, `HTTP_PROXY=http://127.0.0.1:3128`, reading
+    // `Symbol.for('undici.globalDispatcher.1')` — stock `node:24.0.0`, `24.1.0`, `24.2.0`, `24.3.0`,
+    // `24.4.0` and `24.4.1` all install an `EnvHttpProxyAgent` for `NODE_USE_ENV_PROXY='true'`, `'0'`
+    // and `'2'`, and install nothing for `''`. Being stricter than that here would leave such a
+    // deployment proxy-aware at startup and direct-connecting once the boot closure loads — which is
+    // issue #287 itself, unfixed on exactly the runtimes the docs name as having the feature.
+    for (const version of NODES_LENIENT_OPT_IN) {
+      for (const raw of ['1', '0', 'true', 'TRUE', 'yes', 'on', '01', '2', ' 1', '1 ']) {
+        expect(
+          envProxyRequested({ NODE_USE_ENV_PROXY: raw, HTTP_PROXY: 'http://p:3128' }, version),
+          `NODE_USE_ENV_PROXY='${raw}' should arm the gate on node ${version}`,
+        ).toBe(true);
+      }
+      // Blank is "no opt-in" on EVERY version, this window included — measured `<undefined>`.
+      expect(
+        envProxyRequested({ NODE_USE_ENV_PROXY: '', HTTP_PROXY: 'http://p:3128' }, version),
+        `a blank opt-in must not arm the gate on node ${version}`,
+      ).toBe(false);
+      // The other two conditions are unchanged in this window: no opt-in at all, and no proxy named.
+      expect(envProxyRequested({ HTTP_PROXY: 'http://p:3128' }, version)).toBe(false);
+      expect(envProxyRequested({ NODE_USE_ENV_PROXY: 'true' }, version)).toBe(false);
+    }
+  });
+
+  it('puts the opt-in boundary exactly at 24.5.0, and falls to STRICT on an unreadable minor', () => {
+    const loose = { NODE_USE_ENV_PROXY: 'true', HTTP_PROXY: 'http://p:3128' };
+    expect(envProxyRequested(loose, '24.4.1'), 'node 24.4.1 arms on any non-empty').toBe(true);
+    expect(envProxyRequested(loose, '24.5.0'), 'node 24.5.0 compares strictly').toBe(false);
+    // A version string with no readable minor could be anywhere in the 24 line. Installing less than
+    // Node might is recoverable; installing where Node would not is routing somebody's egress through
+    // a proxy they never asked for, so the unknown case takes the strict branch.
+    expect(envProxyRequested(loose, '24')).toBe(false);
+    expect(envProxyRequested({ ...loose, NODE_USE_ENV_PROXY: '1' }, '24')).toBe(true);
   });
 
   it('is false for the opt-in with no proxy named — a blank URL counts as absent', () => {
