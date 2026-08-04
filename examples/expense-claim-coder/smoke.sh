@@ -397,7 +397,7 @@ note "HTTP $STATUS"
 # there, exactly as an invented id would. The WRITE-isolation re-read below is the hard assertion.
 case "$STATUS" in
   200) ok "org B's code attempt ran inside ORG B and returned the neutral run result ({id} is not resolved; A's row stays out of reach)";;
-  404) note "(HTTP 404 — the run surface refused before starting a run; the WRITE-isolation re-read below is the hard assertion)";;
+  404) note "(HTTP 404 — refused before any run started; the WRITE-isolation re-read below is the hard assertion)";;
   400|422) note "(HTTP $STATUS — no run started; the WRITE-isolation re-read below is the hard assertion)";;
   *) note "(HTTP $STATUS — the WRITE-isolation re-read below is the hard assertion)";;
 esac

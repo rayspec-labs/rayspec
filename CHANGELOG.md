@@ -1567,17 +1567,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   predicate resolving `{id}` — while its own case arm absorbed a `200` silently, so the announced
   expectation and the accepted status disagreed. No such resolution exists to refuse anything: an
   `agent` action declares `agent` and an optional `persistTo` and nothing else, so a route names no
-  store its path parameter could address; the route registers the tier throttle, its own `rateLimit`
-  budget, authentication, tenant resolution and `agent:run`, then hands the request to the run
-  surface, which prepends the matched parameters to the run input as a labelled `Route parameters:`
-  block and otherwise leaves them as text for the agent. The script now announces the run result it
-  accepts, says why `{id}` is not resolved, and keeps the write-isolation re-read as the hard
-  assertion it always was — which holds because every store the run touches goes through the
-  tenant-scoped data layer bound to the *caller's* organization, so another organization's id
-  matches no row there exactly as an invented one would. `docs/spec-reference.md` gains a "The path
-  parameter" subsection saying the same for every agent route, including the contrast a reader needs:
-  a `store` route's `get` and the run routes do answer `404` on an id outside the caller's tenant.
-  **No behavior changed** — the correction is in the example script and the reference.
+  store its path parameter could address; the route registers the tier throttle, authentication,
+  tenant resolution and `agent:run`, then hands the request to the run surface, which prepends the
+  matched parameters to the run input as a labelled `Route parameters:` block and otherwise leaves
+  them as text for the agent. The script now announces the run result it accepts, says why `{id}` is
+  not resolved, and keeps the write-isolation re-read as the hard assertion it always was — which
+  holds because every store the run touches goes through the tenant-scoped data layer bound to the
+  *caller's* organization, so another organization's id matches no row there exactly as an invented
+  one would. `docs/spec-reference.md` gains a "The path parameter" subsection saying the same for
+  every agent route, including the contrast a reader needs: a `store` route's `get` and the run
+  routes do answer `404` on an id outside the caller's tenant. **No behavior changed** — the
+  correction is in the example script and the reference.
 
 ### Security
 

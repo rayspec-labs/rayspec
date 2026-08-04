@@ -661,15 +661,15 @@ A declared `agent` route may carry path parameters — `POST /claims/{id}/code` 
 the platform **binds** them into the run rather than **resolving** them. There is
 nowhere to resolve them to: the `agent` action declares `agent` and an optional
 `persistTo` and nothing else (an unrecognized member is a spec error), so a route
-never names the store a parameter addresses. The route registers the same middleware
-chain any declared route gets — the shared tier throttle, the route's own `rateLimit`
-budget, authentication, tenant resolution, and a permission, here **`agent:run`** —
-and then hands the request to the run surface; nothing reads the parameter before the
-run starts. The matched parameters are prepended to the run input as a labelled
-`Route parameters:` block — key-sorted, each value JSON-escaped so it cannot break the
-framing — and are otherwise text the agent reads. Because they are part of the input
-they are also part of the `Idempotency-Key` body hash, so the same route called with
-different parameters does not collide on one key.
+never names the store a parameter addresses. The route registers the same authenticated
+chain a declared `store` route gets — the shared tier throttle, authentication, the
+route's own `rateLimit` budget when it declares one, tenant resolution, and a
+permission, here **`agent:run`** — and then hands the request to the run surface;
+nothing reads the parameter before the run starts. The matched parameters are prepended
+to the run input as a labelled `Route parameters:` block — key-sorted, each value
+JSON-escaped so it cannot break the framing — and are otherwise text the agent reads.
+Because they are part of the input they are also part of the `Idempotency-Key` body
+hash, so the same route called with different parameters does not collide on one key.
 
 There is therefore no resolution step, and nothing for a failed resolution to
 answer. An `{id}` naming a row in another tenant, or naming no row at all, is not
