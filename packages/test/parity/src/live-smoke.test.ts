@@ -14,8 +14,8 @@
  * forwarded through turbo's `test.env` allowlist), so these suites RUN there and a missing credential
  * fails LOUDLY.
  *
- * When the opt-in IS set, the guard below additionally turns a missing/blind REQUIRED backend into a
- * hard fail — a live run can never report success while exercising zero providers.
+ * When the opt-in IS set, the guards below additionally turn a missing/blind REQUIRED backend into a
+ * hard fail (never a green zero-provider run), as they do a stray ANTHROPIC_API_KEY that would BILL.
  */
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -29,7 +29,7 @@ import { RunResult } from '@rayspec/core';
 import { describe, expect, it } from 'vitest';
 import { captureRun } from './harness.js';
 import { runResultShape, scenarioShape } from './index.js';
-import { liveGateFailure, liveTestEnabled } from './live-gate.js';
+import { liveGateFailure, liveTestEnabled, strayAnthropicKeyRefusal } from './live-gate.js';
 import { scenariosForModel } from './scenarios.js';
 
 const openaiKey = process.env.OPENAI_API_KEY;
@@ -77,6 +77,19 @@ const liveGateRefusal = liveGateFailure(
 );
 if (liveGateRefusal !== null) {
   throw new Error(liveGateRefusal);
+}
+
+// The billing refusal, same shape: a stray ANTHROPIC_API_KEY shadows the subscription token in the
+// SDK's credential precedence, so the anthropic blocks below would spend real API money and only then
+// fail the authMode equality in `smokeBackend`. Refuse before the first call instead. The decision is
+// likewise a pure function in ./live-gate.ts, pinned by live-gate.test.ts.
+const strayKeyRefusal = strayAnthropicKeyRefusal(
+  liveOptIn,
+  hasAnthropic,
+  Boolean(process.env.ANTHROPIC_API_KEY),
+);
+if (strayKeyRefusal !== null) {
+  throw new Error(strayKeyRefusal);
 }
 
 /**

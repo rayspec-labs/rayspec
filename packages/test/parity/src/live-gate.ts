@@ -63,3 +63,35 @@ export function liveGateFailure(
 
   return null;
 }
+
+/**
+ * The second collection-time refusal: a stray `ANTHROPIC_API_KEY` in the environment of a live run
+ * that intends the $0 subscription harness. Returns the message to throw, or `null` to proceed.
+ *
+ * The SDK's credential precedence is `ANTHROPIC_API_KEY > CLAUDE_CODE_OAUTH_TOKEN`, so with both set
+ * the anthropic live blocks authenticate as `api-key` — they BILL the API and only THEN fail the
+ * `authMode` equality in `smokeBackend`. Spending first and failing second is the wrong order, so
+ * refuse before the first call. This is the test-lane mirror of `anthropicApiKeyOverrideWarning`
+ * (`packages/app/server/src/product-boot.ts`), which warns on the same shadowing at product boot; a
+ * test lane can be stricter than a deployment, so this one refuses rather than warns.
+ *
+ * The trigger is the anthropic CREDENTIAL being present, not `anthropic` being named in
+ * `RAYSPEC_LIVE_BACKENDS`: the anthropic blocks are gated by `liveTestEnabled(optIn, hasAnthropic)`
+ * alone, so they run — and would spend — whether or not the backend list names them. Conversely, with
+ * the subscription token ABSENT those blocks self-skip and nothing can be billed, so a lone stray key
+ * must NOT block a contributor's openai/codex live run. (A named-but-credential-absent anthropic is
+ * already refused by `liveGateFailure` above.)
+ *
+ * Reachability note: under turbo the `test` task runs in strict env mode, so this check sees
+ * `ANTHROPIC_API_KEY` only because `turbo.json`'s `tasks.test.env` declares it. Removing that
+ * declaration would silently blind this guard through `pnpm test` while leaving a direct `vitest` run
+ * protected.
+ */
+export function strayAnthropicKeyRefusal(
+  optIn: boolean,
+  anthropicCredentialPresent: boolean,
+  anthropicApiKeyPresent: boolean,
+): string | null {
+  if (!optIn || !anthropicCredentialPresent || !anthropicApiKeyPresent) return null;
+  return 'packages/test/parity/src/live-smoke.test.ts: RAYSPEC_REQUIRE_LIVE_TESTS is set and CLAUDE_CODE_OAUTH_TOKEN is present, but ANTHROPIC_API_KEY is ALSO set — the SDK credential precedence is ANTHROPIC_API_KEY > CLAUDE_CODE_OAUTH_TOKEN, so the anthropic live blocks would BILL the API instead of using the $0 subscription harness. Unset ANTHROPIC_API_KEY for this run.';
+}
