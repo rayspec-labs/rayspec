@@ -1427,6 +1427,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documented steps that follow then run verbatim. Repository release tooling only: no published
   package, API or runtime behavior changes.
 
+- **A boot that refuses because `RAYSPEC_FS_SOURCE_ROOT` does not name an existing directory now tells
+  the operator which variable to fix, and tells them without a stack trace.** The read-only fs-source
+  root is validated once, at boot: a path that does not exist, and a path naming a regular file, both
+  abort. That refusal is raised inside `@rayspec/platform`, which is handed a plain root path and never
+  learns which variable produced it, so the message named the resolved path and nothing else — the only
+  environment variable either boot path could fail-close on without naming itself in the message. It
+  was also outside the small set of classes the `rayspec-serve` entrypoint recognises as
+  operator-actionable, so it printed as `boot failed:` followed by a Node stack trace of absolute
+  filesystem paths. Both boot paths now catch that refusal where the variable *is* known and re-raise
+  it in their own house wording: a spec boot aborts with `Boot aborted —
+  RAYSPEC_FS_SOURCE_ROOT='<resolved path>' does not exist or is not a directory. … Fail-closed.`, and a
+  Product-YAML boot with the same sentence behind that boot's own `Boot aborted (Product-YAML) —`
+  prefix. Both classes are ones `rayspec-serve` prints message-only, so the refusal now arrives as that
+  one line and nothing else. Nothing about the decision changed: the same two conditions refuse, the
+  process still exits non-zero, serves nothing, and never creates the directory it refused — measured
+  on the real entrypoint, which exits `1` and leaves the missing path absent. `makeFsSourceFactory`
+  keeps its `(root: string)` signature and its own message, so an embedder calling it directly sees
+  exactly what it saw before.
+
 ### Documentation
 
 - **The getting-started walkthrough's token-expiry recovery can now be carried out by a reader who
