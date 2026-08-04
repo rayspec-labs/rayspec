@@ -8,12 +8,13 @@
  *  - an invalid spec → 1, the ok:false JSON on STDOUT (it is the command's normal output, exit 1);
  *  - a missing command → throws CliError (exit 2), nothing on stdout;
  *  - an unknown command → throws CliError (exit 2);
- *  - an unknown `--flag` → throws CliError (exit 2) (strict parseArgs).
+ *  - an unknown `--flag` → throws CliError (exit 2) (strict parseArgs);
+ *  - the top-level `--version`/`-v` → 0, the version JSON on stdout, nothing on stderr.
  *
  * emit uses a drain callback, so a large payload is flushed before exit — we assert the JSON is
  * COMPLETE (parses + closing brace present), not truncated.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -164,6 +165,69 @@ describe('run — CliError → exit 2 mapping (IDX-EXIT2-1)', () => {
     expect(process.exitCode).toBe(1);
     expect(JSON.parse(outChunks.join('')).ok).toBe(false);
     expect(errChunks.join('')).toBe('');
+  });
+});
+
+describe('run — the top-level --version flag', () => {
+  // The version the CLI must report, read from ITS OWN manifest rather than pinned as a literal, so a
+  // release version bump cannot leave this assertion asserting a stale string. Resolved relative to
+  // this file (one directory below the package root) and NOT against the cwd — these tests run with
+  // the cwd moved into a scratch directory, which is exactly the situation an installed CLI is in.
+  const manifestVersion = (
+    JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version?: unknown;
+    }
+  ).version;
+
+  let prevExit: number | string | undefined;
+  beforeEach(() => {
+    prevExit = process.exitCode;
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    process.exitCode = prevExit;
+  });
+
+  it('the manifest under test actually carries a version (the fixture itself)', () => {
+    expect(typeof manifestVersion).toBe('string');
+    expect(manifestVersion).not.toBe('');
+  });
+
+  for (const flag of ['--version', '-v'] as const) {
+    it(`\`${flag}\` → exit 0, exactly one JSON object on stdout, NOTHING on stderr`, async () => {
+      await run([flag]);
+      expect(process.exitCode).toBe(0);
+      // The two streams are measured separately: the version goes to stdout, stderr stays silent.
+      expect(errChunks.join('')).toBe('');
+      const out = outChunks.join('');
+      // Parsing the WHOLE of stdout is the "exactly one object" assertion: a second object appended
+      // to the first is not a valid JSON document, so this fails if anything else is written.
+      expect(JSON.parse(out)).toEqual({ ok: true, version: manifestVersion });
+      expect(out.endsWith('}\n')).toBe(true);
+    });
+  }
+
+  // The accept/reject control: answering `--version` must not turn the leading-dash check into a
+  // catch-all that swallows a genuine usage error. Both halves of the exit-2 contract stay pinned.
+  it('an unknown leading flag → exit 2, the usage envelope on stderr, nothing on stdout', async () => {
+    await run(['--nope']);
+    expect(process.exitCode).toBe(2);
+    expect(outChunks.join('')).toBe('');
+    const err = errChunks.join('');
+    expect(JSON.parse(err.split('\n')[0] as string)).toMatchObject({ ok: false });
+    expect(err).toMatch(/expected a subcommand/i);
+    expect(err).toContain('got --nope');
+    expect(err).toContain('rayspec — RaySpec CLI');
+  });
+
+  it('an unknown subcommand → exit 2, the usage envelope on stderr, nothing on stdout', async () => {
+    await run(['frobnicate']);
+    expect(process.exitCode).toBe(2);
+    expect(outChunks.join('')).toBe('');
+    const err = errChunks.join('');
+    expect(JSON.parse(err.split('\n')[0] as string)).toMatchObject({ ok: false });
+    expect(err).toMatch(/unknown command/i);
+    expect(err).toContain('rayspec — RaySpec CLI');
   });
 });
 

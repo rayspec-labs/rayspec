@@ -743,6 +743,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cleanup` settings and the resolved `erasureEnabled` gate — the same values the boot hands to the
   cleanup scheduler and the erasure seam. `bootBanner`'s signature is unchanged.
 
+- **`rayspec --version` (and `-v`) now reports the CLI's version instead of failing as a usage error.**
+  The top-level dispatch treated any first token beginning with `-` as "expected a subcommand" and
+  exited `2` before looking at which flag it was, so an installed CLI could not be asked which version
+  it is. Both spellings are now recognised ahead of that check and emit the ordinary single-JSON-object
+  envelope on stdout — `{ "ok": true, "version": "1.7.0" }` — with nothing on stderr and exit `0`.
+
+  **The value is read at run time from the CLI package's own manifest**, resolved relative to the
+  entrypoint rather than the working directory, and npm places `package.json` beside `dist/` in the
+  packed tarball — so a published install reports the version it actually is, from any directory, with
+  no dependency on the source layout. This is the top-level flag only: it reports the CLI itself, not
+  the versions of the packages installed around it. Every other leading `--flag`, and every unknown
+  subcommand, is still the same exit-`2` usage error on stderr.
+
 ### Changed
 
 - **A product deployment whose `RAYSPEC_PRODUCT_TENANT_ID` is malformed or names no live org now
@@ -1694,7 +1707,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   routes do answer `404` on an id outside the caller's tenant. **No behavior changed** — the
   correction is in the example script and the reference.
 
+- **The expense-claim auto-coder's README points at a security policy that exists.** Its
+  trusted-posture note offers exactly one link, and that link routed through a directory at the
+  repository root which this repository does not have and has never had — no commit in the history
+  touches such a path — so from `examples/expense-claim-coder/` it resolved to a file that is not
+  there, and the reader weighing the trust boundary the note describes had nothing to follow. The
+  target is now `../../SECURITY.md`, which resolves to the repository root `SECURITY.md`, the only
+  `SECURITY.md` tracked here. Resolving every relative `*.md` link in every committed `.md` file
+  confirms this was the only target that did not exist: of the 81 such links across 12 files, the
+  other 80 each resolve to a file present in the tree.
+
 ### Security
+
+- **The expense-claim-coder live smoke no longer prints credentials to the terminal.** Its `pp`
+  helper pretty-printed whole response bodies at seven call sites, and three of those bodies carry
+  credential material: the user access token from `POST /v1/auth/register`, the org-scoped access
+  token from `POST /v1/orgs/{id}/switch`, and the api-key `plaintext` from
+  `POST /v1/orgs/{id}/api-keys` — which has no expiry and holds `store:write` and `agent:run`. A
+  developer running the smoke therefore had all three in their scrollback, and in any log or paste of
+  that run. `pp` now replaces the values of `accessToken`, `refreshToken` and `plaintext` with
+  `[REDACTED]` before printing, at any depth of the body. Masking sits in the printer rather than at
+  the call sites, so all seven are covered at once and any call site added later inherits it; the
+  `jq`-less fallback path, and a body `jq` cannot parse, get the same treatment textually. This
+  follows the shape `print_run` already uses one function down, where a run result is projected to a
+  fixed field list so the raw input never reaches the terminal. **What a run observes:** keys and
+  every non-credential field print exactly as before — `tokenType`, `expiresIn`, `keyPrefix`,
+  `scopes` and the run fields are unchanged, and the set of keys printed across a full run is
+  identical — because only the three values are rewritten. No assertion changes: each credential is
+  read with `jval` out of `$BODY`, never out of what was printed, so the lookup, injection, clamp,
+  idempotency and write-isolation proofs are untouched.
 
 - **Six dependencies carrying published advisories are pinned forward:**
   `brace-expansion` to 5.0.9, `postcss` to 8.5.23, `fast-uri` to 3.1.5, `undici` to 8.9.0,
