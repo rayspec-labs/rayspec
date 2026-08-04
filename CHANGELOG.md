@@ -1678,8 +1678,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   said the root is "checked ONCE at boot — a root that does not exist or is not a directory refuses
   the boot", which an operator reads as a guarantee that a typo cannot start a server. It holds only
   where the fs-source is actually built, and only two boots build it: the `rayspec.yaml` deploy and
-  the `*.product.yaml` deploy, the boots that wire the handlers and tools `init.fsSource` is handed
-  to. An auth-only boot (no `RAYSPEC_SPEC_PATH`) wires no handlers, so it never constructs the
+  the `*.product.yaml` deploy. Both build sites are gated on the variable alone, so a spec deploy
+  checks the root whether or not the document declares a handler or tool `init.fsSource` would be
+  handed to. An auth-only boot (no `RAYSPEC_SPEC_PATH`) deploys no spec, so it never constructs the
   factory the check lives in — it resolves the value to an absolute path, validates nothing, and
   serves; a frontend-only static boot does not read the variable at all. The entry now says where
   the check applies and what the other two boots do instead. The refusal itself is unchanged, and

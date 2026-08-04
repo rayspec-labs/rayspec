@@ -3,8 +3,8 @@
  * composition root, in BOTH boot profiles that build the read-only fs-source factory:
  *   - the BACKEND spec path (`composition-root.ts` `deployDeclaredSpec`), and
  *   - the PRODUCT-YAML path (`product-boot.ts` `deployProductYamlSpec`).
- * plus the profile that builds NEITHER — the AUTH-ONLY boot, which wires no handlers, so it can never
- * hand out `init.fsSource`, never reaches the check, and SERVES whatever the variable points at.
+ * plus the profile that builds NEITHER — the AUTH-ONLY boot, which deploys no spec, so it never
+ * reaches the check and SERVES whatever the variable points at.
  *
  * `makeFsSourceFactory` takes a plain `root: string` and legitimately cannot know which variable the
  * server resolved it from, so its refusal names the resolved path and nothing else. Each boot re-raises
@@ -268,9 +268,12 @@ api:
 
   // ── (e) the AUTH-ONLY boot — the SAME two bad roots, and it SERVES ────────────────────────────
   // The refusal above is the SPEC-DEPLOY boot's, because that is the only boot that BUILDS the
-  // fs-source. An auth-only boot wires no handlers, so it can never hand out `init.fsSource` and never
-  // reaches `makeFsSourceFactory` — the value is resolved by `loadServerConfig` and then checked by
-  // nobody. That is the documented scope of the check (`.env.example`), so it is pinned here: flip
+  // fs-source. An auth-only boot DEPLOYS NO SPEC, so it never reaches `makeFsSourceFactory` — the
+  // value is resolved by `loadServerConfig` and then checked by nobody. It is the DEPLOY, not the
+  // wiring, that decides: both build sites gate on `config.fsSourceRoot` alone, which is why the
+  // reject arms above abort on a spec declaring only a `{kind:store}` route — no `{handler}` route
+  // and no tool, so nothing in it could ever be handed `init.fsSource`, and it is refused anyway.
+  // That is the documented scope of the check (`.env.example`), so it is pinned here: flip
   // either arm to expect a refusal and it goes RED against the shipped behaviour.
 
   it('AUTH-ONLY: a MISSING root does NOT abort the spec-less boot — it serves', async () => {
