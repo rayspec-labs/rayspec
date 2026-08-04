@@ -555,22 +555,48 @@ function selfTest() {
 selfTest();
 
 const violations = [];
+const scannedPerRoot = new Map();
 
 for (const root of SCOPED_ROOTS) {
+  let scanned = 0;
   for (const file of walk(join(repoRoot, root))) {
     const rel = relative(repoRoot, file);
     if (isExcluded(rel)) continue;
+    scanned++;
     const src = readFileSync(file, 'utf8');
     violations.push(...detectViolations(rel, src));
   }
+  scannedPerRoot.set(root, scanned);
 }
 
 // db/src: ONLY the gate-only scoped-tables-hook check, with the definition/gate-only allowlist.
+let dbScanned = 0;
 for (const file of walk(join(repoRoot, DB_SCOPED_TABLES_ROOT))) {
   const rel = relative(repoRoot, file);
   if (isExcluded(rel)) continue;
+  dbScanned++;
   const v = detectDbScopedTablesViolation(rel, readFileSync(file, 'utf8'));
   if (v) violations.push(v);
+}
+scannedPerRoot.set(DB_SCOPED_TABLES_ROOT, dbScanned);
+
+// ── fail-closed: a root that read NOTHING certifies nothing ───────────────────────────────────────
+// walk() returns silently on a directory that does not exist, so before this guard a rename or a move
+// of any root above retired the gate WITHOUT a signal: zero files scanned, zero violations found,
+// exit 0, and a PASS line that read exactly like a real one. Every root here holds shipped source in
+// a healthy checkout, so zero means the root list is stale (or the repo root did not resolve) and
+// that root's invariant was not checked at all. Same fail-open, and the same guard, as the scanned-
+// count check in check-no-pack-imports.mjs — per root here, because one renamed package must not be
+// able to hide behind three that still resolve.
+const unscannedRoots = [...scannedPerRoot].filter(([, count]) => count === 0).map(([root]) => root);
+if (unscannedRoots.length > 0) {
+  console.error(
+    `tenant-chokepoint gate FAILED: scanned 0 source file(s) under ${unscannedRoots.join(', ')}. ` +
+      'A root that reads nothing detects nothing, so a PASS would certify an invariant this run ' +
+      `never checked (repo root: '${repoRoot}'). Refusing on an unscanned root (fail-closed) — if a ` +
+      'package moved, update SCOPED_ROOTS / DB_SCOPED_TABLES_ROOT to follow it.',
+  );
+  process.exit(1);
 }
 
 if (violations.length > 0) {
@@ -583,6 +609,8 @@ if (violations.length > 0) {
   process.exit(1);
 }
 
+const totalScanned = [...scannedPerRoot.values()].reduce((sum, count) => sum + count, 0);
 console.log(
-  'tenant-chokepoint gate PASSED: no raw-db imports or unscoped() calls in scoped roots.',
+  `tenant-chokepoint gate PASSED: ${totalScanned} source file(s) across ${scannedPerRoot.size} ` +
+    'root(s) — no raw-db imports or unscoped() calls in scoped roots.',
 );

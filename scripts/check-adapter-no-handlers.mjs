@@ -553,13 +553,35 @@ function selfTest() {
 selfTest();
 
 const violations = [];
+const scannedPerRoot = new Map();
 for (const root of ADAPTER_ROOTS) {
+  let scanned = 0;
   for (const file of walk(join(repoRoot, root))) {
     const rel = relative(repoRoot, file).split('\\').join('/');
     if (isExcluded(rel)) continue;
+    scanned++;
     const src = readFileSync(file, 'utf8');
     violations.push(...detectViolations(rel, src));
   }
+  scannedPerRoot.set(root, scanned);
+}
+
+// ── fail-closed: an adapter root that read NOTHING certifies nothing ──────────────────────────────
+// walk() returns silently on a directory that does not exist, so before this guard renaming or moving
+// an adapter package retired its scan WITHOUT a signal: zero files, zero violations, exit 0, and the
+// usual PASS line — which claims by name that all four adapters route every tool path through
+// ctx.dispatchTool. The ADAPTER_ROOTS comment above already says an unscanned adapter is "a real
+// hole"; this makes that unscannable state loud instead of silent. Per root, because three adapters
+// that still resolve must not cover for a fourth that no longer does.
+const unscannedRoots = [...scannedPerRoot].filter(([, count]) => count === 0).map(([root]) => root);
+if (unscannedRoots.length > 0) {
+  console.error(
+    `adapter-no-handlers gate FAILED: scanned 0 source file(s) under ${unscannedRoots.join(', ')}. ` +
+      'That adapter was not checked at all, so a PASS would name it as clean on no evidence ' +
+      `(repo root: '${repoRoot}'). Refusing on an unscanned root (fail-closed) — if an adapter ` +
+      'package moved, update ADAPTER_ROOTS to follow it.',
+  );
+  process.exit(1);
 }
 
 if (violations.length > 0) {
@@ -572,8 +594,10 @@ if (violations.length > 0) {
   process.exit(1);
 }
 
+const totalScanned = [...scannedPerRoot.values()].reduce((sum, count) => sum + count, 0);
 console.log(
-  'adapter-no-handlers gate PASSED: no handler maps, side-effecting tool factories, or ' +
-    'non-dispatch tool handler bodies (keyed OR positional) in ANY adapter src — openai + ' +
-    'anthropic + pi + codex all route every tool path through ctx.dispatchTool (allowlist empty).',
+  `adapter-no-handlers gate PASSED: ${totalScanned} source file(s) across ${scannedPerRoot.size} ` +
+    'root(s) — no handler maps, side-effecting tool factories, or non-dispatch tool handler bodies ' +
+    '(keyed OR positional) in ANY adapter src; openai + anthropic + pi + codex all route every tool ' +
+    'path through ctx.dispatchTool (allowlist empty).',
 );
