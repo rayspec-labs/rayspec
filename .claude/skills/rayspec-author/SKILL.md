@@ -500,7 +500,8 @@ scope from the start.)
    the external-exposure hardening (a per-tenant sandbox, deferred). **Never claim a generated handler is sandboxed.**
 7. A heads-up on the deploy path (Phase 5): if you will use **Path A (the `@rayspec/local-boot` dev
    wrapper)** it **DROP+CREATEs the throwaway dev DB** `rayspec_local_<spec-dir>` (from the spec file's
-   parent directory name; override with `RAYSPEC_DEV_DB`) — RESET on every boot; confirm it is not a
+   parent directory name, sanitized; a name too long for Postgres's 63-byte identifier limit is capped
+   and given a short digest of the spec path instead; override with `RAYSPEC_DEV_DB`) — RESET on every boot; confirm it is not a
    database the user cares about. **Path B (`rayspec deploy`)** instead preserves data against a
    persistent `DATABASE_URL` (mount-only — it fail-closes on a drifted schema rather than reconciling it;
    an in-place forward delta goes through `rayspec deploy --apply-migration`).
@@ -529,7 +530,9 @@ There are **two boot paths** — pick by whether the data must survive a re-boot
 
 **Path A — the reset-on-boot dev wrapper (`@rayspec/local-boot`) — a THROWAWAY dev DB.** Best for fresh
 authoring/iteration: it DROP+CREATEs the dev DB `rayspec_local_<spec-dir>` (derived from the spec file's
-PARENT DIRECTORY name, sanitized to a safe pg identifier; override with `RAYSPEC_DEV_DB`) on EVERY boot,
+PARENT DIRECTORY name, sanitized to a safe pg identifier — a derived name that would exceed Postgres's
+63-byte identifier limit is capped and disambiguated with a short digest of the resolved spec path, so
+it reads `rayspec_local_<capped>_<8 hex>`; override with `RAYSPEC_DEV_DB`) on EVERY boot,
 so the migration chain bootstraps it clean. **All data is LOST on each boot** — never use it for anything
 durable, and NEVER point `RAYSPEC_DEV_DB` at a DB you care about (first-deploy mode DROP+CREATEs it).
 
