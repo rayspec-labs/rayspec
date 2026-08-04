@@ -1114,15 +1114,18 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     });
 
     // ROWS — the outcome is BOTH arms of the documented pair, not one of them: the rewritten row
-    // REPEATS on page 2 (page 1 returned k1,k2; page 2 returns k4 and k1 again) and k3 is SKIPPED —
-    // never returned by either page, though the caller read every row of a 4-row table in 2-row
-    // pages. Both assertions are false under ANY total order: with a unique tiebreaker the two pages
-    // partition the four rows (the control below reads the SAME rows through the SAME rewrite and
-    // gets exactly that).
+    // REPEATS on page 2, and one row is SKIPPED, never returned by either page, even though the two
+    // pages together span a 4-row table in 2-row windows. WHICH row is skipped follows Postgres'
+    // tuple visitation order, so it is derived here rather than named — pinning its identity would
+    // pin the storage engine instead of the documented hazard. Both assertions are false under ANY
+    // total order: with a unique tiebreaker the two pages partition the four rows, which is exactly
+    // what the control below gets from the same rows under the same kind of rewrite.
     const page1Keys = page1.map((r) => r.business_key);
     const page2Keys = page2.map((r) => r.business_key);
+    const skipped = keys.filter((k) => !page1Keys.includes(k) && !page2Keys.includes(k));
     expect(page1Keys.filter((k) => page2Keys.includes(k))).toEqual([moved]);
-    expect(keys.filter((k) => !page1Keys.includes(k) && !page2Keys.includes(k))).toEqual(['k3']);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).not.toBe(moved);
 
     // SQL — both page statements carry EXACTLY the caller's single non-unique column and nothing
     // else. Appending a unique tiebreaker to a caller's ordering would make the repeat above
@@ -1134,8 +1137,9 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     );
 
     // CONTROL — the remedy both documents prescribe, over the same rows and the same perturbation:
-    // the caller pairs its non-unique column with a trailing `id`. The ordering is now total, so the
-    // rewrite moves nothing, the two pages partition the rows, and no row repeats or is skipped.
+    // the caller pairs its non-unique column with a trailing `id`. The rewrite still moves the row
+    // in the heap — what it no longer moves is the READ order, because the ordering is now total —
+    // so the two pages partition the rows and nothing repeats or is skipped.
     // (The `id` here is the CALLER's — the facade still appends nothing, as the compiled statement
     // asserts.)
     const tiebroken = {
@@ -1153,13 +1157,22 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
       `UPDATE ${SCHEMA}.meetings SET completed = false WHERE business_key = $1`,
       [stable1[0]?.business_key],
     );
-    const stable2 = await aDb.select('meetings', {}, { ...tiebroken, offset: 2 });
+    let stable2: Awaited<ReturnType<typeof aDb.select>> = [];
+    const [stable2Sql] = await capturedSql(db, async () => {
+      stable2 = await aDb.select('meetings', {}, { ...tiebroken, offset: 2 });
+    });
     const stable1Keys = stable1.map((r) => r.business_key);
     const stable2Keys = stable2.map((r) => r.business_key);
     expect(stable1Keys.filter((k) => stable2Keys.includes(k))).toEqual([]);
     expect([...stable1Keys, ...stable2Keys].sort()).toEqual(keys);
+    // BOTH control statements are asserted, symmetrically with the hazard arm above: appending a
+    // tiebreaker in the facade would red the hazard arm, and dropping the caller's own trailing `id`
+    // here would red the control — the two directions of the same sentence.
     expect(orderByClause(stable1Sql ?? '')).toBe(
       'order by "meetings"."title" asc, "meetings"."id" asc limit $2',
+    );
+    expect(orderByClause(stable2Sql ?? '')).toBe(
+      'order by "meetings"."title" asc, "meetings"."id" asc limit $2 offset $3',
     );
   });
 
