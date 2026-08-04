@@ -53,7 +53,7 @@ REDACTED='[REDACTED]'
 # org-switch return an `accessToken`, api-key mint returns a `plaintext` that never expires and holds
 # `store:write` + `agent:run`). Masking lives HERE rather than at the call sites so every call site is
 # covered at once, including any added later. Same intent as print_run below: a body is only ever
-# printed in a form that cannot leak. Keys, and every other field, print unchanged — the assertions
+# printed with those three fields masked. Keys, and every other field, print unchanged — the assertions
 # read their values with jval out of $BODY, never out of what was printed, so none of them are
 # affected. The no-jq path (and an unparseable body) get the same treatment textually.
 pp() {

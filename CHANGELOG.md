@@ -1736,7 +1736,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trimmed before it is matched, so the refusal claim reads on non-blank values only. **No behavior
   changed** — blank keeps counting as unset. The unit tests gain the two arms that pin it: an empty
   string and a whitespace-only value both resolve to the wired default, alongside a case-variant arm
-  (`FFMPEG`) that still refuses, since the match is exact after trimming.
+  (`FFMPEG`) that still refuses, since the match is exact after trimming. The refusal message itself now reads
+  "unset or blank ⇒ ffmpeg": the doc comment said blank counts as unset, but the message an operator
+  meets on a typo is the only place that reaches them, and it named `unset` alone. The comment above
+  the reader no longer claims the repo-wide law that *every* declared env fail-closes on an invalid
+  value — it states what this reader does.
+
+- **Two shipped sentences narrowed to what they can carry.** `.env.example`'s `RAYSPEC_FS_SOURCE_ROOT`
+  entry said the root is checked by "a boot that DEPLOYS A SPEC (a rayspec.yaml or a *.product.yaml
+  document)", but a frontend-only static document is a `rayspec.yaml` too, and that boot does not read
+  the variable — the entry says so three lines later. It now names a backend spec. In
+  `examples/expense-claim-coder/smoke.sh`, the comment above the printer said a body "is only ever
+  printed in a form that cannot leak", which claims an invariant the printer does not establish; it
+  now says what the printer does, which is mask three named fields.
 - **`.env.example` no longer claims `RAYSPEC_FS_SOURCE_ROOT` is validated on every boot.** The entry
   said the root is "checked ONCE at boot — a root that does not exist or is not a directory refuses
   the boot", which an operator reads as a guarantee that a typo cannot start a server. It holds only

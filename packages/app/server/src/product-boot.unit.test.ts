@@ -104,6 +104,15 @@ describe('mediaPrepEnabled — honors RAYSPEC_MEDIA_PREP', () => {
       /RAYSPEC_MEDIA_PREP 'yes' is not supported/,
     );
   });
+  it('the refusal tells the operator that blanking the variable is a way out', () => {
+    // The reader accepts a blank value as unset, and the doc comment says so — but the message an
+    // operator actually sees on a typo is the only place that reaches them. It named `unset` alone,
+    // so "is emptying it the same as removing the line?" was answerable only from the source.
+    expect(() => mediaPrepEnabled({ RAYSPEC_MEDIA_PREP: 'yes' })).toThrow(
+      /unset or blank ⇒ ffmpeg/,
+    );
+  });
+
   it('fail-closes on a case variant of the wired value (no case coercion)', () => {
     expect(() => mediaPrepEnabled({ RAYSPEC_MEDIA_PREP: 'FFMPEG' })).toThrow(
       /RAYSPEC_MEDIA_PREP 'FFMPEG' is not supported/,
