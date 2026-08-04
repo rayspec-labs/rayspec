@@ -1674,6 +1674,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   routes do answer `404` on an id outside the caller's tenant. **No behavior changed** — the
   correction is in the example script and the reference.
 
+- **The README's "From source" block now explains the `Failed to create bin` warnings it makes the
+  reader produce.** Its very first command is `pnpm install && pnpm build`, and on a fresh clone the
+  install half prints a run of `WARN … Failed to create bin at … ENOENT` lines and then exits `0`:
+  it runs before the build, so the two workspace bins it tries to link — `rayspec`
+  (`@rayspec/cli` → `./dist/index.js`) and `rayspec-serve` (`@rayspec/server` → `./dist/serve.js`)
+  — still point at `dist/` files nothing has written. The README said nothing about them, so the
+  first thing the page produced was unexplained red text; the same explanation had been in
+  getting-started since it was written, but a reader in the README is not reading getting-started.
+  A blockquote after the block now says they are non-fatal and why, and states the consequence the
+  rest of the block silently depends on: nothing links those bins until `pnpm install` is run again
+  after the build, and even then only `rayspec-serve` reaches the repo-root `node_modules/.bin`,
+  because the root package depends on `@rayspec/server` and not on `@rayspec/cli` — which is why
+  every step invokes `node packages/app/cli/dist/index.js` rather than `rayspec`. **No behavior
+  changed** — the build sequence the README documents is untouched.
+
 ### Security
 
 - **Six dependencies carrying published advisories are pinned forward:**
