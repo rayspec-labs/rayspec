@@ -1071,6 +1071,111 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     expect(orderByClause(unordered ?? '')).toBe('order by "meetings"."id" asc');
   });
 
+  // The CONSEQUENCE of "used verbatim, with nothing appended" — the empirical half of the hazard, not
+  // only the emitted SQL. Both author-facing statements of it are named here so an edit to either is
+  // followed to this case: the handler-facade ordering paragraph in `docs/spec-reference.md` ("That
+  // matters for offset paging: … an ordering of your own on a non-unique column is not a total order,
+  // and Postgres may break the ties differently between two page queries — a row can then repeat or
+  // be skipped. Pair such an ordering with a unique tiebreaker (a trailing `id` column).") and the
+  // `offset` docstring on `SelectOptions` in `packages/kernel/handler-sdk/src/index.ts`, which states
+  // the same thing to the handler author who reaches for `limit`/`offset`.
+  it('offset paging over a NON-UNIQUE orderBy repeats one row and skips another (the documented no-tiebreaker hazard)', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // Four rows whose caller-supplied sort key is ALL EQUAL — `title asc` is then a total order over
+    // NOTHING, so no part of either page statement decides which tied row lands in which page.
+    // `business_key` only labels the rows for the assertions below; it is never ordered on.
+    const keys = ['k1', 'k2', 'k3', 'k4'];
+    for (const key of keys) {
+      await aDb.insert('meetings', { title: 'dup', completed: false, business_key: key });
+    }
+    const paged = { orderBy: [{ column: 'title', dir: 'asc' as const }], limit: 2 };
+
+    let page1: Awaited<ReturnType<typeof aDb.select>> = [];
+    const [page1Sql] = await capturedSql(db, async () => {
+      page1 = await aDb.select('meetings', {}, { ...paged, offset: 0 });
+    });
+    // BETWEEN the two page queries, move a row page 1 ALREADY RETURNED to the end of the heap: an
+    // UPDATE writes a NEW tuple version, so the scan reaches that row last from here on (the same
+    // technique the `id asc` default case above uses to make physical order differ from the read
+    // order). The sort key is untouched — `completed` is not ordered on — so nothing the caller's
+    // ORDER BY can see has changed. That is the point: with no unique tiebreaker, ordinary write
+    // traffic on an unrelated column between two pages is enough to shuffle the tied rows.
+    const moved = page1[0]?.business_key;
+    expect(moved).toBeDefined();
+    await db.$client.unsafe(
+      `UPDATE ${SCHEMA}.meetings SET completed = true WHERE business_key = $1`,
+      [moved],
+    );
+
+    let page2: Awaited<ReturnType<typeof aDb.select>> = [];
+    const [page2Sql] = await capturedSql(db, async () => {
+      page2 = await aDb.select('meetings', {}, { ...paged, offset: 2 });
+    });
+
+    // ROWS — the outcome is BOTH arms of the documented pair, not one of them: the rewritten row
+    // REPEATS on page 2, and one row is SKIPPED, never returned by either page, even though the two
+    // pages together span a 4-row table in 2-row windows. WHICH row is skipped follows Postgres'
+    // tuple visitation order, so it is derived here rather than named — pinning its identity would
+    // pin the storage engine instead of the documented hazard. Both assertions are false under ANY
+    // total order: with a unique tiebreaker the two pages partition the four rows, which is exactly
+    // what the control below gets from the same rows under the same kind of rewrite.
+    const page1Keys = page1.map((r) => r.business_key);
+    const page2Keys = page2.map((r) => r.business_key);
+    const skipped = keys.filter((k) => !page1Keys.includes(k) && !page2Keys.includes(k));
+    expect(page1Keys.filter((k) => page2Keys.includes(k))).toEqual([moved]);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).not.toBe(moved);
+
+    // SQL — both page statements carry EXACTLY the caller's single non-unique column and nothing
+    // else. Appending a unique tiebreaker to a caller's ordering would make the repeat above
+    // unreachable and both documented sentences false, so the assertion guarding the sentence lives
+    // in the case that demonstrates it.
+    expect(orderByClause(page1Sql ?? '')).toBe('order by "meetings"."title" asc limit $2');
+    expect(orderByClause(page2Sql ?? '')).toBe(
+      'order by "meetings"."title" asc limit $2 offset $3',
+    );
+
+    // CONTROL — the remedy both documents prescribe, over the same rows and the same perturbation:
+    // the caller pairs its non-unique column with a trailing `id`. The rewrite still moves the row
+    // in the heap — what it no longer moves is the READ order, because the ordering is now total —
+    // so the two pages partition the rows and nothing repeats or is skipped.
+    // (The `id` here is the CALLER's — the facade still appends nothing, as the compiled statement
+    // asserts.)
+    const tiebroken = {
+      orderBy: [
+        { column: 'title', dir: 'asc' as const },
+        { column: 'id', dir: 'asc' as const },
+      ],
+      limit: 2,
+    };
+    let stable1: Awaited<ReturnType<typeof aDb.select>> = [];
+    const [stable1Sql] = await capturedSql(db, async () => {
+      stable1 = await aDb.select('meetings', {}, { ...tiebroken, offset: 0 });
+    });
+    await db.$client.unsafe(
+      `UPDATE ${SCHEMA}.meetings SET completed = false WHERE business_key = $1`,
+      [stable1[0]?.business_key],
+    );
+    let stable2: Awaited<ReturnType<typeof aDb.select>> = [];
+    const [stable2Sql] = await capturedSql(db, async () => {
+      stable2 = await aDb.select('meetings', {}, { ...tiebroken, offset: 2 });
+    });
+    const stable1Keys = stable1.map((r) => r.business_key);
+    const stable2Keys = stable2.map((r) => r.business_key);
+    expect(stable1Keys.filter((k) => stable2Keys.includes(k))).toEqual([]);
+    expect([...stable1Keys, ...stable2Keys].sort()).toEqual(keys);
+    // BOTH control statements are asserted, symmetrically with the hazard arm above: appending a
+    // tiebreaker in the facade would red the hazard arm, and dropping the caller's own trailing `id`
+    // here would red the control — the two directions of the same sentence.
+    expect(orderByClause(stable1Sql ?? '')).toBe(
+      'order by "meetings"."title" asc, "meetings"."id" asc limit $2',
+    );
+    expect(orderByClause(stable2Sql ?? '')).toBe(
+      'order by "meetings"."title" asc, "meetings"."id" asc limit $2 offset $3',
+    );
+  });
+
   it('orderBy FAILS CLOSED on an unknown column (resolveColumn)', async () => {
     testsRan += 1;
     const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
