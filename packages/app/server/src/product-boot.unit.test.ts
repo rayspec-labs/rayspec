@@ -91,10 +91,22 @@ describe('mediaPrepEnabled — honors RAYSPEC_MEDIA_PREP', () => {
   it('DISABLES media-prep for RAYSPEC_MEDIA_PREP=off', () => {
     expect(mediaPrepEnabled({ RAYSPEC_MEDIA_PREP: 'off' })).toBe(false);
   });
+  it('treats a BLANK value as unset (empty string ⇒ default ffmpeg)', () => {
+    expect(mediaPrepEnabled({ RAYSPEC_MEDIA_PREP: '' })).toBe(true);
+  });
+  it('treats a WHITESPACE-ONLY value as unset (trimmed ⇒ default ffmpeg)', () => {
+    expect(mediaPrepEnabled({ RAYSPEC_MEDIA_PREP: '   ' })).toBe(true);
+    expect(mediaPrepEnabled({ RAYSPEC_MEDIA_PREP: '\t\n' })).toBe(true);
+  });
   it('fail-closes on any OTHER value, naming it (the env contract)', () => {
     expect(() => mediaPrepEnabled({ RAYSPEC_MEDIA_PREP: 'yes' })).toThrow(ProductBootError);
     expect(() => mediaPrepEnabled({ RAYSPEC_MEDIA_PREP: 'yes' })).toThrow(
       /RAYSPEC_MEDIA_PREP 'yes' is not supported/,
+    );
+  });
+  it('fail-closes on a case variant of the wired value (no case coercion)', () => {
+    expect(() => mediaPrepEnabled({ RAYSPEC_MEDIA_PREP: 'FFMPEG' })).toThrow(
+      /RAYSPEC_MEDIA_PREP 'FFMPEG' is not supported/,
     );
   });
 });
