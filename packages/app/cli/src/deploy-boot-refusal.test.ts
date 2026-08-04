@@ -117,7 +117,7 @@ const CLEAN_PRINT = [
   {
     name: 'an unsupported RAYSPEC_MEDIA_PREP',
     err: new ProductBootError(
-      "RAYSPEC_MEDIA_PREP 'sox' is not supported (wired: ffmpeg | off; unset ⇒ ffmpeg). Fail-closed.",
+      "RAYSPEC_MEDIA_PREP 'sox' is not supported (wired: ffmpeg | off; unset or blank ⇒ ffmpeg). Fail-closed.",
     ),
   },
   {

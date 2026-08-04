@@ -607,15 +607,14 @@ export async function planUpdateBoot(
  * `ffmpeg` (or unset ⇒ default `ffmpeg`; blank counts as unset) wires the fail-soft media-prep hook;
  * `off` disables it (no playable-artifact prep — playback stays 409); the value is trimmed, so a
  * whitespace-only value is blank too, and any OTHER non-blank value fail-closes with a named
- * ProductBootError (the env contract: every declared env fail-closes on an invalid value). Returns
- * whether to wire it.
+ * ProductBootError rather than being coerced to either wiring. Returns whether to wire it.
  */
 export function mediaPrepEnabled(env: NodeJS.ProcessEnv): boolean {
   const raw = env.RAYSPEC_MEDIA_PREP?.trim();
   if (raw === undefined || raw === '' || raw === 'ffmpeg') return true;
   if (raw === 'off') return false;
   throw new ProductBootError(
-    `RAYSPEC_MEDIA_PREP '${raw}' is not supported (wired: ffmpeg | off; unset ⇒ ffmpeg). Fail-closed.`,
+    `RAYSPEC_MEDIA_PREP '${raw}' is not supported (wired: ffmpeg | off; unset or blank ⇒ ffmpeg). Fail-closed.`,
   );
 }
 
@@ -2784,7 +2783,7 @@ export async function deployProductYamlSpec(
     ...(stt ? { stt: { adapter: stt } } : {}),
     ...(liveAgent ? { liveAgent } : {}),
     ...(agents ? { agents } : {}),
-    // media-prep is honored via RAYSPEC_MEDIA_PREP (ffmpeg | off; unset ⇒ ffmpeg). `off`
+    // media-prep is honored via RAYSPEC_MEDIA_PREP (ffmpeg | off; unset or blank ⇒ ffmpeg). `off`
     // omits the hook entirely (playback stays the honest 409); an invalid value fail-closed above.
     // only when the doc declares AUDIO — `&&` short-circuits so RAYSPEC_MEDIA_PREP is not even
     // read for a non-audio doc. (keyed on `withAudio`, not the generalized blobFactory —
