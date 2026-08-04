@@ -24,8 +24,13 @@ const h = vi.hoisted(() => ({
 // point: a revert that stopped `serveDeployment` from setting the env (or set it AFTER assembleServer)
 // makes the captured values wrong, REDding the ordering assertion below.
 vi.mock('@rayspec/server', () => {
+  // Every name `serveDeployment` destructures must be present here — a missing one fails the
+  // destructure itself, before any assertion. The four error classes are the fail-closed set its catch
+  // block branches on; none of them is thrown on the paths below (the boot always succeeds here).
   class BootConfigError extends Error {}
+  class BootTimeoutError extends Error {}
   class DeployError extends Error {}
+  class ProductBootError extends Error {}
   return {
     assembleOptsFromEnv: () => ({}),
     assembleServer: vi.fn(async () => {
@@ -38,6 +43,7 @@ vi.mock('@rayspec/server', () => {
     }),
     assembleStaticServer: vi.fn(),
     BootConfigError,
+    BootTimeoutError,
     bootBanner: () => 'banner',
     bootBaseUrl: () => 'http://127.0.0.1:0',
     DeployError,
@@ -51,6 +57,7 @@ vi.mock('@rayspec/server', () => {
     isStaticProfile: vi.fn(() => false),
     loadServerConfig: () => ({ port: 0 }),
     loadStaticServerConfig: () => ({ port: 0, host: '127.0.0.1' }),
+    ProductBootError,
     staticBootBanner: () => 'static banner',
   };
 });
