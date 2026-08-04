@@ -137,7 +137,12 @@ describe('remuxTimeoutMs (RAYSPEC_FFMPEG_TIMEOUT_MS)', () => {
     expect(remuxTimeoutMs(env({ RAYSPEC_FFMPEG_TIMEOUT_MS: '30000' }))).toBe(30_000);
   });
 
-  it('trims surrounding whitespace', () => {
+  // Deliberately NOT named for the resolver's `.trim()`, which nothing here can pin: `Number()`
+  // already ignores surrounding whitespace, and a whitespace-only value reaches the default down
+  // either path (trimmed it is falsy; untrimmed `Number('   ')` is 0, which `n <= 0` rejects).
+  // Deleting `.trim()` reds no case in this file, so a case named for it would be claiming a guard it
+  // does not have. The call stays for parity with `positiveInt`, whose contract this resolver mirrors.
+  it('reads a whitespace-padded value back as the number it pads', () => {
     expect(remuxTimeoutMs(env({ RAYSPEC_FFMPEG_TIMEOUT_MS: ' 250 ' }))).toBe(250);
   });
 
@@ -216,6 +221,9 @@ describe('remuxChunks — an out-of-range RAYSPEC_FFMPEG_TIMEOUT_MS does not inv
       arms.push({ value, elapsedMs: Date.now() - start, message });
     }
 
+    // Both arms ran: without this the per-arm loop below asserts nothing if `arms` is ever empty,
+    // and the final equality would compare undefined to undefined.
+    expect(arms).toHaveLength(2);
     for (const arm of arms) {
       // The child's own non-zero exit, after the child's own ~2s — not a kill in single-digit ms.
       expect(`${arm.value}: ${arm.message}`).toContain('ffmpeg exited 1');
