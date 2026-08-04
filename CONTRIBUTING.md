@@ -133,6 +133,15 @@ dependency.
   run on `OPENAI_API_KEY`, `anthropic` on `CLAUDE_CODE_OAUTH_TOKEN`, and `codex` on
   `~/.codex/auth.json`. CI's live lane sets both variables and names its backends
   explicitly.
+- A live run also fails collection when `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY`
+  are **both** present. The Anthropic SDK credential precedence is `ANTHROPIC_API_KEY` >
+  `CLAUDE_CODE_OAUTH_TOKEN`, so the anthropic blocks would authenticate as `api-key` and
+  bill the API instead of using the subscription harness — and the `authMode` assertion
+  that catches it runs only once the call has been paid for. Unset `ANTHROPIC_API_KEY` for
+  the run. Like the two refusals above it fails the live smoke file as a whole, so it stops
+  the `openai`/`pi`/`codex` blocks with it; with the subscription token absent the anthropic
+  blocks self-skip and nothing can be billed, so a lone stray key is not refused. CI's live
+  lane sets no `ANTHROPIC_API_KEY`, which is why the refusal is inert there.
 - For a run where nothing skips for want of configuration, put those variables and
   `DATABASE_URL`/`SHADOW_DATABASE_URL` in the **environment** rather than only in a
   `.env` file. `pnpm test` drives the suites through turbo in strict env mode, so a

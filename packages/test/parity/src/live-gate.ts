@@ -86,7 +86,8 @@ export function liveGateFailure(
  * set in the INVOKING SHELL reaches this check through `pnpm test` only because `turbo.json`'s
  * `tasks.test.env` declares the name — without that declaration a shell-set key is stripped and this
  * guard never sees it, while a direct `vitest` run stays protected. That asymmetry is the whole point
- * of declaring it. A key supplied the DOCUMENTED way — the repo-root `.env` (`.env.example:174`) —
+ * of declaring it. A key supplied the DOCUMENTED way — the repo-root `.env`, where `.env.example`
+ * carries `ANTHROPIC_API_KEY` as an operator variable —
  * reaches this check either way, because `vitest.setup.ts` loads that file INSIDE the vitest process,
  * where turbo's filtering no longer applies.
  */
