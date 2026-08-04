@@ -30,6 +30,7 @@
     "gen:dependency-sbom": "node scripts/gen-dependency-sbom.mjs",
     "check:deploy-entrypoint": "node scripts/check-deploy-entrypoint-imports.mjs",
     "test:gate-portability": "node scripts/check-no-pack-imports.spacepath.test.mjs",
+    "test:gate-coverage": "node scripts/check-gate-coverage.test.mjs",
     "test:advisory-sync": "node scripts/sync-advisory-issues.test.mjs",
     "test:release-guard": "node scripts/publish.test.mjs",
     "test:release-identity": "node scripts/release-identity.test.mjs",

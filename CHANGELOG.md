@@ -1870,6 +1870,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The two chokepoint-family gates refuse to certify a source root they never read.** Both
+  `pnpm gate:chokepoint` (no raw-db handle or `unscoped()` in the request path) and
+  `pnpm gate:adapter-handlers` (no tool handler outside `ctx.dispatchTool`) walk a fixed list of
+  source roots, and their directory walk returns silently on a path that does not exist. Renaming or
+  moving any one of those packages therefore retired that root's scan **without a signal**: zero
+  files read, zero violations found, exit 0, and a PASS line indistinguishable from a real one — the
+  adapter gate's line even names all four adapters as clean. Each gate now counts the files it
+  scanned per root, exits non-zero naming any root that read nothing, and reports its coverage in the
+  PASS line the way the handler-imports, extension-capability and no-pack gates already do
+  (`… 100 source file(s) across 4 root(s) …`). This is the same fail-open, and the same guard, that
+  `check-no-pack-imports.mjs` already carries. **No invariant was unenforced:** the roots are correct
+  in this tree and both gates fire on a planted violation — what changes is that a future rename
+  becomes loud instead of silent. Repository infrastructure only: no published package, API or
+  runtime behavior changes. The regression runs locally via `pnpm test:gate-coverage`.
+
 - **The expense-claim-coder live smoke no longer prints credentials to the terminal.** Its `pp`
   helper pretty-printed whole response bodies at seven call sites, and three of those bodies carry
   credential material: the user access token from `POST /v1/auth/register`, the org-scoped access
