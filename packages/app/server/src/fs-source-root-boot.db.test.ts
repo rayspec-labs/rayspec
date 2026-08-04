@@ -19,9 +19,9 @@
  *       (asserted after each reject arm — nothing here is allowed to materialize a source root).
  *   (d) The entrypoint print: both classes sit in `serve.ts`'s message-only branch, so the refusal
  *       prints without a Node stack trace. `serve.ts`'s `main().catch(...)` is not importable (it runs
- *       under `isProcessEntrypoint()`), so the branch membership is pinned against its SOURCE — the same
- *       way boot-timeout.test.ts and serve-bind.test.ts pin the entrypoint's other wiring — while the
- *       CLASS of each refusal is measured at runtime by the arms above.
+ *       under `isProcessEntrypoint()`), so the branch membership is pinned against its comment-stripped
+ *       SOURCE as ONE shape — the same way boot-timeout.test.ts and serve-bind.test.ts pin the
+ *       entrypoint's other wiring — while the CLASS of each refusal is measured at runtime above.
  *
  * DB ISOLATION: two whole throwaway DATABASEs named with process.pid (a backend one and a Product-YAML
  * one), exactly as the neighbouring boot suites. Skips without DATABASE_URL; the un-skippable ran-guard
@@ -297,11 +297,17 @@ api:
 
 describe('the entrypoint prints both refusal classes message-only, with no stack', () => {
   const src = readFileSync(join(here, 'serve.ts'), 'utf8');
+  // Strip comments so the assertion reads the CODE, not prose that merely names the wiring.
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
 
   it('serve.ts routes BootConfigError and ProductBootError to the message-only branch', () => {
-    expect(src).toMatch(/err instanceof BootConfigError/);
-    expect(src).toMatch(/err instanceof ProductBootError/);
-    expect(src).toMatch(/console\.error\(`\[rayspec-serve\] \$\{err\.message\}`\)/);
+    // ONE shape, not three independent tokens: the whole guard condition through to the
+    // message-only print. Naming the classes in separate assertions would let the branch be
+    // rewired around them (e.g. `(false && err instanceof ProductBootError)`) and still read
+    // green — measured — so the condition and the print it guards are matched together.
+    expect(code).toMatch(
+      /if\s*\(\s*err instanceof BootConfigError\s*\|\|\s*err instanceof DeployError\s*\|\|\s*err instanceof ProductBootError\s*\|\|\s*err instanceof BootTimeoutError\s*\)\s*\{\s*console\.error\(`\[rayspec-serve\] \$\{err\.message\}`\)/,
+    );
   });
 });
 

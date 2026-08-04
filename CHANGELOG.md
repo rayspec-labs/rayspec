@@ -1431,12 +1431,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the operator which variable to fix, and tells them without a stack trace.** The read-only fs-source
   root is validated once, at boot: a path that does not exist, and a path naming a regular file, both
   abort. That refusal is raised inside `@rayspec/platform`, which is handed a plain root path and never
-  learns which variable produced it, so the message named the resolved path and nothing else — the only
-  environment variable either boot path could fail-close on without naming itself in the message. It
-  was also outside the small set of classes the `rayspec-serve` entrypoint recognises as
-  operator-actionable, so it printed as `boot failed:` followed by a Node stack trace of absolute
-  filesystem paths. Both boot paths now catch that refusal where the variable *is* known and re-raise
-  it in their own house wording: a spec boot aborts with `Boot aborted —
+  learns which variable produced it, so the message named the resolved path and nothing else — unlike
+  the environment refusals those two boot paths raise themselves (`RAYSPEC_GDPR_RETENTION_DAYS`,
+  `RAYSPEC_ACCESS_TOKEN_TTL_SECONDS`, `RAYSPEC_CRON_TENANT_ID`, `RAYSPEC_BLOB_ROOT`,
+  `RAYSPEC_MEDIA_PREP`), which each name the variable they refuse on. It was also outside the small set
+  of classes the `rayspec-serve` entrypoint recognises as operator-actionable, so it printed as
+  `boot failed:` followed by a Node stack trace of absolute filesystem paths. Both boot paths now catch
+  that refusal where the variable *is* known and re-raise it in their own house wording: a spec boot
+  aborts with `Boot aborted —
   RAYSPEC_FS_SOURCE_ROOT='<resolved path>' does not exist or is not a directory. … Fail-closed.`, and a
   Product-YAML boot with the same sentence behind that boot's own `Boot aborted (Product-YAML) —`
   prefix. Both classes are ones `rayspec-serve` prints message-only, so the refusal now arrives as that
