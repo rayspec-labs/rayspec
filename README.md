@@ -132,6 +132,23 @@ root; `dist/index.js` is the `rayspec` CLI and `dist/serve.js` is the
 ```bash
 git clone <this-repo> rayspec && cd rayspec
 pnpm install && pnpm build
+```
+
+> **The `Failed to create bin` warnings that install prints are benign.** It runs *before*
+> `pnpm build`, so the workspace bins it tries to link — `rayspec` (`@rayspec/cli` →
+> `./dist/index.js`) and `rayspec-serve` (`@rayspec/server` → `./dist/serve.js`) — still point
+> at `dist/` files nothing has written yet, and pnpm prints a `WARN … Failed to create bin at …
+> ENOENT` line for each link it cannot make. Each link is reported more than once, so expect
+> more lines than there are bins. They are non-fatal: the install exits `0`, and the `pnpm build`
+> on the same line writes those files.
+>
+> The bins stay unlinked until `pnpm install` is run again *after* the build — and even then only
+> `rayspec-serve` reaches the repo-root `node_modules/.bin`, because the root package depends on
+> `@rayspec/server` and not on `@rayspec/cli`. That is why the steps below invoke the built
+> entrypoints directly (`node packages/app/cli/dist/index.js`,
+> `node packages/app/server/dist/serve.js`) rather than `rayspec` and `rayspec-serve`.
+
+```bash
 pnpm db:up                                              # local Postgres on :5433
 # Already ran this before? If pnpm db:up reports the container name
 # "/rayspec-pg" is already in use, reuse it: docker start rayspec-pg
@@ -176,18 +193,6 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/sessions
 # Or boot auth-only (no product spec):
 node packages/app/server/dist/serve.js
 ```
-
-> **`Failed to create bin` warnings from that first `pnpm install` are benign.** It runs
-> *before* `pnpm build`, so the workspace bins it tries to link — `rayspec` (`@rayspec/cli`
-> → `./dist/index.js`) and `rayspec-serve` (`@rayspec/server` → `./dist/serve.js`) — still
-> point at `dist/` files nothing has written yet, and pnpm prints a `WARN … Failed to create
-> bin at … ENOENT` line for each link it cannot make. They are non-fatal: the install exits
-> `0`, and the `pnpm build` on the same line writes those files. The bins stay unlinked until
-> `pnpm install` is re-run *after* the build — and even then only `rayspec-serve` reaches the
-> repo-root `node_modules/.bin`, because the root depends on `@rayspec/server` and not on
-> `@rayspec/cli`. That is why the commands above invoke the built entrypoints directly
-> (`node packages/app/cli/dist/index.js`, `node packages/app/server/dist/serve.js`) instead
-> of `rayspec` and `rayspec-serve`.
 
 See **[getting-started](./docs/getting-started.md)** for the full walkthrough,
 including provisioning the first tenant and making an authenticated request.
