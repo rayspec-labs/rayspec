@@ -964,6 +964,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A malformed `RAYSPEC_JWT_SIGNING_KEY` now refuses the boot as a named, fail-closed config abort
+  instead of crashing with the signing library's own error and a stack trace.** `loadServerConfig`
+  checks that the secret is present, and nothing between it and `jose` looked at the bytes, so a value
+  that is not a PKCS#8 PEM surfaced as `TypeError: "pkcs8" must be PKCS#8 formatted string` or as
+  `DOMException: Invalid character` — neither naming the variable, neither hinting that the value needs
+  real newlines, and both taking the entrypoint's unexpected-error branch, which prints a Node stack
+  trace with the absolute paths of the machine that built the artifact. The two shapes that reach it
+  come from one documented value: `rayspec dev gen-secrets` writes the PEM into `.env` as a single line
+  carrying literal `\n` escapes behind a leading `"`, and only the entrypoint's own `.env` loader
+  un-escapes that form — a loader that skips any variable already present in the environment. So a
+  value copied out of `.env` into an inline assignment is never un-escaped: with the quotes still
+  attached the PEM header is not at offset 0, and with them stripped the literal `\n` survives into
+  base64 decoding. The boot now aborts with `Boot aborted — RAYSPEC_JWT_SIGNING_KEY is not a PKCS#8
+  PEM.`, naming the shape expected and both of those causes, and pointing at
+  `RAYSPEC_JWT_SIGNING_KEY_FILE`. It is a `BootConfigError`, one of the classes the entrypoints print
+  as a message rather than as a crash, so the stack trace is gone as well. No byte of the value is
+  echoed, matching the surrounding secret diagnostics, which name the variable and the kind of problem
+  but never the value. **Nothing about what is accepted changed** — a value that is not a PKCS#8 PEM
+  still refuses the boot, and a real multi-line PEM, whether supplied directly or through the `_FILE`
+  variant, boots exactly as before. The `lead-qualifier` example's boot recipe now passes the key
+  through `RAYSPEC_JWT_SIGNING_KEY_FILE`, because the value that example's reader has in `.env` cannot
+  be pasted into the inline assignment it previously showed.
+
 - **A cancelled run reports being cancelled, whatever else it also recorded.** A run can hold two
   classed failures at once: the platform records the cancellation for a run that produced its answer
   anyway — the signal reached it in the post-backend tail, or it executes in a process the signal
