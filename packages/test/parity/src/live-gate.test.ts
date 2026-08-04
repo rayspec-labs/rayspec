@@ -7,7 +7,7 @@
  * `pnpm gate:parity`) turns the second case below RED.
  */
 import { describe, expect, it } from 'vitest';
-import { liveGateFailure, liveTestEnabled } from './live-gate.js';
+import { liveGateFailure, liveTestEnabled, strayAnthropicKeyRefusal } from './live-gate.js';
 
 describe('liveTestEnabled — the live opt-in gate', () => {
   it('runs only when opted in AND the credential is present', () => {
@@ -128,5 +128,36 @@ describe('liveGateFailure — which credential configurations the live suite ref
       expect(liveGateFailure(true, 'codex', creds({ codex: true }))).toBeNull();
       expect(liveGateFailure(true, 'openai,pi', creds({ openai: true }))).toBeNull();
     });
+  });
+});
+
+/**
+ * The billing refusal. The anthropic live blocks assert `authMode === 'subscription-oauth-official-harness'`,
+ * and the adapter resolves that mode from the ambient environment (`ANTHROPIC_API_KEY` first, then
+ * `CLAUDE_CODE_OAUTH_TOKEN`). With both set the run authenticates as `api-key`: it BILLS the API and
+ * only then fails the equality. This refusal moves the failure BEFORE the spend.
+ *
+ * The two accept cases are the ones easy to break by tightening: a stray key with NO subscription token
+ * self-skips every anthropic block, so it must not block a contributor's openai/codex live run, and
+ * nothing at all is refused without the opt-in.
+ */
+describe('strayAnthropicKeyRefusal — refusing to bill the API on a subscription live run', () => {
+  it('REFUSES when opted in with BOTH the subscription token and a stray ANTHROPIC_API_KEY', () => {
+    expect(strayAnthropicKeyRefusal(true, true, true)).toBe(
+      'packages/test/parity/src/live-smoke.test.ts: RAYSPEC_REQUIRE_LIVE_TESTS is set and CLAUDE_CODE_OAUTH_TOKEN is present, but ANTHROPIC_API_KEY is ALSO set — the SDK credential precedence is ANTHROPIC_API_KEY > CLAUDE_CODE_OAUTH_TOKEN, so the anthropic live blocks would BILL the API instead of using the $0 subscription harness. Unset ANTHROPIC_API_KEY for this run.',
+    );
+  });
+
+  it('ACCEPTS a stray key when the subscription token is absent — the anthropic blocks self-skip', () => {
+    expect(strayAnthropicKeyRefusal(true, false, true)).toBeNull();
+  });
+
+  it('ACCEPTS without the opt-in, whatever the environment carries', () => {
+    expect(strayAnthropicKeyRefusal(false, true, true)).toBeNull();
+    expect(strayAnthropicKeyRefusal(false, false, true)).toBeNull();
+  });
+
+  it('ACCEPTS the sanctioned live configuration — subscription token, no API key', () => {
+    expect(strayAnthropicKeyRefusal(true, true, false)).toBeNull();
   });
 });
