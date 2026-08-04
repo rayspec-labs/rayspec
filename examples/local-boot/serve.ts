@@ -237,9 +237,17 @@ const DIGEST_CHARS = 8;
  * names that differ only beyond that byte ARE one database — which, given the prefix and a sanitizer
  * that maps every character to one ASCII byte, is every pair of directory names 49 characters or longer
  * that agree that far. A name that does not fit is therefore CAPPED and disambiguated with a short
- * digest of the RESOLVED spec path, so the result is always ≤ 63 bytes and two distinct spec paths
- * always derive two distinct databases. A name that already fits is returned UNCHANGED — an existing
- * backend keeps the database it has been booting into.
+ * digest of the RESOLVED spec path, so the result is always ≤ 63 bytes and what keeps two capped
+ * siblings apart is that digest rather than how much of their directory names happens to fit. A name
+ * that already fits is returned UNCHANGED — an existing backend keeps the database it has been
+ * booting into.
+ *
+ * What that buys is a BOUND, not a guarantee of distinctness, and the wrapper does not claim one.
+ * `DIGEST_CHARS` hex characters are 32 bits, so two capped names still collide when their spec paths'
+ * digests do (~1 in 2^32 per pair). A capped name is also itself a legal 49-character directory name,
+ * so a directory named exactly like one derives the same database through the unchanged branch. Both are
+ * accepted deliberately: this names a THROWAWAY dev database, and the failure the cap closes — every
+ * sufficiently-long sibling pair colliding, by construction — is the one that actually happens.
  *
  * A spec at a filesystem root has an EMPTY directory segment (`resolve('/rayspec.yaml').split('/')` is
  * `['', 'rayspec.yaml']`), so the fallback tests the segment for emptiness rather than only for

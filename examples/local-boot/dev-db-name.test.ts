@@ -80,6 +80,22 @@ describe('devDatabaseName', () => {
     }
   });
 
+  it('separates two capped siblings by the spec-path digest, not by their directory names', () => {
+    // What the cap buys is a bound, not distinctness: both names are capped, so their readable segment
+    // is byte-identical and the digest is the ONLY thing left holding them apart. Pinned because the
+    // derivation is documented as providing exactly this and no more — a 32-bit digest makes a
+    // collision improbable, it does not make one impossible.
+    const a = devDatabaseName(`/repo/examples/${'a'.repeat(60)}_alpha/rayspec.yaml`);
+    const b = devDatabaseName(`/repo/examples/${'a'.repeat(60)}_beta/rayspec.yaml`);
+    const shared = `rayspec_local_${'a'.repeat(40)}_`;
+    for (const name of [a, b]) {
+      expect(name.startsWith(shared)).toBe(true);
+      expect(name.slice(shared.length)).toMatch(/^[0-9a-f]{8}$/);
+      expect(Buffer.byteLength(name, 'utf8')).toBe(PG_MAX_IDENTIFIER_BYTES);
+    }
+    expect(a).not.toBe(b);
+  });
+
   it('names a spec at a filesystem root without an empty segment', () => {
     expect(devDatabaseName('/rayspec.yaml')).toBe('rayspec_local_spec');
     expect(devDatabaseName('/dist/rayspec.yaml')).toBe('rayspec_local_spec_dist');
