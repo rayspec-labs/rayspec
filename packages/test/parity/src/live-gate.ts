@@ -82,10 +82,13 @@ export function liveGateFailure(
  * must NOT block a contributor's openai/codex live run. (A named-but-credential-absent anthropic is
  * already refused by `liveGateFailure` above.)
  *
- * Reachability note: under turbo the `test` task runs in strict env mode, so this check sees
- * `ANTHROPIC_API_KEY` only because `turbo.json`'s `tasks.test.env` declares it. Removing that
- * declaration would silently blind this guard through `pnpm test` while leaving a direct `vitest` run
- * protected.
+ * Reachability note: under turbo the `test` task runs in strict env mode, so an `ANTHROPIC_API_KEY`
+ * set in the INVOKING SHELL reaches this check through `pnpm test` only because `turbo.json`'s
+ * `tasks.test.env` declares the name — without that declaration a shell-set key is stripped and this
+ * guard never sees it, while a direct `vitest` run stays protected. That asymmetry is the whole point
+ * of declaring it. A key supplied the DOCUMENTED way — the repo-root `.env` (`.env.example:174`) —
+ * reaches this check either way, because `vitest.setup.ts` loads that file INSIDE the vitest process,
+ * where turbo's filtering no longer applies.
  */
 export function strayAnthropicKeyRefusal(
   optIn: boolean,
