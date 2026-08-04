@@ -1743,6 +1743,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the boot suite gains the missing half of the picture: the same missing-path and regular-file roots
   that abort a spec deploy are now asserted to *serve* on an auth-only boot, beside the arms that
   pin the refusal. **No behavior changed** — the correction is in the sample environment file.
+- **The README's "From source" block now explains the `Failed to create bin` warnings it makes the
+  reader produce.** Its first two commands clone the repository and run `pnpm install && pnpm build`,
+  and on a fresh clone the install half prints a run of `WARN … Failed to create bin at … ENOENT`
+  lines and then exits `0`: it runs before the build, so the two workspace bins it tries to link —
+  `rayspec` (`@rayspec/cli` → `./dist/index.js`) and `rayspec-serve` (`@rayspec/server` →
+  `./dist/serve.js`) — still point at `dist/` files nothing has written, and each link is reported
+  more than once. The README said nothing about them, so the
+  first thing the page produced was unexplained red text; getting-started has carried the same
+  explanation since #66, but a reader in the README is not reading getting-started.
+  A blockquote directly beneath that command now says they are non-fatal and why, and states the
+  consequence the rest of the block silently depends on: nothing links those bins until
+  `pnpm install` is run again after the build, and even then only `rayspec-serve` reaches the
+  repo-root `node_modules/.bin`, because the root package depends on `@rayspec/server` and not on
+  `@rayspec/cli` — which is why the block's CLI steps invoke `node packages/app/cli/dist/index.js`
+  rather than `rayspec`. The same correction lands in `docs/getting-started.md`, whose note
+  promised that a re-run install "creates the bins cleanly" and so implied both. The block's
+  `deploy` step also prints the boot's `NON-REAL PROVIDER(S) SELECTED` banner, because the block
+  selects `STT_PROVIDER=fake`; its comment now names that banner as the expected dev/CI posture,
+  as the walkthrough already does. **No behavior changed** — the build sequence the README
+  documents is untouched.
 
 ### Security
 
