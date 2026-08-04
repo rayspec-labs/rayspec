@@ -1427,23 +1427,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documented steps that follow then run verbatim. Repository release tooling only: no published
   package, API or runtime behavior changes.
 
-- **A fail-closed boot refusal through `rayspec deploy` is now the one-line diagnosis alone, the way
-  the same refusal through `rayspec-serve` already was.** Both entrypoints assemble the same
-  deployment and raise the same refusals, but only the `rayspec-serve` entrypoint counted
-  `ProductBootError` among the errors it reports as a message rather than as a crash. Through
+- **A product-boot refusal through `rayspec deploy` no longer carries a stack trace — it is the
+  diagnosis alone, the way the same refusal through `rayspec-serve` already was.** Both entrypoints
+  assemble the same deployment and raise the same refusals, but only the `rayspec-serve` entrypoint
+  counted `ProductBootError` among the errors it reports as a message rather than as a crash. Through
   `rayspec deploy` a product-boot refusal fell into the unexpected-error arm instead: an operator who
   set `RAYSPEC_PRODUCT_TENANT_ID` to something that is not a UUID got the diagnosis followed by seven
   stack frames of absolute paths belonging to the machine that built the artifact — paths that name
   nothing on the operator's own machine, in a trace that buries the line telling them what to fix.
   Measured on the shipped `acme-notes` product against a throwaway database: that refusal now writes
   the single line `[rayspec deploy] Boot aborted (Product-YAML) — RAYSPEC_PRODUCT_TENANT_ID=…` and
-  exits `1`, where the same command previously wrote eight lines, seven of them ` at ` frames; the
-  same is now true of a well-formed id that names no live org and of an unsupported
-  `RAYSPEC_MEDIA_PREP`. Exit codes and the wording of every diagnosis are untouched — only the trace
-  is gone. An error that is *not* one of the fail-closed classes still prints its stack, so a genuine
-  crash stays exactly as debuggable as it was. The two entrypoints now name the identical four
-  classes (`BootConfigError`, `BootTimeoutError`, `DeployError`, `ProductBootError`), compared at the
-  source by a test so they cannot drift apart again.
+  exits `1`, where the same command previously wrote eight lines, seven of them ` at ` frames; a
+  well-formed id that names no live org, and an unsupported `RAYSPEC_MEDIA_PREP`, likewise lose their
+  frames. Exit codes and the wording of every diagnosis are untouched — only the trace is gone. An
+  error that is *not* one of the fail-closed classes still prints its stack, so a genuine crash stays
+  exactly as debuggable as it was. The two entrypoints now name the identical four classes
+  (`BootConfigError`, `BootTimeoutError`, `DeployError`, `ProductBootError`), compared at the source
+  by a test so they cannot drift apart again. What each entrypoint *prints* for a given class is
+  unchanged by this release: a `DeployError` through `rayspec deploy` still carries the `roll-out
+  refused:` prefix and the follow-on line naming the sanctioned registration path, which
+  `rayspec-serve` does not print.
 
 ### Documentation
 
