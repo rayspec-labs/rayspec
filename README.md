@@ -152,7 +152,10 @@ node packages/app/cli/dist/index.js doctor examples/acme-notes/acme-notes.produc
 # acme-notes declares audio + speech-to-text + a note-extraction agent, so it asks
 # for a few capability env vars at boot (fail-closed if one is missing). For a
 # local, no-network hello-world, select the built-in fake STT and pass any
-# placeholder OpenAI key — the key is inert until a recording is processed.
+# placeholder OpenAI key — the key is inert until a recording is processed. The
+# boot then warns "NON-REAL PROVIDER(S) SELECTED", naming STT_PROVIDER=fake: that
+# banner is the dev/CI posture this line asks for, not an error — the deployment
+# comes up and serves.
 # RAYSPEC_PRODUCT_TENANT_ID is the one org the deployment binds to: provision an org
 # first (getting-started) and paste its id — a freshly generated uuid belongs to no
 # org, and the deployment refuses to boot rather than come up bound to a tenant that
