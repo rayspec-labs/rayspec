@@ -381,20 +381,24 @@ do_curl "$BASE/claims/$CLAIM_ID" -H "authorization: Bearer $ORG_TOKEN_A"
 A_BEFORE_CAT="$(read_field categoryCode category_code)"
 A_BEFORE_STATUS="$(read_field status status)"
 
-req "POST /claims/$CLAIM_ID/code  AS ORG B  (expect 404 — cannot code A's claim)" "Bearer <org token B>"
-# A non-empty input so the run DTO doesn't 400 for the wrong reason — the point here is the 404 from the
-# tenant predicate (org B's {id} resolves to no in-tenant claim), not the agent.
+req "POST /claims/$CLAIM_ID/code  AS ORG B  (expect 200 — the run starts, and still cannot touch A's row)" "Bearer <org token B>"
+# A non-empty input so the run DTO doesn't 400 for the wrong reason — the point here is what an agent
+# route does with {id}, not the DTO.
 B_RUN_INPUT="$(jq -n --arg id "$CLAIM_ID" '{input: ({claim_id:$id, description:"org B probe"} | tojson)}')"
 do_curl -X POST "$BASE/claims/$CLAIM_ID/code" -H "authorization: Bearer $ORG_TOKEN_B" \
   -H 'content-type: application/json' -H 'accept: application/json' \
   -H "Idempotency-Key: cross-$STAMP" --data-binary "$B_RUN_INPUT"
 note "HTTP $STATUS"
-# The run-surface returns 404 when the {id} resolves to no in-tenant claim (or the agent's persist
-# no-match returns a failed coding). Either way org B must NOT mutate org A's claim — asserted below.
+# Unlike the GET above, an {kind:agent} route does NOT resolve {id}: it authenticates, resolves the
+# tenant, requires `agent:run`, then hands the request to the run surface, which binds the matched
+# path params into the run INPUT as text. So org B — holding `agent:run` in ITS OWN org — starts
+# a real run and gets the neutral run result. What the run cannot do is reach A's row: every store it
+# touches goes through the tenant-scoped facade bound to the CALLER's org, so A's id matches nothing
+# there, exactly as an invented id would. The WRITE-isolation re-read below is the hard assertion.
 case "$STATUS" in
-  404) ok "org B's code attempt correctly returns 404 (A's claim is invisible to B — tenant predicate)";;
-  400|422) ok "org B's code attempt did not succeed (HTTP $STATUS)";;
-  200) note "(run surface returned 200; the WRITE-isolation re-read below is the hard assertion)";;
+  200) ok "org B's code attempt ran inside ORG B and returned the neutral run result ({id} is not resolved; A's row stays out of reach)";;
+  404) note "(HTTP 404 — the run surface refused before starting a run; the WRITE-isolation re-read below is the hard assertion)";;
+  400|422) note "(HTTP $STATUS — no run started; the WRITE-isolation re-read below is the hard assertion)";;
   *) note "(HTTP $STATUS — the WRITE-isolation re-read below is the hard assertion)";;
 esac
 
