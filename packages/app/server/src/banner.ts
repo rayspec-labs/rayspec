@@ -85,6 +85,51 @@ export function bootBanner(server: BootedServer, base: string): string {
     }
     lines.push('    (webhook/event/manual trigger kinds are RESERVED per-kind — not fired.)');
   }
+
+  // The RESOLVED housekeeping posture — the two irreversible-deletion operator gates and the daily
+  // cleanup crontab. Printed on EVERY boot because BOTH directions matter: an operator who armed a
+  // gate gets the confirmation that irreversible deletion is now live, and one whose `TRUE`/`1` the
+  // strict comparison rejected sees DRY-RUN instead of silence. `server.housekeeping` carries what the
+  // boot RESOLVED, so the supplied string is never echoed back as though it had been accepted.
+  const { cleanup, erasureEnabled } = server.housekeeping;
+  lines.push('');
+  lines.push('  Housekeeping (resolved):');
+  if (cleanup.gdprPurgeEnabled) {
+    lines.push(
+      "    GDPR tombstone purge:  ARMED — RAYSPEC_GDPR_PURGE_ENABLED is exactly 'true'; when the cleanup runs it DELETES irreversibly",
+    );
+  } else {
+    lines.push(
+      "    GDPR tombstone purge:  DRY-RUN — counts what it would delete, deletes nothing (set RAYSPEC_GDPR_PURGE_ENABLED to exactly 'true' to arm)",
+    );
+  }
+  // `eraseTenantNow` is undefined for an auth-only / no-product boot (a spec with zero product
+  // stores) — there is nothing there for the gate to act on, so say that instead of a gate posture.
+  if (server.eraseTenantNow === undefined) {
+    lines.push(
+      '    Tenant data erasure:   NOT WIRED — this boot deployed no product stores, so there is nothing to erase',
+    );
+  } else if (erasureEnabled) {
+    lines.push(
+      "    Tenant data erasure:   ARMED — RAYSPEC_ERASURE_ENABLED is exactly 'true'; an erasure call DELETES irreversibly",
+    );
+  } else {
+    lines.push(
+      "    Tenant data erasure:   DRY-RUN — counts what it would delete, deletes nothing (set RAYSPEC_ERASURE_ENABLED to exactly 'true' to arm)",
+    );
+  }
+  // `runCleanupNow` is undefined for an auth-only / no-durable-worker boot (DBOS is not launched
+  // there, so the cleanup workflow is not wired). The crontab still RESOLVES on such a boot — printing
+  // it would advertise a schedule that never fires, so the banner reports the absence instead.
+  if (server.runCleanupNow === undefined) {
+    lines.push(
+      '    Daily cleanup:         NOT SCHEDULED — this boot wires no durable worker, so no cleanup fires here',
+    );
+  } else {
+    lines.push(
+      `    Daily cleanup:         '${cleanup.schedule}'   (GDPR retention ${cleanup.gdprRetentionDays} days)`,
+    );
+  }
   lines.push(RULE);
   lines.push('');
   return lines.join('\n');

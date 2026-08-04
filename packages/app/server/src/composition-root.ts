@@ -358,6 +358,23 @@ export interface BootedServer {
     tenantId: string,
     opts?: { dryRun?: boolean; journalScrub?: boolean },
   ) => Promise<EraseResult>;
+  /**
+   * The RESOLVED housekeeping posture this boot runs under — the two irreversible-deletion operator
+   * gates and the daily cleanup crontab, exactly as `loadServerConfig` resolved them. RESOLVED, never
+   * the raw environment strings: a `TRUE` the strict comparison rejected reads here as the DISABLED
+   * value it actually produced, so nothing downstream can echo it back as though it were accepted.
+   * The boot banner states it (an operator otherwise learns the mode only when the job fires); an
+   * embedder that assembles the server itself reads the same values.
+   *
+   * It carries the SETTINGS only. Whether the cleanup is actually SCHEDULED is `runCleanupNow`'s
+   * presence, and whether there is anything to erase is `eraseTenantNow`'s.
+   */
+  housekeeping: {
+    /** The resolved cleanup knobs (crontab / GDPR gate / retention) — `ServerConfig.cleanup`. */
+    cleanup: CleanupSettings;
+    /** The resolved tenant data-erasure gate — `ServerConfig.erasureEnabled`. */
+    erasureEnabled: boolean;
+  };
   /** Close the underlying DB pool (the entrypoint wires this to SIGINT/SIGTERM). */
   close: () => Promise<void>;
 }
@@ -1787,6 +1804,10 @@ export async function assembleServer(
     ...(fireCronNow ? { fireCronNow } : {}),
     ...(runCleanupNow ? { runCleanupNow } : {}),
     ...(eraseTenantNow ? { eraseTenantNow } : {}),
+    // The RESOLVED housekeeping posture, straight off the validated config — the SAME values both
+    // deploy branches hand to `SystemCleanupScheduler` / `eraseTenant`, so the banner reports what this
+    // boot will actually do rather than re-reading (and re-interpreting) the environment.
+    housekeeping: { cleanup: config.cleanup, erasureEnabled: config.erasureEnabled },
     close: async () => {
       // Drain the durable worker FIRST (finish in-flight jobs, stop dequeuing) so a
       // shutdown does not orphan a job, THEN end the app DB pool. Swallow a worker-shutdown error so
