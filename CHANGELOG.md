@@ -1730,6 +1730,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changed** — blank keeps counting as unset. The unit tests gain the two arms that pin it: an empty
   string and a whitespace-only value both resolve to the wired default, alongside a case-variant arm
   (`FFMPEG`) that still refuses, since the match is exact after trimming.
+- **`.env.example` no longer claims `RAYSPEC_FS_SOURCE_ROOT` is validated on every boot.** The entry
+  said the root is "checked ONCE at boot — a root that does not exist or is not a directory refuses
+  the boot", which an operator reads as a guarantee that a typo cannot start a server. It holds only
+  where the fs-source is actually built, and only two boots build it: the `rayspec.yaml` deploy and
+  the `*.product.yaml` deploy. Both build sites are gated on the variable alone, so a spec deploy
+  checks the root whether or not the document declares a handler or tool `init.fsSource` would be
+  handed to. An auth-only boot (no `RAYSPEC_SPEC_PATH`) deploys no spec, so it never constructs the
+  factory the check lives in — it resolves the value to an absolute path, validates nothing, and
+  serves; a frontend-only static boot does not read the variable at all. The entry now says where
+  the check applies and what the other two boots do instead. The refusal itself is unchanged, and
+  the boot suite gains the missing half of the picture: the same missing-path and regular-file roots
+  that abort a spec deploy are now asserted to *serve* on an auth-only boot, beside the arms that
+  pin the refusal. **No behavior changed** — the correction is in the sample environment file.
 
 ### Security
 
