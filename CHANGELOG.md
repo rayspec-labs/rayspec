@@ -743,6 +743,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cleanup` settings and the resolved `erasureEnabled` gate — the same values the boot hands to the
   cleanup scheduler and the erasure seam. `bootBanner`'s signature is unchanged.
 
+- **`rayspec --version` (and `-v`) now reports the CLI's version instead of failing as a usage error.**
+  The top-level dispatch treated any first token beginning with `-` as "expected a subcommand" and
+  exited `2` before looking at which flag it was, so an installed CLI could not be asked which version
+  it is. Both spellings are now recognised ahead of that check and emit the ordinary single-JSON-object
+  envelope on stdout — `{ "ok": true, "version": "1.7.0" }` — with nothing on stderr and exit `0`.
+
+  **The value is read at run time from the CLI package's own manifest**, resolved relative to the
+  entrypoint rather than the working directory, and npm places `package.json` beside `dist/` in the
+  packed tarball — so a published install reports the version it actually is, from any directory, with
+  no dependency on the source layout. This is the top-level flag only: it reports the CLI itself, not
+  the versions of the packages installed around it. Every other leading `--flag`, and every unknown
+  subcommand, is still the same exit-`2` usage error on stderr.
+
 ### Changed
 
 - **A product deployment whose `RAYSPEC_PRODUCT_TENANT_ID` is malformed or names no live org now
