@@ -4,7 +4,7 @@ This is a **backend showcase**: a tool-using agent that, *inside its run*, **loo
 store** (the org's expense-category catalog) and **writes its result back to a store** (the coded
 claim row) — the agent→store auto-persist loop, generated end-to-end from a plain-language brief.
 
-> Trusted, self-hosted posture (see the root [SECURITY.md](../../oss-authored/SECURITY.md)). The
+> Trusted, self-hosted posture (see the root [SECURITY.md](../../SECURITY.md)). The
 > generated handlers are **trusted-author, NOT sandboxed** — they run in-process; the two CI gates
 > (`gate:handler-imports`, `gate:extension-capability`) are TRIPWIRES, not a sandbox. Per-tenant
 > execution sandboxing lives in the separate hardening layer (deferred, not in the core).
