@@ -45,16 +45,42 @@ function ffprobeBin(): string {
   return process.env.RAYSPEC_FFPROBE_BIN?.trim() || 'ffprobe';
 }
 
+/** The cap used when `RAYSPEC_FFMPEG_TIMEOUT_MS` is unset or unusable: 120s of wall clock. */
+const DEFAULT_REMUX_TIMEOUT_MS = 120_000;
+
+/** The largest delay a timer actually keeps — `setTimeout` replaces anything above it with 1ms. */
+const MAX_REMUX_TIMEOUT_MS = 2_147_483_647;
+
 /**
  * The bounded wall-clock cap (ms) for a single ffmpeg/ffprobe child (MP-3). A HANGING ffmpeg/ffprobe
  * (e.g. a wedged decode, a stuck pipe) would otherwise stall the durable STT node INDEFINITELY —
  * violating never-poison-the-run. On timeout the child is SIGKILLed and the run turns into a fail-closed
  * `RemuxError` (the media-prep caller's fail-soft path), never an indefinite stall. `-c copy` is a cheap
  * container rewrite, so 120s is generous even for a long recording; overridable via `RAYSPEC_FFMPEG_TIMEOUT_MS`.
+ *
+ * UNUSABLE ⇒ THE DEFAULT — and "unusable" covers BOTH ends the timer cannot hold, not only "not a
+ * number, or not above zero". This number goes straight into `setTimeout`, which keeps a delay only
+ * within 1 … {@link MAX_REMUX_TIMEOUT_MS} and silently substitutes 1ms for anything outside it
+ * (`TimeoutOverflowWarning`). A cap of 3000000000 therefore does NOT wait longer than the default: it
+ * SIGKILLs a HEALTHY child within milliseconds and reports a timeout that never applied — the cap
+ * INVERTED into the stalled, fail-closed step it exists to prevent, for every media step of every run.
+ *
+ * Out of range falls back to the default rather than clamping to the ceiling: an operator who writes an
+ * enormous cap means "do not cut this off", which the generous default already expresses, and silently
+ * running with a number nobody wrote is its own surprise. The floor runs BEFORE the range check, so a
+ * fraction below 1 — which `setTimeout` collapses to 1ms just the same — is unusable rather than
+ * "above zero" and therefore live, and the number checked is exactly the number the timer gets and the
+ * refusal message names. This is the rule `positiveInt` applies to the agent-run bounds in
+ * @rayspec/platform; one rule across the millisecond variables is the one an operator has to remember.
+ * Read at CALL time (and EXPORTED for its own unit proofs) so a deployment/test can set the env after
+ * module load.
  */
-function remuxTimeoutMs(): number {
-  const raw = Number(process.env.RAYSPEC_FFMPEG_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : 120_000;
+export function remuxTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const trimmed = env.RAYSPEC_FFMPEG_TIMEOUT_MS?.trim();
+  if (!trimmed) return DEFAULT_REMUX_TIMEOUT_MS;
+  const n = Math.floor(Number(trimmed));
+  if (!Number.isFinite(n) || n <= 0 || n > MAX_REMUX_TIMEOUT_MS) return DEFAULT_REMUX_TIMEOUT_MS;
+  return n;
 }
 
 /** A remux failure (ffmpeg missing, a non-zero exit, no chunks) — fail-closed, never a partial result. */

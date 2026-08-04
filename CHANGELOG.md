@@ -1628,6 +1628,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused:` prefix and the follow-on line naming the sanctioned registration path, which
   `rayspec-serve` does not print.
 
+- **A deliberately generous `RAYSPEC_FFMPEG_TIMEOUT_MS` no longer turns into the shortest cap there
+  is.** The variable is a wall-clock cap on ONE ffmpeg or ffprobe child, and the number an operator
+  wrote went straight into a timer — which keeps a delay only up to 2147483647ms and silently
+  substitutes 1ms for anything larger (Node prints `TimeoutOverflowWarning` beside it). A cap above
+  that ceiling therefore did not wait longer, it waited a millisecond: the child was SIGKILLed while
+  perfectly healthy and the step ended as a fail-closed remux error naming a timeout that had never
+  applied, so every recording that needed stitching — the transcription path included — failed. Both
+  the ffmpeg and the ffprobe child were affected, since they read the same variable. Measured against
+  a stub child that works for two seconds and then fails: at `2147483647` the remux ended on the
+  child's own exit after 2021ms, at `2147483648` it ended on the timer after 6ms. A value above the
+  ceiling is now UNUSABLE and uses the 120000 default, which is the rule the agent-run bounds already
+  apply to their four variables; it is not clamped to the ceiling, because running with a number
+  nobody wrote is its own surprise, and an operator who asks for an enormous cap is asking for the
+  work not to be cut off, which the generous default already gives them. The same now holds at the
+  other end, where a timer behaves identically: a value that floors below 1 — `0.5` — used to reach
+  the timer and become a 1ms cap, and is unusable too. **A value in range is read exactly as before**,
+  now floored to a whole millisecond so the cap the timer gets is the one the refusal message names.
+  `.env.example` states the extended rule, in the wording the agent-run bounds block already uses.
+
 ### Documentation
 
 - **The getting-started walkthrough's token-expiry recovery can now be carried out by a reader who
