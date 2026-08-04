@@ -1421,6 +1421,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spec inside a build-output directory is now named after the backend instead, and the derivation is a
   pure exported function with the collision pinned by a test. Development wrapper only.
 
+- **Two backends with long directory names no longer share one throwaway development database
+  either.** The same derivation was unbounded in length, and Postgres stores only the first 63 bytes of
+  an identifier — so two sibling directories whose names agree on their first 49 characters were one
+  database, and the second backend's first-deploy boot DROPped and re-created the first one's data.
+  Nothing reported it afterwards, because the connection URL built from the untruncated name resolves
+  to the truncated database. A derived name that would not fit is now capped and disambiguated with a
+  short digest of the resolved spec path, so the result is at most 63 bytes and what keeps two capped
+  siblings apart is that digest rather than how much of their directory names happens to fit. That is a
+  bound, not a guarantee of distinctness: the digest is 8 hex characters, so two capped names still
+  collide when their spec paths' digests do — accepted deliberately for a throwaway development
+  database, where the failure being closed is that every sufficiently-long sibling pair collided by
+  construction. A name that already fits is returned **unchanged**, byte for byte, so an existing
+  backend keeps the database it has been booting into. A spec at a filesystem root now derives a
+  complete name as well: its directory segment is the empty string, and the fallback only covered an
+  absent one, so every such spec derived the single name `rayspec_local_`. One thing this does not
+  change — at exactly 63 bytes the companion `<name>_dbos_sys` drop is still the same identifier as
+  the database itself, for exactly the directory names it already was; it is issued one
+  statement after that database has been dropped, so it finds nothing, and Postgres will not let a
+  separate system database exist under that name in the first place. Development wrapper only.
+
 - **`RAYSPEC_REQUIRE_MEDIA_TESTS` reaches the suite it gates.** The remux suite carries an
   un-skippable guard that refuses to self-skip when the variable says the real media proof is
   required — but `pnpm test` runs the suites through turbo in strict environment mode, and the
