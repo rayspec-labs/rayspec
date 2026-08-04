@@ -760,6 +760,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`rayspec deploy` no longer exports agent traces to OpenAI unless you ask it to: set
+  `RAYSPEC_AGENT_TRACING=openai`.** The agent SDK exports traces to OpenAI by default, and those
+  traces carry prompts and tool arguments. On a machine running somebody else's workload that is their
+  content leaving for a third party without anyone having chosen it, and `deploy` is the strongest
+  signal the platform has that the workload is somebody else's — so on that path the export is now an
+  affirmative choice rather than a default. `RAYSPEC_AGENT_TRACING=openai` turns it on; `off`, or
+  leaving the variable unset or blank, leaves it off. Any other value refuses the boot by name, so a
+  typo cannot read as "not `openai`, therefore off" — silence in either direction is the whole point of
+  this entry. It is an affirmative switch rather than a negation of the SDK's own variable: an operator
+  states an intention, and the repository is not bound to a third party's variable name.
+
+  The export is turned off two ways, because one is not enough. The agent SDK builds its global trace
+  provider while its own module is being evaluated, and that provider reads the kill-switch ONCE, at
+  construction — so `rayspec deploy` sets the switch before it imports the boot closure (which reaches
+  the SDK through the model adapters), *and* drives the SDK's programmatic switch afterwards, which is
+  the only thing that can move a provider that already exists. `--apply-migration`, whose pre-flight
+  loads that closure first, needs the second one.
+
+  **Only `rayspec deploy` changes.** `rayspec-serve` and the local development wrapper keep the SDK
+  default, because a developer tracing their own agent sees their own prompts, and taking that away
+  would burden the case that was never the risk. **The boot banner now states the observed posture on
+  every path** — `Trace export: OFF` or `Trace export: EXPORTING TO OPENAI`, in an observed block beside
+  the resolved housekeeping one — and it is READ OFF THE SDK's own trace provider rather than derived
+  from any variable, so it stays honest on the entry points that do not change the default, on a
+  deployment that set the SDK's own switch directly, and on a boot where the mechanism failed. Nobody
+  loses tracing without being told, and nobody exports customer content without being told.
+
 - **A product deployment whose `RAYSPEC_PRODUCT_TENANT_ID` is malformed or names no live org now
   REFUSES TO BOOT.** Until now that variable was only checked for being non-empty, so a deployment
   pointed at nothing came up green and reported healthy — and then failed for everybody, far from
@@ -978,6 +1005,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps every existing key and gains `versionSource` and `tag`.
 
 ### Fixed
+
+- **A deployment whose only route to the internet is an HTTP proxy can run agents again.** On such a
+  deployment every agent run failed at its first model call with `Error: Connection error.`, zero
+  tokens and `errorClass: internal`, while the identical call from a freshly spawned process in the
+  same container succeeded — and during the failing run, *nothing* from the application reached the
+  proxy at all, measured as a delta on the proxy's own access log. The server's runtime closure
+  contains undici v8, and undici v8 runs this the moment it is imported: if
+  `Symbol.for('undici.globalDispatcher.2')` is unset it installs a plain `Agent` into it — and its
+  `setGlobalDispatcher` also writes `Symbol.for('undici.globalDispatcher.1')`, the slot Node's
+  built-in `fetch` reads, and exactly where `NODE_USE_ENV_PROXY=1` had installed Node's own
+  `EnvHttpProxyAgent` at startup. Node core never sets the `.2` symbol, so the branch fires on the
+  first import in any process. Importing the boot closure therefore replaced a proxy-aware global
+  dispatcher with a direct-connecting one, and every `globalThis.fetch` caller in the process — the
+  model SDKs among them — quietly stopped honouring the proxy. The boot now puts a proxy-aware
+  dispatcher back, in the one place every boot shape reaches (`assembleServer`, which both `rayspec
+  deploy` and `rayspec-serve` call, and through which the classic, Product-YAML and auth-only boots
+  all pass), before the app is assembled and so before any run can start.
+
+  **It runs only where the running Node would have run it, and it changes nothing anywhere else.**
+  The condition is Node's own, in all three of its parts. First, the runtime has to implement
+  `NODE_USE_ENV_PROXY` at all — it exists from **Node 22.21.0** on the 22 line and across the 24 line
+  and up, and NOT on Node 22.0–22.20 or 23.x, which this project's `engines: node >= 22` still
+  admits. Measured, reading `Symbol.for('undici.globalDispatcher.1')` with the environment set at
+  startup: `22.12.0`, `22.19.0`, `22.20.0` and `23.11.1` install nothing; `22.21.1`, `24.0.0` and
+  `25.6.1` install an `EnvHttpProxyAgent`. On a Node without the feature the boot installs nothing
+  either — a deployment carrying those variables in anticipation of a newer runtime keeps the
+  direct egress it had. Second, `NODE_USE_ENV_PROXY` carries a value **that** runtime accepts, which is
+  not the same value everywhere: the strict "must be `1`" comparison arrived on the 24 line at
+  **24.5.0**, and the 24 releases before it arm on any non-empty value. Measured the same way, with `HTTP_PROXY` set —
+  `24.0.0`, `24.1.0`, `24.2.0`, `24.3.0`, `24.4.0` and `24.4.1` install an `EnvHttpProxyAgent` for
+  `NODE_USE_ENV_PROXY=true`, `=0` or `=2`, while `22.21.0`, `22.21.1`, `24.5.0` and `25.6.1` install
+  nothing for any of them and only `=1` arms them; a blank value arms none of them. The boot follows
+  whichever rule the running Node applies rather than picking one and calling it Node's, so a
+  deployment on 24.0–24.4 that spells the opt-in `true` — proxied by stock Node, and therefore
+  broken by the clobber — is restored too. Third, at least one non-empty `HTTP_PROXY` / `HTTPS_PROXY` / `http_proxy` / `https_proxy`,
+  which is also what Node requires before it installs anything. Below that bar the boot does not so
+  much as load undici, and the two global-dispatcher symbols come out of it as the same objects they
+  went in as. `NO_PROXY` keeps working: the dispatcher reads it itself, and a host excluded there is
+  still reached directly.
 
 - **A malformed `RAYSPEC_JWT_SIGNING_KEY` now refuses the boot as a named, fail-closed config abort
   instead of crashing with the signing library's own error and a stack trace.** `loadServerConfig`
@@ -1930,6 +1996,13 @@ existing database, and for clients written against the HTTP surface.
   `ok: false` and exit `1`, and the error names the key (and the declared key it is a near-miss of).
   Fix the key or drop it — a build step that runs `gen-handler` will fail until it is settled, which
   is the point: that key was configuring nothing.
+
+- **If you were reading your agent traces in the OpenAI dashboard from a `rayspec deploy`
+  deployment, set `RAYSPEC_AGENT_TRACING=openai` before upgrading, or they stop arriving.** That path
+  now leaves the export off unless the variable is exactly `openai`; `rayspec-serve` and the local
+  development wrapper are unchanged. Set nothing else to that variable — any value other than
+  `openai` or `off` refuses the boot. Whichever way you leave it, the boot banner states the resolved
+  posture, so check the `Trace export:` line on the first boot after upgrading.
 
 ## [1.6.2] - 2026-07-24
 

@@ -427,13 +427,41 @@ export async function serveDeployment(
   if (migrationPath !== undefined) process.env.RAYSPEC_UPDATE_MIGRATION = migrationPath;
   if (allowlistPath !== undefined) process.env.RAYSPEC_UPDATE_ALLOWLIST = allowlistPath;
 
+  // The agent trace export is DEFAULTED OFF on this path, and only on this path. `@openai/agents`
+  // exports traces to OpenAI by default and those traces carry prompts and tool arguments; `deploy` is
+  // the strongest available signal that the workload running here is somebody else's, so on it the
+  // export becomes an affirmative choice — RAYSPEC_AGENT_TRACING=openai — instead of a default.
+  // `rayspec-serve` and the local dev wrapper are untouched: a developer tracing their own agent sees
+  // their own prompts, which was never the risk case.
+  //
+  // FIRST, and through the `@rayspec/server/agent-tracing` SUBPATH rather than the barrel below. The
+  // agent SDK builds its global trace provider while its module is being evaluated, and that provider
+  // SNAPSHOTS the kill-switch it was built with — so a write that lands after `import('@rayspec/server')`
+  // (whose closure reaches `@openai/agents` through the adapters) changes nothing. The subpath module
+  // pulls in no adapter, so this runs while nothing agent-shaped is loaded yet. It also drives the SDK's
+  // own programmatic switch, which covers the shapes where something ELSE already loaded the closure —
+  // `--apply-migration`, whose pre-flight imports it above. An unsupported value fail-closes by name
+  // here, in the same message-only form the boot refusals below use.
+  const { applyDeployAgentTracing, BootConfigError } = await import(
+    '@rayspec/server/agent-tracing'
+  );
+  try {
+    await applyDeployAgentTracing();
+  } catch (err) {
+    if (err instanceof BootConfigError) {
+      console.error(`[rayspec deploy] ${err.message}`);
+      process.exit(1);
+      return; // unreachable in production; keeps a test that stubs process.exit from booting on anyway.
+    }
+    throw err;
+  }
+
   // Dynamic imports: keep DBOS/Hono/the adapters + product-yaml OUT of `rayspec doctor`'s load path.
   const { serve } = await import('@hono/node-server');
   const {
     assembleOptsFromEnv,
     assembleServer,
     assembleStaticServer,
-    BootConfigError,
     BootTimeoutError,
     bootBanner,
     bootBaseUrl,

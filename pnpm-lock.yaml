@@ -303,6 +303,9 @@ importers:
       '@hono/node-server':
         specifier: 2.0.10
         version: 2.0.10(hono@4.12.34)
+      '@openai/agents':
+        specifier: 0.11.8
+        version: 0.11.8(ws@8.21.0)(zod@4.4.3)
       '@rayspec/adapter-anthropic':
         specifier: workspace:*
         version: link:../../adapters/anthropic
@@ -366,6 +369,9 @@ importers:
       jose:
         specifier: 6.2.3
         version: 6.2.3
+      undici:
+        specifier: 8.9.0
+        version: 8.9.0
       yaml:
         specifier: 2.9.0
         version: 2.9.0

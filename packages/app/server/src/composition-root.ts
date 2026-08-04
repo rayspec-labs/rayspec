@@ -106,12 +106,15 @@ import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { type Env, Hono, type MiddlewareHandler } from 'hono';
 import { exportJWK, importPKCS8 } from 'jose';
 import { stringify as stringifyYaml } from 'yaml';
+import { type AgentTracingPosture, observedAgentTracing } from './agent-tracing.js';
+import { BootConfigError } from './boot-config-error.js';
 import {
   deployProductYamlSpec,
   makeSchemaProbe,
   type ProductAgentBackendsFactory,
   planUpdateBoot,
 } from './product-boot.js';
+import { installEnvProxyDispatcher } from './proxy-dispatcher.js';
 import {
   type FrontendReadiness,
   frontendMountsReadiness,
@@ -376,6 +379,16 @@ export interface BootedServer {
     /** The resolved tenant data-erasure gate — `ServerConfig.erasureEnabled`. */
     erasureEnabled: boolean;
   };
+  /**
+   * The OBSERVED agent trace-export posture this boot runs under — whether agent traces, which carry
+   * prompts and tool arguments, are exported to OpenAI. It is READ OFF THE SDK'S OWN TRACE PROVIDER
+   * (`observedAgentTracing`), not derived from any environment variable, so it reports what will
+   * actually happen on EVERY entry point — including the ones that do not change the SDK default, and
+   * including a boot where the mechanism that was supposed to turn the export off failed to. The boot
+   * banner states it in both directions; an embedder that assembles the server itself reads the same
+   * value.
+   */
+  agentTracing: AgentTracingPosture;
   /** Close the underlying DB pool (the entrypoint wires this to SIGINT/SIGTERM). */
   close: () => Promise<void>;
 }
@@ -544,13 +557,11 @@ export interface CleanupSettings {
   gdprRetentionDays: number;
 }
 
-/** A missing/invalid env var → a fail-closed boot abort with an actionable message. */
-export class BootConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'BootConfigError';
-  }
-}
+// A missing/invalid env var → a fail-closed boot abort with an actionable message. DEFINED in a leaf
+// module (boot-config-error.ts) so `agent-tracing.ts` — which `rayspec deploy` imports BEFORE this
+// closure — can throw and catch the same class; re-exported here so every existing import site keeps
+// naming the identical class object.
+export { BootConfigError };
 
 /**
  * The refusal for a present-but-malformed `RAYSPEC_JWT_SIGNING_KEY`. It names the variable, the shape
@@ -1598,6 +1609,21 @@ export async function assembleServer(
     bootWarn?: BootWarnSink;
   } = {},
 ): Promise<BootedServer> {
+  // Put a proxy-aware global dispatcher back BEFORE anything in this process can issue a model call.
+  // Importing this boot closure pulls in undici v8, whose module-import-time side effect overwrites the
+  // global-dispatcher slot Node's built-in `fetch` reads — including the `EnvHttpProxyAgent` that
+  // NODE_USE_ENV_PROXY=1 installed there at startup (issue #287; see proxy-dispatcher.ts).
+  //
+  // THIS is the seam every boot shape reaches: the classic `rayspec.yaml` deploy, the `*.product.yaml`
+  // deploy (which routes through `deployProductYamlSpec` from inside this function) and the auth-only
+  // boot, on BOTH entrypoints — the `rayspec deploy` CLI and the `rayspec-serve` bin each call exactly
+  // `assembleServer(config, assembleOptsFromEnv(config))`. It runs before the app is assembled, so it
+  // cannot be reached after a run has started.
+  //
+  // Gated: with no proxy opt-in the call touches nothing (it does not even load undici), so a
+  // deployment without proxy configuration boots exactly as it did before.
+  await installEnvProxyDispatcher();
+
   // Hand the two boot secrets to auth-core IN-PROCESS. Its lazy readers — assertBootSecrets (inside
   // createAuthApp) and getApiKeyPepper (the api-key / session-secret / invite-token hashing paths) —
   // then see exactly what loadServerConfig resolved and normalized, including when the caller passed
@@ -1849,6 +1875,10 @@ export async function assembleServer(
     // deploy branches hand to `SystemCleanupScheduler` / `eraseTenant`, so the banner reports what this
     // boot will actually do rather than re-reading (and re-interpreting) the environment.
     housekeeping: { cleanup: config.cleanup, erasureEnabled: config.erasureEnabled },
+    // The OBSERVED trace-export posture, ASKED OF THE SDK's global trace provider rather than derived
+    // from the variable this boot may itself have written — so the banner is honest on the entry points
+    // that never change the SDK default, and cannot report OFF on a process that is still exporting.
+    agentTracing: await observedAgentTracing(),
     close: async () => {
       // Drain the durable worker FIRST (finish in-flight jobs, stop dequeuing) so a
       // shutdown does not orphan a job, THEN end the app DB pool. Swallow a worker-shutdown error so
