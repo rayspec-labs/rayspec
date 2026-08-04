@@ -1676,6 +1676,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The expense-claim-coder live smoke no longer prints credentials to the terminal.** Its `pp`
+  helper pretty-printed whole response bodies at seven call sites, and three of those bodies carry
+  credential material: the user access token from `POST /v1/auth/register`, the org-scoped access
+  token from `POST /v1/orgs/{id}/switch`, and the api-key `plaintext` from
+  `POST /v1/orgs/{id}/api-keys` — which has no expiry and holds `store:write` and `agent:run`. A
+  developer running the smoke therefore had all three in their scrollback, and in any log or paste of
+  that run. `pp` now replaces the values of `accessToken`, `refreshToken` and `plaintext` with
+  `[REDACTED]` before printing, at any depth of the body. Masking sits in the printer rather than at
+  the call sites, so all seven are covered at once and any call site added later inherits it; the
+  `jq`-less fallback path, and a body `jq` cannot parse, get the same treatment textually. This
+  follows the shape `print_run` already uses one function down, where a run result is projected to a
+  fixed field list so the raw input never reaches the terminal. **What a run observes:** keys and
+  every non-credential field print exactly as before — `tokenType`, `expiresIn`, `keyPrefix`,
+  `scopes` and the run fields are unchanged, and the set of keys printed across a full run is
+  identical — because only the three values are rewritten. No assertion changes: each credential is
+  read with `jval` out of `$BODY`, never out of what was printed, so the lookup, injection, clamp,
+  idempotency and write-isolation proofs are untouched.
+
 - **Six dependencies carrying published advisories are pinned forward:**
   `brace-expansion` to 5.0.9, `postcss` to 8.5.23, `fast-uri` to 3.1.5, `undici` to 8.9.0,
   `ip-address` to 10.3.1 and `hono` to 4.12.34, closing ten advisories in total (three High, seven
