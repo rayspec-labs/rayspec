@@ -1435,11 +1435,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   construction. A name that already fits is returned **unchanged**, byte for byte, so an existing
   backend keeps the database it has been booting into. A spec at a filesystem root now derives a
   complete name as well: its directory segment is the empty string, and the fallback only covered an
-  absent one, so every such spec derived the single name `rayspec_local_`. One thing this does not
-  change — at exactly 63 bytes the companion `<name>_dbos_sys` drop is still the same identifier as
-  the database itself, for exactly the directory names it already was; it is issued one
-  statement after that database has been dropped, so it finds nothing, and Postgres will not let a
-  separate system database exist under that name in the first place. Development wrapper only.
+  absent one, so every such spec derived the single name `rayspec_local_`. The cap also reserves the
+  nine bytes the companion `<name>_dbos_sys` needs: truncation makes that identifier equal to the
+  database's own at exactly 63 bytes, so a cap that only respected the 63-byte limit would have put
+  **every** newly capped name on the one length where the boot's companion drop names the app
+  database instead of the companion — the drop is issued one statement after that database has been
+  dropped, so it would find nothing and stale workflow state would survive. Capped names are
+  therefore at most 54 bytes and both identifiers stay whole and distinct. A directory name that
+  already fits but is longer than that keeps the aliasing it has today: changing it would orphan the
+  database that backend has been booting into, which is the collision this derivation exists to
+  avoid. Development wrapper only.
 
 - **`RAYSPEC_REQUIRE_MEDIA_TESTS` reaches the suite it gates.** The remux suite carries an
   un-skippable guard that refuses to self-skip when the variable says the real media proof is
