@@ -713,6 +713,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which exists to prove the contract against real concurrent connections — it has no sweeper and no
   counterpart to the in-process store's entry bound, and is not a deployable store.
 
+- **The platform boot banner now states the resolved housekeeping posture, so an operator can see which
+  way the two irreversible-deletion gates are set and which crontab the cleanup will fire on.** The
+  banner said nothing about any of the three: `RAYSPEC_GDPR_PURGE_ENABLED`, `RAYSPEC_ERASURE_ENABLED`
+  and `RAYSPEC_CLEANUP_SCHEDULE` were resolved at startup and handed straight to the cleanup scheduler
+  and the erasure seam, so the first runtime statement of the purge mode was the cleanup job's own
+  summary line — written when the job runs, at 03:00 by default. Every boot that mounts the platform
+  surface now prints a `Housekeeping (resolved):` block that reports what this boot will actually do
+  and names the variable behind every value it prints: the GDPR tombstone purge reads `ARMED` or
+  `DRY-RUN`, the tenant data erasure reads `ARMED`, `DRY-RUN` or `NOT WIRED`, and the daily cleanup
+  prints either the crontab it is scheduled on together with the `RAYSPEC_GDPR_RETENTION_DAYS` window
+  in days, or `NOT SCHEDULED`.
+
+  **Resolved values only, so a typo reads as the dry-run it produced rather than as the string that was
+  supplied.** Both gates arm on the exact string `true` and on nothing else, and that comparison is
+  unchanged; what changes is that `RAYSPEC_GDPR_PURGE_ENABLED=TRUE` now renders the `DRY-RUN` line
+  instead of saying nothing at all, and the banner is never handed the raw value, so it cannot echo one
+  back as though it had been accepted. Where a line would otherwise advertise something that cannot
+  happen, it says so instead, while still naming the variable it is about: a boot that launches no
+  durable worker reports the cleanup as `NOT SCHEDULED` rather than printing a crontab that will never
+  fire, and a boot that deployed no product stores reports that there is nothing to erase rather than a
+  gate posture.
+
+  **The static (frontend-only) profile is unchanged.** That boot prints its own banner, opens no
+  database, schedules no cleanup and wires no erasure, so it has no resolved housekeeping posture to
+  state and carries no such block.
+
+  **For embedders.** `BootedServer` gains one additive field, `housekeeping`, carrying the resolved
+  `cleanup` settings and the resolved `erasureEnabled` gate — the same values the boot hands to the
+  cleanup scheduler and the erasure seam. `bootBanner`'s signature is unchanged.
+
 ### Changed
 
 - **A product deployment whose `RAYSPEC_PRODUCT_TENANT_ID` is malformed or names no live org now
