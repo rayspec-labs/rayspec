@@ -352,9 +352,12 @@ curl -s -X POST http://localhost:8080/v1/orgs/<ORG_ID>/api-keys \
 ```
 
 The plaintext key is shown **once** — store it now. From here, `Authorization:
-Bearer rk_....<secret>` authenticates a client that only holds the API key. A key
-has the shape `rk_<public-prefix>.<secret>`: the prefix is a public lookup handle,
-the secret is opaque. Newly minted keys use the `rk_` prefix; keys minted before
+Bearer rk_....<secret>` authenticates a client that only holds the API key on the
+routes your spec declares. It is not a user session, so do not reach for it on
+`/v1/auth/me` above: that route answers a *user* identity, and an API-key
+principal has no user behind it — it is refused there with `401` even though the
+key itself is valid. A key has the shape `rk_<public-prefix>.<secret>`: the prefix
+is a public lookup handle, the secret is opaque. Newly minted keys use the `rk_` prefix; keys minted before
 the prefix changed carry an `mk_` prefix and remain valid — both are accepted.
 
 That is a full round trip: a running RaySpec backend, a provisioned tenant, and

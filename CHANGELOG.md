@@ -1649,6 +1649,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **Three shipped statements narrowed to what the code carries.** (1) The getting-started page said a
+  minted API key "authenticates a client that only holds the API key", one block below a worked
+  `GET /v1/auth/me` call — so a reader followed the same call with their new key and got a `401`
+  reading `Authentication failed.` for a credential that is perfectly valid. The key is resolved to a
+  principal; that route just answers a *user* identity, and an API-key principal has no user behind
+  it, so the handler refuses. The sentence now scopes the key to the routes the spec declares and
+  names the exception. (2) The CLI reference presented `path_escape` as an emitted error `code`, in a
+  section that documents `code` as a closed set — but every read-time refusal is deliberately
+  flattened onto `yaml_parse_error` so the envelope stays uniform, and the *message* carries the
+  cause. The reference now says which code actually arrives and that a tool must read the message to
+  tell a jail refusal from a syntax error. (3) The walkthrough tells you to create `rayspec.yaml` in
+  the repo root, which left a reader who followed it inside their own clone with an untracked file
+  from then on; that path is now ignored, as `.env`, each `dist/` and `release/` already were. No
+  behaviour changed in any of the three — the code was right and the words were not.
+
 - **The getting-started walkthrough's token-expiry recovery can now be carried out by a reader who
   followed the page literally.** The page provisions the first tenant with a pinned owner address and
   never passed `--password`, then promised — in a paragraph added this release — that an expired

@@ -58,9 +58,18 @@ is nothing to dispatch it to.
 
 Every command that reads a spec resolves the path against the current working
 directory and **rejects a path that escapes it** — a `..` climb above the cwd, or
-an absolute path pointing outside the cwd, is refused (`path_escape`). The check
-is re-applied after symlink resolution, so an in-cwd symlink pointing outside is
-also refused. The file must exist, be a regular file, and be within a 1 MiB cap.
+an absolute path pointing outside the cwd, is refused. The check is re-applied
+after symlink resolution, so an in-cwd symlink pointing outside is also refused.
+The file must exist, be a regular file, and be within a 1 MiB cap.
+
+Every one of those read-time refusals is reported through the same envelope as a
+malformed document: `code` is `yaml_parse_error`, and the **message** is what
+names the cause — `spec path "…" escapes the working directory …`,
+`spec path is not a regular file: …`, `spec file not found: …`,
+`spec file is N bytes — exceeds the 1048576-byte cap`. That flattening is
+deliberate: the envelope stays uniform across the closed `code` set below. So a
+tool that needs to tell a jail refusal from a syntax error must read the message,
+not the code.
 
 The practical consequence: **run the commands from the directory that contains
 your spec** (typically the repo root), and pass a path *inside* it. An absolute

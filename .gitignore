@@ -30,6 +30,13 @@ packages/app/rayspec/rayspec-release-identity.json
 # into release/v<version>/ before generating the manifest from them; they are build output.
 release/
 
+# The spec `docs/getting-started.md` walks you through authoring: it says to create `rayspec.yaml` in
+# the repo root, so a reader following that page inside their own clone would otherwise carry an
+# untracked file from then on. Every other artefact those docs ask for (`.env`, each `dist/`,
+# `release/`) is already ignored; this closes the last one. The examples keep their own committed
+# specs — those live under `examples/` with their own names and are unaffected.
+/rayspec.yaml
+
 # Caches
 .turbo/
 .cache/
