@@ -82,6 +82,7 @@ import {
   type DurableExecutor,
   type DurableExecutorIdentity,
   ExtensionLoadError,
+  FsSourceConfigError,
   type FsSourceFactory,
   invokeTriggerHandler,
   type LoadedExtensions,
@@ -2176,10 +2177,23 @@ async function deployDeclaredSpec(
   // RAYSPEC_FS_SOURCE_ROOT. Purely deploy-config-gated (no route KIND requires it, unlike the stream→blob
   // guard): build the factory when a root is configured, else leave it undefined (a handler that reads
   // `init.fsSource` then fail-closes loudly). `makeFsSourceFactory` fail-closes at build if the root is
-  // missing / not a directory. Injected into the engine in buildApp (below), like blobFactory.
-  const fsSourceFactory: FsSourceFactory | undefined = config.fsSourceRoot
-    ? makeFsSourceFactory(config.fsSourceRoot)
-    : undefined;
+  // missing / not a directory — it takes a plain `root` and knows nothing about the environment, so that
+  // refusal is re-raised HERE in the house form: it names the VARIABLE the operator has to fix, and a
+  // BootConfigError is one of the classes the entrypoint prints message-only (serve.ts). Injected into
+  // the engine in buildApp (below), like blobFactory.
+  let fsSourceFactory: FsSourceFactory | undefined;
+  if (config.fsSourceRoot) {
+    try {
+      fsSourceFactory = makeFsSourceFactory(config.fsSourceRoot);
+    } catch (err) {
+      if (!(err instanceof FsSourceConfigError)) throw err;
+      throw new BootConfigError(
+        `Boot aborted — RAYSPEC_FS_SOURCE_ROOT='${config.fsSourceRoot}' does not exist or is not a ` +
+          'directory. It is the READ-ONLY source root `init.fsSource` reads under; point it at an ' +
+          'existing directory on the box (nothing here creates it). Fail-closed.',
+      );
+    }
+  }
 
   // ── The MEDIA-TOKEN service (playback's 2nd auth path) deploy guard + build ──
   // A `kind:'stream', mode:'playback'` route is authenticated by a signed `?token=` media-JWT (HS256,
