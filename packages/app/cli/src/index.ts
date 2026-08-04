@@ -217,8 +217,8 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
 
   // The subcommand is the FIRST raw token; the rest is handed to that subcommand UNPARSED (each owns
   // its own arg grammar). `gen-handler` carries its own `--holes/--out/--emit/--file` flags, so the top-level
-  // must NOT strict-parse them; `doctor`/`plan` take a single positional path. (A leading `--flag` —
-  // no subcommand — is a usage error.)
+  // must NOT strict-parse them; `doctor`/`plan` take a single positional path. (A leading `--flag` other
+  // than the `--version`/`-v` answered just below — no subcommand — is a usage error.)
   const command = args[0];
   const rest = args.slice(1);
   if (command === undefined) {
