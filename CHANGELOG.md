@@ -719,11 +719,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `RAYSPEC_CLEANUP_SCHEDULE` were resolved at startup and handed straight to the cleanup scheduler
   and the erasure seam, so the first runtime statement of the purge mode was the cleanup job's own
   summary line — written when the job runs, at 03:00 by default. Every boot that mounts the platform
-  surface now prints a `Housekeeping (resolved):` block that names each of the three variables on the
-  line it governs and reports what this boot will actually do: the GDPR tombstone purge reads `ARMED`
-  or `DRY-RUN`, the tenant data erasure reads `ARMED`, `DRY-RUN` or `NOT WIRED`, and the daily cleanup
-  prints either the crontab it is scheduled on together with the retention window in days, or
-  `NOT SCHEDULED`.
+  surface now prints a `Housekeeping (resolved):` block that reports what this boot will actually do
+  and names the variable behind every value it prints: the GDPR tombstone purge reads `ARMED` or
+  `DRY-RUN`, the tenant data erasure reads `ARMED`, `DRY-RUN` or `NOT WIRED`, and the daily cleanup
+  prints either the crontab it is scheduled on together with the `RAYSPEC_GDPR_RETENTION_DAYS` window
+  in days, or `NOT SCHEDULED`.
 
   **Resolved values only, so a typo reads as the dry-run it produced rather than as the string that was
   supplied.** Both gates arm on the exact string `true` and on nothing else, and that comparison is

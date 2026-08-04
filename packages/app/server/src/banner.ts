@@ -90,7 +90,8 @@ export function bootBanner(server: BootedServer, base: string): string {
   // cleanup crontab. Printed on every boot this banner covers, because BOTH directions matter: an
   // operator who armed a gate gets the confirmation that irreversible deletion is now live, and one
   // whose `TRUE`/`1` the strict comparison rejected sees DRY-RUN instead of silence. Every line names
-  // the variable that governs it, including the lines that report the setting has nothing to act on.
+  // the variable behind every value it prints — the crontab line prints two settings and so names two —
+  // including the lines that report the setting has nothing to act on.
   // `server.housekeeping` carries what the boot RESOLVED, so the supplied string is never echoed back
   // as though it had been accepted.
   const { cleanup, erasureEnabled } = server.housekeeping;
@@ -129,7 +130,7 @@ export function bootBanner(server: BootedServer, base: string): string {
     );
   } else {
     lines.push(
-      `    Daily cleanup:         '${cleanup.schedule}'   (RAYSPEC_CLEANUP_SCHEDULE; GDPR retention ${cleanup.gdprRetentionDays} days)`,
+      `    Daily cleanup:         '${cleanup.schedule}'   (RAYSPEC_CLEANUP_SCHEDULE; RAYSPEC_GDPR_RETENTION_DAYS = ${cleanup.gdprRetentionDays} days)`,
     );
   }
   lines.push(RULE);

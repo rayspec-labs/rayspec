@@ -108,7 +108,10 @@ describe('bootBanner — the resolved daily-cleanup crontab', () => {
     const banner = bootBanner(server, BASE);
     expect(banner).toContain("Daily cleanup:         '15 4 * * *'");
     expect(banner).toContain('RAYSPEC_CLEANUP_SCHEDULE');
-    expect(banner).toContain('GDPR retention 90 days');
+    // The retention window is a SECOND setting printed on this same line, so the line has to name its
+    // variable too — otherwise retention is the one setting an operator can read off the banner
+    // without being able to find the knob that produced it.
+    expect(banner).toContain('RAYSPEC_GDPR_RETENTION_DAYS = 90 days');
   });
 
   it('says NOT SCHEDULED — and prints no crontab — on a boot that wires no durable worker', () => {
