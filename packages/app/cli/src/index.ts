@@ -28,6 +28,10 @@
  *   rayspec dev bootstrap-tenant Create the first tenant+owner via the shipped auth API; emit the
  *                                 org id + the org-scoped token (a deliberate operator credential).
  *
+ * TOP-LEVEL FLAG:
+ *   rayspec --version | -v       Print the CLI's own version (read from its package manifest at
+ *                                 runtime) as a single JSON object on stdout. Exit 0.
+ *
  * The diagnostic-floor commands wrap already-shipped functions — NO new platform mechanism. Output is
  * JSON only (stdout); a usage/CLI error prints a short JSON error to stderr + exit 2. The read-only
  * floor never echoes env vars / DB URLs / credentials; `dev gen-secrets`/`dev db` never echo a secret
@@ -35,7 +39,7 @@
  * as its deliberate, documented output. `tenant ensure` is the one mutating command that emits NO
  * credential at all: a minted invite token reaches a mode-600 file and nothing else.
  */
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { argv } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -144,6 +148,9 @@ LOCAL-DEV, MUTATING (the \`dev\` group — creates a dev DB / writes secret file
                                 RAYSPEC_PRODUCT_TENANT_ID); the target server must be running with
                                 RAYSPEC_TENANT_BOOTSTRAP_ENABLED=true.
 
+TOP-LEVEL FLAGS:
+  rayspec --version | -v        Print the CLI's own version as a single JSON object. Exit 0.
+
 Output: a single JSON object on stdout. Exit 1 = not-ok; exit 2 = a CLI/usage error.`;
 
 /**
@@ -170,6 +177,26 @@ function emit(obj: unknown): Promise<void> {
 }
 
 /**
+ * The CLI's OWN version, read at runtime from the package manifest that ships beside this entrypoint.
+ *
+ * Resolved against `import.meta.url`, never against the cwd: the manifest sits one directory above
+ * both the source entrypoint (`src/index.ts`) and the built one (`dist/index.js`), and npm puts
+ * `package.json` at the tarball root next to `dist/`, so the same relative step lands on the right
+ * manifest in the workspace and in a published install alike. Nothing here depends on the workspace
+ * layout being present.
+ */
+function readCliVersion(): string {
+  const manifest: unknown = JSON.parse(
+    readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+  );
+  const version = (manifest as { version?: unknown }).version;
+  if (typeof version !== 'string' || version === '') {
+    throw new CliError('the CLI package manifest carries no "version"');
+  }
+  return version;
+}
+
+/**
  * The CLI body. RETURNS the numeric exit code (0 ok · 1 not-ok spec/plan · 2 CLI/usage error) instead
  * of calling `process.exit`, so it is testable in-process and the top-level can drain stdout before
  * exiting. A usage/argument problem is raised as a `CliError` and mapped to exit 2 by the
@@ -190,14 +217,27 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
 
   // The subcommand is the FIRST raw token; the rest is handed to that subcommand UNPARSED (each owns
   // its own arg grammar). `gen-handler` carries its own `--holes/--out/--emit/--file` flags, so the top-level
-  // must NOT strict-parse them; `doctor`/`plan` take a single positional path. (A leading `--flag` —
-  // no subcommand — is a usage error.)
+  // must NOT strict-parse them; `doctor`/`plan` take a single positional path. (A leading `--flag` other
+  // than the `--version`/`-v` answered just below — no subcommand — is a usage error.)
   const command = args[0];
   const rest = args.slice(1);
   if (command === undefined) {
     throw new CliError(
       'missing command (expected `init`, `doctor`, `plan`, `openapi`, `gen-handler`, `deploy`, `tenant`, or `dev`)',
     );
+  }
+  // `--version`/`-v` is the one TOP-LEVEL flag, answered BEFORE the leading-dash check below —
+  // otherwise it is rejected as "expected a subcommand" (exit 2) and an installed CLI cannot be asked
+  // which version it is. It emits the ordinary single-JSON-object envelope on stdout and exits 0.
+  if (command === '--version' || command === '-v') {
+    // It answers the flag and nothing else, so a trailing token is refused rather than ignored: this
+    // branch sits BEFORE the leading-dash check, and swallowing what follows would make it a hole in
+    // the very grammar that check enforces (`rayspec --version --nope` would report success).
+    if (rest.length > 0) {
+      throw new CliError(`\`${command}\` takes no arguments, got ${rest.join(' ')}`);
+    }
+    await emit({ ok: true, version: readCliVersion() });
+    return 0;
   }
   if (command.startsWith('-')) {
     throw new CliError(

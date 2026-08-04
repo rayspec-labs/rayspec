@@ -58,8 +58,10 @@ pnpm db:up          # starts the local Postgres on port 5433
 > don't exist yet — so pnpm prints one or more `WARN … Failed to create bin at …`
 > lines because it can't link a bin to a target that isn't built yet. They are
 > non-fatal: the `pnpm build` on the next line produces the `dist/` files, and
-> re-running `pnpm install` after a build creates the bins cleanly. As long as `pnpm
-> install` exits `0`, you can ignore them.
+> re-running `pnpm install` after a build links them without warning — though only
+> `rayspec-serve` lands in the repo-root `node_modules/.bin`, because the root package
+> depends on `@rayspec/server` and not on `@rayspec/cli`. As long as `pnpm install`
+> exits `0`, you can ignore them.
 
 > **Already ran this before?** `pnpm db:up` will report `the container name
 > "/rayspec-pg" is already in use` — you have the container from an earlier run.

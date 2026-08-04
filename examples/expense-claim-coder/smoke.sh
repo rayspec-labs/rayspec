@@ -45,7 +45,34 @@ jval() {
   fi
 }
 
-pp() { if [ "$HAS_JQ" = "1" ]; then printf '%s' "$1" | jq . 2>/dev/null || printf '%s\n' "$1"; else printf '%s\n' "$1"; fi; }
+# Placeholder printed in place of a credential value (matches the platform's own redaction marker).
+REDACTED='[REDACTED]'
+
+# Pretty-print a response body with credential VALUES replaced by REDACTED, so no bearer token and no
+# api-key secret can reach the terminal — three of the bodies printed below carry one (register and
+# org-switch return an `accessToken`, api-key mint returns a `plaintext` that never expires and holds
+# `store:write` + `agent:run`). Masking lives HERE rather than at the call sites so every call site is
+# covered at once, including any added later. Same intent as print_run below: a body is only ever
+# printed with those three fields masked. Keys, and every other field, print unchanged — the assertions
+# read their values with jval out of $BODY, never out of what was printed, so none of them are
+# affected. The no-jq path (and an unparseable body) get the same treatment textually.
+pp() {
+  if [ "$HAS_JQ" = "1" ]; then
+    printf '%s' "$1" | jq --arg r "$REDACTED" '
+      def mask:
+        if type == "object" then
+          with_entries(
+            if .key == "accessToken" or .key == "refreshToken" or .key == "plaintext"
+            then .value = $r
+            else .value |= mask
+            end)
+        elif type == "array" then map(mask)
+        else . end;
+      mask' 2>/dev/null && return
+  fi
+  printf '%s\n' "$1" \
+    | sed -E 's/"(accessToken|refreshToken|plaintext)"([[:space:]]*:[[:space:]]*)"[^"]*"/"\1"\2"'"$REDACTED"'"/g'
+}
 
 # Print a run result (safe fields + the final text; drop `conversation` which embeds the raw INPUT).
 print_run() {

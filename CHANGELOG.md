@@ -743,6 +743,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cleanup` settings and the resolved `erasureEnabled` gate — the same values the boot hands to the
   cleanup scheduler and the erasure seam. `bootBanner`'s signature is unchanged.
 
+- **`rayspec --version` (and `-v`) now reports the CLI's version instead of failing as a usage error.**
+  The top-level dispatch treated any first token beginning with `-` as "expected a subcommand" and
+  exited `2` before looking at which flag it was, so an installed CLI could not be asked which version
+  it is. Both spellings are now recognised ahead of that check and emit the ordinary single-JSON-object
+  envelope on stdout — `{ "ok": true, "version": "1.7.0" }` — with nothing on stderr and exit `0`.
+
+  **The value is read at run time from the CLI package's own manifest**, resolved relative to the
+  entrypoint rather than the working directory, and npm places `package.json` beside `dist/` in the
+  packed tarball — so a published install reports the version it actually is, from any directory, with
+  no dependency on the source layout. This is the top-level flag only: it reports the CLI itself, not
+  the versions of the packages installed around it. Every other leading `--flag`, and every unknown
+  subcommand, is still the same exit-`2` usage error on stderr — and so is a token after the flag:
+  `rayspec --version --nope` is refused rather than answered, because a branch that sits ahead of the
+  leading-dash check would otherwise be a hole in the grammar that check enforces.
+
 ### Changed
 
 - **`rayspec deploy` no longer exports agent traces to OpenAI unless you ask it to: set
@@ -1474,6 +1489,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spec inside a build-output directory is now named after the backend instead, and the derivation is a
   pure exported function with the collision pinned by a test. Development wrapper only.
 
+- **Two backends with long directory names no longer share one throwaway development database
+  either.** The same derivation was unbounded in length, and Postgres stores only the first 63 bytes of
+  an identifier — so two sibling directories whose names agree on their first 49 characters were one
+  database, and the second backend's first-deploy boot DROPped and re-created the first one's data.
+  Nothing reported it afterwards, because the connection URL built from the untruncated name resolves
+  to the truncated database. A derived name that would not fit is now capped and disambiguated with a
+  short digest of the resolved spec path, so the result is at most 63 bytes and what keeps two capped
+  siblings apart is that digest rather than how much of their directory names happens to fit. That is a
+  bound, not a guarantee of distinctness: the digest is 8 hex characters, so two capped names still
+  collide when their spec paths' digests do — accepted deliberately for a throwaway development
+  database, where the failure being closed is that every sufficiently-long sibling pair collided by
+  construction. A name that already fits is returned **unchanged**, byte for byte, so an existing
+  backend keeps the database it has been booting into. A spec at a filesystem root now derives a
+  complete name as well: its directory segment is the empty string, and the fallback only covered an
+  absent one, so every such spec derived the single name `rayspec_local_`. The cap also reserves the
+  nine bytes the companion `<name>_dbos_sys` needs: truncation makes that identifier equal to the
+  database's own at exactly 63 bytes, so a cap that only respected the 63-byte limit would have put
+  **every** newly capped name on the one length where the boot's companion drop names the app
+  database instead of the companion — the drop is issued one statement after that database has been
+  dropped, so it would find nothing and stale workflow state would survive. Capped names are
+  therefore at most 54 bytes and both identifiers stay whole and distinct. A directory name that
+  already fits but is longer than that keeps the aliasing it has today: changing it would orphan the
+  database that backend has been booting into, which is the collision this derivation exists to
+  avoid. Development wrapper only.
+
 - **`RAYSPEC_REQUIRE_MEDIA_TESTS` reaches the suite it gates.** The remux suite carries an
   un-skippable guard that refuses to self-skip when the variable says the real media proof is
   required — but `pnpm test` runs the suites through turbo in strict environment mode, and the
@@ -1740,7 +1780,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   routes do answer `404` on an id outside the caller's tenant. **No behavior changed** — the
   correction is in the example script and the reference.
 
+- **The expense-claim auto-coder's README points at a security policy that exists.** Its
+  trusted-posture note offers exactly one link, and that link routed through a directory at the
+  repository root which this repository does not have and has never had — no commit in the history
+  touches such a path — so from `examples/expense-claim-coder/` it resolved to a file that is not
+  there, and the reader weighing the trust boundary the note describes had nothing to follow. The
+  target is now `../../SECURITY.md`, which resolves to the repository root `SECURITY.md`, the only
+  `SECURITY.md` tracked here. Resolving every relative `*.md` link in every committed `.md` file
+  confirms this was the only target that did not exist: of the 81 such links across 12 files, the
+  other 80 each resolve to a file present in the tree.
+
+- **`RAYSPEC_MEDIA_PREP` is documented for the blank value it actually accepts.** The `.env.example`
+  entry promised that "Any OTHER value refuses the boot by name — an invalid value is never coerced",
+  and the doc comment above `mediaPrepEnabled` said the same for "any OTHER value". Both overstate:
+  the selector is read with `?.trim()` and the unset branch accepts the empty string alongside
+  `undefined`, so a blank value takes the `ffmpeg` default and wires the prep step. An operator who
+  left `RAYSPEC_MEDIA_PREP=` in a file — the ordinary way an env var is neutralized without deleting
+  the line — was told to expect a named refusal and got a silent default instead. Both texts now say
+  "blank counts as unset", the phrasing `RAYSPEC_ACCESS_TOKEN_TTL_SECONDS` and
+  `RAYSPEC_GDPR_RETENTION_DAYS` already use for the same shape, and both state that the value is
+  trimmed before it is matched, so the refusal claim reads on non-blank values only. **No behavior
+  changed** — blank keeps counting as unset. The unit tests gain the two arms that pin it: an empty
+  string and a whitespace-only value both resolve to the wired default, alongside a case-variant arm
+  (`FFMPEG`) that still refuses, since the match is exact after trimming. The refusal message itself now reads
+  "unset or blank ⇒ ffmpeg": the doc comment said blank counts as unset, but the message an operator
+  meets on a typo is the only place that reaches them, and it named `unset` alone. The comment above
+  the reader no longer claims the repo-wide law that *every* declared env fail-closes on an invalid
+  value — it states what this reader does.
+
+- **Two shipped sentences narrowed to what they can carry.** `.env.example`'s `RAYSPEC_FS_SOURCE_ROOT`
+  entry said the root is checked by "a boot that DEPLOYS A SPEC (a rayspec.yaml or a *.product.yaml
+  document)", but a frontend-only static document is a `rayspec.yaml` too, and that boot does not read
+  the variable — the entry says so three lines later. It now names a backend spec. In
+  `examples/expense-claim-coder/smoke.sh`, the comment above the printer said a body "is only ever
+  printed in a form that cannot leak", which claims an invariant the printer does not establish; it
+  now says what the printer does, which is mask three named fields.
+- **`.env.example` no longer claims `RAYSPEC_FS_SOURCE_ROOT` is validated on every boot.** The entry
+  said the root is "checked ONCE at boot — a root that does not exist or is not a directory refuses
+  the boot", which an operator reads as a guarantee that a typo cannot start a server. It holds only
+  where the fs-source is actually built, and only two boots build it: the `rayspec.yaml` deploy and
+  the `*.product.yaml` deploy. Both build sites are gated on the variable alone, so a spec deploy
+  checks the root whether or not the document declares a handler or tool `init.fsSource` would be
+  handed to. An auth-only boot (no `RAYSPEC_SPEC_PATH`) deploys no spec, so it never constructs the
+  factory the check lives in — it resolves the value to an absolute path, validates nothing, and
+  serves; a frontend-only static boot does not read the variable at all. The entry now says where
+  the check applies and what the other two boots do instead. The refusal itself is unchanged, and
+  the boot suite gains the missing half of the picture: the same missing-path and regular-file roots
+  that abort a spec deploy are now asserted to *serve* on an auth-only boot, beside the arms that
+  pin the refusal. **No behavior changed** — the correction is in the sample environment file.
+- **The README's "From source" block now explains the `Failed to create bin` warnings it makes the
+  reader produce.** Its first two commands clone the repository and run `pnpm install && pnpm build`,
+  and on a fresh clone the install half prints a run of `WARN … Failed to create bin at … ENOENT`
+  lines and then exits `0`: it runs before the build, so the two workspace bins it tries to link —
+  `rayspec` (`@rayspec/cli` → `./dist/index.js`) and `rayspec-serve` (`@rayspec/server` →
+  `./dist/serve.js`) — still point at `dist/` files nothing has written, and each link is reported
+  more than once. The README said nothing about them, so the
+  first thing the page produced was unexplained red text; getting-started has carried the same
+  explanation since #66, but a reader in the README is not reading getting-started.
+  A blockquote directly beneath that command now says they are non-fatal and why, and states the
+  consequence the rest of the block silently depends on: nothing links those bins until
+  `pnpm install` is run again after the build, and even then only `rayspec-serve` reaches the
+  repo-root `node_modules/.bin`, because the root package depends on `@rayspec/server` and not on
+  `@rayspec/cli` — which is why the block's CLI steps invoke `node packages/app/cli/dist/index.js`
+  rather than `rayspec`. The same correction lands in `docs/getting-started.md`, whose note
+  promised that a re-run install "creates the bins cleanly" and so implied both. The block's
+  `deploy` step also prints the boot's `NON-REAL PROVIDER(S) SELECTED` banner, because the block
+  selects `STT_PROVIDER=fake`; its comment now names that banner as the expected dev/CI posture,
+  as the walkthrough already does. **No behavior changed** — the build sequence the README
+  documents is untouched.
+
 ### Security
+
+- **The expense-claim-coder live smoke no longer prints credentials to the terminal.** Its `pp`
+  helper pretty-printed whole response bodies at seven call sites, and three of those bodies carry
+  credential material: the user access token from `POST /v1/auth/register`, the org-scoped access
+  token from `POST /v1/orgs/{id}/switch`, and the api-key `plaintext` from
+  `POST /v1/orgs/{id}/api-keys` — which has no expiry and holds `store:write` and `agent:run`. A
+  developer running the smoke therefore had all three in their scrollback, and in any log or paste of
+  that run. `pp` now replaces the values of `accessToken`, `refreshToken` and `plaintext` with
+  `[REDACTED]` before printing, at any depth of the body. Masking sits in the printer rather than at
+  the call sites, so all seven are covered at once and any call site added later inherits it; the
+  `jq`-less fallback path, and a body `jq` cannot parse, get the same treatment textually. This
+  follows the shape `print_run` already uses one function down, where a run result is projected to a
+  fixed field list so the raw input never reaches the terminal. **What a run observes:** keys and
+  every non-credential field print exactly as before — `tokenType`, `expiresIn`, `keyPrefix`,
+  `scopes` and the run fields are unchanged, and the set of keys printed across a full run is
+  identical — because only the three values are rewritten. No assertion changes: each credential is
+  read with `jval` out of `$BODY`, never out of what was printed, so the lookup, injection, clamp,
+  idempotency and write-isolation proofs are untouched.
 
 - **Six dependencies carrying published advisories are pinned forward:**
   `brace-expansion` to 5.0.9, `postcss` to 8.5.23, `fast-uri` to 3.1.5, `undici` to 8.9.0,

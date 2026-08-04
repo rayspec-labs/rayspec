@@ -21,7 +21,7 @@ three-value exit-code contract:
 | ---- | ---------------------------------------------------------------------- |
 | `0`  | Success — the spec is valid / the plan passed / the action succeeded.  |
 | `1`  | A not-ok result — an invalid spec, a blocked migration, a failed op. The JSON result explains why (in its `errors` / findings). |
-| `2`  | A usage/CLI error — no subcommand, an unknown subcommand, or an unknown/invalid flag (including a missing or invalid required flag or path for `gen-handler`, `tenant` and `dev`). A short JSON error is written to **stderr** and the usage text is printed. |
+| `2`  | A usage/CLI error — an empty argument list, an unknown subcommand, or an unknown/invalid flag (including a missing or invalid required flag or path for `gen-handler`, `tenant` and `dev`). A short JSON error is written to **stderr** and the usage text is printed. |
 
 A bad, missing, or out-of-jail **spec path** given to `doctor`, `plan`, or
 `openapi` is *not* a usage error — it is caught and returned as an `ok: false`
@@ -38,6 +38,21 @@ The commands split into three groups:
 - A clearly separated **local-dev, mutating `dev` group** — `dev gen-secrets`,
   `dev db`, `dev bootstrap-tenant`. These deliberately write a secrets file,
   create a database, or provision a tenant.
+
+### The `--version` flag
+
+One flag stands outside the subcommand grammar. `rayspec --version` (or `-v`)
+reports the CLI's own version on **stdout** and exits `0`:
+
+```json
+{ "ok": true, "version": "1.7.0" }
+```
+
+The value is read from the CLI package's own manifest at run time, so it names
+the version you actually have installed. It takes no arguments: a token after it is
+refused as a usage error (exit `2`) rather than ignored. Every *other* leading
+`--flag` remains a usage error too (the exit-`2` row above): with no subcommand there
+is nothing to dispatch it to.
 
 ### The spec-path jail
 
