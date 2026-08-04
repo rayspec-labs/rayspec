@@ -170,6 +170,16 @@ jobs:
       - name: No-pack path-portability regression
         run: pnpm test:gate-portability
 
+      # The chokepoint-family gates walk a fixed list of source roots, and their walk() returns
+      # silently on a directory that does not exist — so a renamed package retired the scan with no
+      # signal: zero files read, zero violations found, exit 0, normal PASS line. Both now count what
+      # they scanned and refuse a root that read nothing. This standalone regression drives the REAL
+      # scripts from throwaway trees and proves all three arms (clean tree passes and reports its
+      # coverage, a planted violation is still detected, an unscanned root fails CLOSED).
+      # DB-free / secret-free → lane 1.
+      - name: Chokepoint-gate coverage regression
+        run: pnpm test:gate-coverage
+
       # The scheduled dependency-advisory round (dependency-advisories.yml) writes to the issue tracker,
       # and its only logic lives in scripts/sync-advisory-issues.mjs — which nothing else exercises,
       # because that workflow runs on a timer, not on a pull request. This standalone test drives the
