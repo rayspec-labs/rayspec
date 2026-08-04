@@ -1674,6 +1674,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   routes do answer `404` on an id outside the caller's tenant. **No behavior changed** — the
   correction is in the example script and the reference.
 
+- **The expense-claim auto-coder's README points at a security policy that exists.** Its
+  trusted-posture note offers exactly one link, and that link routed through a directory at the
+  repository root which this repository does not have and has never had — no commit in the history
+  touches such a path — so from `examples/expense-claim-coder/` it resolved to a file that is not
+  there, and the reader weighing the trust boundary the note describes had nothing to follow. The
+  target is now `../../SECURITY.md`, which resolves to the repository root `SECURITY.md`, the only
+  `SECURITY.md` tracked here. Resolving every relative `*.md` link in every committed `.md` file
+  confirms this was the only target that did not exist: of the 81 such links across 12 files, the
+  other 80 each resolve to a file present in the tree.
+
 ### Security
 
 - **The expense-claim-coder live smoke no longer prints credentials to the terminal.** Its `pp`
