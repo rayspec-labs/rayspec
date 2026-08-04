@@ -61,14 +61,26 @@ pnpm db:up   # Postgres on :5433
 
 # Point DATABASE_URL at a FRESH, EMPTY database — rayspec-serve applies the migration chain but does
 # NOT drop/create the DB. (examples/local-boot is the dev convenience that provisions a throwaway one.)
+#
+# The RS256 key goes in through a FILE rather than an inline assignment, because the value
+# `rayspec dev gen-secrets` writes cannot be pasted into one: it is a single line carrying literal \n
+# escapes behind a leading `"`, and only the entrypoint's own .env loader un-escapes that form — and
+# that loader skips any variable already present in the environment. Pasted below it would arrive with
+# its quotes or its literal \n intact, and the boot refuses it, naming the variable. A file holding the
+# PEM with real newlines has neither problem, and a <VAR>_FILE takes precedence over the plain variable.
 RAYSPEC_SPEC_PATH=$(pwd)/examples/lead-qualifier/lead-qualifier.rayspec.yaml \
 RAYSPEC_HANDLER_ROOT=$(pwd)/examples/lead-qualifier \
 DATABASE_URL="postgres://…:5433/<a-fresh-empty-db>" \
-RAYSPEC_JWT_SIGNING_KEY="<an RS256 PEM>" \
+RAYSPEC_JWT_SIGNING_KEY_FILE=/path/to/jwt-signing-key.pem \
 RAYSPEC_API_KEY_PEPPER="<any string>" \
 OPENAI_API_KEY="sk-…" \
   pnpm --filter @rayspec/server serve
 ```
+
+The key file holds the RS256 PKCS#8 PEM with **real newlines** — the un-escaped form, not the escaped
+single line `dev gen-secrets` writes for `.env` — and is readable by the server process (mode `600` is
+the mounted-secret convention this repo documents). `DATABASE_URL` and `RAYSPEC_API_KEY_PEPPER` are
+single-line values and paste in as shown; each of the three also accepts the `<VAR>_FILE` form.
 
 `RAYSPEC_HANDLER_ROOT` defaults to the spec's directory, so it is optional here — shown for clarity.
 No `PORT` is set, so it listens on **`http://localhost:8080`** (the `rayspec-serve` default); the boot

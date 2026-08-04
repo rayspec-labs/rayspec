@@ -553,6 +553,24 @@ export class BootConfigError extends Error {
 }
 
 /**
+ * The refusal for a present-but-malformed `RAYSPEC_JWT_SIGNING_KEY`. It names the variable, the shape
+ * expected, and the two ways an operator actually arrives here — both of which come from the value
+ * `rayspec dev gen-secrets` writes, a single line carrying literal `\n` behind a leading `"`. The
+ * entrypoint's local `.env` loader un-escapes that form, and it skips any variable already present in
+ * the environment, so a value copied out of `.env` into an inline assignment is never un-escaped:
+ * with the dotenv quotes still attached the PEM header is not at offset 0, and with them stripped the
+ * literal `\n` survives into base64 decoding.
+ *
+ * It carries NO byte of the value.
+ */
+const MALFORMED_JWT_SIGNING_KEY_MESSAGE =
+  "Boot aborted — RAYSPEC_JWT_SIGNING_KEY is not a PKCS#8 PEM. Expected a value starting '-----BEGIN " +
+  "PRIVATE KEY-----' with REAL newlines. A value copied out of .env keeps its surrounding quotes and " +
+  'its literal \\n escapes, and neither is un-escaped for an inline assignment: drop the quotes and ' +
+  'restore real newlines, or point RAYSPEC_JWT_SIGNING_KEY_FILE at a file holding the PEM. The value ' +
+  'itself is not echoed here. Fail-closed.';
+
+/**
  * Build the (optional) agent backends a declared spec needs. The platform ships NO backend (
  * zero-product-code), so the deployer supplies the adapter instances. We keep this injectable so a
  * spec WITHOUT agents needs nothing, and a spec WITH agents has its backends wired by the caller
@@ -1605,10 +1623,32 @@ export async function assembleServer(
 
   // 3. Signer + JWKS + OIDC provider — all from the SAME RS256 PEM. The signer mints with the
   //    configured access-token TTL (default 480s — the boot env, fail-closed-validated above).
-  const signer = await createSigner(config.jwtSigningKeyPem, 'RS256', config.accessTokenTtlSeconds);
+  //
+  // `loadServerConfig` checks this secret is PRESENT; nothing between it and `jose` looks at the
+  // bytes, so a malformed value first surfaces as the library's own `TypeError` ("pkcs8" must be
+  // PKCS#8 formatted string) or `DOMException` (Invalid character, out of base64 decoding) — naming
+  // neither the variable nor the expected shape, and reaching the entrypoint as a genuinely
+  // unexpected error, stack trace and absolute build paths included (serve.ts). An operator-supplied
+  // bad value belongs on the same fail-closed, variable-naming path the missing-secret abort above
+  // and the `_FILE` mount aborts already take, so the parse is re-raised in the house form.
+  //
+  // The DIAGNOSTIC is what changes; nothing here widens what is accepted. A value that is not a
+  // PKCS#8 PEM still refuses the boot.
+  let signer: Awaited<ReturnType<typeof createSigner>>;
+  let privateKey: Awaited<ReturnType<typeof importPKCS8>>;
+  try {
+    signer = await createSigner(config.jwtSigningKeyPem, 'RS256', config.accessTokenTtlSeconds);
+    // The OIDC provider needs the private JWK form (sig/RS256) — derive it from the same PEM.
+    privateKey = await importPKCS8(config.jwtSigningKeyPem, 'RS256', { extractable: true });
+  } catch {
+    // The caught error is deliberately not chained in: `jose` puts no key material in its messages
+    // today, but a `cause` would carry whatever a future version does straight into an operator's
+    // log. The two shapes an operator actually hits are named instead, and no byte of the value is
+    // echoed — the same discipline as the normalization warning, which names the variable and the
+    // kind of change but never the value.
+    throw new BootConfigError(MALFORMED_JWT_SIGNING_KEY_MESSAGE);
+  }
   const jwks = new JwksProvider([signer.publicKeyJwk()]);
-  // The OIDC provider needs the private JWK form (sig/RS256) — derive it from the same PEM.
-  const privateKey = await importPKCS8(config.jwtSigningKeyPem, 'RS256', { extractable: true });
   const providerJwk = await exportJWK(privateKey);
   const oidcProvider = createOidcProvider({
     issuer: config.issuer,
