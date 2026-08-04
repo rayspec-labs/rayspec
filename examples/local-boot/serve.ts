@@ -53,6 +53,7 @@
  *   [RAYSPEC_UPDATE_ALLOWLIST=<abs path to the reviewed allowlist.json>] \
  *     pnpm --filter @rayspec/local-boot serve
  */
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -213,6 +214,13 @@ export function readUpdateMigrations(env: UpdateMigrationEnv): PlannedMigration[
   return [{ name: basename(resolved), sql, allowlist }];
 }
 
+/** Postgres stores only the first `NAMEDATALEN - 1` bytes of an identifier; the rest is truncated. */
+const MAX_IDENTIFIER_BYTES = 63;
+/** The derived dev DB name's fixed prefix (14 bytes). */
+const DEV_DB_PREFIX = 'rayspec_local_';
+/** Hex characters of the spec-path digest appended to a name that had to be capped. */
+const DIGEST_CHARS = 8;
+
 /**
  * The throwaway dev DB name for a spec path, sanitized to a safe pg identifier.
  *
@@ -225,13 +233,32 @@ export function readUpdateMigrations(env: UpdateMigrationEnv): PlannedMigration[
  * this derivation exists to prevent, and silently, because the second boot would DROP and re-create the
  * first backend's database.
  *
+ * LENGTH is the same collision by another route. Postgres truncates an identifier past 63 bytes, so two
+ * names that differ only beyond that byte ARE one database — which, given the prefix and a sanitizer
+ * that maps every character to one ASCII byte, is every pair of directory names 49 characters or longer
+ * that agree that far. A name that does not fit is therefore CAPPED and disambiguated with a short
+ * digest of the RESOLVED spec path, so the result is always ≤ 63 bytes and two distinct spec paths
+ * always derive two distinct databases. A name that already fits is returned UNCHANGED — an existing
+ * backend keeps the database it has been booting into.
+ *
+ * A spec at a filesystem root has an EMPTY directory segment (`resolve('/rayspec.yaml').split('/')` is
+ * `['', 'rayspec.yaml']`), so the fallback tests the segment for emptiness rather than only for
+ * `undefined` — otherwise every such spec shares the one name `rayspec_local_`.
+ *
  * Exported so a test can pin the derivation without booting anything.
  */
 export function devDatabaseName(specPath: string): string {
-  const segments = resolve(specPath).split('/');
-  const dir = segments.slice(-2, -1)[0] ?? 'spec';
-  const named = dir === 'dist' ? `${segments.slice(-3, -2)[0] ?? 'spec'}_dist` : dir;
-  return `rayspec_local_${named.replace(/[^a-z0-9_]/gi, '_').toLowerCase()}`;
+  const resolved = resolve(specPath);
+  const segments = resolved.split('/');
+  const dir = segments.slice(-2, -1)[0] || 'spec';
+  const named = dir === 'dist' ? `${segments.slice(-3, -2)[0] || 'spec'}_dist` : dir;
+  // Every surviving character is one ASCII byte, so the sanitized length IS the byte length.
+  const sanitized = named.replace(/[^a-z0-9_]/gi, '_').toLowerCase();
+  const full = `${DEV_DB_PREFIX}${sanitized}`;
+  if (full.length <= MAX_IDENTIFIER_BYTES) return full;
+  const digest = createHash('sha256').update(resolved).digest('hex').slice(0, DIGEST_CHARS);
+  const cap = MAX_IDENTIFIER_BYTES - DEV_DB_PREFIX.length - 1 - DIGEST_CHARS;
+  return `${DEV_DB_PREFIX}${sanitized.slice(0, cap)}_${digest}`;
 }
 
 /**
@@ -298,6 +325,9 @@ async function provisionDevDatabase(baseUrl: string, devDbName: string): Promise
     await admin.unsafe(`DROP DATABASE IF EXISTS "${devDbName}" WITH (FORCE)`);
     // Also drop the derived DBOS system DB so a fresh-empty app DB never pairs with a stale
     // `<devDbName>_dbos_sys` (orphaned workflow/queue state) auto-created by a durableWorker spec.
+    // At exactly 63 bytes — the bound `devDatabaseName` caps to — Postgres truncates this name back
+    // onto the app DB's own. That is inert here: the app DB was dropped by the statement above, so
+    // this one finds nothing, and no separate system DB can exist under that name to be left behind.
     await admin.unsafe(`DROP DATABASE IF EXISTS "${devDbName}_dbos_sys" WITH (FORCE)`);
     await admin.unsafe(`CREATE DATABASE "${devDbName}"`);
   } finally {
