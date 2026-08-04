@@ -314,9 +314,10 @@ api:
     tenant-scoped). The error message names the violated column but never echoes
     the offending value; a non-conflict failure is unaffected.
   - **`agent`** — invoke a declared agent over the run surface. Fields: `agent`
-    (a declared agent id) and an optional `persistTo` (a declared store name). How a
-    failed run's `errorClass` becomes an HTTP status, when a same-key retry re-runs
-    rather than replays, and what the run `status` field can say are documented under
+    (a declared agent id) and an optional `persistTo` (a declared store name). What
+    the route does with a path parameter, how a failed run's `errorClass` becomes an
+    HTTP status, when a same-key retry re-runs rather than replays, and what the run
+    `status` field can say are documented under
     [Agent route runtime semantics](#agent-route-runtime-semantics) below. When
     `persistTo` is set, a successful run's validated `outputSchema` output is written
     as one row into that store — exactly once, atomically with the run header's
@@ -653,6 +654,40 @@ enqueues the work and answers `202` with the `runId` to poll instead. Everything
 this section describes the synchronous answer; the status vocabulary at the end
 covers both. Two parts of that answer deserve a rule you can code a client against:
 the HTTP status a **failed** run gets, and the `status` vocabulary a run reports.
+
+### The path parameter
+
+A declared `agent` route may carry path parameters — `POST /claims/{id}/code` — and
+the platform **binds** them into the run rather than **resolving** them. There is
+nowhere to resolve them to: the `agent` action declares `agent` and an optional
+`persistTo` and nothing else (an unrecognized member is a spec error), so a route
+never names the store a parameter addresses. The route registers the same authenticated
+chain a declared `store` route gets — the shared tier throttle, authentication, the
+route's own `rateLimit` budget when it declares one, tenant resolution, and a
+permission, here **`agent:run`** — and then hands the request to the run surface;
+nothing reads the parameter before the run starts. The matched parameters are prepended
+to the run input as a labelled `Route parameters:` block — key-sorted, each value
+JSON-escaped so it cannot break the framing — and are otherwise text the agent reads.
+Because they are part of the input they are also part of the `Idempotency-Key` body
+hash, so the same route called with different parameters does not collide on one key.
+
+There is therefore no resolution step, and nothing for a failed resolution to
+answer. An `{id}` naming a row in another tenant, or naming no row at all, is not
+refused: the caller needs only `agent:run` in its **own** tenant, and the request
+executes a run and answers with the neutral run result. That is the opposite of what
+a tenant-scoped path id does elsewhere — a `store` route's `get` on an id outside the
+caller's tenant answers `404`, and so do the run routes
+([Cancelling a run](#cancelling-a-run)) — so do not read a `200` here as evidence
+that the parameter addressed anything.
+
+What such a parameter cannot do is reach another tenant's data. Every store the run
+touches — the agent's tools and the `persistTo` write alike — goes through the same
+tenant-scoped data layer as the rest of the platform, bound to the **caller's**
+tenant, so an id from another tenant matches no row there exactly as an invented one
+would, and the run is handed nothing that tells the two apart. Treat a path parameter
+on an `agent` route as run *input*, not as an access check; the declared control over
+how often a caller may reach the route is its own
+[`rateLimit`](#a-routes-own-budget) budget.
 
 ### `errorClass` → HTTP status
 
