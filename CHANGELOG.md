@@ -1717,6 +1717,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confirms this was the only target that did not exist: of the 81 such links across 12 files, the
   other 80 each resolve to a file present in the tree.
 
+- **`RAYSPEC_MEDIA_PREP` is documented for the blank value it actually accepts.** The `.env.example`
+  entry promised that "Any OTHER value refuses the boot by name — an invalid value is never coerced",
+  and the doc comment above `mediaPrepEnabled` said the same for "any OTHER value". Both overstate:
+  the selector is read with `?.trim()` and the unset branch accepts the empty string alongside
+  `undefined`, so a blank value takes the `ffmpeg` default and wires the prep step. An operator who
+  left `RAYSPEC_MEDIA_PREP=` in a file — the ordinary way an env var is neutralized without deleting
+  the line — was told to expect a named refusal and got a silent default instead. Both texts now say
+  "blank counts as unset", the phrasing `RAYSPEC_ACCESS_TOKEN_TTL_SECONDS` and
+  `RAYSPEC_GDPR_RETENTION_DAYS` already use for the same shape, and both state that the value is
+  trimmed before it is matched, so the refusal claim reads on non-blank values only. **No behavior
+  changed** — blank keeps counting as unset. The unit tests gain the two arms that pin it: an empty
+  string and a whitespace-only value both resolve to the wired default, alongside a case-variant arm
+  (`FFMPEG`) that still refuses, since the match is exact after trimming.
 - **`.env.example` no longer claims `RAYSPEC_FS_SOURCE_ROOT` is validated on every boot.** The entry
   said the root is "checked ONCE at boot — a root that does not exist or is not a directory refuses
   the boot", which an operator reads as a guarantee that a typo cannot start a server. It holds only
