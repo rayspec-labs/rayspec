@@ -134,14 +134,15 @@ export function bootBanner(server: BootedServer, base: string): string {
     );
   }
 
-  // The RESOLVED agent trace-export posture. Printed on every boot this banner covers, in BOTH
+  // The OBSERVED agent trace-export posture. Printed on every boot this banner covers, in BOTH
   // directions, because the defect class here is silence: nobody should lose tracing without being
   // told, and nobody should have their prompts and tool arguments leave for a third party without
-  // being told either. `server.agentTracing` is the EFFECTIVE posture (what the SDK will actually do),
-  // so this line stays honest on the entry points that never change the SDK default. Like the
-  // housekeeping block above, every line names the variable behind the value it prints.
+  // being told either. `server.agentTracing` was read off the SDK's own global trace provider, not
+  // derived from any variable — so this line stays honest on the entry points that never change the
+  // SDK default, and it cannot say OFF on a boot that is still exporting. Like the housekeeping block
+  // above, every line names the variable behind the value it prints.
   lines.push('');
-  lines.push('  Agent tracing (resolved):');
+  lines.push('  Agent tracing (observed):');
   if (server.agentTracing === 'openai') {
     lines.push(
       '    Trace export:          EXPORTING TO OPENAI — agent traces carry prompts and tool arguments, ' +

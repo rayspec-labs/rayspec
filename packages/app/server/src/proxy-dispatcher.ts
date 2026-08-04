@@ -23,10 +23,12 @@
  * `EnvHttpProxyAgent` reads the proxy URL *and* `NO_PROXY` from the environment itself, so a host the
  * operator excluded from proxying keeps its direct route.
  *
- * WHEN. Only when the operator has opted into Node's env-proxy behaviour AND named a proxy — see
- * `envProxyRequested`. Stock Node ignores the proxy variables unless the opt-in is set, so honouring
- * them unconditionally would newly route egress through a proxy for deployments that merely happen to
- * carry those variables. This restores the behaviour Node documents; it adds none Node would not give.
+ * WHEN. Only when the RUNNING Node would itself have installed that dispatcher at startup — see
+ * `envProxyRequested`, which asks Node's question in Node's own terms: the opt-in, a named proxy, AND
+ * a runtime that implements the opt-in at all. Miss any one of the three and the boot touches nothing:
+ * honouring the proxy variables more widely than Node does would newly route egress through a proxy
+ * for deployments that merely happen to carry them. This restores the behaviour Node documents, on the
+ * versions that document it; it adds none Node would not give, on any version.
  *
  * The fix belongs HERE — the boot path — rather than in the adapter that pulls undici in: the
  * clobbering is a property of importing that closure at all, so the process that OWNS the closure is
@@ -34,9 +36,9 @@
  */
 
 /**
- * The proxy-URL variables Node's env-proxy support reads. Measured on Node 22.23.2: setting any ONE
- * of these four (with the opt-in below) makes Node install its `EnvHttpProxyAgent`; setting only
- * `NO_PROXY`/`no_proxy` does not.
+ * The proxy-URL variables Node's env-proxy support reads. Measured on Node 22.21.1, 24.0.0 and
+ * 25.6.1: setting any ONE of these four (with the opt-in below) makes Node install its
+ * `EnvHttpProxyAgent`; setting only `NO_PROXY`/`no_proxy` does not.
  */
 export const PROXY_URL_ENV_VARS = [
   'HTTP_PROXY',
@@ -46,18 +48,54 @@ export const PROXY_URL_ENV_VARS = [
 ] as const;
 
 /**
- * Would STOCK Node have installed its env-proxy dispatcher for this environment?
+ * Does the RUNNING Node implement `NODE_USE_ENV_PROXY` at all?
  *
- * Both halves are Node's own condition, measured on Node 22.23.2:
- *  - `NODE_USE_ENV_PROXY` is accepted ONLY as the exact string `1` — `0`, `true`, `01`, `2`, ` 1`,
- *    `1 ` and blank all leave Node's proxy support off. So this compares strictly, with no
- *    truthy-coercion of an ambiguous value.
- *  - at least one of the four proxy-URL variables must be non-empty. With the opt-in set and none of
- *    them present Node installs nothing, and an EMPTY value counts as absent there too.
+ * It does not exist on every runtime this repository supports. `engines` is `node >= 22`, and the
+ * feature reached the 22 line only in 22.21.0 — so on 22.0–22.20 Node ignores the four proxy-URL
+ * variables UNCONDITIONALLY, opt-in or not, and a boot that installed a proxy dispatcher there would
+ * be adding egress routing Node itself would never have added. That is the very outcome this gate
+ * exists to prevent (a deployment carrying leftover proxy variables from a base image must not
+ * silently start routing through a proxy), so the runtime is part of the condition, not an assumption.
+ *
+ * MEASURED with the environment set at process startup, reading
+ * `Symbol.for('undici.globalDispatcher.1')` — `<undefined>` ⇒ Node installed nothing, an
+ * `EnvHttpProxyAgent` ⇒ it did:
+ *
+ *     v22.12.0 <undefined>   v22.19.0 <undefined>   v22.20.0 <undefined>   v22.21.1 EnvHttpProxyAgent
+ *     v23.11.1 <undefined>   v24.0.0  EnvHttpProxyAgent                    v25.6.1  EnvHttpProxyAgent
+ *
+ * Hence: the whole 24 line and above, plus 22.21.0 and later on the 22 line. The 23 line never got it
+ * and is end-of-life. `nodeVersion` is injectable so the rule can be pinned across the WHOLE declared
+ * engines range from one test run, rather than being re-measured by whichever Node happens to run CI.
+ */
+export function nodeSupportsEnvProxy(nodeVersion: string = process.versions.node): boolean {
+  const parts = nodeVersion.split('.').map((part) => Number.parseInt(part, 10));
+  const major = parts[0];
+  const minor = parts[1];
+  if (major === undefined || Number.isNaN(major)) return false;
+  if (major >= 24) return true;
+  if (major !== 22) return false;
+  return minor !== undefined && !Number.isNaN(minor) && minor >= 21;
+}
+
+/**
+ * Would THIS Node have installed its env-proxy dispatcher for this environment?
+ *
+ * Three conditions, all of them Node's own:
+ *  - the runtime implements `NODE_USE_ENV_PROXY` — see `nodeSupportsEnvProxy`;
+ *  - `NODE_USE_ENV_PROXY` is the exact string `1`. Measured on Node 22.21.1: `0`, `true`, `01`, `2`,
+ *    ` 1`, `1 ` and blank all leave Node's proxy support off, so this compares strictly, with no
+ *    truthy-coercion of an ambiguous value;
+ *  - at least one of the four proxy-URL variables is non-empty. With the opt-in set and none of them
+ *    present Node installs nothing, and an EMPTY value counts as absent there too.
  *
  * Anything else ⇒ `false`, and the caller does nothing at all.
  */
-export function envProxyRequested(env: NodeJS.ProcessEnv): boolean {
+export function envProxyRequested(
+  env: NodeJS.ProcessEnv,
+  nodeVersion: string = process.versions.node,
+): boolean {
+  if (!nodeSupportsEnvProxy(nodeVersion)) return false;
   if (env.NODE_USE_ENV_PROXY !== '1') return false;
   return PROXY_URL_ENV_VARS.some((name) => {
     const value = env[name];
@@ -66,7 +104,7 @@ export function envProxyRequested(env: NodeJS.ProcessEnv): boolean {
 }
 
 /**
- * Install a proxy-aware global dispatcher when — and only when — `envProxyRequested` says stock Node
+ * Install a proxy-aware global dispatcher when — and only when — `envProxyRequested` says this Node
  * would have. Returns whether it installed one.
  *
  * `undici` is loaded through a DYNAMIC import inside the gated branch, so a deployment with no proxy
@@ -77,8 +115,9 @@ export function envProxyRequested(env: NodeJS.ProcessEnv): boolean {
  */
 export async function installEnvProxyDispatcher(
   env: NodeJS.ProcessEnv = process.env,
+  nodeVersion: string = process.versions.node,
 ): Promise<boolean> {
-  if (!envProxyRequested(env)) return false;
+  if (!envProxyRequested(env, nodeVersion)) return false;
   const { EnvHttpProxyAgent, setGlobalDispatcher } = await import('undici');
   setGlobalDispatcher(new EnvHttpProxyAgent());
   return true;

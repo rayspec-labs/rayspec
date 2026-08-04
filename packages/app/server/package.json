@@ -12,6 +12,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./agent-tracing": {
+      "types": "./dist/agent-tracing.d.ts",
+      "default": "./dist/agent-tracing.js"
     }
   },
   "main": "./dist/index.js",
@@ -30,6 +34,7 @@
   },
   "dependencies": {
     "@hono/node-server": "2.0.10",
+    "@openai/agents": "0.11.8",
     "@rayspec/adapter-anthropic": "workspace:*",
     "@rayspec/adapter-codex": "workspace:*",
     "@rayspec/adapter-openai": "workspace:*",

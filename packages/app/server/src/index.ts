@@ -21,6 +21,16 @@ export { DeployError, type PlannedMigration } from '@rayspec/api-auth';
 // `BootedServer.drift`. It originates in @rayspec/db (drift-detect.ts); the server already depends on
 // @rayspec/db, so re-exporting here spares a consumer a direct db dep. Additive — a pure type re-export.
 export type { DriftFinding } from '@rayspec/db';
+// The agent trace-export posture (issue #287). Re-exported here for embedders, but the `rayspec deploy`
+// CLI imports the SAME symbols through the `@rayspec/server/agent-tracing` SUBPATH instead: that module
+// pulls in no adapter, so the deploy path can decide the posture — and write the SDK's switch — before
+// it loads this closure and the agent SDK inside it.
+export {
+  type AgentTracingPosture,
+  applyDeployAgentTracing,
+  observedAgentTracing,
+  resolveAgentTracing,
+} from './agent-tracing.js';
 export { bootBanner, bootBaseUrl, staticBootBanner } from './banner.js';
 // The boot-timeout guard — shared by the `rayspec-serve` bin (serve.ts) and the local-boot dev wrapper
 // so a hung assemble step is diagnosed rather than silent. Pure (timer race); no entrypoint side effect.
@@ -41,8 +51,6 @@ export {
 // share ONE detection instead of duplicating the wrapper (a duplicated wrapper drifts).
 export {
   type AgentBackendsFactory,
-  type AgentTracingPosture,
-  applyDeployAgentTracing,
   applyMigrations,
   assembleServer,
   assembleStaticServer,
@@ -50,13 +58,11 @@ export {
   type BootedServer,
   DEFAULT_PORT,
   detectStaticProfile,
-  effectiveAgentTracing,
   isStaticProfile,
   loadServerConfig,
   loadStaticServerConfig,
   loadTenantProvisionSecrets,
   type ProductTableRegistrar,
-  resolveAgentTracing,
   type ServerConfig,
   type StaticBootedServer,
   type StaticServerConfig,
@@ -84,10 +90,15 @@ export {
   resolveStructuredOutputMode,
   WIRED_EXTRACTION_BACKENDS,
 } from './product-boot.js';
-// The env-proxy dispatcher restore (issue #287) — `assembleServer` installs it at boot; the predicate
-// and the installer are exported so the gate can be asserted directly (proxy variables present + the
-// Node opt-in ⇒ installed; anything else ⇒ the two global-dispatcher symbols are left untouched).
-export { envProxyRequested, installEnvProxyDispatcher } from './proxy-dispatcher.js';
+// The env-proxy dispatcher restore (issue #287) — `assembleServer` installs it at boot; the predicates
+// and the installer are exported so the gate can be asserted directly (a runtime that implements
+// NODE_USE_ENV_PROXY + the opt-in + a named proxy ⇒ installed; anything else ⇒ the two
+// global-dispatcher symbols are left untouched).
+export {
+  envProxyRequested,
+  installEnvProxyDispatcher,
+  nodeSupportsEnvProxy,
+} from './proxy-dispatcher.js';
 // The deployer-seam opts builder — shared by the `rayspec-serve` bin (serve.ts) AND the `rayspec deploy`
 // CLI so both boot a backend-profile spec WITH agents directly from ONE builder (the sanctioned
 // registerProductStores registrar + the env-driven agent-backend factory). Exported so the CLI

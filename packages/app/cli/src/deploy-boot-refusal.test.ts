@@ -175,12 +175,20 @@ describe('rayspec deploy — an unexpected boot error still hands a maintainer i
  * class lists match — which is exactly what drifted before. Compare them at the source.
  */
 describe('rayspec deploy / rayspec-serve — the fail-closed class lists agree', () => {
-  /** The classes a catch block clean-prints: every `err instanceof X`, minus the `Error` stack guard. */
+  /**
+   * The classes a catch block clean-prints: every `err instanceof X`, minus the `Error` stack guard.
+   * DEDUPLICATED — deploy.ts clean-prints `BootConfigError` from two places, because the trace-export
+   * posture is resolved (and can be refused) before the boot closure is even imported. What has to
+   * agree between the two entrypoints is the SET of classes, not how many times each is named.
+   */
   const failClosedClasses = (file: string): string[] =>
-    [...readFileSync(file, 'utf8').matchAll(/\berr instanceof (\w+)/g)]
-      .map((m) => m[1] as string)
-      .filter((name) => name !== 'Error')
-      .sort();
+    [
+      ...new Set(
+        [...readFileSync(file, 'utf8').matchAll(/\berr instanceof (\w+)/g)]
+          .map((m) => m[1] as string)
+          .filter((name) => name !== 'Error'),
+      ),
+    ].sort();
 
   const EXPECTED = ['BootConfigError', 'BootTimeoutError', 'DeployError', 'ProductBootError'];
 

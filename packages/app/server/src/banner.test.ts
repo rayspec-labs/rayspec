@@ -15,12 +15,9 @@
  *     resolved-but-never-fired schedule there goes RED.
  */
 import { describe, expect, it } from 'vitest';
+import type { AgentTracingPosture } from './agent-tracing.js';
 import { bootBanner } from './banner.js';
-import {
-  type BootedServer,
-  effectiveAgentTracing,
-  parseCleanupSettings,
-} from './composition-root.js';
+import { type BootedServer, parseCleanupSettings } from './composition-root.js';
 
 const BASE = 'http://127.0.0.1:8080';
 
@@ -131,16 +128,18 @@ describe('bootBanner — the resolved daily-cleanup crontab', () => {
 });
 
 /**
- * The resolved agent trace-export posture. Both arms resolve their environment through
- * `effectiveAgentTracing` — the SAME resolver the boot calls — and feed its OUTPUT to the banner, so
- * neither arm can pass because the resolver stopped resolving anything. The whole point of the line is
- * that BOTH directions are stated: nobody loses tracing silently, and nobody exports prompts and tool
- * arguments to a third party silently.
+ * The observed agent trace-export posture, stated in BOTH directions — that is the whole point of the
+ * line: nobody loses tracing silently, and nobody exports prompts and tool arguments to a third party
+ * silently. The posture handed in here is the one `assembleServer` reads off the SDK's own global trace
+ * provider (`observedAgentTracing`); what this file pins is that the banner renders each value as the
+ * operator-visible sentence, and never the other one. That the OBSERVATION itself is truthful on the
+ * deploy path is measured against the real SDK in
+ * `packages/app/cli/src/deploy-agent-tracing.sdk.test.ts` — it cannot be measured under vitest, whose
+ * `NODE_ENV=test` the SDK treats as tracing-disabled regardless of anything this repository does.
  */
-describe('bootBanner — the resolved agent trace-export posture', () => {
+describe('bootBanner — the observed agent trace-export posture', () => {
   it('states OFF, and names the variable, when nothing exports', () => {
-    const agentTracing = effectiveAgentTracing({ OPENAI_AGENTS_DISABLE_TRACING: '1' });
-    expect(agentTracing).toBe('off'); // accept control — the boot resolver produced this
+    const agentTracing: AgentTracingPosture = 'off';
     const banner = bootBanner(booted({ agentTracing }), BASE);
     expect(banner).toContain('Trace export:          OFF');
     expect(banner).toContain('RAYSPEC_AGENT_TRACING');
@@ -148,8 +147,9 @@ describe('bootBanner — the resolved agent trace-export posture', () => {
   });
 
   it('states EXPORTING TO OPENAI — never silence — when the export is live', () => {
-    const agentTracing = effectiveAgentTracing({});
-    expect(agentTracing).toBe('openai'); // reject control — an untouched environment still exports
+    // The discrimination control for the arm above: the banner has a second, opposite sentence, so
+    // "OFF" is a statement about this boot and not the only thing the line can say.
+    const agentTracing: AgentTracingPosture = 'openai';
     const banner = bootBanner(booted({ agentTracing }), BASE);
     expect(banner).toContain('Trace export:          EXPORTING TO OPENAI');
     expect(banner).toContain('prompts and tool arguments');

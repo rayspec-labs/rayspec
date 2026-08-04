@@ -25,16 +25,14 @@ const h = vi.hoisted(() => ({
 // makes the captured values wrong, REDding the ordering assertion below.
 vi.mock('@rayspec/server', () => {
   // Every name `serveDeployment` destructures must be present here — a missing one fails the
-  // destructure itself, before any assertion. The four error classes are the fail-closed set its catch
+  // destructure itself, before any assertion. The three error classes are the fail-closed set its catch
   // block branches on; none of them is thrown on the paths below (the boot always succeeds here).
-  class BootConfigError extends Error {}
+  // (`BootConfigError` is NOT among them: serveDeployment takes it from the `@rayspec/server/agent-tracing`
+  // subpath, mocked separately below, because it has to recognise the class before this closure loads.)
   class BootTimeoutError extends Error {}
   class DeployError extends Error {}
   class ProductBootError extends Error {}
   return {
-    // The trace-export default the deploy path applies before the boot — a no-op stand-in here, since
-    // nothing in this suite is about it (its own arms live in deploy-agent-tracing.test.ts).
-    applyDeployAgentTracing: () => 'off',
     assembleOptsFromEnv: () => ({}),
     assembleServer: vi.fn(async () => {
       h.captured = {
@@ -45,7 +43,6 @@ vi.mock('@rayspec/server', () => {
       return { app: { fetch: () => new Response('ok') }, close: async () => {} };
     }),
     assembleStaticServer: vi.fn(),
-    BootConfigError,
     BootTimeoutError,
     bootBanner: () => 'banner',
     bootBaseUrl: () => 'http://127.0.0.1:0',
@@ -63,6 +60,15 @@ vi.mock('@rayspec/server', () => {
     ProductBootError,
     staticBootBanner: () => 'static banner',
   };
+});
+
+// The trace-export posture the deploy path applies BEFORE it imports the boot closure. Stubbed to a
+// no-op here — nothing in this suite is about it, and its own arms live in deploy-agent-tracing.test.ts
+// and deploy-agent-tracing.sdk.test.ts. `BootConfigError` is the class serveDeployment's catch branches
+// on, so it has to come from the same module the code under test imports it from.
+vi.mock('@rayspec/server/agent-tracing', () => {
+  class BootConfigError extends Error {}
+  return { applyDeployAgentTracing: async () => 'off', BootConfigError };
 });
 vi.mock('@hono/node-server', () => ({
   // Return a fake http server; do NOT invoke the banner callback (nothing under test needs it).
