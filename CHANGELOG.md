@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A refreshed access token carries `mship_role` again, resolved from live membership at refresh
+  time.** `POST /v1/auth/refresh` re-minted the JWT without the role claim, so after the first
+  refresh (8 minutes in, at the default `ACCESS_TOKEN_TTL_SECONDS = 480`) every claim-trusted
+  permission (`store:read`, `agent:run`, `agent:read`, `org:read`, `apikey:read`) answered
+  `403 missing_permission`, while every sensitive permission (`store:write`, `apikey:mint`,
+  `apikey:revoke`, the org-management ops) kept working through its live-membership recheck — an
+  inverted session where writes succeeded and reads failed. Both refresh paths — the normal
+  rotation and the grace-window double-submit re-issue — now resolve the role from live membership
+  for the session's current org, the same source login uses, so claim-trusted reads keep answering
+  200 across refreshes and the workaround of following every refresh with an org switch is no
+  longer needed. A membership revoked between login and refresh yields a token without the claim —
+  fail-closed, exactly as a fresh login would.
 - **A frontend served beside an API now carries the same `Content-Security-Policy` and
   `Permissions-Policy` the static profile has always emitted.** A static-profile boot (a
   frontend-only spec) answers every response with the two headers — secure defaults (`default-src
