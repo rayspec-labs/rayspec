@@ -5,6 +5,19 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **The transitive `nanoid` copy behind `oidc-provider` is raised from 5.1.15 to 5.1.16**
+  (GHSA-28wg-ghj8-5hjv / CVE-2026-67214: the `nanoid/non-secure` generators can loop indefinitely
+  when given a negative size). The vulnerable module is not reachable here — `oidc-provider` only
+  imports the secure `nanoid` entry point, with a fixed generator size — but the fix is a patch
+  release inside `oidc-provider`'s declared range, so the copy is pinned forward via a scoped
+  `pnpm.overrides` entry (`nanoid@5`) rather than carried as a scanner exception. The dependency
+  SBOM (`docs/dependency-sbom.json`) is regenerated to match. The separate `nanoid@3.3.17` copy
+  (dev-only, behind `postcss`) is not affected by the advisory and is unchanged.
+
 ## [1.7.0] - 2026-08-05
 
 ### Added
