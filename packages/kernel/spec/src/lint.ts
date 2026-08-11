@@ -45,7 +45,13 @@ import { type AgentSpec, type BackendId, validateSpec } from '@rayspec/core';
 // shapes and take the instance TYPE from the named class export — exactly as dispatch.ts does.
 import type { Ajv2020 as Ajv2020Class } from 'ajv/dist/2020.js';
 import * as Ajv2020Module from 'ajv/dist/2020.js';
-import { type SpecError, type SpecWarning, specError, specWarning } from './errors.js';
+import {
+  type SpecError,
+  type SpecWarning,
+  type SuppressedSpecWarning,
+  specError,
+  specWarning,
+} from './errors.js';
 import { type ColumnType, MAX_IDENTIFIER_LENGTH, type RaySpec } from './grammar.js';
 import { typeScriptSourceExtensionOf } from './module-extensions.js';
 
@@ -1637,4 +1643,101 @@ export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
   });
 
   return warnings;
+}
+
+/** The result of `applyLintSuppressions` — the advisories still visible + the acknowledged ones. */
+export interface AppliedLintSuppressions {
+  /**
+   * The advisories that remain after suppression: every un-acknowledged finding (original order),
+   * followed by one `stale_suppression` advisory per acknowledgement whose code fired nothing on
+   * its node.
+   */
+  warnings: SpecWarning[];
+  /**
+   * The advisories moved OUT of `warnings` — one entry per acknowledged finding, carrying the
+   * finding's code + the acknowledging entry's `because` + the finding's own path.
+   */
+  suppressed: SuppressedSpecWarning[];
+}
+
+/**
+ * Apply the nodes' `lintSuppress` acknowledgements to the advisory list `lintSpecWarnings` produced
+ * for `spec`. Pure over both inputs; a document with no suppressions passes its warnings through
+ * untouched (same findings, same order) with nothing suppressed.
+ *
+ * SCOPE — the node the suppression sits on, never global: a warning is acknowledged only when its
+ * `path` lies UNDER the suppressing node's own path (`agents[0].…`, `stores[2].…`, `api[1].…`) AND
+ * a suppression on that node names its code. The same code fired by another node stays visible, and
+ * a whole-document advisory (no path) is never suppressible.
+ *
+ * STALE — evaluated against the RAW advisory list, in a fixed order: (1) partition the raw
+ * advisories into suppressed/remaining, (2) emit one `stale_suppression` per acknowledgement whose
+ * code matched nothing on its node, pointing at the suppression entry itself. Because stale
+ * advisories are emitted AFTER the partition — and `stale_suppression` is excluded from
+ * `SuppressibleWarningCode` at the grammar level anyway — no acknowledgement can silence the
+ * detector that reports on acknowledgements.
+ */
+export function applyLintSuppressions(
+  spec: RaySpec,
+  warnings: readonly SpecWarning[],
+): AppliedLintSuppressions {
+  // The node kinds that may carry `lintSuppress` (an agent, a store, a route), each with its JSON-path
+  // prefix (the scope) and a human-readable label for the stale message.
+  const nodes = [
+    ...spec.agents.map((a, i) => ({
+      prefix: `agents[${i}]`,
+      label: `agent '${a.id}'`,
+      suppressions: a.lintSuppress ?? [],
+    })),
+    ...spec.stores.map((s, i) => ({
+      prefix: `stores[${i}]`,
+      label: `store '${s.name}'`,
+      suppressions: s.lintSuppress ?? [],
+    })),
+    ...spec.api.map((r, i) => ({
+      prefix: `api[${i}]`,
+      label: `route ${r.method} ${r.path}`,
+      suppressions: r.lintSuppress ?? [],
+    })),
+  ].filter((n) => n.suppressions.length > 0);
+  if (nodes.length === 0) return { warnings: [...warnings], suppressed: [] };
+
+  // A path lies under a node when it IS the node or continues below it with a `.` — the closing `]`
+  // in the prefix keeps `agents[1]` from matching `agents[10].…`.
+  const isUnder = (path: string | undefined, prefix: string): boolean =>
+    path !== undefined && (path === prefix || path.startsWith(`${prefix}.`));
+
+  const remaining: SpecWarning[] = [];
+  const suppressed: SuppressedSpecWarning[] = [];
+  for (const warning of warnings) {
+    const node = nodes.find((n) => isUnder(warning.path, n.prefix));
+    const entry = node?.suppressions.find((s) => s.code === warning.code);
+    if (entry === undefined) {
+      remaining.push(warning);
+      continue;
+    }
+    suppressed.push(
+      warning.path !== undefined
+        ? { code: entry.code, because: entry.because, path: warning.path }
+        : { code: entry.code, because: entry.because },
+    );
+  }
+
+  for (const node of nodes) {
+    node.suppressions.forEach((entry, si) => {
+      const fired = warnings.some((w) => w.code === entry.code && isUnder(w.path, node.prefix));
+      if (fired) return;
+      remaining.push(
+        specWarning(
+          'stale_suppression',
+          `${node.label} acknowledges '${entry.code}' in lintSuppress, but no such advisory fires ` +
+            'on this node — the acknowledgement has outlived its finding; remove the entry (or ' +
+            're-review why it was recorded)',
+          `${node.prefix}.lintSuppress[${si}]`,
+        ),
+      );
+    });
+  }
+
+  return { warnings: remaining, suppressed };
 }

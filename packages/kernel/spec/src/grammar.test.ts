@@ -55,12 +55,13 @@ describe('grammar shape pins (neutral-churn tripwire)', () => {
 
   it('AgentSpecConfig has exactly the expected keys', () => {
     // core.AgentSpec minus {input, tools} (omitted) plus the wrap fields {id, backend, tools,
-    // requireNativeStructuredOutput}. A neutral addition to AgentSpec would appear here.
+    // requireNativeStructuredOutput, lintSuppress}. A neutral addition to AgentSpec would appear here.
     expect(Object.keys(AgentSpecConfig.shape).sort()).toEqual(
       [
         'backend',
         'id',
         'instructions',
+        'lintSuppress',
         'maxTurns',
         'model',
         'name',

@@ -132,6 +132,35 @@
               },
               "fullTextSearch": {
                 "type": "boolean"
+              },
+              "lintSuppress": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "softdelete_fk_restrict",
+                        "fk_forward_reference",
+                        "typescript_handler_module",
+                        "stream_playback_media_token",
+                        "agent_untrusted_field_precedence",
+                        "cron_tenant_required"
+                      ]
+                    },
+                    "because": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "because"
+                  ],
+                  "additionalProperties": false
+                }
               }
             },
             "required": [
@@ -279,6 +308,35 @@
                   "max"
                 ],
                 "additionalProperties": false
+              },
+              "lintSuppress": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "softdelete_fk_restrict",
+                        "fk_forward_reference",
+                        "typescript_handler_module",
+                        "stream_playback_media_token",
+                        "agent_untrusted_field_precedence",
+                        "cron_tenant_required"
+                      ]
+                    },
+                    "because": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "because"
+                  ],
+                  "additionalProperties": false
+                }
               }
             },
             "required": [
@@ -357,6 +415,35 @@
               "requireNativeStructuredOutput": {
                 "default": false,
                 "type": "boolean"
+              },
+              "lintSuppress": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "softdelete_fk_restrict",
+                        "fk_forward_reference",
+                        "typescript_handler_module",
+                        "stream_playback_media_token",
+                        "agent_untrusted_field_precedence",
+                        "cron_tenant_required"
+                      ]
+                    },
+                    "because": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "because"
+                  ],
+                  "additionalProperties": false
+                }
               }
             },
             "required": [

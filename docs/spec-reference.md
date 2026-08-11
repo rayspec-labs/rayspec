@@ -251,6 +251,10 @@ stores:
   tenant-scoped unique index — re-creating that same value returns `409 CONFLICT`
   rather than reusing the freed value. With `softDelete` absent/false the default is a
   hard physical delete with no `deleted_at` filtering anywhere.
+- `lintSuppress` — optional list of acknowledged advisories scoped to **this
+  store**; same shape and semantics as [`lintSuppress` on an agent](#agents): a
+  `code` naming an advisory (never an error) and a **required, non-empty**
+  `because` recording why the finding does not apply here.
 
 ```yaml
 stores:
@@ -295,6 +299,10 @@ api:
   every declared route already has. The semantics, and what the budget does
   *not* buy you, are described under
   [A route's own budget](#a-routes-own-budget).
+- `lintSuppress` — optional list of acknowledged advisories scoped to **this
+  route**; same shape and semantics as [`lintSuppress` on an agent](#agents): a
+  `code` naming an advisory (never an error) and a **required, non-empty**
+  `because` recording why the finding does not apply here.
 - `action` — a discriminated union on `kind`:
   - **`store`** — a CRUD operation over a declared store through the
     tenant-scoped data layer. Fields: `store` (a declared store name) and `op`,
@@ -982,6 +990,32 @@ agents:
   `true`, an `outputSchema` *demands* native structured output; a backend that
   lacks it (`pi`, which emulates via instructions) is rejected at validation time
   rather than failing at runtime.
+- `lintSuppress` — optional list of acknowledged advisories, scoped to **this
+  agent**. Some `doctor` findings are advisory heuristics; when one has been
+  reviewed and judged not applicable, record that judgement in the document
+  instead of leaving a warning that fires on every run:
+
+  ```yaml
+  lintSuppress:
+    - code: agent_untrusted_field_precedence
+      because: >
+        The named columns are correlation ids passed to tools, not free-text
+        fields the agent evaluates; the untrusted-data and closed-rule
+        clauses are stated in the instructions.
+  ```
+
+  `code` names one of the advisory (warning) codes — never an error: an error
+  code is rejected at validation, fail-closed. `because` is **required and
+  non-empty** (whitespace-only is rejected): a suppression without a recorded
+  reason is rejected at parse. The scope is the node the list sits on, never
+  global — the same code fired by another node stays visible. `doctor` moves
+  each acknowledged finding from its `warnings` array to a `suppressed` array
+  (code + justification), so the acknowledgement stays visible in review while
+  quiet in the loop; neither array affects `ok` or the exit code. A suppression
+  whose code no longer fires on the node becomes its own advisory
+  (`stale_suppression`, pointing at the entry), so acknowledgements cannot rot
+  silently. The same key, with the same shape and semantics, is available on a
+  [store](#stores) and on a [route](#api).
 
 There is no `input` field: the task input is a runtime value supplied per
 request, not part of the spec.

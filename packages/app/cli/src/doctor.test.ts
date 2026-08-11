@@ -292,6 +292,121 @@ describe('doctor — no secret leak', () => {
   });
 });
 
+describe('doctor — lintSuppress moves an acknowledged advisory to suppressed', () => {
+  // An agent naming a free-text column without the precedence/closed-rule vocabulary fires the
+  // `agent_untrusted_field_precedence` advisory; `suppress` splices a lintSuppress under the agent.
+  const advisoryDoc = (suppress: string) => `version: '1.0'
+metadata:
+  name: suppress-doc
+stores:
+  - name: leads
+    columns:
+      - { name: company_blurb, type: text }
+agents:
+  - id: qualifier
+    name: qualifier
+    backend: openai
+    model: gpt-4o-mini
+    instructions: >
+      Classify the lead. The company_blurb column describes the company.
+${suppress}`;
+
+  it('a suppressed advisory leaves warnings and appears in suppressed with code + justification', async () => {
+    writeFileSync(
+      join(dir, 'suppress.yaml'),
+      advisoryDoc(`    lintSuppress:
+      - code: agent_untrusted_field_precedence
+        because: >
+          The column carries a correlation id passed to tools, not free text
+          the agent weighs; the untrusted-data framing is stated.
+`),
+      'utf8',
+    );
+    const r = await runDoctor(['suppress.yaml']);
+    // Suppressed entries never affect ok (exactly like warnings).
+    expect(r.ok).toBe(true);
+    expect(r.errors).toEqual([]);
+    expect(r.warnings).toEqual([]);
+    expect(r.suppressed).toHaveLength(1);
+    expect(r.suppressed?.[0]?.code).toBe('agent_untrusted_field_precedence');
+    expect(r.suppressed?.[0]?.because).toContain('correlation id');
+  });
+
+  it('a suppression whose code does not fire on its node is reported as stale_suppression', async () => {
+    // The instructions state BOTH halves the heuristic asks for, so the advisory does not fire —
+    // the acknowledgement is stale and becomes its own advisory instead of rotting silently.
+    writeFileSync(
+      join(dir, 'stale.yaml'),
+      `version: '1.0'
+metadata:
+  name: stale-doc
+stores:
+  - name: leads
+    columns:
+      - { name: company_blurb, type: text }
+agents:
+  - id: qualifier
+    name: qualifier
+    backend: openai
+    model: gpt-4o-mini
+    instructions: >
+      Classify the lead. The structured fields take priority over company_blurb,
+      and the stated rule is the whole rule.
+    lintSuppress:
+      - code: agent_untrusted_field_precedence
+        because: reviewed last quarter
+`,
+      'utf8',
+    );
+    const r = await runDoctor(['stale.yaml']);
+    expect(r.ok).toBe(true);
+    expect(r.warnings.map((w) => w.code)).toEqual(['stale_suppression']);
+    expect(r.warnings[0]?.path).toBe('agents[0].lintSuppress[0]');
+    // Nothing was actually suppressed, so the suppressed key is absent (envelope stays minimal).
+    expect('suppressed' in r).toBe(false);
+  });
+
+  it('rejects a suppression without a justification at parse (empty because)', async () => {
+    writeFileSync(
+      join(dir, 'noreason.yaml'),
+      advisoryDoc(`    lintSuppress:
+      - code: agent_untrusted_field_precedence
+        because: ''
+`),
+      'utf8',
+    );
+    const r = await runDoctor(['noreason.yaml']);
+    expect(r.ok).toBe(false);
+    const v = r.errors.find((e) => e.path === 'agents[0].lintSuppress[0].because');
+    expect(v?.code).toBe('schema_violation');
+  });
+
+  it('rejects an error code in lintSuppress at parse (advisories only)', async () => {
+    writeFileSync(
+      join(dir, 'errcode.yaml'),
+      advisoryDoc(`    lintSuppress:
+      - code: fk_cycle
+        because: reviewed, not applicable here
+`),
+      'utf8',
+    );
+    const r = await runDoctor(['errcode.yaml']);
+    expect(r.ok).toBe(false);
+    const v = r.errors.find((e) => e.path === 'agents[0].lintSuppress[0].code');
+    expect(v?.code).toBe('schema_violation');
+  });
+
+  it('ACCEPT CONTROL: a suppression-free document carries no suppressed key and its warnings are untouched', async () => {
+    writeFileSync(join(dir, 'nosuppress.yaml'), advisoryDoc(''), 'utf8');
+    const r = await runDoctor(['nosuppress.yaml']);
+    expect(r.ok).toBe(true);
+    expect(r.warnings.map((w) => w.code)).toEqual(['agent_untrusted_field_precedence']);
+    // The key is ABSENT, not [] — the emitted envelope stays byte-identical to before the field existed.
+    expect('suppressed' in r).toBe(false);
+    expect(Object.keys(r)).toEqual(['ok', 'errors', 'warnings']);
+  });
+});
+
 describe('doctor — cron/manual triggers surface the deployment-tenant requirement', () => {
   it('reports the RAYSPEC_CRON_TENANT_ID advisory without failing the document', async () => {
     // The requirement is a BOOT requirement the document alone cannot satisfy, so it is advisory:

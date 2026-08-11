@@ -241,6 +241,14 @@ export function specError(code: SpecErrorCode, message: string, path?: string): 
  *                               cron document including the ones that set it correctly. The org the
  *                               id names does NOT have to exist at boot — the scheduler starts and
  *                               skips each firing until it does — but the variable itself must be set.
+ *  - `stale_suppression`      — a node's `lintSuppress` entry acknowledges an advisory code that no
+ *                               longer fires on that node (`applyLintSuppressions`, lint.ts). The
+ *                               acknowledgement has outlived its finding — the heuristic changed, or
+ *                               the document did — so it is surfaced rather than silently kept: an
+ *                               audit trail of "reviewed, not applicable" is only honest while the
+ *                               finding it answers exists. It points at the suppression entry itself.
+ *                               DELIBERATELY NOT SUPPRESSIBLE (see `SuppressibleWarningCode`): a rot
+ *                               detector an author can acknowledge away detects nothing.
  */
 export const SpecWarningCode = z.enum([
   'softdelete_fk_restrict',
@@ -249,8 +257,21 @@ export const SpecWarningCode = z.enum([
   'stream_playback_media_token',
   'agent_untrusted_field_precedence',
   'cron_tenant_required',
+  'stale_suppression',
 ]);
 export type SpecWarningCode = z.infer<typeof SpecWarningCode>;
+
+/**
+ * The advisory codes a node's `lintSuppress` may acknowledge — every warning code EXCEPT
+ * `stale_suppression`. Derived (never re-listed) so a new advisory code is suppressible by default
+ * and the one exclusion stays visible here. `stale_suppression` is excluded because it reports on
+ * the suppressions themselves: were it acknowledgeable, a rotted acknowledgement could be silenced
+ * by one more acknowledgement, which is exactly the silent rot the code exists to prevent. Error
+ * codes (`SpecErrorCode`) are structurally absent — a suppression can never name one, so
+ * suppressing an error is not expressible at all (advisories only, fail-closed at parse).
+ */
+export const SuppressibleWarningCode = SpecWarningCode.exclude(['stale_suppression']);
+export type SuppressibleWarningCode = z.infer<typeof SuppressibleWarningCode>;
 
 /** A single NON-FATAL spec warning (closed code + message + optional JSON path). Never fails a parse. */
 export const SpecWarning = z.object({
@@ -265,6 +286,21 @@ export type SpecWarning = z.infer<typeof SpecWarning>;
 export function specWarning(code: SpecWarningCode, message: string, path?: string): SpecWarning {
   return path !== undefined ? { code, message, path } : { code, message };
 }
+
+/**
+ * One advisory moved out of `warnings` by a node's `lintSuppress` acknowledgement — the finding's
+ * code + the author's recorded justification (`because`, verbatim from the suppression entry), with
+ * the finding's own JSON path so a review can locate what was acknowledged. Visible in review,
+ * quiet in the loop: `doctor` reports these in a `suppressed` array beside `warnings`, and they
+ * never affect `ok` (exactly like the warnings they replace).
+ */
+export const SuppressedSpecWarning = z.object({
+  code: SuppressibleWarningCode,
+  because: z.string(),
+  /** JSON path of the SUPPRESSED finding (e.g. `agents[0].instructions`); absent if it carried none. */
+  path: z.string().optional(),
+});
+export type SuppressedSpecWarning = z.infer<typeof SuppressedSpecWarning>;
 
 /**
  * The result of `parseSpec` — a discriminated `Result` so a caller MUST check `ok` before

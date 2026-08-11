@@ -23,6 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refusal naming the variable and the value, in the same shape as the other env refusals. The
   getting-started docs gain a "Testing against a live boot" section naming the buckets and their
   windows, so suite authors can also stagger registrations knowingly instead.
+- **A spec node can acknowledge a `doctor` advisory with `lintSuppress` — with a mandatory recorded
+  justification.** An agent, a store, or an api route may carry
+  `lintSuppress: [{ code, because }]`. `code` names one of the advisory (warning) codes only — the
+  field's closed vocabulary contains no error codes, so suppressing an error is not expressible —
+  and `because` is required and non-empty (whitespace-only rejected): a suppression without a
+  recorded reason fails the parse, fail-closed. The scope is the node the list sits on, never
+  global; the same code fired by another node stays visible. `doctor` moves each acknowledged
+  finding from `warnings` to a `suppressed` array carrying the finding's code, the justification
+  verbatim, and the finding's path — visible in review, quiet in the loop. Like warnings,
+  suppressed entries never affect `ok` or the exit code, and a document declaring no suppression
+  produces byte-identical `doctor` output to before. A suppression whose code no longer fires on
+  its node is reported as a new advisory, `stale_suppression`, pointing at the stale entry — an
+  acknowledgement cannot outlive its finding silently (and `stale_suppression` itself is not
+  suppressible). The exported spec JSON-Schema artifacts carry the new key, so editor validation
+  offers the closed advisory-code list.
 
 ### Fixed
 
