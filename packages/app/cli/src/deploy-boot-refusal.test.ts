@@ -58,6 +58,10 @@ beforeEach(() => {
     process.env[k] = v;
   }
   saved.RAYSPEC_SPEC_PATH = process.env.RAYSPEC_SPEC_PATH;
+  // The searched-.env suffix asserted below is suppressed by RAYSPEC_SKIP_DOTENV=1 — make the ambient
+  // state deterministic (unset), and let the one test that sets it restore via `saved`.
+  saved.RAYSPEC_SKIP_DOTENV = process.env.RAYSPEC_SKIP_DOTENV;
+  delete process.env.RAYSPEC_SKIP_DOTENV;
 });
 afterEach(() => {
   for (const [k, v] of Object.entries(saved)) {
@@ -93,12 +97,28 @@ async function bootRefusal(
 }
 
 /**
+ * The trailing suffix a MISSING-REQUIRED-VARIABLE refusal gains: the `.env` candidate paths the CLI's
+ * auto-loader searches, in precedence order ($PWD first, install root second), deduplicated when the
+ * two coincide. Re-derived here from first principles — `resolve(cwd, '.env')` + the repo-root `.env`
+ * this suite already computes — so the assertion does not lean on the helper under test.
+ */
+const SEARCHED_SUFFIX = ` (searched: ${[
+  ...new Set([resolve(process.cwd(), '.env'), join(repoRoot, '.env')]),
+].join(', ')})`;
+
+/**
  * One sample per fail-closed class the deploy boot can surface. Each is a REAL instance of the class
  * @rayspec/server exports, carrying the refusal text that class raises for the named env (abridged
  * where the live message continues with recovery steps — the full wording is owned by the code that
- * raises it, and is not what this suite is about).
+ * raises it, and is not what this suite is about). `searched: true` marks the missing-REQUIRED-variable
+ * refusals — the ones whose print gains the searched-.env suffix; every other refusal (an invalid
+ * value, an unsupported option) must stay bare, which the exact-equality assertion below pins.
  */
-const CLEAN_PRINT = [
+const CLEAN_PRINT: ReadonlyArray<{
+  readonly name: string;
+  readonly err: Error;
+  readonly searched?: true;
+}> = [
   {
     name: 'a non-UUID RAYSPEC_PRODUCT_TENANT_ID',
     err: new ProductBootError(
@@ -126,19 +146,32 @@ const CLEAN_PRINT = [
       'Boot aborted — required env var(s) missing: RAYSPEC_API_KEY_PEPPER. Refusing to start ' +
         '(fail-closed).',
     ),
+    searched: true,
   },
-] as const;
+  {
+    name: 'a missing extraction-backend credential',
+    err: new ProductBootError(
+      "OPENAI_API_KEY is required (the OpenAI API key (extraction backend 'openai')). Fail-closed.",
+    ),
+    searched: true,
+  },
+];
 
 describe('rayspec deploy — a fail-closed boot refusal prints the diagnosis and nothing else', () => {
-  for (const { name, err } of CLEAN_PRINT) {
+  for (const { name, err, searched } of CLEAN_PRINT) {
     it(`${name} → one prefixed line, exit 1, no frames`, async () => {
       const { stderr, exitCode } = await bootRefusal(err);
-      expect(stderr).toBe(`[rayspec deploy] ${err.message}\n`);
+      // A missing-REQUIRED-variable refusal additionally names the .env paths the auto-loader
+      // searched (paths only — whether or not each file existed, never a value); everything else
+      // prints the message alone.
+      expect(stderr).toBe(`[rayspec deploy] ${err.message}${searched ? SEARCHED_SUFFIX : ''}\n`);
       expect(exitCode).toBe(1);
       // Restated as the operator reads it: no stack frame, and nothing from the build machine's
       // filesystem. Implied by the equality above; spelled out so a weakened equality still REDs.
+      // (The searched suffix deliberately names paths on the RUNNING machine — the diagnostic — so
+      // the no-local-path half applies only to the refusals that carry no suffix.)
       expect(stderr).not.toMatch(/\n\s+at /);
-      expect(stderr).not.toContain(repoRoot);
+      if (!searched) expect(stderr).not.toContain(repoRoot);
     });
   }
 
@@ -146,6 +179,16 @@ describe('rayspec deploy — a fail-closed boot refusal prints the diagnosis and
     const { stderr } = await bootRefusal(CLEAN_PRINT[0].err);
     expect(stderr.startsWith('[rayspec deploy] Boot aborted (Product-YAML) — ')).toBe(true);
     expect(stderr).toContain('RAYSPEC_PRODUCT_TENANT_ID=');
+  });
+
+  it('RAYSPEC_SKIP_DOTENV=1 → the missing-variable refusal stays bare (nothing was searched)', async () => {
+    // With the auto-load opted out, claiming "(searched: …)" would be false — the suffix must vanish.
+    process.env.RAYSPEC_SKIP_DOTENV = '1';
+    const missingSecret = CLEAN_PRINT.find((c) => c.name === 'a missing boot secret');
+    if (!missingSecret) throw new Error('the missing-boot-secret sample is gone from CLEAN_PRINT');
+    const { stderr, exitCode } = await bootRefusal(missingSecret.err);
+    expect(stderr).toBe(`[rayspec deploy] ${missingSecret.err.message}\n`);
+    expect(exitCode).toBe(1);
   });
 });
 

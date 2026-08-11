@@ -5,6 +5,30 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`rayspec` run from a vendored checkout now honors the invoking project's `./.env`.** The CLI's
+  `.env` auto-loader resolved the file relative to its OWN install location — always the RaySpec
+  checkout root, never the caller's project — so in the vendored/submodule layout the brownfield
+  docs recommend, a product repo's `./.env` was silently ignored and the boot failed closed claiming
+  a variable is missing even though the file set it. The loader now searches `$PWD/.env` first and
+  the install-root `.env` second, with the same parser and the same per-key no-override rule, so the
+  effective precedence is: real environment > `$PWD/.env` > install-root `.env` — an earlier source
+  always wins per key, a later one only fills what is still unset. `RAYSPEC_SKIP_DOTENV=1` keeps
+  skipping the auto-load entirely, now covering both candidates; a run from the RaySpec checkout
+  root, where the two candidates are the same file, behaves exactly as before.
+
+- **A missing-required-variable boot refusal now names the `.env` paths that were searched.**
+  `rayspec deploy`'s fail-closed refusal for a missing required variable gains a trailing
+  `(searched: <$PWD/.env>, <install-root .env>)` — the auto-loader's candidate paths in precedence
+  order, each listed whether or not the file existed, which is the diagnostic: an operator whose
+  `./.env` sits in the invoking project sees at once whether the file they populated was even a
+  candidate. Paths only, never file contents or values; a refusal for an invalid or unsupported
+  value is unchanged, and under `RAYSPEC_SKIP_DOTENV=1` the suffix is omitted because nothing was
+  searched.
+
 ## [1.7.0] - 2026-08-05
 
 ### Added
