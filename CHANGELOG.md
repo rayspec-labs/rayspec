@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A valid API key calling `GET /v1/auth/me` now receives `403 FORBIDDEN` with a message naming
+  the actual situation, instead of `401 UNAUTHENTICATED — "Authentication failed."`.** The key
+  authenticated fine; the route answers a *user* identity, which a key principal (`apikey` or
+  `m2m`) does not have. The old `401` claimed the credential failed and invited clients to
+  re-authenticate, which no re-auth can fix; the response now says
+  `This endpoint answers a user identity; the authenticated key principal has none.` — uniform
+  with the `403` the platform management routes give an authenticated-but-not-permitted key, but
+  without a `missing_permission` hint, since no grantable permission would make the route
+  answerable for a key. A JWT or cookie-session user still gets its `200` unchanged, and an
+  invalid or absent credential still gets the uniform `401`.
 - **A frontend served beside an API now carries the same `Content-Security-Policy` and
   `Permissions-Policy` the static profile has always emitted.** A static-profile boot (a
   frontend-only spec) answers every response with the two headers — secure defaults (`default-src
