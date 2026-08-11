@@ -269,7 +269,18 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
   // GET /v1/auth/me — Bearer JWT or cookie session.
   app.get('/v1/auth/me', requireAuth(), async (c) => {
     const principal = c.get('principal');
-    if (!principal?.userId) throw new ApiError('UNAUTHENTICATED', 'Authentication failed.');
+    // A key principal (apikey/m2m) DID authenticate — requireAuth() let it through — but this route
+    // answers a *user* identity, which a key principal does not have. Refuse with 403 like the
+    // sibling routes, not a false `401 "Authentication failed."` (a 401 tells clients to
+    // re-authenticate, which no re-auth can fix). No missing_permission hint: that hint is accurate
+    // only for a true scope/role gap, and no grantable permission would make this route answerable
+    // for a key.
+    if (!principal?.userId) {
+      throw new ApiError(
+        'FORBIDDEN',
+        'This endpoint answers a user identity; the authenticated key principal has none.',
+      );
+    }
     const user = await deps.identityStore.findUserById(principal.userId);
     if (!user) throw new ApiError('UNAUTHENTICATED', 'Authentication failed.');
     const memberships = await deps.identityStore.membershipsForUser(user.id);

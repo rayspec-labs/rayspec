@@ -110,6 +110,67 @@ describe('register / login / me happy path', () => {
   });
 });
 
+describe('GET /v1/auth/me per principal kind', () => {
+  it('answers a JWT user 200 and a VALID api key 403 — authenticated, but no user identity', async () => {
+    // Accept control: a JWT user principal keeps its 200.
+    const reg = await jsonRequest(h.app, 'POST', '/v1/auth/register', {
+      body: { email: 'key-holder@example.com', password: 'a-sufficiently-long-password' },
+    });
+    expect(reg.status).toBe(201);
+    const t0 = (await reg.json()).accessToken as string;
+    const meByJwt = await jsonRequest(h.app, 'GET', '/v1/auth/me', {
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    expect(meByJwt.status).toBe(200);
+    expect((await meByJwt.json()).email).toBe('key-holder@example.com');
+
+    // Mint a real key through the management route (create org → switch → mint).
+    const orgRes = await jsonRequest(h.app, 'POST', '/v1/orgs', {
+      body: { name: 'KeyCo' },
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    expect(orgRes.status).toBe(201);
+    const orgId = (await orgRes.json()).id as string;
+    const switched = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/switch`, {
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    expect(switched.status).toBe(200);
+    const orgToken = (await switched.json()).accessToken as string;
+    const mintRes = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/api-keys`, {
+      body: { name: 'ci', scopes: ['agent:run'] },
+      headers: { authorization: `Bearer ${orgToken}` },
+    });
+    expect(mintRes.status).toBe(201);
+    const apiKey = (await mintRes.json()).plaintext as string;
+
+    // The key authenticated FINE — the refusal must be authorization-shaped (403), not a false
+    // `401 "Authentication failed."`. No missing_permission hint: there is no permission a key
+    // could hold that would make a user-identity endpoint answerable.
+    const meByKey = await jsonRequest(h.app, 'GET', '/v1/auth/me', {
+      headers: { authorization: `Bearer ${apiKey}` },
+    });
+    expect(meByKey.status).toBe(403);
+    const body = await meByKey.json();
+    expect(body.error.code).toBe('FORBIDDEN');
+    expect(body.error.message).toBe(
+      'This endpoint answers a user identity; the authenticated key principal has none.',
+    );
+    expect(body.error.details).toBeUndefined();
+  });
+
+  it('an INVALID or absent credential still gets the uniform 401', async () => {
+    const invalid = await jsonRequest(h.app, 'GET', '/v1/auth/me', {
+      headers: { authorization: 'Bearer rk_bogus.not-a-real-secret' },
+    });
+    expect(invalid.status).toBe(401);
+    expect((await invalid.json()).error.code).toBe('UNAUTHENTICATED');
+
+    const absent = await jsonRequest(h.app, 'GET', '/v1/auth/me');
+    expect(absent.status).toBe(401);
+    expect((await absent.json()).error.code).toBe('UNAUTHENTICATED');
+  });
+});
+
 describe('request-body byte cap (413 before any side effect)', () => {
   it('rejects an over-cap register/login body with a 413 PAYLOAD_TOO_LARGE envelope', async () => {
     // A tiny cap makes an ordinary auth body exceed it — the read is bounded BEFORE the argon2id work.
