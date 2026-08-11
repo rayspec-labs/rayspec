@@ -428,6 +428,18 @@ export interface ServerConfig {
    */
   host: string;
   /**
+   * The Content-Security-Policy value for responses served by the deployed spec's declared `frontend`
+   * mounts (RAYSPEC_FRONTEND_CSP, else the SAME secure default the static profile emits — see
+   * `DEFAULT_FRONTEND_CSP`). Applied ONLY to mount responses, never to the API/auth surface (whose
+   * chain deliberately leaves CSP to a fronting proxy). Unused when the spec declares no frontend.
+   */
+  frontendCsp: string;
+  /**
+   * The Permissions-Policy value for frontend-mount responses (RAYSPEC_PERMISSIONS_POLICY, else the
+   * shared secure default `DEFAULT_PERMISSIONS_POLICY`). Same scope as `frontendCsp`.
+   */
+  permissionsPolicy: string;
+  /**
    * OPTIONAL absolute path to a `rayspec.yaml` to deploy at boot (the declarative engine). The
    * platform ships none — the deployer injects it (RAYSPEC_SPEC_PATH). Absent ⇒ auth-only boot.
    */
@@ -1028,6 +1040,11 @@ export function loadServerConfig(
   // route on which an org id can be chosen at all. See the ServerConfig field for why that matters.
   const tenantBootstrapEnabled = env.RAYSPEC_TENANT_BOOTSTRAP_ENABLED === 'true';
 
+  // The frontend-mount security-header values — the SAME env read (and the same secure defaults) the
+  // static profile uses, so the two boot shapes cannot drift. Consumed only when the deployed spec
+  // declares `frontend` mounts; the API/auth surface never emits them.
+  const { frontendCsp, permissionsPolicy } = frontendSecurityHeaderValues(env);
+
   // Non-null assertions are safe: the missing-list check above already aborted on any unset secret.
   const config: ServerConfig = {
     databaseUrl: databaseUrl as string,
@@ -1039,6 +1056,8 @@ export function loadServerConfig(
     issuer: env.OIDC_ISSUER?.trim() || `http://127.0.0.1:${port}/oidc`,
     port,
     host,
+    frontendCsp,
+    permissionsPolicy,
     dbosSystemDatabaseUrl,
     cleanup,
     accessTokenTtlSeconds,
@@ -1329,6 +1348,24 @@ export const DEFAULT_FRONTEND_CSP =
 export const DEFAULT_PERMISSIONS_POLICY = 'camera=(), microphone=(), geolocation=()';
 
 /**
+ * Resolve the two frontend security-header VALUES — the env override, verbatim, or the secure default.
+ * The ONE env read behind BOTH boot shapes that serve declared `frontend` mounts: the static
+ * (frontend-only) profile emits the values app-wide via `staticSecurityHeaders`, and the full-backend
+ * boot stamps them on mount responses via `mountFrontend`. Shared so RAYSPEC_FRONTEND_CSP /
+ * RAYSPEC_PERMISSIONS_POLICY mean the SAME thing in both shapes — a spec that grows its first store
+ * must not silently change what its served frontend emits.
+ */
+function frontendSecurityHeaderValues(env: NodeJS.ProcessEnv): {
+  frontendCsp: string;
+  permissionsPolicy: string;
+} {
+  return {
+    frontendCsp: env.RAYSPEC_FRONTEND_CSP?.trim() || DEFAULT_FRONTEND_CSP,
+    permissionsPolicy: env.RAYSPEC_PERMISSIONS_POLICY?.trim() || DEFAULT_PERMISSIONS_POLICY,
+  };
+}
+
+/**
  * The validated STATIC-boot configuration — a strict subset of `ServerConfig` that touches NONE of the
  * three boot secrets (DATABASE_URL / RAYSPEC_JWT_SIGNING_KEY / RAYSPEC_API_KEY_PEPPER). A frontend-only
  * deployment boots with none of them set. (CORS is deliberately omitted — the static boot serves only
@@ -1354,11 +1391,12 @@ export interface StaticServerConfig {
  * either verbatim.
  */
 export function loadStaticServerConfig(env: NodeJS.ProcessEnv = process.env): StaticServerConfig {
+  const { frontendCsp, permissionsPolicy } = frontendSecurityHeaderValues(env);
   return {
     port: parsePort(env.PORT),
     host: env.RAYSPEC_HOST?.trim() || DEFAULT_HOST,
-    frontendCsp: env.RAYSPEC_FRONTEND_CSP?.trim() || DEFAULT_FRONTEND_CSP,
-    permissionsPolicy: env.RAYSPEC_PERMISSIONS_POLICY?.trim() || DEFAULT_PERMISSIONS_POLICY,
+    frontendCsp,
+    permissionsPolicy,
   };
 }
 
@@ -1429,6 +1467,8 @@ export function assembleStaticServer(
   // Mount the declared static frontend(s) — the ONLY request surface. `mountFrontend` (the SAME hardened
   // module the normal path uses) declines the reserved `/v1`,`/health`,`/oidc` prefixes, so an
   // unregistered auth/OIDC/runs path falls through to a uniform 404 — the surface is simply not there.
+  // No per-mount `securityHeaders` here: the app-wide chain above already emits CSP + Permissions-Policy
+  // on every response, so the static profile's emission stays single-sourced (no double stamp).
   mountFrontend(app, spec.frontend, specDir);
   return { app, frontendMounts: spec.frontend, close: () => Promise.resolve() };
 }
@@ -1873,8 +1913,15 @@ export async function assembleServer(
   //    handlers in registration order, a returning handler terminates, and a static miss falls through
   //    to the uniform 404. `deployDeclaredSpec` already fail-closed on a missing/unreadable dir (below),
   //    so the dirs are readable here. The mounts themselves were read above, for the /health probe.
+  //    Mount responses carry Content-Security-Policy + Permissions-Policy (the config values — same
+  //    env overrides and same secure defaults as the static profile): the served frontend is exactly
+  //    the surface a native (proxy-less) boot must protect itself, while the API/auth surface keeps
+  //    its own chain (`securityHeaders`) untouched.
   if (frontendSpecDir !== undefined && frontend.length > 0) {
-    mountFrontend(app, frontend, frontendSpecDir);
+    mountFrontend(app, frontend, frontendSpecDir, {
+      csp: config.frontendCsp,
+      permissionsPolicy: config.permissionsPolicy,
+    });
   }
 
   return {

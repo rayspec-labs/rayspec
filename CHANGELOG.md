@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A frontend served beside an API now carries the same `Content-Security-Policy` and
+  `Permissions-Policy` the static profile has always emitted.** A static-profile boot (a
+  frontend-only spec) answers every response with the two headers — secure defaults (`default-src
+  'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'` / `camera=(), microphone=(),
+  geolocation=()`), each overridable verbatim via `RAYSPEC_FRONTEND_CSP` /
+  `RAYSPEC_PERMISSIONS_POLICY`. The moment the same spec grew its first store, the boot took the
+  full-backend path, whose global header chain deliberately leaves CSP to a fronting proxy — so the
+  served frontend lost both headers and the two env vars silently stopped doing anything, on exactly
+  the documented core posture (trusted, self-hosted, single node) that has no proxy in front to add
+  them. Now every response a declared `frontend` mount itself serves — a file, the SPA fallback, a
+  custom `404.html` page, a range `416`, a method `405` — carries both headers, resolved from the
+  SAME defaults and the SAME env overrides as the static profile through one shared code path, so
+  the two boot shapes cannot drift. Nothing else moved, measured as a before/after diff of full
+  header sets: API and auth responses (`/health`, `/v1/...`) still emit no CSP and no
+  Permissions-Policy, and a static-profile boot's responses are byte-identical to before.
 - **An unparseable `RAYSPEC_CLEANUP_SCHEDULE` now aborts the boot with a refusal naming the variable
   and the value, instead of the scheduler's own error.** The expression used to be handed to the
   worker's scheduler exactly as written: shorthand such as `@daily` or a 4-field expression killed
