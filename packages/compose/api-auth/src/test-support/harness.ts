@@ -9,7 +9,7 @@
  * factory (the Biome ban + chokepoint gate carve out test-support/**).
  */
 
-import { createSigner, JwksProvider, RateLimiter } from '@rayspec/auth-core';
+import { createSigner, JwksProvider, RateLimiter, type RateLimitPolicy } from '@rayspec/auth-core';
 import type { Db } from '@rayspec/db';
 import { forTenant, generateProductSql } from '@rayspec/db';
 import {
@@ -308,6 +308,14 @@ export async function createHarness(
      */
     accessTokenTtlSeconds?: number;
     /**
+     * override the rate-limit policies the harness limiter enforces. Default UNSET ⇒ the limiter's
+     * own DEFAULT_POLICIES, so every existing suite is unaffected. The auth-rate-multiplier suite
+     * passes `scaledAuthPolicies(100)` — the SAME function the composition root hands the
+     * production limiter — so it exercises the real scaling path, never a hand-built policies
+     * object.
+     */
+    rateLimitPolicies?: Record<string, RateLimitPolicy>;
+    /**
      * override the body-refresh operator gate. Default UNSET ⇒ `false` (today's
      * cookie-only posture; every existing suite is unaffected). A body-refresh test passes `true` to
      * exercise the gated+opt-in delivery of the rotated secret in the JSON body.
@@ -451,7 +459,9 @@ export async function createHarness(
     db: opts.wrapDb ? opts.wrapDb(db) : db,
     signer,
     jwks: jwksProvider,
-    rateLimiter: new RateLimiter(),
+    // The policy seam: undefined ⇒ the constructor default (DEFAULT_POLICIES) — every existing
+    // suite is unaffected.
+    rateLimiter: new RateLimiter(undefined, opts.rateLimitPolicies),
     identityStore,
     orgStore,
     apiKeyStore,

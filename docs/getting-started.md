@@ -365,6 +365,36 @@ authenticated requests under strict tenant scoping.
 
 ---
 
+## Testing against a live boot
+
+The auth endpoints are rate-limited per client source, and the limits are sized
+for production traffic, not for a test suite (`DEFAULT_POLICIES` in
+`packages/kernel/auth-core/src/rate-limit.ts`):
+
+| Bucket     | Limit  | Window   |
+| ---------- | ------ | -------- |
+| `register` | 5      | 1 minute |
+| `login`    | 10     | 1 minute |
+| `refresh`  | 30     | 1 minute |
+
+A suite that provisions several orgs against a live boot trips the `register`
+bucket first: the 6th registration inside a minute answers `429`, and because
+that account's token was never minted, the suite's *later* assertions tend to
+fail with `401` — far from the cause. Either stagger registrations across the
+window knowingly, or scale the three buckets for the run:
+
+```bash
+RAYSPEC_AUTH_RATE_MULTIPLIER=100   # scales max per bucket; default 1
+```
+
+The multiplier is a positive integer and applies to exactly the three buckets
+above — the windows and every other limit are untouched. It is dev/CI-only by
+convention: any value other than 1 makes the boot log a loud one-line warning
+naming the variable and the value, so it cannot sit in a production environment
+silently, and a value that is not a positive integer aborts the boot outright.
+
+---
+
 ## Managing org members
 
 The owner you provisioned can add more members to the org. Adding a member is

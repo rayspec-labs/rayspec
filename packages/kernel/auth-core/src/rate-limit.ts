@@ -157,6 +157,39 @@ export const DEFAULT_POLICIES: Record<string, RateLimitPolicy> = {
 export const REUSE_LOCK_MS = 5 * 60_000;
 
 /**
+ * The buckets RAYSPEC_AUTH_RATE_MULTIPLIER scales — the three credential-lifecycle endpoints a
+ * dev/CI harness hits once per provisioned account. Deliberately NOT every bucket: the variable is
+ * auth-scoped by name, and the abuse caps above (reprocess, trigger-fire, invite-accept, the
+ * declared-route tiers) guard cost/probing surfaces a test harness has no reason to flood.
+ */
+const AUTH_MULTIPLIER_BUCKETS = ['login', 'register', 'refresh'] as const;
+
+/**
+ * The effective policies for a boot whose auth rate multiplier is `multiplier`
+ * (RAYSPEC_AUTH_RATE_MULTIPLIER, validated by the composition root): the `max` of exactly the
+ * login/register/refresh buckets scaled, every window and every other bucket untouched. Exists so a
+ * dev/CI run that provisions many accounts (e.g. one org per suite) does not trip the `register`
+ * bucket mid-run — production limits are right for production, but the 6th registration inside a
+ * minute failing 429 surfaces far from its cause in a test harness.
+ *
+ * A multiplier of 1 (the default) returns `policies` ITSELF — not a copy — so a default boot hands
+ * the limiter the same object it received before this function existed, byte-identical behavior
+ * included. Never mutates its input (DEFAULT_POLICIES is the module-level shared table).
+ */
+export function scaledAuthPolicies(
+  multiplier: number,
+  policies: Record<string, RateLimitPolicy> = DEFAULT_POLICIES,
+): Record<string, RateLimitPolicy> {
+  if (multiplier === 1) return policies;
+  const scaled = { ...policies };
+  for (const bucket of AUTH_MULTIPLIER_BUCKETS) {
+    const policy = scaled[bucket];
+    if (policy) scaled[bucket] = { ...policy, max: policy.max * multiplier };
+  }
+  return scaled;
+}
+
+/**
  * One rate-limit answer: whether the call passes, and how long the caller should wait if it does not.
  * `retryAfterMs` is meaningful only when `allowed` is false; an allowed call reports zero.
  */

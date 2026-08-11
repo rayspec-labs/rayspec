@@ -55,7 +55,14 @@ import {
   type PlannedMigration,
   runScheduledCleanup,
 } from '@rayspec/api-auth';
-import { createSigner, JwksProvider, RateLimiter, setBootSecrets } from '@rayspec/auth-core';
+import {
+  createSigner,
+  InMemoryRateLimitStore,
+  JwksProvider,
+  RateLimiter,
+  scaledAuthPolicies,
+  setBootSecrets,
+} from '@rayspec/auth-core';
 import type { Backend, BackendId } from '@rayspec/core';
 import {
   buildProductTables,
@@ -515,6 +522,16 @@ export interface ServerConfig {
    * desktop-refresh path is the proper fix. Fail-closed on an invalid value.
    */
   accessTokenTtlSeconds: number;
+  /**
+   * the dev/CI auth rate-limit multiplier (RAYSPEC_AUTH_RATE_MULTIPLIER; default 1). Scales the
+   * `max` of exactly the login/register/refresh buckets via `scaledAuthPolicies` — windows and
+   * every other bucket untouched — so a dev/CI harness that registers more than 5 accounts a
+   * minute does not trip the `register` bucket mid-run. 1 hands the limiter DEFAULT_POLICIES
+   * itself (byte-identical to a boot before the variable existed); any other value is announced
+   * with a loud one-line boot warning so it can never sit in a production environment silently.
+   * Fail-closed on an invalid value.
+   */
+  authRateMultiplier: number;
   /**
    * the OPERATOR gate for tenant DATA-ERASURE (the `eraseTenantNow` control seam). `true` ONLY when
    * RAYSPEC_ERASURE_ENABLED is EXACTLY the string `"true"`; ANYTHING else (unset, "1", "yes", "TRUE",
@@ -1025,6 +1042,10 @@ export function loadServerConfig(
   // the access-token TTL (always present, default 480; fail-closed on an invalid value).
   const accessTokenTtlSeconds = parseAccessTokenTtlSeconds(env);
 
+  // the dev/CI auth rate-limit multiplier (default 1 = the production limits; fail-closed on an
+  // invalid value; ≠ 1 is announced loudly where the scaled policies are applied — assembleServer).
+  const authRateMultiplier = parseAuthRateMultiplier(env);
+
   // the tenant data-erasure OPERATOR gate, fail-closed: STRICTLY the exact string "true" (no
   // trim/lowercase coercion of an ambiguous value), mirroring RAYSPEC_GDPR_PURGE_ENABLED — an
   // ambiguous/typo'd value must never silently enable irreversible product+blob deletion.
@@ -1061,6 +1082,7 @@ export function loadServerConfig(
     dbosSystemDatabaseUrl,
     cleanup,
     accessTokenTtlSeconds,
+    authRateMultiplier,
     erasureEnabled,
     bodyRefreshEnabled,
     tenantBootstrapEnabled,
@@ -1204,6 +1226,49 @@ export function parseAccessTokenTtlSeconds(env: NodeJS.ProcessEnv): number {
     );
   }
   return n;
+}
+
+/**
+ * resolve the dev/CI auth rate-limit multiplier from env, fail-closed on an invalid value.
+ *
+ *  - RAYSPEC_AUTH_RATE_MULTIPLIER — unset/blank ⇒ 1 (the production limits, byte-identical). A
+ *    positive integer scales the `max` of exactly the login/register/refresh buckets
+ *    (`scaledAuthPolicies`) so a dev/CI harness that registers more than 5 accounts a minute does
+ *    not trip the `register` bucket mid-run; windows and every other bucket are untouched. Any
+ *    value other than 1 is announced with a loud one-line boot warning
+ *    (`authRateMultiplierBanner`), so it can never sit in a production environment silently. A
+ *    non-integer or ≤ 0 value ABORTS the boot.
+ */
+export function parseAuthRateMultiplier(env: NodeJS.ProcessEnv): number {
+  const raw = env.RAYSPEC_AUTH_RATE_MULTIPLIER?.trim();
+  if (raw === undefined || raw === '') return 1;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new BootConfigError(
+      `Boot aborted — RAYSPEC_AUTH_RATE_MULTIPLIER='${raw}' is not a positive integer. It is the ` +
+        'dev/CI multiplier that scales the max of the login/register/refresh rate-limit buckets ' +
+        '(default 1 = the production limits). Fail-closed (a bad multiplier must never silently ' +
+        'fall back — falling back to the production limits would reproduce exactly the ' +
+        'far-from-cause 429s the variable exists to remove, and guessing a scale would silently ' +
+        'weaken an auth throttle).',
+    );
+  }
+  return n;
+}
+
+/**
+ * The loud one-line warning for a boot whose auth rate multiplier is not 1 — the NON-REAL
+ * PROVIDER(S) banner's job (a dev/CI posture must never sneak into production silently) compressed
+ * to one line: it names the variable and the value, says which buckets are scaled, and calls the
+ * posture out as dev/CI. `null` for 1 (the default) — a production boot warns about nothing.
+ */
+export function authRateMultiplierBanner(multiplier: number): string | null {
+  if (multiplier === 1) return null;
+  return (
+    `⚠️  RAYSPEC_AUTH_RATE_MULTIPLIER=${multiplier} — the login/register/refresh rate-limit ` +
+    `buckets are scaled ×${multiplier}. This is a DEV/CI posture — NOT a production configuration. ` +
+    'If this is prod, fix the env. ⚠️'
+  );
 }
 
 /** Parse PORT, fail closed on a non-numeric/out-of-range value (default DEFAULT_PORT when unset). */
@@ -1754,11 +1819,22 @@ export async function assembleServer(
   const inviteStore = new InviteStore(db);
   const authService = new AuthService(identityStore, signer);
 
+  // the dev/CI auth rate-limit multiplier, applied HERE — the one production limiter construction.
+  // 1 (the default) hands the limiter DEFAULT_POLICIES itself (scaledAuthPolicies returns its input,
+  // so a default boot is byte-identical to before); any other value scales the login/register/refresh
+  // buckets and is announced LOUDLY on the boot's one-line warning sink, so it can never sit in a
+  // production environment silently.
+  const authRateBanner = authRateMultiplierBanner(config.authRateMultiplier);
+  if (authRateBanner !== null) (opts.bootWarn ?? consoleWarn)(authRateBanner);
+
   const baseDeps: Omit<AppDeps, 'engine'> = {
     db,
     signer,
     jwks,
-    rateLimiter: new RateLimiter(),
+    rateLimiter: new RateLimiter(
+      new InMemoryRateLimitStore(),
+      scaledAuthPolicies(config.authRateMultiplier),
+    ),
     identityStore,
     orgStore,
     apiKeyStore,

@@ -8,9 +8,11 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  authRateMultiplierBanner,
   BootConfigError,
   loadServerConfig,
   parseAccessTokenTtlSeconds,
+  parseAuthRateMultiplier,
   parseCleanupSettings,
 } from './composition-root.js';
 
@@ -131,6 +133,68 @@ describe('parseAccessTokenTtlSeconds — the fail-closed access-token TTL', () =
     expect(() =>
       loadServerConfig({ ...baseEnv, RAYSPEC_ACCESS_TOKEN_TTL_SECONDS: 'nope' }),
     ).toThrow(BootConfigError);
+  });
+});
+
+describe('parseAuthRateMultiplier — the fail-closed dev/CI auth-bucket multiplier', () => {
+  it('defaults to 1 (the production limits) when unset or blank — silently', () => {
+    expect(parseAuthRateMultiplier({})).toBe(1);
+    expect(parseAuthRateMultiplier({ RAYSPEC_AUTH_RATE_MULTIPLIER: '' })).toBe(1);
+    expect(parseAuthRateMultiplier({ RAYSPEC_AUTH_RATE_MULTIPLIER: '   ' })).toBe(1);
+  });
+
+  it('accepts a positive-integer override (1 explicitly, and the documented 100)', () => {
+    expect(parseAuthRateMultiplier({ RAYSPEC_AUTH_RATE_MULTIPLIER: '1' })).toBe(1);
+    expect(parseAuthRateMultiplier({ RAYSPEC_AUTH_RATE_MULTIPLIER: '100' })).toBe(100);
+  });
+
+  it('FAIL-CLOSES on a non-integer / ≤0 value, naming the variable and the value', () => {
+    for (const v of ['0', '-1', 'abc', '1.5']) {
+      expect(() => parseAuthRateMultiplier({ RAYSPEC_AUTH_RATE_MULTIPLIER: v })).toThrow(
+        BootConfigError,
+      );
+      expect(() => parseAuthRateMultiplier({ RAYSPEC_AUTH_RATE_MULTIPLIER: v })).toThrow(
+        `RAYSPEC_AUTH_RATE_MULTIPLIER='${v}'`,
+      );
+    }
+  });
+
+  it('loadServerConfig surfaces the multiplier (default 1; a valid override threads through)', () => {
+    const baseEnv: NodeJS.ProcessEnv = {
+      DATABASE_URL: 'postgres://u:p@localhost:5432/app',
+      RAYSPEC_JWT_SIGNING_KEY: 'dummy-pem-not-imported-by-loadServerConfig',
+      RAYSPEC_API_KEY_PEPPER: 'dummy-pepper-value-for-config-resolution',
+    };
+    expect(loadServerConfig({ ...baseEnv }).authRateMultiplier).toBe(1);
+    expect(
+      loadServerConfig({ ...baseEnv, RAYSPEC_AUTH_RATE_MULTIPLIER: '100' }).authRateMultiplier,
+    ).toBe(100);
+    // A bad value aborts the whole boot config (fail-closed).
+    expect(() => loadServerConfig({ ...baseEnv, RAYSPEC_AUTH_RATE_MULTIPLIER: '0' })).toThrow(
+      BootConfigError,
+    );
+  });
+});
+
+describe('authRateMultiplierBanner — the loud one-line warning, emitted iff the multiplier is not 1', () => {
+  it('is silent (null) for 1 — the default boot warns about nothing', () => {
+    expect(authRateMultiplierBanner(1)).toBeNull();
+    // Through the resolver: unset and an explicit '1' are the same silent posture.
+    expect(authRateMultiplierBanner(parseAuthRateMultiplier({}))).toBeNull();
+    expect(
+      authRateMultiplierBanner(parseAuthRateMultiplier({ RAYSPEC_AUTH_RATE_MULTIPLIER: '1' })),
+    ).toBeNull();
+  });
+
+  it('warns in ONE line for any other value, naming the variable, the value, and the dev/CI posture', () => {
+    const banner = authRateMultiplierBanner(
+      parseAuthRateMultiplier({ RAYSPEC_AUTH_RATE_MULTIPLIER: '100' }),
+    );
+    expect(banner).not.toBeNull();
+    expect(banner).toContain('RAYSPEC_AUTH_RATE_MULTIPLIER=100');
+    expect(banner).toContain('DEV/CI');
+    expect(banner).toContain('NOT a production configuration');
+    expect(banner).not.toContain('\n');
   });
 });
 
