@@ -19,6 +19,7 @@ export {
   DbosCronScheduler,
   DEFAULT_CATCHUP_LOOKBACK_MS,
   FIRING_INSTANT_GRANULARITY_MS,
+  type FireOutcome,
   firingInstantIso,
   firingKey,
   TRIGGER_FIRE_BODY_HASH,

@@ -2532,8 +2532,14 @@ async function deployDeclaredSpec(
           if (!wiredCronScheduler?.manualTriggerNames.includes(name)) return { notFound: true };
           // Fire NOW through the SAME reserve→dispatch path a cron fire uses (fireNow defaults the
           // instant to now; a double fire within one firing-instant bucket dedups to one dispatch).
-          const fired = await wiredCronScheduler.fireNow(name);
-          return { notFound: false, fired };
+          // The full outcome surfaces the enqueued run's deterministic id when THIS fire dispatched
+          // an AGENT action, so the route's 202 can hand the caller a followable run.
+          const outcome = await wiredCronScheduler.fireNowWithOutcome(name);
+          return {
+            notFound: false,
+            fired: outcome.fired,
+            ...(outcome.runId !== undefined ? { runId: outcome.runId } : {}),
+          };
         },
       }
     : undefined;
@@ -2800,6 +2806,18 @@ async function deployDeclaredSpec(
       // tenant that is actually about to fire.
       tenantExists: (firingTenantId: string) =>
         tenantOrgExists(workerDbHandle as Db, firingTenantId),
+      // The run-header identity for the PRE-ENQUEUE header an agent-action fire writes (the same
+      // header the HTTP async path writes at enqueue time in runs.ts, so a fire-returned runId
+      // resolves immediately on the run-read routes). Resolved off the SAME late-bound registry the
+      // executor's resolveRun reads — the two surfaces can never disagree about a run's identity.
+      // Answering undefined for an unknown agentId keeps the write best-effort (the scheduler then
+      // logs and skips it; the dispatch itself is never blocked on this advisory seam).
+      resolveRunHeaderIdentity: (agentId: string) => {
+        const entry = workerAgentRegistry?.get(agentId);
+        return entry
+          ? { backend: entry.backend.id, agentName: entry.spec.name, model: entry.spec.model }
+          : undefined;
+      },
     });
     // Expose the wired scheduler to the late-bound manual-trigger firer (built above, injected into the
     // app inside deploy()); the firer restricts on-demand fires to its manual triggers.

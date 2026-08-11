@@ -53,6 +53,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acknowledgement cannot outlive its finding silently (and `stale_suppression` itself is not
   suppressible). The exported spec JSON-Schema artifacts carry the new key, so editor validation
   offers the closed advisory-code list.
+- **`POST /v1/triggers/{name}/fire` hands back the run it started when the fired action is an
+  `agent` action.** The `202` was `{ name, fired }` in every case, so the off-request run an
+  agent-action fire had just enqueued could not be followed through the public API — the only ways
+  to observe it were re-deriving the internal deterministic run id client-side or polling a runs
+  listing. An agent-action fire that dispatches now answers
+  `{ name, fired: true, runId, events: "/v1/runs/{id}/events" }` — the real id plus the same events
+  path an `async: true` run's `202` advertises — and the fire path writes the same pre-enqueue
+  `enqueued` run header the async run surface writes, so the returned id resolves on
+  `GET /v1/runs/{id}` and on the events path immediately instead of `404`ing until the run ends
+  (and forever, for a run that ends by throwing). A handler-action fire and a deduped no-op keep
+  the exact previous shape (no `runId` key), and the route's `404`/`429`/`501` and audit behavior
+  are unchanged. The route also enters the spec reference next to `triggers` — method, permission,
+  the `202` bodies, the `fired:false` ambiguity, the error cases, and the `trigger-fire` rate
+  bucket (30 fires per 60 seconds per tenant+trigger).
 
 ### Fixed
 

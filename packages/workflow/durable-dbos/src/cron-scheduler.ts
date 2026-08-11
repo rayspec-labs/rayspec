@@ -145,8 +145,10 @@ import { forTenant, schema } from '@rayspec/db';
 import type {
   DurableExecutor,
   invokeTriggerHandler as InvokeTriggerHandlerFn,
+  RunHeaderIdentity,
   TriggerDescriptor,
 } from '@rayspec/platform';
+import { deleteEnqueuedRunHeader, insertEnqueuedRunHeader } from '@rayspec/platform';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
 /**
@@ -302,6 +304,18 @@ export function cronTenantAbsentLog(triggerName: string, tenantId: string, insta
 }
 
 /**
+ * The outcome of a fire, with the enqueued run's id when there is one: `fired` exactly as `fireNow`
+ * reports it, plus — iff THIS call won the reserve and dispatched an AGENT action — the deterministic
+ * `runId` it enqueued (`cronRunId(name, instant)`), so the consumer control path can hand the caller
+ * a followable run. A handler dispatch, a deduped no-op, a tenant-absent skip and a bounded catch-up
+ * skip all carry NO runId: none of them started a run this call could offer to follow.
+ */
+export interface FireOutcome {
+  readonly fired: boolean;
+  readonly runId?: string;
+}
+
+/**
  * The DEPENDENCIES the cron scheduler dispatches with. The scheduler is engine-aware (it owns the DBOS
  * scheduled-workflow registration) but its dispatch deps are NEUTRAL — the executor for agent runs,
  * `invokeTriggerHandler` + `productTables` for handler runs. Injected (not imported concretely beyond
@@ -358,6 +372,19 @@ export interface CronSchedulerDeps {
    * fire or an explicit `fireNow`. Optional; deployment-level (like `tenantId`).
    */
   readonly catchUpLookbackMs?: number;
+  /**
+   * Resolve the run-header identity (backend / agent name / model) for an AGENT action's `agentId` —
+   * the columns of the PRE-ENQUEUE run header an agent-action fire writes (the SAME header the HTTP
+   * async-run path writes before ITS enqueue, so the runId a fire hands back resolves on the
+   * run-read routes from the first instant instead of 404ing until the run's own header commits).
+   * INJECTED because the agent registry lives with the composition root — this engine package
+   * resolves agents only through the executor at run time; answer `undefined` for an unknown
+   * agentId. OPTIONAL as a dep: absent ⇒ no pre-enqueue header is written (the fire still
+   * dispatches; the header write is an advisory alignment, never a precondition of firing).
+   */
+  readonly resolveRunHeaderIdentity?: (
+    agentId: string,
+  ) => Omit<RunHeaderIdentity, 'runId'> | undefined;
 }
 
 /** Thrown when a NON-cron trigger reaches the cron SCHEDULING path (per-kind reservation — fail-closed). */
@@ -514,6 +541,17 @@ export class DbosCronScheduler {
    *   the org exists (a scheduled deployment resumes at its next instant either way).
    */
   async fireNow(name: string, instant: Date = new Date()): Promise<boolean> {
+    return (await this.fireNowWithOutcome(name, instant)).fired;
+  }
+
+  /**
+   * `fireNow`, surfacing the full {@link FireOutcome}: `fired` exactly as `fireNow` reports it, plus
+   * the enqueued run's deterministic `runId` iff THIS call dispatched an AGENT action. The consumer
+   * control path (the HTTP fire route) needs the id so its 202 can hand back a followable run;
+   * `fireNow` keeps the plain boolean for the callers that only ask whether this call dispatched.
+   * Same reserve→dispatch path, same fail-closed rejection of a non-fireable name.
+   */
+  async fireNowWithOutcome(name: string, instant: Date = new Date()): Promise<FireOutcome> {
     // A cron trigger (scheduled + on-demand) OR a manual trigger (on-demand only) is fireable here.
     const descriptor = this.#crons.get(name) ?? this.#manual.get(name);
     if (!descriptor) {
@@ -551,7 +589,7 @@ export class DbosCronScheduler {
           '(unknown, or a RESERVED webhook/event/manual kind not built here). Fail-closed.',
       );
     }
-    return this.#fire(descriptor, instant, { fromSchedule: true });
+    return (await this.#fire(descriptor, instant, { fromSchedule: true })).fired;
   }
 
   /**
@@ -568,14 +606,16 @@ export class DbosCronScheduler {
    * @param opts.fromSchedule whether this fire came from the DBOS scheduled-workflow body (an active
    *   tick, a crash-recovery replay, or a catch-up make-up replay). Only a `fromSchedule` fire of a
    *   `catchUp` trigger applies the bounded look-back; a `fireNow` (opts absent) never does.
-   * @returns `true` iff this call won the reserve and dispatched; `false` if it was a deduped no-op, a
-   *   bounded make-up skip, OR a skip for a deployment tenant that does not exist (yet).
+   * @returns `fired: true` iff this call won the reserve and dispatched — with the enqueued run's
+   *   deterministic `runId` beside it iff the dispatched action was an AGENT action; `fired: false`
+   *   (no runId) if it was a deduped no-op, a bounded make-up skip, OR a skip for a deployment tenant
+   *   that does not exist (yet).
    */
   async #fire(
     descriptor: TriggerDescriptor & { kind: 'cron' | 'manual' },
     instant: Date,
     opts?: { fromSchedule?: boolean },
-  ): Promise<boolean> {
+  ): Promise<FireOutcome> {
     const { db, tenantId } = this.#deps;
     const key = firingKey(descriptor.name, instant);
 
@@ -601,7 +641,7 @@ export class DbosCronScheduler {
     if (!(await this.#deps.tenantExists(tenantId))) {
       // ONE line — the skip is an expected bootstrap state, not a fault (see `cronTenantAbsentLog`).
       this.#logger.warn(cronTenantAbsentLog(descriptor.name, tenantId, instant));
-      return false;
+      return { fired: false };
     }
     const tdb = forTenant(db, tenantId);
 
@@ -629,7 +669,9 @@ export class DbosCronScheduler {
       .returning();
     if (reserved.length === 0) {
       // Already fired for this instant ⇒ deduped no-op (the whole point of the idempotency guard).
-      return false;
+      // No runId either — a dedup of an agent fire HAS a deterministic id, but THIS call dispatched
+      // nothing, so it offers no run of its own to follow.
+      return { fired: false };
     }
 
     // ── Bounded catch-up look-back (a make-up replay of a stale missed interval) ───────────────────
@@ -641,7 +683,7 @@ export class DbosCronScheduler {
     if (opts?.fromSchedule === true && descriptor.catchUp === true) {
       const ageMs = Date.now() - instant.getTime();
       if (ageMs > this.#catchUpLookbackMs) {
-        return false;
+        return { fired: false };
       }
     }
 
@@ -667,25 +709,81 @@ export class DbosCronScheduler {
         this.#deps.productTables,
         descriptor.name,
       );
-      return true;
+      // A handler dispatch carries no runId — the handler IS the dispatch; there is no off-request
+      // run to follow.
+      return { fired: true };
     }
 
     // AGENT action: enqueue a runAgentJob onto the durable executor with a DETERMINISTIC runId
     // (a double-fire of the same instant maps to the same runId → the engine dedups too — layer 3).
     const runId = cronRunId(descriptor.name, instant);
-    await this.#deps.executor.enqueue(tenantId, {
-      runId,
-      tenantId,
-      agentId: descriptor.action.agentId,
-      // A fixed, self-describing marker input (the agent's declared instructions drive it — a fire has
-      // no client body). Honest by kind so the journal/run header reads truthfully for a manual fire.
-      input: triggerAgentInput(descriptor.kind, descriptor.name),
-      // Carry the action's optional output-persist target so the off-request run writes its validated
-      // output into the declared store (exactly-once via the run-header completing-transition gate).
-      ...(descriptor.action.persistTo !== undefined
-        ? { persistTo: descriptor.action.persistTo }
-        : {}),
-    });
-    return true;
+    // Pre-enqueue run header — the ALIGNMENT with the HTTP async path (runs.ts writes the SAME
+    // header via `insertEnqueuedRunHeader` before ITS enqueue): written BEFORE the enqueue below so
+    // the runId this fire hands back RESOLVES on the run-read routes (status `enqueued`) for the
+    // WHOLE run, instead of 404ing until the run's own header commits — and forever, if the run ends
+    // by throwing (the worker runs the agent inside ONE transaction, so a thrown run's header rolls
+    // back; see @rayspec/platform run-header.ts). The identity (backend/agent/model) comes through
+    // the INJECTED resolver (the agent registry lives with the composition root); BEST-EFFORT like
+    // the async path — an advisory write must never cost the caller the dispatch itself, so a
+    // failure is logged, not thrown, and a resolver that cannot name the agentId logs the skip.
+    // `headerCreated` records whether THIS call created the row, so the enqueue-failure path below
+    // can remove it again for a job that provably never existed (the runs.ts alignment again).
+    const resolveIdentity = this.#deps.resolveRunHeaderIdentity;
+    const headerIdentity = resolveIdentity?.(descriptor.action.agentId);
+    let headerCreated = false;
+    if (headerIdentity) {
+      try {
+        headerCreated = await insertEnqueuedRunHeader(tdb, { runId, ...headerIdentity });
+      } catch (err) {
+        this.#logger.warn(
+          `[cron] enqueue-time run header write failed for trigger '${descriptor.name}' ` +
+            `runId=${runId}: ${String(err)}`,
+        );
+      }
+    } else if (resolveIdentity) {
+      // A WIRED resolver that answers undefined for this agentId is registry drift worth one line:
+      // the fire still dispatches (advisory seam), but with no pre-enqueue header the runId this
+      // fire hands back 404s until the run's own header commits — an operator should see why.
+      this.#logger.warn(
+        `[cron] no run-header identity for agentId '${descriptor.action.agentId}' ` +
+          `(trigger '${descriptor.name}') — pre-enqueue run header skipped, runId=${runId}`,
+      );
+    }
+    try {
+      await this.#deps.executor.enqueue(tenantId, {
+        runId,
+        tenantId,
+        agentId: descriptor.action.agentId,
+        // A fixed, self-describing marker input (the agent's declared instructions drive it — a fire has
+        // no client body). Honest by kind so the journal/run header reads truthfully for a manual fire.
+        input: triggerAgentInput(descriptor.kind, descriptor.name),
+        // Carry the action's optional output-persist target so the off-request run writes its validated
+        // output into the declared store (exactly-once via the run-header completing-transition gate).
+        ...(descriptor.action.persistTo !== undefined
+          ? { persistTo: descriptor.action.persistTo }
+          : {}),
+      });
+    } catch (err) {
+      // The enqueue THREW — mirror runs.ts (the async path this header write aligns with). The throw
+      // does NOT prove the job was never created: the durable engine persists the workflow status
+      // BEFORE `enqueue` resolves, so a throw AFTER that persist means the job WILL still run. Probe
+      // the engine and remove the header ONLY when the job is provably ABSENT (status 'unknown') AND
+      // this call created the row — otherwise a runId that will never run would read back as
+      // `enqueued` for ever on the run-read routes. The status read is fail-CLOSED: if it throws,
+      // keep the header (the job may be live). The firing-key reserve above stays CONSUMED either
+      // way — at-most-once is unchanged; a failed dispatch is never silently re-fired. The delete is
+      // best-effort: a failure here must not mask the original error.
+      if (headerCreated) {
+        let jobAbsent = false;
+        try {
+          jobAbsent = (await this.#deps.executor.status(runId)) === 'unknown';
+        } catch {
+          jobAbsent = false; // status unreadable ⇒ the job may exist ⇒ KEEP the header
+        }
+        if (jobAbsent) await deleteEnqueuedRunHeader(tdb, runId).catch(() => {});
+      }
+      throw err;
+    }
+    return { fired: true, runId };
   }
 }
