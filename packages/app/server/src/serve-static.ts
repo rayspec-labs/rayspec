@@ -62,6 +62,16 @@
  * from a completed write. The guard runs AFTER the reserved-prefix decline, the fail-closed path guard
  * and the range guard (each keeps its exact response for every verb) and BEFORE the file server, so it
  * covers the served files, the SPA fallback and the `404.html` page alike.
+ *
+ * SECURITY HEADERS — when the caller supplies `securityHeaders`, EVERY response this mount itself
+ * serves (a file, the SPA fallback, the custom `404.html` page, the range 416 and the method 405)
+ * carries Content-Security-Policy + Permissions-Policy — the two headers the platform's global chain
+ * deliberately leaves to a fronting proxy, which a native (proxy-less) serve of the declared frontend
+ * must emit itself. The decline/refusal fall-throughs (`next()` — a reserved prefix, a guard-refused
+ * path, a genuine miss with no `404.html`) are NOT stamped: those responses belong to the platform
+ * surface, whose header chain stays byte-identical. The static (frontend-only) boot OMITS the
+ * parameter — `assembleStaticServer` already applies the same two values app-wide, so the static
+ * profile's emission stays single-sourced (no double stamp, no drift).
  */
 import {
   accessSync,
@@ -330,10 +340,25 @@ export function frontendMountsReadiness(
 }
 
 /**
+ * The two frontend security-header VALUES a mount stamps on every response it serves (see the module
+ * header's SECURITY HEADERS section). The VALUES come from the caller — the composition root resolves
+ * them from RAYSPEC_FRONTEND_CSP / RAYSPEC_PERMISSIONS_POLICY with the shared secure defaults, so the
+ * env overrides mean the same thing in both boot shapes.
+ */
+export interface FrontendSecurityHeaders {
+  /** The Content-Security-Policy header value. */
+  csp: string;
+  /** The Permissions-Policy header value. */
+  permissionsPolicy: string;
+}
+
+/**
  * Register a hardened static handler per declared frontend mount on `app`.
  *
  *  - `mounts`  — the parsed `FrontendSpec[]` (from the deployed spec's `frontend` section).
  *  - `specDir` — the spec file's directory; each mount's `dir` is resolved relative to it.
+ *  - `securityHeaders` — when present, stamped on every response the mount itself serves (the
+ *    full-backend boot passes it; the static boot omits it — its app-wide chain already emits both).
  *
  * Mounts are registered LONGEST-route-first so a more-specific prefix (e.g. `/admin`) is not shadowed
  * by a `/` catch-all: Hono runs matching handlers in registration order, so the longer prefix's handler
@@ -343,7 +368,19 @@ export function mountFrontend<E extends Env>(
   app: Hono<E>,
   mounts: readonly FrontendSpec[],
   specDir: string,
+  securityHeaders?: FrontendSecurityHeaders,
 ): void {
+  // Stamp the mount's security headers (when the boot supplies them) on a response THIS mount serves.
+  // Runs at the return points that answer the request — never on a `next()` fall-through, so the
+  // platform surface (reserved prefixes, refused paths, the uniform 404) keeps its exact headers.
+  const stamped = (res: Response): Response => {
+    if (securityHeaders !== undefined) {
+      res.headers.set('Content-Security-Policy', securityHeaders.csp);
+      res.headers.set('Permissions-Policy', securityHeaders.permissionsPolicy);
+    }
+    return res;
+  };
+
   // Longest route first (more-specific prefixes win over a `/` catch-all).
   const ordered = [...mounts].sort((a, b) => b.route.length - a.route.length);
 
@@ -402,7 +439,7 @@ export function mountFrontend<E extends Env>(
       const rangeHeader = c.req.header('Range');
       if (rangeHeader !== undefined && c.req.method !== 'HEAD' && c.req.method !== 'OPTIONS') {
         const rangeRes = unsatisfiableRangeResponse(baseDir, subPath, spa, rangeHeader);
-        if (rangeRes) return rangeRes;
+        if (rangeRes) return stamped(rangeRes);
       }
       // METHOD: a static mount is a CONTENT surface — it serves GET/HEAD/OPTIONS and answers every other
       // verb 405 with `Allow` + the platform's uniform JSON envelope, instead of handing it to the file
@@ -417,24 +454,26 @@ export function mountFrontend<E extends Env>(
       // surface does not take this method) rather than folding it into the not-found bucket, where it is
       // indistinguishable from a mistyped path.
       if (!CONTENT_METHODS.has(c.req.method)) {
-        return c.json(
-          errorEnvelope('METHOD_NOT_ALLOWED', 'Method not allowed.', requestIdOf(c.var)),
-          405,
-          { Allow: ALLOW_HEADER },
+        return stamped(
+          c.json(
+            errorEnvelope('METHOD_NOT_ALLOWED', 'Method not allowed.', requestIdOf(c.var)),
+            405,
+            { Allow: ALLOW_HEADER },
+          ),
         );
       }
       // Serve the file; on a hit serveStatic returns the Response. On a miss it returns undefined —
       // then the SPA fallback (if any) gets a turn; if THAT misses too, fall through to the 404.
       const fileRes = await fileServer(c, noop);
-      if (fileRes) return fileRes;
+      if (fileRes) return stamped(fileRes);
       if (spaServer) {
         const spaRes = await spaServer(c, noop);
-        if (spaRes) return spaRes;
+        if (spaRes) return stamped(spaRes);
       }
       // A genuine miss with no SPA fallback: if the mount ships a root `404.html`, serve it with status 404
       // (the GitHub Pages / Netlify / Cloudflare Pages convention). Absent → the platform's uniform 404, unchanged.
       const notFoundRes = serveNotFoundPage(baseDir, realBaseDir, c.req.method);
-      if (notFoundRes) return notFoundRes;
+      if (notFoundRes) return stamped(notFoundRes);
       return next();
     };
 
