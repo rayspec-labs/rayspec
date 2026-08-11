@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`RAYSPEC_AUTH_RATE_MULTIPLIER` scales the auth rate-limit buckets for a dev/CI run** (default
+  1). The `register` (5/min), `login` (10/min) and `refresh` (30/min) per-source buckets are sized
+  for production and had no dev/CI override, so a test harness that provisions several orgs against
+  a live boot tripped the `register` bucket — the 6th registration inside a minute answered `429`,
+  and the suite's later assertions then failed `401` far from the cause. A positive integer set in
+  the environment now multiplies the `max` of exactly those three buckets; the windows and every
+  other bucket (`oauth-token`, `reprocess`, `trigger-fire`, `invite-accept`, the declared-route
+  tiers) are untouched. Unset, blank or an explicit 1 leaves the limiter byte-identical to before —
+  five registrations per source per minute, `429` on the sixth. Any other value makes the boot log
+  a loud one-line warning naming the variable and the value, so the dev/CI posture can never sit in
+  a production environment silently; a value that is not a positive integer aborts the boot with a
+  refusal naming the variable and the value, in the same shape as the other env refusals. The
+  getting-started docs gain a "Testing against a live boot" section naming the buckets and their
+  windows, so suite authors can also stagger registrations knowingly instead.
+
 ### Fixed
 
 - **A valid API key calling `GET /v1/auth/me` now receives `403 FORBIDDEN` with a message naming

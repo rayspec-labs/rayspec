@@ -14,6 +14,7 @@ import {
   InMemoryRateLimitStore,
   RateLimiter,
   REUSE_LOCK_MS,
+  scaledAuthPolicies,
 } from './rate-limit.js';
 
 /** A controllable clock: `t.now` is read by the store; `t.set(ms)` advances it. */
@@ -135,5 +136,47 @@ describe('RateLimiter.check — an explicit policy is authoritative and never re
       expect(limiter.check('register', 'ip').allowed).toBe(true);
     }
     expect(limiter.check('register', 'ip').allowed).toBe(false);
+  });
+});
+
+describe('scaledAuthPolicies — the dev/CI auth-bucket multiplier', () => {
+  it('multiplier 1 returns the input policies THEMSELVES — the default boot is byte-identical', () => {
+    expect(scaledAuthPolicies(1)).toBe(DEFAULT_POLICIES);
+    const custom: Record<string, RateLimitPolicy> = { login: { max: 3, windowMs: 1_000 } };
+    expect(scaledAuthPolicies(1, custom)).toBe(custom);
+  });
+
+  it('scales the max of EXACTLY login/register/refresh; every window and other bucket untouched', () => {
+    const scaled = scaledAuthPolicies(100);
+    for (const bucket of ['login', 'register', 'refresh']) {
+      const base = DEFAULT_POLICIES[bucket];
+      if (!base) throw new Error(`bucket '${bucket}' has no registered policy`);
+      expect(scaled[bucket]).toEqual({ max: base.max * 100, windowMs: base.windowMs });
+    }
+    // Every OTHER bucket rides through by reference — the abuse caps are never scaled.
+    for (const [bucket, policy] of Object.entries(DEFAULT_POLICIES)) {
+      if (bucket === 'login' || bucket === 'register' || bucket === 'refresh') continue;
+      expect(scaled[bucket]).toBe(policy);
+    }
+    expect(Object.keys(scaled).sort()).toEqual(Object.keys(DEFAULT_POLICIES).sort());
+  });
+
+  it('never mutates DEFAULT_POLICIES (the module-level shared table)', () => {
+    const before = JSON.stringify(DEFAULT_POLICIES);
+    scaledAuthPolicies(100);
+    expect(JSON.stringify(DEFAULT_POLICIES)).toBe(before);
+  });
+
+  it('a limiter built on the scaled policies allows the 6th register hit the default refuses', () => {
+    const defaultLimiter = new RateLimiter();
+    const scaledLimiter = new RateLimiter(new InMemoryRateLimitStore(), scaledAuthPolicies(100));
+    const registered = DEFAULT_POLICIES.register;
+    if (!registered) throw new Error("bucket 'register' has no registered policy");
+    for (let i = 0; i < registered.max; i++) {
+      expect(defaultLimiter.check('register', 'ip').allowed).toBe(true);
+      expect(scaledLimiter.check('register', 'ip').allowed).toBe(true);
+    }
+    expect(defaultLimiter.check('register', 'ip').allowed).toBe(false);
+    expect(scaledLimiter.check('register', 'ip').allowed).toBe(true);
   });
 });
