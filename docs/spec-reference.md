@@ -1105,7 +1105,8 @@ The error cases:
   trigger-existence information.
 - **`429`** — the fires of one (tenant, trigger) are throttled through the
   `trigger-fire` rate bucket: **30 fires per 60 seconds per tenant+name**. An
-  over-quota call dispatches nothing, and the response carries `Retry-After`.
+  over-quota call dispatches nothing; the retry advice rides in the body as
+  `error.details.retryAfterMs` — this `429` carries no `Retry-After` header.
 - **`501`** — no manual-trigger firer is wired on this deployment (the spec
   declares no `manual` trigger, or no durable worker is configured). Fail-closed:
   never a silent no-op `202`.
