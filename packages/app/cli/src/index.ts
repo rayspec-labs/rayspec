@@ -209,10 +209,11 @@ function readCliVersion(): string {
  * vitest shape `process.argv`.
  */
 export async function main(args: readonly string[] = process.argv.slice(2)): Promise<number> {
-  // DEV-DX: auto-load the repo-root `.env` (no-override, opt-out via RAYSPEC_SKIP_DOTENV=1) ONCE at
-  // startup so `plan`'s optional shadow-apply picks up SHADOW_DATABASE_URL + DATABASE_URL out of the
-  // box (matching the server boot). Harmless to `doctor` (needs no env); does NOT change plan's
-  // read-only guarantee — it only makes DATABASE_URL readable so the read-only guard has a compare target.
+  // DEV-DX: auto-load a local `.env` — `$PWD/.env` first, then the install-root `.env` (no-override
+  // per key, opt-out via RAYSPEC_SKIP_DOTENV=1) — ONCE at startup so `plan`'s optional shadow-apply
+  // picks up SHADOW_DATABASE_URL + DATABASE_URL out of the box (matching the server boot). Harmless to
+  // `doctor` (needs no env); does NOT change plan's read-only guarantee — it only makes DATABASE_URL
+  // readable so the read-only guard has a compare target.
   loadLocalDotenvIfPresent();
 
   // The subcommand is the FIRST raw token; the rest is handed to that subcommand UNPARSED (each owns

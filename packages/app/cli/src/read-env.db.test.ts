@@ -19,9 +19,10 @@
  * real shadow URL, then write it into a TEMP `.env` and delete it from the ambient env so the only way
  * `plan` can see it is via the loader (that is what makes this a true fail-the-fix).
  *
- * The loader resolves `.env` relative to its own module dir; we redirect that single resolve() to our
- * temp `.env` via a `node:path` re-mock (same technique as read-env.test.ts), and import a FRESH copy
- * of `main` so it binds the redirected loader.
+ * The loader searches `$PWD/.env` then the install-root `.env` (resolved relative to its own module
+ * dir); we redirect its resolve() calls to our temp `.env` via a `node:path` re-mock (same technique
+ * as read-env.test.ts — both candidates collapse to the one temp file, which is also the `$PWD/.env`
+ * of the temp dir we chdir into), and import a FRESH copy of `main` so it binds the redirected loader.
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
