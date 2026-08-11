@@ -124,6 +124,18 @@ function responseSchemaForColumnType(type: ColumnType): Record<string, unknown> 
       return { type: 'boolean' };
     case 'jsonb':
       return {}; // free-form JSON value
+    case 'double':
+      // A plain JSON number — float8 IS IEEE-754 binary64, so the float a client wrote is the float
+      // it reads back (float64 semantics are the documented contract; a non-finite stored value is
+      // refused with a 400 rather than serialized, since JSON cannot carry NaN/Infinity).
+      return { type: 'number' };
+    case 'numeric':
+      // A decimal STRING, because the RUNTIME is exact: a numeric value crosses the wire as a plain
+      // decimal string in both directions (JSON numbers pass through float64 in every parser, which
+      // corrupts a decimal past 2^53 — exactness is the point of the type, so the string is the only
+      // honest wire form; the bounded bigint schema above is the model for documenting the runtime's
+      // real envelope). Reads render Postgres's canonical form with exactly `scale` fractional digits.
+      return { type: 'string', pattern: '^-?\\d+(\\.\\d+)?$' };
   }
 }
 
@@ -477,6 +489,14 @@ function filterParamSchema(type: ColumnType): Record<string, unknown> {
       return { type: 'string', format: 'date-time' };
     case 'text':
       return { type: 'string' };
+    case 'double':
+      // The filter coercion parses a finite float64 — the same value semantics as the body/row.
+      return { type: 'number' };
+    case 'numeric':
+      // A plain decimal string (no exponent), compared EXACTLY server-side — same wire form as the
+      // body/row, one string envelope end to end: body in, body out, equality filter, `__in`
+      // element, keyset cursor.
+      return { type: 'string', pattern: '^-?\\d+(\\.\\d+)?$' };
     case 'jsonb':
       return { type: 'string' }; // unreachable — jsonb columns are excluded from filter params below
   }

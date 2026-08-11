@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AUDIO_SESSIONS_STORE, AUDIO_TRACKS_STORE } from '@rayspec/audio-runtime';
+import { diffProductStores, generateProductSql } from '@rayspec/db';
 import { type ProductSpec, parseProductSpec } from '@rayspec/spec';
 import { describe, expect, it } from 'vitest';
 import { DeriveStoresError, deriveProductStores } from './derive-stores.js';
@@ -165,5 +166,61 @@ describe('deriveProductStores — declared 0.2 stores', () => {
   it('fail-closed: a declared store colliding with a derived collection store name (defense-in-depth beneath lint)', () => {
     const spec: ProductSpec = { ...acmeSpec(), stores: [declaredStore('note_artifacts')] };
     expect(() => deriveProductStores(spec, AUDIO_STORES)).toThrow(DeriveStoresError);
+  });
+});
+
+// ── declared stores with fractional column types (parse → derive → generate/diff) ──────────────
+
+/**
+ * The acme doc + a declared store carrying BOTH fractional column types, parsed through the REAL
+ * `parseProductSpec` (shape + lint) — the same door a product doc enters plan/deploy/boot through.
+ * `precision` is a parameter so the diff leg can derive two spec versions of the same store.
+ */
+function fractionalSpec(precision: number): ProductSpec {
+  const doc = `${readFileSync(ACME_YAML, 'utf8')}
+stores:
+  - name: ledger_lines
+    columns:
+      - { name: line_ref, type: text }
+      - { name: amount, type: numeric, precision: ${precision}, scale: 2 }
+      - { name: confidence, type: double, nullable: true }
+    key: [line_ref]
+`;
+  const parsed = parseProductSpec(doc);
+  if (!parsed.ok)
+    throw new Error(`fractional store doc must parse: ${JSON.stringify(parsed.errors)}`);
+  return parsed.value;
+}
+
+describe('deriveProductStores — declared fractional columns ride the full pipeline', () => {
+  it('a parsed numeric(12, 2) column derives with its precision/scale intact', () => {
+    const derived = deriveProductStores(fractionalSpec(12), AUDIO_STORES);
+    const ledger = derived.stores.find((s) => s.name === 'ledger_lines');
+    expect(ledger?.columns).toEqual([
+      { name: 'line_ref', type: 'text', nullable: false, unique: true },
+      { name: 'amount', type: 'numeric', nullable: false, unique: false, precision: 12, scale: 2 },
+      { name: 'confidence', type: 'double', nullable: true, unique: false },
+    ]);
+  });
+
+  it('parse → derive → generateProductSql emits the parameterized DDL (the plan/deploy/boot path)', () => {
+    // Fail-the-fix: the derivation once rebuilt declared columns WITHOUT precision/scale, so a
+    // lint-clean numeric column crashed the SQL generator (which asserts the parameters present
+    // fail-closed rather than emitting `numeric(undefined, undefined)`). The generator must see
+    // the declared parameters and emit them verbatim.
+    const derived = deriveProductStores(fractionalSpec(12), AUDIO_STORES);
+    const sql = generateProductSql(derived.stores);
+    expect(sql).toContain('"amount" numeric(12, 2) NOT NULL');
+    expect(sql).toContain('"confidence" double precision');
+  });
+
+  it('a precision change between two parsed docs diffs to the gated SET DATA TYPE alter', () => {
+    const oldDerived = deriveProductStores(fractionalSpec(12), AUDIO_STORES);
+    const newDerived = deriveProductStores(fractionalSpec(14), AUDIO_STORES);
+    const diff = diffProductStores(oldDerived.stores, newDerived.stores);
+    expect(diff.statements).toEqual([
+      'ALTER TABLE "ledger_lines" ALTER COLUMN "amount" SET DATA TYPE numeric(14, 2)',
+    ]);
+    expect(diff.destructive).toBe(true);
   });
 });

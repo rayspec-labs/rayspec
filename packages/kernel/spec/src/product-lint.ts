@@ -675,6 +675,32 @@ export function checkProductStores(
           `${base}.columns[${ci}].name`,
         );
       }
+      // (numeric) The SAME precision/scale discipline the backend store lint enforces (lint.ts): a
+      // `numeric` column REQUIRES both parameters (the generator interpolates them into DDL) with
+      // scale <= precision; either parameter on any other type is rejected. Duplicated here because
+      // the product profile reuses the backend `StoreColumn` grammar but not the backend lint.
+      if (col.type === 'numeric') {
+        if (col.precision === undefined || col.scale === undefined) {
+          inv(
+            `store '${store.name}' column '${col.name}' is type 'numeric' but does not declare ` +
+              'both precision and scale — a numeric column requires them ' +
+              '(e.g. { type: numeric, precision: 12, scale: 2 })',
+            `${base}.columns[${ci}]`,
+          );
+        } else if (col.scale > col.precision) {
+          inv(
+            `store '${store.name}' column '${col.name}' declares scale ${col.scale} > precision ` +
+              `${col.precision} — scale must be between 0 and precision`,
+            `${base}.columns[${ci}].scale`,
+          );
+        }
+      } else if (col.precision !== undefined || col.scale !== undefined) {
+        inv(
+          `store '${store.name}' column '${col.name}' declares precision/scale but is type ` +
+            `'${col.type}' — precision and scale are only valid on a 'numeric' column`,
+          `${base}.columns[${ci}]`,
+        );
+      }
     });
     // Two DECLARED column names mapping to the SAME camelCase
     // runtime key would silently resolve to ONE runtime column — the table builder keys the PgTable

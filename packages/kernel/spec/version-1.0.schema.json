@@ -59,7 +59,9 @@
                         "integer",
                         "bigint",
                         "boolean",
-                        "jsonb"
+                        "jsonb",
+                        "double",
+                        "numeric"
                       ]
                     },
                     "nullable": {
@@ -77,6 +79,16 @@
                         "type": "string",
                         "minLength": 1
                       }
+                    },
+                    "precision": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 1000
+                    },
+                    "scale": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000
                     }
                   },
                   "required": [
@@ -968,7 +980,9 @@
                         "integer",
                         "bigint",
                         "boolean",
-                        "jsonb"
+                        "jsonb",
+                        "double",
+                        "numeric"
                       ]
                     },
                     "nullable": {
@@ -986,6 +1000,16 @@
                         "type": "string",
                         "minLength": 1
                       }
+                    },
+                    "precision": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 1000
+                    },
+                    "scale": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000
                     }
                   },
                   "required": [

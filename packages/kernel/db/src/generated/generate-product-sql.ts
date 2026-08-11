@@ -59,7 +59,56 @@ const PG_TYPE: Record<ColumnType, string> = {
   bigint: 'bigint',
   boolean: 'boolean',
   jsonb: 'jsonb',
+  double: 'double precision',
+  // `numeric` is PARAMETERIZED — bare `numeric` is never emitted; see `pgColumnType`, which carries
+  // the declared `(precision, scale)` (asserted present by `assertNumericColumnParams`).
+  numeric: 'numeric',
 };
+
+/**
+ * The Postgres column type STRING for ONE declared column — parameter-aware: a `numeric` column
+ * carries its declared parameters verbatim (`numeric(24, 6)`, drizzle's spelling — the same string
+ * the runtime twin's `getSQLType()` reports); every other type is the closed PG_TYPE lookup.
+ * The caller has already run {@link assertNumericColumnParams}, so the interpolation is total.
+ */
+export function pgColumnType(col: Pick<StoreColumn, 'type' | 'precision' | 'scale'>): string {
+  if (col.type === 'numeric') return `numeric(${col.precision}, ${col.scale})`;
+  return PG_TYPE[col.type];
+}
+
+/**
+ * Re-assert the numeric-parameter discipline OUTSIDE Zod (the generators/diff may run on a
+ * code-built spec bypassing parseSpec, and `@rayspec/spec` lint owns the config-time rejection).
+ * THROWS rather than interpolating `numeric(undefined, undefined)` into DDL / committed TS — the
+ * same defense-in-depth posture as `assertSafeIdentifier`. Shared by the SQL generator, the TS
+ * generator, the runtime table builder, and the delta-diff (single source of the rule).
+ */
+export function assertNumericColumnParams(storeName: string, col: StoreColumn): void {
+  if (col.type === 'numeric') {
+    if (
+      col.precision === undefined ||
+      col.scale === undefined ||
+      !Number.isInteger(col.precision) ||
+      !Number.isInteger(col.scale) ||
+      col.precision < 1 ||
+      col.precision > 1000 ||
+      col.scale < 0 ||
+      col.scale > col.precision
+    ) {
+      throw new Error(
+        `numeric column '${storeName}.${col.name}' must declare integer precision (1..1000) and ` +
+          `scale (0..precision); got precision=${String(col.precision)}, scale=${String(col.scale)}. ` +
+          'Rejected at config time by @rayspec/spec lint — the generators run only on validated specs.',
+      );
+    }
+  } else if (col.precision !== undefined || col.scale !== undefined) {
+    throw new Error(
+      `column '${storeName}.${col.name}' is type '${col.type}' but carries precision/scale — ` +
+        "those parameters are only valid on a 'numeric' column (rejected at config time by " +
+        '@rayspec/spec lint).',
+    );
+  }
+}
 
 /**
  * Re-assert safe identifiers + the FK-uuid rule on a store before emitting any SQL (the generator
@@ -71,6 +120,7 @@ function assertStoreSafeSql(store: StoreSpec): void {
   const fkColumns = new Map(store.foreignKeys.map((fk) => [fk.column, fk]));
   for (const col of store.columns) {
     assertSafeIdentifier(col.name, `column '${store.name}.${col.name}'`);
+    assertNumericColumnParams(store.name, col);
     const fk = fkColumns.get(col.name);
     // (GEN-1) An ID-TARGET FK column references the parent's injected uuid PK (`id`), so it MUST be
     // uuid. A BUSINESS-KEY FK (`referencesColumn` set) references a NAMED parent column whose TYPE the
@@ -130,7 +180,7 @@ function emitFtsVectorColumnSql(store: StoreSpec): string {
 /** Emit ONE author business column line (matches drizzle DDL: `"name" type [NOT NULL]`). */
 function emitColumnSql(col: StoreColumn): string {
   const nn = col.nullable ? '' : ' NOT NULL';
-  return `\t"${col.name}" ${PG_TYPE[col.type]}${nn}`;
+  return `\t"${col.name}" ${pgColumnType(col)}${nn}`;
 }
 
 /**

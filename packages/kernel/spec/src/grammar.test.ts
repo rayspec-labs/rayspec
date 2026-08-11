@@ -149,6 +149,8 @@ describe('ColumnType vocabulary pin', () => {
       'bigint',
       'boolean',
       'jsonb',
+      'double',
+      'numeric',
     ]);
   });
 });

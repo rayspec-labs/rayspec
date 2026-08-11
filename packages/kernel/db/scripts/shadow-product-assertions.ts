@@ -63,6 +63,18 @@ function seedValues(store: StoreSpec, parentId: string | undefined): Record<stri
       case 'jsonb':
         row[col.name] = {};
         break;
+      case 'double':
+        // Fractional ON PURPOSE, so the seed exercises float8 semantics rather than proving only
+        // that the column accepts an integer-valued number.
+        row[col.name] = 0.5;
+        break;
+      case 'numeric':
+        // A string-mode numeric column binds a decimal STRING. Zero is the only value valid for
+        // EVERY legal (precision, scale) — precision - scale may be 0 (abs < 1 only) and scale may
+        // be 0 (integers only) — rendered at the declared scale so the seed matches the column
+        // shape it was declared with.
+        row[col.name] = (0).toFixed(col.scale ?? 0);
+        break;
     }
   }
   return row;

@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Two fractional column types for declared stores: `double` (PostgreSQL `float8`) and `numeric`
+  with required `precision`/`scale` (exact decimals).** The column vocabulary had no honest home
+  for a fractional value — a confidence score, a price, a coordinate — leaving authors to choose
+  between scaled integers, an untyped `jsonb` slot, or `text`. A `double` column is an IEEE-754
+  binary64 float and round-trips natively as a JSON number (the float a client writes is the float
+  it reads back — the platform never re-rounds); NaN/Infinity are refused fail-closed everywhere a
+  value enters, and a non-finite value planted by direct SQL makes the read a `400` rather than a
+  silent JSON `null`. A `numeric(p, s)` column is the exact type for money, and exactness is why
+  its wire form is a decimal **string** in both directions: JSON numbers pass through float64 in
+  every parser, which corrupts a decimal past 2^53 before any validator could see it. A write must
+  fit the declared shape — at most `scale` fractional digits and `precision − scale` integer
+  digits — and is refused rather than rounded when it does not; a JSON number on a numeric column
+  is refused outright; a read returns the exact stored decimal with exactly `scale` fractional
+  digits. Both types filter (`?col=`, `?col__in=`), order, and keyset-paginate — numeric compares
+  as a number server-side, never lexicographically. `precision`/`scale` are validated at parse
+  (integers, 1..1000, `scale ≤ precision`, both required on `numeric`, both rejected on any other
+  type), a precision/scale change on an existing column is emitted as a gated
+  `ALTER … SET DATA TYPE numeric(p, s)` like any other type change, drift detection verifies the
+  live parameters (a `numeric(14, 2)` column where the spec says `numeric(12, 2)` is drift, not a
+  pass), and the exported spec JSON-Schema artifacts carry the new vocabulary for editor
+  validation. A spec without the new types produces byte-identical generator, diff, and doctor
+  output.
+
 - **An escape-hatch handler can now read the authenticated caller as `init.principal` —
   `{ kind: 'user' | 'apikey' | 'm2m', id, role? }`, plain values resolved by the platform
   middleware.** The route init deliberately strips credential headers, but nothing replaced them,

@@ -61,6 +61,10 @@ interface ColumnRow {
   column_name: string;
   data_type: string;
   is_nullable: string; // 'YES' | 'NO'
+  /** numeric(p, s) typmod — non-null for a constrained numeric column (checked ONLY for `numeric`:
+   *  other types report incidental values here, e.g. 53 binary bits for `double precision`). */
+  numeric_precision: number | null;
+  numeric_scale: number | null;
 }
 interface FkRow {
   table_name: string;
@@ -82,6 +86,12 @@ const EXPECTED_DATA_TYPE: Record<ColumnType, string> = {
   bigint: 'bigint',
   boolean: 'boolean',
   jsonb: 'jsonb',
+  // A float8 column reports 'double precision'.
+  double: 'double precision',
+  // Every numeric(p, s) reports data_type 'numeric' — the TYPE NAME proves nothing about the
+  // parameters, so a `numeric` business column ADDITIONALLY compares numeric_precision/numeric_scale
+  // (a live column with the wrong parameters — or an unconstrained bare `numeric` — is drift).
+  numeric: 'numeric',
 };
 
 /**
@@ -118,7 +128,7 @@ export async function detectDrift(
 
   // --- columns ------------------------------------------------------------------------------
   const colRows = (await query(
-    `SELECT table_name, column_name, data_type, is_nullable
+    `SELECT table_name, column_name, data_type, is_nullable, numeric_precision, numeric_scale
        FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = ANY($2)`,
     [schemaName, tableNames],
@@ -217,6 +227,26 @@ export async function detectDrift(
           expected: expectedType,
           actual: live.data_type,
         });
+      } else if (col.type === 'numeric') {
+        // The live data_type is 'numeric' for EVERY (p, s) — and for an unconstrained bare
+        // `numeric` — so the parameters must be verified too: a live column with the wrong
+        // precision/scale silently rounds (or refuses) values the spec says it holds. Number(...)
+        // normalizes the driver's representation of the cardinal_number columns.
+        const livePrecision =
+          live.numeric_precision === null ? null : Number(live.numeric_precision);
+        const liveScale = live.numeric_scale === null ? null : Number(live.numeric_scale);
+        if (livePrecision !== col.precision || liveScale !== col.scale) {
+          findings.push({
+            table: store.name,
+            kind: 'column_type',
+            column: col.name,
+            expected: `numeric(${col.precision}, ${col.scale})`,
+            actual:
+              livePrecision === null || liveScale === null
+                ? 'numeric (unconstrained)'
+                : `numeric(${livePrecision}, ${liveScale})`,
+          });
+        }
       }
       const expectedNullable = col.nullable;
       const liveNullable = live.is_nullable === 'YES';
