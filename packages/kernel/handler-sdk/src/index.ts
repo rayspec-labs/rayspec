@@ -529,6 +529,25 @@ export function isHttpResponse(value: unknown): value is HttpResponse {
   );
 }
 
+/**
+ * The authenticated caller of a request, as the platform middleware already resolved it — passed to
+ * a handler as PLAIN VALUES (serializable; the documented isolate seam is untouched). `kind` mirrors
+ * EXACTLY the principal kinds the middleware produces (a JWT/cookie user, an api-key, an m2m client
+ * credential); `id` is the userId or apiKeyId — the same value `created_by` stamps — and both derive
+ * from the SAME resolved principal, so the two can never drift. TRUST POSTURE: this is DATA a
+ * trusted-author handler reads (keying per-user rows, audit attribution, a "who am I" route) — never
+ * an authz decision the platform delegates (permission gates ran BEFORE the handler).
+ */
+export interface HandlerPrincipal {
+  /** The principal kind the middleware resolved: a user (JWT/cookie), an api-key, or an m2m client. */
+  readonly kind: 'user' | 'apikey' | 'm2m';
+  /** The userId (user principals) or apiKeyId (apikey/m2m) — the same value `created_by` stamps. */
+  readonly id: string;
+  /** The org role claim — present for user principals with a live org role. NEVER trusted for
+   *  sensitive writes (the platform's authz re-checks live); a key principal has none. */
+  readonly role?: string;
+}
+
 /** What a ROUTE handler receives. Runs INSIDE the engine's `TenantDb.transaction()` (the tenant-GUC seam). */
 export interface RouteHandlerInit extends HandlerInit {
   /**
@@ -559,6 +578,16 @@ export interface RouteHandlerInit extends HandlerInit {
    */
   readonly headers?: Readonly<Record<string, string>>;
   /**
+   * The authenticated caller, resolved by the platform middleware. DATA —
+   * never a tenant signal (the tenant stays server-derived), never absent
+   * on the authenticated chain. `kind`/`id` agree with the `created_by` stamp
+   * (`user:<userId>` / `key:<apiKeyId>`) — both derive from the SAME resolved principal, so they can
+   * never drift. ABSENT when an older engine does not inject it (`?`-optional, mirroring how
+   * `headers` was introduced) — a handler treats a missing principal like a missing header. A plain
+   * serializable value (isolate-safe).
+   */
+  readonly principal?: HandlerPrincipal;
+  /**
    * The TENANT-BOUND durable agent-run enqueue capability (see `EnqueueAgentRun`).
    * OPTIONAL: present only when the deployment wired a durable worker (a no-worker deploy omits it, and a
    * handler that needs it fail-closes loudly on `undefined`). The tenant is captured server-side from
@@ -588,6 +617,12 @@ export interface RouteHandlerInit extends HandlerInit {
 export interface TriggerHandlerInit extends HandlerInit {
   /** The declared trigger's name (DATA — for logging/branching). */
   readonly triggerName: string;
+  /**
+   * The authenticated caller, resolved by the platform middleware. DATA — never a tenant signal
+   * (the tenant stays server-derived). ABSENT when the invocation context has no authenticated
+   * principal (e.g. a scheduled trigger fire) — never fabricated.
+   */
+  readonly principal?: HandlerPrincipal;
 }
 
 /**
@@ -623,6 +658,14 @@ export interface StreamRouteHandlerInit extends HandlerInit {
    * byte — the claim is NEVER trusted alone. OPAQUE to the platform (the pack chose it as its blob key).
    */
   readonly mediaResource?: string;
+  /**
+   * The authenticated caller, resolved by the platform middleware (the ingest chain). DATA — never
+   * a tenant signal (the tenant stays server-derived). `kind`/`id` agree with the `created_by`
+   * stamp — threaded from the SAME resolved principal, exactly like the JSON `{handler}` route.
+   * ABSENT on a posture with no request principal (the media-JWT playback path) and on older
+   * engines — never fabricated.
+   */
+  readonly principal?: HandlerPrincipal;
 }
 
 /**
