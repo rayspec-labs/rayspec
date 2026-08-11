@@ -42,6 +42,7 @@ export {
 // cleanup logic is INJECTED as a neutral `runCleanup()` callback so this package stays api-auth-free.
 export {
   type CleanupLogger,
+  crontabParseError,
   DEFAULT_CLEANUP_SCHEDULE,
   formatSystemCleanupLog,
   SYSTEM_CLEANUP_WORKFLOW_NAME,
