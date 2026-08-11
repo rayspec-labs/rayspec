@@ -298,6 +298,11 @@ const PERSIST_COLUMN_COMPAT: Record<ColumnType, ReadonlySet<string>> = {
   bigint: new Set(['integer', 'number']),
   boolean: new Set(['boolean']),
   jsonb: new Set(['object', 'array', 'string', 'number', 'integer', 'boolean']),
+  double: new Set(['integer', 'number']),
+  // A numeric column's write envelope is a decimal STRING (the exact-decimal wire form — the store
+  // facade validates it against the declared precision/scale and refuses a JSON number, whose exact
+  // decimal was already lost to float64 in JSON.parse before any validator could see it).
+  numeric: new Set(['string']),
 };
 
 /** snake_case → camelCase — the SAME rule the store facade + product-table builder use for columns. */
@@ -678,6 +683,42 @@ export function lintSpec(spec: RaySpec): SpecError[] {
           }
           seenValues.add(value);
         }
+      }
+      // (numeric) `precision`/`scale` are the `numeric(p, s)` DDL parameters — the generator
+      // interpolates them verbatim, so there is no honest default. The grammar already pins each to
+      // an integer in the Postgres bounds (precision 1..1000, scale 0..1000); the lint adds the
+      // facts Zod cannot express here: (a) they belong ONLY on a `numeric` column, where BOTH are
+      // REQUIRED; (b) scale <= precision. Mirrors the enum-only-on-text rule above.
+      if (col.type === 'numeric') {
+        if (col.precision === undefined || col.scale === undefined) {
+          errors.push(
+            specError(
+              'schema_violation',
+              `store '${store.name}' column '${col.name}' is type 'numeric' but does not declare ` +
+                'both precision and scale — a numeric column requires them ' +
+                '(e.g. { type: numeric, precision: 12, scale: 2 })',
+              `stores[${si}].columns[${ci}]`,
+            ),
+          );
+        } else if (col.scale > col.precision) {
+          errors.push(
+            specError(
+              'schema_violation',
+              `store '${store.name}' column '${col.name}' declares scale ${col.scale} > precision ` +
+                `${col.precision} — scale must be between 0 and precision`,
+              `stores[${si}].columns[${ci}].scale`,
+            ),
+          );
+        }
+      } else if (col.precision !== undefined || col.scale !== undefined) {
+        errors.push(
+          specError(
+            'schema_violation',
+            `store '${store.name}' column '${col.name}' declares precision/scale but is type ` +
+              `'${col.type}' — precision and scale are only valid on a 'numeric' column`,
+            `stores[${si}].columns[${ci}]`,
+          ),
+        );
       }
     });
 

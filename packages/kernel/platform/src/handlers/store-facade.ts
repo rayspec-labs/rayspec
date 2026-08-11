@@ -128,6 +128,18 @@ function serializeValue(value: unknown, name: string): unknown {
     }
     return Number(value);
   }
+  // The double READ guard (same posture as the BigInt arm, keyed on VALUE SHAPE): a float8 column
+  // can hold NaN/±Infinity at the SQL level, but a handler's JSON response and the run journal both
+  // pass through `JSON.stringify`, where a NaN becomes `null` — a SILENT substitution of a different
+  // value. Refuse instead (never a silent null); a finite double passes through verbatim, and a
+  // numeric column's exact decimal STRING passes through untouched (it never visits float64).
+  if (typeof value === 'number' && !Number.isFinite(value)) {
+    throw new StoreInputError(
+      `HandlerDb: column '${name}' holds a non-finite value (NaN/Infinity) that JSON cannot ` +
+        'represent — refused rather than silently nulled (fail-closed).',
+      'A stored value cannot be represented by this API.',
+    );
+  }
   return value instanceof Date ? value.toISOString() : value;
 }
 
@@ -342,6 +354,51 @@ function isBigintColumn(col: PgColumn): boolean {
   return c.columnType === 'PgBigInt64' || c.dataType === 'bigint';
 }
 
+/** True if a runtime PgColumn is a float8 column (so a non-finite number value is refused). */
+function isDoubleColumn(col: PgColumn): boolean {
+  // Drizzle's doublePrecision column reports columnType 'PgDoublePrecision'. Its dataType is
+  // 'number' — SHARED with integer columns — so unlike the two detectors above, columnType is the
+  // only usable discriminator here.
+  const c = col as unknown as { columnType?: string };
+  return c.columnType === 'PgDoublePrecision';
+}
+
+/** True if a runtime PgColumn is a string-mode numeric column (so a decimal string is validated). */
+function isNumericColumn(col: PgColumn): boolean {
+  // Drizzle's numeric `{ mode: 'string' }` column (the only mode the table builder emits) reports
+  // columnType 'PgNumeric'. Its dataType is 'string' — SHARED with text columns — so columnType is
+  // the only usable discriminator (same caveat as isDoubleColumn).
+  const c = col as unknown as { columnType?: string };
+  return c.columnType === 'PgNumeric';
+}
+
+/**
+ * The `numeric` write shape at the facade: a plain decimal string (optional sign, digits, optional
+ * fractional digits — no exponent/hex/whitespace, so the exact value is legible from the digits).
+ * The 1..1000 digit-run bounds cover the whole Postgres numeric range (precision <= 1000) and keep
+ * an adversarial string away from any unbounded scan. The SAME envelope the HTTP body validator
+ * applies at the other write chokepoint (store-validation.ts).
+ */
+const NUMERIC_WIRE_RE = /^-?\d{1,1000}(\.\d{1,1000})?$/;
+
+/**
+ * Does a NUMERIC_WIRE_RE-shaped decimal string FIT the column's declared numeric(precision, scale)
+ * without Postgres changing a digit? Fractional digits AS WRITTEN must be <= scale (one more and
+ * Postgres silently ROUNDS on insert — its numeric assignment cast rounds, it does not error);
+ * integer digits (leading zeros ignored — padding, not value) must be <= precision - scale (or the
+ * insert fails 22003 late). Mirrors the HTTP body validator's rule exactly — the platform must never
+ * write through one path what the other path refuses.
+ */
+function fitsNumericParams(value: string, precision: number, scale: number): boolean {
+  const unsigned = value.startsWith('-') ? value.slice(1) : value;
+  const dot = unsigned.indexOf('.');
+  const intPart = dot === -1 ? unsigned : unsigned.slice(0, dot);
+  const fracDigits = dot === -1 ? 0 : unsigned.length - dot - 1;
+  if (fracDigits > scale) return false;
+  const significantIntDigits = intPart.replace(/^0+/, '').length;
+  return significantIntDigits <= precision - scale;
+}
+
 /** The injected/server-controlled columns (camelCase) a handler may never SET (platform-managed). */
 const SERVER_CONTROLLED_CAMEL: ReadonlySet<string> = new Set(
   INJECTED_COLUMN_NAMES.map((snake) => snakeToCamel(snake)),
@@ -474,6 +531,56 @@ function coerceForColumn(col: PgColumn, name: string, value: unknown, op: string
         'untyped parameter and PostgreSQL would store it past this bound (fail-closed).',
       'A supplied value is not a valid integer.',
     );
+  }
+  if (isDoubleColumn(col)) {
+    // A double column takes a REAL JS number — and a handler passes real JS numbers, so NaN/Infinity
+    // CAN reach this boundary (unlike JSON, which cannot carry them). Each is refused fail-closed:
+    // float8 would store a NaN happily, and every read path would then have to refuse the row (the
+    // read guard in serializeValue) — never store what no read can return. A string is refused too:
+    // the JSON-native form of a double is a number, and the driver would bind a string as an untyped
+    // parameter Postgres casts itself (same rationale as the bigint no-string rule below).
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new StoreInputError(
+        `HandlerDb: ${op} value for double column '${name}' must be a FINITE JS number — got ` +
+          `${typeof value === 'number' ? String(value) : typeof value} (fail-closed; NaN/Infinity ` +
+          'cannot cross any JSON surface and are never stored).',
+        'A supplied value is not a valid number.',
+      );
+    }
+    return value;
+  }
+  if (isNumericColumn(col)) {
+    // A numeric column takes a plain decimal STRING, validated against the column's declared
+    // (precision, scale) — read off the runtime PgColumn, where the table builder pinned them. A JS
+    // number is refused outright: it has already been through float64 (a computed 0.1 + 0.2 is
+    // 0.30000000000000004; a decimal past 2^53 is corrupted), so the exact decimal the handler MEANT
+    // can no longer be proven — and exactness is the entire point of this type. Refused, never
+    // silently re-rendered. The bounds check refuses a value Postgres would silently ROUND
+    // (fractional digits beyond the scale) or overflow on — the SAME envelope the HTTP body
+    // validator applies at the other write chokepoint.
+    if (typeof value !== 'string' || !NUMERIC_WIRE_RE.test(value)) {
+      throw new StoreInputError(
+        `HandlerDb: ${op} value for numeric column '${name}' must be a plain decimal STRING ` +
+          `(optional sign, digits, optional fractional digits — no exponent) — got ${typeof value}. ` +
+          'A JS number is deliberately NOT accepted: it has already passed through float64, so the ' +
+          'exact decimal cannot be proven (fail-closed).',
+        'A supplied value is not a valid decimal string.',
+      );
+    }
+    const { precision, scale } = col as unknown as { precision?: number; scale?: number };
+    if (
+      precision !== undefined &&
+      scale !== undefined &&
+      !fitsNumericParams(value, precision, scale)
+    ) {
+      throw new StoreInputError(
+        `HandlerDb: ${op} value for numeric column '${name}' does not fit ` +
+          `numeric(${precision}, ${scale}): at most ${scale} fractional digits and at most ` +
+          `${precision - scale} integer digits — refused rather than rounded (fail-closed).`,
+        'A supplied value does not fit the declared decimal shape.',
+      );
+    }
+    return value;
   }
   if (isTimestampColumn(col) && typeof value === 'string') {
     const d = new Date(value);

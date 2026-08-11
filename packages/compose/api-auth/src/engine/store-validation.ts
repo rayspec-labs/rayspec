@@ -31,6 +31,36 @@ const MAX_SAFE_BIG = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_SAFE_BIG = BigInt(Number.MIN_SAFE_INTEGER);
 
 /**
+ * The `numeric` wire shape: a plain decimal string — optional sign, integer digits, optional
+ * fractional digits. No exponent, no hex, no whitespace, no lone `.`: every accepted form is a
+ * decimal literal whose EXACT value is legible from its digits (exactness is the point of the type;
+ * a form that needs interpretation cannot be proven exact). The 1..1000 digit-run bounds cover the
+ * whole Postgres numeric range (precision <= 1000) and keep an adversarial string away from any
+ * unbounded scan. Serializes into the exported OpenAPI body schema as a `pattern`.
+ */
+const NUMERIC_WIRE_RE = /^-?\d{1,1000}(\.\d{1,1000})?$/;
+
+/**
+ * Does a NUMERIC_WIRE_RE-shaped decimal string FIT the declared numeric(precision, scale) without
+ * Postgres changing a digit? Two counts, each against the declared parameters:
+ *  - fractional digits AS WRITTEN must be <= scale — one more and Postgres would silently ROUND on
+ *    insert (its numeric assignment cast rounds, it does not error), which is exactly the silent
+ *    value change this platform refuses. Even all-zero excess digits are refused: the envelope is
+ *    "at most `scale` fractional digits", one rule with no value-inspection carve-outs.
+ *  - integer digits (leading zeros ignored — padding, not value) must be <= precision - scale, or
+ *    the insert would fail 22003 AFTER commit-side effects; refused early with a clear message.
+ */
+function fitsNumericParams(value: string, precision: number, scale: number): boolean {
+  const unsigned = value.startsWith('-') ? value.slice(1) : value;
+  const dot = unsigned.indexOf('.');
+  const intPart = dot === -1 ? unsigned : unsigned.slice(0, dot);
+  const fracDigits = dot === -1 ? 0 : unsigned.length - dot - 1;
+  if (fracDigits > scale) return false;
+  const significantIntDigits = intPart.replace(/^0+/, '').length;
+  return significantIntDigits <= precision - scale;
+}
+
+/**
  * Tolerant body-casing. The create/update Zod schemas key on the camelCase twin of each
  * declared column (`snakeToCamel(col.name)`). This normalizer lets a client send EITHER the camelCase
  * key (today's) OR the snake_case DECLARED name for a declared column: a snake key is renamed to its
@@ -65,9 +95,10 @@ export function normalizeBodyCasing(store: StoreSpec, raw: unknown): unknown {
   return out;
 }
 
-/** Map a declared ColumnType to the Zod validator for a CREATE/UPDATE body value. */
-function zodForColumn(type: ColumnType): z.ZodType {
-  switch (type) {
+/** Map a declared column to the Zod validator for a CREATE/UPDATE body value (parameter-aware:
+ *  a `numeric` column's validator is built from its declared precision/scale). */
+function zodForColumn(col: StoreColumn): z.ZodType {
+  switch (col.type) {
     case 'text':
       return z.string();
     case 'uuid':
@@ -95,6 +126,37 @@ function zodForColumn(type: ColumnType): z.ZodType {
     case 'jsonb':
       // Free-form JSON value (object/array/scalar) — the column is jsonb.
       return z.unknown();
+    case 'double':
+      // A JSON NUMBER — float8 IS IEEE-754 binary64, so JSON round-trips the value natively and the
+      // float the client wrote is the float it reads back (the honest contract of this type is
+      // float64 semantics, never a re-rounded decimal). NaN/±Infinity cannot appear in JSON, and
+      // zod's z.number() additionally rejects them for any non-JSON caller of this schema —
+      // fail-closed everywhere a double enters, never a silent null.
+      return z.number();
+    case 'numeric': {
+      // A decimal STRING, both directions — never a JSON number. The honest limit is JSON.parse
+      // itself: it maps every numeric literal through float64 BEFORE any validator runs, so a
+      // decimal past float64 exactness (18+ significant digits) would arrive already corrupted,
+      // indistinguishable from a value the author really meant — and exactness is the entire point
+      // of numeric. A string survives JSON.parse byte-exactly, so it is the only wire form on which
+      // exactness can be PROVEN, and a JSON number is refused rather than re-rendered. The value
+      // must FIT the declared numeric(precision, scale): more fractional digits than `scale` would
+      // silently ROUND in Postgres (refused instead — never rounded), more integer digits than
+      // `precision - scale` would overflow (refused early with the declared shape in the message).
+      const { precision, scale } = col;
+      const base = z
+        .string()
+        .regex(
+          NUMERIC_WIRE_RE,
+          'must be a plain decimal string (optional sign, digits, optional fractional digits — no exponent)',
+        );
+      if (precision === undefined || scale === undefined) return base; // lint-unreachable; fail-safe shape-only
+      return base.refine((v) => fitsNumericParams(v, precision, scale), {
+        message:
+          `must fit numeric(${precision}, ${scale}): at most ${scale} fractional digits and at ` +
+          `most ${precision - scale} integer digits — refused rather than rounded`,
+      });
+    }
   }
 }
 
@@ -120,7 +182,7 @@ function zodForColumn(type: ColumnType): z.ZodType {
  */
 function columnSchema(col: StoreColumn): z.ZodType {
   const base =
-    col.enum !== undefined ? z.enum(col.enum as [string, ...string[]]) : zodForColumn(col.type);
+    col.enum !== undefined ? z.enum(col.enum as [string, ...string[]]) : zodForColumn(col);
   return col.nullable ? base.nullable() : base;
 }
 
@@ -193,8 +255,9 @@ export function toDbValues(
  *  - business columns → the AUTHOR's snake_case name;
  *  - injected columns → their snake_case name (id, tenant_id, created_at, deleted_at,
  *    retention_days, region);
- *  - Date → ISO string; BigInt → a JSON number, or a 400 when it cannot be one; everything else
- *    passes through.
+ *  - Date → ISO string; BigInt → a JSON number, or a 400 when it cannot be one; a non-finite
+ *    number (a NaN/Infinity float8 planted by SQL) → a 400, never a silent JSON null; everything
+ *    else passes through (a numeric column's exact decimal string included, verbatim).
  * Tenant_id IS returned (it is the row's data; it is the caller's OWN tenant — resolveTenant already
  * matched it, so there is no cross-tenant leak: a row only reaches here if the tenant predicate
  * admitted it).
@@ -235,6 +298,18 @@ export function serializeRow(
       }
       out[snake] = Number(value);
       continue;
+    }
+    // The double READ guard (same posture as the bigint guard above, keyed on VALUE SHAPE): a float8
+    // column can hold NaN/±Infinity at the SQL level, but JSON cannot carry them —
+    // `JSON.stringify(NaN)` is `null`, i.e. a SILENT substitution of a different value. A non-finite
+    // number can only have arrived by a route other than the HTTP write path (the body validator
+    // refuses it), so refuse here rather than let the response silently null it.
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      throw new ApiError(
+        'VALIDATION_ERROR',
+        `Column '${snake}' holds a non-finite value (NaN/Infinity) JSON cannot represent — ` +
+          `row id ${String(row.id)}.`,
+      );
     }
     out[snake] = value instanceof Date ? value.toISOString() : value;
   }

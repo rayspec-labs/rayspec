@@ -136,9 +136,21 @@ const LintSuppressList = z.array(LintSuppression).optional();
  * can map each to a Drizzle/Postgres type deterministically and the migration gate sees a finite
  * vocabulary. (Authors declare BUSINESS columns only — the tenancy/GDPR columns `tenant_id`,
  * `id`, `created_at`, `deleted_at`, `retention_days`, `region` are INJECTED by the generator,
- * never declared here.)
+ * never declared here.) The two fractional types: `double` is Postgres `float8` (IEEE-754
+ * binary64 — JSON round-trips it natively as a number); `numeric` is the exact decimal
+ * `numeric(precision, scale)` and REQUIRES both parameters on the column (see `StoreColumn`).
  */
-export const ColumnType = z.enum(['text', 'uuid', 'timestamp', 'integer', 'bigint', 'boolean', 'jsonb']);
+export const ColumnType = z.enum([
+  'text',
+  'uuid',
+  'timestamp',
+  'integer',
+  'bigint',
+  'boolean',
+  'jsonb',
+  'double',
+  'numeric',
+]);
 export type ColumnType = z.infer<typeof ColumnType>;
 
 /**
@@ -193,6 +205,17 @@ export const StoreColumn = z
     unique: z.boolean().default(false),
     /** Optional whitelist of allowed values for a text column (a stored value must be one of these). */
     enum: z.array(z.string().min(1)).min(1).optional(),
+    /**
+     * REQUIRED on a `numeric` column, rejected on every other type (both facts lint-enforced, like
+     * `enum`): total significant digits, an integer 1..1000 (the documented Postgres bound). The
+     * generator interpolates it into DDL (`numeric(precision, scale)`), so there is no honest default.
+     */
+    precision: z.number().int().min(1).max(1000).optional(),
+    /**
+     * REQUIRED on a `numeric` column, rejected on every other type: fractional digits, an integer
+     * with 0 <= scale <= precision (the cross-field bound is lint-enforced; the 0..1000 range here).
+     */
+    scale: z.number().int().min(0).max(1000).optional(),
   })
   .strict();
 export type StoreColumn = z.infer<typeof StoreColumn>;

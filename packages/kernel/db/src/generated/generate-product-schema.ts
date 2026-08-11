@@ -43,7 +43,7 @@ import {
   type StoreForeignKey,
   type StoreSpec,
 } from '@rayspec/spec';
-import type { StoreConflictKeys } from './generate-product-sql.js';
+import { assertNumericColumnParams, type StoreConflictKeys } from './generate-product-sql.js';
 import {
   INJECTED_AFTER,
   INJECTED_BEFORE,
@@ -67,15 +67,23 @@ const COLUMN_TYPE_TO_SYMBOL: Record<ColumnType, string> = {
   bigint: 'bigint',
   boolean: 'boolean',
   jsonb: 'jsonb',
+  double: 'doublePrecision',
+  numeric: 'numeric',
 };
 
-/** Map the closed ColumnType vocabulary to a Drizzle pg-core column-builder call (deterministic). */
-const DRIZZLE_BUILDER: Record<ColumnType, (snake: string) => string> = {
-  text: (s) => `text('${s}')`,
-  uuid: (s) => `uuid('${s}')`,
+/**
+ * Map the closed ColumnType vocabulary to a Drizzle pg-core column-builder call (deterministic).
+ * PARAMETER-AWARE: each builder receives the whole column, so `numeric` can carry its declared
+ * `(precision, scale)` — the caller has already run `assertNumericColumnParams`, so the
+ * interpolation is total. Every emitted string must stay byte-identical to the runtime twin in
+ * build-product-tables.ts (the bigint-mode discipline below applies to every parameterized builder).
+ */
+const DRIZZLE_BUILDER: Record<ColumnType, (col: StoreColumn) => string> = {
+  text: (c) => `text('${c.name}')`,
+  uuid: (c) => `uuid('${c.name}')`,
   // timestamptz everywhere (mirrors schema.ts `timestamp(..., { withTimezone: true })`).
-  timestamp: (s) => `timestamp('${s}', { withTimezone: true })`,
-  integer: (s) => `integer('${s}')`,
+  timestamp: (c) => `timestamp('${c.name}', { withTimezone: true })`,
+  integer: (c) => `integer('${c.name}')`,
   // `{ mode: 'bigint' }` (drizzle's PgBigInt64), never `{ mode: 'number' }`. The `number` mode maps an
   // int8 through `Number(value)` INSIDE the ORM — upstream of every chokepoint this platform owns — so
   // a stored value past 2^53-1 would arrive already rounded, indistinguishable from a value that was
@@ -84,9 +92,18 @@ const DRIZZLE_BUILDER: Record<ColumnType, (snake: string) => string> = {
   // platform can either show the true number or refuse. Both modes emit the same DDL; the choice is
   // purely about read fidelity, and it is baked into COMMITTED product source here — it must stay
   // byte-identical to the runtime twin in build-product-tables.ts.
-  bigint: (s) => `bigint('${s}', { mode: 'bigint' })`,
-  boolean: (s) => `boolean('${s}')`,
-  jsonb: (s) => `jsonb('${s}')`,
+  bigint: (c) => `bigint('${c.name}', { mode: 'bigint' })`,
+  boolean: (c) => `boolean('${c.name}')`,
+  jsonb: (c) => `jsonb('${c.name}')`,
+  double: (c) => `doublePrecision('${c.name}')`,
+  // `{ mode: 'string' }` (drizzle's PgNumeric) is TODAY'S DEFAULT, written out because the mode IS
+  // the exactness story of this type: the `number` mode (PgNumericNumber) maps the driver's exact
+  // decimal string through float64 INSIDE the ORM — upstream of every chokepoint — so a value past
+  // float64 exactness would arrive already corrupted with nothing left to detect. The string mode
+  // hands the platform the exact decimal, so it can show the true value or refuse. Pinned in
+  // COMMITTED product source; must stay byte-identical to the runtime twin.
+  numeric: (c) =>
+    `numeric('${c.name}', { precision: ${c.precision}, scale: ${c.scale}, mode: 'string' })`,
 };
 
 /**
@@ -147,6 +164,7 @@ function assertStoreSafe(store: StoreSpec): void {
   const fkColumns = new Map(store.foreignKeys.map((fk) => [fk.column, fk]));
   for (const col of store.columns) {
     assertSafeIdentifier(col.name, `column '${store.name}.${col.name}'`);
+    assertNumericColumnParams(store.name, col);
     if (reserved.has(col.name)) {
       throw new Error(
         `generate-product-schema: store '${store.name}' declares reserved column '${col.name}' ` +
@@ -176,7 +194,7 @@ function assertStoreSafe(store: StoreSpec): void {
  */
 function emitBusinessColumn(col: StoreColumn, isConflictKey: boolean): string {
   const prop = toCamel(col.name);
-  let chain = DRIZZLE_BUILDER[col.type](col.name);
+  let chain = DRIZZLE_BUILDER[col.type](col);
   if (!col.nullable) chain += '.notNull()';
   if (col.unique && isConflictKey) chain += '.unique()';
   return `  ${prop}: ${chain},`;

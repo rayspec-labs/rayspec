@@ -14,12 +14,14 @@
  * for the parameterizable cross-tenant gate (deliverable 7) — it lets the gate run over the
  * throwaway's `notebooks`/`entries` even though the platform baseline is product-empty.
  */
-import type { ColumnType, StoreSpec } from '@rayspec/spec';
+import type { StoreColumn, StoreSpec } from '@rayspec/spec';
 import {
   bigint,
   boolean,
+  doublePrecision,
   integer,
   jsonb,
+  numeric,
   type PgTable,
   pgTable,
   text,
@@ -31,7 +33,7 @@ import { markEnumWhitelist } from '../enum-whitelist-registry.js';
 import { markFtsTable } from '../fts-registry.js';
 import { orgs } from '../schema.js';
 import { markSoftDeleteTable } from '../soft-delete-registry.js';
-import type { StoreConflictKeys } from './generate-product-sql.js';
+import { assertNumericColumnParams, type StoreConflictKeys } from './generate-product-sql.js';
 
 /** snake_case → camelCase (mirrors generate-product-schema's toCamel — the runtime prop key). */
 function toCamel(name: string): string {
@@ -54,9 +56,10 @@ interface ChainableBuilder {
 }
 const chain = (b: unknown): ChainableBuilder => b as ChainableBuilder;
 
-/** Build the business-column builder for a ColumnType (mirrors generate-product-schema.ts). */
-function businessBuilder(type: ColumnType, snake: string): ChainableBuilder {
-  switch (type) {
+/** Build the business-column builder for ONE declared column (mirrors generate-product-schema.ts). */
+function businessBuilder(col: StoreColumn, storeName: string): ChainableBuilder {
+  const snake = col.name;
+  switch (col.type) {
     case 'text':
       return chain(text(snake));
     case 'uuid':
@@ -77,6 +80,24 @@ function businessBuilder(type: ColumnType, snake: string): ChainableBuilder {
       return chain(boolean(snake));
     case 'jsonb':
       return chain(jsonb(snake));
+    case 'double':
+      // float8 — the driver hands back a JS number (IEEE-754 binary64 IS the column's semantics).
+      return chain(doublePrecision(snake));
+    case 'numeric': {
+      // The declared (precision, scale) are asserted present (a code-built spec bypassing parseSpec
+      // must not silently build an UNCONSTRAINED live numeric while the DDL twin is constrained).
+      // `{ mode: 'string' }` mirrors the committed source builder byte-for-byte: the string mode
+      // (PgNumeric) hands the platform the driver's EXACT decimal string; the number mode
+      // (PgNumericNumber) would map it through float64 INSIDE the ORM — upstream of every
+      // chokepoint — corrupting a value past float64 exactness with nothing left to detect. The
+      // meta-test in fractional-columns.test.ts compares `columnType` (PgNumeric vs PgNumericNumber)
+      // and is the guard that sees a divergence.
+      assertNumericColumnParams(storeName, col);
+      // The assert above threw on an undefined parameter — the casts only narrow for TS.
+      const precision = col.precision as number;
+      const scale = col.scale as number;
+      return chain(numeric(snake, { precision, scale, mode: 'string' }));
+    }
   }
 }
 
@@ -126,12 +147,12 @@ function buildStoreTable(
         // round-trips correctly. NO forced uuid (the column may be text/integer/…) and NO runtime
         // `.references()` (it would mis-model the compound FK). A `unique: true` business-key FK column
         // still gets its compound unique index via the `compoundUnique` extras below.
-        let b = businessBuilder(col.type, col.name);
+        let b = businessBuilder(col, store.name);
         if (!col.nullable) b = b.notNull();
         columns[camel] = b;
       }
     } else {
-      let b = businessBuilder(col.type, col.name);
+      let b = businessBuilder(col, store.name);
       if (!col.nullable) b = b.notNull();
       // A conflict-key unique keeps a SINGLE-column `.unique()`; a NON-key unique becomes a
       // TENANT-SCOPED compound `uniqueIndex` table-extra below. Secure default = compound.

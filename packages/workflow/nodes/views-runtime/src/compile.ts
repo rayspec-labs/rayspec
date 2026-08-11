@@ -158,6 +158,16 @@ const COLUMN_PRODUCES: Readonly<Record<ColumnType, ReadonlySet<ViewLeafType>>> =
   bigint: new Set(['integer', 'number']),
   boolean: new Set(['boolean']),
   jsonb: new Set(['string', 'number', 'integer', 'boolean', 'object', 'array']),
+  // A double column produces `number` ONLY — never `integer`: a fractional value would fail
+  // `matchesLeafType('integer')` and `typedLeaf` would silently substitute the declared default,
+  // the same silent-loss shape the bigint comment above guards against. (The store facade refuses a
+  // non-finite float8 before a leaf ever sees it, so a projected double is always a finite number.)
+  double: new Set(['number']),
+  // A numeric column reaches the facade read surface as its EXACT decimal STRING (drizzle's
+  // string-mode numeric — it never visits float64), so the only leaf it can honestly produce is
+  // `string`. Declaring `number` here would make `typedLeaf` silently substitute the default for
+  // every projected value (`typeof value === 'number'` is false for a string) — the same trap.
+  numeric: new Set(['string']),
 };
 
 /** Which param SHAPES may filter a column of a given SQL type (with the coercion the interpreter applies). */
@@ -169,7 +179,8 @@ function paramFilterAllowed(colType: ColumnType, shape: ViewParamSpec['shape']):
     case 'integer':
       return shape === 'positive_int' || shape === 'nonnegative_int'; // coerced to a number
     default:
-      return false; // bigint/boolean/timestamp/jsonb equality on a request param — not expressible
+      // bigint/boolean/timestamp/jsonb/double/numeric equality on a request param — not expressible
+      return false;
   }
 }
 
@@ -185,7 +196,8 @@ function constFilterAllowed(colType: ColumnType, value: ViewConstValue): boolean
     case 'boolean':
       return typeof value === 'boolean';
     default:
-      return false; // bigint/timestamp/jsonb const equality — not expressible declaratively
+      // bigint/timestamp/jsonb/double/numeric const equality — not expressible declaratively
+      return false;
   }
 }
 

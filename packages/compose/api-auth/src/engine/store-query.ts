@@ -243,6 +243,33 @@ function coerceValue(type: ColumnType, name: string, raw: string): unknown {
         validationError(`Filter '${name}' must be an ISO-8601 datetime.`);
       return d;
     }
+    case 'double': {
+      // A float literal (optional sign/fraction/exponent) — a SHAPE check first, then a parse that
+      // must land on a FINITE float64. The shape check keeps `Number()`'s looser accepts out
+      // (`Number('')` is 0, `Number('0x10')` is 16 — each silently means something the caller did
+      // not write); the finite check refuses an exponent that overflows to Infinity. The exponent
+      // form is admitted (unlike `numeric`) because a double IS a float64 — `String(1e21)` is
+      // `'1e+21'`, so the CURSOR round-trip (String → here) depends on it, and any in-range literal
+      // parses to the exact float64 the client's own JSON number would have carried.
+      if (!/^-?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?$/.test(raw)) {
+        validationError(`Filter '${name}' must be a number.`);
+      }
+      const n = Number(raw);
+      if (!Number.isFinite(n)) validationError(`Filter '${name}' must be a finite number.`);
+      return n;
+    }
+    case 'numeric':
+      // The SAME plain-decimal shape the body validator accepts (no exponent — exactness must be
+      // legible from the digits; the 1..1000 digit bounds cover the whole Postgres numeric range and
+      // keep an adversarial string bounded). Returned as the STRING: drizzle binds it verbatim and
+      // Postgres compares it as an EXACT numeric — never through float64. No precision/scale check
+      // here, deliberately: a comparison does not apply the column's typmod, so a filter value
+      // beyond the declared scale is simply an exact value no stored row equals (an honest empty
+      // result), never a rounded match. This is also what a keyset cursor binds on page 2+.
+      if (!/^-?\d{1,1000}(\.\d{1,1000})?$/.test(raw)) {
+        validationError(`Filter '${name}' must be a plain decimal string (no exponent).`);
+      }
+      return raw;
     case 'jsonb':
       return validationError(`Column '${name}' is not filterable.`);
   }

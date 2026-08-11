@@ -131,7 +131,7 @@ stores:
 - `columns` — at least one. Each column has:
   - `name` — a safe identifier (same rule as above).
   - `type` — one of the closed column-type vocabulary: `text`, `uuid`,
-    `timestamp`, `integer`, `bigint`, `boolean`, `jsonb`.
+    `timestamp`, `integer`, `bigint`, `boolean`, `jsonb`, `double`, `numeric`.
 
     `integer` is a PostgreSQL `integer` (`int4`, up to 2 147 483 647); `bigint`
     is a PostgreSQL `bigint` (`int8`). They are separate types — `integer` was
@@ -192,6 +192,55 @@ stores:
     gate is what makes an operator look before that happens, and a `USING`
     expression deciding what to do with such a row belongs in a hand-edited
     migration.
+
+    **`double`** is a PostgreSQL `double precision` (`float8`) — an IEEE-754
+    binary64 float, which is exactly what a JSON number is, so the type
+    round-trips natively: the float a client writes is the float it reads back,
+    on the body, on filters, on keyset cursors. The honest contract is float64
+    semantics, not decimal semantics: `0.1 + 0.2` is `0.30000000000000004`, and
+    the platform never re-rounds on either side. NaN and Infinity are refused
+    fail-closed everywhere a double value enters: JSON cannot carry them on the
+    wire, an escape-hatch handler passing a real JS `NaN`/`Infinity` is refused
+    at the write facade, and a non-finite value planted in the column by direct
+    SQL makes the read a `400 VALIDATION_ERROR` rather than a silent JSON
+    `null` (`JSON.stringify(NaN)` is `null` — a substituted value, which is
+    exactly what the refusal exists to prevent). Use `double` for scores,
+    confidences, coordinates, ratings — never for money.
+
+    **`numeric`, with required `precision`/`scale`,** is a PostgreSQL
+    `numeric(p, s)` — the exact decimal for money and anything else where a
+    wrong last digit is a defect. Exactness is why the value crosses the wire
+    as a **string**, in both directions: every JSON parser maps a numeric
+    literal through float64 before any validator can see it, so a decimal past
+    2^53 (18+ significant digits) would arrive already corrupted — a string
+    survives `JSON.parse` byte-exactly, so it is the only wire form on which
+    exactness can be proven. A write is a plain decimal string (optional sign,
+    digits, optional fractional digits — no exponent) and must FIT the declared
+    shape: at most `scale` fractional digits as written — one more and
+    PostgreSQL would silently round, so the request is refused with
+    `400 VALIDATION_ERROR` instead, never rounded — and at most
+    `precision − scale` integer digits (leading zeros ignored). A JSON
+    **number** on a numeric column is refused outright, for the float64 reason
+    above. A read returns the exact stored value in PostgreSQL's canonical
+    rendering with exactly `scale` fractional digits (`7.5` written into a
+    `numeric(24, 6)` column reads back `7.500000` — the same value,
+    canonically rendered). Filters and keyset cursors carry the same string
+    form and compare exactly server-side: a filter value beyond the declared
+    scale matches nothing rather than matching a rounded neighbour. Both
+    fractional types are orderable and usable as keyset pagination columns.
+
+    **Changing a numeric column's `precision`/`scale`** is a real schema
+    change: the diff emits a single `ALTER … SET DATA TYPE numeric(<p>, <s>)`,
+    classified as a destructive type change and **blocked** by the migration
+    gate until a reviewed allowlist entry covers that exact statement — the
+    `integer` → `bigint` treatment above is the precedent. The review is not a
+    formality: PostgreSQL's implicit `numeric → numeric` cast ROUNDS a stored
+    value with more fractional digits than the new scale and FAILS on one that
+    overflows the new precision, so whether the stored data fits is exactly
+    what the reviewer must confirm.
+  - `precision` / `scale` — **required on a `numeric` column** (integers,
+    `1 ≤ precision ≤ 1000` — the PostgreSQL bound — and `0 ≤ scale ≤ precision`),
+    rejected at validation on every other column type.
   - `nullable` — optional boolean, default `false`.
   - `unique` — optional boolean, default `false`. When `true`, the value is
     **unique WITHIN a tenant**: the generated unique index is tenant-scoped (a

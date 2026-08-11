@@ -3,7 +3,7 @@
  *
  * The generator is the product-agnostic platform mechanism that materializes a validated
  * RaySpec `stores[]` into committed Drizzle-TS source. These tests prove:
- *   1. GOLDEN — a representative stores set (all 6 column types, nullable/unique, FK
+ *   1. GOLDEN — a representative stores set (every column type, nullable/unique, FK
  *      cascade/restrict/set null) produces a byte-stable golden module; a field-flip (a column
  *      type, a nullable, an FK onDelete) BREAKS the golden (fail-the-fix, not pass-the-shape).
  *   2. INJECTION — every generated table carries the 6 injected tenancy/GDPR columns in the fixed
@@ -51,6 +51,8 @@ const REPRESENTATIVE = [
       // Appended (not spliced) so every existing column index in the flip tests below still points
       // at the column its comment names.
       { name: 'bytes_total', type: 'bigint' },
+      { name: 'confidence', type: 'double' },
+      { name: 'amount', type: 'numeric', precision: 12, scale: 2 },
     ],
   }),
   store({
@@ -215,11 +217,11 @@ describe('generator injection invariants', () => {
   });
 
   it('imports only the pg-core builders actually used (no unused import)', () => {
-    // REPRESENTATIVE uses text/uuid/timestamp/integer/bigint/boolean/jsonb -> all seven + pgTable,
-    // plus `uniqueIndex` for the tenant-scoped compound unique on projects.slug. The full set
-    // exceeds printWidth (100) so the generator emits the Biome-canonical MULTILINE import.
+    // REPRESENTATIVE uses every column type -> all nine builder symbols + pgTable, plus
+    // `uniqueIndex` for the tenant-scoped compound unique on projects.slug. The full set exceeds
+    // printWidth (100) so the generator emits the Biome-canonical MULTILINE import.
     expect(out).toContain(
-      "import {\n  bigint,\n  boolean,\n  integer,\n  jsonb,\n  pgTable,\n  text,\n  timestamp,\n  uniqueIndex,\n  uuid,\n} from 'drizzle-orm/pg-core';",
+      "import {\n  bigint,\n  boolean,\n  doublePrecision,\n  integer,\n  jsonb,\n  numeric,\n  pgTable,\n  text,\n  timestamp,\n  uniqueIndex,\n  uuid,\n} from 'drizzle-orm/pg-core';",
     );
     // No unused import: `uniqueIndex` appears (compound unique) and every used builder is present.
     expect(out).toContain('  uniqueIndex,');

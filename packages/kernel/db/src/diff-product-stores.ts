@@ -39,10 +39,12 @@ import {
   type StoreSpec,
 } from '@rayspec/spec';
 import {
+  assertNumericColumnParams,
   emitFkSql,
   emitStoreSql,
   fkConstraintName,
   generateProductSql,
+  pgColumnType,
   type StoreConflictKeys,
   topoSortStoresByFk,
 } from './generated/generate-product-sql.js';
@@ -53,7 +55,12 @@ import { scanMigrationSql } from './migration-scan.js';
 /** The Drizzle statement-breakpoint marker (matches `generateProductSql`; stripped by the applier). */
 const STATEMENT_BREAKPOINT = '\n--> statement-breakpoint\n';
 
-/** Map the closed ColumnType vocabulary to its Postgres column type (mirrors the generator). */
+/**
+ * Map the closed ColumnType vocabulary to its Postgres column type (mirrors the generator). Used
+ * ONLY for the parameterless INJECTED columns (`injectedBackfillSql`) — a declared business column
+ * goes through the shared parameter-aware `pgColumnType` (a `numeric` column carries its declared
+ * `(precision, scale)`).
+ */
 const PG_TYPE: Record<ColumnType, string> = {
   text: 'text',
   uuid: 'uuid',
@@ -62,6 +69,8 @@ const PG_TYPE: Record<ColumnType, string> = {
   bigint: 'bigint',
   boolean: 'boolean',
   jsonb: 'jsonb',
+  double: 'double precision',
+  numeric: 'numeric', // never an injected column type; business columns use pgColumnType
 };
 
 /** Per-statement classification of the diff output (destructive kinds mapped to the scan's vocabulary). */
@@ -159,7 +168,7 @@ export interface StoreDiffResult {
 /** ADD COLUMN. Non-nullable with no default is emitted honestly (the scan flags it for review). */
 function addColumnSql(table: string, col: StoreColumn): string {
   const nn = col.nullable ? '' : ' NOT NULL';
-  return `ALTER TABLE "${table}" ADD COLUMN "${col.name}" ${PG_TYPE[col.type]}${nn}`;
+  return `ALTER TABLE "${table}" ADD COLUMN "${col.name}" ${pgColumnType(col)}${nn}`;
 }
 
 /** DROP COLUMN (destructive — the scan flags `drop-column`). */
@@ -176,10 +185,12 @@ function safeUsingCast(column: string, newType: ColumnType): string | null {
   return newType === 'text' ? `"${column}"::${PG_TYPE[newType]}` : null;
 }
 
-/** ALTER COLUMN ... SET DATA TYPE (destructive — `using-cast` if a USING is safe, else `type-change-no-using`). */
-function alterColumnTypeSql(table: string, column: string, newType: ColumnType): string {
-  const using = safeUsingCast(column, newType);
-  const base = `ALTER TABLE "${table}" ALTER COLUMN "${column}" SET DATA TYPE ${PG_TYPE[newType]}`;
+/** ALTER COLUMN ... SET DATA TYPE (destructive — `using-cast` if a USING is safe, else `type-change-no-using`).
+ *  Parameter-aware: a `numeric` target carries its declared `(precision, scale)` — the SAME statement
+ *  shape covers a type change AND a precision/scale change on a column that stays `numeric`. */
+function alterColumnTypeSql(table: string, newCol: StoreColumn): string {
+  const using = safeUsingCast(newCol.name, newCol.type);
+  const base = `ALTER TABLE "${table}" ALTER COLUMN "${newCol.name}" SET DATA TYPE ${pgColumnType(newCol)}`;
   return using ? `${base} USING ${using}` : base;
 }
 
@@ -280,11 +291,13 @@ function assertUniqueStoreNames(stores: readonly StoreSpec[], which: string): vo
   }
 }
 
-/** Re-assert every identifier we interpolate for a store is safe (TEN-1 defense-in-depth). */
+/** Re-assert every identifier we interpolate for a store is safe (TEN-1 defense-in-depth), plus the
+ *  numeric-parameter discipline (never `numeric(undefined, undefined)` in an emitted ALTER/ADD). */
 function assertStoreIdentifiers(store: StoreSpec): void {
   assertSafeIdentifier(store.name, `store name '${store.name}'`);
   for (const col of store.columns) {
     assertSafeIdentifier(col.name, `column '${store.name}.${col.name}'`);
+    assertNumericColumnParams(store.name, col);
   }
   for (const fk of store.foreignKeys) {
     assertSafeIdentifier(fk.column, `FK column '${store.name}.${fk.column}'`);
@@ -399,13 +412,30 @@ function planSurvivingTable(
   for (const col of newStore.columns) {
     const prev = oldCols.get(col.name);
     if (!prev) continue;
-    if (prev.type !== col.type) {
-      destructive.push(alterColumnTypeSql(table, col.name, col.type));
+    // A `numeric` column whose TYPE is unchanged but whose declared (precision, scale) moved is a
+    // REAL schema change (the live typmod differs), emitted as the SAME `ALTER … SET DATA TYPE
+    // numeric(p, s)` a type change uses — the documented integer→bigint SET DATA TYPE behaviour is
+    // the precedent, and the scan classifies it destructive the same way.
+    const numericParamsChanged =
+      col.type === 'numeric' &&
+      prev.type === 'numeric' &&
+      (prev.precision !== col.precision || prev.scale !== col.scale);
+    if (prev.type !== col.type || numericParamsChanged) {
+      destructive.push(alterColumnTypeSql(table, col));
       if (safeUsingCast(col.name, col.type) === null) {
         notes.push(
-          `column type change "${table}"."${col.name}" (${prev.type} → ${col.type}) is emitted ` +
-            'without a USING clause (relying on the implicit assignment cast) — if existing data ' +
-            'cannot be cast, supply a reviewed USING expression in a hand-edited migration.',
+          `column type change "${table}"."${col.name}" (${pgColumnType(prev)} → ${pgColumnType(col)}) ` +
+            'is emitted without a USING clause (relying on the implicit assignment cast) — if ' +
+            'existing data cannot be cast, supply a reviewed USING expression in a hand-edited ' +
+            'migration.',
+        );
+      }
+      if (numericParamsChanged) {
+        notes.push(
+          `numeric parameter change "${table}"."${col.name}" (${pgColumnType(prev)} → ` +
+            `${pgColumnType(col)}): the implicit numeric → numeric cast ROUNDS a stored value with ` +
+            'more fractional digits than the new scale and FAILS on one that overflows the new ' +
+            'precision — review whether the stored data fits before allowlisting.',
         );
       }
     }
