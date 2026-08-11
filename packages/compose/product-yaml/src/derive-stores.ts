@@ -153,6 +153,12 @@ export function deriveProductStores(
         type: c.type,
         nullable: c.nullable,
         unique: c.unique || keyColumns.has(c.name),
+        // A `numeric` column's declared (precision, scale) MUST ride through: the SQL generator
+        // interpolates them into the DDL (`numeric(p, s)`) and asserts them present fail-closed,
+        // so dropping them here would turn a lint-clean numeric column into a plan/deploy/boot
+        // crash. Carried only when declared (never `precision: undefined` keys on other types).
+        ...(c.precision !== undefined ? { precision: c.precision } : {}),
+        ...(c.scale !== undefined ? { scale: c.scale } : {}),
       })),
       foreignKeys: [],
     });
