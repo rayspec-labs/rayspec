@@ -195,6 +195,41 @@ describe('HandlerRuntime — the single-call-site seam (deliverable d)', () => {
     expect(hasHeaders).toBe(false);
   });
 
+  it('wires init.principal when the api interpreter passes it, and omits the field otherwise', async () => {
+    // With a principal: the exact plain-value caller identity (kind/id/role) reaches the handler as
+    // DATA — never a tenant signal (the tenant stays server-derived).
+    let seenPrincipal: unknown;
+    const readingFn: RouteHandler = async (init: RouteHandlerInit) => {
+      seenPrincipal = init.principal;
+      return null;
+    };
+    await invokeRouteHandler(
+      readingFn,
+      fakeTdb,
+      noTables,
+      { id: 'x' },
+      undefined, // blobFactory
+      undefined, // mintPlayToken
+      undefined, // enqueue
+      undefined, // body
+      undefined, // headers
+      undefined, // createdByActor
+      undefined, // fsSourceFactory
+      { kind: 'user', id: 'user-1', role: 'member' },
+    );
+    expect(seenPrincipal).toEqual({ kind: 'user', id: 'user-1', role: 'member' });
+
+    // Without a principal: the field is ABSENT (not undefined) — an older engine/init combination
+    // (every pre-existing caller) stays well-formed, exactly like the `headers` introduction.
+    let hasPrincipal = true;
+    const absentFn: RouteHandler = async (init: RouteHandlerInit) => {
+      hasPrincipal = 'principal' in (init as object);
+      return null;
+    };
+    await invokeRouteHandler(absentFn, fakeTdb, noTables, { id: 'x' });
+    expect(hasPrincipal).toBe(false);
+  });
+
   it('routes a TRIGGER invocation through the installed runtime', async () => {
     const counting = new CountingRuntime();
     const restore = setHandlerRuntime(counting);

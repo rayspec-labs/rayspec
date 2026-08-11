@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An escape-hatch handler can now read the authenticated caller as `init.principal` —
+  `{ kind: 'user' | 'apikey' | 'm2m', id, role? }`, plain values resolved by the platform
+  middleware.** The route init deliberately strips credential headers, but nothing replaced them,
+  so a handler could not tell two users of the same org apart: a "who am I" route had no "who",
+  per-user rows inside a tenant (preferences, drafts, read cursors) had nothing to key on, and
+  audit attribution in custom logic had to be reinvented — even though the platform already
+  resolved the identity to stamp `created_by`. The new field closes that asymmetry: `id` is the
+  userId or apiKeyId — exactly the value `created_by` stamps, derived from the same resolved
+  principal so the two can never disagree — and `role` is present for user principals with a live
+  org role. Trust posture: the principal is data, never a tenant signal (the tenant stays
+  server-derived) and never an authz input (permission gates run before the handler). The field is
+  `?`-optional like `headers`, so an older engine/init combination stays well-formed with it
+  absent; an invocation context with no authenticated principal (a scheduled trigger fire, the
+  media-token playback path) simply omits it — never a fabricated identity. Route and stream-ingest
+  inits carry it today; the trigger init declares the same optional slot.
 - **`RAYSPEC_AUTH_RATE_MULTIPLIER` scales the auth rate-limit buckets for a dev/CI run** (default
   1). The `register` (5/min), `login` (10/min) and `refresh` (30/min) per-source buckets are sized
   for production and had no dev/CI override, so a test harness that provisions several orgs against
@@ -23,6 +38,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refusal naming the variable and the value, in the same shape as the other env refusals. The
   getting-started docs gain a "Testing against a live boot" section naming the buckets and their
   windows, so suite authors can also stagger registrations knowingly instead.
+- **A spec node can acknowledge a `doctor` advisory with `lintSuppress` — with a mandatory recorded
+  justification.** An agent, a store, or an api route may carry
+  `lintSuppress: [{ code, because }]`. `code` names one of the advisory (warning) codes only — the
+  field's closed vocabulary contains no error codes, so suppressing an error is not expressible —
+  and `because` is required and non-empty (whitespace-only rejected): a suppression without a
+  recorded reason fails the parse, fail-closed. The scope is the node the list sits on, never
+  global; the same code fired by another node stays visible. `doctor` moves each acknowledged
+  finding from `warnings` to a `suppressed` array carrying the finding's code, the justification
+  verbatim, and the finding's path — visible in review, quiet in the loop. Like warnings,
+  suppressed entries never affect `ok` or the exit code, and a document declaring no suppression
+  produces byte-identical `doctor` output to before. A suppression whose code no longer fires on
+  its node is reported as a new advisory, `stale_suppression`, pointing at the stale entry — an
+  acknowledgement cannot outlive its finding silently (and `stale_suppression` itself is not
+  suppressible). The exported spec JSON-Schema artifacts carry the new key, so editor validation
+  offers the closed advisory-code list.
 - **`POST /v1/triggers/{name}/fire` hands back the run it started when the fired action is an
   `agent` action.** The `202` was `{ name, fired }` in every case, so the off-request run an
   agent-action fire had just enqueued could not be followed through the public API — the only ways

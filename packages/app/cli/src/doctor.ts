@@ -25,10 +25,12 @@
 import { accessSync, constants, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import {
+  applyLintSuppressions,
   lintSpecWarnings,
   parseAnySpec,
   type SpecError,
   type SpecWarning,
+  type SuppressedSpecWarning,
   specError,
 } from '@rayspec/spec';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
@@ -36,12 +38,17 @@ import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
 /**
  * The `doctor` JSON result. `{ ok, errors }` is the fail-closed contract (mirrors `parseSpec`); the
  * additive `warnings` array carries NON-FATAL advisories (`lintSpecWarnings`) — present but never
- * affecting `ok` (a spec with only warnings is still valid, exit 0).
+ * affecting `ok` (a spec with only warnings is still valid, exit 0). `suppressed` carries the
+ * advisories a node's `lintSuppress` acknowledged (finding code + recorded justification — visible
+ * in review, quiet in the loop); it never affects `ok` either, and it is ABSENT (not `[]`) when
+ * nothing is suppressed, so a suppression-free document's envelope is byte-identical to before the
+ * field existed.
  */
 export interface DoctorResult {
   readonly ok: boolean;
   readonly errors: SpecError[];
   readonly warnings: SpecWarning[];
+  readonly suppressed?: SuppressedSpecWarning[];
 }
 
 /**
@@ -71,9 +78,16 @@ export async function runDoctor(positionals: readonly string[]): Promise<DoctorR
   const parsed = parseAnySpec(text);
   const errors: SpecError[] = parsed.ok ? [] : [...parsed.errors];
   // NON-FATAL advisories: only a valid backend-profile (rayspec) doc has stores/FKs to inspect (the
-  // product profile has its own store handling). Warnings never affect `ok`.
-  const warnings: SpecWarning[] =
-    parsed.ok && parsed.kind === 'rayspec' ? lintSpecWarnings(parsed.spec) : [];
+  // product profile has its own store handling). Warnings never affect `ok`. The nodes'
+  // `lintSuppress` acknowledgements are applied over the raw advisory list: an acknowledged finding
+  // moves to `suppressed` (code + justification), an acknowledgement whose code fires nothing on
+  // its node comes BACK as a `stale_suppression` warning — a suppression-free document passes
+  // through untouched.
+  let warnings: SpecWarning[] = [];
+  let suppressed: SuppressedSpecWarning[] = [];
+  if (parsed.ok && parsed.kind === 'rayspec') {
+    ({ warnings, suppressed } = applyLintSuppressions(parsed.spec, lintSpecWarnings(parsed.spec)));
+  }
 
   // A valid backend-profile (rayspec) doc: additionally check each declared frontend `dir` resolves to
   // a readable directory of built assets (relative to the spec file). Route COLLISIONS already arrive
@@ -105,5 +119,9 @@ export async function runDoctor(positionals: readonly string[]): Promise<DoctorR
     });
   }
 
-  return { ok: errors.length === 0, errors, warnings };
+  // `suppressed` is emitted only when non-empty: a suppression-free document's envelope (and its
+  // serialized bytes) stays exactly what it was before the field existed.
+  return suppressed.length > 0
+    ? { ok: errors.length === 0, errors, warnings, suppressed }
+    : { ok: errors.length === 0, errors, warnings };
 }

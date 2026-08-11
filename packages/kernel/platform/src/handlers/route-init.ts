@@ -21,6 +21,7 @@ import {
   type BlobStoreFactory,
   type EnqueueAgentRun,
   type FsSourceFactory,
+  type HandlerPrincipal,
   HTTP_RESPONSE_BRAND,
   type RouteHandler,
   type RouteHandlerInit,
@@ -102,6 +103,11 @@ export async function invokeRouteHandler(
   // `fsSourceFactory()` — no tenant arg; a shared, deployment-static read root). Absent ⇒ init.fsSource
   // is omitted (no source root configured; a handler that needs it fail-closes loudly on `undefined`).
   fsSourceFactory?: FsSourceFactory,
+  // The OPTIONAL authenticated caller as plain values (kind/id/role), resolved by the api
+  // interpreter from the SAME request principal `createdByActor` derives from — so `init.principal`
+  // and the `created_by` stamp can never drift. DATA — never a tenant signal (the tenant stays
+  // server-derived). Absent ⇒ init.principal is omitted (an older caller / no authenticated principal).
+  principal?: HandlerPrincipal,
 ): Promise<unknown> {
   return tdb.transaction(async (txTdb) => {
     const init = buildRouteHandlerInit(
@@ -115,6 +121,7 @@ export async function invokeRouteHandler(
       headers,
       createdByActor,
       fsSourceFactory,
+      principal,
     );
     return getHandlerRuntime().invokeRoute(fn, init);
   });
@@ -142,6 +149,10 @@ function buildRouteHandlerInit(
   createdByActor?: string,
   // The READ-ONLY, path-jailed fs-source factory (shared deployment-static root). Absent ⇒ init.fsSource omitted.
   fsSourceFactory?: FsSourceFactory,
+  // The authenticated caller as plain values, derived from the SAME request principal as
+  // `createdByActor` (both route postures share this builder, so both inject identically). Absent ⇒
+  // init.principal is omitted (byte-identical to before).
+  principal?: HandlerPrincipal,
 ): RouteHandlerInit {
   return {
     tenantId: boundTdb.tenantId,
@@ -163,6 +174,10 @@ function buildRouteHandlerInit(
     ...(body !== undefined ? { body: stripResponseBrand(body) } : {}),
     // The request headers (spread so ABSENT when the interpreter did not collect them).
     ...(headers !== undefined ? { headers } : {}),
+    // The authenticated caller (spread so ABSENT when no principal was resolved — an older caller /
+    // an invocation context with no authenticated principal; never fabricated). DATA — never a
+    // tenant signal (the tenant stays server-derived).
+    ...(principal ? { principal } : {}),
     params,
   };
 }
@@ -203,6 +218,9 @@ export async function invokeRouteHandlerDetached(
   // OPTIONAL READ-ONLY fs-source factory — see invokeRouteHandler. Threaded identically so the
   // handler-managed posture receives `init.fsSource` the same way the engine-tx posture does.
   fsSourceFactory?: FsSourceFactory,
+  // OPTIONAL authenticated caller — see invokeRouteHandler. Threaded identically so the
+  // handler-managed posture receives `init.principal` the same way the engine-tx posture does.
+  principal?: HandlerPrincipal,
 ): Promise<unknown> {
   const init = buildRouteHandlerInit(
     tdb,
@@ -215,6 +233,7 @@ export async function invokeRouteHandlerDetached(
     headers,
     createdByActor,
     fsSourceFactory,
+    principal,
   );
   return getHandlerRuntime().invokeRoute(fn, init);
 }
@@ -271,6 +290,11 @@ export async function invokeStreamRouteHandler(
   // the request's SERVER-DERIVED principal — never handler-supplied. Absent ⇒ no stamp (byte-identical to
   // before): a posture with no request principal (the media-JWT playback path) passes nothing here.
   createdByActor?: string,
+  // The OPTIONAL authenticated caller as plain values (kind/id/role), threaded IDENTICALLY to the
+  // JSON `{handler}` route path and derived from the SAME request principal as `createdByActor` — so
+  // `init.principal` and the `created_by` stamp can never drift. Absent ⇒ init.principal is omitted
+  // (the media-JWT playback posture passes nothing here — no request principal, never fabricated).
+  principal?: HandlerPrincipal,
 ): Promise<Response> {
   return tdb.transaction(async (txTdb) => {
     const init: StreamRouteHandlerInit = {
@@ -284,6 +308,9 @@ export async function invokeStreamRouteHandler(
       request,
       // Spread so the field is ABSENT (not `undefined`) on the ingest path, keeping the init shape exact.
       ...(mediaResource !== undefined ? { mediaResource } : {}),
+      // The authenticated caller (spread so ABSENT when no principal was resolved — the playback
+      // posture; never fabricated). DATA — never a tenant signal (the tenant stays server-derived).
+      ...(principal ? { principal } : {}),
     };
     return fn(init);
   });

@@ -40,7 +40,7 @@ import {
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { Context } from 'hono';
 import type { AppDeps, AppEnv } from '../app-context.js';
-import { principalActor } from './principal-actor.js';
+import { handlerPrincipal, principalActor } from './principal-actor.js';
 
 /**
  * Collect the route's path + query params into a plain `{ key: string }` map (DATA). Path params win
@@ -109,6 +109,10 @@ export function makeStreamIngestHandler(args: {
       // no media resource on the ingest path (playback-only); the actor follows as the next arg.
       undefined,
       createdByActor,
+      // the authenticated caller as plain values → `init.principal`, derived from the SAME
+      // server-derived request principal as `createdByActor` (never drift). The playback arm passes
+      // nothing here — no request principal on the media-JWT path, never fabricated.
+      handlerPrincipal(c.get('principal')),
     );
   };
 }

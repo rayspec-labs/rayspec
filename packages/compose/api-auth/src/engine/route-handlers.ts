@@ -36,7 +36,7 @@ import type { AppDeps, AppEnv } from '../app-context.js';
 import { readBoundedJson } from '../http/bounded-body.js';
 import type { MediaTokenService } from '../media/media-token.js';
 import { makeEnqueueAgentRunCapability } from '../routes/runs.js';
-import { principalActor } from './principal-actor.js';
+import { handlerPrincipal, principalActor } from './principal-actor.js';
 
 /**
  * Methods that may carry a request body. A GET/HEAD route never has one, so we don't attempt to read
@@ -258,6 +258,10 @@ export function makeRouteHandler(args: {
       // the READ-ONLY, path-jailed fs-source factory (shared deployment-static root). Absent ⇒
       // init.fsSource is omitted (a handler that needs it fail-closes loudly on `undefined`).
       fsSourceFactory,
+      // the authenticated caller as plain values (kind/id/role) → `init.principal`. Derived from
+      // the SAME server-derived request principal as `createdByActor`, so the identity a handler
+      // reads can never drift from the `created_by` stamp. DATA — never a tenant signal.
+      handlerPrincipal(c.get('principal')),
     );
     // a BRANDED enriched return chooses the status + headers; a plain return keeps the
     // existing behavior (HTTP 200 + that value as the JSON body). The brand check is unambiguous — a
