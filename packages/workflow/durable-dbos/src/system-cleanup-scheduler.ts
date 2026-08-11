@@ -40,6 +40,8 @@
  * A future no-worker-also-cleans path (e.g. a lightweight in-process timer) is a build-on-demand follow-up.
  */
 
+import { createRequire } from 'node:module';
+import path from 'node:path';
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import type { DurableExecutor } from '@rayspec/platform';
 
@@ -169,6 +171,46 @@ export class SystemCleanupScheduler {
       );
       throw e;
     }
+  }
+}
+
+/**
+ * The DBOS crontab validator, loaded lazily from the INSTALLED SDK. The SDK's `exports` map exposes
+ * only `.` and `./datasource`, so its crontab module has no bare specifier — resolve the SDK
+ * entrypoint FILE and load `scheduler/crontab.js` beside it (an absolute path is outside the map's
+ * jurisdiction, and it is the identical installed file the scheduler itself runs). Lazy + memoized so
+ * an SDK-layout change on upgrade fails the first VALIDATION call loudly instead of breaking every
+ * import of this package.
+ */
+let dbosValidateCrontab: ((pattern: string) => string) | undefined;
+function loadDbosValidateCrontab(): (pattern: string) => string {
+  if (dbosValidateCrontab === undefined) {
+    const req = createRequire(import.meta.url);
+    const sdkEntry = req.resolve('@dbos-inc/dbos-sdk');
+    const crontabModule = req(path.join(path.dirname(sdkEntry), 'scheduler', 'crontab.js')) as {
+      validateCrontab: (pattern: string) => string;
+    };
+    dbosValidateCrontab = crontabModule.validateCrontab;
+  }
+  return dbosValidateCrontab;
+}
+
+/**
+ * Attempt to parse a crontab through the scheduler's OWN parser, registering nothing — the boot-time
+ * validation seam for `RAYSPEC_CLEANUP_SCHEDULE`. Returns `undefined` when the scheduler will accept
+ * the expression, else the parser's own failure message (for the boot refusal to carry). DELIBERATELY
+ * not a second cron grammar: at launch the DBOS scheduler runs the crontab through `TimeMatcher`'s
+ * constructor, whose first act is this same `validateCrontab` — a parse ATTEMPT through that exact
+ * function can never diverge from what the launch would do. Lives HERE because this package is BY
+ * DESIGN the only one that imports `@dbos-inc/dbos-sdk` — the composition root calls this seam
+ * instead of growing an SDK import.
+ */
+export function crontabParseError(crontab: string): string | undefined {
+  try {
+    loadDbosValidateCrontab()(crontab);
+    return undefined;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
   }
 }
 
