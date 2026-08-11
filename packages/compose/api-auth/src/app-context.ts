@@ -241,10 +241,14 @@ export interface SessionReprocessor {
  *    (already fired for this firing key) AND a skip because the deployment tenant does not exist
  *    (yet), where nothing has ever been dispatched for this trigger and nothing will be until an
  *    org with that id exists.
+ *  - `runId` rides beside `fired:true` iff the dispatched action was an AGENT action: the id of the
+ *    off-request run THIS fire enqueued, so the route's 202 can hand the caller a followable run.
+ *    Absent for a handler dispatch (the handler IS the dispatch — no run to follow) and for every
+ *    `fired:false` outcome (a dedup of an agent fire has an id, but this call started nothing).
  */
 export type ManualTriggerFireResult =
   | { readonly notFound: true }
-  | { readonly notFound: false; readonly fired: boolean };
+  | { readonly notFound: false; readonly fired: boolean; readonly runId?: string };
 
 /**
  * The OPTIONAL manual-trigger fire seam (opt-in, injected — omit ⇒ the route fail-closes 501, like

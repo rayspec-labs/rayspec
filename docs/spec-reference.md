@@ -1052,6 +1052,64 @@ makes that variable required at boot — `doctor` and `plan` say so. The org it
 names does not have to exist yet: the deployment boots, skips each firing with one
 log line while the org is missing, and starts firing once it exists.
 
+### Firing a manual trigger
+
+A `kind: manual` trigger has no schedule; it fires only on an explicit call:
+
+```
+POST /v1/triggers/{name}/fire
+```
+
+The route requires the **`store:write`** permission — a fire dispatches a declared
+action that writes the tenant's product stores — and fires through the same
+durable reserve→dispatch machinery a cron fire uses, so a double fire within one
+firing-instant bucket dedups to one dispatch. The answer is `202` with:
+
+```json
+{ "name": "nightly-summary", "fired": true }
+```
+
+`fired: true` means **this call** won the exactly-once reserve and dispatched.
+When the fired action is an **`agent`** action, the `202` also carries the run
+that dispatch enqueued:
+
+```json
+{
+  "name": "nightly-summary",
+  "fired": true,
+  "runId": "…",
+  "events": "/v1/runs/{id}/events"
+}
+```
+
+`runId` is the id of the off-request run this fire started, and `events` is the
+same replay path an `async: true` run's `202` advertises. The fire writes the
+run's `enqueued` header before enqueueing (the same pre-enqueue write the async
+run surface performs), so the id resolves on `GET /v1/runs/{id}` straight away
+rather than `404`ing until the run ends — see
+[Run status vocabulary](#run-status-vocabulary). A **`handler`**-action fire
+keeps the plain shape: the handler is the dispatch itself, so there is no run to
+follow and no `runId` key.
+
+`fired: false` (also `202`, plain shape) is deliberately ambiguous, and is **not**
+by itself evidence the work already ran: it is *either* a deduped no-op — this
+firing instant already fired — *or* a skip because the deployment tenant does not
+exist yet, in which case nothing has ever been dispatched for this trigger. The
+seam does not distinguish the two.
+
+The error cases:
+
+- **`404`** — an unknown name, a non-`manual` kind (`cron`, `webhook` and `event`
+  triggers are not fireable here), or a caller whose tenant is not the deployment
+  tenant. The `404` is uniform across all three, so the route leaks no
+  trigger-existence information.
+- **`429`** — the fires of one (tenant, trigger) are throttled through the
+  `trigger-fire` rate bucket: **30 fires per 60 seconds per tenant+name**. An
+  over-quota call dispatches nothing, and the response carries `Retry-After`.
+- **`501`** — no manual-trigger firer is wired on this deployment (the spec
+  declares no `manual` trigger, or no durable worker is configured). Fail-closed:
+  never a silent no-op `202`.
+
 ## `handlers`
 
 A **handler** is the escape hatch: when a route, tool, or trigger needs logic the

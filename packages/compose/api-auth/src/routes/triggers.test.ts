@@ -3,6 +3,9 @@
  * INJECTED fake `ManualTriggerFirer`. Assert the REAL thing:
  *  - POST /v1/triggers/{name}/fire (store:write) → 202 + `{ name, fired }`; the firer is called with the
  *    SERVER-DERIVED tenant + the path name (never a client-supplied tenant);
+ *  - an AGENT-action fire (the firer reports the enqueued runId) surfaces `runId` + the events path on
+ *    the 202, so the run is followable through the public API; a handler-action fire and every
+ *    `fired:false` outcome keep the plain `{ name, fired }` shape (NO runId key — accept controls);
  *  - a deduped no-op (already fired this firing key) still returns 202 with `fired:false`;
  *  - tenant-scoping: tenant B cannot fire tenant A's trigger — the route threads B's server-derived
  *    tenant, the tenant-scoped firer returns notFound → uniform 404 (no existence leak);
@@ -18,12 +21,14 @@ import { createHarness, type Harness, jsonRequest } from '../test-support/harnes
  * A tenant-scoped fake firer: it "has" the MANUAL trigger `manual-refresh` ONLY for its configured
  * owner tenant (mirroring the real firer's tenant reconciliation + kind:'manual' restriction), so a
  * request from any other tenant — or for any other name — gets notFound. `firedFlag` toggles the
- * won-the-reserve (`true`) vs deduped-no-op (`false`) outcome. Records every call so the test can
- * assert the tenant/name the route passed.
+ * won-the-reserve (`true`) vs deduped-no-op (`false`) outcome; `runIdToReport` (when set) mirrors an
+ * AGENT-action fire, whose dispatch enqueues an off-request run under a deterministic id. Records
+ * every call so the test can assert the tenant/name the route passed.
  */
 class FakeManualTriggerFirer implements ManualTriggerFirer {
   ownerTenantId = '';
   firedFlag = true;
+  runIdToReport: string | undefined;
   readonly calls: Array<{ tenantId: string; name: string }> = [];
   async fireManual(input: {
     tenantId: string;
@@ -31,7 +36,11 @@ class FakeManualTriggerFirer implements ManualTriggerFirer {
   }): ReturnType<ManualTriggerFirer['fireManual']> {
     this.calls.push({ ...input });
     if (input.tenantId === this.ownerTenantId && input.name === 'manual-refresh') {
-      return { notFound: false, fired: this.firedFlag };
+      return {
+        notFound: false,
+        fired: this.firedFlag,
+        ...(this.runIdToReport !== undefined ? { runId: this.runIdToReport } : {}),
+      };
     }
     return { notFound: true };
   }
@@ -66,6 +75,7 @@ describe('POST /v1/triggers/:name/fire (the manual-trigger fire control path)', 
     firer.calls.length = 0;
     firer.ownerTenantId = '';
     firer.firedFlag = true;
+    firer.runIdToReport = undefined;
     await h.reset();
   });
   afterAll(async () => {
@@ -84,6 +94,41 @@ describe('POST /v1/triggers/:name/fire (the manual-trigger fire control path)', 
     // The route threaded the SERVER-DERIVED tenant + the path name (never client-supplied).
     expect(firer.calls).toHaveLength(1);
     expect(firer.calls[0]).toEqual({ tenantId: a.orgId, name: 'manual-refresh' });
+  });
+
+  it('an AGENT-action fire surfaces the enqueued runId + the events path on the 202', async () => {
+    const a = await principal('trig-agent@example.test', 'Org Agent');
+    firer.ownerTenantId = a.orgId;
+    // The firer reports the deterministic id of the off-request run THIS fire enqueued (the
+    // agent-action dispatch); the route must hand it back with the events path so the caller can
+    // follow the run through the public API instead of re-deriving an internal id or polling.
+    firer.runIdToReport = '5e8400e2-9b41-5d1c-8c56-000000000abc';
+    const res = await jsonRequest(h.app, 'POST', '/v1/triggers/manual-refresh/fire', {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(202);
+    // The WHOLE body — the same events-path shape the async run surface's 202 advertises.
+    expect(await res.json()).toEqual({
+      name: 'manual-refresh',
+      fired: true,
+      runId: '5e8400e2-9b41-5d1c-8c56-000000000abc',
+      events: '/v1/runs/5e8400e2-9b41-5d1c-8c56-000000000abc/events',
+    });
+  });
+
+  it('a runId beside fired:false is NEVER surfaced (a no-op dispatched nothing to follow)', async () => {
+    const a = await principal('trig-agent-noop@example.test', 'Org Agent Noop');
+    firer.ownerTenantId = a.orgId;
+    firer.firedFlag = false;
+    // Defense-in-depth: even if a firer were to report an id beside a no-op (a deduped agent fire
+    // DOES have a deterministic id), the route keeps today's plain shape — THIS call dispatched
+    // nothing, so there is nothing this call started to follow.
+    firer.runIdToReport = '5e8400e2-9b41-5d1c-8c56-000000000abc';
+    const res = await jsonRequest(h.app, 'POST', '/v1/triggers/manual-refresh/fire', {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ name: 'manual-refresh', fired: false });
   });
 
   it('a deduped no-op (already fired this firing key) still returns 202 with fired:false', async () => {
