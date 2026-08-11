@@ -28,6 +28,7 @@
 import { parseArgs } from 'node:util';
 import type { ProductYamlRollout } from '@rayspec/product-yaml';
 import type { FrontendSpec } from '@rayspec/spec';
+import { dotenvCandidatePaths } from './read-env.js';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
 
 /** A usage/argument problem in `deploy` (mapped to exit 2 by index.ts, like the other subcommands). */
@@ -568,7 +569,10 @@ export async function serveDeployment(
       // same treatment. BootTimeoutError is named for that parity alone — withBootTimeout is wired only
       // in serve.ts, so no boot timeout can reach THIS catch; listing it keeps the two lists comparable
       // as wholes instead of leaving a difference that has to be re-justified on every change.
-      console.error(`[rayspec deploy] ${err.message}`);
+      //
+      // A missing-REQUIRED-variable refusal additionally names the `.env` paths the CLI's auto-loader
+      // searched — the one fact the operator whose ./.env sits in the invoking project needs.
+      console.error(`[rayspec deploy] ${err.message}${missingEnvSearchedSuffix(err.message)}`);
     } else {
       console.error(
         '[rayspec deploy] boot failed:',
@@ -582,4 +586,21 @@ export async function serveDeployment(
 /** A secret-free message from an unknown throw (never echoes env/DB values). */
 function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * The trailing "(searched: …)" a MISSING-REQUIRED-VARIABLE boot refusal gains: the `.env` candidate
+ * paths the CLI's auto-loader searches (in precedence order — $PWD first, install root second),
+ * listed whether or not each file existed — that is the diagnostic: an operator whose ./.env sits in
+ * the invoking project sees at once whether the file they populated was even a candidate. Paths only,
+ * never file contents or values. Keyed on the two missing-required wordings the boot raises
+ * ("required env var(s) missing: …" from loadServerConfig, "<VAR> is required (…)" from the product
+ * boot / agent-backend wiring — the wording itself is owned by @rayspec/server); every other refusal
+ * (an invalid value, an unsupported option) keeps its bare message. Empty under RAYSPEC_SKIP_DOTENV=1:
+ * nothing was searched, so claiming so would be false.
+ */
+function missingEnvSearchedSuffix(message: string): string {
+  if (process.env.RAYSPEC_SKIP_DOTENV === '1') return '';
+  if (!/\bis required\b|required env var\(s\) missing/.test(message)) return '';
+  return ` (searched: ${dotenvCandidatePaths().join(', ')})`;
 }
