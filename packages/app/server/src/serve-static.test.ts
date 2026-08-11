@@ -22,6 +22,11 @@
  *     answered 200 with the SPA shell — while the reserved-prefix decline and the fail-closed path
  *     guard, which both run first, keep their 404. The guard also sits AHEAD of the custom-404
  *     fall-through, so a write verb on a mount that ships a 404.html gets the 405, never the page.
+ *   - SECURITY HEADERS: with the optional `securityHeaders` argument (the full-backend boot passes
+ *     it), EVERY response the mount itself serves — file, SPA fallback, 404.html, 416, 405 — carries
+ *     Content-Security-Policy + Permissions-Policy verbatim, while a `next()` fall-through (reserved
+ *     prefix, refused path) stays unstamped; WITHOUT the argument (the static boot shape) the mount
+ *     emits neither, keeping the static profile's app-wide chain the single source.
  *
  * Fail-the-fix: remove the guard in serve-static.ts and the traversal/dotfile/symlink arms serve the
  * secret file (200) instead of 404 — the `.not.toContain(SECRET)` + status assertions go red. Remove the
@@ -744,5 +749,101 @@ describe('mountFrontend — content methods (a static mount is not a write surfa
     expect(res.status).toBe(404);
     expect(res.status).not.toBe(405);
     expect(await res.text()).not.toContain(DOTFILE_SECRET);
+  });
+});
+
+describe('mountFrontend — securityHeaders stamps every response the mount serves (full-backend parity)', () => {
+  // The values are the CALLER's (the composition root resolves env override vs shared default);
+  // distinctive strings prove verbatim pass-through, not a default baked into serve-static.
+  const CSP = "default-src 'self'; img-src 'self' data:";
+  const PERMISSIONS_POLICY = 'camera=(), microphone=(self), geolocation=()';
+
+  /** The mini app of the other suites, with the mount handed the security headers. */
+  function buildStampedApp(mounts: FrontendSpec[], dir: string): Hono {
+    const app = new Hono();
+    app.get('/v1/registered', (c) => c.json({ registered: true }));
+    mountFrontend(app, mounts, dir, { csp: CSP, permissionsPolicy: PERMISSIONS_POLICY });
+    return app;
+  }
+
+  function expectStamped(res: Response): void {
+    expect(res.headers.get('content-security-policy')).toBe(CSP);
+    expect(res.headers.get('permissions-policy')).toBe(PERMISSIONS_POLICY);
+  }
+  function expectUnstamped(res: Response): void {
+    expect(res.headers.get('content-security-policy')).toBeNull();
+    expect(res.headers.get('permissions-policy')).toBeNull();
+  }
+
+  it('a served file carries both headers verbatim', async () => {
+    const res = await buildStampedApp([spaMount], specDir()).request('/assets/app.js');
+    expect(res.status).toBe(200);
+    expectStamped(res);
+  });
+
+  it('the SPA fallback carries both headers (a fallback response is a mount response too)', async () => {
+    const res = await buildStampedApp([spaMount], specDir()).request('/dashboard/deep/link');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain(INDEX_SENTINEL);
+    expectStamped(res);
+  });
+
+  it('the method 405 carries both headers', async () => {
+    const res = await buildStampedApp([spaMount], specDir()).request('/route-that-does-not-exist', {
+      method: 'POST',
+    });
+    expect(res.status).toBe(405);
+    expectStamped(res);
+  });
+
+  it('the range 416 carries both headers', async () => {
+    const res = await buildStampedApp([spaMount], specDir()).request('/assets/app.js', {
+      headers: { Range: 'bytes=99999-' },
+    });
+    expect(res.status).toBe(416);
+    expectStamped(res);
+  });
+
+  it('a custom 404.html page carries both headers', async () => {
+    const NOTFOUND_SENTINEL = 'STAMPED-404-PAGE-SENTINEL';
+    const root = mkdtempSync(join(tmpdir(), 'rayspec-stamped-404-'));
+    try {
+      mkdirSync(join(root, 'web', 'dist'), { recursive: true });
+      writeFileSync(
+        join(root, 'web', 'dist', '404.html'),
+        `<!doctype html><title>${NOTFOUND_SENTINEL}</title>`,
+        'utf8',
+      );
+      const res = await buildStampedApp([plainMount], root).request('/no/such/page');
+      expect(res.status).toBe(404);
+      expect(await res.text()).toContain(NOTFOUND_SENTINEL);
+      expectStamped(res);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a reserved-prefix fall-through is NOT stamped — the platform surface keeps its own headers', async () => {
+    const app = buildStampedApp([spaMount], specDir());
+    // A REGISTERED platform route wins and stays clean (the mount declined before serving).
+    const registered = await app.request('/v1/registered');
+    expect(registered.status).toBe(200);
+    expectUnstamped(registered);
+    // An UNregistered reserved path reaches the platform fall-through 404, equally clean.
+    const missed = await app.request('/v1/nonexistent');
+    expect(missed.status).toBe(404);
+    expectUnstamped(missed);
+  });
+
+  it('a guard-refused path is NOT stamped — the uniform 404 belongs to the platform surface', async () => {
+    const res = await buildStampedApp([spaMount], specDir()).request('/.env');
+    expect(res.status).toBe(404);
+    expectUnstamped(res);
+  });
+
+  it('WITHOUT the argument (the static boot shape) the mount emits neither header', async () => {
+    const res = await buildApp([spaMount], specDir()).request('/');
+    expect(res.status).toBe(200);
+    expectUnstamped(res);
   });
 });
