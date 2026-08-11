@@ -11,6 +11,7 @@ overrides:
   fast-uri: 3.1.5
   protobufjs: 7.6.5
   postcss: 8.5.23
+  nanoid@5: 5.1.16
   undici: 8.9.0
   ip-address: 10.3.1
 
@@ -2808,8 +2809,8 @@ packages:
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
 
-  nanoid@5.1.15:
-    resolution: {integrity: sha512-kBg3RpGtIe+RpTbyXwoI6pk5yD7KUiI3sygUqgeBMRst42KmhB4RZC7eiO9Wa1HIpaCCtpE2DJ6OI4Wi5ebwFw==}
+  nanoid@5.1.16:
+    resolution: {integrity: sha512-kVrnsrJqMR8+oLJnGEmSWw9BivK5mt7H3FZatVRjrc5wGqFYuBxX1yG7+A7Gi5AefkX6t/oCkizcQgpu0cY1dQ==}
     engines: {node: ^18 || >=20}
     hasBin: true
 
@@ -5068,7 +5069,7 @@ snapshots:
 
   nanoid@3.3.17: {}
 
-  nanoid@5.1.15: {}
+  nanoid@5.1.16: {}
 
   negotiator@0.6.3: {}
 
@@ -5101,7 +5102,7 @@ snapshots:
       jose: 6.2.3
       jsesc: 3.1.0
       koa: 3.2.1
-      nanoid: 5.1.15
+      nanoid: 5.1.16
       quick-lru: 7.3.0
       raw-body: 3.0.2
     transitivePeerDependencies:
