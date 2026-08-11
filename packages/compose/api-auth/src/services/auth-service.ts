@@ -302,10 +302,16 @@ export class AuthService {
         // Benign: re-issue from the live replacement WITHOUT rotating again or revoking.
         const replacement = await this.store.findSessionById(session.replacedBy);
         if (replacement && !replacement.revokedAt) {
+          // Re-resolve the role from LIVE membership (the same source login uses) so the re-issued
+          // JWT carries mship_role — without it every claim-trusted permission 403s. Membership
+          // gone in the meantime → role undefined → claim absent (fail-closed).
+          const role = replacement.currentOrgId
+            ? (await this.store.liveMembership(replacement.userId, replacement.currentOrgId))?.role
+            : undefined;
           const accessToken = await this.mintAccess(
             replacement.userId,
             replacement.currentOrgId,
-            undefined,
+            role,
           );
           // The replacement secret is not re-handed here (the client already holds it); we only
           // re-mint the short JWT. The cookie stays as-is.
@@ -350,7 +356,14 @@ export class AuthService {
       // time source (a wall-clock stamp vs an injected-clock compare would make the delta meaningless).
       rotatedAt: new Date(now),
     });
-    const accessToken = await this.mintAccess(newRow.userId, newRow.currentOrgId, undefined);
+    // Re-resolve the role from LIVE membership (the same source login uses) so the refreshed JWT
+    // carries mship_role — without it every claim-trusted permission 403s while the sensitive ops
+    // (live recheck) keep working. Membership gone in the meantime → role undefined → claim absent
+    // (fail-closed).
+    const role = newRow.currentOrgId
+      ? (await this.store.liveMembership(newRow.userId, newRow.currentOrgId))?.role
+      : undefined;
+    const accessToken = await this.mintAccess(newRow.userId, newRow.currentOrgId, role);
     return {
       result: {
         accessToken,
