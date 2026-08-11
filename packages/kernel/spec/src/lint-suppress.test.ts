@@ -219,18 +219,18 @@ version: '1.0'
 metadata:
   name: store-suppress
 stores:
-  - name: meetings
+  - name: orders
     softDelete: true
     columns:
       - { name: slug, type: text, unique: true }
     lintSuppress:
       - code: softdelete_fk_restrict
-        because: transcripts are pruned by a scheduled job before any meeting is tombstoned
-  - name: transcripts
+        because: shipments are purged by a scheduled job before any order is tombstoned
+  - name: shipments
     columns:
-      - { name: meeting_slug, type: text }
+      - { name: order_slug, type: text }
     foreignKeys:
-      - { column: meeting_slug, references: meetings, referencesColumn: slug, onDelete: restrict }
+      - { column: order_slug, references: orders, referencesColumn: slug, onDelete: restrict }
 `);
     const raw = lintSpecWarnings(value);
     expect(raw.map((w) => w.code)).toEqual(['softdelete_fk_restrict']);
