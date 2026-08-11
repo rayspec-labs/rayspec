@@ -37,6 +37,7 @@ import {
   ToolSpec as NeutralToolSpec,
 } from '@rayspec/core';
 import { z } from 'zod';
+import { SuppressibleWarningCode } from './errors.js';
 
 /** The supported spec major.minor. Parsed FIRST (two-phase) so an unknown major fails cleanly. */
 export const SPEC_VERSION = '1.0' as const;
@@ -78,6 +79,53 @@ export const DeploymentSpec = z
   })
   .strict();
 export type DeploymentSpec = z.infer<typeof DeploymentSpec>;
+
+// ---------------------------------------------------------------------------------------
+// lintSuppress — node-scoped advisory acknowledgements (shared by stores[]/agents[]/api[])
+// ---------------------------------------------------------------------------------------
+
+/**
+ * One acknowledged advisory on the node that carries it. The advisory pass (`lintSpecWarnings`) is
+ * deliberately heuristic in places, so a finding can be reviewed and judged not applicable — this
+ * entry records that judgement IN the document, with the reason, instead of teaching readers to
+ * skim past a warning channel that never clears.
+ *
+ *  - `code`    — the advisory being acknowledged, drawn from `SuppressibleWarningCode`: the closed
+ *                warning vocabulary MINUS `stale_suppression` (the rot detector may not acknowledge
+ *                itself). An ERROR code is structurally out of the enum, so suppressing an error is
+ *                not expressible — advisories only, rejected at parse.
+ *  - `because` — the recorded justification. REQUIRED and non-empty (whitespace-only is rejected):
+ *                a suppression without a reason is rejected at parse, fail-closed — the whole value
+ *                of the entry is the audit trail it leaves.
+ *
+ * SCOPE is the node the list sits on (an agent, a store, a route), never global: a suppression
+ * filters only advisories that node itself produced (`applyLintSuppressions`, lint.ts), and one
+ * whose code does not fire there becomes the `stale_suppression` advisory rather than rotting
+ * silently. `doctor` moves each acknowledged finding from `warnings` into a `suppressed` array
+ * (code + justification) — visible in review, quiet in the loop, never affecting `ok`.
+ */
+export const LintSuppression = z
+  .object({
+    code: z.enum(SuppressibleWarningCode.options, {
+      error:
+        'lintSuppress `code` must name a suppressible advisory code (' +
+        `${SuppressibleWarningCode.options.join(', ')}) — an error cannot be suppressed, and ` +
+        'stale_suppression cannot acknowledge itself',
+    }),
+    because: z
+      .string()
+      .min(1, 'lintSuppress `because` must record a non-empty justification — a suppression without a reason is rejected')
+      .regex(/\S/, 'lintSuppress `because` must record a non-empty justification — whitespace-only is rejected'),
+  })
+  .strict();
+export type LintSuppression = z.infer<typeof LintSuppression>;
+
+/**
+ * The optional `lintSuppress` list a node may carry — `.optional()` (NOT `.default([])`) so a
+ * document that declares none parses byte-identically (absent = nothing acknowledged; the same
+ * absent-field discipline as `frontend`/`rateLimit`).
+ */
+const LintSuppressList = z.array(LintSuppression).optional();
 
 // ---------------------------------------------------------------------------------------
 // stores[] — independent grammar (DB-materialized product tables)
@@ -184,6 +232,8 @@ export const StoreSpec = z
     /** Opt-in full-text search: the store gets a generated tsvector column (over its text columns) + a
      *  GIN index, and a ranked search query surface. Default: substring (ILIKE) search only. */
     fullTextSearch: z.boolean().optional(),
+    /** Optional advisory acknowledgements scoped to THIS store (see `LintSuppression`). */
+    lintSuppress: LintSuppressList,
   })
   .strict();
 export type StoreSpec = z.infer<typeof StoreSpec>;
@@ -229,9 +279,10 @@ export type HandlerSpec = z.infer<typeof HandlerSpec>;
  *  - `.omit({ tools })` — the neutral inline tool array is replaced by ID references into the
  *    `tooling[]` section (a config agent wires tools by id; lint resolves them).
  *  - `.extend(...)` — the wrap-layer fields the engine needs: a logical `id`, a `backend`
- *    selection, the `tools` id-reference list, and an optional `requireNativeStructuredOutput`
+ *    selection, the `tools` id-reference list, an optional `requireNativeStructuredOutput`
  *    flag so a capability violation (e.g. native structured output demanded on pi) is expressible
- *    and checked at config time (lint).
+ *    and checked at config time (lint), and an optional `lintSuppress` list (node-scoped advisory
+ *    acknowledgements — see `LintSuppression`).
  *  - `.strict()` — fail-closed unknown-key rejection (applied last; verified to compose).
  *
  * Single source of truth: `name`/`instructions`/`model`/`outputSchema`/`maxTurns` come straight
@@ -251,6 +302,8 @@ export const AgentSpecConfig = NeutralAgentSpec.omit({ input: true, tools: true 
      * a backend that lacks it (pi). Threaded into core `validateSpec` by the lint pass.
      */
     requireNativeStructuredOutput: z.boolean().default(false),
+    /** Optional advisory acknowledgements scoped to THIS agent (see `LintSuppression`). */
+    lintSuppress: LintSuppressList,
   })
   .strict();
 export type AgentSpecConfig = z.infer<typeof AgentSpecConfig>;
@@ -389,6 +442,8 @@ export const ApiRouteSpec = z
      * is the window length in seconds and `max` the hits allowed inside it.
      */
     rateLimit: z.object({ windowSeconds: z.number().int().positive(), max: z.number().int().positive() }).strict().optional(),
+    /** Optional advisory acknowledgements scoped to THIS route (see `LintSuppression`). */
+    lintSuppress: LintSuppressList,
   })
   .strict();
 export type ApiRouteSpec = z.infer<typeof ApiRouteSpec>;
