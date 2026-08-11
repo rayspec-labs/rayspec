@@ -27,6 +27,10 @@ export type {
   FsSourceReadOptions,
   FsSourceReadResult,
   FsSourceSearchOptions,
+  // The plain-value authenticated-caller shape a route/stream/trigger init may carry
+  // (`init.principal`). Re-exported here so the api-auth interpreter derives it against the one
+  // @rayspec/platform package (alongside the route/stream contracts below).
+  HandlerPrincipal,
   // The OPT-IN enriched `{handler}` route response envelope (handler-chosen status +
   // headers). Re-exported here so the api-auth route interpreter types + detects it against the one
   // @rayspec/platform package (the value guards are the value re-export just below).

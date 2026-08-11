@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An escape-hatch handler can now read the authenticated caller as `init.principal` —
+  `{ kind: 'user' | 'apikey' | 'm2m', id, role? }`, plain values resolved by the platform
+  middleware.** The route init deliberately strips credential headers, but nothing replaced them,
+  so a handler could not tell two users of the same org apart: a "who am I" route had no "who",
+  per-user rows inside a tenant (preferences, drafts, read cursors) had nothing to key on, and
+  audit attribution in custom logic had to be reinvented — even though the platform already
+  resolved the identity to stamp `created_by`. The new field closes that asymmetry: `id` is the
+  userId or apiKeyId — exactly the value `created_by` stamps, derived from the same resolved
+  principal so the two can never disagree — and `role` is present for user principals with a live
+  org role. Trust posture: the principal is data, never a tenant signal (the tenant stays
+  server-derived) and never an authz input (permission gates run before the handler). The field is
+  `?`-optional like `headers`, so an older engine/init combination stays well-formed with it
+  absent; an invocation context with no authenticated principal (a scheduled trigger fire, the
+  media-token playback path) simply omits it — never a fabricated identity. Route and stream-ingest
+  inits carry it today; the trigger init declares the same optional slot.
 - **`RAYSPEC_AUTH_RATE_MULTIPLIER` scales the auth rate-limit buckets for a dev/CI run** (default
   1). The `register` (5/min), `login` (10/min) and `refresh` (30/min) per-source buckets are sized
   for production and had no dev/CI override, so a test harness that provisions several orgs against

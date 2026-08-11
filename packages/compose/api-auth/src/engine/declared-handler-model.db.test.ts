@@ -21,6 +21,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getApiKeyPepper, mintApiKey as mintRawApiKey } from '@rayspec/auth-core';
 import type { AgentSpec, Backend, BackendId, RunContext, RunResult } from '@rayspec/core';
 import { forTenant, schema } from '@rayspec/db';
 import {
@@ -128,6 +129,24 @@ const selectClientLimit: RouteHandler = async (init: RouteHandlerInit) => {
   const body = (init.body ?? {}) as { limit?: unknown };
   const limit = Number(body.limit);
   return { rows: await init.db.select('notebooks', {}, { limit }) };
+};
+
+/**
+ * a whoami-style route handler for the `init.principal` roundtrip: it reads the injected
+ * caller principal, inserts one row through the store facade (whose `created_by` the engine stamps
+ * from the SAME request principal), and returns both — so a test can assert the principal a handler
+ * sees never disagrees with the `created_by` stamp of the SAME request.
+ */
+const whoAmI: RouteHandler = async (init: RouteHandlerInit) => {
+  const row = await init.db.insert('notebooks', {
+    title: 'principal-probe',
+    completed: false,
+    scheduled_at: '2026-07-01T10:00:00Z',
+  });
+  return {
+    principal: init.principal ?? null,
+    createdBy: (row.created_by as string | undefined) ?? null,
+  };
 };
 
 /**
@@ -251,6 +270,13 @@ function specWithHandlerRoute(base: RaySpec): RaySpec {
         export: 'selectClientLimit',
         kind: 'route',
       },
+      // a route that returns init.principal + the created_by stamp of a row it inserts.
+      {
+        id: 'whoami_route',
+        module: 'handlers/whoami.ts',
+        export: 'whoAmI',
+        kind: 'route',
+      },
     ],
     api: [
       ...base.api,
@@ -301,6 +327,12 @@ function specWithHandlerRoute(base: RaySpec): RaySpec {
         path: '/select-client-limit',
         action: { kind: 'handler', handler: 'select_client_limit_route' },
       },
+      // a POST `{handler}` route → the whoami handler (the init.principal roundtrip).
+      {
+        method: 'POST',
+        path: '/whoami',
+        action: { kind: 'handler', handler: 'whoami_route' },
+      },
     ],
   };
 }
@@ -328,6 +360,7 @@ describe.skipIf(!hasDb)('declared agent + tooling + handler model end-to-end', (
       'plain_status_ok_route',
       'insert_client_timestamp_route',
       'select_client_limit_route',
+      'whoami_route',
     ]);
     const loaded = await loadHandlers(
       ACME_DIR,
@@ -344,6 +377,7 @@ describe.skipIf(!hasDb)('declared agent + tooling + handler model end-to-end', (
       ['plain_status_ok_route', { kind: 'route', fn: plainStatusOk as never }],
       ['insert_client_timestamp_route', { kind: 'route', fn: insertClientTimestamp as never }],
       ['select_client_limit_route', { kind: 'route', fn: selectClientLimit as never }],
+      ['whoami_route', { kind: 'route', fn: whoAmI as never }],
     ]);
     backends = new Map<BackendId, Backend>([['openai', backend]]);
     h = await createHarness({
@@ -728,6 +762,80 @@ describe.skipIf(!hasDb)('declared agent + tooling + handler model end-to-end', (
         /\blimit\b|\boffset\b|HandlerDb|non-negative|notebooks/i,
       );
     }
+  });
+
+  // ----------------------------------------------------------------------------------------------
+  // init.principal — the authenticated caller reaches the handler as plain values, and it never
+  // disagrees with the created_by stamp of the SAME request (both derive from the one resolved
+  // request principal). One roundtrip per principal kind: user, apikey, m2m.
+  // ----------------------------------------------------------------------------------------------
+
+  /** The whoami route's response shape (typed structurally — the test asserts exact values). */
+  interface WhoAmIBody {
+    principal: { kind: string; id: string; role?: string } | null;
+    createdBy: string | null;
+  }
+
+  it('a JWT user principal reaches the handler as init.principal and agrees with created_by', async () => {
+    const { token } = await principal('principal-user@example.com', 'PrincipalUserOrg');
+    // The real userId, from the identity surface (the same id created_by stamps).
+    const me = await jsonRequest(h.app, 'GET', '/v1/auth/me', {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(me.status).toBe(200);
+    const userId = (await me.json()).userId as string;
+
+    const res = await jsonRequest(h.app, 'POST', '/whoami', {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(200);
+    const out = (await res.json()) as WhoAmIBody;
+    // The org-switched JWT carries the live org role ('owner' for the org creator).
+    expect(out.principal).toEqual({ kind: 'user', id: userId, role: 'owner' });
+    // AGREEMENT: the created_by stamp of the row THIS request inserted names the SAME identity.
+    expect(out.createdBy).toBe(`user:${userId}`);
+  });
+
+  it('an api-key principal reaches the handler as init.principal and agrees with created_by', async () => {
+    const { orgId, token } = await principal('principal-key@example.com', 'PrincipalKeyOrg');
+    // Mint through the management route — the mint response carries the key id created_by stamps.
+    const mintRes = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/api-keys`, {
+      body: { name: 'principal-probe', scopes: ['store:write'] },
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(mintRes.status).toBe(201);
+    const minted = (await mintRes.json()) as { id: string; plaintext: string };
+
+    const res = await jsonRequest(h.app, 'POST', '/whoami', {
+      headers: { authorization: `Bearer ${minted.plaintext}` },
+    });
+    expect(res.status).toBe(200);
+    const out = (await res.json()) as WhoAmIBody;
+    // A key principal has no role claim — the field is absent, never fabricated.
+    expect(out.principal).toEqual({ kind: 'apikey', id: minted.id });
+    expect(out.createdBy).toBe(`key:${minted.id}`);
+  });
+
+  it('an m2m client-credential principal reaches the handler as init.principal and agrees with created_by', async () => {
+    const { orgId } = await principal('principal-m2m@example.com', 'PrincipalM2mOrg');
+    // No management route mints an m2m client credential; mint one at the store seam with the SAME
+    // `type` the bearer resolution keys the m2m kind on (`type === 'm2m_client'` → kind 'm2m').
+    const secret = mintRawApiKey(getApiKeyPepper());
+    const row = await h.deps.apiKeyStore.mint({
+      orgId,
+      type: 'm2m_client',
+      keyPrefix: secret.prefix,
+      keyHash: secret.hash,
+      scopes: ['store:write'],
+    });
+
+    const res = await jsonRequest(h.app, 'POST', '/whoami', {
+      headers: { authorization: `Bearer ${secret.plaintext}` },
+    });
+    expect(res.status).toBe(200);
+    const out = (await res.json()) as WhoAmIBody;
+    expect(out.principal).toEqual({ kind: 'm2m', id: row.id });
+    expect(out.createdBy).toBe(`key:${row.id}`);
   });
 
   it('REGRESSION GUARD: a PLAIN-body {handler} route STILL returns 200', async () => {
