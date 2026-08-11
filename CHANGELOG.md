@@ -24,6 +24,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the two boot shapes cannot drift. Nothing else moved, measured as a before/after diff of full
   header sets: API and auth responses (`/health`, `/v1/...`) still emit no CSP and no
   Permissions-Policy, and a static-profile boot's responses are byte-identical to before.
+- **An unparseable `RAYSPEC_CLEANUP_SCHEDULE` now aborts the boot with a refusal naming the variable
+  and the value, instead of the scheduler's own error.** The expression used to be handed to the
+  worker's scheduler exactly as written: shorthand such as `@daily` or a 4-field expression killed
+  the launch with an unhandled `TypeError: Cannot read properties of undefined (reading 'replace')`
+  that named neither the variable nor cron, while an out-of-range field (`99 99 99 99 99`) at least
+  got the parser's field error — still without the variable name. The boot now attempts the parse up
+  front, through the scheduler's own parser rather than a second cron grammar (so a value accepted at
+  boot cannot diverge from one the scheduler accepts), and an operator who mistypes the crontab sees
+  `Boot aborted — RAYSPEC_CLEANUP_SCHEDULE='<value>' is not a crontab the scheduler can parse (<the
+  parser's own detail>)`, in the same shape as the other env refusals. Every currently-valid value is
+  unaffected: a 5-field or 6-field expression reaches the scheduler byte-identically, and unset or
+  blank still resolves to the documented `0 3 * * *`. One surface grows: the check runs where the
+  rest of the environment is resolved, so a boot that wires no durable worker — an auth-only boot, or
+  a classic `rayspec.yaml` without one — now also refuses an unparseable value it previously ignored.
+
+### Security
+
+- **The transitive `nanoid` copy behind `oidc-provider` is raised from 5.1.15 to 5.1.16**
+  (GHSA-28wg-ghj8-5hjv / CVE-2026-67214: the `nanoid/non-secure` generators can loop indefinitely
+  when given a negative size). The vulnerable module is not reachable here — `oidc-provider` only
+  imports the secure `nanoid` entry point, with a fixed generator size — but the fix is a patch
+  release inside `oidc-provider`'s declared range, so the copy is pinned forward via a scoped
+  `pnpm.overrides` entry (`nanoid@5`) rather than carried as a scanner exception. The dependency
+  SBOM (`docs/dependency-sbom.json`) is regenerated to match. The separate `nanoid@3.3.17` copy
+  (dev-only, behind `postcss`) is not affected by the advisory and is unchanged.
 
 ## [1.7.0] - 2026-08-05
 

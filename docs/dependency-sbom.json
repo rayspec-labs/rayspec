@@ -4,7 +4,7 @@
   "reproduce": "pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs",
   "scope_note": "The package SET is derived from pnpm-lock.yaml (host-independent). Each licence is read verbatim from the installed package.json after a --frozen-lockfile install. Rows with installed:false are optional, platform-gated packages this host does not install; their licence was not read from disk and is recorded as null with an absent_reason, never dropped. 'provenance' below records WHERE the licences were read — it does not describe the scope of this inventory.",
   "lockfile": "pnpm-lock.yaml",
-  "lockfile_sha256": "32f5b339eb67c31171834ddbdf52028fd549d0272e37e785d7a6b7a5ee67ec33",
+  "lockfile_sha256": "b50aa907c852b387b7ea07045e0789f9319815d09b45e6b4f51f2af3a4ec985d",
   "provenance": {
     "host": "darwin-arm64",
     "node": "v22.12.0"
@@ -3467,7 +3467,7 @@
     },
     {
       "name": "nanoid",
-      "version": "5.1.15",
+      "version": "5.1.16",
       "license": "MIT",
       "license_file_present": true,
       "installed": true

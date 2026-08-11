@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  crontabParseError,
   DEFAULT_CLEANUP_SCHEDULE,
   formatSystemCleanupLog,
   type SystemCleanupOutcome,
@@ -27,6 +28,23 @@ describe('system cleanup defaults', () => {
       schedule: '30 4 * * *',
     });
     expect(s.schedule).toBe('30 4 * * *');
+  });
+});
+
+describe("crontabParseError — the parse attempt through the scheduler's own parser", () => {
+  it('accepts what the scheduler accepts: the default, a 5-field, and a 6-field expression', () => {
+    expect(crontabParseError(DEFAULT_CLEANUP_SCHEDULE)).toBeUndefined();
+    expect(crontabParseError('30 4 * * *')).toBeUndefined();
+    expect(crontabParseError('0 3 * * * *')).toBeUndefined();
+  });
+
+  it('reports a failure message for what the scheduler cannot parse (shorthand, 4-field, out-of-range)', () => {
+    // `@daily` / a 4-field expression die inside the parser with a bare TypeError; the seam turns
+    // that into a reported message instead of an unhandled throw.
+    expect(crontabParseError('@daily')).toBeTypeOf('string');
+    expect(crontabParseError('0 3 * *')).toBeTypeOf('string');
+    // An out-of-range field gets the parser's own field-level detail, passed through verbatim.
+    expect(crontabParseError('99 99 99 99 99')).toContain('99 is a invalid expression for minute');
   });
 });
 

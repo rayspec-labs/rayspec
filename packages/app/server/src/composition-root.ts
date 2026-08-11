@@ -70,6 +70,7 @@ import {
   migrationsDir,
 } from '@rayspec/db';
 import {
+  crontabParseError,
   DbosCronScheduler,
   DbosDurableExecutor,
   DEFAULT_CLEANUP_SCHEDULE,
@@ -1127,6 +1128,9 @@ export function deriveDbosSystemUrl(databaseUrl: string): string {
  * Resolve the system cleanup knobs from env (always returns a complete, safe-default object).
  *
  *  - RAYSPEC_CLEANUP_SCHEDULE — the daily crontab (default `0 3 * * *` = 3am daily). Blank ⇒ default.
+ *    Fail-closed: an expression the scheduler cannot parse ABORTS the boot here, naming the variable
+ *    and the value — validated through the scheduler's OWN parser (the `crontabParseError` seam), so
+ *    an unparseable value never reaches the worker launch, where the parser's bare error names neither.
  *  - RAYSPEC_GDPR_PURGE_ENABLED — the OPERATOR gate, fail-closed: `true` ONLY for the exact string
  *    "true". Any other value (unset, "1", "yes", "TRUE", " true ") ⇒ DISABLED. This is deliberately
  *    strict (no truthy-coercion) so an ambiguous/typo'd value never silently enables irreversible
@@ -1137,6 +1141,20 @@ export function deriveDbosSystemUrl(databaseUrl: string): string {
  */
 export function parseCleanupSettings(env: NodeJS.ProcessEnv): CleanupSettings {
   const schedule = env.RAYSPEC_CLEANUP_SCHEDULE?.trim() || DEFAULT_CLEANUP_SCHEDULE;
+  // Fail-closed: a crontab the scheduler cannot parse aborts HERE, naming the variable and the value.
+  // The parse attempt goes through the scheduler's own parser (never a second cron grammar), so a
+  // value accepted here is exactly a value the worker launch accepts.
+  const scheduleError = crontabParseError(schedule);
+  if (scheduleError !== undefined) {
+    throw new BootConfigError(
+      `Boot aborted — RAYSPEC_CLEANUP_SCHEDULE='${schedule}' is not a crontab the scheduler can ` +
+        `parse (${scheduleError}). It is the crontab the daily system cleanup fires on: a standard ` +
+        `5-field expression or the 6-field form with a leading seconds field (default '0 3 * * *' ` +
+        `= 3am daily); shorthand such as '@daily' is not supported. Fail-closed (an unparseable ` +
+        `schedule must never reach the worker launch — it would abort there with the parser's ` +
+        'bare error, naming neither this variable nor the value).',
+    );
+  }
   // Fail-closed gate: STRICTLY the exact string "true" (no trim/lowercase coercion of an ambiguous value).
   const gdprPurgeEnabled = env.RAYSPEC_GDPR_PURGE_ENABLED === 'true';
   const rawRetention = env.RAYSPEC_GDPR_RETENTION_DAYS?.trim();

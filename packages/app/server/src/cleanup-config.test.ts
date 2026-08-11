@@ -43,6 +43,41 @@ describe('parseCleanupSettings — the fail-closed GDPR gate', () => {
     expect(parseCleanupSettings({ RAYSPEC_CLEANUP_SCHEDULE: '   ' }).schedule).toBe('0 3 * * *');
   });
 
+  it('REFUSES an unparseable crontab at boot, naming the variable and the value', () => {
+    // Handed through unvalidated, `@daily` / a 4-field expression previously killed the worker
+    // launch with the scheduler's bare `TypeError: Cannot read properties of undefined
+    // (reading 'replace')` — naming neither the variable nor cron.
+    for (const v of ['@daily', '0 3 * *']) {
+      expect(() => parseCleanupSettings({ RAYSPEC_CLEANUP_SCHEDULE: v })).toThrow(BootConfigError);
+      expect(() => parseCleanupSettings({ RAYSPEC_CLEANUP_SCHEDULE: v })).toThrow(
+        `RAYSPEC_CLEANUP_SCHEDULE='${v}'`,
+      );
+    }
+  });
+
+  it("REFUSES an out-of-range field the same way, carrying the parser's own detail", () => {
+    // This form used to at least get the scheduler's own `Error: 99 is a invalid expression for
+    // minute` — but still without the variable name. Now it gets the naming refusal AND keeps the
+    // parser's field-level detail inside it.
+    const bad = () => parseCleanupSettings({ RAYSPEC_CLEANUP_SCHEDULE: '99 99 99 99 99' });
+    expect(bad).toThrow(BootConfigError);
+    expect(bad).toThrow("RAYSPEC_CLEANUP_SCHEDULE='99 99 99 99 99'");
+    expect(bad).toThrow('99 is a invalid expression for minute');
+  });
+
+  it('ACCEPT CONTROL: valid 5-field and 6-field expressions still resolve VERBATIM (the guard is not refusing everything)', () => {
+    // 5-field (the documented default's own shape) and the 6-field seconds form both reach the
+    // scheduler byte-identically; unset/blank keeps resolving to the documented default.
+    expect(parseCleanupSettings({ RAYSPEC_CLEANUP_SCHEDULE: '0 3 * * *' }).schedule).toBe(
+      '0 3 * * *',
+    );
+    expect(parseCleanupSettings({ RAYSPEC_CLEANUP_SCHEDULE: '0 3 * * * *' }).schedule).toBe(
+      '0 3 * * * *',
+    );
+    expect(parseCleanupSettings({}).schedule).toBe('0 3 * * *');
+    expect(parseCleanupSettings({ RAYSPEC_CLEANUP_SCHEDULE: '' }).schedule).toBe('0 3 * * *');
+  });
+
   it('resolves the retention default (30) and accepts a valid override', () => {
     expect(parseCleanupSettings({}).gdprRetentionDays).toBe(30);
     expect(parseCleanupSettings({ RAYSPEC_GDPR_RETENTION_DAYS: '90' }).gdprRetentionDays).toBe(90);
