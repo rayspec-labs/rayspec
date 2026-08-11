@@ -148,7 +148,7 @@ import type {
   RunHeaderIdentity,
   TriggerDescriptor,
 } from '@rayspec/platform';
-import { insertEnqueuedRunHeader } from '@rayspec/platform';
+import { deleteEnqueuedRunHeader, insertEnqueuedRunHeader } from '@rayspec/platform';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
 /**
@@ -725,31 +725,65 @@ export class DbosCronScheduler {
     // back; see @rayspec/platform run-header.ts). The identity (backend/agent/model) comes through
     // the INJECTED resolver (the agent registry lives with the composition root); BEST-EFFORT like
     // the async path — an advisory write must never cost the caller the dispatch itself, so a
-    // failure (or an unresolvable agentId) is logged, not thrown.
-    const headerIdentity = this.#deps.resolveRunHeaderIdentity?.(descriptor.action.agentId);
+    // failure is logged, not thrown, and a resolver that cannot name the agentId logs the skip.
+    // `headerCreated` records whether THIS call created the row, so the enqueue-failure path below
+    // can remove it again for a job that provably never existed (the runs.ts alignment again).
+    const resolveIdentity = this.#deps.resolveRunHeaderIdentity;
+    const headerIdentity = resolveIdentity?.(descriptor.action.agentId);
+    let headerCreated = false;
     if (headerIdentity) {
       try {
-        await insertEnqueuedRunHeader(tdb, { runId, ...headerIdentity });
+        headerCreated = await insertEnqueuedRunHeader(tdb, { runId, ...headerIdentity });
       } catch (err) {
         this.#logger.warn(
           `[cron] enqueue-time run header write failed for trigger '${descriptor.name}' ` +
             `runId=${runId}: ${String(err)}`,
         );
       }
+    } else if (resolveIdentity) {
+      // A WIRED resolver that answers undefined for this agentId is registry drift worth one line:
+      // the fire still dispatches (advisory seam), but with no pre-enqueue header the runId this
+      // fire hands back 404s until the run's own header commits — an operator should see why.
+      this.#logger.warn(
+        `[cron] no run-header identity for agentId '${descriptor.action.agentId}' ` +
+          `(trigger '${descriptor.name}') — pre-enqueue run header skipped, runId=${runId}`,
+      );
     }
-    await this.#deps.executor.enqueue(tenantId, {
-      runId,
-      tenantId,
-      agentId: descriptor.action.agentId,
-      // A fixed, self-describing marker input (the agent's declared instructions drive it — a fire has
-      // no client body). Honest by kind so the journal/run header reads truthfully for a manual fire.
-      input: triggerAgentInput(descriptor.kind, descriptor.name),
-      // Carry the action's optional output-persist target so the off-request run writes its validated
-      // output into the declared store (exactly-once via the run-header completing-transition gate).
-      ...(descriptor.action.persistTo !== undefined
-        ? { persistTo: descriptor.action.persistTo }
-        : {}),
-    });
+    try {
+      await this.#deps.executor.enqueue(tenantId, {
+        runId,
+        tenantId,
+        agentId: descriptor.action.agentId,
+        // A fixed, self-describing marker input (the agent's declared instructions drive it — a fire has
+        // no client body). Honest by kind so the journal/run header reads truthfully for a manual fire.
+        input: triggerAgentInput(descriptor.kind, descriptor.name),
+        // Carry the action's optional output-persist target so the off-request run writes its validated
+        // output into the declared store (exactly-once via the run-header completing-transition gate).
+        ...(descriptor.action.persistTo !== undefined
+          ? { persistTo: descriptor.action.persistTo }
+          : {}),
+      });
+    } catch (err) {
+      // The enqueue THREW — mirror runs.ts (the async path this header write aligns with). The throw
+      // does NOT prove the job was never created: the durable engine persists the workflow status
+      // BEFORE `enqueue` resolves, so a throw AFTER that persist means the job WILL still run. Probe
+      // the engine and remove the header ONLY when the job is provably ABSENT (status 'unknown') AND
+      // this call created the row — otherwise a runId that will never run would read back as
+      // `enqueued` for ever on the run-read routes. The status read is fail-CLOSED: if it throws,
+      // keep the header (the job may be live). The firing-key reserve above stays CONSUMED either
+      // way — at-most-once is unchanged; a failed dispatch is never silently re-fired. The delete is
+      // best-effort: a failure here must not mask the original error.
+      if (headerCreated) {
+        let jobAbsent = false;
+        try {
+          jobAbsent = (await this.#deps.executor.status(runId)) === 'unknown';
+        } catch {
+          jobAbsent = false; // status unreadable ⇒ the job may exist ⇒ KEEP the header
+        }
+        if (jobAbsent) await deleteEnqueuedRunHeader(tdb, runId).catch(() => {});
+      }
+      throw err;
+    }
     return { fired: true, runId };
   }
 }

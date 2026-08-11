@@ -19,7 +19,12 @@
  *     enqueues nothing new (accept controls — today's shapes stay byte-identical).
  *  4. OPTIONAL SEAM: with NO `resolveRunHeaderIdentity` injected the fire still dispatches and
  *     writes NO header (the pre-#322 posture) — the write is driven by the seam, never a side effect
- *     a deployment cannot opt out of.
+ *     a deployment cannot opt out of. A WIRED resolver that cannot name the agentId skips the write
+ *     and logs it (the dispatch is unaffected).
+ *  5. NO PHANTOM HEADER: when the ENQUEUE itself throws, the fire probes the engine and removes the
+ *     header it just wrote ONLY for a provably-absent job (status `unknown`); a job the engine may
+ *     have durably created keeps it, and an unreadable status keeps it too (fail-closed) — mirroring
+ *     the async run surface's enqueue-failure path (runs.ts).
  *
  * Skips without DATABASE_URL; the un-skippable ran-guard hard-fails a REQUIRED run (CI / opt-in).
  */
@@ -90,6 +95,30 @@ class ProbingExecutor implements DurableExecutor {
   }
 }
 
+/**
+ * A stub whose ENQUEUE always throws — the enqueue-failure arm. `statusAnswer` scripts what the
+ * engine's post-throw probe reports: a `DurableJobStatus` (the probe resolves it), or 'THROW' (the
+ * probe itself fails — the fail-closed arm).
+ */
+class ThrowingEnqueueExecutor implements DurableExecutor {
+  statusCalls = 0;
+  constructor(private readonly statusAnswer: 'unknown' | 'enqueued' | 'THROW') {}
+  async enqueue(): Promise<EnqueueResult> {
+    throw new Error('enqueue exploded (stubbed)');
+  }
+  async status(): Promise<'unknown' | 'enqueued'> {
+    this.statusCalls += 1;
+    if (this.statusAnswer === 'THROW') throw new Error('status unreadable (stubbed)');
+    return this.statusAnswer;
+  }
+  async cancel(): Promise<void> {}
+  async start(): Promise<void> {}
+  async shutdown(): Promise<void> {}
+  identity(): DurableExecutorIdentity {
+    return { executorId: 'stub-executor', applicationVersion: 'stub-version' };
+  }
+}
+
 /** A stores-free trigger HANDLER — the handler-action arm needs no product table for this suite. */
 const noopHandler: ResolvedHandler & { kind: 'trigger' } = {
   kind: 'trigger',
@@ -97,8 +126,8 @@ const noopHandler: ResolvedHandler & { kind: 'trigger' } = {
 };
 
 /** A MANUAL→agent descriptor — the on-demand fire whose dispatch enqueues an off-request run. */
-function manualAgentDescriptor(name: string): TriggerDescriptor {
-  return { name, kind: 'manual', action: { kind: 'agent', agentId: 'digest-agent' } };
+function manualAgentDescriptor(name: string, agentId = 'digest-agent'): TriggerDescriptor {
+  return { name, kind: 'manual', action: { kind: 'agent', agentId } };
 }
 
 /** A MANUAL→handler descriptor — dispatches in-process; there is never a run to follow. */
@@ -158,6 +187,34 @@ function makeScheduler(withResolver: boolean): DbosCronScheduler {
                 : undefined,
           }
         : {}),
+    },
+  );
+}
+
+/**
+ * Build a scheduler over an ARBITRARY executor — the enqueue-failure tests script their own — with
+ * the resolver always wired (composition-root shape: unknown agentId → undefined) and an optional
+ * capturing warn sink. Carries a second manual→agent trigger whose agentId the resolver cannot name.
+ */
+function makeSchedulerOver(
+  executor: DurableExecutor,
+  opts?: { warnSink?: string[] },
+): DbosCronScheduler {
+  const warnSink = opts?.warnSink;
+  return new DbosCronScheduler(
+    [manualAgentDescriptor('manual-agent'), manualAgentDescriptor('manual-ghost', 'ghost-agent')],
+    {
+      db,
+      tenantId: TENANT,
+      executor,
+      productTables: new Map<string, PgTable>(),
+      invokeTriggerHandler,
+      tenantExists: async () => true,
+      ...(warnSink ? { logger: { warn: (m: string) => warnSink.push(m) } } : {}),
+      resolveRunHeaderIdentity: (agentId: string) =>
+        agentId === 'digest-agent'
+          ? { backend: 'openai', agentName: 'digest', model: 'gpt-4o-mini' }
+          : undefined,
     },
   );
 }
@@ -261,6 +318,72 @@ describe.skipIf(!hasDb)(
       const instant = new Date('2026-06-24T09:20:00.000Z');
       expect(await scheduler.fireNow('manual-agent', instant)).toBe(true);
       expect(await scheduler.fireNow('manual-agent', instant)).toBe(false);
+    });
+
+    it('an enqueue throw with a provably-ABSENT job removes the header (no phantom `enqueued` run)', async () => {
+      const throwing = new ThrowingEnqueueExecutor('unknown');
+      const scheduler = makeSchedulerOver(throwing);
+      const instant = new Date('2026-06-24T09:25:00.000Z');
+      const runId = cronRunId('manual-agent', instant);
+
+      await expect(scheduler.fireNowWithOutcome('manual-agent', instant)).rejects.toThrow(
+        'enqueue exploded',
+      );
+
+      // The engine was probed, answered 'unknown' (never durably created), and the header this fire
+      // wrote was removed again — the runId does not read back for ever as an `enqueued` run that
+      // never existed (the runs.ts enqueue-failure alignment).
+      expect(throwing.statusCalls).toBe(1);
+      expect(await countHeaderRows(runId)).toBe(0);
+
+      // The firing-key reserve stays CONSUMED (at-most-once unchanged): a re-fire of the same
+      // instant is a deduped no-op, never a silent second dispatch.
+      expect(await scheduler.fireNowWithOutcome('manual-agent', instant)).toEqual({ fired: false });
+    });
+
+    it('an enqueue throw with a job the engine MAY have created KEEPS the header (the run is live)', async () => {
+      const throwing = new ThrowingEnqueueExecutor('enqueued');
+      const scheduler = makeSchedulerOver(throwing);
+      const instant = new Date('2026-06-24T09:30:00.000Z');
+      const runId = cronRunId('manual-agent', instant);
+
+      await expect(scheduler.fireNowWithOutcome('manual-agent', instant)).rejects.toThrow(
+        'enqueue exploded',
+      );
+
+      // The engine reports the job EXISTS (a throw after the durable persist) → the header belongs
+      // to a run that will still execute; deleting it would 404 a live run.
+      expect(await countHeaderRows(runId)).toBe(1);
+    });
+
+    it('an enqueue throw with an UNREADABLE status keeps the header (fail-closed probe)', async () => {
+      const throwing = new ThrowingEnqueueExecutor('THROW');
+      const scheduler = makeSchedulerOver(throwing);
+      const instant = new Date('2026-06-24T09:35:00.000Z');
+      const runId = cronRunId('manual-agent', instant);
+
+      // The ORIGINAL enqueue error surfaces (never the probe's), and the header stays: an
+      // unreadable status must be treated as a possibly-live job.
+      await expect(scheduler.fireNowWithOutcome('manual-agent', instant)).rejects.toThrow(
+        'enqueue exploded',
+      );
+      expect(await countHeaderRows(runId)).toBe(1);
+    });
+
+    it('a WIRED resolver that cannot name the agentId logs the skip and writes no header (dispatch unaffected)', async () => {
+      const warnings: string[] = [];
+      const scheduler = makeSchedulerOver(stub, { warnSink: warnings });
+      const instant = new Date('2026-06-24T09:40:00.000Z');
+      const runId = cronRunId('manual-ghost', instant);
+
+      const outcome = await scheduler.fireNowWithOutcome('manual-ghost', instant);
+
+      expect(outcome).toEqual({ fired: true, runId });
+      expect(stub.enqueued).toHaveLength(1);
+      expect(await countHeaderRows(runId)).toBe(0);
+      expect(
+        warnings.some((w) => w.includes("no run-header identity for agentId 'ghost-agent'")),
+      ).toBe(true);
     });
   },
 );

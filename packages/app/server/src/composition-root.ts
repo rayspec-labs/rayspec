@@ -2811,7 +2811,7 @@ async function deployDeclaredSpec(
       // resolves immediately on the run-read routes). Resolved off the SAME late-bound registry the
       // executor's resolveRun reads — the two surfaces can never disagree about a run's identity.
       // Answering undefined for an unknown agentId keeps the write best-effort (the scheduler then
-      // skips it; the dispatch itself is never blocked on this advisory seam).
+      // logs and skips it; the dispatch itself is never blocked on this advisory seam).
       resolveRunHeaderIdentity: (agentId: string) => {
         const entry = workerAgentRegistry?.get(agentId);
         return entry
