@@ -143,7 +143,7 @@ maybeDescribe('rayspec deploy --dry-run — a backend document, through the buil
       agents: [],
       handlers: ['add_note'],
       // A backend document MAY also serve a bundled UI; the mounts boot gates on are named, not dropped.
-      frontendMounts: [{ route: '/', dir: 'web/dist', spa: true }],
+      frontendMounts: [{ route: '/', dir: 'web/dist', spa: true, cleanUrls: false }],
     });
     // Nothing composed, and this is not the static profile — both blocks stay absent.
     expect(verdict.composed).toBeUndefined();
@@ -193,7 +193,7 @@ maybeDescribe('rayspec deploy --dry-run — a backend document, through the buil
     expect(verdict.backendProfile).toBeUndefined();
     expect(verdict.staticProfile.profile).toBe('static');
     expect(verdict.staticProfile.frontendMounts).toEqual([
-      { route: '/', dir: 'web/dist', spa: true },
+      { route: '/', dir: 'web/dist', spa: true, cleanUrls: false },
     ]);
   }, 60_000);
 

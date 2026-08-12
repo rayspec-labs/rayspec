@@ -683,10 +683,21 @@ export type ExtensionRef = z.infer<typeof ExtensionRef>;
  * One static frontend mount served alongside the backend's API. A backend may declare a list of
  * these so a spec can ship its own web UI (built assets) next to the routes it exposes.
  *
- *  - `route` — the URL prefix the mount is served under (e.g. `/` or `/app`); must start with `/`.
- *  - `dir`   — the directory of built static assets, relative to the spec file.
- *  - `spa`   — when true, an unmatched path under `route` falls back to `index.html` (the
- *              History-API single-page-app fallback); default false (plain static file serving).
+ *  - `route`     — the URL prefix the mount is served under (e.g. `/` or `/app`); must start with `/`.
+ *  - `dir`       — the directory of built static assets, relative to the spec file.
+ *  - `spa`       — when true, an unmatched path under `route` falls back to `index.html` (the
+ *                  History-API single-page-app fallback); default false (plain static file serving).
+ *  - `cleanUrls` — when true, an extensionless path that is not itself a file resolves to
+ *                  `<path>.html` before `<path>/index.html` (the Netlify / Vercel / GitHub Pages
+ *                  order), so a site whose links are `/docs/getting-started` while the built file is
+ *                  `docs/getting-started.html` serves rather than 404s; default false, so no existing
+ *                  deployment changes behaviour. EXTENSIONLESS is the exact domain: a path whose last
+ *                  segment carries a `.` names a typed asset (`/app.js`, `/data.json`) and is never
+ *                  rewritten, so a missing typed file stays a 404 rather than being answered from a
+ *                  `<name>.<ext>.html` sibling; only the last segment decides, so `/guide/1.2/notes`
+ *                  still resolves. 404 stays the terminal outcome (unlike `spa`), and
+ *                  when BOTH `<path>.html` and `<path>/index.html` exist the `.html` file wins —
+ *                  the one visible change for a site that opts in with both forms present.
  *
  * `.strict()` — fail-closed unknown-key rejection, consistent with every other grammar level.
  */
@@ -695,6 +706,7 @@ export const FrontendSpec = z
     route: z.string().min(1).regex(/^\//, 'route must start with "/"'),
     dir: z.string().min(1),
     spa: z.boolean().default(false),
+    cleanUrls: z.boolean().default(false),
   })
   .strict();
 export type FrontendSpec = z.infer<typeof FrontendSpec>;
@@ -736,9 +748,9 @@ export const RaySpec = z
      */
     deployment: DeploymentSpec.optional(),
     /**
-     * OPTIONAL static frontend mounts. A list of `{route, dir, spa?}` entries served alongside the
-     * API (see `FrontendSpec`). `.optional()` (NOT `.default([])`) so a spec that omits `frontend`
-     * parses byte-identically — absent = NO static mounts. A minimal spec (just `version` +
+     * OPTIONAL static frontend mounts. A list of `{route, dir, spa?, cleanUrls?}` entries served
+     * alongside the API (see `FrontendSpec`). `.optional()` (NOT `.default([])`) so a spec that omits
+     * `frontend` parses byte-identically — absent = NO static mounts. A minimal spec (just `version` +
      * `metadata`) stays valid (frontend is omittable).
      */
     frontend: z.array(FrontendSpec).optional(),

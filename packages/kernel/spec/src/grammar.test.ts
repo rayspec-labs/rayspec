@@ -97,14 +97,31 @@ describe('FrontendSpec (static frontend mount)', () => {
     const res = FrontendSpec.safeParse({ route: '/', dir: 'web/dist', spa: true });
     expect(res.success).toBe(true);
     if (res.success) {
-      expect(res.data).toEqual({ route: '/', dir: 'web/dist', spa: true });
+      expect(res.data).toEqual({ route: '/', dir: 'web/dist', spa: true, cleanUrls: false });
     }
   });
 
-  it('defaults spa to false when omitted', () => {
+  it('defaults spa and cleanUrls to false when omitted (both are opt-in)', () => {
     const res = FrontendSpec.safeParse({ route: '/app', dir: 'ui' });
     expect(res.success).toBe(true);
-    if (res.success) expect(res.data.spa).toBe(false);
+    if (res.success) {
+      expect(res.data.spa).toBe(false);
+      expect(res.data.cleanUrls).toBe(false);
+    }
+  });
+
+  it('accepts cleanUrls: true, and it is independent of spa', () => {
+    const res = FrontendSpec.safeParse({ route: '/', dir: 'site', cleanUrls: true });
+    expect(res.success).toBe(true);
+    if (res.success) {
+      expect(res.data).toEqual({ route: '/', dir: 'site', spa: false, cleanUrls: true });
+    }
+    const both = FrontendSpec.safeParse({ route: '/', dir: 'site', spa: true, cleanUrls: true });
+    expect(both.success).toBe(true);
+  });
+
+  it('rejects a non-boolean cleanUrls', () => {
+    expect(FrontendSpec.safeParse({ route: '/', dir: 'ui', cleanUrls: 'yes' }).success).toBe(false);
   });
 
   it('rejects a route without a leading slash', () => {
@@ -127,7 +144,9 @@ describe('FrontendSpec (static frontend mount)', () => {
     });
     expect(withFrontend.success).toBe(true);
     if (withFrontend.success) {
-      expect(withFrontend.data.frontend).toEqual([{ route: '/', dir: 'web/dist', spa: false }]);
+      expect(withFrontend.data.frontend).toEqual([
+        { route: '/', dir: 'web/dist', spa: false, cleanUrls: false },
+      ]);
     }
     // Absent ⇒ the key is not injected (keeps a frontend-less spec byte-identical).
     const withoutFrontend = RaySpec.safeParse({ version: '1.0', metadata: { name: 'm' } });

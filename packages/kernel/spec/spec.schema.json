@@ -789,6 +789,10 @@
           "spa": {
             "default": false,
             "type": "boolean"
+          },
+          "cleanUrls": {
+            "default": false,
+            "type": "boolean"
           }
         },
         "required": [

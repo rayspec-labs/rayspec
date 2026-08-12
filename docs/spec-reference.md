@@ -1559,6 +1559,7 @@ frontend:
   - route: /            # URL prefix the mount is served under; must start with `/`
     dir: web/dist       # directory of built assets, relative to this spec file
     spa: true           # optional (default false): unmatched paths fall back to index.html
+    cleanUrls: true     # optional (default false): /docs/page also resolves docs/page.html
 ```
 
 - `route` — the URL prefix (e.g. `/` or `/app`). Must start with `/`. It must not
@@ -1574,6 +1575,36 @@ frontend:
   `false`, an unmatched path is a `404`. An `spa: true` mount's `index.html` must be
   a readable file in `dir` at boot — the same requirement the readiness check below
   applies, fail-closed at deploy on the same terms as `dir` above.
+- `cleanUrls` — optional boolean (default `false`). When `true`, an **extensionless**
+  path that is not itself a file resolves to `<path>.html` before `<path>/index.html`,
+  the order Netlify, Vercel and GitHub Pages use — so a site whose navigation links
+  `/docs/getting-started` while the built file is `docs/getting-started.html` serves it
+  instead of returning `404`. That is the default output shape of most static site
+  generators. Unlike `spa`, it adds candidates rather than a catch-all: `404` stays the
+  **terminal** outcome for an `spa: false` mount, so a genuinely broken link is still
+  reported as one.
+
+  **Extensionless** is the option's exact domain: a request whose last path segment
+  carries a `.` names a typed asset (`/app.js`, `/data.json`) and is never rewritten, so a
+  request for a typed file that is not there stays a `404` instead of coming back
+  `200 text/html` from a `<name>.<ext>.html` sibling — which is what keeps the terminal
+  `404` meaningful for a `fetch`/XHR. Only the last segment decides, so a dotted directory
+  on the way (`/guide/1.2/notes`) still resolves its page.
+
+  The full resolution order for a request under the mount is: the exact path when it is
+  a file → `<path>.html` → `<path>/index.html` → (only when `spa: true`) the `index.html`
+  SPA fallback → the mount root's `404.html`, else the uniform `404`. The two options are
+  ordered rather than exclusive, so a mount may set both: a deep link that has a page gets
+  that page, and only a path with no page at all reaches the SPA shell.
+
+  **One behaviour changes when you opt in.** With `cleanUrls: false` (the default) every
+  path answers exactly as it does today. With it `true`, a site that ships **both**
+  `<path>.html` and `<path>/index.html` for the same path serves `<path>.html`, where it
+  serves `<path>/index.html` today — `.html` is tried first. A request with a trailing
+  slash (`/docs/`) is unaffected and still resolves the directory index. The fail-closed
+  guard below applies to the `.html` candidate exactly as it does to any other served
+  path: a dotfile, a traversal, or a symlink escaping the directory is refused, never
+  followed.
 
 **Readiness.** Declaring a mount adds a `frontend` field to the `/health` response,
 valued `"ok"` or `"unavailable"`. It reports whether the mounts can be served — the

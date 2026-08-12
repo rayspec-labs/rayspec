@@ -140,7 +140,9 @@ describe('rayspec deploy --dry-run — a frontend-only (static-profile) document
     // compose summary is absent and the static block carries the answer instead.
     expect(r.composed).toBeUndefined();
     expect(r.staticProfile?.profile).toBe('static');
-    expect(r.staticProfile?.frontendMounts).toEqual([{ route: '/', dir: 'web/dist', spa: true }]);
+    expect(r.staticProfile?.frontendMounts).toEqual([
+      { route: '/', dir: 'web/dist', spa: true, cleanUrls: false },
+    ]);
     // The three facts stated outright rather than left to inference.
     const notes = (r.staticProfile?.notes ?? []).join(' ');
     expect(notes).toMatch(/no database/);
@@ -148,6 +150,16 @@ describe('rayspec deploy --dry-run — a frontend-only (static-profile) document
     expect(notes).toMatch(/nothing to compose/);
     // The honest boundary is still carried (a document-only check binds no port).
     expect(r.notProven.length).toBeGreaterThan(0);
+  });
+
+  it('echoes a declared cleanUrls in the mounts it reports (the option boot will resolve with)', async () => {
+    writeFileSync(STATIC_DOC, FRONTEND_ONLY_SPEC.replace('spa: true', 'cleanUrls: true'), 'utf8');
+    const outcome = await runDeploy(['--dry-run', STATIC_REL]);
+    if (outcome.kind !== 'dry-run') throw new Error('unreachable');
+    expect(outcome.result.ok).toBe(true);
+    expect(outcome.result.staticProfile?.frontendMounts).toEqual([
+      { route: '/', dir: 'web/dist', spa: false, cleanUrls: true },
+    ]);
   });
 
   it('leaves a product document on the compose path (no static block, same boundary)', async () => {
@@ -226,7 +238,22 @@ describe('rayspec deploy --dry-run — a backend-profile document', () => {
     // Still the backend arm, never the static one (a doc with stores/api is not a static profile).
     expect(outcome.result.staticProfile).toBeUndefined();
     expect(outcome.result.backendProfile?.frontendMounts).toEqual([
-      { route: '/', dir: 'web/dist', spa: true },
+      { route: '/', dir: 'web/dist', spa: true, cleanUrls: false },
+    ]);
+  });
+
+  it('echoes a declared cleanUrls on the backend profile too (a mount option means one thing in both)', async () => {
+    // A mount option that surfaces in only one profile's verdict makes the preview lie about the other.
+    writeFileSync(
+      BACKEND_DOC,
+      `${BACKEND_SPEC}frontend:\n  - { route: /, dir: web/dist, cleanUrls: true }\n`,
+      'utf8',
+    );
+    const outcome = await runDeploy(['--dry-run', BACKEND_REL]);
+    if (outcome.kind !== 'dry-run') throw new Error('unreachable');
+    expect(outcome.result.ok).toBe(true);
+    expect(outcome.result.backendProfile?.frontendMounts).toEqual([
+      { route: '/', dir: 'web/dist', spa: false, cleanUrls: true },
     ]);
   });
 
@@ -260,7 +287,7 @@ describe('rayspec deploy --dry-run — a backend-profile document', () => {
     expect(outcome.result.ok).toBe(true);
     expect(outcome.result.backendProfile).toBeUndefined();
     expect(outcome.result.staticProfile?.frontendMounts).toEqual([
-      { route: '/', dir: 'web/dist', spa: true },
+      { route: '/', dir: 'web/dist', spa: true, cleanUrls: false },
     ]);
   });
 

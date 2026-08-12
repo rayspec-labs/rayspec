@@ -142,7 +142,7 @@ gate) — so even a read-only handler is reachable only by a caller that holds
 
 A backend-profile document can serve a built web UI itself, in one of two forms.
 
-- **Alongside the API.** Add a `frontend` mount (a `{ route, dir, spa }` entry) and
+- **Alongside the API.** Add a `frontend` mount (a `{ route, dir, spa, cleanUrls }` entry) and
   the same server that answers your API also serves the built static assets at that
   route. Static mounts are the last fallback, so every platform and API route
   (`/health`, `/v1/*`, `/oidc/*`, and any declared `api` path) always wins over
