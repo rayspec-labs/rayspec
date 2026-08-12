@@ -224,9 +224,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frontend-only one was rescued by an explicit classification arm, and a backend one had no arm — so
   the product grammar's rejection became its verdict. One document, one binary, three answers:
   `doctor` and `plan` accepted it, `deploy` validated and booted it, and `deploy --dry-run` returned
-  `ok: false`, exit `1`, and `no_code_in_yaml` violations about the very `api`, `handlers` and
-  `tooling` sections that profile is *made* of — scaling with the document, so a larger spec produced
-  proportionally more of them. A backend document that declares **no** handlers or tools was rejected
+  `ok: false`, exit `1`, and `no_code_in_yaml` violations about the very `handlers`, `tooling`,
+  `triggers` and `extensions` keys that profile is *made* of — scaling with the document, so a larger
+  spec produced proportionally more of them. A deployment spec that declares only an extensions pack
+  was rejected on that key alone (the shipped `examples/stream-backend` and
+  `examples/agent-pack-deployment` each came back with one violation at `extensions[0].module`). A backend document that declares **no** handlers or tools was rejected
   just the same, only in the product grammar's other vocabulary: a purely store-backed one (the
   shipped `examples/notes-ui`) carried no code-like key for that lint to fire on, so it came back with
   the product shape rejections instead — a missing `product:` section, a missing `stores[].key`, and
