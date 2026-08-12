@@ -1592,6 +1592,22 @@ returns the platform's uniform `404`. Serving is fail-closed — path traversal
 (including URL-encoded forms), dotfiles/hidden paths, and symlinks that escape the
 directory are refused; directories are never listed.
 
+**Response security headers — put CSS and JS in files, not inline.** Every response a
+mount serves carries `Content-Security-Policy` and `Permissions-Policy`, on **both** boot
+shapes: a static profile emits them app-wide, and a full-backend boot stamps them on the
+mount's own responses (the API and auth surface deliberately carries no CSP — that one is
+left to a fronting proxy). The CSP default is
+`default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'`, which
+names no `style-src` and no `script-src`, so an inline `<style>` or `<script>` in a served
+page falls back to `default-src` and is **blocked**. Nothing on the server side reports it:
+the response is a `200` carrying the exact bytes, so `curl`, the deploy output and the logs
+all look correct, and only the rendered page differs — the inline CSS is not applied and the
+inline script never runs. Reference built `.css`/`.js` files by `href`/`src` from the same
+mount instead (same-origin, which `default-src 'self'` allows); if a page genuinely needs a
+weaker policy, `RAYSPEC_FRONTEND_CSP` replaces the whole baseline verbatim (and
+`RAYSPEC_PERMISSIONS_POLICY` the other header) — an operator choice, never the shipped
+default.
+
 **Range and HEAD** are a supported feature: a byte-`Range` GET returns `206` partial
 content (`Content-Range`, `Accept-Ranges: bytes`, and exactly the requested bytes),
 and a `HEAD` returns `200` with `Content-Length` and an empty body — useful for media

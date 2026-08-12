@@ -834,7 +834,12 @@ deployment sets its configuration through its orchestrator or secret manager.
   its own `Content-Security-Policy`
   and `Permissions-Policy` response headers, read from `RAYSPEC_FRONTEND_CSP` and
   `RAYSPEC_PERMISSIONS_POLICY` (each with a secure default when unset), so a built
-  single-page app can be served directly with no reverse proxy in front — see
+  single-page app can be served directly with no reverse proxy in front — the same two
+  headers a full-backend boot stamps on the responses its own `frontend` mounts serve,
+  from the same two variables. The CSP default is
+  `default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'` — it names
+  no `style-src` and no `script-src`, so a served page's CSS and JS belong in files, not
+  inline, and an override replaces that whole baseline verbatim rather than adding to it — see
   [getting-started → a frontend-only (static) deployment](./getting-started.md#a-frontend-only-static-deployment).
 
 It listens on `PORT` (default `8080`) and shuts down gracefully on `SIGINT` /

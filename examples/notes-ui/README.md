@@ -9,6 +9,9 @@ declarative routes, and static serving.
   mount).
 - `web/dist/index.html` — the bundled static page the backend serves at `/` (a real build would emit
   this directory; here it is a single hand-written page).
+- `web/dist/app.js` — the page's script, in a **file** rather than an inline `<script>`: the default
+  `Content-Security-Policy` a served frontend carries is `default-src 'self'` with no `script-src`,
+  which blocks inline code. See [Posture](#posture) below.
 
 ## What it does
 
@@ -83,3 +86,11 @@ curl -s "$BASE/api/notes" -H "authorization: Bearer $TOKEN" | jq '.[].title'
 LOCAL / single-node / trusted-author. The static assets are served read-only from `web/dist`; the
 static handler is hardened against dotfiles, path traversal, and symlink-escape, but this document is
 **not** internet-facing without the separate external-exposure hardening layer.
+
+Every response the mount serves carries `Content-Security-Policy: default-src 'self'; frame-ancestors
+'none'; object-src 'none'; base-uri 'self'` and `Permissions-Policy: camera=(), microphone=(),
+geolocation=()`. The CSP names no `style-src` or `script-src`, so an inline `<style>` or `<script>` in
+a served page is blocked — which is why this example's script is a file. Nothing on the server reports
+that: the response is a `200` carrying the exact bytes, and only the rendered page differs.
+`RAYSPEC_FRONTEND_CSP` overrides the baseline verbatim. See the
+[`frontend` reference](../../docs/spec-reference.md#frontend).

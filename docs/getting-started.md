@@ -701,6 +701,17 @@ curl -s http://localhost:8080/health      # → the health JSON, never the UI sh
 rules, and what static serving does **not** do in v1. A ready-to-run example lives in
 [`examples/notes-ui/`](../examples/notes-ui/).
 
+**Put CSS and JS in files, not inline.** Every response the mount serves carries a
+`Content-Security-Policy` of
+`default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'` — the
+same default a static profile emits (below), on this boot shape too. It names no
+`style-src` and no `script-src`, so an inline `<style>` or `<script>` in a served page
+is **blocked**. Nothing on the server side reports that: the response is a `200` with
+the exact bytes, so `curl` and the deploy output look right, and only the rendered page
+differs — the inline CSS is not applied and the inline script never runs. Reference
+built `.css`/`.js` files by `href`/`src` instead (same-origin, which the default
+allows), or set `RAYSPEC_FRONTEND_CSP` to replace the baseline.
+
 ### A frontend-only (static) deployment
 
 The mount above serves a UI *next to* a full API. If a document declares **only** a
@@ -743,7 +754,9 @@ default when unset:
   `default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'`.
   The default deliberately carries **no** `'unsafe-inline'`, so a SPA that needs
   inline styles or scripts must opt into a weaker policy explicitly (an operator
-  choice, never the shipped default).
+  choice, never the shipped default). A page that ships them anyway is still served
+  `200` with the correct bytes and simply renders without them — see
+  [Serving a static frontend](#serving-a-static-frontend-spa) above.
 - `RAYSPEC_PERMISSIONS_POLICY` — the `Permissions-Policy`. Default:
   `camera=(), microphone=(), geolocation=()` (the high-risk device features denied).
 

@@ -338,6 +338,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value is unchanged, and under `RAYSPEC_SKIP_DOTENV=1` the suffix is omitted because nothing was
   searched.
 
+### Documentation
+
+- **The default Content-Security-Policy a served frontend carries is now documented where someone
+  deploying a built site meets it — and the shipped example stops violating it.** The baseline is
+  `default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'`, which names no
+  `style-src` and no `script-src`, so an inline `<style>` or `<script>` in a served page is blocked.
+  The policy is right and is unchanged; what was missing is that meeting it required a browser. No
+  server-side signal exists: the response is a `200` carrying the exact bytes, so `curl`, the deploy
+  output and the logs all look correct and only the rendered page differs — the first encounter reads
+  as "the deployment lost my CSS", with nothing connecting it to the policy. The `frontend` grammar
+  reference, the getting-started static-serving walkthrough, the concepts page and the CLI reference
+  now state the default value in full, that CSS and JS belong in files the page references rather than
+  in inline code (a same-origin file is what the default allows), and that `RAYSPEC_FRONTEND_CSP`
+  replaces that whole baseline verbatim — it does not add to it — when a page genuinely needs a weaker
+  one. Every page under `docs/` that mentioned those two headers framed them as a static-profile
+  property — `.env.example` already described both boot shapes — and a full-backend boot stamps the
+  same two, from the same two variables, on the responses its own `frontend` mounts serve, so each of
+  those pages now says both shapes. The bundled `examples/notes-ui` page carried its `loadNotes` fetch
+  helper as an inline script — the one shipped asset the platform's own default policy would have
+  blocked; it now lives in `web/dist/app.js` and the page references it. No behaviour changed: the
+  policy, the two environment variables and the served headers are exactly as they were.
+
 ### Security
 
 - **The transitive `nanoid` copy behind `oidc-provider` is raised from 5.1.15 to 5.1.16**
