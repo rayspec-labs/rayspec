@@ -76,8 +76,9 @@ full 6-phase walkthrough below covers all three branches; the It.2-only addition
 an It.0/It.1 author can skip them.
 
 **Add a frontend? (optional).** A backend can also serve its own built web UI next to the API — add a
-`frontend[]` mount (`{ route, dir, spa? }`) pointing at a directory of built static assets (relative to
-the spec file). Use `route: /` + `spa: true` for a single-page app served at the root; `api` routes,
+`frontend[]` mount (`{ route, dir, spa?, cleanUrls? }`) pointing at a directory of built static assets
+(relative to the spec file). Use `route: /` + `spa: true` for a single-page app served at the root, or
+`cleanUrls: true` for a generated multi-page site whose links are extensionless; `api` routes,
 `/health`, and `/v1/*` always win over the static mount. See `frontend[]` in the grammar reference and
 `examples/notes-ui/rayspec.yaml`.
 
@@ -1109,6 +1110,9 @@ Notes that matter:
   dir: <string>       # REQUIRED, non-empty — directory of BUILT static assets, relative to the spec file.
   spa: <bool>         # optional, default false — when true, an unmatched path under `route` returns
                       #   index.html (History-API single-page-app routing); when false, it is a 404.
+  cleanUrls: <bool>   # optional, default false — when true, an EXTENSIONLESS path that is not itself a
+                      #   file resolves to `<path>.html` BEFORE `<path>/index.html` (the Netlify /
+                      #   Vercel / GitHub Pages order), so a link to /docs/page serves docs/page.html.
 ```
 
 - Static mounts are served **last**: every `api` route, `/health`, `/v1/*`, and `/oidc/*` always wins,
@@ -1119,7 +1123,15 @@ Notes that matter:
 - `dir` must resolve to a readable directory of built assets at deploy — otherwise the boot fails closed
   with an actionable error (`rayspec doctor` reports a missing/unreadable dir too).
 - Serving is fail-closed: path traversal (incl. URL-encoded forms), dotfiles/hidden paths, and symlinks
-  that escape `dir` are refused; directories are never listed.
+  that escape `dir` are refused; directories are never listed — the `cleanUrls` `<path>.html` candidate
+  runs the same guard.
+- `cleanUrls` is for a MULTI-PAGE site built by a static site generator; `spa` is for a single-page app.
+  Do not reach for `spa: true` to fix broken extensionless links — it answers EVERY unmatched path with
+  the root document, so a genuinely broken link comes back `200`. `cleanUrls` keeps `404` terminal (for
+  `spa: false`). A mount may set both: the order is exact file → `<path>.html` → `<path>/index.html` →
+  the SPA fallback → `404.html`/404. ONE behaviour changes when you opt in — a site shipping BOTH
+  `<path>.html` and `<path>/index.html` starts serving `<path>.html` where the directory index served
+  before; a trailing-slash request (`/docs/`) still resolves the directory index.
 - Mount responses carry `Content-Security-Policy: default-src 'self'; frame-ancestors 'none';
   object-src 'none'; base-uri 'self'` plus a `Permissions-Policy` (both boot shapes — a static profile
   app-wide, a full backend on its mount responses; `RAYSPEC_FRONTEND_CSP` / `RAYSPEC_PERMISSIONS_POLICY`

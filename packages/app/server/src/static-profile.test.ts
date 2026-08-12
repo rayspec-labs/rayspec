@@ -340,7 +340,9 @@ frontend:
     expect(detected).toBeDefined();
     expect(detected?.specPath).toBe(specPath);
     // The TYPED mounts, not the raw source — assembleStaticServer mounts these verbatim.
-    expect(detected?.frontend).toEqual([{ route: '/', dir: 'web/dist', spa: true }]);
+    expect(detected?.frontend).toEqual([
+      { route: '/', dir: 'web/dist', spa: true, cleanUrls: false },
+    ]);
   });
 
   it('a NON-static doc (stores + api alongside the frontend) yields undefined ⇒ the normal boot', () => {

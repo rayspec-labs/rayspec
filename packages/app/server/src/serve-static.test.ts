@@ -17,6 +17,14 @@
  *     the full size (BEFORE serveStatic, which would otherwise emit a malformed 0-byte 206 or throw a
  *     500); and the fail-closed guard stays method/range-agnostic (dotfile, traversal, and symlink-escape
  *     each still 404 under BOTH a Range GET and a HEAD).
+ *   - CLEAN URLS (`cleanUrls: true`, opt-in): an extensionless path that is not itself a file resolves to
+ *     `<path>.html` BEFORE `<path>/index.html` — so `/docs/getting-started` serves
+ *     `docs/getting-started.html`; with the flag OFF the same paths keep today's status and document
+ *     (the opt-in control), a site shipping BOTH forms sees the documented flip, an exact match still
+ *     wins, 404 stays terminal for `spa:false`, and on an `spa:true` mount the page wins the deep link
+ *     while only a genuine miss reaches the shell. The guard, the range guard and the method guard all
+ *     still run first (a dotfile, a `.html` symlink escaping the dir, an unsatisfiable range and a write
+ *     verb keep their exact responses).
  *   - CONTENT METHODS: a mount serves GET/HEAD/OPTIONS; every other verb gets 405 + `Allow` and the
  *     uniform JSON envelope — so a POST/DELETE to a missing path under an spa:true mount is never
  *     answered 200 with the SPA shell — while the reserved-prefix decline and the fail-closed path
@@ -671,6 +679,246 @@ describe('mountFrontend — custom 404.html page', () => {
     const body = await res.text();
     expect(body).toContain(DOCS_404_SENTINEL); // the docs mount's own custom 404 page
     expect(body).not.toContain(APP_INDEX_SENTINEL); // NOT the outer catch-all SPA shell
+  });
+});
+
+describe('mountFrontend — cleanUrls (extensionless resolution, opt-in)', () => {
+  // `cleanUrls: true` resolves an extensionless path to `<path>.html` before `<path>/index.html` — the
+  // order Netlify / Vercel / GitHub Pages use — so a site whose links are `/docs/getting-started` while
+  // the built file is `docs/getting-started.html` serves rather than 404s. Each arm mints its OWN fixture
+  // (the shared beforeAll fixture stays byte-untouched) holding BOTH resolvable forms plus an exact
+  // extensionless file, a 404.html, a dotfile and a symlink escaping the served dir — so one fixture can
+  // pin the resolution ORDER, the opt-in control, the terminal 404 and the fail-closed hardening alike.
+  //
+  // Fail-the-fix: drop the `cleanUrls` branch and the `/docs/getting-started` arms go RED at 404; run it
+  // AFTER the file server instead of before and the both-forms arm goes RED (index.html would win); skip
+  // the `isSafeStaticPath` check on the `.html` candidate and the symlink arm serves the outside secret.
+  const CLEAN_PAGE_SENTINEL = 'CLEAN-URL-PAGE-SENTINEL';
+  const CLEAN_INDEX_SENTINEL = 'CLEAN-URL-ROOT-INDEX-SENTINEL';
+  const DOCS_INDEX_SENTINEL = 'CLEAN-URL-DOCS-INDEX-SENTINEL';
+  const BOTH_FILE_SENTINEL = 'CLEAN-URL-BOTH-FILE-SENTINEL';
+  const BOTH_INDEX_SENTINEL = 'CLEAN-URL-BOTH-INDEX-SENTINEL';
+  const EXACT_FILE_SENTINEL = 'CLEAN-URL-EXACT-FILE-SENTINEL';
+  const EXACT_HTML_SENTINEL = 'CLEAN-URL-EXACT-HTML-SENTINEL';
+  const CLEAN_404_SENTINEL = 'CLEAN-URL-404-PAGE-SENTINEL';
+  const CLEAN_DOTFILE_SECRET = 'CLEAN-URL-DOTFILE-SECRET';
+  const CLEAN_SYMLINK_SECRET = 'CLEAN-URL-SYMLINK-SECRET';
+
+  const tempRoots: string[] = [];
+  let fixtureRoot = '';
+
+  /**
+   * The multi-page-site fixture every arm shares (minted once — no arm writes to it):
+   *   index.html                      the root document
+   *   docs/index.html                 a directory index (reachable as `/docs/`)
+   *   docs/getting-started.html       the page the issue's navigation links to as `/docs/getting-started`
+   *   both.html + both/index.html     BOTH resolvable forms — pins which one `cleanUrls` picks
+   *   exact + exact.html              an EXACT extensionless file beside its `.html` sibling
+   *   404.html                        the mount-root custom not-found page (the terminal outcome)
+   *   .env                            a dotfile the guard must keep refusing
+   *   leak.html                       a symlink OUT of the served dir (the `.html` candidate itself)
+   */
+  beforeAll(() => {
+    const root = mkdtempSync(join(tmpdir(), 'rayspec-clean-urls-'));
+    tempRoots.push(root);
+    const dir = join(root, 'web', 'dist');
+    mkdirSync(join(dir, 'docs'), { recursive: true });
+    mkdirSync(join(dir, 'both'), { recursive: true });
+    const page = (sentinel: string): string => `<!doctype html><title>${sentinel}</title>`;
+    writeFileSync(join(dir, 'index.html'), page(CLEAN_INDEX_SENTINEL), 'utf8');
+    writeFileSync(join(dir, 'docs', 'index.html'), page(DOCS_INDEX_SENTINEL), 'utf8');
+    writeFileSync(join(dir, 'docs', 'getting-started.html'), page(CLEAN_PAGE_SENTINEL), 'utf8');
+    writeFileSync(join(dir, 'both.html'), page(BOTH_FILE_SENTINEL), 'utf8');
+    writeFileSync(join(dir, 'both', 'index.html'), page(BOTH_INDEX_SENTINEL), 'utf8');
+    writeFileSync(join(dir, 'exact'), page(EXACT_FILE_SENTINEL), 'utf8');
+    writeFileSync(join(dir, 'exact.html'), page(EXACT_HTML_SENTINEL), 'utf8');
+    writeFileSync(join(dir, '404.html'), page(CLEAN_404_SENTINEL), 'utf8');
+    writeFileSync(join(dir, '.env'), `SECRET=${CLEAN_DOTFILE_SECRET}`, 'utf8');
+    const outside = join(root, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'secret.html'), CLEAN_SYMLINK_SECRET, 'utf8');
+    symlinkSync(join(outside, 'secret.html'), join(dir, 'leak.html'));
+    fixtureRoot = root;
+  });
+
+  afterAll(() => {
+    for (const root of tempRoots) rmSync(root, { recursive: true, force: true });
+  });
+
+  const cleanMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: false, cleanUrls: true };
+  const offMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: false, cleanUrls: false };
+
+  it('cleanUrls:true — an extensionless link resolves to <path>.html (200 + that page)', async () => {
+    const app = buildApp([cleanMount], fixtureRoot);
+    const res = await app.request('/docs/getting-started');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(/text\/html/);
+    expect(await res.text()).toContain(CLEAN_PAGE_SENTINEL);
+  });
+
+  it('cleanUrls:false — the SAME request is still a miss (the option is opt-in, nothing changes)', async () => {
+    const app = buildApp([offMount], fixtureRoot);
+    const res = await app.request('/docs/getting-started');
+    expect(res.status).toBe(404);
+    const body = await res.text();
+    expect(body).toContain(CLEAN_404_SENTINEL); // the mount's own not-found page, exactly as before
+    expect(body).not.toContain(CLEAN_PAGE_SENTINEL);
+  });
+
+  it('cleanUrls:false — every other path answers byte-identically to a mount that never had the option', async () => {
+    // The opt-in promise in full: with the flag off, the paths the option COULD have moved keep the
+    // status and the document they have today.
+    const app = buildApp([offMount], fixtureRoot);
+    for (const [path, sentinel] of [
+      ['/', CLEAN_INDEX_SENTINEL],
+      ['/docs/', DOCS_INDEX_SENTINEL],
+      ['/docs/index.html', DOCS_INDEX_SENTINEL],
+      ['/docs/getting-started.html', CLEAN_PAGE_SENTINEL],
+      ['/both', BOTH_INDEX_SENTINEL], // the DIRECTORY index — the resolution `cleanUrls` flips
+      ['/both.html', BOTH_FILE_SENTINEL],
+      ['/exact', EXACT_FILE_SENTINEL],
+    ] as const) {
+      const res = await app.request(path);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain(sentinel);
+    }
+  });
+
+  it('cleanUrls:true — BOTH forms present: <path>.html WINS over <path>/index.html (the documented flip)', async () => {
+    // The one visible change for a site that opts in while shipping both forms: today `/both` serves
+    // `both/index.html`; under the flag it serves `both.html`, the order the hosts this mirrors use.
+    const app = buildApp([cleanMount], fixtureRoot);
+    const res = await app.request('/both');
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain(BOTH_FILE_SENTINEL);
+    expect(body).not.toContain(BOTH_INDEX_SENTINEL);
+  });
+
+  it('cleanUrls:true — a TRAILING-SLASH request still resolves the directory index, never <path>.html', async () => {
+    const app = buildApp([cleanMount], fixtureRoot);
+    const res = await app.request('/both/');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain(BOTH_INDEX_SENTINEL);
+  });
+
+  it('cleanUrls:true — an EXACT file match wins over its .html sibling', async () => {
+    const app = buildApp([cleanMount], fixtureRoot);
+    const res = await app.request('/exact');
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain(EXACT_FILE_SENTINEL);
+    expect(body).not.toContain(EXACT_HTML_SENTINEL);
+  });
+
+  it('cleanUrls:true — the mount root and a directory index are unaffected', async () => {
+    const app = buildApp([cleanMount], fixtureRoot);
+    const rootRes = await app.request('/');
+    expect(rootRes.status).toBe(200);
+    expect(await rootRes.text()).toContain(CLEAN_INDEX_SENTINEL);
+    const docsRes = await app.request('/docs/');
+    expect(docsRes.status).toBe(200);
+    expect(await docsRes.text()).toContain(DOCS_INDEX_SENTINEL);
+  });
+
+  it('cleanUrls:true + spa:false — a genuine miss still ends at the root 404.html (404 stays terminal)', async () => {
+    const app = buildApp([cleanMount], fixtureRoot);
+    const res = await app.request('/no/such/page');
+    expect(res.status).toBe(404);
+    expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    expect(await res.text()).toContain(CLEAN_404_SENTINEL);
+  });
+
+  it('cleanUrls:true + spa:true — <path>.html wins the deep link, and only a genuine miss reaches the SPA shell', async () => {
+    // The two options are ORDERED, not exclusive: exact → `<path>.html` → `<path>/index.html` → the SPA
+    // fallback. So a link that HAS a page gets that page (not the shell), and a path with no page at all
+    // still gets the shell — each option keeps its own promise on the same mount.
+    const app = buildApp(
+      [{ route: '/', dir: 'web/dist', spa: true, cleanUrls: true }],
+      fixtureRoot,
+    );
+    const page = await app.request('/docs/getting-started');
+    expect(page.status).toBe(200);
+    const pageBody = await page.text();
+    expect(pageBody).toContain(CLEAN_PAGE_SENTINEL);
+    expect(pageBody).not.toContain(CLEAN_INDEX_SENTINEL);
+
+    const miss = await app.request('/no/such/page');
+    expect(miss.status).toBe(200);
+    const missBody = await miss.text();
+    expect(missBody).toContain(CLEAN_INDEX_SENTINEL); // the SPA shell, unchanged by the flag
+    expect(missBody).not.toContain(CLEAN_404_SENTINEL);
+  });
+
+  it('spa:true alone — an unmatched path still returns the root document (unchanged by this change)', async () => {
+    const app = buildApp(
+      [{ route: '/', dir: 'web/dist', spa: true, cleanUrls: false }],
+      fixtureRoot,
+    );
+    const res = await app.request('/no/such/page');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain(CLEAN_INDEX_SENTINEL);
+  });
+
+  it('cleanUrls:true — a non-content verb on an extensionless path is still 405 + Allow, never the page', async () => {
+    const app = buildApp([cleanMount], fixtureRoot);
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE'] as const) {
+      const res = await app.request('/docs/getting-started', { method });
+      expect(res.status).toBe(405);
+      expect(res.headers.get('allow')).toBe('GET, HEAD, OPTIONS');
+      expect(await res.text()).not.toContain(CLEAN_PAGE_SENTINEL);
+    }
+  });
+
+  it('cleanUrls:true — HEAD on an extensionless path carries the page metadata with an EMPTY body', async () => {
+    const app = buildApp([cleanMount], fixtureRoot);
+    const res = await app.request('/docs/getting-started', { method: 'HEAD' });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-length')).not.toBeNull();
+    expect(await res.text()).toBe('');
+  });
+
+  it('cleanUrls:true — an unsatisfiable Range on an extensionless path → 416 sized from the .html file', async () => {
+    // The range guard resolves what the mount will ACTUALLY serve, so the clean-URL target is guarded
+    // exactly like a directly-requested file: no malformed 0-byte 206, no ERR_OUT_OF_RANGE → 500.
+    const size = Buffer.byteLength(`<!doctype html><title>${CLEAN_PAGE_SENTINEL}</title>`, 'utf8');
+    const app = buildApp([cleanMount], fixtureRoot);
+    const res = await app.request('/docs/getting-started', { headers: { Range: 'bytes=99999-' } });
+    expect(res.status).toBe(416);
+    expect(res.headers.get('content-range')).toBe(`bytes */${size}`);
+  });
+
+  it('cleanUrls:true — the fail-closed guard still refuses a dotfile and a .html symlink escaping the dir', async () => {
+    const app = buildApp([cleanMount], fixtureRoot);
+    // The dotfile itself, and the `.html` form of a path whose candidate leaves the served directory.
+    const dotfile = await app.request('/.env');
+    expect(dotfile.status).toBe(404);
+    expect(await dotfile.text()).not.toContain(CLEAN_DOTFILE_SECRET);
+    // `leak.html` is a symlink OUT of the served dir — the clean-URL candidate must not follow it.
+    const leak = await app.request('/leak');
+    expect(leak.status).toBe(404);
+    expect(await leak.text()).not.toContain(CLEAN_SYMLINK_SECRET);
+    // An encoded traversal whose `.html` form would land outside the served directory.
+    const traversal = await app.request('/a/..%2f..%2f..%2foutside/secret');
+    expect(traversal.status).toBe(404);
+    expect(await traversal.text()).not.toContain(CLEAN_SYMLINK_SECRET);
+  });
+
+  it('cleanUrls:true on a NON-ROOT mount — the route prefix is stripped before the .html lookup', async () => {
+    const app = buildApp(
+      [{ route: '/site', dir: 'web/dist', spa: false, cleanUrls: true }],
+      fixtureRoot,
+    );
+    const res = await app.request('/site/docs/getting-started');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain(CLEAN_PAGE_SENTINEL);
+  });
+
+  it('cleanUrls:true — a reserved platform namespace is still declined, never served as <path>.html', async () => {
+    const app = buildApp([cleanMount], fixtureRoot);
+    const res = await app.request('/v1/docs/getting-started');
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain(CLEAN_PAGE_SENTINEL);
   });
 });
 

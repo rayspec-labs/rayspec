@@ -339,7 +339,7 @@ maybeDescribe(
       expect(verdict.errors).toEqual([]);
       expect(verdict.staticProfile.profile).toBe('static');
       expect(verdict.staticProfile.frontendMounts).toEqual([
-        { route: '/', dir: 'web/dist', spa: true },
+        { route: '/', dir: 'web/dist', spa: true, cleanUrls: false },
       ]);
       // Nothing was composed (a static profile declares no store/route/trigger/workflow) and the verdict
       // says so outright rather than leaving the operator to infer it from an absent section.

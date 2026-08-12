@@ -58,7 +58,11 @@ export interface DeployDryRunResult {
   readonly staticProfile?: {
     /** The boot profile the doc selects — the DB-less, auth-less static boot. */
     readonly profile: 'static';
-    /** The frontend mounts that boot would serve (route → dir, plus the SPA-fallback flag). */
+    /**
+     * The frontend mounts that boot would serve (route → dir, plus the per-mount `spa` SPA-fallback
+     * and `cleanUrls` extensionless-resolution flags — every declared mount option, so the preview
+     * names the resolution boot will actually use).
+     */
     readonly frontendMounts: readonly FrontendSpec[];
     /** What such a deploy does NOT do — stated outright rather than left to inference. */
     readonly notes: readonly string[];
@@ -92,7 +96,9 @@ export interface DeployDryRunResult {
      * boot GATES on them: `deployDeclaredSpec` refuses fail-closed on a mount whose directory is
      * missing/unreadable or whose `spa` mount has no index.html, and that refusal is the one a backend
      * document meets most often (`examples/notes-ui` is exactly this shape). The matching `notProven`
-     * line says what was NOT checked; this says what will BE checked.
+     * line says what was NOT checked; this says what will BE checked. Each mount is echoed WHOLE —
+     * `route`, `dir` and both mount options (`spa`, `cleanUrls`) — the same shape `staticProfile`
+     * reports, so a mount option means one thing across the two profiles.
      */
     readonly frontendMounts?: readonly FrontendSpec[];
   };

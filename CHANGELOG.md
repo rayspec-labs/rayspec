@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`cleanUrls: true` on a frontend mount — extensionless URLs resolve to `<path>.html`, so a
+  generated multi-page site arrives with working links.** A static mount resolved a directory to its
+  `index.html` but never tried `<path>.html` for an extensionless request, so a site whose navigation
+  links `/docs/getting-started` while the built file is `docs/getting-started.html` answered `404` on
+  every such link — the default output shape of common static site generators, and a shape Netlify,
+  Vercel and GitHub Pages all resolve. The only mount knob was `spa`, which is not a substitute and is
+  worth naming as a trap here: on a multi-page site it turns every broken link into a `200` carrying
+  the root document, so link checkers, uptime probes and `curl` all pass and the site is wrong only to
+  a reader. The new third mount option resolves the extensionless form instead: the exact path when it
+  is a file, then `<path>.html`, then `<path>/index.html`, then — only when `spa: true` — the SPA
+  fallback, then the mount root's `404.html` or the uniform `404`. The two options are ordered rather
+  than exclusive, so a mount may set both and each keeps its own promise: a deep link that has a page
+  gets that page, and only a path with no page at all reaches the shell. `404` therefore stays the
+  **terminal** outcome for every `spa: false` mount — the distinction `spa: true` necessarily
+  destroys — and the option is fail-closed in the same two senses as the rest of the module: the
+  `<path>.html` candidate runs the same dotfile / traversal / symlink-escape guard as any other served
+  path, and the range, method and reserved-namespace guards all still run first. **It is opt-in
+  (default `false`), so no existing deployment changes behaviour** — and **one** behaviour changes for
+  a site that opts in: where **both** `<path>.html` and `<path>/index.html` exist for the same path,
+  the `.html` file now wins where the directory index served before (`.html` is tried first, the order
+  the hosts above use). A trailing-slash request (`/docs/`) is unaffected and still resolves the
+  directory index. The option is echoed in the `deploy --dry-run` verdict for **both** the static and
+  the backend profile, so the preview names the resolution boot will use.
+
 - **Speech synthesis reaches a backend-profile handler as the optional `init.tts` capability, behind a
   new `TTS_PROVIDER` contract — the egress half of the audio pipeline.** The platform shipped a real
   speech-to-text stack and, since the previous change, an `init.stt` handle for it; the other

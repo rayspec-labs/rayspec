@@ -1,8 +1,8 @@
 /**
  * Static frontend serving — mount a spec's declared `frontend[]` static assets alongside the API.
  *
- * A backend document may declare `frontend: [{ route, dir, spa? }]` (grammar.ts) so it can ship its
- * own built web UI next to the routes it exposes. `mountFrontend` registers ONE hardened static
+ * A backend document may declare `frontend: [{ route, dir, spa?, cleanUrls? }]` (grammar.ts) so it can
+ * ship its own built web UI next to the routes it exposes. `mountFrontend` registers ONE hardened static
  * handler per mount on the assembled Hono app, AFTER every API/auth/`/health`/OIDC route is
  * registered — so an API route, `/health`, and every `/v1/*`/`/oidc/*` platform path ALWAYS win over
  * a static mount (Hono runs matching handlers in registration order; a returning handler terminates,
@@ -29,6 +29,19 @@
  * A refused request passes through to `next()` → the platform's uniform 404 (never the SPA shell, even
  * for an `spa:true` mount — a traversal/dotfile attempt must not be answered with `index.html`). A
  * directory is never listed. This module is import-safe (no side effects at module load).
+ *
+ * CLEAN URLS — `cleanUrls: true` (opt-in, default false) resolves an extensionless request the way
+ * Netlify / Vercel / GitHub Pages do, so a site whose navigation links `/docs/getting-started` while
+ * the built file is `docs/getting-started.html` serves rather than 404s. The mount's full resolution
+ * order is then: the EXACT path when it is a file → `<path>.html` → `<path>/index.html` → (only for
+ * `spa: true`) the SPA fallback → the root `404.html` / the uniform 404. Two consequences worth
+ * stating: `<path>.html` is tried BEFORE `<path>/index.html`, so on a site that ships BOTH forms the
+ * `.html` file wins where the directory index does today (visible only once the mount opts in); and,
+ * because the flag adds candidates rather than a catch-all, 404 stays the TERMINAL outcome — the
+ * distinction `spa: true` necessarily destroys — for every `spa: false` mount. The resolution runs
+ * AFTER the reserved-prefix decline, the fail-closed path guard, the range guard and the method guard,
+ * and `<path>.html` passes the SAME dotfile / traversal / symlink-escape hardening as any other served
+ * path; a mount that does not set the flag resolves byte-identically to before.
  *
  * CUSTOM 404 PAGE — at the GENUINE-miss fall-through (a request that resolved to no file, has no
  * `dir/index.html`, and no SPA fallback took over), if the mount root ships a `404.html` it is served
@@ -149,25 +162,62 @@ function statSyncSafe(path: string): Stats | undefined {
 }
 
 /**
- * Resolve the on-disk file `serveStatic` will read for `subPath` under `baseDir`, mirroring its own
- * resolution: `join(baseDir, subPath)`, and if that is a directory, its `index.html`. Returns the file
- * `{ path, size }` from the SAME stat that proved it a file (so the range check never re-stats), or
+ * Resolve the CLEAN-URL target for `subPath` under `baseDir` — the `<subPath>.html` file a
+ * `cleanUrls:true` mount serves for an extensionless request (see the module header). Returns the file
+ * `{ path, size }` from the stat that proved it a file, or `undefined` when the clean-URL form does not
+ * apply, in which case the caller's resolution continues UNCHANGED:
+ *
+ *   - a DIRECTORY request (the mount root, or a path ending in `/`) keeps its `index.html` — appending
+ *     `.html` there would name the hidden file `docs/.html`, which the dotfile guard refuses anyway;
+ *   - an EXACT match wins over the clean-URL form: `<subPath>.html` is the fallback for a request path
+ *     that is not itself a servable file, never a redirect of one that is;
+ *   - `<subPath>.html` runs the SAME fail-closed hardening the request path itself got (`isSafeStaticPath`),
+ *     so a dotfile, a candidate escaping the served directory, and a symlink pointing out of it are refused.
+ */
+function resolveCleanUrlTarget(
+  baseDir: string,
+  realBaseDir: string,
+  subPath: string,
+): { path: string; size: number } | undefined {
+  if (subPath === '' || subPath.endsWith('/')) return undefined;
+  if (statSyncSafe(join(baseDir, subPath))?.isFile() === true) return undefined;
+  const htmlSubPath = `${subPath}.html`;
+  if (!isSafeStaticPath(baseDir, realBaseDir, htmlSubPath)) return undefined;
+  const htmlFile = join(baseDir, htmlSubPath);
+  const htmlStat = statSyncSafe(htmlFile);
+  return htmlStat?.isFile() ? { path: htmlFile, size: htmlStat.size } : undefined;
+}
+
+/**
+ * Resolve the on-disk file the mount will read for `subPath` under `baseDir`, mirroring the resolution
+ * the request itself takes: `join(baseDir, subPath)` when that is a file, then — for a `cleanUrls:true`
+ * mount only — `<subPath>.html`, then, if the candidate is a directory, its `index.html`. Returns the
+ * file `{ path, size }` from the SAME stat that proved it a file (so the range check never re-stats), or
  * `undefined` when nothing servable exists (a miss — `serveStatic` will 404 / the SPA fallback takes
- * over, so the range guard must NOT intercept it via this resolution).
+ * over, so the range guard must NOT intercept it via this resolution). With `cleanUrls:false` the
+ * resolution is byte-for-byte `serveStatic`'s own.
  */
 function resolveStaticTarget(
   baseDir: string,
+  realBaseDir: string,
   subPath: string,
+  cleanUrls: boolean,
 ): { path: string; size: number } | undefined {
   const candidate = join(baseDir, subPath);
   const stat = statSyncSafe(candidate);
-  if (stat === undefined) return undefined;
-  if (stat.isDirectory()) {
+  if (stat?.isFile()) return { path: candidate, size: stat.size };
+  // CLEAN URLS: `<subPath>.html` is tried BEFORE the directory's `index.html` — the order the hosts
+  // this option mirrors use, and the order the mount serves in.
+  if (cleanUrls) {
+    const cleanTarget = resolveCleanUrlTarget(baseDir, realBaseDir, subPath);
+    if (cleanTarget !== undefined) return cleanTarget;
+  }
+  if (stat?.isDirectory()) {
     const indexFile = join(candidate, 'index.html');
     const indexStat = statSyncSafe(indexFile);
     return indexStat?.isFile() ? { path: indexFile, size: indexStat.size } : undefined;
   }
-  return stat.isFile() ? { path: candidate, size: stat.size } : undefined;
+  return undefined;
 }
 
 /**
@@ -189,21 +239,24 @@ function unsatisfiableRangeForSize(size: number, rangeHeader: string): Response 
 }
 
 /**
- * RFC-7233 range validation, additive in front of `serveStatic`. Resolves the target the way
- * `serveStatic` will (reusing its single stat's size — no re-stat, no unchecked cast) and, if the range
- * is unsatisfiable, returns a proper 416 instead of `serveStatic`'s malformed 0-byte 206 (closed beyond
- * EOF) or `ERR_OUT_OF_RANGE` → 500 (open beyond EOF). When the requested path resolves to NO file, an
- * `spa:true` mount would fall through to the SPA fallback, which re-runs the SAME buggy Range math
- * against `baseDir/index.html` — so the range is validated against that `index.html` too. Only a genuine
- * miss with no SPA fallback returns `undefined`, letting `serveStatic` produce its normal 404.
+ * RFC-7233 range validation, additive in front of `serveStatic`. Resolves the target the way the mount
+ * will serve it (reusing its single stat's size — no re-stat, no unchecked cast), including a
+ * `cleanUrls:true` mount's `<path>.html`, and, if the range is unsatisfiable, returns a proper 416
+ * instead of `serveStatic`'s malformed 0-byte 206 (closed beyond EOF) or `ERR_OUT_OF_RANGE` → 500 (open
+ * beyond EOF). When the requested path resolves to NO file, an `spa:true` mount would fall through to
+ * the SPA fallback, which re-runs the SAME buggy Range math against `baseDir/index.html` — so the range
+ * is validated against that `index.html` too. Only a genuine miss with no SPA fallback returns
+ * `undefined`, letting `serveStatic` produce its normal 404.
  */
 function unsatisfiableRangeResponse(
   baseDir: string,
+  realBaseDir: string,
   subPath: string,
   spa: boolean,
+  cleanUrls: boolean,
   rangeHeader: string,
 ): Response | undefined {
-  const target = resolveStaticTarget(baseDir, subPath);
+  const target = resolveStaticTarget(baseDir, realBaseDir, subPath, cleanUrls);
   if (target !== undefined) return unsatisfiableRangeForSize(target.size, rangeHeader);
   // Direct target missed. For an spa:true mount the request falls through to `index.html` — guard the
   // range against the file the SPA fallback will actually serve so the buggy math never runs on it.
@@ -385,7 +438,7 @@ export function mountFrontend<E extends Env>(
   const ordered = [...mounts].sort((a, b) => b.route.length - a.route.length);
 
   for (const mount of ordered) {
-    const { route, spa } = mount;
+    const { route, spa, cleanUrls } = mount;
     const baseDir = resolve(specDir, mount.dir);
     // Pre-resolve the served directory's real path once (the boot guard already proved it exists +
     // is a directory). If it cannot be resolved, fall back to baseDir — serveStatic then misses.
@@ -408,6 +461,18 @@ export function mountFrontend<E extends Env>(
               return stripped.length > 0 ? stripped : '/';
             },
           });
+
+    // CLEAN URLS: the same byte server pointed at `<path>.html`. `serveStatic` hands the rewrite the
+    // FULL decoded request path, so the rewrite strips the route prefix exactly as `fileServer`'s does
+    // and appends the extension. Only invoked once `resolveCleanUrlTarget` has proven that file exists
+    // and is safe to serve, so this server never resolves a path the guards have not cleared.
+    const cleanUrlServer = cleanUrls
+      ? serveStatic({
+          root: baseDir,
+          rewriteRequestPath: (p: string): string =>
+            `${route === '/' ? p : p.slice(route.length)}.html`,
+        })
+      : undefined;
 
     // SPA fallback: an unmatched deep link under the mount returns `index.html` (History-API routing).
     // Only reached for a SAFE path that missed the file server — a guard-refused path never gets here.
@@ -438,7 +503,14 @@ export function mountFrontend<E extends Env>(
       // fallback would serve; every honored / clamped range still falls through to serveStatic.
       const rangeHeader = c.req.header('Range');
       if (rangeHeader !== undefined && c.req.method !== 'HEAD' && c.req.method !== 'OPTIONS') {
-        const rangeRes = unsatisfiableRangeResponse(baseDir, subPath, spa, rangeHeader);
+        const rangeRes = unsatisfiableRangeResponse(
+          baseDir,
+          realBaseDir,
+          subPath,
+          spa,
+          cleanUrls,
+          rangeHeader,
+        );
         if (rangeRes) return stamped(rangeRes);
       }
       // METHOD: a static mount is a CONTENT surface — it serves GET/HEAD/OPTIONS and answers every other
@@ -461,6 +533,16 @@ export function mountFrontend<E extends Env>(
             { Allow: ALLOW_HEADER },
           ),
         );
+      }
+      // CLEAN URLS (opt-in): an extensionless path that is not itself a file is served as
+      // `<path>.html` — BEFORE the file server, whose own resolution would answer `<path>/index.html`.
+      // Runs AFTER every guard above, so a reserved namespace, a refused attack path, an unsatisfiable
+      // range and a non-content verb keep their exact responses; when no such file exists the request
+      // falls through to the file server UNCHANGED, so `<path>/index.html`, the SPA fallback and the
+      // terminal 404 all keep their turn in that order.
+      if (cleanUrlServer && resolveCleanUrlTarget(baseDir, realBaseDir, subPath) !== undefined) {
+        const cleanRes = await cleanUrlServer(c, noop);
+        if (cleanRes) return stamped(cleanRes);
       }
       // Serve the file; on a hit serveStatic returns the Response. On a miss it returns undefined —
       // then the SPA fallback (if any) gets a turn; if THAT misses too, fall through to the 404.
