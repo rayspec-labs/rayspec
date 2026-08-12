@@ -358,10 +358,11 @@ export interface HandlerInit {
    * plain result out), preserving the external-exposure isolate seam. NOT tenant-partitioned (it
    * transcribes the bytes it is handed — see `SttCapability`).
    *
-   * POPULATED ON ROUTE + TOOL INITS. A TRIGGER init carries only `{ tenantId, db, triggerName }` at
-   * runtime (the trigger builder injects no optional capability at all — the same boundary `blob` and
-   * `fsSource` already have), so a trigger handler that needs transcription does its work through a
-   * route or a tool.
+   * POPULATED ON `handler`-KIND ROUTE INITS + TOOL INITS. A `stream`-kind route init carries only its
+   * byte-moving surface (the raw request plus the REQUIRED `blob`) and a TRIGGER init carries only
+   * `{ tenantId, db, triggerName }` at runtime — neither builder injects this capability, the same
+   * boundary `fsSource` already has — so a trigger or stream handler that needs transcription does its
+   * work through a `handler`-kind route or a tool.
    */
   readonly stt?: SttCapability;
 }

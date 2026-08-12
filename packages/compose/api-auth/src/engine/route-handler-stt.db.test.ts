@@ -2,7 +2,7 @@
  * the STT route-handler seam, DB-backed, end-to-end through the REAL createAuthApp +
  * declared-route interpreter, with a RECORDING stand-in `SttCapability` (NO provider call in this
  * process — the REAL provider selection + the bytes→ref resolver wrap are proven in @rayspec/server's
- * stt-capability suites).
+ * `stt-capability.unit.test.ts`).
  *
  * These assert the contract on GROUND TRUTH (fail-the-fix, not pass-the-shape): a declared ROUTE
  * handler that calls `init.stt.transcribe(...)` reaches the capability the DEPLOYMENT injected onto

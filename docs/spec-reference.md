@@ -1370,34 +1370,51 @@ otherwise not automatic for handler routes.
 
 Beyond the tenant-bound data facade (`init.db`), a handler receives whatever
 **optional capabilities the deployment configured** — never one it constructs
-itself. Each follows the same rule: **present when the deployment wired it, absent
-otherwise**. Absent means the field is not on the init at all (`'stt' in init` is
-`false`), not that it is `undefined`-valued, so a handler that needs one fail-closes
-loudly on the missing handle rather than calling a silent no-op:
+itself. Each follows the same presence rule: **present when the deployment wired it
+*and* this handler kind receives it, absent otherwise**. Absent means the field is not
+on the init at all (`'stt' in init` is `false`), not that it is `undefined`-valued, so
+a handler that needs one fail-closes loudly on the missing handle rather than calling
+a silent no-op:
 
-| Field | What it is | Configured by |
-| --- | --- | --- |
-| `init.blob` | Tenant-bound binary storage (opaque keys). | `RAYSPEC_BLOB_ROOT` |
-| `init.fsSource` | Read-only, path-jailed reader over a deployment-static root. | `RAYSPEC_FS_SOURCE_ROOT` |
-| `init.mintPlayToken` | Mint a short-lived `?token=` for a `stream` playback route. | `RAYSPEC_MEDIA_SIGNING_KEY` |
-| `init.enqueue` | Enqueue a durable, off-request agent run. | a configured durable worker |
-| `init.stt` | Transcribe audio bytes (speech-to-text). | `STT_PROVIDER` |
+Which handlers a capability reaches differs per capability — there is no blanket
+rule, so read the **Reaches** column rather than assuming a configured capability is
+everywhere:
 
-Capabilities reach **route** and **tool** handlers. A **trigger** handler receives
-only `{ tenantId, db, triggerName }`, so work that needs a capability belongs in a
-route or a tool the trigger drives.
+| Field | What it is | Reaches | Configured by |
+| --- | --- | --- | --- |
+| `init.blob` | Tenant-bound binary storage (opaque keys). | `stream`-kind routes (always) and tools | a blob backend — `RAYSPEC_BLOB_ROOT`, or one an extension pack provides — and only built when the spec declares a `stream` route |
+| `init.fsSource` | Read-only, path-jailed reader over a deployment-static root. | `handler`-kind routes and tools | `RAYSPEC_FS_SOURCE_ROOT` |
+| `init.mintPlayToken` | Mint a short-lived `?token=` for a `stream` playback route. | `handler`-kind routes | `RAYSPEC_MEDIA_SIGNING_KEY` |
+| `init.enqueue` | Enqueue a durable, off-request agent run. | `handler`-kind routes | a configured durable worker |
+| `init.stt` | Transcribe audio bytes (speech-to-text). | `handler`-kind routes and tools | `STT_PROVIDER` |
+
+Two boundaries the table implies are worth spelling out.
+
+- A `kind: route` handler is reached through one of **two** route actions, and they
+  carry different inits. A `handler`-kind route gets the `handler`-kind rows above;
+  a `stream`-kind route gets the raw `Request`/`Response` pair plus a **required**
+  `init.blob` (a stream route exists to move bytes, so the boot fail-closes without a
+  blob backend) and **nothing else from this table**. In particular a `handler`-kind
+  route never receives `init.blob`, however `RAYSPEC_BLOB_ROOT` is set — move bytes
+  through a `stream` route or a tool, and pass the handler a key, not a handle.
+- A **trigger** handler receives only `{ tenantId, db, triggerName }`, so work that
+  needs any capability here belongs in a route or a tool the trigger drives.
 
 #### `init.stt` — transcription
 
 ```ts
+// pin the language …
 const result = await init.stt.transcribe(bytes, {
   contentType: 'audio/ogg',   // advisory; providers sniff the container
-  languageHint: 'de',         // pin a language …
-  detectLanguage: true,       // … or detect one (mutually exclusive with the hint)
+  languageHint: 'de',
 })
 if (result.status === 'completed') {
   await init.db.insert('transcripts', { text: result.transcript.full_text })
 }
+
+// … or ask the provider to detect it. The two are MUTUALLY EXCLUSIVE: a call that
+// sets both comes back as `status: 'failed'` with `error.code: 'unsupported_option'`.
+const detected = await init.stt.transcribe(bytes, { detectLanguage: true })
 ```
 
 `transcribe` takes the **bytes the handler already holds** — a raw-body upload, a

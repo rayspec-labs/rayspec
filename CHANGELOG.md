@@ -16,21 +16,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had to deep-import built adapter files across package boundaries and cap its audio at the JSON body
   limit. A route or tool handler now receives `init.stt.transcribe(bytes, opts)` — bytes it already
   holds (a raw-body upload, a blob, a file read through `init.fsSource`) in, the neutral transcript
-  artifact out, with `contentType`, `languageHint`, and `detectLanguage` as plain options. The engine
-  selects the provider and builds the adapter once at boot and resolves the per-call media internally,
-  so a handler never names a provider, reads a credential, or constructs an adapter. Presence follows
-  the other optional capabilities exactly: set `STT_PROVIDER` and every route/tool init carries the
-  handle; leave it unset and the field is **absent** (not `undefined`-valued), so a handler that needs
-  it fail-closes loudly instead of transcribing into a silent no-op — and an unset provider is never a
-  boot error, since nothing in a spec declares that a handler transcribes. `STT_PROVIDER=deepgram`
-  demands `DEEPGRAM_API_KEY` **at boot** rather than answering every call with a content-free
-  `provider_unavailable` at request time, an unsupported provider name is refused at boot naming the
-  wired ones, and `STT_PROVIDER=fake` is a working deterministic offline transcriber for dev and CI
-  (identical input yields an identical synthetic transcript; the boot warns loudly that no audio is
-  being transcribed, warn-only). A provider-side failure is a `status: 'failed'` result carrying a
-  content-free error, never a throw and never an echo of the audio or the credential. Trigger inits
-  are unchanged (they carry no optional capability), and a deployment that sets no provider boots and
-  serves exactly as before.
+  artifact out, with `contentType`, `languageHint`, and `detectLanguage` as plain options
+  (`languageHint` and `detectLanguage: true` are mutually exclusive: a call that sets both comes back
+  as a `failed` result carrying `unsupported_option`, on the offline provider exactly as on the real
+  one, so the illegal pair cannot pass in CI and first fail in production). The engine selects the
+  provider and builds the adapter once at boot and resolves the per-call media internally, so a
+  handler never names a provider, reads a credential, or constructs an adapter. Presence follows the
+  other optional capabilities exactly: set `STT_PROVIDER` and every `handler`-kind route init and
+  every tool init carries the handle (a `stream`-kind route init and a trigger init do not — neither
+  builder injects it); leave it unset and the field is **absent** (not `undefined`-valued), so a
+  handler that needs it fail-closes loudly instead of transcribing into a silent no-op — and an unset
+  provider is never a boot error, since nothing in a spec declares that a handler transcribes.
+  `STT_PROVIDER=deepgram` demands `DEEPGRAM_API_KEY` **at boot** rather than answering every call
+  with a content-free `provider_unavailable` at request time, an unsupported provider name is refused
+  at boot naming the wired ones, and `STT_PROVIDER=fake` is a working deterministic offline
+  transcriber for dev and CI (identical input yields an identical synthetic transcript; the boot warns
+  loudly that no audio is being transcribed, warn-only). A provider-side failure is a
+  `status: 'failed'` result carrying a content-free error, never a throw and never an echo of the
+  audio or the credential. Trigger inits are unchanged (they carry no optional capability), and a
+  deployment that sets no provider boots and serves exactly as before.
 
 - **An optional response projection on declared store routes: `project` with `casing`
   (snake default | camel), `omitInjected`, `rename`, and a `fields` allowlist.** A store route

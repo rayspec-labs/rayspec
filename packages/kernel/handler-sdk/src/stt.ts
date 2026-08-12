@@ -48,8 +48,10 @@ export interface SttTranscribeOptions {
   readonly contentType?: string;
   /**
    * Pin the transcription to a language (a BCP-47-ish provider language code, e.g. `de`). MUTUALLY
-   * EXCLUSIVE with `detectLanguage: true` — a call that sets both is refused by the adapter with a
-   * structured `unsupported_option` failure, never a silently-dropped option.
+   * EXCLUSIVE with `detectLanguage: true` — a call that sets both comes back as the `failed` variant
+   * carrying a structured `unsupported_option` error, never a silently-dropped option. Every wired
+   * provider refuses the pair, the offline one included, so a call that passes in dev/CI cannot first
+   * fail on a real provider.
    */
   readonly languageHint?: string;
   /** Ask the provider to DETECT the dominant language instead of pinning one (see `languageHint`). */

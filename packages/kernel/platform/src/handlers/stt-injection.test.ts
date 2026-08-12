@@ -5,7 +5,7 @@
  *
  * FAIL-THE-FIX against a recording stand-in capability (this layer ROUTES the handle; the real
  * adapter-backed capability — provider selection, the bytes→ref resolver wrap, the deterministic fake —
- * is proven in @rayspec/server):
+ * is proven in @rayspec/server's `stt-capability.unit.test.ts`):
  *   - a tool / route handler receives an `init.stt` whose `transcribe(bytes, opts)` it can call;
  *   - the EXACT bytes + the plain option record reach the capability (serializable-shaped pass-through);
  *   - FAIL-CLOSED when nothing is wired: `init.stt` is ABSENT (not `undefined`) → the handler fail-closes.
