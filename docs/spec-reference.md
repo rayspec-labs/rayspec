@@ -1366,6 +1366,64 @@ holds `store:write`; the read/write scope split that declarative `store` routes 
 (`list`/`get` → `store:read`, `create`/`update`/`delete` → `store:write`) is
 otherwise not automatic for handler routes.
 
+### Optional handler capabilities
+
+Beyond the tenant-bound data facade (`init.db`), a handler receives whatever
+**optional capabilities the deployment configured** — never one it constructs
+itself. Each follows the same rule: **present when the deployment wired it, absent
+otherwise**. Absent means the field is not on the init at all (`'stt' in init` is
+`false`), not that it is `undefined`-valued, so a handler that needs one fail-closes
+loudly on the missing handle rather than calling a silent no-op:
+
+| Field | What it is | Configured by |
+| --- | --- | --- |
+| `init.blob` | Tenant-bound binary storage (opaque keys). | `RAYSPEC_BLOB_ROOT` |
+| `init.fsSource` | Read-only, path-jailed reader over a deployment-static root. | `RAYSPEC_FS_SOURCE_ROOT` |
+| `init.mintPlayToken` | Mint a short-lived `?token=` for a `stream` playback route. | `RAYSPEC_MEDIA_SIGNING_KEY` |
+| `init.enqueue` | Enqueue a durable, off-request agent run. | a configured durable worker |
+| `init.stt` | Transcribe audio bytes (speech-to-text). | `STT_PROVIDER` |
+
+Capabilities reach **route** and **tool** handlers. A **trigger** handler receives
+only `{ tenantId, db, triggerName }`, so work that needs a capability belongs in a
+route or a tool the trigger drives.
+
+#### `init.stt` — transcription
+
+```ts
+const result = await init.stt.transcribe(bytes, {
+  contentType: 'audio/ogg',   // advisory; providers sniff the container
+  languageHint: 'de',         // pin a language …
+  detectLanguage: true,       // … or detect one (mutually exclusive with the hint)
+})
+if (result.status === 'completed') {
+  await init.db.insert('transcripts', { text: result.transcript.full_text })
+}
+```
+
+`transcribe` takes the **bytes the handler already holds** — a raw-body upload, a
+blob it just read, a file from `init.fsSource` — and returns the neutral transcript
+artifact (`full_text`, `language`, `confidence`, plus word/segment/span detail). The
+engine builds the provider adapter **once at boot** and resolves the per-call media
+internally, so a handler never selects a provider, reads a credential, or constructs
+an adapter.
+
+Provider selection is the `STT_PROVIDER` environment contract — `deepgram` or `fake`
+today, the same contract the audio pipeline uses:
+
+- **unset** — `init.stt` is absent. This is not a boot error: nothing in a spec
+  declares that a handler transcribes, so the capability is purely deploy-gated.
+- **`deepgram`** — requires `DEEPGRAM_API_KEY`, demanded **at boot**. Selecting the
+  provider without its credential fails the boot closed rather than answering every
+  call with `provider_unavailable` at request time.
+- **`fake`** — a deterministic offline transcriber for dev and CI: identical input
+  yields an identical synthetic transcript, no audio is read and no provider is
+  contacted. The boot **warns** loudly (warn-only — it never blocks a dev boot).
+
+`transcribe` does not throw for a provider-side condition. An upstream failure comes
+back as `status: 'failed'` with a content-free `error` (a code plus a message naming
+the provider or HTTP status only — never the audio, the response body, or the
+credential), so a handler branches on `result.status`.
+
 ## `extensions`
 
 Optional references to versioned **extension packs** — product code authored and

@@ -77,6 +77,28 @@ export type {
 
 import type { FsSource } from './fs-source.js';
 
+// The neutral TRANSCRIPT shapes an `init.stt` call returns — defined in `@rayspec/stt-port`, the
+// provider-NEUTRAL speech-to-text port (no provider is named or imported there). Re-exported on the
+// same conduit as the text/byte primitives above so a handler names the result type from the ONE SDK
+// package; TYPE-ONLY, so the SDK still ships no runtime.
+export type {
+  SttAdapterError,
+  SttSegment,
+  SttTrack,
+  SttTranscript,
+  SttTranscriptionResult,
+  SttTranscriptSpan,
+  SttTranscriptStatus,
+  SttWord,
+} from '@rayspec/stt-port';
+// The neutral speech-to-text capability contract — the injected handle a handler may receive to
+// transcribe audio BYTES it already holds (interface only; the provider adapter is selected + built at
+// the composition root). Re-exported here so a handler imports every capability shape from the one SDK
+// package.
+export type { SttCapability, SttTranscribeOptions } from './stt.js';
+
+import type { SttCapability } from './stt.js';
+
 // ---------------------------------------------------------------------------------------
 // The store capability facade — a SERIALIZABLE-shaped, NAME-keyed, tenant-bound DB surface.
 // ---------------------------------------------------------------------------------------
@@ -324,6 +346,24 @@ export interface HandlerInit {
    * (a shared, deployment-static read root — see `FsSource`).
    */
   readonly fsSource?: FsSource;
+  /**
+   * The neutral SPEECH-TO-TEXT capability — transcribe audio bytes the handler
+   * already holds into the neutral transcript artifact. OPTIONAL: present only when the deployment
+   * configured an STT provider at the composition root (`STT_PROVIDER` — the SAME env contract the
+   * product profile's audio pipeline uses), so a handler that needs it fail-closes loudly on
+   * `undefined` rather than the engine forcing a provider onto every deployment (mirrors `blob`/
+   * `fsSource`). The engine builds the provider adapter ONCE at the composition root and wraps the
+   * per-call media resolution internally — a handler never selects a provider, reads a credential, or
+   * constructs an adapter. It is a SERIALIZABLE-shaped handle (bytes + a plain options record in, a
+   * plain result out), preserving the external-exposure isolate seam. NOT tenant-partitioned (it
+   * transcribes the bytes it is handed — see `SttCapability`).
+   *
+   * POPULATED ON ROUTE + TOOL INITS. A TRIGGER init carries only `{ tenantId, db, triggerName }` at
+   * runtime (the trigger builder injects no optional capability at all — the same boundary `blob` and
+   * `fsSource` already have), so a trigger handler that needs transcription does its work through a
+   * route or a tool.
+   */
+  readonly stt?: SttCapability;
 }
 
 /**

@@ -18,6 +18,7 @@ import type {
   DurableExecutor,
   FsSourceFactory,
   ResolvedHandler,
+  SttCapability,
   ToolFactory,
 } from '@rayspec/platform';
 import type { RaySpec } from '@rayspec/spec';
@@ -141,6 +142,18 @@ export interface DeclarativeEngine {
    * root ⇒ available to every handler; unset ⇒ absent. NOT tenant-partitioned (see `FsSource`).
    */
   fsSourceFactory?: FsSourceFactory;
+  /**
+   * the composition-root `SttCapability` — the speech-to-text handle a tool/route handler
+   * receives as `init.stt` (transcribe audio bytes the handler already holds; no tenant arg, since it
+   * transcribes what it is handed). Injected exactly like `blobFactory` (the platform ships no
+   * provider): the deployment selects a provider via `STT_PROVIDER` and the composition root builds
+   * the adapter ONCE, wrapping the per-call media resolution internally. OPTIONAL: absent when no
+   * provider is configured — a handler that reads `init.stt` then fail-closes loudly on `undefined`.
+   * Like `fsSourceFactory` no route KIND requires it (there is no `stream`-equivalent deploy guard),
+   * so it is purely deploy-config-gated: set the provider ⇒ available to every route/tool handler;
+   * unset ⇒ absent. NOT tenant-partitioned (see `SttCapability`).
+   */
+  sttCapability?: SttCapability;
   /**
    * the media-token service for the `stream` (mode:'playback') arm — the SECOND
    * auth path (HS256, distinct `RAYSPEC_MEDIA_SIGNING_KEY`). Injected exactly like `blobFactory` (the
