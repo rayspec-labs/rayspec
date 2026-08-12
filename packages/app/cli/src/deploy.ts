@@ -139,7 +139,7 @@ const BACKEND_DRY_RUN_NOT_PROVEN = [
   ...DRY_RUN_NOT_PROVEN,
   "that the boot accepts the declared routes (a 'stream' route with no blob backend configured is refused fail-closed)",
   'that the declared handler modules resolve (the boot loads compiled JavaScript only, under the jailed root)',
-  'any speech capability the handlers reach for (STT_PROVIDER / TTS_PROVIDER and their credentials are demanded at boot)',
+  'any speech capability the handlers reach for (selecting STT_PROVIDER / TTS_PROVIDER makes that provider credential a boot demand; leaving one unset is never a boot error)',
   // The refusal a backend document meets most often, and the one the static arm already warns about:
   // this profile's boot GATES on every declared frontend mount (deployDeclaredSpec throws
   // BootConfigError on a missing/unreadable dir, or an `spa` mount with no index.html) where the
