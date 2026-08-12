@@ -17,7 +17,8 @@ npx rayspec plan rayspec.yaml   # show what a deploy would materialize
 npx rayspec dev gen-secrets     # mint the boot secrets, then set DATABASE_URL to deploy
 ```
 
-Every subcommand emits machine-parseable JSON to stdout.
+Every subcommand emits machine-parseable JSON to stdout — `--help` is the one exception
+and prints plain text there (`rayspec <command> --help` scopes it to that command).
 
 ## Links
 
