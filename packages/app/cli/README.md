@@ -5,8 +5,9 @@ diagnosis, `rayspec plan` for a deploy preview), a production-mutating `tenant`
 command group (`rayspec tenant ensure` — idempotently create or resolve the
 organization a deployment binds to), and a clearly separated, local-dev `dev`
 command group (scaffolding, secret minting). Every subcommand emits
-machine-parseable JSON to stdout, and none of them prints a secret except
-`rayspec dev bootstrap-tenant`, whose org token is its documented output.
+machine-parseable JSON to stdout — `--help` is the one exception and prints plain
+text there — and none of them prints a secret except `rayspec dev bootstrap-tenant`,
+whose org token is its documented output.
 
 Usually invoked through the unscoped launcher
 [`rayspec`](https://www.npmjs.com/package/rayspec) (`npx rayspec …`).
