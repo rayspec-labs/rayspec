@@ -218,6 +218,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A malformed `init.enqueue` call now fail-closes with a clear error naming the expected
+  `{ agentId, input }` shape, instead of answering `404`.** The capability takes one request object.
+  Called positionally — `init.enqueue(agentId, input)`, the shape the name reads like — the string
+  landed where the object was expected, `agentId` read as `undefined`, the registry lookup missed, and
+  the request ended as `404 NOT_FOUND` with the uniform `Not found.` body: a declared route reporting
+  a not-found from a handler that demonstrably ran, which sends debugging to routing and mounting. A
+  handler ships as an `.mjs` module, so the published type protects a type-checked call site only. The
+  closure now refuses a malformed argument — anything that is not an object carrying a string
+  `agentId` — before it reaches the shared enqueue core, with a `500 INTERNAL` whose message names the
+  capability, names the expected `{ agentId, input }` shape, reports the *type* of the argument that
+  arrived (never its value), and states that the call is not positional. `500` rather than `400` or
+  `404` because a mis-call is a defect in the handler's own code, not something the HTTP caller did —
+  the same register in which this capability family already fails closed (an absent capability throws
+  to `500`, and a nullish mis-call already reached `500`). The refusal is written as a shared shape the
+  other optional capabilities (`blob`, `fsSource`, `mintPlayToken`, `stt`, `tts`) can adopt at their
+  own seams; none is retrofitted here. **Note the status change:** a call that answers `404` today
+  answers `5xx` after this change, so a deployment alerting on 5xx rates will see it. An undeclared but
+  well-formed agent id is unmoved — it still answers the uniform registry-bound `404` — and a correct
+  object-form call is untouched.
 - **A valid API key calling `GET /v1/auth/me` now receives `403 FORBIDDEN` with a message naming
   the actual situation, instead of `401 UNAUTHENTICATED — "Authentication failed."`.** The key
   authenticated fine; the route answers a *user* identity, which a key principal (`apikey` or

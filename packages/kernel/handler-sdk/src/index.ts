@@ -442,6 +442,10 @@ export type ToolHandlerInit = HandlerInit;
  *  - FAIL-CLOSED WHEN UNWIRED: this capability is ABSENT (`undefined`) on a deployment with no durable
  *    worker wired — a handler that needs it fail-closes loudly on `undefined` (mirrors `blob`/
  *    `mintPlayToken`), never a silent no-op.
+ *  - FAIL-CLOSED ON A MALFORMED CALL: it takes ONE request object and is NOT positional. A positional
+ *    `enqueue(agentId, input)` — or any argument with no string `agentId` — is refused with a clear
+ *    error naming the expected `{ agentId, input }` shape, never a 404 that reads as a routing fault.
+ *    A handler ships as an `.mjs` module, where the type below does not reach the call site.
  *
  * IDEMPOTENCY: an OPTIONAL `idempotencyKey` makes the enqueue exactly-once for that key (the SAME
  * Idempotency-Key reserve the HTTP path uses — a re-call with the same key + same `{agentId,input}`

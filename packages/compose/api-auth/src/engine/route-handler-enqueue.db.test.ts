@@ -16,6 +16,9 @@
  *  (3) REGISTRY-BOUND — `init.enqueue({ agentId:'no-such-agent' })` fail-closes (NOT_FOUND); no job.
  *  (4) FAIL-CLOSED WHEN UNWIRED — with no durable executor, `init.enqueue` is ABSENT (the handler
  *      fail-closes loudly on `undefined`); no silent no-op.
+ *  (5) MALFORMED CALL — a POSITIONAL `init.enqueue(agentId, input)` (or an argument with no string
+ *      `agentId`) fail-closes 500 naming the expected `{ agentId, input }` shape; no job. The
+ *      UNDECLARED-agent 404 of (3) is UNMOVED — the two failures stay distinguishable.
  *
  * Skips when DATABASE_URL is absent.
  */
@@ -119,12 +122,21 @@ handlers:
     module: handlers/finalize.ts
     export: finalize
     kind: route
+  - id: mis_finalize_handler
+    module: handlers/mis-finalize.ts
+    export: misFinalize
+    kind: route
 api:
   - method: POST
     path: /finalize/{agent_id}
     action:
       kind: handler
       handler: finalize_handler
+  - method: POST
+    path: /mis-finalize/{agent_id}
+    action:
+      kind: handler
+      handler: mis_finalize_handler
 `;
 
 function buildSpec(): RaySpec {
@@ -173,6 +185,32 @@ const finalizeHandler: ResolvedHandler = {
   },
 };
 
+/**
+ * The MIS-CALLING route handler — the natural mis-reading of the capability's name: `init.enqueue`
+ * called POSITIONALLY (`enqueue(agentId, input)`) instead of with the ONE request object. A pack ships
+ * as an `.mjs` module, so the published type never sees the call site; the cast here reproduces exactly
+ * that un-type-checked caller. `?arg=` selects which malformed argument is passed.
+ */
+const misFinalizeHandler: ResolvedHandler = {
+  kind: 'route',
+  fn: async (init): Promise<unknown> => {
+    const i = init as { params: Record<string, string>; enqueue?: unknown };
+    if (!i.enqueue) {
+      throw new Error(
+        'mis-finalize: init.enqueue is not available (no durable worker wired). Fail-closed.',
+      );
+    }
+    const misCall = i.enqueue as (...args: unknown[]) => Promise<{ runId: string }>;
+    const agentId = i.params.agent_id ?? 'transcribe-agent';
+    const args: unknown[] =
+      i.params.arg === 'no-agent-id'
+        ? [{ input: 'transcribe this recording' }] // an object, but no `agentId`
+        : [agentId, { note: 'transcribe this recording' }]; // the positional mis-call
+    const { runId } = await misCall(...args);
+    return { enqueued: true, runId };
+  },
+};
+
 describe.skipIf(!hasDb)('route-handler init.enqueue durable seam', () => {
   let h: Harness;
   let stub: StubExecutor;
@@ -183,7 +221,10 @@ describe.skipIf(!hasDb)('route-handler init.enqueue durable seam', () => {
     backend = new FakeRunBackend();
     h = await createHarness({
       engineSpec: buildSpec(),
-      engineHandlers: new Map<string, ResolvedHandler>([['finalize_handler', finalizeHandler]]),
+      engineHandlers: new Map<string, ResolvedHandler>([
+        ['finalize_handler', finalizeHandler],
+        ['mis_finalize_handler', misFinalizeHandler],
+      ]),
       agentRegistry: buildRegistry(backend),
       schema: SCHEMA,
     });
@@ -297,6 +338,38 @@ describe.skipIf(!hasDb)('route-handler init.enqueue durable seam', () => {
     expect(res.status).toBe(500);
     expect(stub.enqueued).toHaveLength(0);
     expect(backend.liveRuns).toBe(0);
+  });
+
+  it('(5) MALFORMED CALL: a POSITIONAL enqueue(agentId, input) fail-closes 500 naming the expected shape (NOT a 404); no job', async () => {
+    const { token } = await principal('positional@example.com', 'PositionalOrg');
+    const res = await jsonRequest(h.app, 'POST', '/mis-finalize/transcribe-agent', {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    // Fail-the-fix: without the shape guard the string lands where the request object is expected,
+    // `agentId` reads as `undefined`, the registry gate misses and this answers 404 — a declared route
+    // reporting 404 from a handler that demonstrably ran, which sends debugging to routing.
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('INTERNAL');
+    // ACTIONABLE: the message names the capability and the expected `{ agentId, input }` shape, so the
+    // failure points back at the call site rather than at the router.
+    expect(body.error.message).toContain('init.enqueue');
+    expect(body.error.message).toContain('{ agentId, input }');
+    // Not the generic unexpected-error text — the refusal is deliberate, not an escaped TypeError.
+    expect(body.error.message).not.toBe('Internal server error.');
+    expect(stub.enqueued).toHaveLength(0);
+  });
+
+  it('(5b) MALFORMED CALL: an object with NO string `agentId` fail-closes the same way; no job', async () => {
+    const { token } = await principal('noagentid@example.com', 'NoAgentIdOrg');
+    const res = await jsonRequest(h.app, 'POST', '/mis-finalize/transcribe-agent?arg=no-agent-id', {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('INTERNAL');
+    expect(body.error.message).toContain('{ agentId, input }');
+    expect(stub.enqueued).toHaveLength(0);
   });
 
   it('PINNED runId is TENANT-NAMESPACED: two tenants pinning the SAME runId enqueue DIFFERENT durable ids (no cross-tenant collision)', async () => {
