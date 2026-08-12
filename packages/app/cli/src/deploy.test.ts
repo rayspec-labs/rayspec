@@ -21,6 +21,8 @@ const DOCTORED = join(repoRoot, '_deploy_test_doctored.product.yaml');
 const GARBAGE = join(repoRoot, '_deploy_test_garbage.product.yaml');
 const STATIC_REL = '_deploy_test_static.rayspec.yaml';
 const STATIC_DOC = join(repoRoot, STATIC_REL);
+const BACKEND_REL = '_deploy_test_backend.rayspec.yaml';
+const BACKEND_DOC = join(repoRoot, BACKEND_REL);
 
 /** A FRONTEND-ONLY document — the shape `deploy` boots as the static profile (no DB, no boot secret). */
 const FRONTEND_ONLY_SPEC = `version: '1.0'
@@ -28,6 +30,18 @@ metadata:
   name: static-profile-ui
 frontend:
   - { route: /, dir: web/dist, spa: true }
+`;
+
+/** A BACKEND-profile document — a store + a handler-backed route, the shape `deploy` boots and serves. */
+const BACKEND_SPEC = `version: '1.0'
+metadata: { name: notes-api }
+stores:
+  - name: notes
+    columns: [{ name: body, type: text }]
+api:
+  - { method: POST, path: '/notes', action: { kind: handler, handler: add_note } }
+handlers:
+  - { id: add_note, module: handlers/notes.mjs, export: addNote, kind: route }
 `;
 
 // The read-spec jail resolves against the CWD; run every dry-run from the repo root so the example
@@ -42,6 +56,7 @@ afterEach(() => {
   rmSync(DOCTORED, { force: true });
   rmSync(GARBAGE, { force: true });
   rmSync(STATIC_DOC, { force: true });
+  rmSync(BACKEND_DOC, { force: true });
 });
 
 describe('rayspec deploy --dry-run', () => {
@@ -149,6 +164,82 @@ describe('rayspec deploy --dry-run — a frontend-only (static-profile) document
     await expect(
       runDeploy(['--dry-run', '--apply-migration', 'delta.sql', STATIC_REL]),
     ).rejects.toBeInstanceOf(DeployCliError);
+  });
+});
+
+/**
+ * `--dry-run` against a BACKEND-profile document — the third profile `deploy` boots. Judging it by the
+ * product grammar was wrong in BOTH directions: a document `deploy` validates and boots came back
+ * `ok:false` with product-lint violations, and a document with a REAL defect came back with the same
+ * violations instead of the defect. Both directions are pinned here.
+ */
+describe('rayspec deploy --dry-run — a backend-profile document', () => {
+  beforeEach(() => {
+    writeFileSync(BACKEND_DOC, BACKEND_SPEC, 'utf8');
+  });
+
+  it('answers ok:true, naming the backend profile and the declarations plan projects', async () => {
+    const outcome = await runDeploy(['--dry-run', BACKEND_REL]);
+    if (outcome.kind !== 'dry-run') throw new Error('unreachable');
+    const r = outcome.result;
+    expect(r.ok).toBe(true);
+    expect(r.errors).toEqual([]);
+    // A backend document declares its routes/handlers rather than lowering to them — nothing composes,
+    // and the static block belongs to the other DB-free profile.
+    expect(r.composed).toBeUndefined();
+    expect(r.staticProfile).toBeUndefined();
+    expect(r.backendProfile).toEqual({
+      profile: 'rayspec',
+      stores: ['notes'],
+      routes: ['POST /notes'],
+      agents: [],
+      handlers: ['add_note'],
+    });
+    // ok:true means the document VALIDATES, not that it boots — the boot refusals it can still meet are
+    // stated in the verdict, on top of the shared boundary.
+    expect(r.notProven).toEqual(
+      expect.arrayContaining([
+        'the migration (no DB was touched)',
+        'live-schema drift against an existing deployment',
+      ]),
+    );
+    const notProven = r.notProven.join(' ');
+    expect(notProven).toMatch(/stream.*blob backend/);
+    expect(notProven).toMatch(/STT_PROVIDER \/ TTS_PROVIDER/);
+  });
+
+  it('reports the document own defect, not product lint, when the backend grammar rejects it', async () => {
+    // A dangling handler reference — the defect `doctor` reports as `dangling_ref`. Under the product
+    // ruleset it was drowned in `no_code_in_yaml` violations about the very sections this profile has.
+    writeFileSync(BACKEND_DOC, BACKEND_SPEC.replace('add_note }', 'missing_handler }'), 'utf8');
+    const outcome = await runDeploy(['--dry-run', BACKEND_REL]);
+    if (outcome.kind !== 'dry-run') throw new Error('unreachable');
+    const r = outcome.result;
+    expect(r.ok).toBe(false);
+    expect(r.backendProfile).toBeUndefined();
+    expect(r.errors.join(' ')).toMatch(/dangling_ref.*missing_handler/);
+    expect(r.errors.join(' ')).not.toMatch(/no_code_in_yaml/);
+  });
+
+  it('does NOT swallow the static profile (a static doc is a backend doc parseSpec accepts)', async () => {
+    // The ordering guard: `detectSpecKind` calls both profiles 'rayspec', so the static classification
+    // has to run FIRST — a backend arm ahead of it would answer a frontend-only doc with an empty
+    // backendProfile block and drop its mounts.
+    writeFileSync(STATIC_DOC, FRONTEND_ONLY_SPEC, 'utf8');
+    const outcome = await runDeploy(['--dry-run', STATIC_REL]);
+    if (outcome.kind !== 'dry-run') throw new Error('unreachable');
+    expect(outcome.result.ok).toBe(true);
+    expect(outcome.result.backendProfile).toBeUndefined();
+    expect(outcome.result.staticProfile?.frontendMounts).toEqual([
+      { route: '/', dir: 'web/dist', spa: true },
+    ]);
+  });
+
+  it('leaves a product document on the compose path (no backend block)', async () => {
+    const outcome = await runDeploy(['--dry-run', ACME_REL]);
+    if (outcome.kind !== 'dry-run') throw new Error('unreachable');
+    expect(outcome.result.backendProfile).toBeUndefined();
+    expect(outcome.result.composed?.product).toBe('acme_notes');
   });
 });
 

@@ -681,22 +681,40 @@ does **not** derive and apply a schema change on its own: if the live schema has
 change is applied by the explicit `--apply-migration` flag below.
 
 - **`--dry-run`** is a **one-shot**, DB-free, network-free check: it validates the
-  document and **composes** it against the wired runtime, emitting a JSON verdict.
+  document with the grammar of the **profile it boots**, and — for a product
+  document — **composes** it against the wired runtime, emitting a JSON verdict.
   It does **not** prove the migration, boot-env sufficiency, any provider
-  credential, live-schema drift, or that the app serves — it is a fast
-  validate-and-compose. Exit `0` if it composes, `1` otherwise.
+  credential, live-schema drift, or that the app serves. Exit `0` if the document
+  passes its profile's check, `1` otherwise.
 
   ```
   rayspec deploy --dry-run examples/acme-notes/acme-notes.product.yaml
   ```
 
-  A **frontend-only** document has nothing to compose, so it is answered for the boot
-  it actually takes (the static profile below): the verdict is `ok: true` (exit `0`)
-  and carries a `staticProfile` block instead of `composed` — the profile named, the
-  `frontendMounts` that boot would serve, and the statement that no database is
-  touched, no migration applies, and there is nothing to compose. What such a check
-  does not prove narrows accordingly: it reads only the document, so it says nothing
-  about whether the declared directories hold built assets, or that the app serves.
+  Each of the three profiles `deploy` boots is answered on its own terms, so the
+  verdict never reports one profile's document in another's vocabulary and a caller
+  gating on `ok` needs to know nothing about which ruleset applied:
+
+  | Document | `ok: true` payload | Judged by |
+  | --- | --- | --- |
+  | **product** (carries `product:`) | `composed` — the product id and the store / view-route / trigger-event / workflow names it composes to | the product grammar + a stubbed compose |
+  | **backend** (`rayspec`, no `product:`) | `backendProfile` — the profile named, plus the declared `stores`, `routes` (`METHOD /path`), `agents` and `handlers` | the same parser `doctor` and `plan` use |
+  | **frontend-only** (static) | `staticProfile` — the profile named, the `frontendMounts` that boot would serve, and the statement that no database is touched, no migration applies, and there is nothing to compose | the same detection the static boot branches on |
+
+  A **backend** document declares its routes and handlers rather than lowering to
+  them, so there is nothing to compose: the check is the validation `doctor` runs,
+  and the payload is the projection `plan` publishes for the same document (declared
+  names only — no SQL, nothing derived). `ok: true` means the document **validates**,
+  not that it boots: `notProven` carries the shared boundary **plus** this profile's
+  boot refusals — a `stream` route with no blob backend configured, a declared
+  handler module that does not resolve as compiled JavaScript under the jailed root,
+  and the `STT_PROVIDER` / `TTS_PROVIDER` credentials demanded at boot. A document
+  the backend grammar rejects reports **its own** violations (a `dangling_ref`, an
+  unknown key) — the same errors `doctor` reports for it.
+
+  A **frontend-only** document has nothing to compose either, and what its check does
+  not prove narrows instead: it reads only the document, so it says nothing about
+  whether the declared directories hold built assets, or that the app serves.
 
 - **`--apply-migration <delta.sql>`** applies a **reviewed forward migration** in
   place before serving — the supported path for evolving an existing deployment's

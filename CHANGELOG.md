@@ -218,6 +218,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`rayspec deploy --dry-run` now judges a backend-profile document by the backend grammar, so a
+  document `deploy` validates and boots is no longer reported `ok: false` by its own preview.** The
+  dry run applied the **product** ruleset to every document: a product document was parsed by it, a
+  frontend-only one was rescued by an explicit classification arm, and a backend one had no arm — so
+  the product grammar's rejection became its verdict. One document, one binary, three answers:
+  `doctor` and `plan` accepted it, `deploy` validated and booted it, and `deploy --dry-run` returned
+  `ok: false`, exit `1`, and `no_code_in_yaml` violations about the very `api`, `handlers` and
+  `tooling` sections that profile is *made* of — scaling with the document, so a larger spec produced
+  proportionally more of them. The failure was authoritative-looking in the direction that hides work
+  (`spec did not validate`), and nothing in the output said a different profile's ruleset had been
+  applied. It was also wrong in the *other* direction: a backend document with a real defect — a
+  dangling handler reference `doctor` reports as `dangling_ref` — came back carrying the same product
+  lint and never the actual error, so the arm could neither pass a good document nor diagnose a bad
+  one. `--dry-run` now dispatches on the document profile **before** parsing, the order `plan` already
+  uses, and validates a backend document with the same parser `doctor` and `plan` use for it.
+  **Consumer-visible verdict change:** such a document now returns `ok: true` and exit `0` where it
+  returned `ok: false` and exit `1`, carrying a new `backendProfile` block — the profile named plus
+  the declared `stores`, `routes` (`METHOD /path`), `agents` and `handlers`, the same projection
+  `plan` publishes, no SQL and nothing derived — as the counterpart of the `composed` and
+  `staticProfile` blocks. `ok: true` there means the document **validates**, never that it boots, and
+  its `notProven` says so: the shared boundary plus this profile's boot refusals (a `stream` route
+  with no blob backend configured, a declared handler module that does not resolve as compiled
+  JavaScript under the jailed root, and the `STT_PROVIDER` / `TTS_PROVIDER` credentials demanded at
+  boot). A document the backend grammar rejects now reports **its own** violations. A caller gating on
+  the JSON verdict therefore no longer has to know which ruleset was applied. Product and
+  frontend-only documents are untouched — same verdict, same errors, byte-identical payloads — and
+  the profile dispatch keeps the boot dependency graph off every product document's dry run exactly as
+  before.
 - **A malformed `init.enqueue` call now fail-closes with a clear error naming the expected
   `{ agentId, input }` shape, instead of answering `404`.** The capability takes one request object.
   Called positionally — `init.enqueue(agentId, input)`, the shape the name reads like — the string

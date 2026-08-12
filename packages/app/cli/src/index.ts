@@ -149,10 +149,13 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 from the NEXT deploy once the delta has landed (a delta is not
                                 idempotent).
   rayspec deploy --dry-run <spec.yaml>
-                                One-shot: validate the product doc + COMPOSE it against a stubbed
-                                rollout. NO DB, NO network. Emits a JSON verdict. Does NOT prove: the
+                                One-shot: validate the document with the grammar of the profile it
+                                boots — a product doc is also COMPOSED against a stubbed rollout, a
+                                backend doc reports its declarations, a frontend-only doc its mounts.
+                                NO DB, NO network. Emits a JSON verdict. Does NOT prove: the
                                 migration, boot-env sufficiency, any provider credential, live-schema
-                                drift, or that the app serves. Exit 0 ok / 1 not.`,
+                                drift, or that the app serves — the verdict's notProven lists what
+                                each profile leaves open. Exit 0 ok / 1 not.`,
       },
     ],
   },
