@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An optional response projection on declared store routes: `project` with `casing`
+  (snake default | camel), `omitInjected`, `rename`, and a `fields` allowlist.** A store route
+  serialized rows in exactly one shape — snake_case, every injected column included — so a product
+  whose wire contract predates its backend (an existing frontend, a mobile app, a published API)
+  could not use the declarative surface at all and fell off onto `{handler}` routes wholesale.
+  `project` docks on a route or on a store (the route-level one overrides wholesale; `project: {}`
+  opts a single route back out) and reshapes **responses only**: `casing: camel` re-keys every
+  field to its camelCase twin, `omitInjected: true` drops the injected columns while keeping `id`,
+  `rename` maps a declared/injected column to a pinned wire name (`id → companionId`), and
+  `fields` — matched against the post-casing/rename wire names, applied last — is the final word
+  on membership (it can re-include an injected column past `omitInjected` and can drop `id`).
+  Requests are untouched: bodies keep the declared column names in either casing, and the `list`
+  query surface (filters, `order`, operator params) stays author-named — a rename produces a
+  documented request/response naming split, stated in the reference docs and on every projected
+  operation of the generated OpenAPI document, whose response schemas follow the projection (the
+  serializer and the emitter consume one shared resolution, so the documented shape is the served
+  shape). Misconfiguration fails `doctor` with three new closed error codes — an unknown or dead
+  `rename`/`fields` member (`projection_unknown_column`), two columns on one wire name
+  (`projection_collision`), and a rename target equal to another column's author name, which would
+  mislead the author-named query surface (`projection_query_shadow`) — never a runtime surprise.
+  Keyset pagination is projection-immune (the cursor is minted from the stored row, so paging
+  works with `id` renamed or dropped), and a projected route serializes exactly its projected
+  field set. Purely additive: a document without `project` parses, serves, and documents
+  byte-identically.
+
 - **Two fractional column types for declared stores: `double` (PostgreSQL `float8`) and `numeric`
   with required `precision`/`scale` (exact decimals).** The column vocabulary had no honest home
   for a fractional value — a confidence score, a price, a coordinate — leaving authors to choose

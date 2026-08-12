@@ -145,6 +145,47 @@
               "fullTextSearch": {
                 "type": "boolean"
               },
+              "project": {
+                "type": "object",
+                "properties": {
+                  "casing": {
+                    "type": "string",
+                    "enum": [
+                      "snake",
+                      "camel"
+                    ]
+                  },
+                  "omitInjected": {
+                    "type": "boolean"
+                  },
+                  "rename": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 63,
+                      "pattern": "^[a-z_][a-z0-9_]*$"
+                    },
+                    "additionalProperties": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 63,
+                      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                    }
+                  },
+                  "fields": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 63,
+                      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                    }
+                  }
+                },
+                "additionalProperties": false
+              },
               "lintSuppress": {
                 "type": "array",
                 "items": {
@@ -319,6 +360,47 @@
                   "windowSeconds",
                   "max"
                 ],
+                "additionalProperties": false
+              },
+              "project": {
+                "type": "object",
+                "properties": {
+                  "casing": {
+                    "type": "string",
+                    "enum": [
+                      "snake",
+                      "camel"
+                    ]
+                  },
+                  "omitInjected": {
+                    "type": "boolean"
+                  },
+                  "rename": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 63,
+                      "pattern": "^[a-z_][a-z0-9_]*$"
+                    },
+                    "additionalProperties": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 63,
+                      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                    }
+                  },
+                  "fields": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 63,
+                      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                    }
+                  }
+                },
                 "additionalProperties": false
               },
               "lintSuppress": {

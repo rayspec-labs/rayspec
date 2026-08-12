@@ -15,7 +15,9 @@
  * The DB row (a Drizzle select result, keyed by the camelCase TS property the runtime table builder
  * uses) is serialized back to a snake_case JSON object keyed by the AUTHOR's declared names + the
  * injected columns, so the wire shape is the declared store, not Drizzle's internal casing. Dates
- * are ISO strings; everything else passes through (jsonb is already a JS value).
+ * are ISO strings; everything else passes through (jsonb is already a JS value). A route that
+ * declares a `project` response projection re-keys/filters that shape through the resolved
+ * projection map (store-projection.ts) — read side only, values untouched.
  *
  * This module is PRODUCT-AGNOSTIC: it derives everything from a `StoreSpec` at runtime — no product
  * table, column, or name is hard-coded. The platform stays product-free.
@@ -69,7 +71,10 @@ function fitsNumericParams(value: string, precision: number, scale: number): boo
  * additive: an all-camelCase body is returned unchanged, and a non-object body passes straight through
  * (the strict schema rejects it). Only DECLARED business columns are remapped — an injected/reserved key
  * (e.g. `created_by`) is left as-is, so `.strict()` still rejects it and it can never be smuggled in via
- * casing. Responses stay snake_case (serializeRow is unchanged).
+ * casing. Responses stay snake_case unless the route declares a `project` response projection
+ * (serializeRow's projection arm) — the projection is READ-SIDE ONLY and never widens what this
+ * normalizer (or the strict schemas) accepts: bodies key on the DECLARED column names, never on a
+ * projected wire name.
  */
 export function normalizeBodyCasing(store: StoreSpec, raw: unknown): unknown {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw;
@@ -274,10 +279,21 @@ export function toDbValues(
  * containing it a 400, and the filter bound means you cannot query for that row either — recovering
  * it is a SQL-level operation. That is the deliberate price of never returning a wrong number, which
  * is why the message names the column and the row id rather than the value.
+ *
+ * PROJECTION (`projection` — the resolved `snake → wire name` map from `resolveResponseProjection`,
+ * threaded by the route that declared a `project`): each column's value is emitted under its WIRE
+ * name, a column absent from the map is OMITTED (skipped BEFORE the range guards — nothing reaches
+ * the wire, so there is nothing to refuse; the guard messages keep naming the column by its author
+ * snake name either way). `undefined` (no `project` declared) keeps the historical path
+ * byte-identically. DELIBERATE BOUNDARY the projection closes: the un-projected path passes an
+ * UNKNOWN row key through raw (the `?? key` arm below — unreachable today, every row key is a
+ * declared or injected column); a projected route serializes EXACTLY the resolved column set, so
+ * an unknown key can never ride a projected response.
  */
 export function serializeRow(
   store: StoreSpec,
   row: Record<string, unknown>,
+  projection?: ReadonlyMap<string, string>,
 ): Record<string, unknown> {
   // camelCase → snake_case for every key we expose. Business columns: author names. Injected: known.
   const camelToSnake = new Map<string, string>();
@@ -285,9 +301,16 @@ export function serializeRow(
   for (const [snake, camel] of Object.entries(INJECTED_COLUMN_TS_NAMES)) {
     camelToSnake.set(camel, snake);
   }
-  const out: Record<string, unknown> = {};
+  // Prototype-free accumulator on the PROJECTED path only: wire names are author-chosen (a name
+  // like `__proto__` must land as a plain own-property, never a prototype mutation). The
+  // un-projected path keeps its plain `{}` untouched (the byte-identity accept-control).
+  const out: Record<string, unknown> = projection === undefined ? {} : Object.create(null);
   for (const [key, value] of Object.entries(row)) {
     const snake = camelToSnake.get(key) ?? key;
+    // The wire name this column serializes under: its snake name (no projection — historical
+    // behaviour, byte-identical), or the projection's resolved name; absent ⇒ omitted.
+    const wireName = projection === undefined ? snake : projection.get(snake);
+    if (wireName === undefined) continue;
     if (typeof value === 'bigint') {
       if (value > MAX_SAFE_BIG || value < MIN_SAFE_BIG) {
         throw new ApiError(
@@ -296,7 +319,7 @@ export function serializeRow(
             `(±9007199254740991) — row id ${String(row.id)}.`,
         );
       }
-      out[snake] = Number(value);
+      out[wireName] = Number(value);
       continue;
     }
     // The double READ guard (same posture as the bigint guard above, keyed on VALUE SHAPE): a float8
@@ -311,7 +334,7 @@ export function serializeRow(
           `row id ${String(row.id)}.`,
       );
     }
-    out[snake] = value instanceof Date ? value.toISOString() : value;
+    out[wireName] = value instanceof Date ? value.toISOString() : value;
   }
   return out;
 }

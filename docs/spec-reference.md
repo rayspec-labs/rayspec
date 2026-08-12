@@ -300,6 +300,11 @@ stores:
   tenant-scoped unique index — re-creating that same value returns `409 CONFLICT`
   rather than reusing the freed value. With `softDelete` absent/false the default is a
   hard physical delete with no `deleted_at` filtering anywhere.
+- `project` — optional [response projection](#response-projection) applied to
+  **every** declared store route that reads this store. A route may declare its
+  own `project`, which **overrides** the store-level one wholesale (an explicit
+  `project: {}` opts a single route back out). Omit the field and responses keep
+  the default snake_case shape byte-identically.
 - `lintSuppress` — optional list of acknowledged advisories scoped to **this
   store**; same shape and semantics as [`lintSuppress` on an agent](#agents): a
   `code` naming an advisory (never an error) and a **required, non-empty**
@@ -348,6 +353,14 @@ api:
   every declared route already has. The semantics, and what the budget does
   *not* buy you, are described under
   [A route's own budget](#a-routes-own-budget).
+- `project` — **optional**, on a row-returning `store` route only. This route's
+  [response projection](#response-projection): reshape the rows the route
+  returns on the wire (`casing`, `omitInjected`, `rename`, `fields`) without
+  touching what it accepts. When set it **overrides** a store-level `project`
+  wholesale — an explicit `project: {}` opts this one route back out. Declaring
+  it on a non-`store` route, or on a store `delete` route (a delete answers
+  `204` with no body), fails lint as dead config. Omit the field and the route
+  behaves byte-identically.
 - `lintSuppress` — optional list of acknowledged advisories scoped to **this
   route**; same shape and semantics as [`lintSuppress` on an agent](#agents): a
   `code` naming an advisory (never an error) and a **required, non-empty**
@@ -624,8 +637,73 @@ snake_case declared name **or** its camelCase twin (`session_id` or `sessionId`
 for a declared `session_id` column). The generated OpenAPI document describes the
 camelCase request key; both forms are accepted, so neither is the sole canonical
 key. Sending **both** variants of the same column in one body is ambiguous and is
-rejected (`400 VALIDATION_ERROR`). Responses are **always** snake_case, keyed by
-your declared column names plus the injected columns.
+rejected (`400 VALIDATION_ERROR`). Responses are snake_case by default, keyed by
+your declared column names plus the injected columns — unless the route declares
+a [response projection](#response-projection) (below), which reshapes responses
+**only**: body keys always stay the declared names, never a projected wire name.
+
+### Response projection
+
+A store route serializes rows in one default shape: snake_case, every injected
+column included. For a product whose wire contract *predates* its backend — an
+existing frontend, a mobile app, a published API — that shape is often pinned
+the other way around, so `project` lets a store route serve the contract the
+client already has:
+
+```yaml
+api:
+  - method: GET
+    path: /companions
+    action: { kind: store, store: companions, op: list }
+    project:
+      casing: camel                 # snake (default) | camel
+      omitInjected: true            # drop the injected columns; id is kept
+      rename: { id: companionId }   # declared/injected column → wire field name
+      fields: [companionId, name, role, createdAt]   # allowlist, applied last
+```
+
+`project` docks in two places: on a **route** (as above) or on a **store**
+(applied to every store route reading it), with the route-level `project`
+overriding the store-level one wholesale. The members, in the order they apply:
+
+- `casing` — `snake` (the default shape) or `camel` (each column's camelCase
+  twin — the same snake↔camel rule request bodies already accept).
+- `omitInjected` — when `true`, drop the injected columns (`tenant_id`,
+  `created_at`, `deleted_at`, `retention_days`, `region`, `created_by`,
+  `idempotency_key`) from responses. `id` is **kept** — a client needs the row
+  key — unless a `fields` allowlist drops it.
+- `rename` — map a declared or injected column to a wire field name (it wins
+  over `casing` for that column).
+- `fields` — an allowlist of **wire** names (post-`casing`/`rename`), applied
+  **last**: when present it alone decides membership, so it can re-include an
+  injected column past `omitInjected` (the `createdAt` above) and it can drop
+  `id`. A projected route serializes exactly its projected field set — nothing
+  else can ride a projected response.
+
+The projection is **read-side only** and **fail-closed**:
+
+- **Requests are untouched.** Create/update bodies key on the declared column
+  names (either casing), and the `list` query surface — equality/set/comparison
+  filters, `order`, `search` — stays **author-named**. A `rename` therefore
+  creates a deliberate request/response naming split: with the example above you
+  sort with `?order=created_at.asc` and read the same value back as `createdAt`,
+  and no query parameter is ever named `companionId`. The generated OpenAPI
+  document states this split on every projected operation.
+- **Misconfiguration is a `doctor` error, never a runtime surprise.** An unknown
+  column in `rename`/`fields`, a rename of a column the projection itself
+  removes from the response, two columns mapping to one wire name (including two
+  snake names whose camelCase twins coincide), and a rename target equal to
+  **another** column's author name (it would mislead the author-named query
+  surface — `?x=` filtering a different column than the response field `x`
+  carries) each fail lint with a dedicated error code.
+- **OpenAPI follows the projection.** The generated document's response schemas
+  carry the projected wire names — the serializer and the emitter consume one
+  shared projection resolution, so the documented shape *is* the served shape.
+- **Keyset pagination is projection-immune.** The `X-Next-Cursor` is minted from
+  the stored row, so paging keeps working when the response renames `id` away or
+  a `fields` allowlist drops it entirely.
+- **Purely additive.** No `project` key ⇒ byte-identical responses, documents,
+  and write behaviour.
 
 ### The `created_by` actor stamp
 
