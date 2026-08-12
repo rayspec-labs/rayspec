@@ -162,15 +162,22 @@ A backend-profile document can serve a built web UI itself, in one of two forms.
   one is at fault. This is the form for serving a built single-page app directly, with
   no reverse proxy in front.
 
-Because a static profile runs with no proxy in front, the app emits the two response
+Because a served frontend runs with no proxy in front, the app emits the two response
 security headers a proxy would normally add — `Content-Security-Policy` and
 `Permissions-Policy` — itself, read from the environment as `RAYSPEC_FRONTEND_CSP`
-and `RAYSPEC_PERMISSIONS_POLICY`. Each has a secure default when unset: a same-origin
-`default-src 'self'` CSP baseline (deliberately with no `'unsafe-inline'`, so a SPA
-that needs inline styles or scripts must opt into a weaker policy explicitly), and a
-Permissions-Policy that denies camera, microphone, and geolocation. A deployer can
-override either verbatim. See
-[getting-started → a frontend-only (static) deployment](./getting-started.md#a-frontend-only-static-deployment).
+and `RAYSPEC_PERMISSIONS_POLICY`. **Both** forms above emit them from that one pair of
+variables: a static profile app-wide, a mount beside an API on the mount's own responses
+(the API and auth surface carries no CSP — that one is left to a fronting proxy). Each
+has a secure default when unset: a same-origin `default-src 'self'` CSP baseline
+(deliberately with no `'unsafe-inline'`), and a Permissions-Policy that denies camera,
+microphone, and geolocation. A deployer can override either verbatim.
+
+That baseline names no `style-src` and no `script-src`, so an inline `<style>` or
+`<script>` in a served page is blocked — and nothing on the server side reports it: the
+response is a `200` carrying the exact bytes, and only the rendered page differs. Ship
+CSS and JS as files the page references, or opt into a weaker policy explicitly. See
+[getting-started → serving a static frontend](./getting-started.md#serving-a-static-frontend-spa)
+and [→ a frontend-only (static) deployment](./getting-started.md#a-frontend-only-static-deployment).
 
 ---
 

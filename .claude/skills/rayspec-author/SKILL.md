@@ -1120,6 +1120,12 @@ Notes that matter:
   with an actionable error (`rayspec doctor` reports a missing/unreadable dir too).
 - Serving is fail-closed: path traversal (incl. URL-encoded forms), dotfiles/hidden paths, and symlinks
   that escape `dir` are refused; directories are never listed.
+- Mount responses carry `Content-Security-Policy: default-src 'self'; frame-ancestors 'none';
+  object-src 'none'; base-uri 'self'` plus a `Permissions-Policy` (both boot shapes — a static profile
+  app-wide, a full backend on its mount responses; `RAYSPEC_FRONTEND_CSP` / `RAYSPEC_PERMISSIONS_POLICY`
+  replace either verbatim). No `style-src`/`script-src` ⇒ an inline `<style>`/`<script>` in a served page
+  is **BLOCKED**, and SILENTLY: the response is a 200 with the exact bytes, only the rendered page
+  differs. Author the assets with CSS and JS in FILES referenced by `href`/`src`, never inline.
 - **Not in v1:** SSR, template rendering, an asset build/bundle pipeline, cache/CDN headers, and the
   product profile — `frontend` is backend-profile only. (Range and HEAD ARE honored: a byte-`Range` GET
   returns **`206`** partial content and a `HEAD` returns **`200`**; an **UNSATISFIABLE** range — a start
