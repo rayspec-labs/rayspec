@@ -25,7 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **terminal** outcome for every `spa: false` mount — the distinction `spa: true` necessarily
   destroys — and the option is fail-closed in the same two senses as the rest of the module: the
   `<path>.html` candidate runs the same dotfile / traversal / symlink-escape guard as any other served
-  path, and the range, method and reserved-namespace guards all still run first. **It is opt-in
+  path, and the range, method and reserved-namespace guards all still run first. **Extensionless** is
+  the exact domain, which is what makes that terminal `404` worth having: a path whose last segment
+  carries a `.` names a typed asset (`/app.js`, `/data.json`) and is never rewritten, so a `fetch` for
+  a file that is not there still gets a `404` rather than `200 text/html` from a `<name>.<ext>.html`
+  sibling — while a dotted directory on the way (`/guide/1.2/notes`) still resolves its page, since
+  only the last segment decides. **It is opt-in
   (default `false`), so no existing deployment changes behaviour** — and **one** behaviour changes for
   a site that opts in: where **both** `<path>.html` and `<path>/index.html` exist for the same path,
   the `.html` file now wins where the directory index served before (`.html` is tried first, the order

@@ -1584,6 +1584,13 @@ frontend:
   **terminal** outcome for an `spa: false` mount, so a genuinely broken link is still
   reported as one.
 
+  **Extensionless** is the option's exact domain: a request whose last path segment
+  carries a `.` names a typed asset (`/app.js`, `/data.json`) and is never rewritten, so a
+  request for a typed file that is not there stays a `404` instead of coming back
+  `200 text/html` from a `<name>.<ext>.html` sibling — which is what keeps the terminal
+  `404` meaningful for a `fetch`/XHR. Only the last segment decides, so a dotted directory
+  on the way (`/guide/1.2/notes`) still resolves its page.
+
   The full resolution order for a request under the mount is: the exact path when it is
   a file → `<path>.html` → `<path>/index.html` → (only when `spa: true`) the `index.html`
   SPA fallback → the mount root's `404.html`, else the uniform `404`. The two options are

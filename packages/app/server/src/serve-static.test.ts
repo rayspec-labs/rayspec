@@ -22,9 +22,12 @@
  *     `docs/getting-started.html`; with the flag OFF the same paths keep today's status and document
  *     (the opt-in control), a site shipping BOTH forms sees the documented flip, an exact match still
  *     wins, 404 stays terminal for `spa:false`, and on an `spa:true` mount the page wins the deep link
- *     while only a genuine miss reaches the shell. The guard, the range guard and the method guard all
- *     still run first (a dotfile, a `.html` symlink escaping the dir, an unsatisfiable range and a write
- *     verb keep their exact responses).
+ *     while only a genuine miss reaches the shell. The option's DOMAIN is pinned in both directions: a
+ *     TYPED path (`/api.js`, `/data.json`) is never rewritten — it stays a 404 even when a
+ *     `<name>.<ext>.html` sibling exists, while a typed asset that exists still serves — and only the
+ *     LAST segment decides, so a dotted directory (`/guide/1.2/notes`) still resolves. The guard, the
+ *     range guard and the method guard all still run first (a dotfile, a `.html` symlink escaping the
+ *     dir, an unsatisfiable range and a write verb keep their exact responses).
  *   - CONTENT METHODS: a mount serves GET/HEAD/OPTIONS; every other verb gets 405 + `Allow` and the
  *     uniform JSON envelope — so a POST/DELETE to a missing path under an spa:true mount is never
  *     answered 200 with the SPA shell — while the reserved-prefix decline and the fail-closed path
@@ -703,6 +706,9 @@ describe('mountFrontend — cleanUrls (extensionless resolution, opt-in)', () =>
   const CLEAN_404_SENTINEL = 'CLEAN-URL-404-PAGE-SENTINEL';
   const CLEAN_DOTFILE_SECRET = 'CLEAN-URL-DOTFILE-SECRET';
   const CLEAN_SYMLINK_SECRET = 'CLEAN-URL-SYMLINK-SECRET';
+  const TYPED_SIBLING_SENTINEL = 'CLEAN-URL-TYPED-SIBLING-SENTINEL';
+  const TYPED_ASSET_SENTINEL = 'CLEAN-URL-TYPED-ASSET-SENTINEL';
+  const DOTTED_DIR_SENTINEL = 'CLEAN-URL-DOTTED-DIR-SENTINEL';
 
   const tempRoots: string[] = [];
   let fixtureRoot = '';
@@ -715,6 +721,10 @@ describe('mountFrontend — cleanUrls (extensionless resolution, opt-in)', () =>
    *   both.html + both/index.html     BOTH resolvable forms — pins which one `cleanUrls` picks
    *   exact + exact.html              an EXACT extensionless file beside its `.html` sibling
    *   404.html                        the mount-root custom not-found page (the terminal outcome)
+   *   api.js.html + data.json.html    TYPED paths with an `.html` sibling but NO typed file — the
+   *                                   out-of-domain case: `/api.js` must stay a 404, never the sibling
+   *   real.js                         a typed asset that DOES exist (the accept control beside it)
+   *   guide/1.2/notes.html            a DOTTED directory on the way to an extensionless leaf
    *   .env                            a dotfile the guard must keep refusing
    *   leak.html                       a symlink OUT of the served dir (the `.html` candidate itself)
    */
@@ -724,6 +734,7 @@ describe('mountFrontend — cleanUrls (extensionless resolution, opt-in)', () =>
     const dir = join(root, 'web', 'dist');
     mkdirSync(join(dir, 'docs'), { recursive: true });
     mkdirSync(join(dir, 'both'), { recursive: true });
+    mkdirSync(join(dir, 'guide', '1.2'), { recursive: true });
     const page = (sentinel: string): string => `<!doctype html><title>${sentinel}</title>`;
     writeFileSync(join(dir, 'index.html'), page(CLEAN_INDEX_SENTINEL), 'utf8');
     writeFileSync(join(dir, 'docs', 'index.html'), page(DOCS_INDEX_SENTINEL), 'utf8');
@@ -733,6 +744,12 @@ describe('mountFrontend — cleanUrls (extensionless resolution, opt-in)', () =>
     writeFileSync(join(dir, 'exact'), page(EXACT_FILE_SENTINEL), 'utf8');
     writeFileSync(join(dir, 'exact.html'), page(EXACT_HTML_SENTINEL), 'utf8');
     writeFileSync(join(dir, '404.html'), page(CLEAN_404_SENTINEL), 'utf8');
+    // TYPED paths whose ONLY on-disk form is a `<name>.<ext>.html` sibling — the resolution must not
+    // reach them, so `/api.js` and `/data.json` stay genuine misses.
+    writeFileSync(join(dir, 'api.js.html'), page(TYPED_SIBLING_SENTINEL), 'utf8');
+    writeFileSync(join(dir, 'data.json.html'), page(TYPED_SIBLING_SENTINEL), 'utf8');
+    writeFileSync(join(dir, 'real.js'), `console.log('${TYPED_ASSET_SENTINEL}');`, 'utf8');
+    writeFileSync(join(dir, 'guide', '1.2', 'notes.html'), page(DOTTED_DIR_SENTINEL), 'utf8');
     writeFileSync(join(dir, '.env'), `SECRET=${CLEAN_DOTFILE_SECRET}`, 'utf8');
     const outside = join(root, 'outside');
     mkdirSync(outside, { recursive: true });
@@ -809,6 +826,66 @@ describe('mountFrontend — cleanUrls (extensionless resolution, opt-in)', () =>
     const body = await res.text();
     expect(body).toContain(EXACT_FILE_SENTINEL);
     expect(body).not.toContain(EXACT_HTML_SENTINEL);
+  });
+
+  it('cleanUrls:true — a TYPED path is NOT rewritten: /api.js stays a 404, never api.js.html', async () => {
+    // The option's domain is EXTENSIONLESS paths. A request whose last segment carries an extension
+    // names a typed asset, so a MISSING one must stay a miss — answering it 200 + HTML from a
+    // `<name>.<ext>.html` sibling would hand a fetch/XHR a success status for a file that is not there
+    // and break the "404 stays terminal for spa:false" promise exactly where it matters.
+    // Fail-the-fix: drop the extension test in `resolveCleanUrlTarget` and both paths come back
+    // 200 `text/html` carrying TYPED_SIBLING_SENTINEL.
+    const app = buildApp([cleanMount], fixtureRoot);
+    for (const path of ['/api.js', '/data.json'] as const) {
+      const res = await app.request(path);
+      expect(res.status).toBe(404);
+      const body = await res.text();
+      expect(body).toContain(CLEAN_404_SENTINEL); // the terminal outcome, unchanged by the flag
+      expect(body).not.toContain(TYPED_SIBLING_SENTINEL);
+    }
+  });
+
+  it('cleanUrls:true — the accept control: a typed asset that EXISTS still serves, by either name', async () => {
+    // Without this the arm above would pass on a fixture that serves nothing at all. `real.js` proves
+    // typed assets still serve, and `api.js.html` proves the sibling IS reachable — under its own name.
+    const app = buildApp([cleanMount], fixtureRoot);
+    const asset = await app.request('/real.js');
+    expect(asset.status).toBe(200);
+    expect(await asset.text()).toContain(TYPED_ASSET_SENTINEL);
+    const sibling = await app.request('/api.js.html');
+    expect(sibling.status).toBe(200);
+    expect(await sibling.text()).toContain(TYPED_SIBLING_SENTINEL);
+  });
+
+  it('cleanUrls:true — only the LAST segment decides: a dotted directory still resolves the page', async () => {
+    const app = buildApp([cleanMount], fixtureRoot);
+    const res = await app.request('/guide/1.2/notes');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain(DOTTED_DIR_SENTINEL);
+  });
+
+  it('cleanUrls:true + spa:true — a typed miss reaches the SPA shell, never the .html sibling', async () => {
+    // On a mount that sets both, the SPA fallback keeps its own promise for a typed miss — but the
+    // answer is the shell, not the out-of-domain `api.js.html`.
+    const app = buildApp(
+      [{ route: '/', dir: 'web/dist', spa: true, cleanUrls: true }],
+      fixtureRoot,
+    );
+    const res = await app.request('/api.js');
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain(CLEAN_INDEX_SENTINEL);
+    expect(body).not.toContain(TYPED_SIBLING_SENTINEL);
+  });
+
+  it('cleanUrls:true — an unsatisfiable Range on a TYPED miss is not sized from the .html sibling', async () => {
+    // The range guard shares the one resolution, so the domain restriction holds there too: `/api.js`
+    // resolves to nothing, so the request falls through to serveStatic's normal 404 rather than a 416
+    // computed from `api.js.html`.
+    const app = buildApp([cleanMount], fixtureRoot);
+    const res = await app.request('/api.js', { headers: { Range: 'bytes=99999-' } });
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain(TYPED_SIBLING_SENTINEL);
   });
 
   it('cleanUrls:true — the mount root and a directory index are unaffected', async () => {

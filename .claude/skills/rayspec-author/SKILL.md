@@ -1113,6 +1113,7 @@ Notes that matter:
   cleanUrls: <bool>   # optional, default false — when true, an EXTENSIONLESS path that is not itself a
                       #   file resolves to `<path>.html` BEFORE `<path>/index.html` (the Netlify /
                       #   Vercel / GitHub Pages order), so a link to /docs/page serves docs/page.html.
+                      #   A TYPED path (last segment carries a '.', e.g. /app.js) is never rewritten.
 ```
 
 - Static mounts are served **last**: every `api` route, `/health`, `/v1/*`, and `/oidc/*` always wins,
@@ -1131,7 +1132,10 @@ Notes that matter:
   `spa: false`). A mount may set both: the order is exact file → `<path>.html` → `<path>/index.html` →
   the SPA fallback → `404.html`/404. ONE behaviour changes when you opt in — a site shipping BOTH
   `<path>.html` and `<path>/index.html` starts serving `<path>.html` where the directory index served
-  before; a trailing-slash request (`/docs/`) still resolves the directory index.
+  before; a trailing-slash request (`/docs/`) still resolves the directory index. EXTENSIONLESS is the
+  exact domain: a TYPED path (last segment carries a `.`, e.g. `/app.js`, `/data.json`) is never
+  rewritten, so a missing asset stays a `404` instead of being answered from a `<name>.<ext>.html`
+  sibling; only the last segment decides, so `/guide/1.2/notes` still resolves.
 - Mount responses carry `Content-Security-Policy: default-src 'self'; frame-ancestors 'none';
   object-src 'none'; base-uri 'self'` plus a `Permissions-Policy` (both boot shapes — a static profile
   app-wide, a full backend on its mount responses; `RAYSPEC_FRONTEND_CSP` / `RAYSPEC_PERMISSIONS_POLICY`

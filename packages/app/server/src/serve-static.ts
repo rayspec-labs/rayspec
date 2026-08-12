@@ -34,7 +34,11 @@
  * Netlify / Vercel / GitHub Pages do, so a site whose navigation links `/docs/getting-started` while
  * the built file is `docs/getting-started.html` serves rather than 404s. The mount's full resolution
  * order is then: the EXACT path when it is a file → `<path>.html` → `<path>/index.html` → (only for
- * `spa: true`) the SPA fallback → the root `404.html` / the uniform 404. Two consequences worth
+ * `spa: true`) the SPA fallback → the root `404.html` / the uniform 404. EXTENSIONLESS is the option's
+ * exact domain: a path whose LAST segment carries a `.` names a typed asset (`/app.js`, `/data.json`)
+ * and is NEVER rewritten, so a request for a typed file that is not there stays a 404 rather than
+ * coming back `200 text/html` from a `<name>.<ext>.html` sibling; only the last segment is inspected,
+ * so a dotted directory on the way (`/guide/1.2/notes`) still resolves. Two consequences worth
  * stating: `<path>.html` is tried BEFORE `<path>/index.html`, so on a site that ships BOTH forms the
  * `.html` file wins where the directory index does today (visible only once the mount opts in); and,
  * because the flag adds candidates rather than a catch-all, 404 stays the TERMINAL outcome — the
@@ -162,6 +166,16 @@ function statSyncSafe(path: string): Stats | undefined {
 }
 
 /**
+ * Does `subPath`'s LAST segment carry a file EXTENSION — i.e. does it contain a `.`? That is the exact
+ * test that keeps the clean-URL resolution to the EXTENSIONLESS paths it is defined for: `/docs/intro`
+ * is a page link, `/data.json` and `/app.js` name typed assets. Only the last segment is inspected, so a
+ * dotted DIRECTORY on the way (`/guide/1.2/notes`) leaves the leaf extensionless and still resolves.
+ */
+function lastSegmentHasExtension(subPath: string): boolean {
+  return subPath.slice(subPath.lastIndexOf('/') + 1).includes('.');
+}
+
+/**
  * Resolve the CLEAN-URL target for `subPath` under `baseDir` — the `<subPath>.html` file a
  * `cleanUrls:true` mount serves for an extensionless request (see the module header). Returns the file
  * `{ path, size }` from the stat that proved it a file, or `undefined` when the clean-URL form does not
@@ -169,6 +183,10 @@ function statSyncSafe(path: string): Stats | undefined {
  *
  *   - a DIRECTORY request (the mount root, or a path ending in `/`) keeps its `index.html` — appending
  *     `.html` there would name the hidden file `docs/.html`, which the dotfile guard refuses anyway;
+ *   - a TYPED path — one whose last segment carries an extension (`/app.js`, `/data.json`) — is NOT a
+ *     clean URL and is left alone, so a MISSING typed asset stays a 404 instead of being answered
+ *     `200 text/html` from a `<name>.<ext>.html` sibling. This is what keeps 404 terminal for an
+ *     `spa:false` mount in the case that matters most: a fetch/XHR for a file that is not there;
  *   - an EXACT match wins over the clean-URL form: `<subPath>.html` is the fallback for a request path
  *     that is not itself a servable file, never a redirect of one that is;
  *   - `<subPath>.html` runs the SAME fail-closed hardening the request path itself got (`isSafeStaticPath`),
@@ -180,6 +198,7 @@ function resolveCleanUrlTarget(
   subPath: string,
 ): { path: string; size: number } | undefined {
   if (subPath === '' || subPath.endsWith('/')) return undefined;
+  if (lastSegmentHasExtension(subPath)) return undefined;
   if (statSyncSafe(join(baseDir, subPath))?.isFile() === true) return undefined;
   const htmlSubPath = `${subPath}.html`;
   if (!isSafeStaticPath(baseDir, realBaseDir, htmlSubPath)) return undefined;
@@ -534,8 +553,9 @@ export function mountFrontend<E extends Env>(
           ),
         );
       }
-      // CLEAN URLS (opt-in): an extensionless path that is not itself a file is served as
+      // CLEAN URLS (opt-in): an EXTENSIONLESS path that is not itself a file is served as
       // `<path>.html` — BEFORE the file server, whose own resolution would answer `<path>/index.html`.
+      // A typed path (`/app.js`, `/data.json`) is out of the option's domain and is never rewritten.
       // Runs AFTER every guard above, so a reserved namespace, a refused attack path, an unsatisfiable
       // range and a non-content verb keep their exact responses; when no such file exists the request
       // falls through to the file server UNCHANGED, so `<path>/index.html`, the SPA fallback and the

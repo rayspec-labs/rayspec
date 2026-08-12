@@ -691,7 +691,11 @@ export type ExtensionRef = z.infer<typeof ExtensionRef>;
  *                  `<path>.html` before `<path>/index.html` (the Netlify / Vercel / GitHub Pages
  *                  order), so a site whose links are `/docs/getting-started` while the built file is
  *                  `docs/getting-started.html` serves rather than 404s; default false, so no existing
- *                  deployment changes behaviour. 404 stays the terminal outcome (unlike `spa`), and
+ *                  deployment changes behaviour. EXTENSIONLESS is the exact domain: a path whose last
+ *                  segment carries a `.` names a typed asset (`/app.js`, `/data.json`) and is never
+ *                  rewritten, so a missing typed file stays a 404 rather than being answered from a
+ *                  `<name>.<ext>.html` sibling; only the last segment decides, so `/guide/1.2/notes`
+ *                  still resolves. 404 stays the terminal outcome (unlike `spa`), and
  *                  when BOTH `<path>.html` and `<path>/index.html` exist the `.html` file wins —
  *                  the one visible change for a site that opts in with both forms present.
  *
