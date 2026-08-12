@@ -15,6 +15,7 @@
 
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   boolean,
   index,
   integer,
@@ -459,6 +460,80 @@ export const runEvents = pgTable(
   ],
 );
 
+// ---------------------------------------------------------------------------------------
+// Tenant event bus — the durable, per-tenant-sequenced product event stream.
+// ---------------------------------------------------------------------------------------
+
+/**
+ * tenant_event_streams — ONE row per tenant: the stream's HEAD and its retention FLOOR.
+ *
+ * `last_seq` is the last sequence number ISSUED to this tenant. An emit bumps it and inserts its
+ * rows in ONE statement, so the UPDATE's row lock (held until COMMIT, like any Postgres row lock)
+ * makes ALLOCATION ORDER EQUAL COMMIT ORDER: a later transaction physically cannot obtain seq N+1
+ * before the holder of N has committed or rolled back. That is exactly the property a `seq > cursor`
+ * resume needs and exactly what a plain `bigserial` does NOT give — a sequence hands out values
+ * before commit, so a reader that saw 101 would lose row 100 permanently when the slower writer
+ * committed after it. A rolled-back emit RETURNS its number and the next emit reissues it, so the
+ * visible sequence is GAP-FREE: a hole is a real signal (retention), never noise.
+ *
+ * `truncated_through` is the highest seq retention has removed. It is written in the SAME STATEMENT
+ * as the DELETE (one transaction, one snapshot), so a reader can never observe a deletion the floor
+ * has not accounted for — the "ok plus a hole" outcome a separate floor-check round trip produces.
+ * It only ever moves FORWARD (a GREATEST on write).
+ *
+ * TENANT-SCOPED (registered in TENANT_SCOPED_TABLES below) and `tenant_id uuid NOT NULL REFERENCES
+ * orgs(id) ON DELETE CASCADE`, so an org delete takes the counter with the events.
+ */
+export const tenantEventStreams = pgTable('tenant_event_streams', {
+  /** The tenant this stream belongs to — the PK (exactly one counter row per tenant). */
+  tenantId: uuid('tenant_id')
+    .primaryKey()
+    .references(() => orgs.id, { onDelete: 'cascade' }),
+  /** The last seq ISSUED to this tenant (0 before the first emit). The allocation lock lives here. */
+  lastSeq: bigint('last_seq', { mode: 'number' }).notNull().default(0),
+  /** The highest seq RETENTION has deleted (0 when nothing has aged out). Monotonic; never rewound. */
+  truncatedThrough: bigint('truncated_through', { mode: 'number' }).notNull().default(0),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * tenant_events — the durable per-tenant event stream a product emits into via `init.emit`.
+ *
+ * ONE ROW PER EVENT, keyed `(tenant_id, seq)` — that composite PK is both the uniqueness guarantee
+ * and the ordered read path (a resume is `tenant_id = $t AND seq > $cursor ORDER BY seq`).
+ *
+ * `seq` IS THE SOLE ORDERING AUTHORITY. `at` is DISPLAY ONLY and is NOT monotone with `seq`: it is
+ * transaction-START time while the seq is allocated at FLUSH time, so on concurrent traffic adjacent
+ * rows routinely run backwards in `at` relative to `seq` (measured on real concurrent data: 45% of
+ * adjacent pairs). Any query that orders or windows by `at` therefore REORDERS and DROPS events —
+ * order by `seq`, and use `at` only to show a human when something happened.
+ *
+ * TENANT-SCOPED (registered in TENANT_SCOPED_TABLES below): every read/write carries the tenant
+ * predicate through the TenantDb chokepoint, and the `tenant_id` FK cascades an org delete.
+ */
+export const tenantEvents = pgTable(
+  'tenant_events',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    /** The per-tenant sequence number allocated by the counter row. ORDERING AUTHORITY. */
+    seq: bigint('seq', { mode: 'number' }).notNull(),
+    /** The author-chosen topic (DATA — a product's own vocabulary; the platform never interprets it). */
+    topic: text('topic').notNull(),
+    /** The event body as jsonb (DATA — the payload the handler emitted, stored verbatim). */
+    payload: jsonb('payload').notNull(),
+    /** When the emitting transaction STARTED. DISPLAY ONLY — never an ordering or windowing key. */
+    at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // The composite key IS the stream: unique per (tenant, seq) and the ordered resume read path.
+    primaryKey({ columns: [t.tenantId, t.seq] }),
+    // The retention sweep's age scan (`at < cutoff`), so it never sequentially scans the stream.
+    index('tenant_events_at_idx').on(t.at),
+  ],
+);
+
 /** A run header — links journal + conversation under one run + tenant. final_text is RAW PII. */
 export const runs = pgTable(
   'runs',
@@ -656,6 +731,8 @@ export const CORE_TENANT_SCOPED_TABLES = [
   workflowRuns,
   workflowNodeStates,
   workflowArtifacts,
+  tenantEvents,
+  tenantEventStreams,
 ] as const;
 
 /**

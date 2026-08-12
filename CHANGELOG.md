@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A tenant-scoped event bus: `deployment.eventBus` turns on `init.emit(topic, payload)`, a durable
+  per-tenant event stream a route or tool handler appends to.** Everything real-time in RaySpec was
+  scoped to a single agent run, so a product whose UI is driven by everything happening in a workspace
+  had no transport to carry it and each one rebuilt the same polled events table in product code. A
+  deployment that declares `deployment: { eventBus: { enabled: true } }` now gives every
+  `handler`-kind route init and every tool init an `emit(topic, payload)` capability; a
+  product-profile deployment has it structurally, with nothing to declare. Presence follows the
+  `blob`/`enqueue` posture exactly: without the declaration the field is **absent** (not
+  `undefined`-valued), so a handler that needs it fail-closes loudly rather than dropping events into
+  a silent no-op, and a `stream`-kind route init and a trigger init do not carry it (the same
+  boundary `fsSource`/`stt`/`tts` already draw). The capability is **tenant-bound by construction** —
+  it is built per request from the run's server-derived tenant and has no tenant parameter — and it is
+  positional, so a mis-call in the shape the sibling `init.enqueue` takes (`emit({ topic, payload })`)
+  is refused with a named error stating the expected `emit(topic, payload)` shape, never a 404 and
+  never a corrupt row. What a consumer of the stream may rely on: every event carries a per-tenant
+  sequence number; the order numbers are issued in is the order the writes commit in, so a reader
+  resuming with `seq > cursor` cannot skip an event that committed late; the sequence is gap-free (a
+  request that rolls back returns its number and the next emit reuses it); and on a route handler the
+  events commit **with** the handler's own writes, so a reader never sees an event announcing a change
+  it cannot yet read. A tool handler has no outer transaction, so each of its emits is durable as it
+  returns. Two platform tables ship with it (`tenant_events`, `tenant_event_streams`, migration
+  `0011`), both cascading on org delete and both now **reserved** store names. Events are kept for
+  `retentionHours` (default 24) and swept by the daily housekeeping pass that already runs the OIDC
+  prune — an **approximate** bound, and deliberately so: nothing is deleted inside a product request,
+  so a tenant's oldest events can outlive the declared window, and a bursting tenant can exceed its
+  nominal size, until the next pass. `seq` is the only ordering authority the stream has; the `at`
+  column is display only and is **not** monotone with `seq` under concurrency (it is transaction-start
+  time while the number is issued at flush), so ordering or windowing a query by it reorders and drops
+  events. **The subscription surface from #314 (`GET /v1/subscribe`) is not part of this change** —
+  this is the emit and storage half.
+
 - **`cleanUrls: true` on a frontend mount — extensionless URLs resolve to `<path>.html`, so a
   generated multi-page site arrives with working links.** A static mount resolved a directory to its
   `index.html` but never tried `<path>.html` for an extensionless request, so a site whose navigation

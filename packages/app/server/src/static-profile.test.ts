@@ -238,6 +238,42 @@ frontend:
 `;
     expect(isStaticProfile(doc)).toBe(false);
   });
+
+  it('deployment.eventBus.enabled:true disqualifies (the event stream IS database rows)', () => {
+    // The keys-allowlist tripwire above canNOT catch this one: it reasons about TOP-LEVEL sections,
+    // and `deployment` is already a known key — so a NEW SUB-key inside it arrives with no tripwire
+    // firing at all. Fail-the-fix: remove the explicit eventBus check in `isStaticProfile` and this
+    // doc boots as a frontend-only static profile with NO database, while its own declaration says it
+    // keeps a durable per-tenant event stream.
+    const doc = `
+version: '1.0'
+metadata:
+  name: bus
+deployment:
+  eventBus:
+    enabled: true
+frontend:
+  - route: /
+    dir: web/dist
+`;
+    expect(isStaticProfile(doc)).toBe(false);
+  });
+
+  it('a declared-but-DISABLED event bus stays static (the disqualifier is the enablement, not the key)', () => {
+    const doc = `
+version: '1.0'
+metadata:
+  name: bus-off
+deployment:
+  eventBus:
+    enabled: false
+    retentionHours: 12
+frontend:
+  - route: /
+    dir: web/dist
+`;
+    expect(isStaticProfile(doc)).toBe(true);
+  });
 });
 
 describe('isStaticProfile — product / malformed / empty-frontend docs are not static', () => {

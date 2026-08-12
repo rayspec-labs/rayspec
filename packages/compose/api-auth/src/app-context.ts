@@ -19,6 +19,7 @@ import type {
   FsSourceFactory,
   ResolvedHandler,
   SttCapability,
+  TenantEventBus,
   ToolFactory,
   TtsCapability,
 } from '@rayspec/platform';
@@ -173,6 +174,25 @@ export interface DeclarativeEngine {
    * loudly there. Work that needs speech belongs on the in-request path until that seam is widened.
    */
   ttsCapability?: TtsCapability;
+  /**
+   * the deployment's TENANT EVENT BUS — the seam a route/tool handler's `init.emit` is built from.
+   * Injected by the composition root when the deployed spec turned the bus on
+   * (`deployment.eventBus.enabled`, or structurally on a product deployment); its PRESENCE is the
+   * enablement signal, so an absent bus means no init carries `emit` and a handler that needs it
+   * fail-closes loudly on `undefined` (mirrors `blobFactory`).
+   *
+   * UNLIKE `sttCapability`/`ttsCapability` this is NOT a ready handle: it is a pair of constructors
+   * the handler builders call with the run's tenant-bound `TenantDb`, so the capability a handler
+   * receives is TENANT-BOUND BY CONSTRUCTION (no tenant parameter exists on it) and, on a route, its
+   * flush lands inside that request's transaction. There is no provider and no credential to
+   * configure — the backend is the database the boot already required.
+   *
+   * OFF-REQUEST BOUNDARY (the same one `fsSourceFactory`/`sttCapability`/`ttsCapability` have): this
+   * reaches the tools of an agent run driven through THIS app. The composition root's
+   * durable-worker-side `buildAgentRegistry` call does not thread it, so a tool invoked from a durable
+   * (off-request) run carries no `init.emit` and fail-closes loudly there.
+   */
+  eventBus?: TenantEventBus;
   /**
    * the media-token service for the `stream` (mode:'playback') arm — the SECOND
    * auth path (HS256, distinct `RAYSPEC_MEDIA_SIGNING_KEY`). Injected exactly like `blobFactory` (the

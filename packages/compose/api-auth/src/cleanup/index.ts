@@ -15,6 +15,16 @@
  *      decision: the irreversible PII erasure NEVER auto-runs). The soft-delete already tombstones a
  *      user/membership (`deleted_at`); this purges the tombstone once it is older than retention.
  *
+ *   3. TENANT EVENT-BUS RETENTION — LIVE, no gate, and only when the deployment enabled the bus.
+ *      Deletes events past the declared AGE window and raises each affected tenant's truncation floor
+ *      IN THE SAME STATEMENT, so a subscriber can never be told "you are fine" about rows that are
+ *      already gone. It is an AGE WINDOW SWEEP, deliberately not a cap enforced on insert: a cap would
+ *      put a DELETE inside a product request's transaction, would commit differently on the route and
+ *      tool surfaces, and would have no dry-run or operator visibility, unlike every other destructive
+ *      operation here. The consequence is honest and worth stating: the bound is APPROXIMATE — a
+ *      bursting tenant can exceed its nominal size, and its oldest events can outlive the nominal
+ *      window, until the next pass.
+ *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * THE GATE — operator-only, fail-closed, lives HERE (not in a store, not in a spec).
  * ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -53,7 +63,7 @@
  * iterates orgs for per-org retention via its join.
  */
 
-import type { Db } from '@rayspec/db';
+import { type Db, eventRetentionCutoff, sweepTenantEvents } from '@rayspec/db';
 import { IdentityStore } from '../stores/identity-store.js';
 import { DrizzleOidcAdapter } from '../stores/oidc-store.js';
 import { OrgStore } from '../stores/org-store.js';
@@ -76,6 +86,13 @@ export interface CleanupConfig {
    * this. Defaults to {@link DEFAULT_GDPR_RETENTION_DAYS}.
    */
   readonly gdprRetentionDays: number;
+  /**
+   * The tenant event-bus AGE window (hours). Present ONLY when the deployment enabled the bus —
+   * absent ⇒ the sweep does not run at all (no bus, nothing to sweep), which is also why it carries no
+   * default here: the default belongs to the grammar (`DEFAULT_EVENT_BUS_RETENTION_HOURS`), resolved
+   * at the composition root where the spec is read.
+   */
+  readonly eventBusRetentionHours?: number;
 }
 
 /** The GDPR-purge half of the structured cleanup result. */
@@ -90,12 +107,25 @@ export interface GdprCleanupResult {
   readonly oldestTombstoneAgeDays: number;
 }
 
+/** The event-bus retention half of the structured cleanup result (absent when the bus is not enabled). */
+export interface EventBusCleanupResult {
+  /** Events deleted across every tenant (0 when nothing had aged out). */
+  readonly deleted: number;
+  /** Tenants whose truncation floor advanced — written in the SAME statement as their delete. */
+  readonly tenants: number;
+}
+
 /** The structured result the scheduler logs + the tests assert on (robust, not log-spying). */
 export interface CleanupResult {
   /** Expired `oidc_models` rows hard-deleted (LIVE — always performed). */
   readonly oidcPruned: number;
   /** The gated GDPR purge outcome (dry-run counts when disabled, delete counts when enabled). */
   readonly gdpr: GdprCleanupResult;
+  /**
+   * The tenant event-bus retention outcome. ABSENT when the deployment did not enable the bus — the
+   * absence says "this deployment has no event stream", which a `{ deleted: 0 }` would not.
+   */
+  readonly eventBus?: EventBusCleanupResult;
 }
 
 /** What `runScheduledCleanup` needs: the raw Db (composition root) + the gate/retention config. */
@@ -155,6 +185,19 @@ export async function runScheduledCleanup(deps: CleanupDeps): Promise<CleanupRes
     oldestTombstoneAgeDays = Math.max(userCount.oldestAgeDays, memCount.oldestAgeDays);
   }
 
+  // ── 3. TENANT EVENT-BUS RETENTION — LIVE, and only for a deployment that enabled the bus. ────────
+  // ONE statement deletes the aged-out events AND raises each affected tenant's truncation floor, so
+  // the two can never be observed apart (a floor read that raced a delete is exactly how a subscriber
+  // gets told "ok" and handed a hole). The cutoff derives from the SAME `now` the rest of the pass
+  // uses. No gate: an event past its declared window is not PII the operator must sign off on, it is
+  // the stream doing what the deployment declared — the operator control is the window itself.
+  const eventBus =
+    config.eventBusRetentionHours === undefined
+      ? undefined
+      : await sweepTenantEvents(db, {
+          cutoff: eventRetentionCutoff(now, config.eventBusRetentionHours),
+        });
+
   return {
     oidcPruned,
     gdpr: {
@@ -163,6 +206,8 @@ export async function runScheduledCleanup(deps: CleanupDeps): Promise<CleanupRes
       memberships,
       oldestTombstoneAgeDays,
     },
+    // Spread so the field is ABSENT (not a fabricated zero) on a deployment with no event bus.
+    ...(eventBus ? { eventBus } : {}),
   };
 }
 
@@ -171,11 +216,16 @@ export async function runScheduledCleanup(deps: CleanupDeps): Promise<CleanupRes
  * scheduler does the actual logging) so it is testable and the engine package needs no formatting logic.
  */
 export function formatCleanupLogLine(result: CleanupResult): string {
-  const { oidcPruned, gdpr } = result;
+  const { oidcPruned, gdpr, eventBus } = result;
   const verb = gdpr.mode === 'enabled' ? 'purged' : 'would purge (DRY-RUN, gate OFF)';
   return (
     `[cleanup] oidc: pruned ${oidcPruned} expired token row(s); ` +
     `gdpr[${gdpr.mode}]: ${verb} ${gdpr.users} user + ${gdpr.memberships} membership tombstone(s), ` +
-    `oldest ${gdpr.oldestTombstoneAgeDays} day(s) old`
+    `oldest ${gdpr.oldestTombstoneAgeDays} day(s) old` +
+    // Appended only for a deployment that HAS an event bus — a line reporting 0 swept events on a
+    // deployment with no stream would read as a bus that is running and empty.
+    (eventBus
+      ? `; event bus: swept ${eventBus.deleted} aged-out event(s), floor advanced for ${eventBus.tenants} tenant(s)`
+      : '')
   );
 }

@@ -19,6 +19,7 @@
 import type { TenantDb } from '@rayspec/db';
 import {
   type BlobStoreFactory,
+  type EmitEvent,
   type EnqueueAgentRun,
   type FsSourceFactory,
   type HandlerPrincipal,
@@ -33,6 +34,7 @@ import {
   type TtsCapability,
 } from '@rayspec/handler-sdk';
 import type { PgTable } from 'drizzle-orm/pg-core';
+import type { TenantEventBus } from './event-bus.js';
 import { getHandlerRuntime } from './handler-runtime.js';
 import { makeHandlerDb } from './store-facade.js';
 
@@ -120,8 +122,15 @@ export async function invokeRouteHandler(
   // Absent ⇒ init.tts is omitted (no provider configured; the handler fail-closes). NOT tenant-bound
   // — it speaks the text it is handed.
   tts?: TtsCapability,
+  // An OPTIONAL tenant event bus (present iff the deployment enabled it). Bound HERE to the
+  // TRANSACTIONAL handle, so `init.emit` is tenant-bound by construction and its flush lands inside
+  // THIS request's transaction. Absent ⇒ init.emit is omitted (the handler fail-closes loudly).
+  eventBus?: TenantEventBus,
 ): Promise<unknown> {
   return tdb.transaction(async (txTdb) => {
+    // The request-local emit buffer, bound to the TRANSACTIONAL handle. Built before the handler runs
+    // so the capability exists for the whole invocation; flushed after it returns (below).
+    const bus = eventBus?.buffered(txTdb);
     const init = buildRouteHandlerInit(
       txTdb,
       productTables,
@@ -136,8 +145,15 @@ export async function invokeRouteHandler(
       principal,
       stt,
       tts,
+      bus?.emit,
     );
-    return getHandlerRuntime().invokeRoute(fn, init);
+    const result = await getHandlerRuntime().invokeRoute(fn, init);
+    // THE LAST STATEMENT BEFORE COMMIT. It runs only on the success path — a handler that threw
+    // takes the whole transaction down with it, so its buffered events are never written (and the
+    // sequence numbers they would have taken are never issued). Await it INSIDE the transaction
+    // callback: the events must be part of this commit, not a write that races it.
+    await bus?.flush();
+    return result;
   });
 }
 
@@ -173,6 +189,9 @@ function buildRouteHandlerInit(
   // The composition-root text-to-speech capability (no tenant arg — it speaks the text the handler
   // hands it). Absent ⇒ init.tts omitted (no TTS provider configured).
   tts?: TtsCapability,
+  // The tenant-bound event-bus emit, ALREADY built from the bound handle by the caller (which owns
+  // the flush that pairs with it). Absent ⇒ init.emit omitted (the bus is not enabled).
+  emit?: EmitEvent,
 ): RouteHandlerInit {
   return {
     tenantId: boundTdb.tenantId,
@@ -187,6 +206,8 @@ function buildRouteHandlerInit(
     ...(stt ? { stt } : {}),
     // The text-to-speech capability (spread so ABSENT when no TTS provider is configured).
     ...(tts ? { tts } : {}),
+    // The tenant-bound event-bus emit (spread so ABSENT when the bus is not enabled).
+    ...(emit ? { emit } : {}),
     // The play-token mint capability (spread so ABSENT when no media key is wired).
     ...(mintPlayToken ? { mintPlayToken } : {}),
     // The tenant-bound durable-enqueue capability (spread so ABSENT when no worker is wired).
@@ -251,7 +272,16 @@ export async function invokeRouteHandlerDetached(
   // OPTIONAL text-to-speech capability — see invokeRouteHandler. Threaded identically so the
   // handler-managed posture receives `init.tts` the same way the engine-tx posture does.
   tts?: TtsCapability,
+  // OPTIONAL tenant event bus — see invokeRouteHandler. Threaded identically so this posture also
+  // receives `init.emit`, with the ONE honest difference stated below.
+  eventBus?: TenantEventBus,
 ): Promise<unknown> {
+  // Same buffer, bound to the BASE handle: this posture holds no engine transaction (that is its
+  // whole reason for existing), so the flush below is its own standalone statement rather than the
+  // last statement of an enclosing commit. The events are still ordered and durable; what this
+  // posture does NOT get is atomicity with writes the handler committed in its own short
+  // transactions — it committed them itself, before the flush ran.
+  const bus = eventBus?.buffered(tdb);
   const init = buildRouteHandlerInit(
     tdb,
     productTables,
@@ -266,8 +296,13 @@ export async function invokeRouteHandlerDetached(
     principal,
     stt,
     tts,
+    bus?.emit,
   );
-  return getHandlerRuntime().invokeRoute(fn, init);
+  const result = await getHandlerRuntime().invokeRoute(fn, init);
+  // Only on the success path — a throwing handler's buffered events are never written (the buffer
+  // dies with the request), matching the engine-tx posture's outcome.
+  await bus?.flush();
+  return result;
 }
 
 /**

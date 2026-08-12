@@ -51,6 +51,7 @@ import {
   IdentityStore,
   InviteStore,
   type ManualTriggerFirer,
+  makeTenantEventBus,
   OrgStore,
   type PlannedMigration,
   runScheduledCleanup,
@@ -101,6 +102,7 @@ import {
   type RunJob,
 } from '@rayspec/platform';
 import {
+  DEFAULT_EVENT_BUS_RETENTION_HOURS,
   detectSpecKind,
   type FrontendSpec,
   parseAnySpec,
@@ -1387,6 +1389,10 @@ const STATIC_PROFILE_KNOWN_KEYS: ReadonlySet<string> = new Set([
  *     before deploy, so a non-empty `extensions[]` would smuggle in every route-bearing field the
  *     other empty checks catch;
  *   - a durable off-request worker (`deployment.durableWorker`) needs a DB, so it disqualifies;
+ *   - an enabled tenant event bus (`deployment.eventBus.enabled`) needs a DB — its whole backend IS
+ *     the database — so it disqualifies too. The keys-allowlist above does NOT catch this on its own:
+ *     `deployment` is already a known key, so a NEW SUB-key inside it trips no tripwire and would
+ *     otherwise pass the static gate silently;
  *   - `frontend` must be non-empty (a static boot with nothing to serve is not a static profile).
  */
 export function isStaticProfile(specSource: string): boolean {
@@ -1416,6 +1422,10 @@ export function isStaticProfile(specSource: string): boolean {
   }
   // A durable off-request worker needs a database — disqualifies the static boot.
   if (spec.deployment?.durableWorker === true) return false;
+  // An enabled event bus needs a database (the stream IS database rows) — disqualifies it too. This
+  // check is NOT redundant with the keys-allowlist: that allowlist reasons about TOP-LEVEL sections,
+  // and `deployment` is already in it, so a new sub-key of an allowed section arrives unnoticed.
+  if (spec.deployment?.eventBus?.enabled === true) return false;
   // The one field a static profile MUST carry: something to serve.
   return spec.frontend !== undefined && spec.frontend.length > 0;
 }
@@ -2541,6 +2551,20 @@ async function deployDeclaredSpec(
   // Warn loudly at boot (warn-only — an offline dev/CI boot legitimately selects it).
   if (ttsCapability && config.ttsProvider === 'fake') bootWarn(FAKE_TTS_BOOT_WARNING);
 
+  // ── The TENANT EVENT BUS build (`init.emit`) ───────────────────────────────
+  // Spec-gated, not env-gated, and that asymmetry with the stt/tts builds above is the point: this
+  // capability has NO provider and NO credential to select — its backend is the database the boot
+  // already required — so the deployed document is the only thing that has to say anything. Built iff
+  // `deployment.eventBus.enabled` is true; otherwise left undefined, and every init is then WITHOUT
+  // `emit` (a handler that reads it fail-closes loudly). Injected into the engine in buildApp (below),
+  // like blobFactory. The retention window rides the same key and is read by the cleanup arm.
+  const eventBusDecl = effectiveSpec.deployment?.eventBus;
+  const eventBus = eventBusDecl?.enabled === true ? makeTenantEventBus() : undefined;
+  const eventBusRetentionHours =
+    eventBusDecl?.enabled === true
+      ? (eventBusDecl.retentionHours ?? DEFAULT_EVENT_BUS_RETENTION_HOURS)
+      : undefined;
+
   // ── The static FRONTEND deploy guard (fail-closed on a mount that cannot be served) ──
   // A declared frontend mount serves built static assets from `dir` (relative to the spec file). FAIL
   // CLOSED at deploy on the SAME per-mount check `/health` reports — `mountUnservableReason`, the one
@@ -2787,6 +2811,10 @@ async function deployDeclaredSpec(
           // Inject the text-to-speech capability (when a provider is configured) so a route/tool
           // handler's `init.tts` synthesizes through it. Spread so ABSENT when TTS_PROVIDER is unset.
           ...(ttsCapability ? { ttsCapability } : {}),
+          // Inject the tenant event bus (when the deployed spec enabled it) so a route/tool handler's
+          // `init.emit` appends to its tenant's stream. Spread so ABSENT otherwise — which is what
+          // makes the capability absent from every init rather than an undefined-valued key.
+          ...(eventBus ? { eventBus } : {}),
         };
         // Inject the durable executor (when wired) so the run surface's async path can enqueue.
         return createAuthApp({
@@ -2942,6 +2970,10 @@ async function deployDeclaredSpec(
           config: {
             gdprPurgeEnabled: config.cleanup.gdprPurgeEnabled,
             gdprRetentionDays: config.cleanup.gdprRetentionDays,
+            // The event-bus AGE window, present iff THIS deployment enabled the bus (so the sweep
+            // does not run at all on a deployment that has no stream). It comes from the SPEC, not
+            // the environment: it describes the deployed product's stream, not the operator's host.
+            ...(eventBusRetentionHours !== undefined ? { eventBusRetentionHours } : {}),
           },
         }),
       schedule: config.cleanup.schedule,

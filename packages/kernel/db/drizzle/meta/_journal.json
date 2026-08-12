@@ -78,6 +78,13 @@
       "when": 1785510360513,
       "tag": "0010_journal_step_error_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1786571056897,
+      "tag": "0011_tenant_event_bus",
+      "breakpoints": true
     }
   ]
 }

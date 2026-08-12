@@ -111,6 +111,8 @@ export const RESERVED_STORE_NAMES: ReadonlySet<string> = new Set([
   'workflow_runs',
   'workflow_node_states',
   'workflow_artifacts',
+  'tenant_events',
+  'tenant_event_streams',
   // The global identity/auth cluster (reached through db.unscoped(), never tenant-scoped).
   'orgs',
   'users',

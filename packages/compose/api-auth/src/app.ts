@@ -369,6 +369,10 @@ function withDeclaredAgents(deps: AppDeps): AppDeps {
     // thread the wired text-to-speech capability so a declared tool's init carries `init.tts`
     // (the SAME handle the route arm reads). Absent when no TTS provider is configured.
     ...(engine.ttsCapability ? { ttsCapability: engine.ttsCapability } : {}),
+    // thread the wired event bus so a declared tool's init carries `init.emit`, built per run from
+    // the run's tenant-bound TenantDb (the SAME bus the route arm reads). Absent when the deployment
+    // did not enable the bus.
+    ...(engine.eventBus ? { eventBus: engine.eventBus } : {}),
   });
   // Merge: direct entries first, spec-declared entries override on id collision (spec is the source).
   const merged = new Map(deps.agentRegistry ?? []);

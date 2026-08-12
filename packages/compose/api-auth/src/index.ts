@@ -65,6 +65,7 @@ export {
   type CleanupDeps,
   type CleanupResult,
   DEFAULT_GDPR_RETENTION_DAYS,
+  type EventBusCleanupResult,
   formatCleanupLogLine,
   type GdprCleanupResult,
   runScheduledCleanup,
@@ -86,6 +87,10 @@ export {
   type PlannedMigration,
   type RolloutConfig,
 } from './engine/deploy.js';
+// the tenant event-bus capability builder — the composition root constructs ONE per deployment that
+// enabled the bus and injects it onto the engine, where its presence is what makes a route/tool init
+// carry `init.emit`.
+export { makeTenantEventBus } from './engine/event-bus.js';
 // the media-token service (the playback route's distinct HS256 auth path) + the
 // in-process revocation denylist. The composition root builds the service from the distinct
 // RAYSPEC_MEDIA_SIGNING_KEY and injects it into the engine. Zero product vocabulary (a generic

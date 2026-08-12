@@ -242,6 +242,25 @@ describe.skipIf(!baseUrl)(
       },
       120_000,
     );
+
+    maybe(
+      'THE PRODUCT PROFILE HAS THE EVENT BUS WITHOUT DECLARING IT: the cleanup result carries the event-bus half',
+      async () => {
+        armsRan += 1;
+        // The product document below declares NOTHING about an event bus — the product grammar has no
+        // key to declare one with. The bus is on STRUCTURALLY on this profile, the same rule by which
+        // a product deployment gets its durable worker, and the observable proof is that this boot's
+        // housekeeping sweeps a stream at all: the event-bus half of the structured result is present
+        // ONLY for a deployment whose cleanup config carries a retention window.
+        const result = await server!.runCleanupNow!();
+        expect(result.eventBus).toBeDefined();
+        // Nothing has been emitted on this boot, so the sweep is a well-defined no-op — the POINT is
+        // that it ran. (A backend-profile boot that did not enable the bus reports no such half; that
+        // control is asserted in system-cleanup-classic-boot.db.test.ts.)
+        expect(result.eventBus).toEqual({ deleted: 0, tenants: 0 });
+      },
+      120_000,
+    );
   },
 );
 
@@ -253,7 +272,7 @@ describe.skipIf(!baseUrl)(
 describe('Product-YAML system cleanup — ran-guard (the wiring proof must not silently skip)', () => {
   it('the cleanup-wiring arms ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (dbRequired) {
-      expect(armsRan).toBe(2);
+      expect(armsRan).toBe(3);
     } else {
       expect(dbRequired).toBe(false);
     }

@@ -19,6 +19,10 @@ export type {
   BlobStat,
   BlobStore,
   BlobStoreFactory,
+  // The tenant-scoped event-bus emit CONTRACT (defined open-core in @rayspec/handler-sdk) —
+  // re-exported here so a platform consumer (the api-auth declarative engine) types its
+  // emit-injection seam against the one @rayspec/platform package, like the contracts around it.
+  EmitEvent,
   FsSource,
   FsSourceEntry,
   FsSourceFactory,
@@ -137,6 +141,7 @@ export {
 // single swappable HandlerRuntime indirection, the serializable-shaped HandlerDb facade over the
 // real TenantDb chokepoint, the declared-tooling NeutralTool factory, and the route/trigger
 // transaction-wrapped invocation. Composed by the api-auth declarative engine.
+export type { BufferedTenantEmit, TenantEventBus } from './handlers/index.js';
 export {
   assertCompiledJavaScriptModule,
   buildToolFactory,

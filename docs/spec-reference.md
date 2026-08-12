@@ -122,8 +122,8 @@ stores:
 
   `api_keys`, `auth_audit`, `conversation_items`, `idempotency_keys`, `invites`,
   `journal_steps`, `memberships`, `oidc_models`, `orgs`, `run_events`, `runs`,
-  `sessions`, `users`, `workflow_artifacts`, `workflow_node_states`,
-  `workflow_runs`.
+  `sessions`, `tenant_event_streams`, `tenant_events`, `users`,
+  `workflow_artifacts`, `workflow_node_states`, `workflow_runs`.
 
   Several are names a product would plausibly reach for on its own — `sessions`
   for a chat application, `invites`, `runs`. The match is exact, so a
@@ -1547,6 +1547,37 @@ deployment:
 - `durableWorker` — optional boolean. When `true`, the deployment runs a durable
   off-request worker, so an asynchronous run is enqueued rather than refused, and
   scheduled triggers fire on it.
+- `eventBus` — optional object. Turns on the **tenant-scoped event bus**: with
+  `enabled: true`, a `{handler}` route's init and a tool's init carry
+  `emit(topic, payload)`, which appends a durable event to that tenant's stream.
+  There is no provider and no credential to configure — the backend is the
+  database the deployment already has.
+
+  ```yaml
+  deployment:
+    eventBus:
+      enabled: true
+      retentionHours: 24   # optional; default 24
+  ```
+
+  - `enabled` — optional boolean. Absent or `false` means the capability is
+    **absent from the init entirely**, so a handler that reaches for it fails
+    closed rather than silently dropping events.
+  - `retentionHours` — optional positive whole number (default `24`). The **age**
+    an event is kept for. Events past it are swept by the platform's daily
+    housekeeping pass, which makes the bound **approximate**: a tenant's oldest
+    events can outlive the declared window, and a bursting tenant can exceed its
+    nominal size, until the next pass runs. Nothing is ever deleted inside a
+    product request.
+
+  What a handler may rely on: every event gets a per-tenant sequence number, and
+  the order numbers are handed out in is the order the writes commit in — so a
+  reader resuming from a cursor cannot skip an event that committed late. The
+  sequence is gap-free (a rolled-back request returns its number and the next
+  emit reuses it), which is what makes a hole in a stream a real signal that
+  retention removed something, rather than noise. On a route handler the events
+  commit with the handler's own writes, so a reader never sees an event
+  announcing a change it cannot yet read.
 
 ## `frontend`
 
