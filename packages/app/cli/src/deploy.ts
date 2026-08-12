@@ -68,10 +68,12 @@ export interface DeployDryRunResult {
    * no `product:` section), else absent — the counterpart of `composed` for the profile whose
    * declarations are MOUNTED rather than composed. Reported INSTEAD of a compose summary.
    *
-   * The projection is deliberately the one `plan` already publishes for the same document (declared
-   * names, nothing derived and no SQL), so the two commands cannot disagree about what the document
-   * says. `ok:true` beside it means the document VALIDATES — never that it boots; `notProven` names
-   * the boot refusals it can still meet.
+   * DECLARED NAMES ONLY — read straight off the document `parseSpec` validated, with no SQL and
+   * nothing derived. It covers the sections `plan` also projects (`stores`, `routes`, `agents`) plus
+   * the declared handler ids, but it is NOT `plan`'s payload: `plan` publishes no handlers at all, and
+   * its stores/routes are richer objects (column and FK counts; `{method,path,action}`). This is the
+   * name-level view, in the vocabulary `composed` already uses for a route. `ok:true` beside it means
+   * the document VALIDATES — never that it boots; `notProven` names the boot refusals it can still meet.
    */
   readonly backendProfile?: {
     /** The boot profile the doc selects — the backend (RaySpec) boot. */
@@ -84,6 +86,15 @@ export interface DeployDryRunResult {
     readonly agents: readonly string[];
     /** The declared handler ids (the escape-hatch modules that boot loads). */
     readonly handlers: readonly string[];
+    /**
+     * The frontend mounts declared ALONGSIDE the backend, when there are any — omitted otherwise, so a
+     * document with no `frontend:` section keeps the payload it had. Surfaced because this profile's
+     * boot GATES on them: `deployDeclaredSpec` refuses fail-closed on a mount whose directory is
+     * missing/unreadable or whose `spa` mount has no index.html, and that refusal is the one a backend
+     * document meets most often (`examples/notes-ui` is exactly this shape). The matching `notProven`
+     * line says what was NOT checked; this says what will BE checked.
+     */
+    readonly frontendMounts?: readonly FrontendSpec[];
   };
   /** The fail-closed reasons compose/parse rejected the doc (ok:false). */
   readonly errors: readonly string[];
@@ -129,6 +140,11 @@ const BACKEND_DRY_RUN_NOT_PROVEN = [
   "that the boot accepts the declared routes (a 'stream' route with no blob backend configured is refused fail-closed)",
   'that the declared handler modules resolve (the boot loads compiled JavaScript only, under the jailed root)',
   'any speech capability the handlers reach for (STT_PROVIDER / TTS_PROVIDER and their credentials are demanded at boot)',
+  // The refusal a backend document meets most often, and the one the static arm already warns about:
+  // this profile's boot GATES on every declared frontend mount (deployDeclaredSpec throws
+  // BootConfigError on a missing/unreadable dir, or an `spa` mount with no index.html) where the
+  // static boot only degrades its /health. Only the document was read here, so nothing was checked.
+  'that the declared frontend directories hold servable built assets (only the document was read; an unservable mount is refused fail-closed at boot)',
 ] as const;
 
 /** The discriminated outcome of `runDeploy`: a dry-run verdict to emit, or a served (long-running) boot. */
@@ -335,9 +351,13 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     }
     // The BACKEND profile — the shape `serveDeployment` boots through assembleServer. There is nothing
     // to compose (a backend document declares its own routes/handlers rather than lowering to them), so
-    // the verdict is the validation `doctor` runs plus the declarations `plan` projects.
+    // the verdict is the validation `doctor` runs plus the names the document declares.
     const backend = parseSpec(specText);
     if (!backend.ok) return { ...base, errors: specDidNotValidate(backend.errors) };
+    // A backend document MAY also declare frontend mounts (examples/notes-ui does). It is not the
+    // static profile — it boots the full platform, which GATES on every mount — so the mounts are
+    // reported here rather than silently dropped; omitted entirely when the document declares none.
+    const mounts = backend.value.frontend ?? [];
     return {
       ...base,
       ok: true,
@@ -347,6 +367,7 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
         routes: backend.value.api.map((route) => `${route.method} ${route.path}`),
         agents: backend.value.agents.map((agent) => agent.id),
         handlers: backend.value.handlers.map((handler) => handler.id),
+        ...(mounts.length > 0 ? { frontendMounts: mounts } : {}),
       },
       errors: [],
       notProven: BACKEND_DRY_RUN_NOT_PROVEN,

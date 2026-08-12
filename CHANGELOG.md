@@ -235,13 +235,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uses, and validates a backend document with the same parser `doctor` and `plan` use for it.
   **Consumer-visible verdict change:** such a document now returns `ok: true` and exit `0` where it
   returned `ok: false` and exit `1`, carrying a new `backendProfile` block — the profile named plus
-  the declared `stores`, `routes` (`METHOD /path`), `agents` and `handlers`, the same projection
-  `plan` publishes, no SQL and nothing derived — as the counterpart of the `composed` and
-  `staticProfile` blocks. `ok: true` there means the document **validates**, never that it boots, and
-  its `notProven` says so: the shared boundary plus this profile's boot refusals (a `stream` route
-  with no blob backend configured, a declared handler module that does not resolve as compiled
-  JavaScript under the jailed root, and the `STT_PROVIDER` / `TTS_PROVIDER` credentials demanded at
-  boot). A document the backend grammar rejects now reports **its own** violations. A caller gating on
+  the declared `stores`, `routes` (`METHOD /path`), `agents`, `handlers` and, when the document
+  declares any, `frontendMounts`: declared names only, no SQL and nothing derived — as the counterpart
+  of the `composed` and `staticProfile` blocks. It covers the sections `plan` also projects (`stores`,
+  `routes`, `agents`) plus the declared handler ids; it is not `plan`'s own payload, which publishes no
+  handlers and carries richer store/route objects. `ok: true` there means the document **validates**,
+  never that it boots, and its `notProven` says so: the shared boundary plus this profile's boot
+  refusals (a `stream` route with no blob backend configured, a declared handler module that does not
+  resolve as compiled JavaScript under the jailed root, the `STT_PROVIDER` / `TTS_PROVIDER` credentials
+  demanded at boot, and a declared frontend mount whose directory does not hold servable built assets —
+  a backend document that also serves a bundled UI, as `examples/notes-ui` does, boots the full
+  platform, which refuses an unservable mount fail-closed). A document the backend grammar rejects now
+  reports **its own** violations. A caller gating on
   the JSON verdict therefore no longer has to know which ruleset was applied. Product and
   frontend-only documents are untouched — same verdict, same errors, byte-identical payloads — and
   the profile dispatch keeps the boot dependency graph off every product document's dry run exactly as

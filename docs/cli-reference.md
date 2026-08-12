@@ -698,19 +698,26 @@ change is applied by the explicit `--apply-migration` flag below.
   | Document | `ok: true` payload | Judged by |
   | --- | --- | --- |
   | **product** (carries `product:`) | `composed` — the product id and the store / view-route / trigger-event / workflow names it composes to | the product grammar + a stubbed compose |
-  | **backend** (`rayspec`, no `product:`) | `backendProfile` — the profile named, plus the declared `stores`, `routes` (`METHOD /path`), `agents` and `handlers` | the same parser `doctor` and `plan` use |
+  | **backend** (`rayspec`, no `product:`) | `backendProfile` — the profile named, plus the declared `stores`, `routes` (`METHOD /path`), `agents`, `handlers` and (when the document declares any) `frontendMounts` | the same parser `doctor` and `plan` use |
   | **frontend-only** (static) | `staticProfile` — the profile named, the `frontendMounts` that boot would serve, and the statement that no database is touched, no migration applies, and there is nothing to compose | the same detection the static boot branches on |
 
   A **backend** document declares its routes and handlers rather than lowering to
   them, so there is nothing to compose: the check is the validation `doctor` runs,
-  and the payload is the projection `plan` publishes for the same document (declared
-  names only — no SQL, nothing derived). `ok: true` means the document **validates**,
-  not that it boots: `notProven` carries the shared boundary **plus** this profile's
-  boot refusals — a `stream` route with no blob backend configured, a declared
-  handler module that does not resolve as compiled JavaScript under the jailed root,
-  and the `STT_PROVIDER` / `TTS_PROVIDER` credentials demanded at boot. A document
-  the backend grammar rejects reports **its own** violations (a `dangling_ref`, an
-  unknown key) — the same errors `doctor` reports for it.
+  and the payload is **declared names only** — no SQL, nothing derived. It covers the
+  sections [`plan`](#plan) also projects (`stores`, `routes`, `agents`) plus the
+  declared handler ids, but it is not `plan`'s payload: `plan` publishes no handlers,
+  and its stores and routes are richer objects (column and FK counts,
+  `{method, path, action}`). `ok: true` means the document **validates**, not that it
+  boots: `notProven` carries the shared boundary **plus** this profile's boot refusals
+  — a `stream` route with no blob backend configured, a declared handler module that
+  does not resolve as compiled JavaScript under the jailed root, the `STT_PROVIDER` /
+  `TTS_PROVIDER` credentials demanded at boot, and any declared **frontend mount**
+  whose directory does not hold servable built assets (this profile boots the full
+  platform, which refuses an unservable mount fail-closed — see
+  [spec-reference → `frontend`](./spec-reference.md#frontend); the mounts themselves
+  are echoed in `frontendMounts`, so the verdict names what boot will check). A
+  document the backend grammar rejects reports **its own** violations (a
+  `dangling_ref`, an unknown key) — the same errors `doctor` reports for it.
 
   A **frontend-only** document has nothing to compose either, and what its check does
   not prove narrows instead: it reads only the document, so it says nothing about

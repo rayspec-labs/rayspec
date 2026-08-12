@@ -206,6 +206,35 @@ describe('rayspec deploy --dry-run — a backend-profile document', () => {
     const notProven = r.notProven.join(' ');
     expect(notProven).toMatch(/stream.*blob backend/);
     expect(notProven).toMatch(/STT_PROVIDER \/ TTS_PROVIDER/);
+    // Including the gate this profile's boot applies to a `frontend:` section a backend document may
+    // also carry — the refusal the full-platform boot raises fail-closed (see examples/notes-ui).
+    expect(notProven).toMatch(/frontend directories hold servable built assets/);
+  });
+
+  it('names the frontend mounts a backend document also declares (the gate its boot applies)', async () => {
+    // `examples/notes-ui` is exactly this shape: an api PLUS a `frontend:` mount. It is NOT the static
+    // profile — it boots the full platform, which refuses an unservable mount fail-closed — so the
+    // mounts belong in the verdict rather than being dropped from it.
+    writeFileSync(
+      BACKEND_DOC,
+      `${BACKEND_SPEC}frontend:\n  - { route: /, dir: web/dist, spa: true }\n`,
+      'utf8',
+    );
+    const outcome = await runDeploy(['--dry-run', BACKEND_REL]);
+    if (outcome.kind !== 'dry-run') throw new Error('unreachable');
+    expect(outcome.result.ok).toBe(true);
+    // Still the backend arm, never the static one (a doc with stores/api is not a static profile).
+    expect(outcome.result.staticProfile).toBeUndefined();
+    expect(outcome.result.backendProfile?.frontendMounts).toEqual([
+      { route: '/', dir: 'web/dist', spa: true },
+    ]);
+  });
+
+  it('omits frontendMounts when the document declares no frontend (the field is additive)', async () => {
+    const outcome = await runDeploy(['--dry-run', BACKEND_REL]);
+    if (outcome.kind !== 'dry-run') throw new Error('unreachable');
+    expect(outcome.result.backendProfile).toBeDefined();
+    expect('frontendMounts' in (outcome.result.backendProfile ?? {})).toBe(false);
   });
 
   it('reports the document own defect, not product lint, when the backend grammar rejects it', async () => {
