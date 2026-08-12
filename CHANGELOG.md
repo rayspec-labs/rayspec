@@ -228,12 +228,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closure now refuses a malformed argument — anything that is not an object carrying a string
   `agentId` — before it reaches the shared enqueue core, with a `500 INTERNAL` whose message names the
   capability, names the expected `{ agentId, input }` shape, reports the *type* of the argument that
-  arrived (never its value), and states that the call is not positional. `500` rather than `400` or
-  `404` because a mis-call is a defect in the handler's own code, not something the HTTP caller did —
-  the same register in which this capability family already fails closed (an absent capability throws
-  to `500`, and a nullish mis-call already reached `500`). The refusal is written as a shared shape the
-  other optional capabilities (`blob`, `fsSource`, `mintPlayToken`, `stt`, `tts`) can adopt at their
-  own seams; none is retrofitted here. **Note the status change:** a call that answers `404` today
+  arrived (never its value), and names the call form that fits what arrived — that the capability is
+  not positional when a bare positional argument landed, that `agentId` is absent or not a string when
+  the request object itself arrived. `500` rather than `400` or `404` because a mis-call is a defect in
+  the handler's own code, not something the HTTP caller did — the same register in which this
+  capability family already fails closed (an absent capability throws to `500`, and a nullish mis-call
+  already reached `500`). The refusal is written as a shared shape the other optional capabilities
+  (`blob`, `fsSource`, `mintPlayToken`, `stt`, `tts`) can adopt at their own seams: each supplies its
+  own name, expected argument and call form, because the family is not uniform on the call form
+  (`blob.put(key, body, opts?)`, `fsSource.read(path, opts?)`, `stt.transcribe(bytes, opts?)` and
+  `tts.synthesize(text, opts?)` are positional, while `enqueue` and `mintPlayToken` take one request
+  object). None is retrofitted here. **Note the status change:** a call that answers `404` today
   answers `5xx` after this change, so a deployment alerting on 5xx rates will see it. An undeclared but
   well-formed agent id is unmoved — it still answers the uniform registry-bound `404` — and a correct
   object-form call is untouched.

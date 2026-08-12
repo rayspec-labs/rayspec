@@ -355,6 +355,8 @@ describe.skipIf(!hasDb)('route-handler init.enqueue durable seam', () => {
     // failure points back at the call site rather than at the router.
     expect(body.error.message).toContain('init.enqueue');
     expect(body.error.message).toContain('{ agentId, input }');
+    // The CALL FORM names the mis-call that actually happened: a bare positional argument landed.
+    expect(body.error.message).toContain('it is NOT positional');
     // Not the generic unexpected-error text — the refusal is deliberate, not an escaped TypeError.
     expect(body.error.message).not.toBe('Internal server error.');
     expect(stub.enqueued).toHaveLength(0);
@@ -369,6 +371,10 @@ describe.skipIf(!hasDb)('route-handler init.enqueue durable seam', () => {
     const body = (await res.json()) as { error: { code: string; message: string } };
     expect(body.error.code).toBe('INTERNAL');
     expect(body.error.message).toContain('{ agentId, input }');
+    // This caller DID pass one request object, so the message must NOT accuse it of a positional call
+    // — the call-form clause diagnoses what arrived instead of restating a fixed convention.
+    expect(body.error.message).not.toContain('it is NOT positional');
+    expect(body.error.message).toContain('`agentId` is absent or not a string');
     expect(stub.enqueued).toHaveLength(0);
   });
 
