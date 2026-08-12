@@ -41,6 +41,7 @@ import {
   type FsSourceFactory,
   type ResolvedHandler,
   type SttCapability,
+  type TtsCapability,
 } from '@rayspec/platform';
 import type { AgentSpecConfig, RaySpec } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
@@ -78,6 +79,13 @@ export interface BuildAgentRegistryConfig {
    * tool's `init.stt` is then undefined, fail-closed loudly).
    */
   sttCapability?: SttCapability;
+  /**
+   * the composition-root `TtsCapability` (the SAME one the route arm uses). When wired, each declared
+   * tool's per-run `ToolHandlerInit` carries `init.tts` — synthesize audio from text through the
+   * deployment's configured provider. Optional: absent when no `TTS_PROVIDER` is configured (the
+   * tool's `init.tts` is then undefined, fail-closed loudly).
+   */
+  ttsCapability?: TtsCapability;
 }
 
 /** Build the base neutral `AgentSpec` for a declared agent (the per-request `input` is a placeholder). */
@@ -115,6 +123,7 @@ export function buildAgentRegistry(config: BuildAgentRegistryConfig): AgentRegis
     blobFactory,
     fsSourceFactory,
     sttCapability,
+    ttsCapability,
   } = config;
   const registry = new Map<string, AgentRegistryEntry>();
 
@@ -132,7 +141,8 @@ export function buildAgentRegistry(config: BuildAgentRegistryConfig): AgentRegis
     // the run's TenantDb. An agent with no tools gets a factory that yields []. The blobFactory (when
     // wired) lets each tool init carry a tenant-bound `init.blob`; the fsSourceFactory (when wired) lets
     // each tool init carry a READ-ONLY, path-jailed `init.fsSource`; the sttCapability (when wired)
-    // lets each tool init carry `init.stt`.
+    // lets each tool init carry `init.stt`; the ttsCapability (when wired) lets each tool init carry
+    // `init.tts`.
     const toolFactory = buildToolFactory(
       spec,
       handlers,
@@ -141,6 +151,7 @@ export function buildAgentRegistry(config: BuildAgentRegistryConfig): AgentRegis
       blobFactory,
       fsSourceFactory,
       sttCapability,
+      ttsCapability,
     );
 
     registry.set(agent.id, {

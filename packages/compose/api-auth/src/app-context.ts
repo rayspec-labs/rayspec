@@ -20,6 +20,7 @@ import type {
   ResolvedHandler,
   SttCapability,
   ToolFactory,
+  TtsCapability,
 } from '@rayspec/platform';
 import type { RaySpec } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
@@ -154,6 +155,24 @@ export interface DeclarativeEngine {
    * unset ⇒ absent. NOT tenant-partitioned (see `SttCapability`).
    */
   sttCapability?: SttCapability;
+  /**
+   * the composition-root `TtsCapability` — the text-to-speech handle a tool/route handler
+   * receives as `init.tts` (synthesize audio from text the handler already assembled; no tenant arg,
+   * since it speaks what it is handed). Injected exactly like `blobFactory` (the platform ships no
+   * provider): the deployment selects a provider via `TTS_PROVIDER` and the composition root builds
+   * the adapter ONCE. OPTIONAL: absent when no provider is configured — a handler that reads
+   * `init.tts` then fail-closes loudly on `undefined`. Like `fsSourceFactory`/`sttCapability` no route
+   * KIND requires it (there is no `stream`-equivalent deploy guard), so it is purely
+   * deploy-config-gated: set the provider ⇒ available to every route/tool handler; unset ⇒ absent.
+   * NOT tenant-partitioned (see `TtsCapability`).
+   *
+   * OFF-REQUEST BOUNDARY (deliberate, and the same one `fsSourceFactory` and `sttCapability` have):
+   * this reaches the tools of an agent run driven through THIS app. The composition root's
+   * durable-worker-side `buildAgentRegistry` call does NOT thread it, so a tool invoked from a durable
+   * (off-request) run carries neither `init.fsSource`, `init.stt` nor `init.tts` and fail-closes
+   * loudly there. Work that needs speech belongs on the in-request path until that seam is widened.
+   */
+  ttsCapability?: TtsCapability;
   /**
    * the media-token service for the `stream` (mode:'playback') arm — the SECOND
    * auth path (HS256, distinct `RAYSPEC_MEDIA_SIGNING_KEY`). Injected exactly like `blobFactory` (the

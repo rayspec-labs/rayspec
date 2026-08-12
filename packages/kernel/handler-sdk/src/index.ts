@@ -91,13 +91,29 @@ export type {
   SttTranscriptStatus,
   SttWord,
 } from '@rayspec/stt-port';
+// The neutral SYNTHESIS shapes an `init.tts` call takes and returns — defined in `@rayspec/tts-port`,
+// the provider-NEUTRAL text-to-speech port (no provider is named or imported there). Re-exported on
+// the same conduit as the transcript types above so a handler names the request/result types from the
+// ONE SDK package; TYPE-ONLY, so the SDK still ships no runtime.
+export type {
+  TtsAudioFormat,
+  TtsErrorCode,
+  TtsSynthesisResult,
+  TtsSynthesizeRequest,
+} from '@rayspec/tts-port';
 // The neutral speech-to-text capability contract — the injected handle a handler may receive to
 // transcribe audio BYTES it already holds (interface only; the provider adapter is selected + built at
 // the composition root). Re-exported here so a handler imports every capability shape from the one SDK
 // package.
 export type { SttCapability, SttTranscribeOptions } from './stt.js';
+// The neutral speech-synthesis capability contract — the injected handle a handler may receive to turn
+// TEXT it already holds into audio bytes (interface only; the provider adapter is selected + built at
+// the composition root). Re-exported here so a handler imports every capability shape from the one SDK
+// package.
+export type { TtsCapability, TtsSynthesizeOptions } from './tts.js';
 
 import type { SttCapability } from './stt.js';
+import type { TtsCapability } from './tts.js';
 
 // ---------------------------------------------------------------------------------------
 // The store capability facade — a SERIALIZABLE-shaped, NAME-keyed, tenant-bound DB surface.
@@ -365,6 +381,23 @@ export interface HandlerInit {
    * work through a `handler`-kind route or a tool.
    */
   readonly stt?: SttCapability;
+  /**
+   * The neutral TEXT-TO-SPEECH capability — synthesize audio bytes from text the
+   * handler already holds. OPTIONAL: present only when the deployment configured a TTS provider at the
+   * composition root (`TTS_PROVIDER`), so a handler that needs it fail-closes loudly on `undefined`
+   * rather than the engine forcing a provider onto every deployment (mirrors `blob`/`fsSource`/`stt`).
+   * The engine builds the provider adapter ONCE at the composition root — a handler never selects a
+   * provider, reads a credential, or constructs an adapter. It is a SERIALIZABLE-shaped handle (a
+   * string + a plain options record in, a plain result out), preserving the external-exposure isolate
+   * seam. NOT tenant-partitioned (it speaks the text it is handed — see `TtsCapability`).
+   *
+   * POPULATED ON `handler`-KIND ROUTE INITS + TOOL INITS. A `stream`-kind route init carries only its
+   * byte-moving surface (the raw request plus the REQUIRED `blob`) and a TRIGGER init carries only
+   * `{ tenantId, db, triggerName }` at runtime — neither builder injects this capability, the same
+   * boundary `fsSource`/`stt` already have — so a trigger or stream handler that needs speech does its
+   * work through a `handler`-kind route or a tool.
+   */
+  readonly tts?: TtsCapability;
 }
 
 /**

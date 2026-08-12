@@ -1,5 +1,5 @@
 {
-  "name": "@rayspec/handler-sdk",
+  "name": "@rayspec/tts-port",
   "version": "1.7.0",
   "private": true,
   "files": [
@@ -23,12 +23,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
-  "dependencies": {
-    "@rayspec/core": "workspace:*",
-    "@rayspec/stt-port": "workspace:*",
-    "@rayspec/tts-port": "workspace:*"
-  },
   "devDependencies": {
+    "@types/node": "22.12.0",
     "typescript": "5.9.3",
     "vitest": "4.1.9"
   }

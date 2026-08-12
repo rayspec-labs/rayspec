@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Speech synthesis reaches a backend-profile handler as the optional `init.tts` capability, behind a
+  new `TTS_PROVIDER` contract — the egress half of the audio pipeline.** The platform shipped a real
+  speech-to-text stack and, since the previous change, an `init.stt` handle for it; the other
+  direction did not exist in either profile, so every voice product had to hand-roll a raw provider
+  call in product code, each with its own key handling, error hygiene, and provider-drift exposure —
+  exactly the scaffolding the platform otherwise absorbs. A route or tool handler now receives
+  `init.tts.synthesize(text, opts)` — the text it already assembled in, the audio bytes plus the
+  `contentType` describing them out, with `voice`, `speed`, and `format` (`mp3` | `opus` | `wav`) as
+  plain options. Two new packages carry it: `@rayspec/tts-port`, the provider-neutral `TtsAdapter`
+  contract and the request rules every adapter behind it applies, and `@rayspec/adapter-openai-tts`,
+  a raw-`fetch` OpenAI adapter (`tts-1` / `tts-1-hd`, one REST call, no provider SDK and no new
+  third-party dependency). The engine selects the provider and builds the adapter once at boot, so a
+  handler never names a provider, reads a credential, or constructs an adapter. Presence follows the
+  other optional capabilities exactly: set `TTS_PROVIDER` and every `handler`-kind route init and
+  every tool init carries the handle (a `stream`-kind route init and a trigger init do not — neither
+  builder injects it); leave it unset and the field is **absent** (not `undefined`-valued), so a
+  handler that needs it fail-closes loudly instead of speaking into a silent no-op — and an unset
+  provider is never a boot error, since nothing in a spec declares that a handler speaks.
+  `TTS_PROVIDER=openai` demands `OPENAI_API_KEY` **at boot** rather than failing every call at
+  request time (that is the same variable the OpenAI and Pi agent backends already use, so those
+  deployments need no new credential; an Anthropic- or Codex-backed one does not carry it and must
+  supply it), an unsupported provider name is refused at boot naming the wired ones, and
+  `TTS_PROVIDER=fake` is a working deterministic offline synthesizer for dev and CI (every call
+  returns the same fixed-length tone, byte-identical; the boot warns loudly that nothing is being
+  spoken, warn-only). Unlike `transcribe`, `synthesize` rejects rather than returning a status union —
+  the happy path is the audio itself — with a structured, content-free `TtsAdapterError` that never
+  echoes the text, the response body, or the credential. Two limits are enforced before any provider
+  call, so a rejected request is never billed: the 4096-character text cap is **fail-closed** (an
+  over-long text is refused, never truncated into a recording that stops mid-sentence), and an unknown
+  voice is refused rather than silently falling back to a default, while `speed` is clamped into the
+  supported range. The offline provider enforces exactly those same limits — it is handed the live
+  adapter's own policy — so a request that passes in CI cannot first fail in production. Deployments
+  that set no provider boot and serve exactly as before.
+
 - **Transcription reaches a backend-profile handler as the optional `init.stt` capability, behind the
   existing `STT_PROVIDER` contract.** The platform shipped a real speech-to-text stack — the neutral
   adapter port and a production Deepgram adapter — that only the product profile's audio pipeline

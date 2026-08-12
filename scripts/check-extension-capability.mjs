@@ -133,6 +133,17 @@ const SELF_CONSTRUCT_VECTORS = [
     re: /\bnew\s+DeepgramSttAdapter\s*\(/,
     what: 'new DeepgramSttAdapter(...) (a raw provider adapter — use the injected init.stt handle)',
   },
+  // A self-built TTS stack — the egress twin of the two vectors above, forbidden for the same reason:
+  // a handler that selects the provider or builds its own adapter reads the provider credential itself
+  // and pins the deployment's provider choice inside product code, defeating the injection seam.
+  {
+    re: /\bbuildTtsCapability\s*\(/,
+    what: 'buildTtsCapability(...) (self-selecting the TTS provider — use the injected init.tts handle)',
+  },
+  {
+    re: /\bnew\s+OpenAiTtsAdapter\s*\(/,
+    what: 'new OpenAiTtsAdapter(...) (a raw provider adapter — use the injected init.tts handle)',
+  },
 ];
 
 function* walk(dir) {
@@ -261,6 +272,12 @@ function selfTest() {
       expect: true,
     },
     { rel: 'h/x.ts', src: 'const a = new DeepgramSttAdapter({ resolver });', expect: true },
+    {
+      rel: 'h/x.ts',
+      src: "const tts = buildTtsCapability({ ttsProvider: 'fake' });",
+      expect: true,
+    },
+    { rel: 'h/x.ts', src: 'const a = new OpenAiTtsAdapter({ apiKey });', expect: true },
     // a COMMENT mentioning a forbidden token — must NOT fire (prose, not code)
     {
       rel: 'h/x.ts',

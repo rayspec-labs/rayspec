@@ -292,6 +292,13 @@ export async function createHarness(
      */
     sttCapability?: NonNullable<NonNullable<AppDeps['engine']>['sttCapability']>;
     /**
+     * the text-to-speech capability wired into `deps.engine.ttsCapability` (a route/tool
+     * handler's `init.tts`). A synthesis test passes a recording stand-in — exercising the SAME
+     * injection the composition root does. Omit ⇒ `init.tts` is ABSENT (a handler that needs it
+     * fail-closes loudly — the deploy posture a test can also exercise).
+     */
+    ttsCapability?: NonNullable<NonNullable<AppDeps['engine']>['ttsCapability']>;
+    /**
      * the media-token service wired into `deps.engine.mediaTokenService` (the playback
      * route's 2nd auth path + the mint capability). A playback test passes a service built over a test
      * media secret. Omit ⇒ a declared `stream` playback route fails closed at boot (no media verifier).
@@ -415,6 +422,9 @@ export async function createHarness(
       // the speech-to-text capability a route/tool handler reads as `init.stt` (omit ⇒ ABSENT,
       // so a handler that needs transcription fail-closes loudly).
       ...(opts.sttCapability ? { sttCapability: opts.sttCapability } : {}),
+      // the text-to-speech capability a route/tool handler reads as `init.tts` (omit ⇒ ABSENT,
+      // so a handler that needs speech fail-closes loudly).
+      ...(opts.ttsCapability ? { ttsCapability: opts.ttsCapability } : {}),
       // the media-token service for declared `stream` playback routes + the mint capability
       // (omit ⇒ a playback route fails closed at boot — the deploy-guard a test can also exercise).
       ...(opts.mediaTokenService ? { mediaTokenService: opts.mediaTokenService } : {}),

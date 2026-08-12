@@ -1,10 +1,7 @@
 {
-  "name": "@rayspec/handler-sdk",
+  "name": "@rayspec/adapter-openai-tts",
   "version": "1.7.0",
   "private": true,
-  "files": [
-    "dist"
-  ],
   "license": "FSL-1.1-ALv2",
   "type": "module",
   "exports": {
@@ -24,11 +21,11 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@rayspec/core": "workspace:*",
-    "@rayspec/stt-port": "workspace:*",
     "@rayspec/tts-port": "workspace:*"
   },
   "devDependencies": {
+    "@types/node": "22.12.0",
+    "dotenv": "17.4.2",
     "typescript": "5.9.3",
     "vitest": "4.1.9"
   }

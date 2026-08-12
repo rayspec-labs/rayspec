@@ -30,6 +30,7 @@ import {
   type SttCapability,
   type TriggerHandler,
   type TriggerHandlerInit,
+  type TtsCapability,
 } from '@rayspec/handler-sdk';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { getHandlerRuntime } from './handler-runtime.js';
@@ -114,6 +115,11 @@ export async function invokeRouteHandler(
   // `{handler}` route can transcribe an upload. Absent ⇒ init.stt is omitted (no provider configured;
   // the handler fail-closes). NOT tenant-bound — it transcribes the bytes it is handed.
   stt?: SttCapability,
+  // An OPTIONAL text-to-speech capability (the provider adapter the composition root built from
+  // `TTS_PROVIDER`). Spread onto the init when present so a `{handler}` route can synthesize a reply.
+  // Absent ⇒ init.tts is omitted (no provider configured; the handler fail-closes). NOT tenant-bound
+  // — it speaks the text it is handed.
+  tts?: TtsCapability,
 ): Promise<unknown> {
   return tdb.transaction(async (txTdb) => {
     const init = buildRouteHandlerInit(
@@ -129,6 +135,7 @@ export async function invokeRouteHandler(
       fsSourceFactory,
       principal,
       stt,
+      tts,
     );
     return getHandlerRuntime().invokeRoute(fn, init);
   });
@@ -163,6 +170,9 @@ function buildRouteHandlerInit(
   // The composition-root speech-to-text capability (no tenant arg — it transcribes the bytes the
   // handler hands it). Absent ⇒ init.stt omitted (no STT provider configured).
   stt?: SttCapability,
+  // The composition-root text-to-speech capability (no tenant arg — it speaks the text the handler
+  // hands it). Absent ⇒ init.tts omitted (no TTS provider configured).
+  tts?: TtsCapability,
 ): RouteHandlerInit {
   return {
     tenantId: boundTdb.tenantId,
@@ -175,6 +185,8 @@ function buildRouteHandlerInit(
     ...(fsSourceFactory ? { fsSource: fsSourceFactory() } : {}),
     // The speech-to-text capability (spread so ABSENT when no STT provider is configured).
     ...(stt ? { stt } : {}),
+    // The text-to-speech capability (spread so ABSENT when no TTS provider is configured).
+    ...(tts ? { tts } : {}),
     // The play-token mint capability (spread so ABSENT when no media key is wired).
     ...(mintPlayToken ? { mintPlayToken } : {}),
     // The tenant-bound durable-enqueue capability (spread so ABSENT when no worker is wired).
@@ -236,6 +248,9 @@ export async function invokeRouteHandlerDetached(
   // OPTIONAL speech-to-text capability — see invokeRouteHandler. Threaded identically so the
   // handler-managed posture receives `init.stt` the same way the engine-tx posture does.
   stt?: SttCapability,
+  // OPTIONAL text-to-speech capability — see invokeRouteHandler. Threaded identically so the
+  // handler-managed posture receives `init.tts` the same way the engine-tx posture does.
+  tts?: TtsCapability,
 ): Promise<unknown> {
   const init = buildRouteHandlerInit(
     tdb,
@@ -250,6 +265,7 @@ export async function invokeRouteHandlerDetached(
     fsSourceFactory,
     principal,
     stt,
+    tts,
   );
   return getHandlerRuntime().invokeRoute(fn, init);
 }

@@ -17,7 +17,9 @@
     { "path": "../../capabilities/audio-runtime" },
     { "path": "../../compose/product-yaml" },
     { "path": "../../adapters/deepgram" },
-    { "path": "../../kernel/stt-port" }
+    { "path": "../../kernel/stt-port" },
+    { "path": "../../adapters/openai-tts" },
+    { "path": "../../kernel/tts-port" }
   ],
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules", "**/*.test.ts"]

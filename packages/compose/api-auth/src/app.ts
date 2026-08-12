@@ -366,6 +366,9 @@ function withDeclaredAgents(deps: AppDeps): AppDeps {
     // thread the wired speech-to-text capability so a declared tool's init carries `init.stt`
     // (the SAME handle the route arm reads). Absent when no STT provider is configured.
     ...(engine.sttCapability ? { sttCapability: engine.sttCapability } : {}),
+    // thread the wired text-to-speech capability so a declared tool's init carries `init.tts`
+    // (the SAME handle the route arm reads). Absent when no TTS provider is configured.
+    ...(engine.ttsCapability ? { ttsCapability: engine.ttsCapability } : {}),
   });
   // Merge: direct entries first, spec-declared entries override on id collision (spec is the source).
   const merged = new Map(deps.agentRegistry ?? []);
