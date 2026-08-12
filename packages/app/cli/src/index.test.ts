@@ -9,7 +9,8 @@
  *  - a missing command → throws CliError (exit 2), nothing on stdout;
  *  - an unknown command → throws CliError (exit 2);
  *  - an unknown `--flag` → throws CliError (exit 2) (strict parseArgs);
- *  - the top-level `--version`/`-v` → 0, the version JSON on stdout, nothing on stderr.
+ *  - the top-level `--version`/`-v` → 0, the version JSON on stdout, nothing on stderr;
+ *  - `--help`/`-h`, at every level → 0, the help text on stdout, nothing on stderr.
  *
  * emit uses a drain callback, so a large payload is flushed before exit — we assert the JSON is
  * COMPLETE (parses + closing brace present), not truncated.
@@ -241,6 +242,148 @@ describe('run — the top-level --version flag', () => {
     expect(JSON.parse(err.split('\n')[0] as string)).toMatchObject({ ok: false });
     expect(err).toMatch(/unknown command/i);
     expect(err).toContain('rayspec — RaySpec CLI');
+  });
+});
+
+/**
+ * `--help`/`-h` is a HELP REQUEST, not a usage error.
+ *
+ * Three separate code paths used to reject it — the top-level leading-dash check, each subcommand's
+ * strict `parseArgs`, and the `tenant`/`dev` group dispatchers — so every spelling is measured on BOTH
+ * halves of the observable contract: the exit code AND which stream carried the bytes. The accept
+ * control lives alongside: a genuine usage error must still be exit 2 with the `cliError` envelope on
+ * stderr, or a catch-all "answer help" would pass these arms while breaking the grammar.
+ */
+describe('run — `--help`/`-h` at every level', () => {
+  let prevExit: number | string | undefined;
+  beforeEach(() => {
+    prevExit = process.exitCode;
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    process.exitCode = prevExit;
+  });
+
+  // Every spelling the CLI must answer: the two top-level ones, each subcommand, both groups, and the
+  // group MEMBERS (`dev db`, `tenant ensure`) — the sub-subcommand level a group dispatcher owns.
+  const SPELLINGS: readonly (readonly string[])[] = [
+    ['--help'],
+    ['-h'],
+    ['init', '--help'],
+    ['doctor', '--help'],
+    ['plan', '--help'],
+    ['openapi', '--help'],
+    ['gen-handler', '--help'],
+    ['deploy', '--help'],
+    ['deploy', '-h'],
+    ['tenant', '--help'],
+    ['dev', '--help'],
+    ['tenant', 'ensure', '--help'],
+    ['dev', 'gen-secrets', '--help'],
+    ['dev', 'db', '--help'],
+    ['dev', 'db', '-h'],
+    ['dev', 'bootstrap-tenant', '--help'],
+  ];
+
+  for (const args of SPELLINGS) {
+    it(`\`rayspec ${args.join(' ')}\` → exit 0, help on STDOUT, nothing on stderr`, async () => {
+      await run([...args]);
+      expect(process.exitCode).toBe(0);
+      expect(errChunks.join('')).toBe('');
+      const out = outChunks.join('');
+      // stdout is non-empty and is the help text — not a JSON envelope.
+      expect(out.length).toBeGreaterThan(0);
+      expect(out.startsWith('rayspec')).toBe(true);
+      expect(out).toContain('RaySpec CLI');
+    });
+  }
+
+  it('`deploy --help` is SCOPED to deploy: its five flags, not the general manual', async () => {
+    await run(['deploy', '--help']);
+    const out = outChunks.join('');
+    for (const flag of ['--dry-run', '--port', '--host', '--apply-migration', '--allowlist']) {
+      expect(out, `deploy's help must name ${flag}`).toContain(flag);
+    }
+    // The whole manual would carry these; deploy's own block does not.
+    expect(out).not.toContain('GET STARTED:');
+    expect(out).not.toContain('rayspec dev gen-secrets');
+    expect(out).not.toContain('rayspec tenant ensure --org-id');
+  });
+
+  it('a GROUP answers for its members; a member answers for itself alone', async () => {
+    await run(['dev', '--help']);
+    const group = outChunks.join('');
+    for (const member of ['dev gen-secrets', 'dev db', 'dev bootstrap-tenant']) {
+      expect(group).toContain(`rayspec ${member}`);
+    }
+
+    outChunks.length = 0;
+    process.exitCode = undefined;
+    await run(['dev', 'db', '--help']);
+    const one = outChunks.join('');
+    expect(one).toContain('rayspec dev db [--database-url <url>]');
+    expect(one).not.toContain('rayspec dev gen-secrets');
+    expect(one).not.toContain('rayspec dev bootstrap-tenant');
+  });
+
+  // The composition property the per-command split exists for: each command is described in ONE
+  // block, and the general usage is that same block re-composed. An edit to a command's entry
+  // therefore reaches both surfaces, and neither can drift from the other.
+  it('the general usage CONTAINS, verbatim, the block each scoped help prints', async () => {
+    await run(['--help']);
+    const general = outChunks.join('');
+    const commands = [
+      'init',
+      'doctor',
+      'plan',
+      'openapi',
+      'gen-handler',
+      'deploy',
+      'tenant ensure',
+      'dev gen-secrets',
+      'dev db',
+      'dev bootstrap-tenant',
+    ];
+    for (const command of commands) {
+      outChunks.length = 0;
+      process.exitCode = undefined;
+      await run([...command.split(' '), '--help']);
+      // Strip the scoped header (title, blank, section heading) and the footer (blank, the two
+      // output-contract lines, the "run --help" pointer, the trailing newline) — what is left is the
+      // command's block.
+      const block = outChunks.join('').split('\n').slice(3, -5).join('\n');
+      expect(block.length, `${command} has an empty help block`).toBeGreaterThan(0);
+      expect(general, `the general usage lost ${command}'s block`).toContain(block);
+    }
+  });
+
+  // ACCEPT CONTROL — answering help must not become a catch-all that swallows a genuine usage error.
+  const USAGE_ERRORS: readonly (readonly string[])[] = [
+    ['frobnicate'], // an unknown subcommand
+    ['doctor', '--nope'], // a genuinely unknown option
+    ['dev', 'frobnicate'], // an unknown sub-subcommand in a group
+    ['frobnicate', '--help'], // help NAMED on something that does not exist
+    ['doctor', '--help', '--nope'], // a token after the help flag is refused, like `--version`
+  ];
+
+  for (const args of USAGE_ERRORS) {
+    it(`\`rayspec ${args.join(' ')}\` is still exit 2 with the cliError envelope on stderr`, async () => {
+      await run([...args]);
+      expect(process.exitCode).toBe(2);
+      expect(outChunks.join('')).toBe('');
+      const err = errChunks.join('');
+      expect(JSON.parse(err.split('\n')[0] as string)).toMatchObject({ ok: false });
+      expect(err).toContain('rayspec — RaySpec CLI');
+    });
+  }
+
+  // Past the command path, the top level hands the vector over unparsed — so a `-h` there is still
+  // the command's own token and still resolves through the command's own strict parser, unchanged.
+  it('a `-h` past the command path is left to the command that owns it', async () => {
+    await expect(main(['plan', 'rayspec.yaml', '--against', '-h'])).rejects.toThrow(
+      /invalid arguments/i,
+    );
+    expect(outChunks.join('')).toBe('');
   });
 });
 

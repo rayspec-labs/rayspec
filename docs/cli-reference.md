@@ -14,8 +14,9 @@ check against, see the [spec reference](./spec-reference.md).
 
 ## Conventions
 
-Every `rayspec` subcommand emits **exactly one JSON object on stdout** and uses a
-three-value exit-code contract:
+Every `rayspec` subcommand emits **exactly one JSON object on stdout** — with one
+documented exception, `--help`, which prints plain text there instead (see
+[below](#the---help-flag)) — and uses a three-value exit-code contract:
 
 | Exit | Meaning                                                                 |
 | ---- | ---------------------------------------------------------------------- |
@@ -50,9 +51,40 @@ reports the CLI's own version on **stdout** and exits `0`:
 
 The value is read from the CLI package's own manifest at run time, so it names
 the version you actually have installed. It takes no arguments: a token after it is
-refused as a usage error (exit `2`) rather than ignored. Every *other* leading
-`--flag` remains a usage error too (the exit-`2` row above): with no subcommand there
-is nothing to dispatch it to.
+refused as a usage error (exit `2`) rather than ignored.
+
+### The `--help` flag
+
+`--help` (or `-h`) is a help **request**, not a usage error: it prints help on
+**stdout** and exits `0`. It is the one exception to the single-JSON-object rule
+above — the help text is plain text, so a `set -e` script or a CI smoke step can
+run it and read it.
+
+Named on its own it prints the full manual; named after a command it prints
+**that command's** help alone, which is how you ask what flags one command takes
+without scrolling the whole thing:
+
+```console
+$ rayspec deploy --help
+rayspec deploy — RaySpec CLI
+
+PRODUCTION-MUTATING (boots + serves a real deployment; mutates the target DB):
+  rayspec deploy <spec.yaml> [--port <n>] [--host <addr>] [--apply-migration …]
+  …
+```
+
+A group answers for its members: `rayspec dev --help` prints all three `dev`
+commands, `rayspec dev db --help` just that one.
+
+The flag is honoured where a command name sits — `rayspec --help`,
+`rayspec <command> --help`, `rayspec <group> <sub> --help` — and, like
+`--version`, it takes no arguments: a token *after* it is refused as a usage
+error (exit `2`) rather than ignored. Everything past the command path is that
+command's own argument grammar, which the top level hands over untouched, so a
+`-h` written further along is still that command's to interpret.
+
+Every *other* leading `--flag` remains a usage error (the exit-`2` row above):
+with no subcommand there is nothing to dispatch it to.
 
 ### The spec-path jail
 
