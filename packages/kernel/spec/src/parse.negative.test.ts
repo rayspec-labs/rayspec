@@ -10,6 +10,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CAPABILITIES } from '@rayspec/core';
 import { describe, expect, it } from 'vitest';
 import type { SpecErrorCode } from './errors.js';
 import { RESERVED_STORE_NAMES } from './lint.js';
@@ -331,6 +332,50 @@ agents:
     const okOnOpenai = parseSpec(yaml.replace('backend: pi', 'backend: openai'));
     expect(okOnOpenai.ok).toBe(true);
     expectRejection(yaml, 'capability_violation');
+  });
+
+  it('rejects sequentialTools on a backend whose descriptor cannot honor it (synthetic); all four real backends accept it', () => {
+    const yamlFor = (backend: string) => `
+version: '1.0'
+metadata:
+  name: cap
+agents:
+  - id: ordered
+    name: ordered
+    backend: ${backend}
+    model: some-model
+    instructions: call tools one at a time
+    sequentialTools: true
+    tools: [echo]
+tooling:
+  - id: echo
+    name: echo
+    description: echo back
+    parameters:
+      type: object
+    handler: echo_handler
+    idempotent: true
+    timeoutMs: 1000
+handlers:
+  - { id: echo_handler, module: handlers/echo.ts, export: echo, kind: tool }
+`;
+    // All FOUR real backends dispatch tools through the platform's serializable dispatchTool path,
+    // so every real descriptor honors sequentialTools and the spec lints clean everywhere.
+    for (const backend of ['openai', 'anthropic', 'pi', 'codex'] as const) {
+      const ok = parseSpec(yamlFor(backend));
+      expect(ok.ok).toBe(true);
+    }
+    // The violating descriptor is UNSATISFIABLE at HEAD (see above), so the guard is exercised
+    // against a SYNTHETIC incapable descriptor: patch one backend's capability off, expect the
+    // capability_violation, restore. This is the fail-closed path a FUTURE backend that executes
+    // tools outside platform dispatch would hit — never a silent no-op of a declared ordering.
+    const original = CAPABILITIES.pi;
+    CAPABILITIES.pi = { ...original, sequentialTools: false };
+    try {
+      expectRejection(yamlFor('pi'), 'capability_violation');
+    } finally {
+      CAPABILITIES.pi = original;
+    }
   });
 });
 

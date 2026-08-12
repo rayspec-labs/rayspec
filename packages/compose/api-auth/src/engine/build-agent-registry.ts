@@ -86,6 +86,10 @@ function baseAgentSpec(agent: AgentSpecConfig): AgentSpec {
     tools: [],
     maxTurns: agent.maxTurns,
     ...(agent.outputSchema ? { outputSchema: agent.outputSchema } : {}),
+    // The declared ordering constraint rides the neutral spec (run-core serializes dispatch; a
+    // capable adapter also disables provider-side batching). Spread-only-when-true so a spec
+    // without it stays byte-identical to before the field existed.
+    ...(agent.sequentialTools ? { sequentialTools: true } : {}),
   };
 }
 

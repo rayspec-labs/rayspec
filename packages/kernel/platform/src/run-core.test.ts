@@ -959,3 +959,117 @@ describe('run-core run-header reconcile on heal', () => {
     expect(steps[0]?.status).toBe('ok');
   });
 });
+
+/**
+ * A fake backend that fires a BATCH of two WRITING (idempotent:false) tools the way a real
+ * adapter marshals an SDK batch: two un-awaited `ctx.dispatchTool` calls in emission order
+ * (write_a first, write_b second), both in flight at once. What the platform does with that
+ * batch is exactly what `sequentialTools` decides.
+ */
+class BatchToolBackend implements Backend {
+  readonly id = 'openai' as const;
+  results: string[] = [];
+  async resolveAuth() {
+    return 'api-key' as const;
+  }
+  async run(_spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
+    if (!ctx.dispatchTool) throw new Error('BatchToolBackend requires ctx.dispatchTool');
+    // The SDK-batch shape: both calls issued back-to-back WITHOUT awaiting the first.
+    const [a, b] = await Promise.all([
+      ctx.dispatchTool('write_a', { v: 1 }, 'call_a'),
+      ctx.dispatchTool('write_b', { v: 2 }, 'call_b'),
+    ]);
+    this.results = [a.kind, b.kind];
+    return {
+      runId: ctx.runId,
+      backend: this.id,
+      authMode: 'api-key',
+      status: 'completed',
+      finalText: 'done',
+      output: null,
+      error: null,
+      errorClass: null,
+      conversation: [{ role: 'assistant', index: 0, parts: [{ kind: 'text', text: 'done' }] }],
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      costUsd: 0,
+      stepCount: 2,
+    };
+  }
+}
+
+/**
+ * Build the ordered-write tool pair + its trace for ONE batch run (a fresh gate per test).
+ * The interleaving observation is STRUCTURAL, not timing-based: write_a's handler waits for
+ * write_b's handler to START (or a 250ms timeout when nothing else can run). Under concurrent
+ * dispatch `b:start` therefore ALWAYS lands between `a:start` and `a:end`; under serialized
+ * dispatch write_b cannot start until write_a completed, so the timeout fires and the trace is
+ * strictly ordered.
+ */
+function orderedWritePair(): { trace: string[]; tools: NeutralTool[] } {
+  const trace: string[] = [];
+  let releaseBStarted = () => {};
+  const bStarted = new Promise<void>((resolve) => {
+    releaseBStarted = resolve;
+  });
+  const writeA: NeutralTool = {
+    spec: {
+      name: 'write_a',
+      description: 'ordered side effect A',
+      parameters: { type: 'object', properties: {} },
+    },
+    handler: async () => {
+      trace.push('a:start');
+      await Promise.race([bStarted, new Promise((r) => setTimeout(r, 250))]);
+      trace.push('a:end');
+      return { wrote: 'a' };
+    },
+    timeoutMs: 5000,
+    idempotent: false,
+  };
+  const writeB: NeutralTool = {
+    spec: {
+      name: 'write_b',
+      description: 'ordered side effect B',
+      parameters: { type: 'object', properties: {} },
+    },
+    handler: () => {
+      trace.push('b:start');
+      releaseBStarted();
+      trace.push('b:end');
+      return { wrote: 'b' };
+    },
+    timeoutMs: 5000,
+    idempotent: false,
+  };
+  return { trace, tools: [writeA, writeB] };
+}
+
+describe('run-core sequentialTools (per-run FIFO width-1 queue in front of dispatchTool)', () => {
+  it('executes a batch of two writing tools STRICTLY in emission order when sequentialTools is set', async () => {
+    const { trace, tools } = orderedWritePair();
+    const backend = new BatchToolBackend();
+    const seqSpec: AgentSpec = { ...spec, sequentialTools: true };
+
+    const res = await runAgent(forTenant(db, TENANT_A), backend, seqSpec, { tools });
+
+    expect(res.status).toBe('completed');
+    expect(backend.results).toEqual(['tool_data', 'tool_data']);
+    // Strict emission order: write_a runs TO COMPLETION before write_b starts. Without the
+    // queue the concurrent dispatch interleaves them (b:start lands before a:end) and this fails.
+    expect(trace).toEqual(['a:start', 'a:end', 'b:start', 'b:end']);
+  });
+
+  it('ACCEPT-CONTROL: without the flag the batch still dispatches concurrently (today’s behavior)', async () => {
+    const { trace, tools } = orderedWritePair();
+    const backend = new BatchToolBackend();
+
+    const res = await runAgent(forTenant(db, TENANT_A), backend, spec, { tools });
+
+    expect(res.status).toBe('completed');
+    expect(backend.results).toEqual(['tool_data', 'tool_data']);
+    // The default stays concurrent: write_b STARTS before write_a has completed (under the
+    // serialized queue b:start could only ever land AFTER a:end). Which of the two handlers
+    // reaches its first line first is scheduler jitter, so only the overlap is asserted.
+    expect(trace.indexOf('b:start')).toBeLessThan(trace.indexOf('a:end'));
+  });
+});

@@ -353,3 +353,45 @@ describe('OpenAI adapter: the run’s cancellation signal reaches the SDK call',
     expect(options).toEqual({ stream: false, maxTurns: baseSpec.maxTurns });
   });
 });
+
+describe('OpenAI adapter: sequentialTools maps to BOTH SDK settings — and ONLY with the flag', () => {
+  it('with sequentialTools: Agent carries modelSettings.parallelToolCalls === false AND the run options carry toolExecution.maxFunctionToolConcurrency === 1', async () => {
+    const calls: unknown[] = [];
+    const tool = recordingTool(calls);
+    const journal = new FakeJournal();
+    runSpy.mockImplementation(fakeRunImpl());
+    const adapter = new OpenAIAdapter({ apiKey: 'sk-test' });
+
+    await adapter.run(
+      { ...baseSpec, sequentialTools: true, tools: [tool.spec] },
+      makeCtx(journal, [tool]),
+    );
+
+    // Provider side: the constructed Agent disables parallel tool calls at the source.
+    const agent = runSpy.mock.calls[0]?.[0] as { modelSettings?: Record<string, unknown> };
+    expect(agent.modelSettings?.parallelToolCalls).toBe(false);
+    // SDK-loop side: a received batch executes strictly in emission-index order.
+    const options = runSpy.mock.calls[0]?.[2] as Record<string, unknown>;
+    expect(Object.keys(options).sort()).toEqual(['maxTurns', 'stream', 'toolExecution']);
+    expect(options.toolExecution).toEqual({ maxFunctionToolConcurrency: 1 });
+  });
+
+  it('without the flag BOTH settings are ABSENT (not false, not null) — today’s wire shape byte-identical', async () => {
+    const calls: unknown[] = [];
+    const tool = recordingTool(calls);
+    const journal = new FakeJournal();
+    runSpy.mockImplementation(fakeRunImpl());
+    const adapter = new OpenAIAdapter({ apiKey: 'sk-test' });
+
+    await adapter.run({ ...baseSpec, tools: [tool.spec] }, makeCtx(journal, [tool]));
+
+    // The Agent was constructed WITHOUT a modelSettings option (for this non-gpt-5 model the SDK
+    // then seeds `{}`), so the `parallelToolCalls` KEY does not exist — the provider setting is
+    // NOT SENT and the provider's own default (parallel ON) applies.
+    const agent = runSpy.mock.calls[0]?.[0] as { modelSettings: Record<string, unknown> };
+    expect(Object.hasOwn(agent.modelSettings, 'parallelToolCalls')).toBe(false);
+    // And the option bag has NO toolExecution key at all.
+    const options = runSpy.mock.calls[0]?.[2] as Record<string, unknown>;
+    expect(Object.keys(options).sort()).toEqual(['maxTurns', 'stream']);
+  });
+});

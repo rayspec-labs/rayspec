@@ -304,8 +304,9 @@ export type HandlerSpec = z.infer<typeof HandlerSpec>;
  *  - `.extend(...)` — the wrap-layer fields the engine needs: a logical `id`, a `backend`
  *    selection, the `tools` id-reference list, an optional `requireNativeStructuredOutput`
  *    flag so a capability violation (e.g. native structured output demanded on pi) is expressible
- *    and checked at config time (lint), and an optional `lintSuppress` list (node-scoped advisory
- *    acknowledgements — see `LintSuppression`).
+ *    and checked at config time (lint), a defaulted `sequentialTools` flag (the neutral-optional
+ *    field, pinned to an explicit boolean at this layer), and an optional `lintSuppress` list
+ *    (node-scoped advisory acknowledgements — see `LintSuppression`).
  *  - `.strict()` — fail-closed unknown-key rejection (applied last; verified to compose).
  *
  * Single source of truth: `name`/`instructions`/`model`/`outputSchema`/`maxTurns` come straight
@@ -325,6 +326,14 @@ export const AgentSpecConfig = NeutralAgentSpec.omit({ input: true, tools: true 
      * a backend that lacks it (pi). Threaded into core `validateSpec` by the lint pass.
      */
     requireNativeStructuredOutput: z.boolean().default(false),
+    /**
+     * When true, this agent's tool calls execute SEQUENTIALLY in emission order: the backend's
+     * provider-side parallel-tool-call setting is disabled where one exists (openai), and the
+     * platform serializes dispatch on every backend. Neutral-optional on core `AgentSpec`;
+     * DEFAULTED here (the wrap-layer idiom) so a parsed config always carries the decision.
+     * Default false — concurrent dispatch, today's behavior.
+     */
+    sequentialTools: z.boolean().default(false),
     /** Optional advisory acknowledgements scoped to THIS agent (see `LintSuppression`). */
     lintSuppress: LintSuppressList,
   })
