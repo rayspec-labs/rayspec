@@ -886,6 +886,50 @@ export type EnqueueAgentRunCapability = (req: {
 }) => Promise<{ runId: string }>;
 
 /**
+ * The SHARED malformed-argument refusal for an OPTIONAL handler capability. Established HERE on
+ * `init.enqueue` and written to be adopted — same shape, same message register — by a sibling
+ * capability (`blob`, `fsSource`, `mintPlayToken`, `stt`, `tts`, and whatever the family grows next).
+ *
+ * EVERY capability-specific part is the CALLER'S to supply — its name, the argument it expects, and
+ * its CALL FORM. The call form especially: this family is NOT uniform on it. `enqueue` and
+ * `mintPlayToken` take one request object; `blob.put(key, body, opts?)`, `fsSource.read(path, opts?)`,
+ * `stt.transcribe(bytes, opts?)` and `tts.synthesize(text, opts?)` are positional by design. A call
+ * form baked in here would make an adopting seam state something false about itself, which is the
+ * exact class of misdirection this refusal exists to remove. Adopting it is a per-capability change
+ * at that capability's own seam; nothing here retrofits one.
+ *
+ * The register this helper OWNS: name the capability, name the argument it expects, say what arrived
+ * — its TYPE only, never the value (a capability argument carries caller data) — and point at the
+ * handler call site. `callForm` is the one sentence between those, in the caller's own words.
+ *
+ * INTERNAL (500) is deliberate, and consistent with how this family already fails closed: an ABSENT
+ * capability throws to 500, and a nullish mis-call reached 500 as an escaped TypeError before this
+ * guard. A malformed call is a defect in the HANDLER'S code, not something the HTTP caller did — so
+ * it is neither a 400 (the caller's request is fine) nor a 404 (the route resolved and the handler
+ * ran), both of which point debugging at a subsystem that is working.
+ */
+export function malformedCapabilityCall(
+  capability: string,
+  expected: string,
+  received: unknown,
+  callForm: string,
+): ApiError {
+  const t = typeof received;
+  const kind =
+    received === null
+      ? 'null'
+      : Array.isArray(received)
+        ? 'an array'
+        : t === 'undefined'
+          ? 'no argument'
+          : `${t === 'object' ? 'an' : 'a'} ${t}`;
+  return new ApiError(
+    'INTERNAL',
+    `${capability} expects ${expected}; received ${kind}. ${callForm} Check the handler call site.`,
+  );
+}
+
+/**
  * build the TENANT-BOUND `init.enqueue` capability a declared ROUTE handler
  * receives — a closure that enqueues a durable agent run for THIS request's SERVER-DERIVED tenant.
  *
@@ -914,6 +958,34 @@ export function makeEnqueueAgentRunCapability(
     idempotencyKey?: string;
     runId?: string;
   }): Promise<{ runId: string }> => {
+    // MALFORMED-CALL FAIL-CLOSED — the FIRST thing the closure does, ahead of the shared core. The
+    // capability takes ONE request object; called POSITIONALLY (`enqueue(agentId, input)` — the shape
+    // the name reads like) the string lands where the object is expected, `agentId` reads as
+    // `undefined`, and the REGISTRY-BOUND gate in the core misses and answers a 404 that attributes the
+    // failure to routing. A handler ships as an `.mjs` module, so the declared parameter type above is
+    // the CONTRACT, not a runtime guarantee — re-read the argument as `unknown` before trusting it.
+    // An UNDECLARED but well-formed agent id is untouched: it reaches the registry gate and keeps its
+    // 404 (that gate is correct), so the two failures stay distinguishable.
+    const arg: unknown = req;
+    if (
+      typeof arg !== 'object' ||
+      arg === null ||
+      typeof (arg as { agentId?: unknown }).agentId !== 'string'
+    ) {
+      // The call form is THIS capability's to state, and it states the one that fits what arrived: a
+      // non-object argument IS the positional mis-call's signature, while an object that reached here
+      // was shaped right and simply carries no string `agentId` — naming the wrong one of those two
+      // would send the handler author to the wrong line.
+      const arrivedAsObject = typeof arg === 'object' && arg !== null && !Array.isArray(arg);
+      throw malformedCapabilityCall(
+        'init.enqueue',
+        'a single request object `{ agentId, input }` whose `agentId` is a string',
+        arg,
+        arrivedAsObject
+          ? 'The request object arrived, but its `agentId` is absent or not a string.'
+          : 'init.enqueue takes ONE request object — it is NOT positional.',
+      );
+    }
     // The body hash covers ONLY the logical run inputs (agentId + input) — symmetric with the HTTP
     // path's hash (which also excludes `async`), so a closure-enqueue and a sync/async run of the same
     // {agentId,input} share ONE idempotency slot under the same key. The closure does not take
