@@ -610,11 +610,30 @@ export async function runAgent(
   // committed — because the call making it belongs to a run this function has already given up on.
   // The refusal is the dispatcher's own neutral `tool_error` shape, so an adapter marshals it back to
   // the model exactly like any other refused call.
+  //
+  // `spec.sequentialTools` — the platform-level honor: a per-run FIFO width-1 queue AT THE ENTRY.
+  // The dispatcher's own Semaphore caps how many HANDLERS run at once, but its acquire sits BEHIND
+  // awaited pre-work (the tool_called emission, replay/validation lookups), so a width-1 semaphore
+  // would serialize execution WITHOUT guaranteeing emission ORDER — two calls race through the
+  // pre-work and either may reach the acquire first. Chaining every call behind the previous one's
+  // SETTLEMENT here makes the whole dispatch (events, validation, handler, journaling) execute
+  // strictly in arrival order — the order the backend emitted the calls. A rejected dispatch must
+  // not wedge the queue, so the tail swallows; the CALLER still sees the real rejection. Absent /
+  // false ⇒ the dispatcher is invoked exactly as before (concurrent, semaphore-capped).
+  let sequentialTail: Promise<unknown> = Promise.resolve();
   const dispatchTool =
     dispatch === undefined
       ? undefined
       : (name: string, rawArgs: unknown, toolCallId?: string): Promise<ToolDispatchResult> => {
-          if (abandoned === undefined) return dispatch(name, rawArgs, toolCallId);
+          if (abandoned === undefined) {
+            if (spec.sequentialTools !== true) return dispatch(name, rawArgs, toolCallId);
+            const call = sequentialTail.then(() => dispatch(name, rawArgs, toolCallId));
+            sequentialTail = call.then(
+              () => undefined,
+              () => undefined,
+            );
+            return call;
+          }
           return Promise.resolve({
             kind: 'tool_error',
             name,

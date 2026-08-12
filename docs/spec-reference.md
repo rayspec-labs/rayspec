@@ -1139,6 +1139,18 @@ agents:
   `true`, an `outputSchema` *demands* native structured output; a backend that
   lacks it (`pi`, which emulates via instructions) is rejected at validation time
   rather than failing at runtime.
+- `sequentialTools` — optional boolean, default `false`. When `true`, the
+  agent's tool calls execute one at a time, in the order the model emitted
+  them, instead of concurrently. Honored at two levels: a backend with a
+  provider-side parallel-tool-call setting (`openai`) disables the batching at
+  the source, and the platform serializes the run's tool dispatch on every
+  backend, so a batch that still arrives runs strictly in emission order —
+  handlers, events, and journal steps included. Declare it for tools with
+  ordered side effects (a write that must land before a finish, a spawn that
+  must land before a sweep); the default keeps concurrent dispatch, which
+  suits read-only tools. A backend that could honor neither level is rejected
+  at validation time (`capability_violation`) rather than silently ignoring
+  the declaration; every current backend honors it.
 - `lintSuppress` — optional list of acknowledged advisories, scoped to **this
   agent**. Some `doctor` findings are advisory heuristics; when one has been
   reviewed and judged not applicable, record that judgement in the document

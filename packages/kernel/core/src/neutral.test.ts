@@ -4,6 +4,7 @@ import {
   AgentSpec,
   assertRunResultKeyPresence,
   assertSpecValid,
+  CAPABILITIES,
   ConvPart,
   ConvTurn,
   makeEventIngest,
@@ -307,6 +308,35 @@ describe('validateSpec (fail-closed capability descriptor)', () => {
     expect(() =>
       assertSpecValid(specWithOutput, 'pi', { requireNativeStructuredOutput: true }),
     ).toThrow(/fail-closed/);
+  });
+
+  it('accepts sequentialTools on every real backend; REJECTS it on a synthetic incapable descriptor', () => {
+    const seqSpec = AgentSpec.parse({
+      name: 'ordered',
+      instructions: 'Call tools one at a time.',
+      model: 'm',
+      input: 'x',
+      sequentialTools: true,
+    });
+    // All four real backends dispatch tools through the platform's serializable dispatchTool path,
+    // so every real descriptor honors the flag.
+    for (const backend of ['openai', 'anthropic', 'pi', 'codex'] as const) {
+      expect(validateSpec(seqSpec, backend).ok).toBe(true);
+    }
+    // The violation is UNSATISFIABLE at HEAD, so the fail-closed branch is exercised against a
+    // SYNTHETIC incapable descriptor (patch one backend off, assert, restore) — the path a FUTURE
+    // backend that executes tools outside platform dispatch would hit, never a silent no-op.
+    const original = CAPABILITIES.pi;
+    CAPABILITIES.pi = { ...original, sequentialTools: false };
+    try {
+      const res = validateSpec(seqSpec, 'pi');
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.violations[0]?.capability).toBe('sequentialTools');
+      // The flag left FALSE stays accepted even on the incapable descriptor (nothing is demanded).
+      expect(validateSpec({ ...seqSpec, sequentialTools: false }, 'pi').ok).toBe(true);
+    } finally {
+      CAPABILITIES.pi = original;
+    }
   });
 });
 

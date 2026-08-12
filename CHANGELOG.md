@@ -138,6 +138,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly the rows that arrived since. An empty page carries no cursor (your previously-held
   cursor remains your frontier), a ranked `?__search=` page carries none (relevance-ordered, no
   keyset), and `X-Result-Truncated` is still set only when a page fills to the cap.
+- **`sequentialTools: true` on an agent serializes its tool calls — they execute one at a time,
+  in the order the model emitted them.** A tool-call batch was always dispatched concurrently:
+  the model can batch several calls into one turn, the platform ran such a batch in parallel
+  under the per-run concurrency cap, and no spec field could turn that off — for tools with
+  ordered side effects (a write that must land before a finish, a spawn that must land before a
+  sweep) that is a real race, and instructing the model to "call tools one at a time" does not
+  stop SDK-level batching. The new optional agent field (default `false` — dispatch is unchanged
+  for a spec that does not set it) is honored at two levels. On `openai` the adapter sends the
+  provider-side `parallel_tool_calls: false`, so the model stops batching at the source, and caps
+  the SDK loop's local tool concurrency at 1, so a batch that still arrives executes strictly in
+  emission-index order; with the flag off neither setting is sent and the provider's own default
+  (parallel) applies, exactly as before. On every backend the platform additionally serializes
+  the run's tool dispatch through a per-run FIFO width-1 queue in front of the tool dispatcher,
+  so a batched turn's calls run strictly in emission order — handlers, events, and journal steps
+  included. A backend that could honor neither level is rejected at validation time with a
+  `capability_violation` (never a silent no-op); every wired backend honors it today.
 
 ### Fixed
 
