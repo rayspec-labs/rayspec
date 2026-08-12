@@ -28,16 +28,20 @@
  *   rayspec dev bootstrap-tenant Create the first tenant+owner via the shipped auth API; emit the
  *                                 org id + the org-scoped token (a deliberate operator credential).
  *
- * TOP-LEVEL FLAG:
+ * TOP-LEVEL FLAGS:
  *   rayspec --version | -v       Print the CLI's own version (read from its package manifest at
  *                                 runtime) as a single JSON object on stdout. Exit 0.
+ *   rayspec --help | -h          Print the usage text on stdout as PLAIN TEXT — the one exception to
+ *                                 the JSON-only rule below. Exit 0. Named after a command
+ *                                 (`rayspec deploy --help`) it prints THAT command's help alone.
  *
  * The diagnostic-floor commands wrap already-shipped functions — NO new platform mechanism. Output is
  * JSON only (stdout); a usage/CLI error prints a short JSON error to stderr + exit 2. The read-only
  * floor never echoes env vars / DB URLs / credentials; `dev gen-secrets`/`dev db` never echo a secret
  * VALUE (only a written/present summary), while `dev bootstrap-tenant` emits a freshly-minted org token
  * as its deliberate, documented output. `tenant ensure` is the one mutating command that emits NO
- * credential at all: a minted invite token reaches a mode-600 file and nothing else.
+ * credential at all: a minted invite token reaches a mode-600 file and nothing else. The ONE exception
+ * to "JSON only" is `--help`, which prints plain help text on stdout and exits 0.
  */
 import { readFileSync, realpathSync } from 'node:fs';
 import { argv } from 'node:process';
@@ -53,19 +57,47 @@ import { runPlan } from './plan.js';
 import { loadLocalDotenvIfPresent } from './read-env.js';
 import { runTenant, TenantCliError } from './tenant.js';
 
-const USAGE = `rayspec — RaySpec CLI
+/**
+ * The usage text, split ONE BLOCK PER COMMAND under the section headings the general usage prints.
+ *
+ * A block is both the unit of EDIT and the unit of OUTPUT: a command's flags are described in exactly
+ * ONE place, which `rayspec <command> --help` prints on its own and the general usage below composes
+ * back into the full manual in declaration order. A block's lines start at column 0 in this file
+ * because a template literal keeps its own whitespace — the leading two spaces are the printed layout,
+ * not source indentation.
+ */
+interface HelpSection {
+  readonly heading: string;
+  /** The commands under that heading, in the order the general usage lists them. A `dev`/`tenant`
+   *  group member is named by its FULL path (`dev db`), which is also how a scoped help asks for it. */
+  readonly commands: readonly { readonly name: string; readonly block: string }[];
+}
 
-GET STARTED:
-  rayspec init [dir] [--force]  Scaffold a new project: write a minimal, valid starter rayspec.yaml
+const HELP_SECTIONS: readonly HelpSection[] = [
+  {
+    heading: 'GET STARTED:',
+    commands: [
+      {
+        name: 'init',
+        block: `  rayspec init [dir] [--force]  Scaffold a new project: write a minimal, valid starter rayspec.yaml
                                 (one store + its CRUD routes) into [dir] (default: the current
                                 directory). Product-neutral, no custom code. Refuses to overwrite an
                                 existing rayspec.yaml unless --force. Then validate it with
                                 \`rayspec doctor ./rayspec.yaml\` and preview a deploy with
-                                \`rayspec plan ./rayspec.yaml\`.
-
-READ-ONLY diagnostic floor (never mutates a real/target DB; never prints secrets):
-  rayspec doctor <spec.yaml>   Static spec validation (parseSpec). Exit 0 if valid, 1 otherwise.
-  rayspec plan   <spec.yaml> [--against <old-spec>] [--allowlist <file.json>]
+                                \`rayspec plan ./rayspec.yaml\`.`,
+      },
+    ],
+  },
+  {
+    heading: 'READ-ONLY diagnostic floor (never mutates a real/target DB; never prints secrets):',
+    commands: [
+      {
+        name: 'doctor',
+        block: `  rayspec doctor <spec.yaml>   Static spec validation (parseSpec). Exit 0 if valid, 1 otherwise.`,
+      },
+      {
+        name: 'plan',
+        block: `  rayspec plan   <spec.yaml> [--against <old-spec>] [--allowlist <file.json>]
                              [--reconcile-injected-columns]
                                 Read-only deploy front-half (validate -> diff -> gate [-> shadow]).
                                 Handles both spec profiles (backend + product). With --against, diffs
@@ -77,18 +109,30 @@ READ-ONLY diagnostic floor (never mutates a real/target DB; never prints secrets
                                 predates the platform tenancy columns and genuinely lacks
                                 created_by / idempotency_key: the delta then also carries their
                                 idempotent ADD COLUMN IF NOT EXISTS + idempotency index. Never mutates
-                                the real/target DB. Exit 0/1.
-  rayspec gen-handler --holes <holes.json> --out <dir> [--emit <ts|js>] [--file <name>]
+                                the real/target DB. Exit 0/1.`,
+      },
+      {
+        name: 'gen-handler',
+        block: `  rayspec gen-handler --holes <holes.json> --out <dir> [--emit <ts|js>] [--file <name>]
                                 Render ONE bounded-template handler from a holes contract.
                                 Deterministic; type-only SDK import; zero npm deps. --emit ts (the
                                 default) writes TypeScript source, which needs a build step before
                                 deploy; --emit js writes the same program as plain ESM JavaScript,
-                                deployable as it stands. The JSON envelope carries the next steps.
-  rayspec openapi <spec.yaml>  Emit the OpenAPI 3.1 document for a product-profile doc's declared
-                                VIEW surface (read routes → paths/params/response schemas). Product profile only.
-
-PRODUCTION-MUTATING (boots + serves a real deployment; mutates the target DB):
-  rayspec deploy <spec.yaml> [--port <n>] [--host <addr>] [--apply-migration <delta.sql> [--allowlist <file.json>]]
+                                deployable as it stands. The JSON envelope carries the next steps.`,
+      },
+      {
+        name: 'openapi',
+        block: `  rayspec openapi <spec.yaml>  Emit the OpenAPI 3.1 document for a product-profile doc's declared
+                                VIEW surface (read routes → paths/params/response schemas). Product profile only.`,
+      },
+    ],
+  },
+  {
+    heading: 'PRODUCTION-MUTATING (boots + serves a real deployment; mutates the target DB):',
+    commands: [
+      {
+        name: 'deploy',
+        block: `  rayspec deploy <spec.yaml> [--port <n>] [--host <addr>] [--apply-migration <delta.sql> [--allowlist <file.json>]]
                                 Assemble the platform from the ambient env, register the product
                                 stores through the SANCTIONED validating registrar, apply the committed
                                 migration chain + roll out the declared product, and SERVE on PORT
@@ -108,10 +152,17 @@ PRODUCTION-MUTATING (boots + serves a real deployment; mutates the target DB):
                                 One-shot: validate the product doc + COMPOSE it against a stubbed
                                 rollout. NO DB, NO network. Emits a JSON verdict. Does NOT prove: the
                                 migration, boot-env sufficiency, any provider credential, live-schema
-                                drift, or that the app serves. Exit 0 ok / 1 not.
-
-PRODUCTION-MUTATING (the \`tenant\` group — writes to the database DATABASE_URL names):
-  rayspec tenant ensure --org-id <uuid> --name <n> [--owner-email <e>] [--owner-invite-out <path>]
+                                drift, or that the app serves. Exit 0 ok / 1 not.`,
+      },
+    ],
+  },
+  {
+    heading:
+      'PRODUCTION-MUTATING (the `tenant` group — writes to the database DATABASE_URL names):',
+    commands: [
+      {
+        name: 'tenant ensure',
+        block: `  rayspec tenant ensure --org-id <uuid> --name <n> [--owner-email <e>] [--owner-invite-out <path>]
                         [--invite-ttl-seconds <n>] [--reissue-owner-invite]
                                 Create OR resolve the organization under <uuid>, idempotently — run it
                                 twice with the same id and you get the same org and no second row. Use
@@ -128,30 +179,70 @@ PRODUCTION-MUTATING (the \`tenant\` group — writes to the database DATABASE_UR
                                 that file can take the tenant, so treat it as a credential: it defaults
                                 to a 1-hour lifetime (--invite-ttl-seconds overrides, clamped to
                                 5min-30d). --reissue-owner-invite revokes the outstanding invite and
-                                mints a replacement (for a lost token). Emits ONE JSON object.
-
-LOCAL-DEV, MUTATING (the \`dev\` group — creates a dev DB / writes secret files):
-  rayspec dev gen-secrets [--out <path>]
+                                mints a replacement (for a lost token). Emits ONE JSON object.`,
+      },
+    ],
+  },
+  {
+    heading: 'LOCAL-DEV, MUTATING (the `dev` group — creates a dev DB / writes secret files):',
+    commands: [
+      {
+        name: 'dev gen-secrets',
+        block: `  rayspec dev gen-secrets [--out <path>]
                                 Mint the 3 platform boot secrets (RS256 JWT PEM, api-key pepper,
                                 media key) into a .env (default ./.env). Idempotent: never overwrites
                                 an existing key; NEVER echoes a value (prints a written/present
-                                summary only). chmod 600.
-  rayspec dev db [--database-url <url>] [--name <db>] [--reset --yes]
+                                summary only). chmod 600.`,
+      },
+      {
+        name: 'dev db',
+        block: `  rayspec dev db [--database-url <url>] [--name <db>] [--reset --yes]
                                 Create the dev database if absent (idempotent; never destructive).
                                 Base URL from --database-url or DATABASE_URL. With --reset --yes,
                                 DROP + re-create a CLEAN database (destroys all data; --reset alone
-                                refuses without --yes).
-  rayspec dev bootstrap-tenant --base-url <url> [--email <e>] [--password <p>] [--org-name <n>] [--org-id <uuid>]
+                                refuses without --yes).`,
+      },
+      {
+        name: 'dev bootstrap-tenant',
+        block: `  rayspec dev bootstrap-tenant --base-url <url> [--email <e>] [--password <p>] [--org-name <n>] [--org-id <uuid>]
                                 Create the first tenant+owner via the shipped auth API; emit ORG_ID
                                 + the org-scoped token (a deliberate operator credential). With
                                 --org-id, the org is created under THAT id (for
                                 RAYSPEC_PRODUCT_TENANT_ID); the target server must be running with
-                                RAYSPEC_TENANT_BOOTSTRAP_ENABLED=true.
+                                RAYSPEC_TENANT_BOOTSTRAP_ENABLED=true.`,
+      },
+    ],
+  },
+];
 
-TOP-LEVEL FLAGS:
+/** The two flags that stand OUTSIDE the subcommand grammar, listed at the foot of the general usage. */
+const TOP_LEVEL_FLAGS = `TOP-LEVEL FLAGS:
   rayspec --version | -v        Print the CLI's own version as a single JSON object. Exit 0.
+  rayspec --help | -h           Print this usage text on stdout as plain text. Exit 0. Named after a
+                                command (\`rayspec deploy --help\`) it prints THAT command's help.`;
 
-Output: a single JSON object on stdout. Exit 1 = not-ok; exit 2 = a CLI/usage error.`;
+/** The output/exit contract, printed at the foot of every help text. */
+const OUTPUT_CONTRACT = `Output: a single JSON object on stdout — \`--help\` is the one exception and prints plain text.
+Exit 1 = not-ok; exit 2 = a CLI/usage error.`;
+
+/** Every command block, flattened with its section heading — the lookup a scoped `--help` resolves. */
+const HELP_COMMANDS = HELP_SECTIONS.flatMap((section) =>
+  section.commands.map((command) => ({ ...command, heading: section.heading })),
+);
+
+/** The GENERAL usage — the full manual, re-composed from the per-command blocks above. */
+const USAGE = [
+  'rayspec — RaySpec CLI',
+  ...HELP_SECTIONS.flatMap((section) => [
+    '',
+    section.heading,
+    ...section.commands.map((command) => command.block),
+  ]),
+  '',
+  TOP_LEVEL_FLAGS,
+  '',
+  OUTPUT_CONTRACT,
+].join('\n');
 
 /**
  * A CLI error: a usage/argument problem (exit 2 — distinct from a not-ok spec, which is exit 1).
@@ -197,6 +288,62 @@ function readCliVersion(): string {
 }
 
 /**
+ * The help text for ONE command path — a command (`deploy`), a group member (`dev db`), or a GROUP
+ * name (`dev`, `tenant`). `undefined` when nothing by that name exists, so the caller falls through to
+ * the normal dispatch and an unknown name keeps the usage error it has always been (exit 2).
+ *
+ * A group is not a command of its own: it is answered with every member's block under the group's
+ * heading, derived from the names, so a new member is carried without a second registration.
+ */
+function helpForCommand(path: string): string | undefined {
+  const exact = HELP_COMMANDS.find((command) => command.name === path);
+  const members =
+    exact === undefined
+      ? HELP_COMMANDS.filter((command) => command.name.startsWith(`${path} `))
+      : [exact];
+  const first = members[0];
+  if (first === undefined) return undefined;
+  return [
+    `rayspec ${path} — RaySpec CLI`,
+    '',
+    first.heading,
+    ...members.map((command) => command.block),
+    '',
+    OUTPUT_CONTRACT,
+    'Run `rayspec --help` for the full command list.',
+  ].join('\n');
+}
+
+/** `--help` and its short spelling — a help REQUEST, never a usage error. */
+function isHelpFlag(token: string | undefined): boolean {
+  return token === '--help' || token === '-h';
+}
+
+/**
+ * Resolve a `--help`/`-h` request in the full argument vector to the text it asks for; `undefined`
+ * when the vector carries no help request and dispatch should proceed normally.
+ *
+ * The flag is honoured only where a command NAME sits — `rayspec --help`, `rayspec <cmd> --help`,
+ * `rayspec <group> <sub> --help`. Everything past the command path is that command's OWN argument
+ * grammar, which the top level deliberately hands over unparsed (see `main`); reading a token out of
+ * it here would be the top level second-guessing a grammar it does not own.
+ */
+function resolveHelpRequest(args: readonly string[]): string | undefined {
+  const at = args.findIndex((token) => isHelpFlag(token));
+  const flag = at === -1 ? undefined : args[at];
+  if (flag === undefined || at > 2) return undefined;
+  const path = args.slice(0, at).join(' ');
+  const text = path === '' ? USAGE : helpForCommand(path);
+  if (text === undefined) return undefined;
+  // Like `--version`, it answers the flag and nothing else, so a trailing token is REFUSED rather than
+  // ignored — otherwise `rayspec doctor --help --nope` would report success.
+  if (at < args.length - 1) {
+    throw new CliError(`\`${flag}\` takes no arguments, got ${args.slice(at + 1).join(' ')}`);
+  }
+  return text;
+}
+
+/**
  * The CLI body. RETURNS the numeric exit code (0 ok · 1 not-ok spec/plan · 2 CLI/usage error) instead
  * of calling `process.exit`, so it is testable in-process and the top-level can drain stdout before
  * exiting. A usage/argument problem is raised as a `CliError` and mapped to exit 2 by the
@@ -238,6 +385,17 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
       throw new CliError(`\`${command}\` takes no arguments, got ${rest.join(' ')}`);
     }
     await emit({ ok: true, version: readCliVersion() });
+    return 0;
+  }
+  // `--help`/`-h` is a HELP REQUEST, not a usage error. It is answered at the SAME interception point
+  // as `--version` — before the leading-dash check below, and before the vector reaches a subcommand's
+  // strict parser or a group dispatcher, each of which would otherwise reject the flag as an unknown
+  // option / unknown sub-subcommand (exit 2). Named after a command it prints THAT command's block
+  // rather than the whole manual. It is the one exception to the single-JSON-object-per-invocation
+  // rule: PLAIN TEXT on stdout, exit 0 (documented as such in docs/cli-reference.md).
+  const help = resolveHelpRequest(args);
+  if (help !== undefined) {
+    await writeDrained(process.stdout, `${help}\n`);
     return 0;
   }
   if (command.startsWith('-')) {

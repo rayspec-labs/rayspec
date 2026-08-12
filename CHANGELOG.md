@@ -242,6 +242,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers `5xx` after this change, so a deployment alerting on 5xx rates will see it. An undeclared but
   well-formed agent id is unmoved — it still answers the uniform registry-bound `404` — and a correct
   object-form call is untouched.
+- **`rayspec --help` (and `-h`) is now answered as a help request — exit `0`, on stdout — and, named
+  after a command, prints that command's help instead of the whole manual.** Every spelling was a
+  usage error: `rayspec --help` exited `2` from the leading-dash check, `rayspec deploy --help` and
+  `rayspec dev db --help` from the subcommand's strict argument parser, and `rayspec dev --help` from
+  the group dispatcher — and in every case the `cliError` envelope *and* the usage text went to
+  **stderr**, leaving stdout empty. A CI smoke step or a `set -e` script running `rayspec --help`
+  therefore failed on a successful help request and had nothing readable on the stream it was
+  reading. All three paths now answer ahead of the check that rejected them, the same interception
+  point `--version` uses: `rayspec --help`, `rayspec <command> --help`, and
+  `rayspec <group> <sub> --help` each exit `0` and print to stdout, with `rayspec dev --help`
+  answering for all three `dev` commands and `rayspec dev db --help` for that one alone.
+  `rayspec deploy --help` now shows deploy's five flags (`--dry-run`, `--port`, `--host`,
+  `--apply-migration`, `--allowlist`) without the rest of the manual around them.
+
+  **This is the one documented exception to "every subcommand emits exactly one JSON object on
+  stdout"**: the help text is plain text, and every place that carried that promise — the CLI
+  reference's Conventions section and both published package READMEs — now names the exception rather
+  than leaving it quietly broken. Nothing else moves — a genuine usage error (an unknown subcommand,
+  an unknown option, a token *after* the help flag) is still exit `2` with the `cliError` envelope and
+  the usage text on stderr, and past the command path the vector is still that command's own to parse,
+  so a `-h` written further along means exactly what it meant before. The usage text itself is now
+  assembled from one self-contained block per command, so a command's flags are described in a single
+  place that both its scoped help and the general usage read from.
+
 - **A valid API key calling `GET /v1/auth/me` now receives `403 FORBIDDEN` with a message naming
   the actual situation, instead of `401 UNAUTHENTICATED — "Authentication failed."`.** The key
   authenticated fine; the route answers a *user* identity, which a key principal (`apikey` or

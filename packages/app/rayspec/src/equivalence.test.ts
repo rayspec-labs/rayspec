@@ -7,8 +7,10 @@
  *                   two runs in two fresh temp dirs produce byte-identical output) AND has a side
  *                   effect we assert positively (the starter `rayspec.yaml` is written), proving the
  *                   launcher really drives the CLI rather than merely matching an empty result.
- *   - `--help`      the usage/error path: a leading flag with no subcommand exits 2 and prints the
- *                   shared USAGE block to stderr.
+ *   - `--help`      the help path: a help request exits 0 and prints the usage text to stdout, so the
+ *                   launcher answers `rayspec --help` exactly as the scoped bin does.
+ *   - `frobnicate`  the usage/error path: an unknown subcommand exits 2 and prints the shared USAGE
+ *                   block to stderr.
  *
  * If the shim ever diverges from the CLI (wrong argv forwarding, not invoking `run`, swallowing the
  * exit code, ...), the launcher's output stops matching the CLI's and this test goes RED.
@@ -91,9 +93,27 @@ describe('rayspec launcher ≡ @rayspec/cli bin', () => {
     );
   });
 
-  it('`--help` (usage/error path) is identical: exit 2 with the shared USAGE on stderr', () => {
+  it('`--help` (help path) is identical: exit 0 with the usage text on stdout', () => {
     const meta = runBin(META_BIN, ['--help'], freshCwd());
     const cli = runBin(CLI_BIN, ['--help'], freshCwd());
+    expect(meta).toEqual(cli);
+    expect(meta.code).toBe(0);
+    expect(meta.stderr).toBe('');
+    expect(meta.stdout).toContain('rayspec — RaySpec CLI');
+  });
+
+  it('`deploy --help` (scoped help) is identical: exit 0 with deploy alone on stdout', () => {
+    const meta = runBin(META_BIN, ['deploy', '--help'], freshCwd());
+    const cli = runBin(CLI_BIN, ['deploy', '--help'], freshCwd());
+    expect(meta).toEqual(cli);
+    expect(meta.code).toBe(0);
+    expect(meta.stdout).toContain('rayspec deploy — RaySpec CLI');
+    expect(meta.stdout).not.toContain('GET STARTED:');
+  });
+
+  it('an unknown subcommand (usage/error path) is identical: exit 2 with the USAGE on stderr', () => {
+    const meta = runBin(META_BIN, ['frobnicate'], freshCwd());
+    const cli = runBin(CLI_BIN, ['frobnicate'], freshCwd());
     expect(meta).toEqual(cli);
     expect(meta.code).toBe(2);
     expect(meta.stdout).toBe('');
