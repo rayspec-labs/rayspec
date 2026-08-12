@@ -37,6 +37,7 @@ import type {
   SttCapability,
   ToolHandler,
   ToolHandlerInit,
+  TtsCapability,
 } from '@rayspec/handler-sdk';
 import type { RaySpec, ToolSpecConfig } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
@@ -66,6 +67,10 @@ export type ToolFactory = (tdb: TenantDb) => NeutralTool[];
  * the deployment's configured provider (no tenant argument: it transcribes the bytes the tool hands
  * it). Omitted ⇒ `init.stt` is ABSENT (no provider configured; a tool that needs it fail-closes
  * loudly on `undefined`, like `init.blob`).
+ *
+ * An OPTIONAL `tts` adds `init.tts` — the text-to-speech capability, the egress twin of `stt` (no
+ * tenant argument: it speaks the text the tool hands it). Omitted ⇒ `init.tts` is ABSENT (no provider
+ * configured; a tool that needs it fail-closes loudly on `undefined`, like `init.blob`).
  */
 function buildNeutralTool(
   tool: ToolSpecConfig,
@@ -75,6 +80,7 @@ function buildNeutralTool(
   blobFactory?: BlobStoreFactory,
   fsSourceFactory?: FsSourceFactory,
   stt?: SttCapability,
+  tts?: TtsCapability,
 ): NeutralTool {
   return {
     spec: {
@@ -98,6 +104,9 @@ function buildNeutralTool(
         // The speech-to-text capability (spread so ABSENT when no STT provider is configured).
         // Mirrors invokeRouteHandler exactly (the SAME composition-root handle the route arm gets).
         ...(stt ? { stt } : {}),
+        // The text-to-speech capability (spread so ABSENT when no TTS provider is configured).
+        // Mirrors invokeRouteHandler exactly (the SAME composition-root handle the route arm gets).
+        ...(tts ? { tts } : {}),
       };
       return getHandlerRuntime().invokeTool(fn, rawArgs, init);
     },
@@ -131,6 +140,9 @@ function buildNeutralTool(
  * @param stt           OPTIONAL composition-root `SttCapability` — when wired, each tool init carries
  *                      `init.stt` (transcribe audio bytes through the deployment's configured STT
  *                      provider); absent on a deploy with no `STT_PROVIDER` configured.
+ * @param tts           OPTIONAL composition-root `TtsCapability` — when wired, each tool init carries
+ *                      `init.tts` (synthesize audio from text through the deployment's configured TTS
+ *                      provider); absent on a deploy with no `TTS_PROVIDER` configured.
  */
 export function buildToolFactory(
   spec: RaySpec,
@@ -140,6 +152,7 @@ export function buildToolFactory(
   blobFactory?: BlobStoreFactory,
   fsSourceFactory?: FsSourceFactory,
   stt?: SttCapability,
+  tts?: TtsCapability,
 ): ToolFactory {
   const toolById = new Map(spec.tooling.map((t) => [t.id, t]));
 
@@ -170,6 +183,6 @@ export function buildToolFactory(
 
   return (tdb: TenantDb): NeutralTool[] =>
     resolved.map(({ tool, fn }) =>
-      buildNeutralTool(tool, fn, tdb, productTables, blobFactory, fsSourceFactory, stt),
+      buildNeutralTool(tool, fn, tdb, productTables, blobFactory, fsSourceFactory, stt, tts),
     );
 }

@@ -133,6 +133,7 @@ import { buildSttCapability, FAKE_STT_BOOT_WARNING } from './stt-capability.js';
 // TYPE-ONLY: `tenant-provision.ts` imports `applyMigrations` from THIS module, so a value import back
 // would be a runtime cycle. The shape of the secret pair belongs with the code that consumes it.
 import type { TenantProvisionSecrets } from './tenant-provision.js';
+import { buildTtsCapability, FAKE_TTS_BOOT_WARNING } from './tts-capability.js';
 
 /** The default local port (overridable via PORT). Local DX only — not a reserved well-known port. */
 export const DEFAULT_PORT = 8080;
@@ -521,6 +522,26 @@ export interface ServerConfig {
    * `provider_unavailable` at request time). Absent for a `fake`/unset provider.
    */
   deepgramApiKey?: string;
+  /**
+   * The text-to-speech provider a route/tool handler's `init.tts` synthesizes through — set via
+   * TTS_PROVIDER (`openai | fake`). OPTIONAL: unset ⇒ no TTS capability is wired (`init.tts` is
+   * absent; a handler that needs it fail-closes loudly) — never a boot error, since no spec signal
+   * says a handler synthesizes speech. Carried RAW here; an unsupported value is fail-closed-refused
+   * at DEPLOY time, where the adapter is built.
+   */
+  ttsProvider?: string;
+  /**
+   * The OpenAI credential — set via OPENAI_API_KEY. REQUIRED iff `ttsProvider` is `openai`, and
+   * demanded EAGERLY at deploy time (a deployment that selects the provider without its credential
+   * would otherwise boot green and fail every synthesis with a content-free `provider_unavailable` at
+   * request time). Absent for a `fake`/unset provider.
+   *
+   * NOTE: an OpenAI-backed (or Pi-backed) agent deployment already carries this variable, so those
+   * products need no new credential for speech. An Anthropic- or Codex-backed deployment does NOT
+   * carry it — the Codex backend deliberately strips it — so those must supply it to select
+   * `TTS_PROVIDER=openai`.
+   */
+  openaiApiKey?: string;
   /**
    * The SYSTEM cleanup (OIDC prune + the operator-gated GDPR purge) configuration, ALWAYS
    * present (safe defaults). It is wired onto the durable worker's daily scheduled-workflow whenever a
@@ -1146,6 +1167,14 @@ export function loadServerConfig(
   if (sttProvider) config.sttProvider = sttProvider;
   const deepgramApiKey = env.DEEPGRAM_API_KEY?.trim();
   if (deepgramApiKey) config.deepgramApiKey = deepgramApiKey;
+
+  // The TTS provider selection (the `init.tts` capability) + its credential. Resolved RAW here on the
+  // SAME terms as the STT pair above: the VALUE is validated where the capability is built, an UNSET
+  // provider is never an error, and the key is trimmed + only carried through when non-blank.
+  const ttsProvider = env.TTS_PROVIDER?.trim();
+  if (ttsProvider) config.ttsProvider = ttsProvider;
+  const openaiApiKey = env.OPENAI_API_KEY?.trim();
+  if (openaiApiKey) config.openaiApiKey = openaiApiKey;
 
   return config;
 }
@@ -2500,6 +2529,18 @@ async function deployDeclaredSpec(
   // transcript. Warn loudly at boot (warn-only — an offline dev/CI boot legitimately selects it).
   if (sttCapability && config.sttProvider === 'fake') bootWarn(FAKE_STT_BOOT_WARNING);
 
+  // ── The TEXT-TO-SPEECH capability build (`init.tts`) ───────────────────────
+  // The egress twin of the capability above, on exactly the same terms: purely deploy-config-gated
+  // (no route KIND requires it and no spec signal says a handler synthesizes speech), built when a
+  // provider is configured, else left undefined (`init.tts` is then ABSENT and a handler that reads
+  // it fail-closes loudly). `buildTtsCapability` fail-closes at BUILD on an unsupported provider name
+  // or on `openai` without its credential — the credential demand is EAGER here for the same reason.
+  // Injected into the engine in buildApp (below), like blobFactory.
+  const ttsCapability = buildTtsCapability(config);
+  // The env-selected fake is a DEV/CI posture: it answers every call with the same deterministic tone.
+  // Warn loudly at boot (warn-only — an offline dev/CI boot legitimately selects it).
+  if (ttsCapability && config.ttsProvider === 'fake') bootWarn(FAKE_TTS_BOOT_WARNING);
+
   // ── The static FRONTEND deploy guard (fail-closed on a mount that cannot be served) ──
   // A declared frontend mount serves built static assets from `dir` (relative to the spec file). FAIL
   // CLOSED at deploy on the SAME per-mount check `/health` reports — `mountUnservableReason`, the one
@@ -2743,6 +2784,9 @@ async function deployDeclaredSpec(
           // Inject the speech-to-text capability (when a provider is configured) so a route/tool
           // handler's `init.stt` transcribes through it. Spread so ABSENT when STT_PROVIDER is unset.
           ...(sttCapability ? { sttCapability } : {}),
+          // Inject the text-to-speech capability (when a provider is configured) so a route/tool
+          // handler's `init.tts` synthesizes through it. Spread so ABSENT when TTS_PROVIDER is unset.
+          ...(ttsCapability ? { ttsCapability } : {}),
         };
         // Inject the durable executor (when wired) so the run surface's async path can enqueue.
         return createAuthApp({

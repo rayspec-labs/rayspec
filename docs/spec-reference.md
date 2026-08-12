@@ -1387,6 +1387,7 @@ everywhere:
 | `init.mintPlayToken` | Mint a short-lived `?token=` for a `stream` playback route. | `handler`-kind routes | `RAYSPEC_MEDIA_SIGNING_KEY` |
 | `init.enqueue` | Enqueue a durable, off-request agent run. | `handler`-kind routes | a configured durable worker |
 | `init.stt` | Transcribe audio bytes (speech-to-text). | `handler`-kind routes and tools | `STT_PROVIDER` |
+| `init.tts` | Synthesize audio from text (text-to-speech). | `handler`-kind routes and tools | `TTS_PROVIDER` |
 
 Two boundaries the table implies are worth spelling out.
 
@@ -1440,6 +1441,59 @@ today, the same contract the audio pipeline uses:
 back as `status: 'failed'` with a content-free `error` (a code plus a message naming
 the provider or HTTP status only — never the audio, the response body, or the
 credential), so a handler branches on `result.status`.
+
+#### `init.tts` — speech synthesis
+
+```ts
+const speech = await init.tts.synthesize('Guten Morgen.', {
+  voice: 'onyx',   // validated against the adapter's own list; unknown → rejected
+  speed: 1.25,     // clamped into the provider's range
+  format: 'mp3',   // 'mp3' | 'opus' | 'wav'
+})
+// speech.bytes (Uint8Array), speech.contentType ('audio/mpeg'), speech.durationSeconds
+return httpResponse(Buffer.from(speech.bytes).toString('base64'), {
+  headers: { 'x-audio-content-type': speech.contentType },
+})
+```
+
+`synthesize` is the egress twin of `init.stt`: it takes the **text the handler
+already assembled** and returns the audio bytes plus the `contentType` that
+describes them (and `durationSeconds` when the provider reports one — `null` when
+it does not, never a guess derived from the text). The engine builds the provider
+adapter **once at boot**, so a handler never selects a provider, reads a
+credential, or constructs an adapter.
+
+Provider selection is the `TTS_PROVIDER` environment contract — `openai` or `fake`
+today:
+
+- **unset** — `init.tts` is absent. This is not a boot error: nothing in a spec
+  declares that a handler speaks, so the capability is purely deploy-gated.
+- **`openai`** — requires `OPENAI_API_KEY`, demanded **at boot**. This is the same
+  variable the OpenAI and Pi agent backends already use, so those deployments need
+  no new credential; an Anthropic- or Codex-backed deployment does not carry it and
+  must supply it. Selecting the provider without the credential fails the boot
+  closed rather than failing every call at request time.
+- **`fake`** — a deterministic offline synthesizer for dev and CI: every call
+  returns the same fixed-length tone, byte-identical, and nothing is spoken or
+  contacted. The boot **warns** loudly (warn-only — it never blocks a dev boot).
+
+Unlike `transcribe`, `synthesize` **rejects** rather than returning a status union
+(the happy path is the audio itself). A failure is a `TtsAdapterError` carrying a
+`code` — `invalid_request`, `unsupported_option`, `provider_unavailable`,
+`malformed_provider_output`, or `unknown` — and a content-free message (the
+provider, an HTTP status, or an error class only — never the text, the response
+body, or the credential).
+
+Two limits are enforced **before** any provider call, so a rejected request is
+never billed — and the offline provider enforces exactly the same ones, so a call
+that passes in CI cannot first fail in production:
+
+- **the text cap is fail-closed.** A text over the provider's maximum (4096
+  characters) is **refused**, never truncated into a recording that stops
+  mid-sentence and looks successful.
+- **voice membership is closed.** An unknown voice is refused rather than silently
+  falling back to a default the caller did not ask for. `speed`, by contrast, is
+  **clamped** into the supported range rather than refused.
 
 ## `extensions`
 

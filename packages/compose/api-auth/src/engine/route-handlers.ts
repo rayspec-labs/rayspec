@@ -190,6 +190,11 @@ export function makeRouteHandler(args: {
   // `init.stt` is omitted (a handler that reads it fail-closes loudly on `undefined`). Read once at
   // registration, exactly like `fsSourceFactory`.
   const sttCapability = deps.engine?.sttCapability;
+  // the text-to-speech capability the deployment wired onto the engine (`TTS_PROVIDER`). When
+  // present, a `{handler}` route receives `init.tts` — the same handle the tool arm gets. Absent ⇒
+  // `init.tts` is omitted (a handler that reads it fail-closes loudly on `undefined`). Read once at
+  // registration, exactly like `sttCapability`.
+  const ttsCapability = deps.engine?.ttsCapability;
   if (handler.kind !== 'route') {
     // Guarded again at registration; narrows the ResolvedHandler union so `handler.fn` is a RouteHandler.
     throw new Error(`makeRouteHandler: expected a 'route' handler, got '${handler.kind}'.`);
@@ -270,6 +275,9 @@ export function makeRouteHandler(args: {
       // the speech-to-text capability (the deployment's configured provider). Absent ⇒ init.stt
       // is omitted (a handler that needs it fail-closes loudly on `undefined`).
       sttCapability,
+      // the text-to-speech capability (the deployment's configured provider). Absent ⇒ init.tts
+      // is omitted (a handler that needs it fail-closes loudly on `undefined`).
+      ttsCapability,
     );
     // a BRANDED enriched return chooses the status + headers; a plain return keeps the
     // existing behavior (HTTP 200 + that value as the JSON body). The brand check is unambiguous — a

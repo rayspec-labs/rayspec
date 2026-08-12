@@ -70,7 +70,9 @@ function mediaKey(ref: Pick<SttFinalizedTrackRef, 'session_id' | 'track'>): stri
  * The CONTENT-DERIVED call ref. Deriving the session id from the bytes + the options (rather than a
  * random per-call id) is what makes the whole artifact DETERMINISTIC: the neutral transcript's ids are
  * `stableId`-derived from `session_id`/`track`, so identical input yields an identical transcript —
- * the property the fake path is asserted on and a real provider's envelope inherits.
+ * the property the fake path is asserted on. A REAL provider inherits the stableId-derived IDS only,
+ * not an identical artifact: its transcript stamps `created_at`/`updated_at` from the wall clock, so
+ * two identical calls differ in those fields.
  */
 function callRef(digest: string): SttFinalizedTrackRef {
   return { session_id: `handler-stt.${digest}`, track: CAPABILITY_TRACK };

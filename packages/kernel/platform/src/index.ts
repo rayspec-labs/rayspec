@@ -48,6 +48,15 @@ export type {
   // against the one @rayspec/platform package, exactly like the blob/fs-source contracts above.
   SttCapability,
   SttTranscribeOptions,
+  // The neutral text-to-speech CONTRACT (defined open-core in @rayspec/handler-sdk) — re-exported
+  // here so a platform consumer (the api-auth declarative engine) types its tts-injection seam
+  // against the one @rayspec/platform package, exactly like the stt contract above. The RESULT type
+  // travels with it: a consumer (or a test stand-in) that must NAME what `synthesize` returns can do
+  // so from this one package instead of casting the shape away.
+  TtsCapability,
+  TtsSynthesisResult,
+  TtsSynthesizeOptions,
+  TtsSynthesizeRequest,
 } from '@rayspec/handler-sdk';
 // The VALUE builders/guards for the enriched route response (the api-auth interpreter
 // imports `isHttpResponse`; a handler may import `httpResponse`). Re-exported here so a platform
