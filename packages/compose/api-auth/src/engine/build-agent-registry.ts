@@ -40,6 +40,7 @@ import {
   buildToolFactory,
   type FsSourceFactory,
   type ResolvedHandler,
+  type SttCapability,
 } from '@rayspec/platform';
 import type { AgentSpecConfig, RaySpec } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
@@ -70,6 +71,13 @@ export interface BuildAgentRegistryConfig {
    * (the tool's `init.fsSource` is then undefined, fail-closed loudly).
    */
   fsSourceFactory?: FsSourceFactory;
+  /**
+   * the composition-root `SttCapability` (the SAME one the route arm uses). When wired, each declared
+   * tool's per-run `ToolHandlerInit` carries `init.stt` — transcribe audio bytes through the
+   * deployment's configured provider. Optional: absent when no `STT_PROVIDER` is configured (the
+   * tool's `init.stt` is then undefined, fail-closed loudly).
+   */
+  sttCapability?: SttCapability;
 }
 
 /** Build the base neutral `AgentSpec` for a declared agent (the per-request `input` is a placeholder). */
@@ -99,7 +107,15 @@ function baseAgentSpec(agent: AgentSpecConfig): AgentSpec {
  * empty registry (a stores/api-only spec).
  */
 export function buildAgentRegistry(config: BuildAgentRegistryConfig): AgentRegistry {
-  const { spec, agentBackends, handlers, productTables, blobFactory, fsSourceFactory } = config;
+  const {
+    spec,
+    agentBackends,
+    handlers,
+    productTables,
+    blobFactory,
+    fsSourceFactory,
+    sttCapability,
+  } = config;
   const registry = new Map<string, AgentRegistryEntry>();
 
   for (const agent of spec.agents) {
@@ -115,7 +131,8 @@ export function buildAgentRegistry(config: BuildAgentRegistryConfig): AgentRegis
     // each tool + its handler at boot (fail-closed) and returns a factory the run surface calls with
     // the run's TenantDb. An agent with no tools gets a factory that yields []. The blobFactory (when
     // wired) lets each tool init carry a tenant-bound `init.blob`; the fsSourceFactory (when wired) lets
-    // each tool init carry a READ-ONLY, path-jailed `init.fsSource`.
+    // each tool init carry a READ-ONLY, path-jailed `init.fsSource`; the sttCapability (when wired)
+    // lets each tool init carry `init.stt`.
     const toolFactory = buildToolFactory(
       spec,
       handlers,
@@ -123,6 +140,7 @@ export function buildAgentRegistry(config: BuildAgentRegistryConfig): AgentRegis
       agent.tools,
       blobFactory,
       fsSourceFactory,
+      sttCapability,
     );
 
     registry.set(agent.id, {

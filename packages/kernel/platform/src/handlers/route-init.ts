@@ -27,6 +27,7 @@ import {
   type RouteHandlerInit,
   type StreamRouteHandler,
   type StreamRouteHandlerInit,
+  type SttCapability,
   type TriggerHandler,
   type TriggerHandlerInit,
 } from '@rayspec/handler-sdk';
@@ -108,6 +109,11 @@ export async function invokeRouteHandler(
   // and the `created_by` stamp can never drift. DATA — never a tenant signal (the tenant stays
   // server-derived). Absent ⇒ init.principal is omitted (an older caller / no authenticated principal).
   principal?: HandlerPrincipal,
+  // An OPTIONAL speech-to-text capability (the provider adapter the composition root built from
+  // `STT_PROVIDER`, wrapped so it takes the handler's BYTES). Spread onto the init when present so a
+  // `{handler}` route can transcribe an upload. Absent ⇒ init.stt is omitted (no provider configured;
+  // the handler fail-closes). NOT tenant-bound — it transcribes the bytes it is handed.
+  stt?: SttCapability,
 ): Promise<unknown> {
   return tdb.transaction(async (txTdb) => {
     const init = buildRouteHandlerInit(
@@ -122,6 +128,7 @@ export async function invokeRouteHandler(
       createdByActor,
       fsSourceFactory,
       principal,
+      stt,
     );
     return getHandlerRuntime().invokeRoute(fn, init);
   });
@@ -153,6 +160,9 @@ function buildRouteHandlerInit(
   // `createdByActor` (both route postures share this builder, so both inject identically). Absent ⇒
   // init.principal is omitted (byte-identical to before).
   principal?: HandlerPrincipal,
+  // The composition-root speech-to-text capability (no tenant arg — it transcribes the bytes the
+  // handler hands it). Absent ⇒ init.stt omitted (no STT provider configured).
+  stt?: SttCapability,
 ): RouteHandlerInit {
   return {
     tenantId: boundTdb.tenantId,
@@ -163,6 +173,8 @@ function buildRouteHandlerInit(
     // The READ-ONLY, path-jailed fs-source handle (no tenant arg — a shared deployment-static read root).
     // Spread so ABSENT when no source root is configured — keeping the init shape exact.
     ...(fsSourceFactory ? { fsSource: fsSourceFactory() } : {}),
+    // The speech-to-text capability (spread so ABSENT when no STT provider is configured).
+    ...(stt ? { stt } : {}),
     // The play-token mint capability (spread so ABSENT when no media key is wired).
     ...(mintPlayToken ? { mintPlayToken } : {}),
     // The tenant-bound durable-enqueue capability (spread so ABSENT when no worker is wired).
@@ -221,6 +233,9 @@ export async function invokeRouteHandlerDetached(
   // OPTIONAL authenticated caller — see invokeRouteHandler. Threaded identically so the
   // handler-managed posture receives `init.principal` the same way the engine-tx posture does.
   principal?: HandlerPrincipal,
+  // OPTIONAL speech-to-text capability — see invokeRouteHandler. Threaded identically so the
+  // handler-managed posture receives `init.stt` the same way the engine-tx posture does.
+  stt?: SttCapability,
 ): Promise<unknown> {
   const init = buildRouteHandlerInit(
     tdb,
@@ -234,6 +249,7 @@ export async function invokeRouteHandlerDetached(
     createdByActor,
     fsSourceFactory,
     principal,
+    stt,
   );
   return getHandlerRuntime().invokeRoute(fn, init);
 }

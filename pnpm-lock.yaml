@@ -742,6 +742,9 @@ importers:
       '@rayspec/core':
         specifier: workspace:*
         version: link:../core
+      '@rayspec/stt-port':
+        specifier: workspace:*
+        version: link:../stt-port
     devDependencies:
       typescript:
         specifier: 5.9.3

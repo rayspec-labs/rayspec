@@ -285,6 +285,13 @@ export async function createHarness(
      */
     blobFactory?: NonNullable<NonNullable<AppDeps['engine']>['blobFactory']>;
     /**
+     * the speech-to-text capability wired into `deps.engine.sttCapability` (a route/tool
+     * handler's `init.stt`). A transcription test passes a recording stand-in — exercising the SAME
+     * injection the composition root does. Omit ⇒ `init.stt` is ABSENT (a handler that needs it
+     * fail-closes loudly — the deploy posture a test can also exercise).
+     */
+    sttCapability?: NonNullable<NonNullable<AppDeps['engine']>['sttCapability']>;
+    /**
      * the media-token service wired into `deps.engine.mediaTokenService` (the playback
      * route's 2nd auth path + the mint capability). A playback test passes a service built over a test
      * media secret. Omit ⇒ a declared `stream` playback route fails closed at boot (no media verifier).
@@ -405,6 +412,9 @@ export async function createHarness(
       // the tenant-bound blob backend for declared `stream` routes (omit ⇒ no blob backend
       // ⇒ a stream route fails closed at boot — the deploy-guard property a test can also exercise).
       ...(opts.blobFactory ? { blobFactory: opts.blobFactory } : {}),
+      // the speech-to-text capability a route/tool handler reads as `init.stt` (omit ⇒ ABSENT,
+      // so a handler that needs transcription fail-closes loudly).
+      ...(opts.sttCapability ? { sttCapability: opts.sttCapability } : {}),
       // the media-token service for declared `stream` playback routes + the mint capability
       // (omit ⇒ a playback route fails closed at boot — the deploy-guard a test can also exercise).
       ...(opts.mediaTokenService ? { mediaTokenService: opts.mediaTokenService } : {}),

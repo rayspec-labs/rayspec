@@ -34,6 +34,7 @@ import type { TenantDb } from '@rayspec/db';
 import type {
   BlobStoreFactory,
   FsSourceFactory,
+  SttCapability,
   ToolHandler,
   ToolHandlerInit,
 } from '@rayspec/handler-sdk';
@@ -60,6 +61,11 @@ export type ToolFactory = (tdb: TenantDb) => NeutralTool[];
  * built per run via `fsSourceFactory()` (no tenant argument: the source root is a shared, deployment-
  * static read root, jailed by construction). Omitted ⇒ `init.fsSource` is ABSENT (no source root
  * configured; a tool that needs it fail-closes loudly on `undefined`, like `init.blob`).
+ *
+ * An OPTIONAL `stt` adds `init.stt` — the speech-to-text capability the composition root built from
+ * the deployment's configured provider (no tenant argument: it transcribes the bytes the tool hands
+ * it). Omitted ⇒ `init.stt` is ABSENT (no provider configured; a tool that needs it fail-closes
+ * loudly on `undefined`, like `init.blob`).
  */
 function buildNeutralTool(
   tool: ToolSpecConfig,
@@ -68,6 +74,7 @@ function buildNeutralTool(
   productTables: ReadonlyMap<string, PgTable>,
   blobFactory?: BlobStoreFactory,
   fsSourceFactory?: FsSourceFactory,
+  stt?: SttCapability,
 ): NeutralTool {
   return {
     spec: {
@@ -88,6 +95,9 @@ function buildNeutralTool(
         // The READ-ONLY, path-jailed fs-source handle (shared deployment-static root, no tenant arg).
         // Spread so ABSENT when no source root is configured — keeping the init shape exact.
         ...(fsSourceFactory ? { fsSource: fsSourceFactory() } : {}),
+        // The speech-to-text capability (spread so ABSENT when no STT provider is configured).
+        // Mirrors invokeRouteHandler exactly (the SAME composition-root handle the route arm gets).
+        ...(stt ? { stt } : {}),
       };
       return getHandlerRuntime().invokeTool(fn, rawArgs, init);
     },
@@ -118,6 +128,9 @@ function buildNeutralTool(
  * @param fsSourceFactory OPTIONAL composition-root `FsSourceFactory` — when wired, each tool init
  *                      carries `init.fsSource` (the READ-ONLY, path-jailed local-file reader over the
  *                      deployment's shared source root); absent on a no-source-root deploy.
+ * @param stt           OPTIONAL composition-root `SttCapability` — when wired, each tool init carries
+ *                      `init.stt` (transcribe audio bytes through the deployment's configured STT
+ *                      provider); absent on a deploy with no `STT_PROVIDER` configured.
  */
 export function buildToolFactory(
   spec: RaySpec,
@@ -126,6 +139,7 @@ export function buildToolFactory(
   toolIds: readonly string[],
   blobFactory?: BlobStoreFactory,
   fsSourceFactory?: FsSourceFactory,
+  stt?: SttCapability,
 ): ToolFactory {
   const toolById = new Map(spec.tooling.map((t) => [t.id, t]));
 
@@ -156,6 +170,6 @@ export function buildToolFactory(
 
   return (tdb: TenantDb): NeutralTool[] =>
     resolved.map(({ tool, fn }) =>
-      buildNeutralTool(tool, fn, tdb, productTables, blobFactory, fsSourceFactory),
+      buildNeutralTool(tool, fn, tdb, productTables, blobFactory, fsSourceFactory, stt),
     );
 }

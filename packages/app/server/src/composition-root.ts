@@ -129,6 +129,7 @@ import {
   mountFrontend,
   mountUnservableReason,
 } from './serve-static.js';
+import { buildSttCapability, FAKE_STT_BOOT_WARNING } from './stt-capability.js';
 // TYPE-ONLY: `tenant-provision.ts` imports `applyMigrations` from THIS module, so a value import back
 // would be a runtime cycle. The shape of the secret pair belongs with the code that consumes it.
 import type { TenantProvisionSecrets } from './tenant-provision.js';
@@ -505,6 +506,21 @@ export interface ServerConfig {
    * ≥32 bytes (a short HMAC secret weakens HS256). Absent for an auth-only / no-playback deploy.
    */
   mediaSigningKey?: string;
+  /**
+   * The speech-to-text provider a route/tool handler's `init.stt` transcribes through — set via
+   * STT_PROVIDER (`deepgram | fake`, the SAME env contract the product profile's audio pipeline uses).
+   * OPTIONAL: unset ⇒ no STT capability is wired (`init.stt` is absent; a handler that needs it
+   * fail-closes loudly) — never a boot error, since no spec signal says a handler transcribes. Carried
+   * RAW here; an unsupported value is fail-closed-refused at DEPLOY time, where the adapter is built.
+   */
+  sttProvider?: string;
+  /**
+   * The Deepgram credential — set via DEEPGRAM_API_KEY. REQUIRED iff `sttProvider` is `deepgram`, and
+   * demanded EAGERLY at deploy time (a deployment that selects the provider without its credential
+   * would otherwise boot green and answer every transcription with a content-free
+   * `provider_unavailable` at request time). Absent for a `fake`/unset provider.
+   */
+  deepgramApiKey?: string;
   /**
    * The SYSTEM cleanup (OIDC prune + the operator-gated GDPR purge) configuration, ALWAYS
    * present (safe defaults). It is wired onto the durable worker's daily scheduled-workflow whenever a
@@ -1120,6 +1136,16 @@ export function loadServerConfig(
   // secret is used verbatim); only carried through when present.
   const mediaSigningKey = env.RAYSPEC_MEDIA_SIGNING_KEY;
   if (mediaSigningKey && mediaSigningKey.length > 0) config.mediaSigningKey = mediaSigningKey;
+
+  // The STT provider selection (the `init.stt` capability) + its credential. Resolved RAW here — the
+  // VALUE is validated where the capability is built: loadServerConfig just resolves them;
+  // deployDeclaredSpec fail-closes on an unsupported provider or a missing credential. An UNSET
+  // provider is not an error at any point (the capability is simply absent, like an unset fs-source
+  // root). The key is trimmed + only carried through when non-blank (a blank key is no key).
+  const sttProvider = env.STT_PROVIDER?.trim();
+  if (sttProvider) config.sttProvider = sttProvider;
+  const deepgramApiKey = env.DEEPGRAM_API_KEY?.trim();
+  if (deepgramApiKey) config.deepgramApiKey = deepgramApiKey;
 
   return config;
 }
@@ -2460,6 +2486,20 @@ async function deployDeclaredSpec(
     }
   }
 
+  // ── The SPEECH-TO-TEXT capability build (`init.stt`) ───────────────────────
+  // A route/tool handler transcribes audio bytes through the provider the deployment selected with
+  // STT_PROVIDER. Purely deploy-config-gated (no route KIND requires it, unlike the stream→blob
+  // guard, and no spec signal says a handler transcribes): build the capability when a provider is
+  // configured, else leave it undefined (`init.stt` is then ABSENT and a handler that reads it
+  // fail-closes loudly). `buildSttCapability` fail-closes at BUILD on an unsupported provider name or
+  // on `deepgram` without its credential — the credential demand is EAGER here (the adapter's own
+  // lazy resolution would turn the whole deployment into a request-time `provider_unavailable`).
+  // Injected into the engine in buildApp (below), like blobFactory.
+  const sttCapability = buildSttCapability(config);
+  // The env-selected fake is a DEV/CI posture: it answers every call with a deterministic synthetic
+  // transcript. Warn loudly at boot (warn-only — an offline dev/CI boot legitimately selects it).
+  if (sttCapability && config.sttProvider === 'fake') bootWarn(FAKE_STT_BOOT_WARNING);
+
   // ── The static FRONTEND deploy guard (fail-closed on a mount that cannot be served) ──
   // A declared frontend mount serves built static assets from `dir` (relative to the spec file). FAIL
   // CLOSED at deploy on the SAME per-mount check `/health` reports — `mountUnservableReason`, the one
@@ -2700,6 +2740,9 @@ async function deployDeclaredSpec(
           // Inject the media-token service (when wired) so the playback arm's 2nd auth path
           // + the mint capability are available. Spread so ABSENT for a no-playback spec.
           ...(mediaTokenService ? { mediaTokenService } : {}),
+          // Inject the speech-to-text capability (when a provider is configured) so a route/tool
+          // handler's `init.stt` transcribes through it. Spread so ABSENT when STT_PROVIDER is unset.
+          ...(sttCapability ? { sttCapability } : {}),
         };
         // Inject the durable executor (when wired) so the run surface's async path can enqueue.
         return createAuthApp({

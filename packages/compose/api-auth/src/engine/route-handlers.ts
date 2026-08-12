@@ -185,6 +185,11 @@ export function makeRouteHandler(args: {
   // shared, deployment-static read root the tool arm gets. Absent ⇒ `init.fsSource` is omitted (a
   // handler that reads it fail-closes loudly on `undefined`). Read once at registration.
   const fsSourceFactory = deps.engine?.fsSourceFactory;
+  // the speech-to-text capability the deployment wired onto the engine (`STT_PROVIDER`). When
+  // present, a `{handler}` route receives `init.stt` — the same handle the tool arm gets. Absent ⇒
+  // `init.stt` is omitted (a handler that reads it fail-closes loudly on `undefined`). Read once at
+  // registration, exactly like `fsSourceFactory`.
+  const sttCapability = deps.engine?.sttCapability;
   if (handler.kind !== 'route') {
     // Guarded again at registration; narrows the ResolvedHandler union so `handler.fn` is a RouteHandler.
     throw new Error(`makeRouteHandler: expected a 'route' handler, got '${handler.kind}'.`);
@@ -262,6 +267,9 @@ export function makeRouteHandler(args: {
       // the SAME server-derived request principal as `createdByActor`, so the identity a handler
       // reads can never drift from the `created_by` stamp. DATA — never a tenant signal.
       handlerPrincipal(c.get('principal')),
+      // the speech-to-text capability (the deployment's configured provider). Absent ⇒ init.stt
+      // is omitted (a handler that needs it fail-closes loudly on `undefined`).
+      sttCapability,
     );
     // a BRANDED enriched return chooses the status + headers; a plain return keeps the
     // existing behavior (HTTP 200 + that value as the JSON body). The brand check is unambiguous — a

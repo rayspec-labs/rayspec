@@ -122,6 +122,17 @@ const SELF_CONSTRUCT_VECTORS = [
     re: /\bmakeFsSourceFactory\s*\(/,
     what: 'makeFsSourceFactory(...) (a raw fs-source backend factory — use the injected init.fsSource handle)',
   },
+  // A self-built STT stack — selecting a provider / constructing a provider adapter instead of using
+  // the injected init.stt. A handler that builds its own adapter reads the provider credential itself
+  // and pins the deployment's provider choice inside product code, defeating the injection seam.
+  {
+    re: /\bbuildSttCapability\s*\(/,
+    what: 'buildSttCapability(...) (self-selecting the STT provider — use the injected init.stt handle)',
+  },
+  {
+    re: /\bnew\s+DeepgramSttAdapter\s*\(/,
+    what: 'new DeepgramSttAdapter(...) (a raw provider adapter — use the injected init.stt handle)',
+  },
 ];
 
 function* walk(dir) {
@@ -244,6 +255,12 @@ function selfTest() {
     { rel: 'h/x.ts', src: 'const blob = new FsBlobStore(root, tenantId);', expect: true },
     { rel: 'h/x.ts', src: "const f = makeFsBlobStoreFactory('/data/blobs');", expect: true },
     { rel: 'h/x.ts', src: "const s = makeFsSourceFactory('/data/reference');", expect: true },
+    {
+      rel: 'h/x.ts',
+      src: "const stt = buildSttCapability({ sttProvider: 'fake' });",
+      expect: true,
+    },
+    { rel: 'h/x.ts', src: 'const a = new DeepgramSttAdapter({ resolver });', expect: true },
     // a COMMENT mentioning a forbidden token — must NOT fire (prose, not code)
     {
       rel: 'h/x.ts',

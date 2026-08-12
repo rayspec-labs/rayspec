@@ -24,7 +24,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@rayspec/core": "workspace:*"
+    "@rayspec/core": "workspace:*",
+    "@rayspec/stt-port": "workspace:*"
   },
   "devDependencies": {
     "typescript": "5.9.3",

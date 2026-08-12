@@ -43,6 +43,11 @@ export type {
   // interpreter types its handler fn + the deploy seam against the one @rayspec/platform package.
   StreamRouteHandler,
   StreamRouteHandlerInit,
+  // The neutral speech-to-text CONTRACT (defined open-core in @rayspec/handler-sdk) — re-exported
+  // here so a platform consumer (the api-auth declarative engine) types its stt-injection seam
+  // against the one @rayspec/platform package, exactly like the blob/fs-source contracts above.
+  SttCapability,
+  SttTranscribeOptions,
 } from '@rayspec/handler-sdk';
 // The VALUE builders/guards for the enriched route response (the api-auth interpreter
 // imports `isHttpResponse`; a handler may import `httpResponse`). Re-exported here so a platform
