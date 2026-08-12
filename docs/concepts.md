@@ -119,14 +119,18 @@ boundary.
 
 Two practical notes on the declarative surface versus the handler escape hatch.
 First, the declarative `store` `list` op supports a narrow, fail-closed query
-surface — equality filters, an opt-in case-insensitive substring search
+surface — equality filters, bounded comparison filters
+(`?<column>__gt=` / `__gte` / `__lt` / `__lte` on non-nullable, non-jsonb declared
+columns), an opt-in case-insensitive substring search
 (`?search=` / `?<column>__contains=`), single-column ordering, and keyset
 pagination — all
 folded through the tenant predicate, capped at a fixed page size (it signals
-truncation with an `X-Result-Truncated` header and returns an `X-Next-Cursor`). A
+truncation with an `X-Result-Truncated` header and returns an `X-Next-Cursor` on
+every non-empty page). A
 read that needs an **offset** page or a total **count** is a `handler` route, whose
-injected data facade adds `limit`/`offset` paging and a filtered count (still
-equality-only). Second, `handler` routes are authorized on the `store:write`
+injected data facade adds `limit`/`offset` paging and a filtered count (equality
+and the same bounded comparisons — no `like`/`OR`). Second, `handler` routes are
+authorized on the `store:write`
 permission (the
 platform cannot prove a handler is read-only, so it fail-closes to the stronger
 gate) — so even a read-only handler is reachable only by a caller that holds

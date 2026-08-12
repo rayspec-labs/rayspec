@@ -216,12 +216,13 @@ describeDb('declared store — the bigint column type', () => {
     expect(body).not.toContain('9007199254740992'); // never a rounded figure, not even in the message
 
     // The LIST that contains the row fails the same way — and mints no pagination header on the way
-    // out. `limit=1` is load-bearing, not decoration: a cursor is minted ONLY when the page is FULL
-    // (`rows.length === limit`), so on the default limit of 200 a one-row list could never carry the
-    // header under ANY implementation and the assertion below would be vacuous. With `limit=1` the
-    // page IS full, the mint path IS entered, and the assertion discriminates: serializing before
-    // minting is what keeps the header off the 400. (Hono replays the context's prepared headers onto
-    // the response `onError` builds, so a header set before the throw survives it.)
+    // out. `limit=1` is load-bearing, not decoration: `X-Result-Truncated` is set ONLY when the page
+    // is FULL (`rows.length === limit`), so on the default limit of 200 a one-row list could never
+    // carry that header under ANY implementation and its assertion below would be vacuous. With
+    // `limit=1` the page IS full, BOTH header paths ARE entered (the cursor mints on every non-empty
+    // page, the truncation flag on this full one), and the assertions discriminate: serializing
+    // before minting is what keeps the headers off the 400. (Hono replays the context's prepared
+    // headers onto the response `onError` builds, so a header set before the throw survives it.)
     const list = await listUsage(token, 'limit=1');
     expect(list.status).toBe(400);
     expect(list.headers.get('X-Next-Cursor')).toBeNull();

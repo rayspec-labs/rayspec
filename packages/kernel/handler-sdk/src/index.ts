@@ -90,11 +90,13 @@ import type { FsSource } from './fs-source.js';
 export type StoreRow = Record<string, unknown>;
 
 /**
- * A row filter — an equality map over column names (snake_case, as declared in the spec). `{}` (or
- * omitted) matches all rows in the tenant. Each entry AND-combines; the engine resolves the column
- * names against the declared store + delegates to the real `TenantDb` chokepoint, so the tenant
- * predicate is ALWAYS auto-injected (a handler can never read/write across tenants, and can never
- * touch an auth/core table — only a DECLARED product store, by name).
+ * A row filter — a value map over column names (snake_case, as declared in the spec). `{}` (or
+ * omitted) matches all rows in the tenant. Each entry AND-combines; a value is matched by EQUALITY
+ * (an ARRAY on a non-jsonb column is a batched `IN`, and — on the READ filters (`select`/`count`)
+ * only — a `{ gt/gte/lt/lte: bound }` object is a bounded comparison; see `HandlerDb.select`). The
+ * engine resolves the column names against the declared store + delegates to the real `TenantDb`
+ * chokepoint, so the tenant predicate is ALWAYS auto-injected (a handler can never read/write across
+ * tenants, and can never touch an auth/core table — only a DECLARED product store, by name).
  *
  * SERIALIZABLE BY DESIGN: a filter is a plain JSON object (no live query builder), so a `HandlerDb`
  * call is a serializable request the isolate can marshal across a boundary unchanged.
@@ -189,6 +191,19 @@ export interface HandlerDb {
    * `IN`.) Each array element still passes the same data-value guard a scalar does (an injection vector
    * is rejected fail-closed).
    *
+   * COMPARISON OPERATORS (a plain-object filter value — serializable/isolate-safe like everything
+   * else here): `{ col: { gt: bound } }` (and `gte`/`lt`/`lte`) narrows the read to rows whose `col`
+   * compares against the bound — `{ seq: { gt: lastSeen } }` is the "everything after X" read. Two
+   * COMPATIBLE bounds in one object AND-combine to a range (`{ gt: a, lte: b }`). FAIL-CLOSED
+   * eligibility and shape: operators bind ONLY to a non-nullable, non-jsonb DECLARED business column
+   * (a nullable column, an injected column such as `id`/`created_at`, an unknown key, a mixed
+   * known+unknown object, an empty object, a contradictory pair — `gt` with `gte`, `lt` with `lte` —
+   * and an `undefined`/`null`/non-scalar bound each REJECT; nothing is guessed). On a `jsonb` column
+   * a plain object stays a legal EQUALITY VALUE, exactly as before — an operator-shaped object there
+   * is matched as data, never interpreted. The operator form is accepted on the READ filters
+   * (`select`/`count`) only; `update`/`delete` filters remain equality/`IN` and reject an object
+   * value fail-closed.
+   *
    * OPTS: optional `orderBy`/`limit`/`offset` (see `SelectOptions`) for server-side ordering +
    * paging. The tenant predicate is structural BENEATH this; opts can never widen it.
    */
@@ -203,8 +218,9 @@ export interface HandlerDb {
    * OPTIONAL because it is additive: the engine-built facade provides it, but an older or
    * alternative `HandlerDb` provider may not — a consumer feature-detects
    * (`typeof db.count === 'function'`) and falls back to a full read. Serializable-shaped like
-   * `select` (a store name + a plain equality filter → a number), so the isolate seam is
-   * unchanged.
+   * `select` (a store name + a plain filter → a number), and it takes the SAME filter forms `select`
+   * does — comparison operators included, so a paged reader can total its range — leaving the
+   * isolate seam unchanged.
    */
   count?(store: string, filter?: StoreFilter): Promise<number>;
   /** Insert one row into a declared store (tenant_id auto-stamped); returns the inserted row. */

@@ -633,9 +633,13 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     await expect(
       aDb.insert('meetings', { title: ['x'] as unknown as string, completed: false }),
     ).rejects.toThrow(/must be a plain scalar/);
-    // A non-scalar in a FILTER value → throw (the read path is guarded too).
+    // A non-scalar in a FILTER value → throw (the read path is guarded too). On a READ filter a
+    // plain object is classified against the comparison-operator form (`{ gt/gte/lt/lte }`) first,
+    // so THIS reject names the malformed comparison — still a fail-closed StoreInputError before
+    // anything reaches the driver (a real Drizzle SQL object is a class instance, never enters the
+    // operator path at all, and keeps the plain-scalar SF-1 reject).
     await expect(aDb.select('meetings', { title: sqlish as unknown as string })).rejects.toThrow(
-      /must be a plain scalar/,
+      /not a well-formed comparison/,
     );
     // A non-scalar in an UPDATE patch → throw.
     const row = await aDb.insert('meetings', { title: 'ok', completed: false });
