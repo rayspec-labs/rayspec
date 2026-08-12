@@ -508,6 +508,8 @@ function filterParamSchema(type: ColumnType): Record<string, unknown> {
  *  - one equality-filter param per declared BUSINESS column (a `jsonb` column is NOT filterable at
  *    runtime, so it is excluded — documenting it would over-claim), keyed by the AUTHOR snake name;
  *  - a `<col>__in` SET-filter param per filterable column (a comma-separated value list → SQL `IN`);
+ *  - a `<col>__gt`/`__gte`/`__lt`/`__lte` COMPARISON-filter param set per non-nullable, non-jsonb
+ *    DECLARED column (the operator eligibility rule — injected columns are excluded);
  *  - the injected `created_by` equality + `created_by__in` set filter.
  * All optional. Product-agnostic: every name is derived from the spec, none is hard-coded.
  */
@@ -536,6 +538,43 @@ function containsFilterParam(name: string): OpenApiParameter {
     required: false,
     description: `Case-insensitive substring filter on '${name}': matches a row whose '${name}' CONTAINS the given term (the term's wildcards are matched literally).`,
     schema: { type: 'string' },
+  };
+}
+
+/**
+ * The comparison-operator suffixes and their prose (matches store-query.ts `OPERATOR_SUFFIXES`).
+ * One `<col>__<op>` query param each per ELIGIBLE column — a non-nullable, non-jsonb DECLARED
+ * business column (never an injected column) — mirroring the runtime eligibility rule exactly, so
+ * the document never advertises an operator param the server 400s.
+ */
+const COMPARISON_OPS: ReadonlyArray<readonly [string, string]> = [
+  ['gt', 'greater than'],
+  ['gte', 'greater than or equal to'],
+  ['lt', 'less than'],
+  ['lte', 'less than or equal to'],
+];
+
+/**
+ * A `<col>__gt`/`__gte`/`__lt`/`__lte` COMPARISON-filter param (matches store-query.ts, which coerces
+ * the value with the SAME per-type rules equality uses and folds a single bound into the AND-chain —
+ * two compatible bounds make a range). The value schema is the SAME per-type fragment the equality
+ * filter documents.
+ */
+function comparisonFilterParam(
+  name: string,
+  op: string,
+  prose: string,
+  type: ColumnType,
+): OpenApiParameter {
+  return {
+    name: `${name}__${op}`,
+    in: 'query',
+    required: false,
+    description:
+      `Comparison filter on '${name}': matches a row whose '${name}' is ${prose} the given value. ` +
+      'Available only on non-nullable, non-jsonb declared columns; composes with other filters, ' +
+      'order, and keyset pagination.',
+    schema: filterParamSchema(type),
   };
 }
 
@@ -577,6 +616,11 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
   // the declared text columns and the injected created_by does NOT widen it, so it must not appear in
   // this set's role of deciding whether `search` is emitted.
   const textNames = new Set<string>();
+  // The COMPARISON-eligible columns (name → type): the non-nullable, non-jsonb DECLARED business
+  // columns — the exact runtime eligibility set (store-query.ts). The injected `created_by` is
+  // deliberately NEVER added (injected columns are not operator-eligible), so no `created_by__gt`
+  // param can over-claim a request the server 400s.
+  const comparableColumns = new Map<string, ColumnType>();
   for (const col of store.columns) {
     if (col.type === 'jsonb') continue; // jsonb is not filterable — omit rather than over-claim
     // Defense-in-depth: a column named after a control key (order/after/limit/search) is already
@@ -586,6 +630,7 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
     if (CONTROL_KEYS.has(col.name)) continue;
     equalityNames.add(col.name);
     if (col.type === 'text') textNames.add(col.name);
+    if (!col.nullable) comparableColumns.set(col.name, col.type);
     params.push({
       name: col.name,
       in: 'query',
@@ -657,6 +702,17 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
     if (equalityNames.has(`${name}__contains`)) continue;
     params.push(containsFilterParam(name));
   }
+  // The `<col>__gt`/`__gte`/`__lt`/`__lte` COMPARISON-filter companions — one set per eligible
+  // (non-nullable, non-jsonb, declared) column, EXCEPT when a companion name is ITSELF a declared
+  // equality param (a column literally named `<x>__gt`). The exact-named EQUALITY param wins —
+  // mirroring the runtime Precedence-1 (store-query.ts) — so that one companion is DROPPED and the
+  // emitted document never carries a duplicate (name+in) parameter.
+  for (const [name, type] of comparableColumns) {
+    for (const [op, prose] of COMPARISON_OPS) {
+      if (equalityNames.has(`${name}__${op}`)) continue;
+      params.push(comparisonFilterParam(name, op, prose, type));
+    }
+  }
   return params;
 }
 
@@ -684,8 +740,10 @@ function storeOperation(
             headers: {
               'X-Next-Cursor': {
                 description:
-                  'Opaque keyset cursor for the next page — present only on a full/truncated page. ' +
-                  'Pass it back as ?after=.',
+                  'Opaque keyset cursor bound to the LAST row of the page — present on every ' +
+                  'non-empty keyset-ordered page (an empty page carries none, and a ranked __search ' +
+                  'page is relevance-ordered and carries none). Pass it back as ?after= to fetch the ' +
+                  'rows beyond it — including rows that arrive later.',
                 schema: { type: 'string' },
               },
               'X-Result-Truncated': {

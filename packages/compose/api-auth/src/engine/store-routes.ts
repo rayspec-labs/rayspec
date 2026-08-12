@@ -299,16 +299,22 @@ export function makeStoreHandler(args: {
             // returned no page at all. A client that follows the cursor before checking the status
             // would then skip the very page it never received.
             const body = rows.map((r) => serializeRow(store, r));
+            // The page hit the cap — signal HONESTLY (X-Result-Truncated is set ONLY on a cap-hit
+            // page; a non-full page carries no truncation signal).
             if (rows.length === limit) {
-              // The page hit the cap — signal HONESTLY. A ranked full-text-search page (`?__search=`) is
-              // ordered by `ts_rank`, NOT a stored order column, so it mints NO keyset cursor (relevance
-              // search returns a single bounded page); the normal keyset path hands back the next cursor.
               c.header('X-Result-Truncated', 'true');
-              if (!rankedSearch) {
-                const last = rows[rows.length - 1];
-                const cursor = last ? nextCursor(order, last) : undefined;
-                if (cursor) c.header('X-Next-Cursor', cursor);
-              }
+            }
+            // Cursor COMPLETENESS: EVERY non-empty keyset-ordered page mints the cursor of its LAST
+            // row — not only a full one — so a client can park the cursor of a drained feed as its
+            // frontier and resume with `after` when new rows arrive. An EMPTY page mints NO cursor: a
+            // cursor binds to a row boundary the server actually observed, and an empty page observed
+            // none — the client's previously-held cursor remains its frontier. A ranked
+            // full-text-search page (`?__search=`) is ordered by `ts_rank`, NOT a stored order column
+            // (and rejects `after`), so it mints NO keyset cursor either.
+            if (!rankedSearch && rows.length > 0) {
+              const last = rows[rows.length - 1];
+              const cursor = last ? nextCursor(order, last) : undefined;
+              if (cursor) c.header('X-Next-Cursor', cursor);
             }
             return c.json(body);
           }

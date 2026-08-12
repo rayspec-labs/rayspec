@@ -9,21 +9,24 @@
  *
  * Fail-CLOSED: every query param must be a recognized control key (`order`/`after`/`limit`/`search`, and
  * `__search` on a `fullTextSearch` store), a filterable column (a declared business column, or the
- * injected `created_by`), a `<col>__in` set filter, or a `<col>__contains` substring filter on one such
- * column. An UNKNOWN param is a VALIDATION_ERROR (never silently ignored — a typo'd filter must not
- * return the whole table).
+ * injected `created_by`), a `<col>__in` set filter, a `<col>__gt`/`__gte`/`__lt`/`__lte` comparison
+ * filter on a non-nullable non-jsonb DECLARED column, or a `<col>__contains` substring filter on one
+ * such column. An UNKNOWN param is a VALIDATION_ERROR (never silently ignored — a typo'd filter must
+ * not return the whole table).
  *
  * Deliberately NARROW: equality filters (`?col=v`, AND-combined) + a per-column set filter
- * (`?col__in=v1,v2,…` → SQL `IN`) + a case-insensitive substring search (`?search=term` matched over
- * EVERY text column as an OR; `?<col>__contains=term` on one text column), all folded into the SAME
- * AND-chain — no ranges, no relevance ranking. `search`/`__contains` escape the term's LIKE wildcards
- * (`%`/`_`) with an explicit `ESCAPE` clause so a term matches LITERALLY (never injects a wildcard). The
- * distinct `__in`/`__contains` SUFFIXES (not a bare `?col=a,b`) keep plain equality byte-identical and
- * unambiguous on a comma-bearing value, and a real column literally named `<x>__in`/`<x>__contains`
- * still takes precedence as plain equality. Order is a single `order=<col>.asc|desc`; the default is a
- * deterministic `id asc` so keyset pagination is stable. Keyset (`after=<opaque cursor>` + `limit`)
- * compares `(order_col, id)` against the cursor in the sort direction, so paging is correct even when
- * the order column has duplicate values.
+ * (`?col__in=v1,v2,…` → SQL `IN`) + a bounded per-column comparison family (`?col__gt=v` et al. — a
+ * single AND-folded bound each, so `?col__gt=a&col__lte=b` is a range) + a case-insensitive substring
+ * search (`?search=term` matched over EVERY text column as an OR; `?<col>__contains=term` on one text
+ * column), all folded into the SAME AND-chain — no OR, no relevance ranking. `search`/`__contains`
+ * escape the term's LIKE wildcards (`%`/`_`) with an explicit `ESCAPE` clause so a term matches
+ * LITERALLY (never injects a wildcard). The distinct `__in`/`__gt`-family/`__contains` SUFFIXES (not a
+ * bare `?col=a,b`) keep plain equality byte-identical and unambiguous on a comma-bearing value, and a
+ * real column literally named `<x>__in`/`<x>__gt`/`<x>__contains` still takes precedence as plain
+ * equality. Order is a single `order=<col>.asc|desc`; the default is a deterministic `id asc` so keyset
+ * pagination is stable. Keyset (`after=<opaque cursor>` + `limit`) compares `(order_col, id)` against
+ * the cursor in the sort direction, so paging is correct even when the order column has duplicate
+ * values.
  *
  * ORDER COLUMNS ARE NON-NULLABLE ONLY: keyset pagination compares `(order_col, id)`
  * against the cursor's stored order value; a NULL order value makes `col > NULL` / `col = NULL`
@@ -43,9 +46,11 @@ import {
   eq,
   getTableColumns,
   gt,
+  gte,
   inArray,
   isNull,
   lt,
+  lte,
   or,
   type SQL,
   sql,
@@ -85,6 +90,24 @@ const MAX_LIMIT = 200;
  */
 const IN_SUFFIX = '__in';
 const MAX_IN_VALUES = 100;
+
+/**
+ * The bounded comparison-operator suffixes (`?<col>__gt=v` / `__gte` / `__lt` / `__lte`) — the `__in`
+ * pattern extended to ranges. Each is a single AND-folded bound on ONE column, so
+ * `?col__gt=a&col__lte=b` is a range and every operator composes with equality/`__in`/`order`/keyset
+ * pagination (the `after` predicate is just another AND term). ELIGIBILITY IS FAIL-CLOSED: an operator
+ * binds ONLY to a non-nullable, non-jsonb DECLARED business column — a nullable declared column, a
+ * jsonb column (even a non-nullable one), an undeclared column, and every injected column
+ * (`id`/`created_at`/`created_by`) each 400, so a typo'd operator can never widen a read. The value is
+ * coerced through the SAME per-type `coerceValue` equality/`__in` use, and a real column literally
+ * named `<x>__gt` still wins as plain equality at Precedence 1 (the `__in` discipline).
+ */
+const OPERATOR_SUFFIXES: ReadonlyArray<readonly [string, typeof gt]> = [
+  ['__gte', gte],
+  ['__lte', lte],
+  ['__gt', gt],
+  ['__lt', lt],
+];
 
 /**
  * The substring-search control key + the per-column `__contains` suffix. `?search=term` runs a
@@ -451,7 +474,8 @@ export function buildListQuery(
     limit = n;
   }
 
-  // --- filters: plain equality + the `<col>__in` set filter (unknown param ⇒ fail-closed) ---
+  // --- filters: plain equality + the `<col>__in` set filter + the `<col>__gt`-family comparison
+  // filters (unknown param ⇒ fail-closed) ---
   const predicates: SQL[] = [];
   for (const [key, rawValue] of params) {
     if (CONTROL_KEYS.has(key)) continue;
@@ -491,7 +515,39 @@ export function buildListQuery(
         continue;
       }
     }
-    // Precedence 3 — `<col>__contains`: a case-insensitive SUBSTRING (ILIKE '%term%') filter on ONE
+    // Precedence 3 — `<col>__gt`/`__gte`/`__lt`/`__lte`: a bounded COMPARISON on a non-nullable,
+    // non-jsonb DECLARED business column, coerced through the SAME per-type coerceValue equality/`__in`
+    // use and folded into the SAME AND-chain (composes with equality, `__in`, `order`, and the keyset
+    // `after` predicate). Fail-closed: a nullable declared column 400s (a NULL never compares under SQL
+    // three-valued logic — a bound over it would silently hide those rows), a jsonb column 400s (no
+    // comparison semantics — even a NON-nullable jsonb, which IS sortable, is not comparable here), an
+    // empty value 400s (almost certainly a typo — mirrors `__in`/`__contains`), and an UNKNOWN or
+    // INJECTED prefix (`id`/`created_at`/`created_by` — the operator surface is the DECLARED business
+    // columns only) falls THROUGH to the fail-closed reject below. A column literally named `<x>__gt`
+    // already won as plain equality at Precedence 1 (the `__in` discipline).
+    const operator = OPERATOR_SUFFIXES.find(([suffix]) => key.endsWith(suffix));
+    if (operator) {
+      const [suffix, cmp] = operator;
+      const prefix = key.slice(0, -suffix.length);
+      const business = store.columns.find((c) => c.name === prefix);
+      if (business !== undefined) {
+        if (business.nullable) {
+          validationError(
+            `Filter '${key}' requires a non-nullable column ('${prefix}' is nullable).`,
+          );
+        }
+        if (business.type === 'jsonb') {
+          validationError(`Filter '${key}' requires a comparable column ('${prefix}' is jsonb).`);
+        }
+        if (rawValue === '') {
+          validationError(`Filter '${key}' must not be empty.`);
+        }
+        const col = drizzleColumn(table, prefix);
+        predicates.push(cmp(col, coerceValue(business.type, key, rawValue)) as SQL);
+        continue;
+      }
+    }
+    // Precedence 4 — `<col>__contains`: a case-insensitive SUBSTRING (ILIKE '%term%') filter on ONE
     // declared TEXT column, folded into the SAME AND-chain. Only text columns are searchable: a
     // `__contains` on a non-text filterable column (integer/uuid/…) 400s (substring match is undefined
     // for it), and an empty term 400s (a blank substring would match every row — almost certainly a
@@ -514,7 +570,7 @@ export function buildListQuery(
         continue;
       }
     }
-    // Precedence 4 — none of the above: fail-closed.
+    // Precedence 5 — none of the above: fail-closed.
     validationError(`Unknown query parameter '${key}'.`);
   }
 

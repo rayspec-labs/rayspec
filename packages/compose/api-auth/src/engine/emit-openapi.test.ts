@@ -349,6 +349,83 @@ describe('buildDeclaredRoutesOpenApi — product-agnostic emission', () => {
     const res200 = doc.paths['/widgets'].get.responses['200'];
     expect(res200.headers?.['X-Next-Cursor']?.schema).toEqual({ type: 'string' });
     expect(res200.headers?.['X-Result-Truncated']?.schema).toEqual({ type: 'string' });
+    // The cursor is documented as EVERY-non-empty-page (cursor completeness), never as a
+    // truncated-page-only header — and the two exceptions (empty page, ranked __search) are named.
+    const cursorDesc = res200.headers?.['X-Next-Cursor']?.description ?? '';
+    expect(cursorDesc).toContain('every non-empty');
+    expect(cursorDesc).toContain('__search');
+  });
+
+  it('a {store} LIST documents the __gt/__gte/__lt/__lte comparison params on ELIGIBLE columns only', () => {
+    const doc = buildDeclaredRoutesOpenApi(richSpec());
+    const params = doc.paths['/widgets'].get.parameters ?? [];
+    const byName = new Map(params.map((p) => [p.name, p]));
+    // Every NON-nullable, non-jsonb declared business column carries the four operator companions…
+    for (const col of ['title', 'count', 'bytes_total', 'active']) {
+      for (const op of ['gt', 'gte', 'lt', 'lte']) {
+        const p = byName.get(`${col}__${op}`);
+        expect(p?.in, `${col}__${op} must be a query param`).toBe('query');
+        expect(p?.required ?? false).toBe(false);
+        // …each naming the eligibility rule (the operator surface is bounded, and the doc says so).
+        expect(p?.description).toContain('non-nullable');
+      }
+    }
+    // …with the SAME per-type value schema the equality filter documents.
+    expect(byName.get('count__gt')?.schema).toMatchObject({ type: 'integer' });
+    expect(byName.get('bytes_total__lte')?.schema).toMatchObject({
+      type: 'integer',
+      maximum: Number.MAX_SAFE_INTEGER,
+    });
+    // A NULLABLE declared column and the injected created_by are NOT operator-eligible — documenting
+    // a param the server 400s would over-claim.
+    for (const op of ['gt', 'gte', 'lt', 'lte']) {
+      expect(byName.has(`note__${op}`)).toBe(false);
+      expect(byName.has(`created_by__${op}`)).toBe(false);
+    }
+  });
+
+  it('a column literally named `<x>__gt` alongside `<x>` does NOT emit a duplicate query param (equality wins)', () => {
+    // Mirrors the runtime Precedence-1 (store-query.ts): `?foo__gt=` on a store with a REAL `foo__gt`
+    // column is plain equality on that column, so the emitter must keep the exact-named EQUALITY param
+    // and drop `foo`'s colliding operator companion — never a duplicate (name+in) parameter.
+    const doc = buildDeclaredRoutesOpenApi(
+      specFromObject({
+        version: '1.0',
+        metadata: { name: 'cmp-collision-backend' },
+        stores: [
+          {
+            name: 'widgets',
+            columns: [
+              { name: 'foo', type: 'text' },
+              { name: 'foo__gt', type: 'text', nullable: true }, // literally named `<x>__gt` — legal (runtime Precedence-1)
+              { name: 'payload', type: 'jsonb' }, // non-nullable jsonb: sortable, but NOT comparable
+            ],
+          },
+        ],
+        api: [
+          {
+            method: 'GET',
+            path: '/widgets',
+            action: { kind: 'store', store: 'widgets', op: 'list' },
+          },
+        ],
+      }),
+    );
+    const params = doc.paths['/widgets'].get.parameters ?? [];
+    // EXACTLY ONE `foo__gt` query param — and it is the EQUALITY filter (the exact-named column wins).
+    const fooGt = params.filter((p) => p.name === 'foo__gt' && p.in === 'query');
+    expect(fooGt).toHaveLength(1);
+    expect(fooGt[0]?.description).toContain('Equality');
+    // `foo` keeps its OTHER three companions (only the colliding one is dropped)…
+    for (const op of ['gte', 'lt', 'lte']) {
+      expect(params.some((p) => p.name === `foo__${op}`)).toBe(true);
+    }
+    // …a non-nullable JSONB column gets NONE (comparability, not sortability, is the rule)…
+    for (const op of ['gt', 'gte', 'lt', 'lte']) {
+      expect(params.some((p) => p.name === `payload__${op}`)).toBe(false);
+    }
+    // …and the whole document stays structurally valid (no duplicate parameter anywhere).
+    expect(structuralOpenApiProblems(doc)).toEqual([]);
   });
 
   it('a {store} CREATE documents the Idempotency-Key header + the 200 replay response', () => {

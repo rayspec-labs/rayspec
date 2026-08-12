@@ -90,6 +90,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are unchanged. The route also enters the spec reference next to `triggers` — method, permission,
   the `202` bodies, the `fired:false` ambiguity, the error cases, and the `trigger-fire` rate
   bucket (30 fires per 60 seconds per tenant+trigger).
+- **Bounded comparison filters on both read surfaces, and a cursor on every `list` page.** Every
+  read was equality-only, so "give me everything after X" — the natural read for an event log, an
+  activity feed, or an incremental sync — could not be written at all. The declared `list` op now
+  accepts `?<column>__gt=` / `__gte` / `__lt` / `__lte` (the `__in` pattern extended to ranges):
+  allowed **only on non-nullable, non-jsonb declared columns** — a nullable column, a `jsonb`
+  column, an undeclared column, and the injected `id`/`created_at`/`created_by` each answer
+  `400 VALIDATION_ERROR`, so a typo'd operator never widens a read. Values are coerced with the
+  same per-type rules equality uses (`double` and `numeric` compare numerically, `numeric`
+  exactly), each bound folds into the same AND-chain (two bounds on one column make a range) and
+  composes with equality, `__in`, `order`, and keyset pagination; a column literally named
+  `<x>__gt` still routes as plain equality, and the generated OpenAPI documents the per-column
+  operator params with the eligibility rule. The handler facade takes the same family as a typed
+  filter value — `init.db.select('events', { seq: { gt: lastSeen } }, …)` (and on `count`) — a
+  plain serializable object, fail-closed the same way: only a well-formed `{ gt/gte/lt/lte }`
+  object on an eligible declared column is a comparison (an unknown or mixed key, an empty object,
+  a contradictory `gt`+`gte` / `lt`+`lte` pair, a `null`/`undefined` bound, or an ineligible
+  column each reject; on a `jsonb` column an object remains an equality *value*, and `update`/
+  `delete` filters still reject objects — no previously-legal filter changes meaning). And the
+  `list` op now returns `X-Next-Cursor` on **every non-empty** keyset-ordered page, not only a
+  full one, so a client can drain a feed, park the cursor, and later pass it as `after` to receive
+  exactly the rows that arrived since. An empty page carries no cursor (your previously-held
+  cursor remains your frontier), a ranked `?__search=` page carries none (relevance-ordered, no
+  keyset), and `X-Result-Truncated` is still set only when a page fills to the cap.
 
 ### Fixed
 

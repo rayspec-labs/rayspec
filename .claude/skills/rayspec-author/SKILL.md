@@ -102,7 +102,8 @@ with a declarative approximation; recommend it as a future iteration or the prod
   backfill** (expand-contract's backfill step is authored/app work, not something the skill runs).
 - Beyond the loop: multi-store atomic `db.transaction(fn)` writes; concurrency-race hardening (23505
   re-read / human-edit preservation / stale-reconcile); grounding/validation over a closed evidence
-  set; vector/embedding/fuzzy/range lookups (the facade is **AND-equality only**); typed scalar arrays
+  set; vector/embedding/fuzzy/range lookups (the templates scaffold **AND-equality filters only** — the
+  facade's bounded `{ gt/gte/lt/lte }` comparisons are not scaffolded); typed scalar arrays
   / floats at the DB layer (map to `jsonb`, never a typed scalar array).
 
 ## What you must NEVER touch
@@ -193,7 +194,8 @@ are how the generated CRUD surface behaves. Know them so your PRD assumptions an
   Sending BOTH variants of the SAME column in one body is a **400** (ambiguous). **Responses are ALWAYS
   snake_case** — every exposed key (business + injected) is serialized snake_case, timestamps as ISO-8601.
 - **List query power** (on a `list` route). All narrow and fail-closed:
-  - **Equality filters** — `?<column>=<value>`, AND-combined (no ranges / OR; the only substring match is
+  - **Equality filters** — `?<column>=<value>`, AND-combined (no OR; ranges are the `__gt` family below;
+    the only substring match is
     the opt-in `search` / `__contains` surface below). Filterable columns are the declared business
     columns **plus the injected `created_by`**.
   - **Set filter — `?<column>__in=v1,v2,…`** (a SQL `IN`, folded into the SAME AND-chain, so it composes
@@ -209,13 +211,22 @@ are how the generated CRUD surface behaves. Know them so your PRD assumptions an
     escaped (via `ESCAPE`), so they match literally (never as a wildcard). Both fold into the SAME
     AND-chain and stay **keyset-stable** (compose with `order` + the `after` cursor). **`search` is a
     RESERVED query word** — a store that declares a column literally named `search` fails lint.
+  - **Comparison filters — `?<column>__gt=v` / `__gte` / `__lt` / `__lte`** (the "everything after X"
+    read: `?seq__gt=12345&order=seq.asc`). Allowed ONLY on **non-nullable, non-jsonb DECLARED** columns —
+    a nullable column, a `jsonb` column, an undeclared column, and the injected `id`/`created_at`/
+    `created_by` each **400** (fail-closed; a typo'd operator never widens a read). Values are coerced
+    with the SAME per-type rules as equality; each bound folds into the SAME AND-chain (two bounds on one
+    column = a range), composing with equality/`__in`/`order` + the keyset cursor. A column literally
+    named `<x>__gt` still routes as plain equality (like `<x>__in`).
   - **Ordering** — `?order=<column>.asc|desc`. Only **NON-nullable** columns are sortable (the declared
     non-nullable business columns + the injected `id` / `created_at`); the default is `id asc`. A nullable
     column — and `created_by` — is filterable but a **400** as an order column (keyset stability needs a
     non-null sort key).
   - **Keyset pagination** — `?after=<opaque cursor>&limit=<n>`, `limit` bounded **1..200** (default 200).
-    When a page hits the cap the response sets **`X-Result-Truncated: true`** and **`X-Next-Cursor: <opaque
-    cursor>`** — pass that cursor back as `after` for the next page.
+    EVERY non-empty keyset-ordered page returns an **`X-Next-Cursor: <opaque cursor>`** bound to its last
+    row — pass it back as `after` for the rows beyond it (park it on a drained feed and resume later). An
+    EMPTY page returns no cursor (your previously-held cursor stays your frontier); a ranked `?__search=`
+    page returns none. **`X-Result-Truncated: true`** is set only when the page hits the cap.
   - An **UNKNOWN query param → 400** (a typo'd filter must never silently return the whole table).
 - **Idempotent create — the `Idempotency-Key` header.** Send an `Idempotency-Key` on a `create`; a repeat
   with the SAME key **replays the original row** — HTTP **200** with **`Idempotency-Replay: true`** —
@@ -1293,7 +1304,8 @@ Multi-store atomic `db.transaction(fn)` writes · concurrency-race hardening (23
 preservation / stale-reconcile) · grounding/validation over a closed evidence set · blob/stream/media
 (a document-UPLOAD pipeline IS authorable as a product-profile document — see the reference below) ·
 durable-enqueue / off-request jobs / triggers / cron · typed scalar arrays / floats at the DB layer
-(→ `jsonb`) · vector/embedding/fuzzy/range lookups (the facade is AND-equality only). A PRD needing any
+(→ `jsonb`) · vector/embedding/fuzzy/range lookups (the templates scaffold AND-equality filters only —
+the facade's bounded `{ gt/gte/lt/lte }` comparisons are not scaffolded). A PRD needing any
 of these is out of It.2 scope — say so and STOP.
 
 ---

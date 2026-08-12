@@ -356,10 +356,12 @@ api:
   - **`store`** — a CRUD operation over a declared store through the
     tenant-scoped data layer. Fields: `store` (a declared store name) and `op`,
     one of `list`, `get`, `create`, `update`, `delete`. The `list` op supports
-    equality filters, single-column ordering, and keyset pagination (all folded
-    through the tenant predicate and fail-closed on an unknown parameter), capped
-    at a fixed page size (200 rows; it sets an `X-Result-Truncated: true` header
-    and an `X-Next-Cursor` when the cap is hit). A `create` accepts an
+    equality filters, bounded comparison filters (`__gt`/`__gte`/`__lt`/`__lte`
+    on non-nullable, non-jsonb declared columns), single-column ordering, and
+    keyset pagination (all folded through the tenant predicate and fail-closed
+    on an unknown parameter), capped at a fixed page size (200 rows; it sets an
+    `X-Result-Truncated: true` header when the cap is hit, and returns an
+    `X-Next-Cursor` on every non-empty keyset-ordered page). A `create` accepts an
     `Idempotency-Key` and stamps a server-side `created_by` actor, and a request
     body may use snake_case or camelCase column keys. All of these store-route
     runtime behaviours are documented in full under
@@ -648,9 +650,9 @@ the tenant predicate, so no query can cross tenants; an unrecognized query
 parameter is rejected (`400 VALIDATION_ERROR`).
 
 - **Equality filters** — `?<column>=<value>` on any declared column, plus the
-  injected `created_by`. Multiple filters are AND-combined. There are no range or
-  `OR` operators; the only substring match is the opt-in `search` / `__contains`
-  surface below.
+  injected `created_by`. Multiple filters are AND-combined. There are no `OR`
+  operators; the only range surface is the bounded comparison family below, and
+  the only substring match is the opt-in `search` / `__contains` surface below.
 - **Set filters** — `?<column>__in=v1,v2,…` matches any of a comma-separated value
   list (SQL `IN`) on a filterable column, so a "status is `open` OR `in_progress`"
   read is one query. The distinct `__in` suffix keeps plain `?<column>=<value>`
@@ -661,6 +663,20 @@ parameter is rejected (`400 VALIDATION_ERROR`).
   predicate). Fail-closed: an empty/blank element, more than 100 values, a
   non-filterable (`jsonb`) column, or an unknown prefix column each return
   `400 VALIDATION_ERROR`.
+- **Comparison filters** — `?<column>__gt=<value>` / `__gte` / `__lt` / `__lte`
+  bounds a read on one column, so "give me everything after X" — the natural read
+  for an event log or an incremental sync — is one query
+  (`?seq__gt=12345&order=seq.asc`). Allowed **only on non-nullable, non-jsonb
+  declared columns** — not on a nullable column (a `NULL` never compares under SQL
+  three-valued logic, so a bound would silently hide those rows), not on a `jsonb`
+  column (even a non-nullable one), and not on the injected `id` / `created_at` /
+  `created_by`; anything else is `400 VALIDATION_ERROR`, so a typo'd operator can
+  never widen a read. The value is coerced with the same per-type rules equality
+  uses (`double` and `numeric` columns compare numerically, `numeric` exactly).
+  Each bound folds into the same AND-chain — two bounds on one column make a range
+  (`?seq__gt=10&seq__lte=20`), and every bound composes with equality, `__in`,
+  `order`, and the `after` cursor. A column literally named `<x>__gt` still routes
+  as plain equality, exactly like `<x>__in`.
 - **Substring search** — an opt-in, case-insensitive substring match, distinct
   from the exact filters above. `?search=<term>` matches the term against **all**
   of the store's declared `text` columns (an `OR` across them); `?<column>__contains=<term>`
@@ -678,10 +694,16 @@ parameter is rejected (`400 VALIDATION_ERROR`).
   across the keyset boundary — so `created_by` is filterable but **not** sortable.
   The default order is `id asc`.
 - **Keyset pagination** — `?limit=<n>` bounds the page (`1`–`200`, default `200`),
-  and `?after=<cursor>` fetches the next page. When a page fills to the cap, the
-  response sets `X-Result-Truncated: true` and returns an opaque `X-Next-Cursor`;
-  pass that value back as `after` to page forward. The cursor is bound to the
-  order it was minted for — reusing it under a different `order` is rejected.
+  and `?after=<cursor>` fetches the rows beyond the cursor. **Every non-empty**
+  keyset-ordered page returns an opaque `X-Next-Cursor` bound to its last row —
+  not only a page that filled to the cap — so a client can drain a feed, park the
+  cursor, and pass it back as `after` later to receive exactly the rows that
+  arrived since. An **empty** page returns no cursor (a cursor binds to a row
+  boundary the server actually observed; on an empty page your previously-held
+  cursor remains your frontier), and a ranked `?__search=` page returns none (it
+  is relevance-ordered and rejects `after`). `X-Result-Truncated: true` is still
+  set only when the page fills to the cap. The cursor is bound to the order it
+  was minted for — reusing it under a different `order` is rejected.
 
 An **offset**-paged read or a filtered total row **count** is not part of the
 declarative `list` op; a read that needs either drops to a `handler` route (see
@@ -1223,11 +1245,14 @@ handlers:
 
 A `handler`-kind route is also the escape hatch for reads the declarative `store`
 `list` op does not cover — an **offset**-paged read or a filtered **`count`**. (The
-`list` op itself handles equality filters, single-column ordering, and keyset
-pagination — see [Store route runtime semantics](#store-route-runtime-semantics).)
+`list` op itself handles equality and comparison filters, single-column ordering,
+and keyset pagination — see
+[Store route runtime semantics](#store-route-runtime-semantics).)
 The injected data facade a route handler receives supports **equality filters,
-`orderBy`, `limit`/`offset` paging, and a filtered `count`** over the tenant-scoped
-store (still tenant-predicated beneath, and still equality-only — no `>`/`<`/`like`
+bounded comparison filters (`{ column: { gt: bound } }` and `gte`/`lt`/`lte`, on
+non-nullable, non-jsonb declared columns — read filters only), `orderBy`,
+`limit`/`offset` paging, and a filtered `count`** over the tenant-scoped store
+(still tenant-predicated beneath; no `like`/`OR`
 operators). A read that passes **no** `orderBy` comes back in `id` ascending order —
 the same default the `list` op applies — so a handler never receives rows in an
 unspecified physical order. That default is the injected `id`, a random UUID, so it

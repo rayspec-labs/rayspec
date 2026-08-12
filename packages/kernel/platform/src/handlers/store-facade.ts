@@ -19,9 +19,12 @@
  *  - #3 REJECTS server-controlled/injected columns in insert/update VALUES (a handler may never SET
  *    `id`/`tenant_id`/`created_at`/`deleted_at`/`retention_days`/`region`);
  *  - #4 every filter/value key MUST be a real declared column (fail-closed on an unknown column);
- *    FILTERS are EQUALITY-ONLY in v0.1 (`{ col: value }` → AND-combined `eq`) — NO operators
- *    (>/</>=/<=/like/in); a richer filter grammar is a deliberate later spec-version decision;
- *  - exchanges only plain serializable rows / equality filters (the isolate-ready shape — except
+ *    FILTERS are `{ col: value }` → AND-combined `eq` (an ARRAY value on a non-jsonb column is a
+ *    batched `IN`), plus — on the READ surface (select/count) ONLY — a bounded comparison object
+ *    `{ gt/gte/lt/lte: bound }` on a non-nullable, non-jsonb declared column (see filterPredicate;
+ *    every other object shape stays a fail-closed reject). No LIKE/OR — a richer filter grammar is a
+ *    deliberate later spec-version decision;
+ *  - exchanges only plain serializable rows / filters (the isolate-ready shape — except
  *    `transaction`, whose closure callback is an isolate design point, #5; see the method + the SDK header).
  *
  * SNAKE ↔ CAMEL: the spec/handler speak snake_case column names (the declared/wire shape); the
@@ -57,8 +60,12 @@ import {
   eq,
   getTableColumns,
   getTableName,
+  gt,
+  gte,
   inArray,
   isNull,
+  lt,
+  lte,
   type SQL,
 } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
@@ -273,11 +280,94 @@ function assertValidValue(col: PgColumn, where: string, name: string, value: unk
 }
 
 /**
- * Build the AND-combined predicate for a filter (refinement #4). The v0.1 default is EQUALITY
- * (`{ column: value }` → `eq(column, value)`, multiple keys AND-combined) — still NO comparison
- * operators (>/</>=/<=/like); a richer operator grammar is a deliberate later spec-version decision.
+ * The comparison-operator keys a READ filter's object value may carry (`{ gt/gte/lt/lte: bound }`),
+ * each mapped to its drizzle predicate builder. A closed vocabulary — any other key on an object
+ * filter value stays the fail-closed reject it always was.
+ */
+const OPERATOR_FNS: ReadonlyMap<string, typeof gt> = new Map([
+  ['gt', gt],
+  ['gte', gte],
+  ['lt', lt],
+  ['lte', lte],
+]);
+
+/**
+ * The injected columns' snake_case names — never comparison-operator-eligible (the operator surface
+ * is the non-nullable, non-jsonb DECLARED business columns only; injected columns remain valid
+ * EQUALITY filter keys, e.g. a read-by-id).
+ */
+const INJECTED_SNAKE: ReadonlySet<string> = new Set(INJECTED_COLUMN_NAMES);
+
+/** True for a PLAIN, non-array, non-Date object (prototype exactly Object.prototype or null). */
+function isPlainNonArrayObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (value instanceof Date) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/**
+ * Build the predicate for a COMPARISON-OPERATOR filter value on a NON-jsonb column — the one
+ * ADDITIVE-OVER-REJECTION object form (`{ gt/gte/lt/lte: bound }`): before it existed, EVERY plain
+ * object on a non-jsonb column was an SF-1 reject, so admitting exactly the well-formed operator
+ * object changes the meaning of NO previously-legal filter. Everything else about an object value
+ * REMAINS a fail-closed reject, each with its reason:
+ *  - an empty object, an unknown key, or a mix of known + unknown keys (never guess at a typo);
+ *  - a contradictory pair — `gt` with `gte`, or `lt` with `lte` (never silently pick one bound);
+ *  - an INELIGIBLE column: an injected column (`id`/`created_at`/…) or a NULLABLE declared column (a
+ *    NULL never compares under SQL three-valued logic, so a bound would silently hide those rows) —
+ *    the jsonb case never reaches here (the caller routes a jsonb object to EQUALITY, unchanged);
+ *  - an `undefined`/`null` bound (not a defined comparison — `col > NULL` is never-true SQL, and an
+ *    honest reject beats an empty lie), or a non-scalar bound (the SAME SF-1 guard equality values
+ *    pass, so an injection vector is rejected identically).
+ * Two compatible bounds in one object (`{ gt: a, lte: b }`) AND-combine to a range.
+ */
+function operatorPredicate(col: PgColumn, name: string, obj: Record<string, unknown>): SQL {
+  const entries = Object.entries(obj);
+  const malformed = (why: string): never => {
+    throw new StoreInputError(
+      `HandlerDb: filter value for '${name}' is an object but not a well-formed comparison ` +
+        `({ gt/gte/lt/lte: bound }): ${why}. Rejected fail-closed.`,
+      'A supplied filter value is not a permitted filter shape.',
+    );
+  };
+  if (entries.length === 0) malformed('it has no operator key');
+  for (const [key] of entries) {
+    if (!OPERATOR_FNS.has(key)) malformed(`'${key}' is not a comparison operator`);
+  }
+  if ('gt' in obj && 'gte' in obj) malformed("'gt' and 'gte' contradict — pick one lower bound");
+  if ('lt' in obj && 'lte' in obj) malformed("'lt' and 'lte' contradict — pick one upper bound");
+  // Eligibility (the caller already routed jsonb columns to equality): a comparison binds ONLY to a
+  // non-nullable DECLARED business column — never an injected column, never a nullable one.
+  if (INJECTED_SNAKE.has(col.name) || !col.notNull) {
+    throw new StoreInputError(
+      `HandlerDb: a comparison filter on '${name}' is not permitted — operators bind only to ` +
+        'non-nullable, non-jsonb DECLARED business columns (an injected or nullable column is ' +
+        'refused: a NULL value never compares, so a bound over it would silently hide rows). ' +
+        'Rejected fail-closed.',
+      'A comparison filter is not permitted on the target column.',
+    );
+  }
+  const preds: SQL[] = [];
+  for (const [key, bound] of entries) {
+    if (bound === undefined || bound === null) {
+      malformed(`the '${key}' bound is ${bound === null ? 'null' : 'undefined'}, not a value`);
+    }
+    // The SAME data-value guard equality bounds pass (SF-1): a SQL object/function/class instance is
+    // rejected, and on this (non-jsonb) column any plain object/array bound is rejected too.
+    assertValidValue(col, 'filter', name, bound);
+    const fn = OPERATOR_FNS.get(key);
+    if (fn) preds.push(fn(col, bound) as SQL);
+  }
+  return preds.length === 1 ? (preds[0] as SQL) : (and(...preds) as SQL);
+}
+
+/**
+ * Build the AND-combined predicate for a filter (refinement #4). The default form is EQUALITY
+ * (`{ column: value }` → `eq(column, value)`, multiple keys AND-combined); no LIKE/OR — a richer
+ * operator grammar is a deliberate later spec-version decision.
  *
- * BATCHED `inArray` (the ONE additive form): a filter VALUE that is an ARRAY on a NON-jsonb column
+ * BATCHED `inArray`: a filter VALUE that is an ARRAY on a NON-jsonb column
  * is a SET-MEMBERSHIP filter — `inArray(column, value)` (a single `IN (…)` query, so a list handler
  * stops doing N+1 round-trips). COLUMN-TYPE-AWARE (a hard-won lesson): on a `jsonb` column an
  * array value is the VALUE ITSELF, so it is matched by EQUALITY (`eq`) — never `IN` — preserving legit
@@ -285,11 +375,23 @@ function assertValidValue(col: PgColumn, where: string, name: string, value: unk
  * path uses, so a crafted SQL/function/class element is rejected fail-closed (no injection through the
  * batched path).
  *
+ * COMPARISON OPERATORS (`allowOperators`, the READ surface — select/count — only): a plain-object
+ * value on a NON-jsonb column is routed to `operatorPredicate` (`{ gt/gte/lt/lte: bound }` on an
+ * eligible column; every other object shape stays a fail-closed reject — see there). On a `jsonb`
+ * column an object is the VALUE ITSELF and keeps EQUALITY (never an operator — same hard-won lesson
+ * as the array rule above). The WRITE-path filters (update/delete/upsert `updateWhere`) do NOT pass
+ * the flag: an object value there remains the SF-1 reject it always was — a range write/delete is a
+ * deliberate later decision, not a side effect of a read feature.
+ *
  * Each key is resolved fail-closed to a real column (#4); injected columns (e.g. `id`) ARE valid filter
  * keys (a read-by-id is legitimate). The tenant predicate is AND-combined by TenantDb BENEATH this, so a
  * filter can NEVER drop the tenant scope.
  */
-function filterPredicate(table: PgTable, filter: StoreFilter | undefined): SQL | undefined {
+function filterPredicate(
+  table: PgTable,
+  filter: StoreFilter | undefined,
+  allowOperators = false,
+): SQL | undefined {
   const entries = Object.entries(filter ?? {});
   if (entries.length === 0) return undefined;
   const preds = entries.map(([name, value]) => {
@@ -299,6 +401,11 @@ function filterPredicate(table: PgTable, filter: StoreFilter | undefined): SQL |
     if (Array.isArray(value) && !isJsonbColumn(col)) {
       for (const element of value) assertValidValue(col, 'filter', name, element);
       return inArray(col, value as unknown[]);
+    }
+    // Read-shaping: a PLAIN OBJECT on a NON-jsonb column → the comparison-operator form (or its
+    // fail-closed reject) — READ filters only. A jsonb column keeps eq (the object IS the value).
+    if (allowOperators && isPlainNonArrayObject(value) && !isJsonbColumn(col)) {
+      return operatorPredicate(col, name, value);
     }
     assertValidValue(col, 'filter', name, value);
     return eq(col, value);
@@ -723,7 +830,8 @@ export function makeHandlerDb(
     async select(store: string, filter?: StoreFilter, opts?: SelectOptions): Promise<StoreRow[]> {
       const table = resolveTable(productTables, store);
       // A softDelete store hides tombstoned rows (deleted_at IS NULL folded in); default store unchanged.
-      const pred = visiblePredicate(table, filterPredicate(table, filter));
+      // READ filter: the comparison-operator form ({ gt/gte/lt/lte }) is admitted here (allowOperators).
+      const pred = visiblePredicate(table, filterPredicate(table, filter, true));
       // TenantDb.select<T> wants the registered table type; the runtime PgTable is admitted via the
       // chokepoint's deny-by-default Set (the deployment registered it). The `as never` bridges the
       // literal-tuple member type to the runtime PgTable (same bridge store-routes.ts uses).
@@ -773,8 +881,9 @@ export function makeHandlerDb(
       // tenant predicate beneath the filter, so a count can never see another tenant's rows. Lets a
       // paged reader total without loading the tenant's whole match set.
       const table = resolveTable(productTables, store);
-      // A softDelete store excludes tombstoned rows from the count too (uniform with select).
-      const pred = visiblePredicate(table, filterPredicate(table, filter));
+      // A softDelete store excludes tombstoned rows from the count too (uniform with select) — and the
+      // SAME read filter select takes, comparison operators included (a paged reader totals its range).
+      const pred = visiblePredicate(table, filterPredicate(table, filter, true));
       const rows = (await tdb.select(table as never, { value: countRows() }).where(pred)) as Array<{
         value: number;
       }>;
