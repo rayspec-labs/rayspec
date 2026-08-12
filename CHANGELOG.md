@@ -226,13 +226,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `doctor` and `plan` accepted it, `deploy` validated and booted it, and `deploy --dry-run` returned
   `ok: false`, exit `1`, and `no_code_in_yaml` violations about the very `api`, `handlers` and
   `tooling` sections that profile is *made* of — scaling with the document, so a larger spec produced
-  proportionally more of them. The failure was authoritative-looking in the direction that hides work
-  (`spec did not validate`), and nothing in the output said a different profile's ruleset had been
-  applied. It was also wrong in the *other* direction: a backend document with a real defect — a
-  dangling handler reference `doctor` reports as `dangling_ref` — came back carrying the same product
-  lint and never the actual error, so the arm could neither pass a good document nor diagnose a bad
-  one. `--dry-run` now dispatches on the document profile **before** parsing, the order `plan` already
-  uses, and validates a backend document with the same parser `doctor` and `plan` use for it.
+  proportionally more of them. A backend document that declares **no** handlers or tools was rejected
+  just the same, only in the product grammar's other vocabulary: a purely store-backed one (the
+  shipped `examples/notes-ui`) carried no code-like key for that lint to fire on, so it came back with
+  the product shape rejections instead — a missing `product:` section, a missing `stores[].key`, and
+  `unknown_field` on its `api` and `frontend`. The failure was authoritative-looking in the direction
+  that hides work (`spec did not validate`), and nothing in the output said a different profile's
+  ruleset had been applied. It was also wrong in the *other* direction: a backend document with a
+  real defect — a dangling handler reference `doctor` reports as `dangling_ref` — came back carrying
+  the same product lint and never the actual error, so the arm could neither pass a good document nor
+  diagnose a bad one. `--dry-run` now dispatches on the document profile **before** parsing — the
+  order `plan` already uses — and validates a backend document with the parser `doctor` and `plan` use.
   **Consumer-visible verdict change:** such a document now returns `ok: true` and exit `0` where it
   returned `ok: false` and exit `1`, carrying a new `backendProfile` block — the profile named plus
   the declared `stores`, `routes` (`METHOD /path`), `agents`, `handlers` and, when the document
