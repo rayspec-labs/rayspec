@@ -52,7 +52,13 @@ import {
   specError,
   specWarning,
 } from './errors.js';
-import { type ColumnType, MAX_IDENTIFIER_LENGTH, type RaySpec } from './grammar.js';
+import {
+  type ColumnType,
+  MAX_IDENTIFIER_LENGTH,
+  type RaySpec,
+  type ResponseProjection,
+  type StoreSpec,
+} from './grammar.js';
 import { typeScriptSourceExtensionOf } from './module-extensions.js';
 
 type AjvInstance = Ajv2020Class;
@@ -529,6 +535,173 @@ function checkPersistTo(
   return out;
 }
 
+/**
+ * Check ONE declared response projection (`project` on a store OR on a store route) against its
+ * store — the doctor rules that make the projection FAIL-CLOSED at config time rather than a
+ * runtime surprise:
+ *  1. a `rename` key must name a declared business column or an injected column, and must rename a
+ *     column the projected response actually carries (`projection_unknown_column` otherwise — a
+ *     rename of a column `omitInjected`/`fields` removes is dead config);
+ *  2. a `rename` target may not be the AUTHOR name of ANOTHER column of the same store
+ *     (`projection_query_shadow`): the list-query surface stays author-named (filters/order/
+ *     operator params), so a response field named after a different real column would actively
+ *     mislead callers. A fresh wire name (`id` → `companionId`) is allowed — it produces the
+ *     documented request/response naming split, stated in the docs and the OpenAPI document;
+ *  3. `fields` entries must be distinct (`duplicate_name`) and must each match a post-casing/rename
+ *     wire name (`projection_unknown_column`, with a did-you-mean hint when the entry is an author
+ *     name whose wire name differs);
+ *  4. no two EXPOSED columns may map to the same wire name (`projection_collision`) — whether via a
+ *     rename or via two snake names whose camelCase twins coincide under `casing: camel`.
+ *
+ * MEMBERSHIP mirrors the runtime resolution exactly (@rayspec/api-auth `resolveResponseProjection`
+ * — a KEEP-IN-SYNC twin; spec cannot import compose, the same layering as
+ * `RESERVED_QUERY_KEYWORDS` ↔ `CONTROL_KEYS`): `fields`, when present, is the last word on
+ * membership; otherwise `omitInjected` drops the injected columns except the spared `id`. The
+ * injected set here is `RESERVED_COLUMN_NAMES` (meta-test-locked to the db's
+ * `INJECTED_COLUMN_NAMES`, so the two views cannot drift).
+ */
+function checkResponseProjection(
+  project: ResponseProjection,
+  store: StoreSpec,
+  subject: string,
+  path: string,
+): SpecError[] {
+  const errors: SpecError[] = [];
+  const businessNames = new Set(store.columns.map((c) => c.name));
+  // Every column of the store, author names: declared business + the 8 injected (a business column
+  // can never share an injected name — `reserved_column_name` — the filter is belt-and-braces).
+  const allColumnNames = [
+    ...businessNames,
+    ...[...RESERVED_COLUMN_NAMES].filter((n) => !businessNames.has(n)),
+  ];
+  const isColumn = (name: string): boolean =>
+    businessNames.has(name) || RESERVED_COLUMN_NAMES.has(name);
+  const isInjected = (name: string): boolean =>
+    RESERVED_COLUMN_NAMES.has(name) && !businessNames.has(name);
+  // The wire name of a column BEFORE the `fields` allowlist: a rename wins, else the casing rule
+  // (the SAME snake→camel transform the request side / generators use — toJsIdentifier). The
+  // rename lookup is OWN-property only: a plain `rename?.[name]` walks the prototype chain, so a
+  // column legally named `constructor` or `__proto__` would resolve to an inherited
+  // Object.prototype member and poison every wire-name check below (KEEP-IN-SYNC twin:
+  // @rayspec/api-auth `resolveResponseProjection`).
+  const wireOf = (name: string): string => {
+    const renamed =
+      project.rename !== undefined && Object.hasOwn(project.rename, name)
+        ? project.rename[name]
+        : undefined;
+    return renamed ?? (project.casing === 'camel' ? toJsIdentifier(name) : name);
+  };
+  // Is the column ON the projected response? `fields` (when present) alone decides membership;
+  // otherwise `omitInjected` drops the injected columns except the spared `id`.
+  const exposed = (name: string): boolean => {
+    if (project.fields !== undefined) return project.fields.includes(wireOf(name));
+    if (project.omitInjected === true && isInjected(name) && name !== 'id') return false;
+    return true;
+  };
+
+  // (1) + (2) — rename keys resolve, stay on the response, and shadow no other author name.
+  for (const [col, wire] of Object.entries(project.rename ?? {})) {
+    if (!isColumn(col)) {
+      errors.push(
+        specError(
+          'projection_unknown_column',
+          `${subject} project.rename renames unknown column '${col}' — a rename key must name a ` +
+            `declared business column or an injected column of store '${store.name}'`,
+          `${path}.rename.${col}`,
+        ),
+      );
+      continue;
+    }
+    if (!exposed(col)) {
+      const cause =
+        project.fields !== undefined
+          ? `the fields allowlist does not include its wire name '${wire}'`
+          : 'omitInjected removes it and no fields allowlist re-includes it';
+      errors.push(
+        specError(
+          'projection_unknown_column',
+          `${subject} project.rename renames '${col}' to '${wire}', but the projection removes ` +
+            `that column from the response (${cause}) — a rename must rename a column the ` +
+            'response carries',
+          `${path}.rename.${col}`,
+        ),
+      );
+      continue;
+    }
+    if (wire !== col && allColumnNames.includes(wire)) {
+      errors.push(
+        specError(
+          'projection_query_shadow',
+          `${subject} project.rename maps '${col}' to '${wire}', the author name of ANOTHER ` +
+            `column of store '${store.name}' — the list query surface stays author-named ` +
+            `(?${wire}= addresses the real '${wire}' column), so this response field would ` +
+            "actively mislead callers; pick a wire name that is not another column's name",
+          `${path}.rename.${col}`,
+        ),
+      );
+    }
+  }
+
+  // (3) — fields entries: distinct, each matching a post-casing/rename wire name.
+  if (project.fields !== undefined) {
+    const wireNames = new Set(allColumnNames.map((name) => wireOf(name)));
+    const seen = new Set<string>();
+    project.fields.forEach((entry, fi) => {
+      if (seen.has(entry)) {
+        errors.push(
+          specError(
+            'duplicate_name',
+            `${subject} project.fields lists '${entry}' more than once — allowlist entries must ` +
+              'be distinct',
+            `${path}.fields[${fi}]`,
+          ),
+        );
+        return;
+      }
+      seen.add(entry);
+      if (!wireNames.has(entry)) {
+        // Did-you-mean: the entry is a column's AUTHOR name whose wire name differs (the common
+        // slip — fields are matched AFTER casing/rename, so the author name no longer matches).
+        const hint =
+          isColumn(entry) && wireOf(entry) !== entry
+            ? ` — fields are matched against the projected wire names (after casing/rename); ` +
+              `did you mean '${wireOf(entry)}'?`
+            : '';
+        errors.push(
+          specError(
+            'projection_unknown_column',
+            `${subject} project.fields entry '${entry}' matches no projected wire field of ` +
+              `store '${store.name}'${hint}`,
+            `${path}.fields[${fi}]`,
+          ),
+        );
+      }
+    });
+  }
+
+  // (4) — collisions among the EXPOSED columns' wire names.
+  const colsByWire = new Map<string, string[]>();
+  for (const name of allColumnNames) {
+    if (!exposed(name)) continue;
+    const wire = wireOf(name);
+    colsByWire.set(wire, [...(colsByWire.get(wire) ?? []), name]);
+  }
+  for (const [wire, cols] of colsByWire) {
+    if (cols.length > 1) {
+      errors.push(
+        specError(
+          'projection_collision',
+          `${subject} project maps columns ${cols.map((c) => `'${c}'`).join(' and ')} to the ` +
+            `SAME wire name '${wire}' — post-projection field names must be unique (one response ` +
+            'key cannot carry two columns)',
+          path,
+        ),
+      );
+    }
+  }
+  return errors;
+}
+
 /** The full semantic pass. Input is already shape-valid (post-Zod-parse). */
 export function lintSpec(spec: RaySpec): SpecError[] {
   const errors: SpecError[] = [];
@@ -751,6 +924,21 @@ export function lintSpec(spec: RaySpec): SpecError[] {
           ),
         );
       }
+    }
+
+    // (PROJECT) A store-level response projection is checked HERE, on its own dock (a route-level
+    // `project` is checked in the api pass below against the same rules). Fail-closed at config:
+    // unknown/dead rename+fields members, wire-name collisions, and query-surface shadowing are
+    // doctor errors, never runtime surprises.
+    if (store.project !== undefined) {
+      errors.push(
+        ...checkResponseProjection(
+          store.project,
+          store,
+          `store '${store.name}'`,
+          `stores[${si}].project`,
+        ),
+      );
     }
 
     store.foreignKeys.forEach((fk, fi) => {
@@ -1038,6 +1226,47 @@ export function lintSpec(spec: RaySpec): SpecError[] {
       }
     }
     const action = route.action;
+    // api[].project — a route-level response projection. KIND/OP COHERENCE first (the catchUp
+    // pattern: silently dead config is a config error): a projection reshapes row RESPONSES, so it
+    // is meaningful only on a store route whose op returns rows — a non-store route has no store
+    // row to project, and a `delete` answers 204 with no body. On a row-returning store route the
+    // projection is checked against its store (same rules as the store-level dock; a dangling
+    // store ref is already reported above, so the projection check is skipped for it).
+    if (route.project !== undefined) {
+      if (action.kind !== 'store') {
+        errors.push(
+          specError(
+            'schema_violation',
+            `route ${route.method} ${route.path} declares 'project' but its action kind is ` +
+              `'${action.kind}' — a response projection reshapes a store route's row responses; ` +
+              "remove it (a handler/agent/stream response is the handler's/run's own shape)",
+            `api[${ri}].project`,
+          ),
+        );
+      } else if (action.op === 'delete') {
+        errors.push(
+          specError(
+            'schema_violation',
+            `route ${route.method} ${route.path} declares 'project' on a store 'delete' op — a ` +
+              'delete answers 204 with no body, so there is no response to project; declare it ' +
+              'on the store or on the row-returning routes',
+            `api[${ri}].project`,
+          ),
+        );
+      } else {
+        const projectedStore = storeByName.get(action.store);
+        if (projectedStore !== undefined) {
+          errors.push(
+            ...checkResponseProjection(
+              route.project,
+              projectedStore,
+              `route ${route.method} ${route.path}`,
+              `api[${ri}].project`,
+            ),
+          );
+        }
+      }
+    }
     if (action.kind === 'store') {
       if (!storeNames.has(action.store)) {
         errors.push(

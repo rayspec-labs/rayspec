@@ -322,11 +322,18 @@ export function registerDeclaredRoutes(
       // Pass this store's conflict-key set (product-profile only) so a global-unique key
       // column is never named in a 409 (cross-tenant oracle); absent ⇒ name any tenant-scoped unique.
       const storeConflictKeys = config.conflictKeys?.get(action.store);
+      // The route's EFFECTIVE response projection: a route-level `project` overrides the
+      // store-level one WHOLESALE (so an explicit `project: {}` opts a single route back out of a
+      // store-level projection). Absent ⇒ the historical snake wire shape, byte-identical. The
+      // OpenAPI emitter applies the SAME `route.project ?? store.project` resolution, so the
+      // served document always describes what this handler actually serializes.
+      const project = route.project ?? store.project;
       const handler = makeStoreHandler({
         store,
         table,
         op: action.op,
         deps,
+        ...(project ? { project } : {}),
         ...(storeConflictKeys ? { conflictKeys: storeConflictKeys } : {}),
       });
       registerOn(

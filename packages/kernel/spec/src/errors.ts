@@ -72,6 +72,28 @@ import { z } from 'zod';
  *                               tool — a lookup/persist loop silently never fires. Rejected UNIFORMLY,
  *                               fail-closed, on every backend (not per capability). The structured shape
  *                               belongs on the persist tool's `parameters`.
+ *  - `projection_unknown_column` — a store-route response projection (`project`) member addresses
+ *                               no column on the response: a `rename` key that names no declared
+ *                               business / injected column, a `rename` of a column the projection
+ *                               itself removes from the response (dead config — `omitInjected`
+ *                               dropped it with no `fields` re-include, or the `fields` allowlist
+ *                               excludes its wire name), or a `fields` entry matching no
+ *                               post-casing/rename wire name (fields are matched AFTER the rename/
+ *                               casing steps, so an author snake name no longer matches a re-cased
+ *                               column).
+ *  - `projection_collision`   — a response projection maps two exposed columns to the SAME wire
+ *                               field name (a rename target colliding with another column's wire
+ *                               name, or two snake names whose camelCase twins coincide under
+ *                               `casing: camel`, e.g. `a_1`/`a1`). Post-projection field names must
+ *                               be unique — one response key cannot carry two columns.
+ *  - `projection_query_shadow`— a response projection `rename` target equals the AUTHOR name of
+ *                               ANOTHER column of the same store. The list-query surface stays
+ *                               author-named (filters/order/operator params address declared column
+ *                               names), so a response field named after a different real column
+ *                               would actively mislead callers (`?x=` filters the real `x` column
+ *                               while the response field `x` carries another). A rename to a FRESH
+ *                               wire name (e.g. `id` → `companionId`) is allowed and produces the
+ *                               documented request/response naming split.
  *
  * PRODUCT-YAML codes — used ONLY by the Product-YAML validation path (`parseProductSpec`,
  * `product-lint.ts`). They share this closed envelope so a fresh session sees ONE error vocabulary
@@ -134,6 +156,9 @@ export const SpecErrorCode = z.enum([
   'frontend_dir_missing',
   'fk_cycle',
   'agent_output_schema_shortcircuits_tools',
+  'projection_unknown_column',
+  'projection_collision',
+  'projection_query_shadow',
   'no_code_in_yaml',
   'provider_native_leak',
   'invalid_capability_status',

@@ -240,6 +240,66 @@ export const StoreForeignKey = z
   .strict();
 export type StoreForeignKey = z.infer<typeof StoreForeignKey>;
 
+// ---------------------------------------------------------------------------------------
+// project — the optional response projection (docked on stores[] AND on api[] store routes)
+// ---------------------------------------------------------------------------------------
+
+/**
+ * A WIRE FIELD NAME a response projection may expose — a JSON object key on the response, NOT a SQL
+ * identifier, so (unlike `SafeIdentifier`) uppercase letters are allowed: the whole point of the
+ * projection is wire names like `companionId` that a pre-existing client contract pins. Still
+ * bounded and shaped (letters/digits/underscore, not digit-leading, <= 63 chars) so a declared wire
+ * name can never smuggle a structural character into a serialized response or the OpenAPI document.
+ */
+const WIRE_FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const WireFieldName = z
+  .string()
+  .min(1)
+  .max(
+    MAX_IDENTIFIER_LENGTH,
+    `wire field name must be <= ${MAX_IDENTIFIER_LENGTH} chars`,
+  )
+  .regex(
+    WIRE_FIELD_RE,
+    'wire field name must match /^[A-Za-z_][A-Za-z0-9_]*$/ (letters/digits/underscore, not digit-leading)',
+  );
+
+/**
+ * The optional, fail-closed RESPONSE PROJECTION on the declared store read surface. READ-SIDE ONLY:
+ * it reshapes what a store route's row responses look like on the wire — requests (create/update
+ * bodies, filters, order, operator params, path params) keep the DECLARED author names throughout,
+ * so a rename creates a documented request/response naming split (query by author name, response by
+ * wire name). It docks in TWO places: on a store (`stores[].project`, applied to every store route
+ * reading that store) and on a route (`api[].project`, which OVERRIDES the store-level projection
+ * WHOLESALE — an explicit `project: {}` opts a single route back out).
+ *
+ * Member semantics (each member `.optional()`, NEVER `.default()` — a document that declares no
+ * `project` parses byte-identically and behaves byte-identically, the same absent-field guarantee
+ * `rateLimit` carries):
+ *  - `casing`       — `snake` (the default wire shape today) | `camel` (each column's camelCase
+ *                     twin, the same snake→camel rule the request side already accepts).
+ *  - `omitInjected` — drop the server-injected columns (tenant_id, created_at, deleted_at,
+ *                     retention_days, region, created_by, idempotency_key) from responses; `id` is
+ *                     SPARED (a client needs the row key) unless a `fields` allowlist drops it.
+ *  - `rename`       — declared/injected column name → wire field name (wins over `casing` for that
+ *                     column). Lint rejects an unknown column, a rename the projection then removes
+ *                     from the response, a post-projection wire-name collision, and a rename target
+ *                     equal to ANOTHER column's author name (it would actively mislead the
+ *                     author-named query surface) — doctor errors, never runtime surprises.
+ *  - `fields`       — an optional allowlist of post-casing/rename WIRE names, applied LAST: when
+ *                     present it alone decides membership (it can re-include an injected column
+ *                     past `omitInjected`, and dropping `id`'s wire name drops `id`).
+ */
+export const ResponseProjection = z
+  .object({
+    casing: z.enum(['snake', 'camel']).optional(),
+    omitInjected: z.boolean().optional(),
+    rename: z.record(SafeIdentifier, WireFieldName).optional(),
+    fields: z.array(WireFieldName).min(1).optional(),
+  })
+  .strict();
+export type ResponseProjection = z.infer<typeof ResponseProjection>;
+
 /**
  * A declared product store. Authors declare a name + business columns (+ optional child→parent
  * FKs). Tenancy is NON-OPTIONAL by construction — there is no opt-out field (a non-tenant store
@@ -255,6 +315,10 @@ export const StoreSpec = z
     /** Opt-in full-text search: the store gets a generated tsvector column (over its text columns) + a
      *  GIN index, and a ranked search query surface. Default: substring (ILIKE) search only. */
     fullTextSearch: z.boolean().optional(),
+    /** Optional response projection applied to EVERY declared store route reading this store (a
+     *  route-level `project` overrides it wholesale). See `ResponseProjection`. `.optional()`,
+     *  never `.default()` — absent ⇒ the historical snake wire shape, byte-identical. */
+    project: ResponseProjection.optional(),
     /** Optional advisory acknowledgements scoped to THIS store (see `LintSuppression`). */
     lintSuppress: LintSuppressList,
   })
@@ -474,6 +538,16 @@ export const ApiRouteSpec = z
      * is the window length in seconds and `max` the hits allowed inside it.
      */
     rateLimit: z.object({ windowSeconds: z.number().int().positive(), max: z.number().int().positive() }).strict().optional(),
+    /**
+     * OPT-IN response projection for a `store` route (see `ResponseProjection`): reshapes THIS
+     * route's row responses on the wire (casing / omitInjected / rename / fields), read-side only.
+     * When set it OVERRIDES a store-level `project` WHOLESALE (`project: {}` opts back out).
+     * Meaningful only on a row-returning store route — lint rejects it on a non-store action and on
+     * a `delete` op (dead config). Absent ⇒ the store-level projection, or the historical snake
+     * wire shape — which is why this carries NO `.default()`: the same absent-field guarantee
+     * `rateLimit` documents above applies verbatim.
+     */
+    project: ResponseProjection.optional(),
     /** Optional advisory acknowledgements scoped to THIS route (see `LintSuppression`). */
     lintSuppress: LintSuppressList,
   })

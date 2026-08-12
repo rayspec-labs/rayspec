@@ -30,13 +30,14 @@ import {
   isUniqueViolation,
   uniqueViolationConstraintName,
 } from '@rayspec/db';
-import type { StoreOp, StoreSpec } from '@rayspec/spec';
+import type { ResponseProjection, StoreOp, StoreSpec } from '@rayspec/spec';
 import { and, eq, getTableColumns, isNull, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { Context } from 'hono';
 import type { AppDeps, AppEnv } from '../app-context.js';
 import { readBoundedJson } from '../http/bounded-body.js';
 import { principalActor } from './principal-actor.js';
+import { resolveResponseProjection } from './store-projection.js';
 import { buildListQuery, nextCursor } from './store-query.js';
 import {
   createBodySchema,
@@ -260,10 +261,21 @@ export function makeStoreHandler(args: {
    * is tenant-scoped, so any resolved unique column is safe to name.
    */
   conflictKeys?: ReadonlySet<string>;
+  /**
+   * This route's EFFECTIVE response projection (`route.project ?? store.project`, resolved by the
+   * registrar — a route-level `project` overrides the store-level one wholesale). READ-SIDE ONLY:
+   * it is resolved ONCE at registration into a `snake → wire name` map and threaded to every
+   * `serializeRow` site below; the request path (body schemas, casing normalizer, list query) never
+   * sees it. Absent ⇒ the historical snake wire shape, byte-identical.
+   */
+  project?: ResponseProjection;
 }): (c: Context<AppEnv>) => Promise<Response> {
   const { store, table, op, deps, conflictKeys } = args;
   const createSchema = createBodySchema(store);
   const updateSchema = updateBodySchema(store);
+  // Resolved once at boot (throws fail-closed on a wire-name collision a code-built spec smuggled
+  // past lint); undefined without a `project`, keeping serializeRow on its byte-identical path.
+  const projection = resolveResponseProjection(store, args.project);
 
   return async (c: Context<AppEnv>): Promise<Response> => {
     const tenantId = c.get('tenantId');
@@ -298,7 +310,7 @@ export function makeStoreHandler(args: {
             // offending order value verbatim, base64url-encoded) and `X-Result-Truncated` on a 400 that
             // returned no page at all. A client that follows the cursor before checking the status
             // would then skip the very page it never received.
-            const body = rows.map((r) => serializeRow(store, r));
+            const body = rows.map((r) => serializeRow(store, r, projection));
             // The page hit the cap — signal HONESTLY (X-Result-Truncated is set ONLY on a cap-hit
             // page; a non-full page carries no truncation signal).
             if (rows.length === limit) {
@@ -327,7 +339,7 @@ export function makeStoreHandler(args: {
             // Cross-tenant, absent, OR (softDelete) tombstoned → zero rows → uniform 404 (the tenant
             // predicate is AND-combined by TenantDb; `deleted_at IS NULL` folds in for a softDelete store).
             if (!row) throw new ApiError('NOT_FOUND', 'Not found.');
-            return c.json(serializeRow(store, row));
+            return c.json(serializeRow(store, row, projection));
           }
           case 'create': {
             // Drain the body under the configured byte cap (413 pre-parse for an over-cap body),
@@ -376,7 +388,7 @@ export function makeStoreHandler(args: {
             }
             const row = inserted[0];
             if (!row) throw new ApiError('INTERNAL', 'Internal server error.');
-            return c.json(serializeRow(store, row), 201);
+            return c.json(serializeRow(store, row, projection), 201);
           }
           case 'update': {
             const id = requireUuidId(c);
@@ -420,7 +432,7 @@ export function makeStoreHandler(args: {
             // No row updated ⇒ cross-tenant/absent/(softDelete) tombstoned ⇒ uniform 404 (tenant
             // predicate AND-combined; a tombstoned row is uniformly invisible: a PATCH on it is a 404).
             if (!row) throw new ApiError('NOT_FOUND', 'Not found.');
-            return c.json(serializeRow(store, row));
+            return c.json(serializeRow(store, row, projection));
           }
           case 'delete': {
             const id = requireUuidId(c);
@@ -499,7 +511,7 @@ export function makeStoreHandler(args: {
           // context's prepared headers onto whatever response `onError` builds. Stamping first would
           // put `Idempotency-Replay: true` on a 400 that replayed nothing, telling a retrying client
           // its write had already been accepted.
-          const body = serializeRow(store, row);
+          const body = serializeRow(store, row, projection);
           c.header('Idempotency-Replay', 'true');
           return c.json(body, 200);
         }

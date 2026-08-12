@@ -29,6 +29,7 @@ import {
   braceParamNames,
   type ColumnType,
   type RaySpec,
+  type ResponseProjection,
   rewriteBraceParams,
   type StoreOp,
   type StoreSpec,
@@ -36,6 +37,7 @@ import {
 import { z } from 'zod';
 import { StartRunRequest } from '../routes/runs.js';
 import { INJECTED_COLUMN_TS_NAMES } from './injected-columns-view.js';
+import { resolveResponseProjection } from './store-projection.js';
 import { CONTROL_KEYS } from './store-query.js';
 import { createBodySchema, updateBodySchema } from './store-validation.js';
 
@@ -52,6 +54,14 @@ type OpenApiPathItem = Record<string, OpenApiOperation>;
 /** One OpenAPI operation (the subset we populate). */
 interface OpenApiOperation {
   summary: string;
+  /**
+   * Optional operation prose. Emitted ONLY on a store operation whose route carries a response
+   * projection, where it states the request/response NAMING SPLIT explicitly (query/path
+   * parameters by declared column name, response fields by projected wire name) — a generated
+   * client must read that rule here, not infer it from a 400. Absent otherwise (an un-projected
+   * document is byte-identical).
+   */
+  description?: string;
   operationId: string;
   parameters?: OpenApiParameter[];
   requestBody?: {
@@ -175,26 +185,38 @@ const INJECTED_RESPONSE_PROPS: Record<string, Record<string, unknown>> = {
  * wire names, exactly what `serializeRow` exposes) + the declared business columns (author snake_case
  * names, nullable where declared). This mirrors `serializeRow` so the documented response shape is the
  * real wire shape, not a guess.
+ *
+ * A route-level/store-level `project` reshapes BOTH sides of that mirror through the SAME resolution
+ * (`resolveResponseProjection` — one shared `snake → wire name` map the serializer consumes too, so
+ * the documented shape and the served shape cannot drift): each column's type fragment is emitted
+ * under its WIRE name, and a column the projection omits is absent. Values are untouched — the
+ * projection renames/filters keys, never reshapes a fragment. No `project` ⇒ byte-identical emission.
  */
-function storeRowSchema(store: StoreSpec): Record<string, unknown> {
-  // Prototype-free accumulator: the keys are author-derived column names, so a column named
+function storeRowSchema(store: StoreSpec, project?: ResponseProjection): Record<string, unknown> {
+  const wireBySnake = resolveResponseProjection(store, project);
+  // Prototype-free accumulator: the keys are author-derived column/wire names, so a name like
   // `__proto__`/`constructor` lands as a plain own-property here, never a prototype mutation (on a plain
   // `{}` such a key would be silently dropped/reparented). Behaviour is otherwise identical — own
   // enumerable keys serialize the same, and the doc is JSON-serialized (no prototype method is called).
   const properties: Record<string, Record<string, unknown>> = Object.create(null);
   // Injected columns first (the same set serializeRow re-keys to snake_case).
   for (const snake of Object.keys(INJECTED_COLUMN_TS_NAMES)) {
-    properties[snake] = INJECTED_RESPONSE_PROPS[snake] ?? {};
+    const wire = wireBySnake === undefined ? snake : wireBySnake.get(snake);
+    if (wire === undefined) continue; // projected away
+    properties[wire] = INJECTED_RESPONSE_PROPS[snake] ?? {};
   }
-  // Declared business columns under their author snake_case names. A nullable column uses the 3.1
-  // `[type, 'null']` union (consistent with the injected columns above) — NOT the removed `nullable`
-  // keyword.
+  // Declared business columns under their wire names (author snake_case without a projection). A
+  // nullable column uses the 3.1 `[type, 'null']` union (consistent with the injected columns above)
+  // — NOT the removed `nullable` keyword.
   for (const col of store.columns) {
+    const wire = wireBySnake === undefined ? col.name : wireBySnake.get(col.name);
+    if (wire === undefined) continue; // projected away
     const base = responseSchemaForColumnType(col.type);
-    properties[col.name] = col.nullable ? nullable3_1(base) : base;
+    properties[wire] = col.nullable ? nullable3_1(base) : base;
   }
-  // The row carries EXACTLY the injected + declared columns (the closed, server-serialized wire shape),
-  // so the response schema is strict — no silent extra props (matching the strict create/update bodies).
+  // The row carries EXACTLY the injected + declared columns the projection exposes (the closed,
+  // server-serialized wire shape), so the response schema is strict — no silent extra props
+  // (matching the strict create/update bodies).
   return { type: 'object', properties, additionalProperties: false };
 }
 
@@ -319,7 +341,10 @@ function buildOperation(
   if (action.kind === 'store') {
     const store = storeByName.get(action.store);
     if (!store) return undefined; // an undeclared store ref (lint normally resolves it) — skip it.
-    return storeOperation(store, action.op, base);
+    // The route's EFFECTIVE projection — a route-level `project` overrides the store-level one
+    // WHOLESALE (the same resolution the registrar hands makeStoreHandler, so the document
+    // describes exactly what the route serves).
+    return storeOperation(store, action.op, base, route.project ?? store.project);
   }
 
   if (action.kind === 'agent') {
@@ -716,21 +741,42 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
   return params;
 }
 
-/** Build the operation for a `{store}` route from its op + the StoreSpec-derived schemas. */
+/**
+ * Build the operation for a `{store}` route from its op + the StoreSpec-derived schemas.
+ *
+ * `project` (the route's effective response projection) reshapes the RESPONSE row schemas only —
+ * the request surface (path/query parameters, create/update body schemas) stays author-named, and
+ * the operation `description` states that naming split explicitly so a generated client reads the
+ * rule instead of inferring it from a 400. No `project` ⇒ a byte-identical operation.
+ */
 function storeOperation(
   store: StoreSpec,
   op: StoreOp,
   base: { operationId: string; parameters?: OpenApiParameter[] },
+  project?: ResponseProjection,
 ): OpenApiOperation {
-  const row = storeRowSchema(store);
+  const row = storeRowSchema(store, project);
   const rowResponse: OpenApiResponse = {
     description: `A '${store.name}' row.`,
     content: { 'application/json': { schema: row } },
   };
+  // The documented naming split of a projected route: responses carry the projected WIRE names;
+  // everything request-side keeps the DECLARED column names (the projection is read-side only).
+  const split =
+    project !== undefined
+      ? {
+          description:
+            'This route declares a response projection: response fields carry the projected wire ' +
+            'names (casing/rename/fields applied server-side), while path and query parameters — ' +
+            'equality/set/comparison filters, order, and the create/update body keys — keep the ' +
+            'declared column names. The projection is read-side only.',
+        }
+      : {};
   switch (op) {
     case 'list':
       return {
         ...base,
+        ...split,
         summary: `List '${store.name}' rows (tenant-scoped).`,
         // The declared filters + order/after/limit query surface (plus any path params from base).
         parameters: [...(base.parameters ?? []), ...listQueryParameters(store)],
@@ -759,6 +805,7 @@ function storeOperation(
     case 'get':
       return {
         ...base,
+        ...split,
         summary: `Get one '${store.name}' row by id.`,
         responses: {
           '200': rowResponse,
@@ -768,6 +815,7 @@ function storeOperation(
     case 'create':
       return {
         ...base,
+        ...split,
         summary: `Create a '${store.name}' row.`,
         // The optional Idempotency-Key request header: a repeat CREATE with the same key returns
         // the ORIGINAL row (200 + Idempotency-Replay) instead of creating a duplicate.
@@ -806,6 +854,7 @@ function storeOperation(
     case 'update':
       return {
         ...base,
+        ...split,
         summary: `Update a '${store.name}' row by id (partial).`,
         requestBody: {
           required: true,
