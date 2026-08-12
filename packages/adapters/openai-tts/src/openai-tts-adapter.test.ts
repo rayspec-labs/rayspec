@@ -161,7 +161,11 @@ describe('OpenAiTtsAdapter — fail-closed request validation (NO network call)'
     expect(calls).toHaveLength(0);
   });
 
-  it('ACCEPT CONTROL: every voice on the adapter list is accepted', async () => {
+  // ACCEPT CONTROL for the refusal above: the membership check passes every listed voice through to
+  // the wire UNCHANGED (no silent substitution). Scope, deliberately stated: a stubbed fetch cannot
+  // observe whether the PROVIDER accepts a voice — that claim belongs to the live parity arm in
+  // openai-tts-adapter.live.test.ts, which walks this same list against the real endpoint.
+  it('ACCEPT CONTROL: every voice on the adapter list reaches the wire unchanged', async () => {
     for (const voice of OPENAI_TTS_POLICY.voices) {
       const { fetchImpl, calls } = fetchReturning(AUDIO);
       const adapter = new OpenAiTtsAdapter({ apiKey: SECRET_KEY, env: {}, fetchImpl });

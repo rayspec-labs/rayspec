@@ -9,16 +9,22 @@ export type OpenAiTtsModel = (typeof OPENAI_TTS_MODELS)[number];
 export const DEFAULT_OPENAI_TTS_MODEL: OpenAiTtsModel = 'tts-1';
 
 /**
- * THIS ADAPTER'S OWN request policy — deliberately a closed list maintained here, not a mirror of a
- * provider SDK's type (which is an OPEN `string` union and so constrains nothing, and whose prose and
- * type do not agree about which voices exist). A closed list is what makes the issue's "adapter
- * validates membership" real: an unknown voice is refused HERE, before a request is billed, instead of
- * reaching the provider and coming back as an opaque 400.
+ * THIS ADAPTER'S OWN request policy — a closed list maintained here, so an unknown voice is refused
+ * HERE, before a request is billed, instead of reaching the provider and coming back as an opaque 400.
+ * That is what makes "the adapter validates membership" real rather than aspirational.
  *
- * Reviewing an addition is therefore a deliberate act: add a voice only after confirming the provider
- * documents it, and the offline fake inherits the change automatically (it is handed THIS policy).
+ * The list is MODEL-SCOPED: every entry is a voice the wired models (`tts-1` / `tts-1-hd`) actually
+ * accept, each one confirmed against the live endpoint rather than assumed. That confirmation is the
+ * whole point of the shared policy: the offline fake is handed THIS object, so a voice the list admits
+ * but the wired models reject would pass offline and fail on the wire — exactly the dev/CI-versus-
+ * production split the policy exists to prevent.
  *
- * The values:
+ * Adding a voice is therefore a deliberate act: confirm the wired models accept it (the live smoke
+ * loops this list against the real endpoint and goes red on any that do not), then add it here — the
+ * fake inherits the change automatically. Should the two models ever diverge, this becomes a
+ * per-model list rather than a widened shared one.
+ *
+ * The remaining values:
  *   - `maxTextLength` 4096 — the documented input cap. Over it the call is REFUSED, never truncated.
  *   - `minSpeed`/`maxSpeed` 0.25/4.0 — the documented rate range. The wire field is a bare number with
  *     no provider-side clamp, so an out-of-range value is clamped HERE (the port's stated contract).
@@ -29,17 +35,13 @@ export const OPENAI_TTS_POLICY: TtsRequestPolicy = {
   voices: [
     'alloy',
     'ash',
-    'ballad',
-    'cedar',
     'coral',
     'echo',
     'fable',
-    'marin',
     'nova',
     'onyx',
     'sage',
     'shimmer',
-    'verse',
   ],
   defaultVoice: 'alloy',
   minSpeed: 0.25,
