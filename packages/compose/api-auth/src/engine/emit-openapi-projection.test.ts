@@ -195,6 +195,44 @@ describe('OpenAPI — projected store routes describe the actual wire shape', ()
     expect(Object.keys(overridden ?? {})).toContain('tenant_id');
   });
 
+  it("documents columns named after Object.prototype members ('constructor', '__proto__') under their OWN wire names", () => {
+    // Both names are SafeIdentifier-legal. The rename lookup is an OWN-property read — a
+    // prototype-walking `rename[col]` resolved these columns to inherited Object.prototype
+    // members and documented a garbage property key ("function Object() { [native code] }").
+    const spec = specFromObject({
+      version: '1.0',
+      metadata: { name: 'proto-named-doc' },
+      stores: [
+        {
+          name: 'relics',
+          columns: [
+            { name: 'wire_name', type: 'text' },
+            { name: 'constructor', type: 'text' },
+            { name: '__proto__', type: 'text' },
+          ],
+        },
+      ],
+      api: [
+        {
+          method: 'GET',
+          path: '/things',
+          action: { kind: 'store', store: 'relics', op: 'list' },
+          project: { rename: { wire_name: 'wireName' } },
+        },
+      ],
+    });
+    const props = (
+      buildDeclaredRoutesOpenApi(spec).paths['/things']?.get?.responses['200']?.content?.[
+        'application/json'
+      ]?.schema as { items?: { properties?: Record<string, unknown> } }
+    ).items?.properties;
+    const keys = Object.keys(props ?? {});
+    expect(keys).toContain('wireName');
+    expect(keys).toContain('constructor');
+    expect(keys).toContain('__proto__');
+    expect(keys.some((k) => k.includes('native code') || k === '[object Object]')).toBe(false);
+  });
+
   it('accept-control: a spec WITHOUT project emits the document byte-identically (deep-equal across builds)', () => {
     const a = buildDeclaredRoutesOpenApi(specWith(undefined));
     const props = listRowSchema(specWith(undefined));

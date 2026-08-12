@@ -579,9 +579,18 @@ function checkResponseProjection(
   const isInjected = (name: string): boolean =>
     RESERVED_COLUMN_NAMES.has(name) && !businessNames.has(name);
   // The wire name of a column BEFORE the `fields` allowlist: a rename wins, else the casing rule
-  // (the SAME snake→camel transform the request side / generators use — toJsIdentifier).
-  const wireOf = (name: string): string =>
-    project.rename?.[name] ?? (project.casing === 'camel' ? toJsIdentifier(name) : name);
+  // (the SAME snake→camel transform the request side / generators use — toJsIdentifier). The
+  // rename lookup is OWN-property only: a plain `rename?.[name]` walks the prototype chain, so a
+  // column legally named `constructor` or `__proto__` would resolve to an inherited
+  // Object.prototype member and poison every wire-name check below (KEEP-IN-SYNC twin:
+  // @rayspec/api-auth `resolveResponseProjection`).
+  const wireOf = (name: string): string => {
+    const renamed =
+      project.rename !== undefined && Object.hasOwn(project.rename, name)
+        ? project.rename[name]
+        : undefined;
+    return renamed ?? (project.casing === 'camel' ? toJsIdentifier(name) : name);
+  };
   // Is the column ON the projected response? `fields` (when present) alone decides membership;
   // otherwise `omitInjected` drops the injected columns except the spared `id`.
   const exposed = (name: string): boolean => {

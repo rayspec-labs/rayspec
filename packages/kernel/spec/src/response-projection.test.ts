@@ -260,4 +260,38 @@ api:
       'stores[0].project',
     );
   });
+
+  it("columns named after Object.prototype members ('constructor', '__proto__') resolve to their OWN wire names next to a rename", () => {
+    // Both names are SafeIdentifier-legal. The rename lookup must be an OWN-property read: a
+    // prototype-walking `rename[col]` resolves such a column to an inherited Object.prototype
+    // member instead of a wire name, which silently poisons every wire-name check.
+    const protoYaml = (project: string): string => `
+version: '1.0'
+metadata:
+  name: proto-named-columns
+stores:
+  - name: relics
+    columns:
+      - { name: wire_name, type: text }
+      - { name: constructor, type: text }
+      - { name: __proto__, type: text }
+api:
+  - method: GET
+    path: /relics
+    action: { kind: store, store: relics, op: list }
+    project: ${project}
+`;
+    // A rename of ANOTHER column leaves the proto-named columns on their own names: clean.
+    expect(lintOf(protoYaml('{ rename: { wire_name: wireName } }'))).toEqual([]);
+    // The discriminating pin: `fields` matches WIRE names, and the wire name of an un-renamed
+    // 'constructor'/'__proto__' column is the column's own name (with the prototype-walking
+    // lookup these allowlist entries were falsely unmatchable — projection_unknown_column).
+    expect(
+      lintOf(
+        protoYaml(
+          '{ rename: { wire_name: wireName }, fields: [wireName, constructor, __proto__, id] }',
+        ),
+      ),
+    ).toEqual([]);
+  });
 });

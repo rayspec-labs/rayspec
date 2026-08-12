@@ -40,8 +40,14 @@ export function resolveResponseProjection(
   const wireBySnake = new Map<string, string>();
   const snakeByWire = new Map<string, string>();
   const expose = (snake: string, injected: boolean): void => {
-    const wire =
-      project.rename?.[snake] ?? (project.casing === 'camel' ? snakeToCamel(snake) : snake);
+    // OWN-property lookup only: a plain `rename?.[snake]` walks the prototype chain, so a column
+    // legally named `constructor` or `__proto__` would resolve to an inherited Object.prototype
+    // member and serialize under a garbage wire key (KEEP-IN-SYNC twin: lint's `wireOf`).
+    const renamed =
+      project.rename !== undefined && Object.hasOwn(project.rename, snake)
+        ? project.rename[snake]
+        : undefined;
+    const wire = renamed ?? (project.casing === 'camel' ? snakeToCamel(snake) : snake);
     if (project.fields !== undefined) {
       // `fields` is the last word on membership (it can re-include past omitInjected).
       if (!project.fields.includes(wire)) return;
