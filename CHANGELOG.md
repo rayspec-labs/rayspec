@@ -301,15 +301,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output and the logs all look correct and only the rendered page differs — the first encounter reads
   as "the deployment lost my CSS", with nothing connecting it to the policy. The `frontend` grammar
   reference, the getting-started static-serving walkthrough, the concepts page and the CLI reference
-  now state the default value, that CSS and JS belong in files referenced by `href`/`src` (same-origin,
-  which the default allows), and that `RAYSPEC_FRONTEND_CSP` replaces the baseline verbatim when a page
-  genuinely needs a weaker one. Every published mention of those two headers framed them as a
-  static-profile property; the change above stamps the same two, from the same two variables, on the
-  responses a full-backend boot's own `frontend` mounts serve, so each page now says both boot shapes.
-  The bundled `examples/notes-ui` page carried its `loadNotes` fetch helper as an inline script — the
-  one shipped asset the platform's own default policy would have blocked; it now lives in
-  `web/dist/app.js` and the page references it. No behaviour changed: the policy, the two environment
-  variables and the served headers are exactly as they were.
+  now state the default value in full, that CSS and JS belong in files the page references rather than
+  in inline code (a same-origin file is what the default allows), and that `RAYSPEC_FRONTEND_CSP`
+  replaces that whole baseline verbatim — it does not add to it — when a page genuinely needs a weaker
+  one. Every page under `docs/` that mentioned those two headers framed them as a static-profile
+  property — `.env.example` already described both boot shapes — and a full-backend boot stamps the
+  same two, from the same two variables, on the responses its own `frontend` mounts serve, so each of
+  those pages now says both shapes. The bundled `examples/notes-ui` page carried its `loadNotes` fetch
+  helper as an inline script — the one shipped asset the platform's own default policy would have
+  blocked; it now lives in `web/dist/app.js` and the page references it. No behaviour changed: the
+  policy, the two environment variables and the served headers are exactly as they were.
 
 ### Security
 
