@@ -6,8 +6,8 @@
  * `@rayspec/server`'s barrel re-exports the product-boot graph (the durable engine, the model adapters,
  * the postgres driver), so no PRODUCT document must reach for it — neither one that composes nor one an
  * operator is still fixing, which is the document shape a `--dry-run` loop spends its time on. The
- * static-profile classification therefore runs only where the product grammar REJECTED the document AND
- * the document is not the product profile (`isStaticProfile` refuses that profile outright).
+ * static-profile classification therefore runs only on the NON-product arm of the profile dispatch
+ * (`isStaticProfile` refuses the product profile outright), before the document is parsed at all.
  *
  * The `@rayspec/server` mock factory below is the probe: it runs the FIRST time that module is imported,
  * so a counter inside it turns "did this document shape load the boot graph?" into an assertion. Its
@@ -89,7 +89,7 @@ describe('rayspec deploy --dry-run — the boot dependency graph stays off the c
     expect(h.serverLoads).toBe(before);
   });
 
-  it('a document the product grammar rejects IS classified through the shared detection', async () => {
+  it('a document that is NOT the product profile IS classified through the shared detection', async () => {
     writeFileSync(STATIC_DOC, FRONTEND_ONLY_SPEC, 'utf8');
     const outcome = await runDeploy(['--dry-run', STATIC_REL]);
     if (outcome.kind !== 'dry-run') throw new Error('unreachable');

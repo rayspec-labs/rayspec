@@ -7,8 +7,10 @@
  *                                            validating registrar, apply the committed migration chain
  *                                            + roll out the declared product, and SERVE on PORT until
  *                                            SIGINT/SIGTERM. Mutates the target DB (materialize/mount).
- *   rayspec deploy --dry-run <spec.yaml>    ONE-SHOT: validate the product doc + COMPOSE it against a
- *                                            stubbed rollout (NO DB, NO network). Emits a JSON verdict.
+ *   rayspec deploy --dry-run <spec.yaml>    ONE-SHOT: validate the document with the grammar of the
+ *                                            profile it boots — and, for a product doc, COMPOSE it
+ *                                            against a stubbed rollout (NO DB, NO network). Emits a
+ *                                            JSON verdict.
  *
  * WHAT deploy IS. It is `deployments/acme-notes/serve.mts` as a first-class operator command: it wraps
  * `assembleServer` (NOT the frozen-surface `deploy()` — that stays inside the composition root) and injects
@@ -27,7 +29,7 @@
 
 import { parseArgs } from 'node:util';
 import type { ProductYamlRollout } from '@rayspec/product-yaml';
-import type { FrontendSpec } from '@rayspec/spec';
+import type { FrontendSpec, SpecError } from '@rayspec/spec';
 import { dotenvCandidatePaths } from './read-env.js';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
 
@@ -61,6 +63,39 @@ export interface DeployDryRunResult {
     /** What such a deploy does NOT do — stated outright rather than left to inference. */
     readonly notes: readonly string[];
   };
+  /**
+   * What the DB-free validation found when the doc is the BACKEND profile (a `version:'1.0'` doc with
+   * no `product:` section), else absent — the counterpart of `composed` for the profile whose
+   * declarations are MOUNTED rather than composed. Reported INSTEAD of a compose summary.
+   *
+   * DECLARED NAMES ONLY — read straight off the document `parseSpec` validated, with no SQL and
+   * nothing derived. It covers the sections `plan` also projects (`stores`, `routes`, `agents`) plus
+   * the declared handler ids, but it is NOT `plan`'s payload: `plan` publishes no handlers at all, and
+   * its stores/routes are richer objects (column and FK counts; `{method,path,action}`). This is the
+   * name-level view, in the vocabulary `composed` already uses for a route. `ok:true` beside it means
+   * the document VALIDATES — never that it boots; `notProven` names the boot refusals it can still meet.
+   */
+  readonly backendProfile?: {
+    /** The boot profile the doc selects — the backend (RaySpec) boot. */
+    readonly profile: 'rayspec';
+    /** The declared store names (the tables that boot materializes or mounts). */
+    readonly stores: readonly string[];
+    /** The declared routes as `METHOD /path` (the shape `composed.viewRoutes` uses). */
+    readonly routes: readonly string[];
+    /** The declared agent ids. */
+    readonly agents: readonly string[];
+    /** The declared handler ids (the escape-hatch modules that boot loads). */
+    readonly handlers: readonly string[];
+    /**
+     * The frontend mounts declared ALONGSIDE the backend, when there are any — omitted otherwise, so a
+     * document with no `frontend:` section keeps the payload it had. Surfaced because this profile's
+     * boot GATES on them: `deployDeclaredSpec` refuses fail-closed on a mount whose directory is
+     * missing/unreadable or whose `spa` mount has no index.html, and that refusal is the one a backend
+     * document meets most often (`examples/notes-ui` is exactly this shape). The matching `notProven`
+     * line says what was NOT checked; this says what will BE checked.
+     */
+    readonly frontendMounts?: readonly FrontendSpec[];
+  };
   /** The fail-closed reasons compose/parse rejected the doc (ok:false). */
   readonly errors: readonly string[];
   /** The honest boundary — what --dry-run does NOT prove. */
@@ -91,6 +126,25 @@ const STATIC_PROFILE_NOTES = [
 const STATIC_DRY_RUN_NOT_PROVEN = [
   'that the declared frontend directories exist or hold built assets (only the document was read)',
   'that the app actually serves (no port was bound)',
+] as const;
+
+/**
+ * What a BACKEND-PROFILE `--dry-run` does NOT prove. The shared boundary applies in full (that boot
+ * does touch a database, does apply the migration chain and does read secrets), so this EXTENDS
+ * DRY_RUN_NOT_PROVEN rather than replacing it — with the boot refusals a document meets AFTER it
+ * validates. They are stated here, in the verdict itself, because `ok:true` on this arm means the
+ * document VALIDATES, never that it boots.
+ */
+const BACKEND_DRY_RUN_NOT_PROVEN = [
+  ...DRY_RUN_NOT_PROVEN,
+  "that the boot accepts the declared routes (a 'stream' route with no blob backend configured is refused fail-closed)",
+  'that the declared handler modules resolve (the boot loads compiled JavaScript only, under the jailed root)',
+  'any speech capability the handlers reach for (selecting STT_PROVIDER / TTS_PROVIDER makes that provider credential a boot demand; leaving one unset is never a boot error)',
+  // The refusal a backend document meets most often, and the one the static arm already warns about:
+  // this profile's boot GATES on every declared frontend mount (deployDeclaredSpec throws
+  // BootConfigError on a missing/unreadable dir, or an `spa` mount with no index.html) where the
+  // static boot only degrades its /health. Only the document was read here, so nothing was checked.
+  'that the declared frontend directories hold servable built assets (only the document was read; an unservable mount is refused fail-closed at boot)',
 ] as const;
 
 /** The discriminated outcome of `runDeploy`: a dry-run verdict to emit, or a served (long-running) boot. */
@@ -229,20 +283,45 @@ export async function runDeploy(args: readonly string[]): Promise<DeployOutcome>
   return { kind: 'served' };
 }
 
+/** Render a parser's `SpecError`s as the verdict's `errors` lines — one wording, whichever grammar judged the doc. */
+function specDidNotValidate(errors: readonly SpecError[]): string[] {
+  return errors.map(
+    (err) =>
+      `spec did not validate: ${err.code}${err.path ? ` at ${err.path}` : ''}: ${err.message}`,
+  );
+}
+
 /**
- * `--dry-run`: parse the product doc + COMPOSE it against a STUBBED rollout — NO DB, NO network. The
- * store bindings come from the REAL `deriveProductStores` (so a store/collection mismatch is caught);
- * the runtime-only instances (the durable enqueuer, the STT adapter, the extraction executors, the
- * conversation responder, the file blob reader) are inert stubs that compose only checks for PRESENCE,
- * never invokes. It proves the doc VALIDATES and COMPOSES against the wired surface — and nothing more.
+ * `--dry-run`: validate the document + (product profile) COMPOSE it against a STUBBED rollout — NO DB,
+ * NO network. The store bindings come from the REAL `deriveProductStores` (so a store/collection
+ * mismatch is caught); the runtime-only instances (the durable enqueuer, the STT adapter, the
+ * extraction executors, the conversation responder, the file blob reader) are inert stubs that compose
+ * only checks for PRESENCE, never invokes. It proves the doc VALIDATES and COMPOSES against the wired
+ * surface — and nothing more.
  *
- * A FRONTEND-ONLY (static-profile) document is answered when the product grammar REJECTS the document:
- * it is not a product doc, so `parseProductSpec` rejects its shape — an ok:false verdict on a document
- * this very command BOOTS (the static branch in serveDeployment). It is classified with the SAME shared
- * `detectStaticProfile` that branch takes, so the check and the boot cannot disagree, and its mounts ARE
- * the plan — a static profile has nothing to compose. That classification is asked only of a document
- * that is NOT the product profile, so no product document — valid or still being fixed — pays for the
- * boot-side import.
+ * It dispatches on the document PROFILE BEFORE parsing (the order `runPlan` uses), so each of the three
+ * profiles `deploy` boots is judged by the grammar that boot uses and the verdict never reports one
+ * profile's document in another's vocabulary:
+ *
+ *   • PRODUCT  — `parseProductSpec` + compose, the summary in `composed`.
+ *   • FRONTEND-ONLY (static) — nothing to compose; its mounts ARE the plan. Classified with the SAME
+ *     shared `detectStaticProfile` the boot branches on, so the check and the boot cannot disagree.
+ *   • BACKEND (`rayspec`) — `parseSpec`, the parser `doctor` and `plan` use for it; the declarations go
+ *     in `backendProfile`. Its verdict is `ok:true` for a document those two commands accept, and its
+ *     OWN violations (a dangling reference, an unknown key) for one they reject.
+ *
+ * ORDER IS LOAD-BEARING between the last two: a static-profile document is a backend document with a
+ * frontend section, so `parseSpec` ACCEPTS it — `detectSpecKind` calls both `'rayspec'` and cannot tell
+ * them apart. The static classification therefore runs FIRST; a backend arm ahead of it would swallow
+ * the `staticProfile` verdict.
+ *
+ * Both non-product arms sit behind the `detectSpecKind` check, so no product document — valid or still
+ * being fixed — pays for the boot-side import: @rayspec/server's barrel re-exports the boot dependency
+ * graph (the durable engine, the model adapters, the postgres driver). Keyed on the same `product:`
+ * discriminant `isStaticProfile` fails closed on in its own first line — "a product-profile doc is
+ * categorically never static", the invariant static-profile.test.ts pins. Dynamic for the same reason it
+ * is dynamic in serveDeployment: `rayspec doctor` must not drag the boot dependencies in. The
+ * product-yaml compose graph is imported on the product arm alone, on exactly the same terms.
  */
 async function dryRunCompose(specPath: string, specText: string): Promise<DeployDryRunResult> {
   const base = {
@@ -252,7 +331,49 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     notProven: DRY_RUN_NOT_PROVEN,
   };
 
-  const { detectSpecKind, parseProductSpec } = await import('@rayspec/spec');
+  const { detectSpecKind, parseProductSpec, parseSpec } = await import('@rayspec/spec');
+
+  if (detectSpecKind(specText) !== 'product') {
+    const { detectStaticProfile } = await import('@rayspec/server');
+    const staticBoot = detectStaticProfile(specPath);
+    if (staticBoot) {
+      return {
+        ...base,
+        ok: true,
+        staticProfile: {
+          profile: 'static',
+          frontendMounts: staticBoot.frontend,
+          notes: STATIC_PROFILE_NOTES,
+        },
+        errors: [],
+        notProven: STATIC_DRY_RUN_NOT_PROVEN,
+      };
+    }
+    // The BACKEND profile — the shape `serveDeployment` boots through assembleServer. There is nothing
+    // to compose (a backend document declares its own routes/handlers rather than lowering to them), so
+    // the verdict is the validation `doctor` runs plus the names the document declares.
+    const backend = parseSpec(specText);
+    if (!backend.ok) return { ...base, errors: specDidNotValidate(backend.errors) };
+    // A backend document MAY also declare frontend mounts (examples/notes-ui does). It is not the
+    // static profile — it boots the full platform, which GATES on every mount — so the mounts are
+    // reported here rather than silently dropped; omitted entirely when the document declares none.
+    const mounts = backend.value.frontend ?? [];
+    return {
+      ...base,
+      ok: true,
+      backendProfile: {
+        profile: 'rayspec',
+        stores: backend.value.stores.map((store) => store.name),
+        routes: backend.value.api.map((route) => `${route.method} ${route.path}`),
+        agents: backend.value.agents.map((agent) => agent.id),
+        handlers: backend.value.handlers.map((handler) => handler.id),
+        ...(mounts.length > 0 ? { frontendMounts: mounts } : {}),
+      },
+      errors: [],
+      notProven: BACKEND_DRY_RUN_NOT_PROVEN,
+    };
+  }
+
   const {
     composeCapabilityStores,
     composeProductDeploy,
@@ -264,45 +385,7 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
   // parseProductSpec returns a fail-closed Result — unwrap it (the caller must check `ok` before
   // touching `value`); a validation failure surfaces every SpecError verbatim.
   const parsed = parseProductSpec(specText);
-  if (!parsed.ok) {
-    // The product grammar rejected the document — before reporting its violations, ask whether this is
-    // the ONE shape `deploy` itself boots without a database: a frontend-only (static-profile) doc. It is
-    // classified with the SAME shared `detectStaticProfile` the boot branches on, so verdict and boot
-    // cannot disagree. This arm is the only one that can be static (a doc `parseProductSpec` ACCEPTS is a
-    // product doc), so the check is exhaustive here.
-    //
-    // Asked only of a NON-product document, keyed on the same `product:` discriminant `isStaticProfile`
-    // fails closed on in its own first line — "a product-profile doc is categorically never static", the
-    // invariant static-profile.test.ts pins. So the guard can change no verdict; what it changes is the
-    // cost: @rayspec/server's barrel re-exports the boot dependency graph (the durable engine, the model
-    // adapters, the postgres driver), and this keeps that off EVERY product document's dry-run — the ones
-    // that compose and the ones an operator is still fixing. Dynamic for the same reason it is dynamic in
-    // serveDeployment: `rayspec doctor` must not drag the boot dependencies in.
-    if (detectSpecKind(specText) !== 'product') {
-      const { detectStaticProfile } = await import('@rayspec/server');
-      const staticBoot = detectStaticProfile(specPath);
-      if (staticBoot) {
-        return {
-          ...base,
-          ok: true,
-          staticProfile: {
-            profile: 'static',
-            frontendMounts: staticBoot.frontend,
-            notes: STATIC_PROFILE_NOTES,
-          },
-          errors: [],
-          notProven: STATIC_DRY_RUN_NOT_PROVEN,
-        };
-      }
-    }
-    return {
-      ...base,
-      errors: parsed.errors.map(
-        (err) =>
-          `spec did not validate: ${err.code}${err.path ? ` at ${err.path}` : ''}: ${err.message}`,
-      ),
-    };
-  }
+  if (!parsed.ok) return { ...base, errors: specDidNotValidate(parsed.errors) };
   const spec = parsed.value;
 
   try {

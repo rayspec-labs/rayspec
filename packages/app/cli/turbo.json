@@ -6,12 +6,13 @@
     // package's OWN build stays deliberately out of its test's task graph — and widens only the
     // CACHE KEY, by the one artifact the package's dist-backed suite actually spawns.
     //
-    // WHY: src/deploy-static-profile.test.ts self-skips when dist/index.js is absent, and a skip is a
+    // WHY: the dist-backed suites (src/deploy-static-profile.test.ts, src/deploy-dry-run-backend.test.ts)
+    // self-skip when dist/index.js is absent, and a skip is a
     // cacheable SUCCESS. dist/ is gitignored, so it is not a hashed input by default, and this task
     // never builds it — without the glob below an UNBUILT run and a BUILT run hash identically. A
     // `pnpm test` before the first build would then record the skip, and the `pnpm build && pnpm test`
     // that is supposed to fix it would replay that skip as a cache hit, leaving the real-CLI proof
-    // unrun. Hashing the entry the suite's guard probes makes the two states different tasks: the
+    // unrun. Hashing the entry those guards probe makes the two states different tasks: the
     // build that resolves the skip also invalidates it.
     "test": { "inputs": ["$TURBO_DEFAULT$", "dist/index.js"] }
   }
