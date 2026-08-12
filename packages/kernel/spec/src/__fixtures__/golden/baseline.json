@@ -78,6 +78,7 @@
           "instructions": "work",
           "model": "claude-sonnet-4-6",
           "maxTurns": 8,
+          "sequentialTools": false,
           "id": "worker",
           "backend": "anthropic",
           "tools": ["fetch_thing"],
@@ -206,6 +207,7 @@
             }
           },
           "maxTurns": 8,
+          "sequentialTools": false,
           "id": "emu",
           "backend": "pi",
           "tools": [],

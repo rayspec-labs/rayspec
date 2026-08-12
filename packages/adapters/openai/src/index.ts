@@ -8,6 +8,21 @@
  *   - `run(agent, input, { stream:false, maxTurns, signal? })` -> RunResult   (run.d.ts / index)
  *       signal: SharedRunOptions.signal?: AbortSignal (run.d.ts) — the run's cancellation reaches the
  *       model call itself, so ending a run frees the provider work, not only the caller.
+ *   - ModelSettings.parallelToolCalls?: boolean   (model.d.ts:208) — the provider-side
+ *       parallel-tool-call switch. MEASURED against the installed SDK (openaiResponsesModel.js:
+ *       only a BOOLEAN value is forwarded as `parallel_tool_calls`): left UNSET the parameter is
+ *       NOT SENT and the provider's own default applies (parallel ON) — so the flag-absent path
+ *       keeps the wire request byte-identical. Set false it is sent and stops the batching at the
+ *       source.
+ *   - SharedRunOptions.toolExecution?: ToolExecutionConfig (run.d.ts) —
+ *       `maxFunctionToolConcurrency?: number|null` caps how many LOCAL function tools the SDK loop
+ *       starts at once; 1 executes a received batch strictly in emission-index order, explicitly
+ *       WITHOUT changing provider-side parallelToolCalls semantics (its own docstring). Unset ⇒
+ *       all calls of a turn start together (today's loop behavior).
+ *   - `getDefaultModelSettings(model)` (defaultModel.d.ts, re-exported) — the SAME per-model
+ *       implicit settings the SDK applies when an Agent has NO explicit modelSettings
+ *       (run.js #prepareModelCall: explicit settings SUPPRESS the implicit ones). Reproduced when
+ *       the adapter must set modelSettings, so the one observable delta stays parallelToolCalls.
  *   - RunResult.finalOutput        result.d.ts: `get finalOutput()`            (string | parsed)
  *   - RunResult.history            result.d.ts: `get history(): AgentInputItem[]`
  *                                  (= "replay-ready next-turn input built from input + newItems")
@@ -72,7 +87,14 @@ import type {
   Usage,
 } from '@rayspec/core';
 import { classifyUpstreamError, costUsd, hashJson } from '@rayspec/core';
-import { Agent, run, setDefaultOpenAIClient, setDefaultOpenAIKey, tool } from '@openai/agents';
+import {
+  Agent,
+  getDefaultModelSettings,
+  run,
+  setDefaultOpenAIClient,
+  setDefaultOpenAIKey,
+  tool,
+} from '@openai/agents';
 import OpenAI from 'openai';
 
 /**
@@ -85,10 +107,25 @@ import OpenAI from 'openai';
  * .test.ts pins both option bags exactly (the key set as well as the values). Every platform path DOES
  * supply one — run-core arms a run's controller unconditionally and always sets `ctx.signal` — so on a
  * real run the bag is `{stream, maxTurns, signal}`; the unset case is a directly-built RunContext.
+ *
+ * `sequentialTools` adds `toolExecution: { maxFunctionToolConcurrency: 1 }` — the SDK loop then
+ * executes a received batch strictly in emission-index order (see the file header). Spread just as
+ * conditionally: with the flag off the bag stays exactly the one it always was.
  */
-// biome-ignore lint/suspicious/noExplicitAny: matches the SDK's run() signature (Agent<any, any>).
-function runNonStream(agent: Agent<any, any>, input: string, maxTurns: number, signal?: AbortSignal) {
-  return run(agent, input, { stream: false, maxTurns, ...(signal ? { signal } : {}) });
+function runNonStream(
+  // biome-ignore lint/suspicious/noExplicitAny: matches the SDK's run() signature (Agent<any, any>).
+  agent: Agent<any, any>,
+  input: string,
+  maxTurns: number,
+  signal?: AbortSignal,
+  sequentialTools?: boolean,
+) {
+  return run(agent, input, {
+    stream: false,
+    maxTurns,
+    ...(signal ? { signal } : {}),
+    ...(sequentialTools ? { toolExecution: { maxFunctionToolConcurrency: 1 } } : {}),
+  });
 }
 
 /**
@@ -208,12 +245,29 @@ export class OpenAIAdapter implements Backend {
     // (no literal-vs-literal); flipping strict here breaks that test.
     const outputType = spec.outputSchema ? (toOutputType(spec.outputSchema) as never) : undefined;
 
+    // ---- map neutral sequentialTools -> BOTH SDK settings ----------------------
+    // Level-1 honor of `spec.sequentialTools`, in two halves (file header, verified surface):
+    // `modelSettings.parallelToolCalls: false` stops the model batching at the source, and
+    // `toolExecution.maxFunctionToolConcurrency: 1` (on the run() options) makes the SDK loop
+    // execute a batch it still receives strictly in emission-index order. Only meaningful when the
+    // model is actually offered tools — a tool-free run has no call to order, so its request stays
+    // byte-identical. EXPLICIT modelSettings suppress the SDK's implicit per-model defaults, so
+    // those defaults are reproduced via getDefaultModelSettings(spec.model) and the flag's setting
+    // layered on top — the one observable delta is parallel_tool_calls. With the flag off NEITHER
+    // half is emitted (no modelSettings option, no toolExecution key): the provider setting is then
+    // NOT SENT and the provider's own default (parallel ON) applies — today's behavior, and the
+    // integration tests pin the absence.
+    const sequentialTools = spec.sequentialTools === true && spec.tools.length > 0;
+
     const agent = new Agent({
       name: spec.name,
       instructions: spec.instructions,
       model: spec.model,
       tools,
       ...(outputType ? { outputType } : {}),
+      ...(sequentialTools
+        ? { modelSettings: { ...getDefaultModelSettings(spec.model), parallelToolCalls: false } }
+        : {}),
     });
 
     // ---- REPLAY = neutral-journal STEP short-circuit -------------
@@ -239,7 +293,7 @@ export class OpenAIAdapter implements Backend {
     try {
       // The run's cancellation signal (when the platform supplied one) goes straight into the SDK call,
       // so ending a run aborts the model request rather than leaving it to finish unread.
-      result = await runNonStream(agent, spec.input, spec.maxTurns, ctx.signal);
+      result = await runNonStream(agent, spec.input, spec.maxTurns, ctx.signal, sequentialTools);
     } catch (err) {
       // ---- ERROR-PATH RunResult — identical shape, error set ----
       // Classify the upstream cause into the neutral ErrorClass (preserving the real

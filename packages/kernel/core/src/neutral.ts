@@ -98,6 +98,16 @@ export const AgentSpec = z.object({
   outputSchema: OutputSchemaSpec.optional(),
   /** Hard cap on agent loop turns (safety). */
   maxTurns: z.number().int().positive().default(8),
+  /**
+   * When true, the agent's tool calls execute SEQUENTIALLY in emission order: no two tool
+   * handlers overlap, and a batched turn's calls run in the order the model emitted them.
+   * Honored at two levels — a backend with a provider-side parallel-tool-call setting disables
+   * the batching at the source (OpenAI), and the platform serializes dispatch for every backend
+   * via a per-run FIFO width-1 queue in front of `dispatchTool`. Optional (not defaulted) so a
+   * spec that never mentions it stays byte-identical: absent/false ⇒ concurrent dispatch under
+   * the per-run concurrency cap, exactly as before.
+   */
+  sequentialTools: z.boolean().optional(),
 });
 export type AgentSpec = z.infer<typeof AgentSpec>;
 
@@ -506,6 +516,15 @@ export const CapabilityDescriptor = z.object({
   reasoning: z.boolean(),
   /** Backend authenticates via an OAuth subscription official-harness path (not just API key). */
   subscriptionAuth: z.boolean(),
+  /**
+   * Backend can honor `sequentialTools` (ordered, one-at-a-time tool execution) — natively via a
+   * provider-side parallel-tool-call setting, or because its tool calls dispatch through the
+   * platform's serializable `dispatchTool` path. All four wired backends dispatch through the
+   * platform, so all four are capable today; the field exists so a FUTURE backend that executes
+   * tools outside platform dispatch rejects a declared ordering constraint fail-closed instead of
+   * silently no-op'ing it.
+   */
+  sequentialTools: z.boolean(),
 });
 export type CapabilityDescriptor = z.infer<typeof CapabilityDescriptor>;
 
@@ -528,6 +547,8 @@ export const CAPABILITIES: Record<BackendId, CapabilityDescriptor> = {
     streaming: true,
     reasoning: true,
     subscriptionAuth: false,
+    // Both honor levels: the SDK's provider-side parallelToolCalls setting AND platform dispatch.
+    sequentialTools: true,
   },
   anthropic: {
     nativeStructuredOutput: true,
@@ -536,6 +557,8 @@ export const CAPABILITIES: Record<BackendId, CapabilityDescriptor> = {
     streaming: true,
     reasoning: true,
     subscriptionAuth: true,
+    // No provider-side setting; honored via the platform's serialized dispatchTool path.
+    sequentialTools: true,
   },
   pi: {
     // Pi has NO native structured output (the lone documented exception); it EMULATES.
@@ -545,6 +568,8 @@ export const CAPABILITIES: Record<BackendId, CapabilityDescriptor> = {
     streaming: true,
     reasoning: true,
     subscriptionAuth: false,
+    // No provider-side setting; honored via the platform's serialized dispatchTool path.
+    sequentialTools: true,
   },
   // codex (@openai/codex-sdk 0.142.2): native structured output (--output-schema →
   // finalResponse JSON), tools (in-proc streamable-HTTP MCP bridge → ctx.dispatchTool), streaming
@@ -559,6 +584,8 @@ export const CAPABILITIES: Record<BackendId, CapabilityDescriptor> = {
     streaming: true,
     reasoning: true,
     subscriptionAuth: true,
+    // No provider-side setting; honored via the platform's serialized dispatchTool path.
+    sequentialTools: true,
   },
 };
 
@@ -615,6 +642,19 @@ export function validateSpec(
     violations.push({
       capability: 'tools',
       message: `backend '${backend}' cannot execute tools but the spec declares ${spec.tools.length}`,
+    });
+  }
+
+  // A declared ordering constraint must never be silently no-op'ed: a backend that can honor it
+  // NEITHER natively (a provider-side parallel-tool-call setting) NOR via platform-serialized
+  // dispatch is rejected up front. Unsatisfiable for the four wired backends today (all dispatch
+  // through the platform) — the guard is for a future backend that bypasses platform dispatch.
+  if (spec.sequentialTools === true && !cap.sequentialTools) {
+    violations.push({
+      capability: 'sequentialTools',
+      message:
+        `backend '${backend}' cannot honor sequentialTools (no provider-side parallel-tool-call ` +
+        'setting and no platform-serialized dispatch)',
     });
   }
 

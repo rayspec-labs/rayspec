@@ -1295,6 +1295,9 @@ export function lintSpec(spec: RaySpec): SpecError[] {
       tools: resolvedToolSpecs,
       maxTurns: agent.maxTurns,
       ...(agent.outputSchema ? { outputSchema: agent.outputSchema } : {}),
+      // A declared ordering constraint is a capability question too: a backend that can honor it
+      // neither natively nor via platform-serialized dispatch must reject it here, fail-closed.
+      ...(agent.sequentialTools ? { sequentialTools: true } : {}),
     };
     const res = validateSpec(synthetic, agent.backend as BackendId, {
       requireNativeStructuredOutput: agent.requireNativeStructuredOutput,
