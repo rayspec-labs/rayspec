@@ -46,10 +46,15 @@ const CALL_FORM = 'init.emit is POSITIONAL — emit(topic, payload).';
  * reporting a fault. A whitespace-only topic is refused for the same reason (it is not a topic
  * anything can subscribe to).
  *
- * PAYLOAD: must survive `JSON.stringify` — the row column is `jsonb`. A circular structure or a
- * BigInt would otherwise throw out of the ENGINE's flush, after the handler returned successfully, as
- * an anonymous 500. `undefined` (a one-argument `emit('topic')`) is a legitimate topic-only event and
- * is stored as JSON `null`; it is not a mis-call.
+ * PAYLOAD: must survive `JSON.stringify` WITH A VALUE — the row column is `jsonb NOT NULL`. Both of
+ * that call's failure modes are refused here, and only ONE of them throws: a circular structure or a
+ * BigInt throws, while a function, a symbol, or an object whose `toJSON()` returns `undefined`
+ * serializes to `undefined` WITHOUT throwing. Both end the same way if they get past this point — the
+ * batch the engine builds simply omits the key, the `NOT NULL` column rejects the row, and the failure
+ * surfaces out of the ENGINE's flush after the handler returned successfully, as an anonymous 500 that
+ * rolls back the handler's own writes with it. So the guard judges the RESULT, not just whether the
+ * call threw. `undefined` (a one-argument `emit('topic')`) is a legitimate topic-only event and is
+ * stored as JSON `null`; it is not a mis-call.
  */
 function validateEmitCall(topic: unknown, payload: unknown): TenantEventInput {
   if (typeof topic !== 'string' || topic.trim().length === 0) {
@@ -62,14 +67,30 @@ function validateEmitCall(topic: unknown, payload: unknown): TenantEventInput {
         : CALL_FORM,
     );
   }
+  let encoded: string | undefined;
   try {
-    JSON.stringify(payload);
+    encoded = JSON.stringify(payload);
   } catch {
     throw malformedCapabilityCall(
       'init.emit',
       'a JSON-serializable payload as its SECOND argument',
       payload,
       `${CALL_FORM} The payload could not be serialized to JSON (a circular reference or a BigInt).`,
+    );
+  }
+  // The SILENT half of the same fault: `JSON.stringify` returns `undefined` — no throw — for a
+  // function, a symbol, or a value whose `toJSON()` returns `undefined`. Such a payload has no JSON
+  // form at all, so it would be DROPPED from the batch rather than stored, and the `NOT NULL` column
+  // would reject the row inside the flush. Refuse it here, where the handler made the call. (A real
+  // `undefined` payload is the topic-only event above and is not affected.)
+  if (payload !== undefined && encoded === undefined) {
+    throw malformedCapabilityCall(
+      'init.emit',
+      'a JSON-serializable payload as its SECOND argument',
+      payload,
+      `${CALL_FORM} The payload has no JSON form (a function, a symbol, or a value whose toJSON() ` +
+        'returns undefined) — it would be dropped rather than stored. Pass a JSON value, or omit the ' +
+        'argument for a topic-only event.',
     );
   }
   return { topic, payload };

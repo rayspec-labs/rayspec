@@ -40,6 +40,45 @@ deployment:
     expect(res.value.deployment?.durableWorker).toBe(true);
   });
 
+  it('accepts an optional deployment.eventBus section, defaulting retentionHours to nothing', () => {
+    // The bare enablement: `retentionHours` is OMITTED here on purpose — the grammar must not invent a
+    // value, because the default belongs to the composition root that reads the key
+    // (DEFAULT_EVENT_BUS_RETENTION_HOURS), and a default baked in here would make an undeclared window
+    // indistinguishable from a declared one.
+    const yaml = `
+version: '1.0'
+metadata:
+  name: with-bus
+deployment:
+  eventBus:
+    enabled: true
+`;
+    const res = parseSpec(yaml);
+    if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.value.deployment?.eventBus?.enabled).toBe(true);
+    expect(res.value.deployment?.eventBus?.retentionHours).toBeUndefined();
+  });
+
+  it('accepts deployment.eventBus WITHOUT deployment.durableWorker (the keys are independent)', () => {
+    // Deliberate, and the opposite of the cron→durableWorker coupling one section below: a cron
+    // without the worker can do NOTHING, while the bus without it still emits, orders and serves —
+    // only the retention sweep (which rides the worker's housekeeping pass) does not run. The boot
+    // says that in one line; the document is valid.
+    const yaml = `
+version: '1.0'
+metadata:
+  name: bus-without-worker
+deployment:
+  eventBus:
+    enabled: true
+    retentionHours: 6
+`;
+    const res = parseSpec(yaml);
+    if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.value.deployment?.durableWorker).toBeUndefined();
+    expect(res.value.deployment?.eventBus).toEqual({ enabled: true, retentionHours: 6 });
+  });
+
   it('leaves deployment undefined when the section is omitted (minimal spec stays valid)', () => {
     const res = parseSpec("version: '1.0'\nmetadata:\n  name: no-deployment\n");
     if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);

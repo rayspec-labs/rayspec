@@ -715,9 +715,10 @@ allows), or set `RAYSPEC_FRONTEND_CSP` to replace the baseline.
 ### A frontend-only (static) deployment
 
 The mount above serves a UI *next to* a full API. If a document declares **only** a
-`frontend` — no stores, api, agents, tooling, triggers, handlers, or extensions, and
-no durable worker — RaySpec boots it as a **static profile**: it needs **no database
-and none of the three boot secrets**, and it mounts **no** auth / OIDC / run route.
+`frontend` — no stores, api, agents, tooling, triggers, handlers, or extensions, no
+durable worker and no enabled event bus — RaySpec boots it as a **static profile**:
+it needs **no database and none of the three boot secrets**, and it mounts **no**
+auth / OIDC / run route.
 The auth-and-database composition is never constructed, so there is provably no
 authenticated surface behind the assets, and `/health` reports no database — only whether
 the declared mounts can be served. This is the way to serve a built single-page app

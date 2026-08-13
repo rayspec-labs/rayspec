@@ -73,7 +73,12 @@ export type Metadata = z.infer<typeof Metadata>;
  *    sweep runs on the daily platform-housekeeping pass, so a tenant's oldest events can outlive the
  *    nominal window by up to one sweep interval, and a bursting tenant can exceed its nominal size
  *    until the next pass. It is an age window, NOT a row cap: nothing is deleted inside a product
- *    request. Default {@link DEFAULT_EVENT_BUS_RETENTION_HOURS} when omitted.
+ *    request. Default {@link DEFAULT_EVENT_BUS_RETENTION_HOURS} when omitted. That housekeeping pass
+ *    runs on the DURABLE WORKER, so on a deployment that enables the bus without `durableWorker` the
+ *    window sweeps nothing and the stream is unbounded — the boot says so, and the two keys stay
+ *    INDEPENDENT here deliberately: unlike a cron trigger (which can do nothing at all without the
+ *    worker), the bus without it still emits, orders and serves, so refusing the document would break
+ *    a working posture rather than protect one.
  */
 export const EventBusSpec = z
   .object({

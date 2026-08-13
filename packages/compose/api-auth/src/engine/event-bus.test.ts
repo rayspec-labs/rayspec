@@ -7,7 +7,9 @@
  * route-handler-emit.db.test.ts.
  *
  *   - a mis-call in the shape the sibling `init.enqueue` takes is REFUSED, naming the positional form;
- *   - a payload that cannot be JSON-serialized is refused AT THE CALL, not later inside the engine;
+ *   - a payload that cannot be JSON-serialized is refused AT THE CALL, not later inside the engine —
+ *     BOTH of `JSON.stringify`'s failure modes: the one that throws (circular, BigInt) and the one
+ *     that silently returns `undefined` (a function, a symbol, a `toJSON()` returning undefined);
  *   - a route handler's emits BUFFER: N calls, ONE write, in call order;
  *   - an emit AFTER the flush (a streaming producer, which runs once the transaction is gone) is
  *     refused rather than dropped — a lost event may not be this capability's own failure mode;
@@ -75,6 +77,31 @@ describe('init.emit — the fail-closed refusals', () => {
     // The refusal happened at the handler's call site, so the flush has nothing to fail on.
     await flush();
     expect(tdb.batches).toEqual([]);
+  });
+
+  it('a payload whose JSON form is `undefined` (function / symbol / toJSON→undefined) is refused too', async () => {
+    // The SILENT half of the same fault, and the one a `try { JSON.stringify(p) } catch` guard misses
+    // entirely: `JSON.stringify(() => {})` returns `undefined` WITHOUT throwing. Fail-the-fix — accept
+    // any of these and the engine's batch omits the payload key, `payload jsonb NOT NULL` rejects the
+    // row inside the flush, and the whole route transaction (the handler's own writes included) rolls
+    // back as an anonymous 500: exactly the outcome this guard exists to prevent.
+    const noJsonForm: readonly [string, unknown][] = [
+      ['function', () => 'not serializable'],
+      ['symbol', Symbol('nope')],
+      ['toJSON→undefined', { toJSON: () => undefined }],
+    ];
+    for (const [label, payload] of noJsonForm) {
+      const tdb = fakeTdb();
+      const { emit, flush } = makeTenantEventBus().buffered(tdb);
+      const err = await emit(`note.created.${label}`, payload).catch((e: ApiError) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).message).toContain('init.emit');
+      expect((err as ApiError).message).toContain('JSON-serializable payload');
+      expect((err as ApiError).message).toContain('no JSON form');
+      await flush();
+      // The topic names the case, so a regression points at the payload class that got through.
+      expect({ [label]: tdb.batches }).toEqual({ [label]: [] });
+    }
   });
 });
 

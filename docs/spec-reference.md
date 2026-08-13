@@ -1388,6 +1388,7 @@ everywhere:
 | `init.enqueue` | Enqueue a durable, off-request agent run. | `handler`-kind routes | a configured durable worker |
 | `init.stt` | Transcribe audio bytes (speech-to-text). | `handler`-kind routes and tools | `STT_PROVIDER` |
 | `init.tts` | Synthesize audio from text (text-to-speech). | `handler`-kind routes and tools | `TTS_PROVIDER` |
+| `init.emit` | Append a durable, per-tenant-sequenced event to the tenant's stream. | `handler`-kind routes and tools | `deployment.eventBus.enabled` (a product deployment has it structurally, with nothing to declare) |
 
 Two boundaries the table implies are worth spelling out.
 
@@ -1495,6 +1496,64 @@ that passes in CI cannot first fail in production:
   falling back to a default the caller did not ask for. `speed`, by contrast, is
   **clamped** into the supported range rather than refused.
 
+#### `init.emit` — append to the tenant's event stream
+
+```ts
+export const createNote = async (init) => {
+  const note = await init.db.insert('notes', { title: init.body.title })
+  // POSITIONAL — emit(topic, payload). The topic is your own vocabulary; the
+  // payload is any JSON value, stored verbatim as the event body.
+  await init.emit('note.created', { id: note.id, title: note.title })
+  return note
+}
+```
+
+`emit` appends **one durable event** to the calling tenant's stream — the primitive a
+live UI reads back, instead of every product growing its own polled events table. It
+is present only when the deployment enabled the bus
+([`deployment.eventBus`](#deployment)), and it reaches **`handler`-kind routes and
+tools** only: a `stream`-kind route init and a trigger init do not carry it (the same
+boundary the rest of this table draws), so work that must emit belongs in a
+`handler`-kind route or a tool the trigger drives.
+
+The **tenant is engine-bound**: the capability has no tenant parameter, so a handler
+cannot emit into another tenant — there is nowhere to name one. That is the same
+construction `init.enqueue` uses, and the reason there is nothing to configure per
+call.
+
+What a subscriber may rely on:
+
+- **`seq` is the ordering authority.** Every event gets a per-tenant sequence number,
+  and the order numbers are handed out in is the order the writes **commit** in, so a
+  reader resuming with `seq > cursor` cannot skip an event that committed late. The
+  event's timestamp is **display only** — it is transaction-start time, so it is not
+  monotone with `seq` and a query that orders or windows by it reorders and drops
+  events.
+- **The sequence is gap-free.** A rolled-back request returns its number and the next
+  emit reuses it, which is what makes a hole in a stream a real signal that retention
+  removed something, rather than noise.
+- **On a route handler the events are atomic with the handler's own writes.** They are
+  written as the last statement before the route transaction commits, so a reader
+  never sees an event announcing a change it cannot yet read — and a handler that
+  throws leaves neither its rows nor its events. A tool has no outer transaction by
+  design, so there each emit is its own statement, durable as it returns.
+
+Two refusals, both fail-closed with a named error (`500 INTERNAL`) rather than a
+silent no-op:
+
+- **A malformed call.** The first argument must be a non-empty topic string and the
+  payload must have a JSON form. In particular `emit({ topic, payload })` — the shape
+  the sibling `init.enqueue` takes — is refused naming `emit(topic, payload)`, instead
+  of writing a row whose topic is `[object Object]`. A payload with no JSON form at
+  all (a function, a symbol) is refused for the same reason. A one-argument
+  `emit('heartbeat')` is a legitimate topic-only event, not a mis-call.
+- **An emit after the handler returned.** On a route, emit from the **handler body**.
+  A `{handler}` route may return a streaming envelope (`sseResponse`) whose producer
+  runs after the route transaction closed; an `init.emit` call from inside it has no
+  transaction left to append to, so it is refused rather than accepted and lost. (Note
+  the name collision: the producer's own first argument is also called `emit` — that
+  one writes an SSE frame to the open connection and is unrelated to this capability.)
+
 ## `extensions`
 
 Optional references to versioned **extension packs** — product code authored and
@@ -1537,7 +1596,7 @@ walks that shape end to end and ships a copy-ready manifest for it.
 ## `deployment`
 
 Optional deployment-level properties (an object, not a list). Absent means no
-durable worker.
+durable worker and no event bus.
 
 ```yaml
 deployment:
@@ -1549,7 +1608,10 @@ deployment:
   scheduled triggers fire on it.
 - `eventBus` — optional object. Turns on the **tenant-scoped event bus**: with
   `enabled: true`, a `{handler}` route's init and a tool's init carry
-  `emit(topic, payload)`, which appends a durable event to that tenant's stream.
+  `init.emit(topic, payload)`, which appends a durable event to that tenant's
+  stream (the capability itself — its call shape, its reach and its two refusals —
+  is `init.emit` under
+  [Optional handler capabilities](#optional-handler-capabilities)).
   There is no provider and no credential to configure — the backend is the
   database the deployment already has.
 
@@ -1569,6 +1631,15 @@ deployment:
     events can outlive the declared window, and a bursting tenant can exceed its
     nominal size, until the next pass runs. Nothing is ever deleted inside a
     product request.
+
+    **That pass runs on the durable worker.** A deployment that enables the bus
+    **without** `durableWorker: true` (or without the agent backends the worker
+    needs) still emits, orders and serves events exactly as described here — but
+    it runs **no** housekeeping pass, so nothing is ever swept and the declared
+    window describes nothing: the stream grows for as long as the deployment
+    lives. The boot says so in one line, and the remedy is either
+    `durableWorker: true` or pruning the stream out of band. The product profile
+    always has both, so it always sweeps.
 
   What a handler may rely on: every event gets a per-tenant sequence number, and
   the order numbers are handed out in is the order the writes commit in — so a
@@ -1687,8 +1758,9 @@ an asset build/bundling pipeline, cache-control/CDN headers, and the product pro
 **Frontend-only (static) deployment.** The `frontend` section above serves static
 assets *alongside* the full API. Separately, a document that declares **only** a
 `frontend` — every route/data/agent section empty (`stores`, `api`, `agents`,
-`tooling`, `triggers`, `handlers`, `extensions`) and no durable worker — boots as a
-**static profile**: with no database and no auth/OIDC/run surface constructed at all,
+`tooling`, `triggers`, `handlers`, `extensions`), no durable worker and no enabled
+event bus — boots as a **static profile**: with no database and no auth/OIDC/run
+surface constructed at all,
 for serving a built single-page app directly with no reverse proxy in front. That
 boot form, and the two response-header environment variables it reads
 (`RAYSPEC_FRONTEND_CSP`, `RAYSPEC_PERMISSIONS_POLICY`, each with a secure default),

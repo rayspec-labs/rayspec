@@ -460,7 +460,10 @@ export interface HandlerInit {
  *
  * RETENTION: events are kept for the deployment's declared age window and swept by the platform's
  * scheduled housekeeping. The bound is APPROXIMATE — the sweep runs on that schedule, so a tenant's
- * oldest events can outlive the nominal window until the next pass.
+ * oldest events can outlive the nominal window until the next pass. It is also a DEPLOYMENT property,
+ * not a promise of this call: that housekeeping runs on the durable worker, so a deployment that
+ * enabled the bus without one emits and serves exactly as described above and simply never sweeps
+ * (its boot says so). Nothing here changes for the handler either way.
  *
  * ⚠ ISOLATE-READINESS (honest — like `db.transaction`, `mintPlayToken` and `enqueue`): `emit` is a
  * CLOSURE over the engine's tenant-bound handle, so it does NOT trivially cross an external-exposure

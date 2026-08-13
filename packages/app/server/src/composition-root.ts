@@ -1724,6 +1724,35 @@ export function cronTenantAbsentBootNotice(cronTenantId: string): string {
 }
 
 /**
+ * The ONE line a boot emits when the deployment ENABLED the event bus but this boot wired NO daily
+ * housekeeping pass to sweep it. Pure + exported so its wording has a single source of truth and is
+ * directly assertable, exactly like the cron notice above.
+ *
+ * WHY IT EXISTS. The retention window is swept by the daily cleanup workflow, and that workflow runs
+ * on the durable off-request worker — so a deployment that enables the bus WITHOUT
+ * `deployment.durableWorker: true` (or without the agent backends the executor needs) emits happily
+ * and never sweeps: `tenant_events` grows for as long as the process lives, and the `retentionHours`
+ * the author wrote in the document describes nothing. That is the exact shape the cron coupling is
+ * refused for — a declared knob that is silently inert.
+ *
+ * WHY IT WARNS RATHER THAN REFUSES, unlike cron. A cron trigger without the worker can do NOTHING; the
+ * bus without the worker still does its whole job — events are appended, ordered and readable — and
+ * only the age-out is missing, which a short-lived or low-volume deployment may legitimately not need.
+ * Refusing would break a working posture; staying silent would sell a bound that does not exist. So
+ * the boot says the state, the consequence and the remedy, once, where an operator is watching, and
+ * `docs/spec-reference.md` states the same precondition under `retentionHours`.
+ */
+export function eventBusUnsweptBootNotice(retentionHours: number): string {
+  return (
+    `[events] deployment.eventBus is enabled with retentionHours=${retentionHours}, but this boot ` +
+    'wired NO durable worker — the daily housekeeping pass that sweeps aged-out events runs on it, ' +
+    'so NOTHING is ever swept and tenant_events grows without bound. init.emit itself is fully ' +
+    'live. Set deployment.durableWorker: true (and supply agent backends) for the declared window ' +
+    'to mean anything, or treat the stream as unbounded and prune it out of band.'
+  );
+}
+
+/**
  * Assemble the full platform app from a validated `ServerConfig`. Builds the raw Db, applies the
  * migration chain, derives the signer/JWKS + OIDC provider from the PEM, wires the five stores +
  * AuthService, optionally runs the REAL `deploy()` for an injected spec, and returns the running app
@@ -2557,7 +2586,9 @@ async function deployDeclaredSpec(
   // already required — so the deployed document is the only thing that has to say anything. Built iff
   // `deployment.eventBus.enabled` is true; otherwise left undefined, and every init is then WITHOUT
   // `emit` (a handler that reads it fail-closes loudly). Injected into the engine in buildApp (below),
-  // like blobFactory. The retention window rides the same key and is read by the cleanup arm.
+  // like blobFactory. The retention window rides the same key and is read by the cleanup arm — which
+  // runs on the DURABLE WORKER, so a boot that enables the bus without one never sweeps; that boot is
+  // told so, once, below (`eventBusUnsweptBootNotice`, after the cleanup wiring decides).
   const eventBusDecl = effectiveSpec.deployment?.eventBus;
   const eventBus = eventBusDecl?.enabled === true ? makeTenantEventBus() : undefined;
   const eventBusRetentionHours =
@@ -2985,6 +3016,14 @@ async function deployDeclaredSpec(
     // injected runScheduledCleanup returns exactly that — the scheduler's narrower type is a structural
     // subset, so this is the runtime value, not a type hole).
     runCleanupNow = () => cleanupScheduler.runCleanupNow() as Promise<CleanupResult>;
+  }
+
+  // The bus is enabled but NO housekeeping pass was wired above (this boot has no durable worker), so
+  // the declared retention window sweeps nothing. Say it once, loudly, where an operator is watching —
+  // `init.emit` still works, so a refusal would break a legitimate posture, but a silent boot would
+  // leave the author believing a bound that this deployment does not have.
+  if (eventBusRetentionHours !== undefined && runCleanupNow === undefined) {
+    bootWarn(eventBusUnsweptBootNotice(eventBusRetentionHours));
   }
 
   // Fix F: NOW that deploy() → buildApp has bound `workerAgentRegistry`, START the durable engine

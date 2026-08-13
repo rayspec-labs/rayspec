@@ -151,9 +151,9 @@ A backend-profile document can serve a built web UI itself, in one of two forms.
   backend profile.
 - **Frontend-only — a static profile.** A document that declares **only** a
   `frontend` — with no stores, api, agents, tooling, triggers, handlers, or
-  extensions, and no durable worker — boots as a **static profile**: no database,
-  no JWT signing key, no API-key pepper, and **no auth / OIDC / run route mounted at
-  all**. The auth-and-database composition is not merely left empty — the boot
+  extensions, no durable worker and no enabled event bus — boots as a **static
+  profile**: no database, no JWT signing key, no API-key pepper, and **no auth /
+  OIDC / run route mounted at all**. The auth-and-database composition is not merely left empty — the boot
   branches away from it entirely, so there is provably no authenticated surface
   behind the assets. `/health` runs no database probe; it reports whether the declared
   mounts can be served — `200 {"status":"ok","frontend":"ok"}`, or `503` with

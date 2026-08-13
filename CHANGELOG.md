@@ -34,7 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `retentionHours` (default 24) and swept by the daily housekeeping pass that already runs the OIDC
   prune — an **approximate** bound, and deliberately so: nothing is deleted inside a product request,
   so a tenant's oldest events can outlive the declared window, and a bursting tenant can exceed its
-  nominal size, until the next pass. `seq` is the only ordering authority the stream has; the `at`
+  nominal size, until the next pass. That pass runs on the durable worker, so a deployment that
+  enables the bus **without** `deployment.durableWorker: true` emits and serves exactly as described
+  but never sweeps — the stream then grows for as long as it lives, and the boot says so in one line
+  rather than leaving the declared window looking like a bound. (A product-profile deployment always
+  has the worker, so it always sweeps.) `seq` is the only ordering authority the stream has; the `at`
   column is display only and is **not** monotone with `seq` under concurrency (it is transaction-start
   time while the number is issued at flush), so ordering or windowing a query by it reorders and drops
   events. **The subscription surface from #314 (`GET /v1/subscribe`) is not part of this change** —

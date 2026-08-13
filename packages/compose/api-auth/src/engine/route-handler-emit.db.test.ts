@@ -18,6 +18,10 @@
  *  (5) MALFORMED CALL — the natural mis-reading (`emit({ topic, payload })`, the shape `init.enqueue`
  *      takes) fail-closes 500 INTERNAL naming the capability and the expected positional shape, never
  *      a 404 and never a silent no-op; nothing is written.
+ *  (6) MALFORMED CALL, THE SILENT CLASS — a payload whose JSON form is `undefined` (a function) is
+ *      refused BY NAME at the call site. It is the one `JSON.stringify` does not throw on, so an
+ *      accepting guard would carry it into the ENGINE's flush, where the `NOT NULL` payload column
+ *      rejects the row and the caller gets an ANONYMOUS 500 with the handler's own write rolled back.
  *
  * Skips when DATABASE_URL is absent; HARD-FAILS when the DB is required (CI / RAYSPEC_REQUIRE_DB_TESTS)
  * but absent — this suite proves a durability contract and must never self-skip to a false green.
@@ -139,9 +143,15 @@ const probeHandler: ResolvedHandler = {
 };
 
 /**
- * The MIS-CALLING handler — `init.emit` called with ONE request object (`emit({ topic, payload })`),
- * the shape the sibling `init.enqueue` capability takes. A pack ships as an `.mjs` module, so the
- * published positional type never reaches this call site; the cast reproduces that caller exactly.
+ * The MIS-CALLING handler — two mis-calls a pack author actually makes, selected by the request body.
+ * A pack ships as an `.mjs` module, so the published positional type never reaches this call site; the
+ * casts reproduce that caller exactly.
+ *
+ *  - `object_topic` (default): `emit({ topic, payload })`, the shape the sibling `init.enqueue` takes.
+ *  - `no_json_payload`: a payload whose JSON form is `undefined` (a function). It writes a note FIRST,
+ *    so the arm can show what the unguarded version costs — `JSON.stringify` does NOT throw for this
+ *    one, so an accepting guard would carry it to the flush, where `payload jsonb NOT NULL` rejects
+ *    the row and takes the handler's own note down with it under an anonymous 500.
  */
 const misEmitHandler: ResolvedHandler = {
   kind: 'route',
@@ -150,7 +160,13 @@ const misEmitHandler: ResolvedHandler = {
     if (!i.emit) {
       throw new Error('mis-emit: init.emit is not available (the event bus is not enabled).');
     }
+    const kind = ((i.body ?? {}) as { kind?: string }).kind ?? 'object_topic';
     const misCall = i.emit as unknown as (...args: unknown[]) => Promise<void>;
+    if (kind === 'no_json_payload') {
+      await i.db.insert('notes', { title: 'written before the bad emit' });
+      await misCall('note.created', () => 'not serializable');
+      return { emitted: 1 };
+    }
     await misCall({ topic: 'note.created', payload: { id: 1 } });
     return { emitted: 1 };
   },
@@ -360,5 +376,30 @@ describe.skipIf(!hasDb)('route-handler init.emit tenant-event-bus seam', () => {
     expect(body.error.message).toContain('emit(topic, payload)');
     expect(body.error.message).not.toBe('Internal server error.');
     expect(await eventsOf(orgId)).toEqual([]);
+  });
+
+  it('(6) MALFORMED CALL, THE SILENT CLASS: a payload with no JSON form is refused BY NAME at the call, not by the flush', async () => {
+    const { orgId, token } = await principal('nojson@example.com', 'NoJsonOrg');
+    const res = await jsonRequest(h.app, 'POST', '/mis-emit', {
+      body: { kind: 'no_json_payload' },
+      headers: { authorization: `Bearer ${token}` },
+    });
+    // Fail-the-fix: `JSON.stringify(() => {})` returns `undefined` WITHOUT throwing, so a guard that
+    // only catches a throw ACCEPTS this. The batch then omits the payload key, `payload jsonb NOT
+    // NULL` rejects the row inside the ENGINE's flush — after the handler returned successfully — and
+    // the caller gets the anonymous 500 asserted against below, with the handler's own note rolled
+    // back beside it. The refusal must carry the capability's name and the fault.
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('INTERNAL');
+    expect(body.error.message).not.toBe('Internal server error.');
+    expect(body.error.message).toContain('init.emit');
+    expect(body.error.message).toContain('no JSON form');
+    expect(await eventsOf(orgId)).toEqual([]);
+    const notes = (await h.db.$client.unsafe(
+      'SELECT count(*)::int AS n FROM notes WHERE tenant_id = $1',
+      [orgId],
+    )) as unknown as { n: number }[];
+    expect(notes[0]?.n).toBe(0);
   });
 });
