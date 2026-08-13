@@ -549,7 +549,14 @@ export interface BootEnvReport {
   readonly missing: readonly string[];
   /** The honest boundary — what this check does NOT establish. */
   readonly notChecked: readonly string[];
-  /** Why no demand set could be produced (an unparseable document); empty when the report is complete. */
+  /**
+   * The refusals this document + environment already raises that are NOT an unset variable, so no
+   * `missing` entry could carry them: a document that does not validate, an agent selecting a backend
+   * that is not wired, an `stt.*` step declared without the audio capability, an unrecognised
+   * `RAYSPEC_ANTHROPIC_REUSE_LOGIN` on a document that selects the anthropic backend. Each is a boot
+   * refusal, so a non-empty list is `ok:false` exactly as an unmet demand is. Empty ⇒ the verdict is a
+   * complete demand set and nothing else stands in the way of a boot that this check can see.
+   */
   readonly errors: readonly string[];
 }
 
@@ -609,14 +616,20 @@ class RequirementSet {
 /** What NO read-only environment check can establish — stated in the verdict rather than left implied. */
 const NOT_CHECKED = [
   'no extension pack is loaded (running pack code is exactly what would open a socket, a database or ' +
-    'a credential), so a pack-provided blob backend that REMOVES the RAYSPEC_BLOB_ROOT demand, and a ' +
-    'pack-contributed agent that ADDS a backend credential demand, are both invisible here',
+    'a credential), so every demand a pack changes is invisible here — it can REMOVE one (a ' +
+    'pack-provided blob backend removes the RAYSPEC_BLOB_ROOT demand) and it can ADD one: a ' +
+    "pack-contributed api route adds the RAYSPEC_BLOB_ROOT demand (any kind:'stream') and the " +
+    "RAYSPEC_MEDIA_SIGNING_KEY demand (mode:'playback'), and a pack-contributed agent adds its " +
+    'backend credential demand. The guards run on the POST-merge document; this reads the base one',
   'a set <VAR>_FILE mount counts as set from the variable alone — the file is never opened, so a ' +
     'missing, unreadable or empty secret file still refuses the boot (it NEVER falls back to the ' +
     'plain variable)',
   'no VALUE is validated: a malformed PKCS#8 PEM, a non-UUID RAYSPEC_CRON_TENANT_ID, a media key ' +
     'under 32 bytes, an unsupported provider selection or an unparseable schedule all still refuse ' +
-    'the boot',
+    'the boot. A value is READ only where it decides WHICH demands apply — a selected ' +
+    'STT_PROVIDER/TTS_PROVIDER, and RAYSPEC_ANTHROPIC_REUSE_LOGIN, whose unrecognised value IS ' +
+    'reported because it decides whether the anthropic token demand exists at all — and no value is ' +
+    'ever echoed',
   'nothing about the deployment itself: no database is opened, no migration is applied, no port is ' +
     'bound and no provider is called',
   'a deployment that injects its own boot seams (an agent-backend factory, a deterministic executor) ' +
@@ -648,7 +661,9 @@ const PRODUCT_NOT_CHECKED = [
  *
  * It opens no socket, no database and no credential file, and it loads no extension pack — executing
  * pack code is precisely what would break that promise. The consequences of not loading packs run in
- * BOTH directions and are stated in `notChecked` rather than hidden.
+ * BOTH directions — a pack can REMOVE a demand (it supplies a blob backend) and it can ADD one (its
+ * routes and its agents both raise demands, on a document whose own sections may declare neither) —
+ * and are stated in `notChecked`, naming the packs the document declares, rather than hidden.
  */
 export async function checkBootEnv(
   specPath: string,
@@ -751,14 +766,23 @@ function backendReport(
 
   // B.5 the agent-backend credentials — raised while the boot opts are built, before the server is
   // assembled, from the SAME per-backend contract makeExtractionBackend constructs each adapter under.
-  const reuseLogin = anthropicReuseLogin(env);
+  const backends = declaredAgentBackends(spec.agents);
+  // RAYSPEC_ANTHROPIC_REUSE_LOGIN is CONSULTED EXACTLY WHERE THE BOOT CONSULTS IT: inside the anthropic
+  // backend's construction, and nowhere else (`makeExtractionBackend` case 'anthropic', plus the banner
+  // and shadow-footgun helpers that same-gate on it). A document whose declared agents select no
+  // anthropic backend never reaches a reader of it, so an unrecognised value is NOT a refusal for that
+  // document — reporting one would invent a demand the boot does not raise, which is the one failure
+  // this module exists to prevent. Same predicate as the `optional` row for it below.
+  const reuseLogin = backends.has('anthropic') ? anthropicReuseLogin(env) : false;
   if (reuseLogin === 'unsupported') {
+    // The variable is NAMED, never quoted: this verdict prints no environment value, and this is the
+    // one place a value could otherwise have reached it. (The boot's own refusal does echo the value —
+    // that wording is unchanged; this report is the surface that promises not to.)
     errors.push(
-      `RAYSPEC_ANTHROPIC_REUSE_LOGIN '${env.RAYSPEC_ANTHROPIC_REUSE_LOGIN}' is not supported ` +
-        '(wired: true | false; unset ⇒ false) — the boot refuses fail-closed on it',
+      'RAYSPEC_ANTHROPIC_REUSE_LOGIN is set to an unsupported value (wired: true | false; unset ⇒ ' +
+        'false) — the boot refuses fail-closed on it. The value itself is not echoed here.',
     );
   }
-  const backends = declaredAgentBackends(spec.agents);
   for (const [backend, selectors] of backends) {
     const demand = AGENT_BACKEND_DEMANDS[backend];
     const declaredBy = `declared agent(s) [${selectors.join(', ')}] select backend '${backend}'`;
@@ -821,7 +845,21 @@ function backendReport(
     );
   }
 
-  return assemble(base, 'rayspec', required.list(), optional, [...NOT_CHECKED], errors);
+  // A pack-BEARING document is never a silent green: the base document is all this check reads, and the
+  // stream/playback guards run on the post-merge one, so the packs this document names are stated —
+  // PARSED off the document, never loaded. Without this an operator reads a green verdict for a
+  // document whose whole route surface (and therefore whole demand set) arrives from a pack.
+  const notChecked = [...NOT_CHECKED];
+  if (spec.extensions.length > 0) {
+    notChecked.unshift(
+      `this document declares ${spec.extensions.length} extension pack(s) — ` +
+        `[${spec.extensions.map((ext) => ext.id).join(', ')}] — whose stores, routes, handlers and ` +
+        'agents merge into the deployed document BEFORE the boot guards ask their questions. None ' +
+        'was loaded, so every demand they carry is missing from this verdict',
+    );
+  }
+
+  return assemble(base, 'rayspec', required.list(), optional, notChecked, errors);
 }
 
 /** The demand set of a PRODUCT-profile (`product:`-bearing) document. */
@@ -843,6 +881,7 @@ async function productReport(
   } = await import('@rayspec/product-yaml');
 
   const required = new RequirementSet(env);
+  const errors: string[] = [];
 
   for (const secret of SERVER_BOOT_SECRETS) {
     required.demand(secret, 'every non-static boot reads it at config load');
@@ -871,10 +910,25 @@ async function productReport(
   }
   // The ONE place a provider SELECTOR is itself a demand — and it is still DOCUMENT-conditional, raised
   // only when the document declares a transcribing step, never unconditionally.
+  //
+  // AND ONLY ALONGSIDE THE AUDIO CAPABILITY, which is the boot's own condition: the STT media resolver
+  // reads the audio capability's blob-backed chunks, so the product boot rejects an `stt.*` step
+  // declared WITHOUT audio on the document SHAPE — before it reads STT_PROVIDER at all. Demanding the
+  // selector for such a document would send an operator to set a variable that changes nothing, and the
+  // boot would refuse anyway. The shape refusal is reported instead, as the refusal it is.
   if (declaresSttStep(spec)) {
-    required.demand(STT_PROVIDER, 'the document declares an stt.* workflow step');
-    if (env.STT_PROVIDER?.trim() === 'deepgram') {
-      required.demand(DEEPGRAM_API_KEY, "STT_PROVIDER='deepgram' is selected in the environment");
+    if (withAudio) {
+      required.demand(STT_PROVIDER, 'the document declares an stt.* workflow step');
+      if (env.STT_PROVIDER?.trim() === 'deepgram') {
+        required.demand(DEEPGRAM_API_KEY, "STT_PROVIDER='deepgram' is selected in the environment");
+      }
+    } else {
+      errors.push(
+        "the document declares an 'stt.*' workflow step but no audio capability " +
+          '(audio_input/media_playback), whose blob-backed chunks the stt media resolver reads — the ' +
+          'boot refuses fail-closed on that document SHAPE, before it reads STT_PROVIDER at all. ' +
+          'Declare the audio capability or remove the stt step',
+      );
     }
   }
 
@@ -892,7 +946,7 @@ async function productReport(
     required.list(),
     optional,
     [...NOT_CHECKED, ...PRODUCT_NOT_CHECKED],
-    [],
+    errors,
   );
 }
 

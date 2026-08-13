@@ -361,8 +361,11 @@ export async function runDeploy(args: readonly string[]): Promise<DeployOutcome>
  *
  * NO PACK IS LOADED. An extension pack is arbitrary code; running it is precisely what would open a
  * socket, a database or a credential, which is the promise this command is FOR. The consequence runs in
- * both directions — a pack can supply a blob backend that removes a demand, and contribute an agent
- * that adds one — and is stated in the verdict's `notChecked` rather than left for the operator to
+ * both directions — a pack can supply a blob backend that REMOVES a demand, and it ADDS demands two
+ * ways: a contributed `kind:'stream'` / `mode:'playback'` route raises the blob-root and media-key
+ * demands, and a contributed agent raises its backend's credential demand. The boot guards ask their
+ * questions of the POST-merge document; this reads the base one. That is stated in the verdict's
+ * `notChecked`, which also NAMES the packs the document declares, rather than left for the operator to
  * discover from a refusal.
  *
  * NO VALUE IS PRINTED. Every variable is reported as a `set` boolean; no environment value, no `.env`

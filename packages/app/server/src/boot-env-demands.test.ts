@@ -3,11 +3,15 @@
  * extraction worth having, asserted separately because they fail separately.
  *
  * 1. BEHAVIOUR-NEUTRALITY (the accept control). The refusals that are now COMPOSED from the catalogue
- *    rather than restating it must be byte-identical to the ones they replaced. Each is pinned here as
- *    a whole literal string, per refusal, so a `what` clause edited in the catalogue REDS this suite
+ *    rather than restating it must be byte-identical to the ones they replaced. Each is pinned as a
+ *    whole literal string, per refusal, so a `what` clause edited in the catalogue REDS a suite
  *    instead of silently rewording a boot abort — and so the two wordings the CLI matches on to append
  *    its searched-`.env`-paths diagnostic (`required env var(s) missing: …` and `<VAR> is required
- *    (…)`) cannot be normalized away.
+ *    (…)`) cannot be normalized away. Every refusal reachable WITHOUT a database is pinned here; the
+ *    two that are raised only from inside `deployProductYamlSpec` — `RAYSPEC_PRODUCT_TENANT_ID` and
+ *    `RAYSPEC_EXTRACTION_MODE` — are pinned as whole literal strings in
+ *    `product-boot-conditional-env.db.test.ts`, through a real boot, because that is the only place
+ *    they can be provoked. Between the two files every `what` clause in the catalogue is covered.
  *
  * 2. The REPORT agrees with the boot. `checkBootEnv` is not allowed to answer a question the boot would
  *    answer differently, so the cases below drive the distinctions that were easiest to get wrong: the
@@ -36,7 +40,12 @@ import {
   SERVER_BOOT_SECRETS,
 } from './boot-env-demands.js';
 import { loadServerConfig, loadTenantProvisionSecrets } from './composition-root.js';
-import { makeExtractionBackend } from './product-boot.js';
+import {
+  buildRecordNormalizer,
+  buildSttAdapter,
+  buildTurnResponder,
+  makeExtractionBackend,
+} from './product-boot.js';
 import { buildSttCapability } from './stt-capability.js';
 import { buildTtsCapability } from './tts-capability.js';
 
@@ -175,6 +184,36 @@ describe('the refusals composed from the catalogue are byte-identical', () => {
     );
   });
 
+  it('the product executors keep their "<VAR> is required (…)" wording too', () => {
+    // The product profile's three ENV-SELECTED executors. Each demands its variable as the FIRST
+    // statement of its builder, so an empty env reaches the refusal without a db, a spec or a blob
+    // store — and the `what` clause each names is the catalogue's, pinned whole here so editing it
+    // reds this suite rather than rewording a shipped abort.
+    expect(() => buildSttAdapter({}, undefined as never, undefined)).toThrow(
+      "Boot aborted (Product-YAML) — STT_PROVIDER is required (the STT provider: 'deepgram' | " +
+        "'fake'). Fail-closed.",
+    );
+    expect(() =>
+      buildTurnResponder({}, '/s.yaml', undefined as never, undefined as never, {}),
+    ).toThrow(
+      'Boot aborted (Product-YAML) — RAYSPEC_RESPONDER_MODE is required (the conversation reply ' +
+        "executor: 'live' (real runAgent) | 'deterministic' (injected Backend, dev/CI)). Fail-closed.",
+    );
+    expect(() =>
+      buildRecordNormalizer(
+        {},
+        '/s.yaml',
+        undefined as never,
+        undefined as never,
+        {},
+        undefined as never,
+      ),
+    ).toThrow(
+      'Boot aborted (Product-YAML) — RAYSPEC_NORMALIZE_MODE is required (the record input-normalize ' +
+        "executor: 'live' (real runAgent) | 'deterministic' (injected Backend, dev/CI)). Fail-closed.",
+    );
+  });
+
   it('the two speech credential refusals keep their exact text', () => {
     expect(() => buildSttCapability({ sttProvider: 'deepgram' })).toThrow(
       'Boot aborted — DEEPGRAM_API_KEY is required (the Deepgram API key (STT_PROVIDER=deepgram)). ' +
@@ -310,7 +349,30 @@ describe('checkBootEnv — the backend profile', () => {
       RAYSPEC_ANTHROPIC_REUSE_LOGIN: 'maybe',
     });
     expect(bad.ok).toBe(false);
-    expect(bad.errors[0]).toContain("RAYSPEC_ANTHROPIC_REUSE_LOGIN 'maybe' is not supported");
+    expect(bad.errors[0]).toContain('RAYSPEC_ANTHROPIC_REUSE_LOGIN is set to an unsupported value');
+  });
+
+  it('an unrecognised RAYSPEC_ANTHROPIC_REUSE_LOGIN is NOT a refusal without an anthropic backend', async () => {
+    // The boot reads that variable in ONE place: the anthropic backend's construction. A document
+    // whose agents select `openai` never reaches it, and a document with NO agents builds no factory
+    // at all — so reporting a refusal for either would invent one the boot does not raise, which is
+    // the failure direction this whole module exists to close.
+    const openaiOnly = await checkBootEnv('/s.yaml', backendSpec({ agentBackend: 'openai' }), {
+      ...OK3,
+      OPENAI_API_KEY: 'k',
+      RAYSPEC_ANTHROPIC_REUSE_LOGIN: 'maybe',
+    });
+    expect(openaiOnly.errors).toEqual([]);
+    expect(openaiOnly.ok).toBe(true);
+    const noAgents = await checkBootEnv('/s.yaml', backendSpec(), {
+      ...OK3,
+      RAYSPEC_ANTHROPIC_REUSE_LOGIN: 'maybe',
+    });
+    expect(noAgents.errors).toEqual([]);
+    expect(noAgents.ok).toBe(true);
+    // …and the variable is not reported as optional there either — the verdict says nothing about a
+    // variable this document's boot never reads.
+    expect(noAgents.optional.map((o) => o.name)).not.toContain('RAYSPEC_ANTHROPIC_REUSE_LOGIN');
   });
 });
 
@@ -358,6 +420,41 @@ describe('checkBootEnv — the ENV-ONLY demands no document could predict', () =
     const openai = report.required.filter((r) => r.name === 'OPENAI_API_KEY');
     expect(openai).toHaveLength(1);
     expect(openai[0]?.because).toHaveLength(2);
+  });
+});
+
+describe('checkBootEnv — a pack-BEARING document is never a silent green', () => {
+  /** The shipped pack example: a THIN deployment doc whose whole route surface arrives from a pack. */
+  const STREAM_PACK_EXAMPLE = join(repoRoot, 'examples/stream-backend/rayspec.yaml');
+
+  it('names the packs it declares, and states that their routes ADD demands it cannot see', async () => {
+    const report = await checkBootEnv(
+      STREAM_PACK_EXAMPLE,
+      readFileSync(STREAM_PACK_EXAMPLE, 'utf8'),
+      { ...OK3 },
+    );
+    // The honest answer for THIS document is the three secrets: its own `api` is empty, and the boot
+    // guards run on the POST-merge document this check must not produce (loading the pack is exactly
+    // the socket/database/credential access the command promises not to perform). A real boot of this
+    // file demands RAYSPEC_BLOB_ROOT + RAYSPEC_MEDIA_SIGNING_KEY as well — stream-pack.db.test.ts sets
+    // both to boot it — so the verdict has to SAY that rather than read as a clean bill of health.
+    expect(report.required.map((r) => r.name)).toEqual([
+      'DATABASE_URL',
+      'RAYSPEC_JWT_SIGNING_KEY',
+      'RAYSPEC_API_KEY_PEPPER',
+    ]);
+    const notChecked = report.notChecked.join(' ');
+    expect(notChecked).toContain('declares 1 extension pack(s)');
+    expect(notChecked).toContain('stream_pack');
+    // BOTH adding directions are named, not just the agent one.
+    expect(notChecked).toContain('pack-contributed api route adds the RAYSPEC_BLOB_ROOT demand');
+    expect(notChecked).toContain('RAYSPEC_MEDIA_SIGNING_KEY demand');
+    expect(notChecked).toContain('REMOVE one');
+  });
+
+  it('says nothing about packs for a document that declares none', async () => {
+    const report = await checkBootEnv('/s.yaml', backendSpec(), { ...OK3 });
+    expect(report.notChecked.join(' ')).not.toContain('extension pack(s)');
   });
 });
 
@@ -426,11 +523,12 @@ describe('checkBootEnv — the product profile has its OWN demand set', () => {
   });
 
   /**
-   * AGREEMENT WITH THE BOOT, on the documents whose demanded set a real boot already pins.
-   * product-boot-conditional-env.db.test.ts drives each of these through `deployProductYamlSpec` and
-   * asserts which variable it refuses on; this asserts the report names the same set — without a
-   * database, which is the whole point. A predicate that drifted in either direction reds one of the
-   * two suites.
+   * AGREEMENT WITH THE BOOT, on EVERY document whose demanded set a real boot already pins.
+   * product-boot-conditional-env.db.test.ts drives all five of these through `deployProductYamlSpec`
+   * and asserts what it refuses on; this asserts the report names the same set — without a database,
+   * which is the whole point. A predicate that drifted in either direction reds one of the two suites.
+   * The fixture list is the DB suite's, complete: dropping one here would let a predicate disagree
+   * with the boot on the one document nobody compared.
    */
   it.each([
     // a NON-audio doc that DECLARES an agent demands the extraction mode ALONE (not blob/media/stt)
@@ -439,6 +537,8 @@ describe('checkBootEnv — the product profile has its OWN demand set', () => {
     ['__fixtures__/file-ingest.product.yaml', ['RAYSPEC_BLOB_ROOT']],
     // a non-audio, zero-agent, no-stt doc demands NONE of the four
     ['__fixtures__/non-audio-intake.product.yaml', []],
+    // an stt.* step WITHOUT audio demands NOTHING — the boot refuses it on its SHAPE (below)
+    ['__fixtures__/stt-no-audio.product.yaml', []],
   ])('%s demands exactly %j beyond the tenant + the three', async (rel, expected) => {
     const path = join(here, rel);
     const report = await checkBootEnv(path, readFileSync(path, 'utf8'), {
@@ -446,6 +546,30 @@ describe('checkBootEnv — the product profile has its OWN demand set', () => {
       RAYSPEC_PRODUCT_TENANT_ID: '00000000-0000-4000-8000-000000000000',
     });
     expect(missingOf(report)).toEqual(expected);
+  });
+
+  it('an stt.* step WITHOUT audio is reported as the SHAPE refusal it is, never as an STT_PROVIDER demand', async () => {
+    // The boot's stt guard is `usesStt && withAudio`: the transcription resolver reads the audio
+    // capability's blob-backed chunks, so a doc declaring stt without audio is refused on its shape
+    // BEFORE STT_PROVIDER is read (product-boot-conditional-env.db.test.ts boots this same fixture and
+    // pins that refusal). Demanding the selector here would send an operator to set a variable that
+    // changes nothing and be refused anyway — the report and the boot disagreeing, in the one
+    // direction that wastes the operator's time.
+    const path = join(here, '__fixtures__/stt-no-audio.product.yaml');
+    const report = await checkBootEnv(path, readFileSync(path, 'utf8'), {
+      ...OK3,
+      RAYSPEC_PRODUCT_TENANT_ID: '00000000-0000-4000-8000-000000000000',
+    });
+    expect(report.required.map((r) => r.name)).not.toContain('STT_PROVIDER');
+    expect(report.ok).toBe(false);
+    expect(report.errors[0]).toContain('Declare the audio capability or remove the stt step');
+    // …and setting the selector does NOT turn it green: the refusal is not about the environment.
+    const selected = await checkBootEnv(path, readFileSync(path, 'utf8'), {
+      ...OK3,
+      RAYSPEC_PRODUCT_TENANT_ID: '00000000-0000-4000-8000-000000000000',
+      STT_PROVIDER: 'fake',
+    });
+    expect(selected.ok).toBe(false);
   });
 
   it('names file_input — not audio — as what made a file-only doc demand the blob root', async () => {
@@ -476,6 +600,23 @@ describe('checkBootEnv reads no value out of the environment', () => {
       OPENAI_API_KEY: secret,
     });
     expect(report.ok).toBe(true);
+    expect(JSON.stringify(report)).not.toContain(secret);
+  });
+
+  it('not even on the one path that REPORTS a value as wrong', async () => {
+    // The posture flag is the only variable whose VALUE the report judges, so it is the only place a
+    // value could reach the verdict — and an unrecognised one is exactly the case that judges it. The
+    // refusal names the variable and states the wired vocabulary; it never quotes what was set. (The
+    // BOOT's own refusal for this does quote it — unchanged, byte for byte. This report is the surface
+    // that promises not to, so the promise is pinned HERE.)
+    const secret = 'S3CR3T-sentinel-value';
+    const report = await checkBootEnv('/s.yaml', backendSpec({ agentBackend: 'anthropic' }), {
+      ...OK3,
+      RAYSPEC_ANTHROPIC_CONFIG_ROOT: '/roots',
+      RAYSPEC_ANTHROPIC_REUSE_LOGIN: secret,
+    });
+    expect(report.ok).toBe(false);
+    expect(report.errors).toHaveLength(1);
     expect(JSON.stringify(report)).not.toContain(secret);
   });
 });

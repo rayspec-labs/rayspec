@@ -63,6 +63,19 @@ deployment:
   durableWorker: true
 `;
 
+/** The SAME document with an `openai` agent instead — it selects no anthropic backend at all. */
+const OPENAI_ONLY_SPEC = `version: '1.0'
+metadata: { name: check-env-openai-only }
+stores:
+  - name: recordings
+    columns: [{ name: title, type: text }]
+api:
+  - { method: GET, path: '/recordings', action: { kind: store, store: recordings, op: list } }
+  - { method: POST, path: '/recordings/write', action: { kind: agent, agent: a1 } }
+agents:
+  - { id: a1, name: a1, backend: openai, model: m, instructions: hi }
+`;
+
 /** A FRONTEND-ONLY document — the profile that must be told to set NONE of the platform secrets. */
 const FRONTEND_ONLY_SPEC = `version: '1.0'
 metadata: { name: static-profile-ui }
@@ -76,6 +89,7 @@ beforeAll(() => {
   if (!distBuilt) return;
   root = mkdtempSync(join(tmpdir(), 'rayspec-cli-check-env-'));
   writeFileSync(join(root, 'compound.rayspec.yaml'), COMPOUND_SPEC, 'utf8');
+  writeFileSync(join(root, 'openai-only.rayspec.yaml'), OPENAI_ONLY_SPEC, 'utf8');
   writeFileSync(join(root, 'frontend-only.rayspec.yaml'), FRONTEND_ONLY_SPEC, 'utf8');
 });
 
@@ -184,9 +198,31 @@ maybeDescribe('rayspec deploy --check-env — the demands, through the built CLI
     const { out } = await checkEnv(['--check-env', './compound.rayspec.yaml']);
     const notChecked = (JSON.parse(out).notChecked as string[]).join(' ');
     expect(notChecked).toContain('no extension pack is loaded');
-    // BOTH directions — a pack can remove a demand and a pack can add one.
-    expect(notChecked).toContain('REMOVES the RAYSPEC_BLOB_ROOT demand');
-    expect(notChecked).toContain('ADDS a backend credential demand');
+    // BOTH directions, and BOTH of the adding ones: a pack removes a demand by supplying a blob
+    // backend, and adds one with a contributed ROUTE as well as with a contributed agent. The route
+    // direction is the one a document can hit while declaring no api section of its own at all.
+    expect(notChecked).toContain('REMOVE one');
+    expect(notChecked).toContain('pack-contributed api route adds the RAYSPEC_BLOB_ROOT demand');
+    expect(notChecked).toContain("RAYSPEC_MEDIA_SIGNING_KEY demand (mode:'playback')");
+    expect(notChecked).toContain('pack-contributed agent adds its backend credential demand');
+  });
+
+  it("does not invent a refusal for a posture flag this document's boot never reads", async () => {
+    // RAYSPEC_ANTHROPIC_REUSE_LOGIN is read in ONE place: the anthropic backend's construction. This
+    // document selects `openai`, so an unrecognised value is not a refusal for it — the boot builds
+    // the factory and serves. A verdict that reds here would be a demand the boot does not raise,
+    // reported by the command that exists to pre-empt real ones.
+    const { code, out, err } = await checkEnv(['--check-env', './openai-only.rayspec.yaml'], {
+      DATABASE_URL: 'postgresql://u:p@127.0.0.1:1/db',
+      RAYSPEC_JWT_SIGNING_KEY: 'pem',
+      RAYSPEC_API_KEY_PEPPER: 'pepper',
+      OPENAI_API_KEY: 'k',
+      RAYSPEC_ANTHROPIC_REUSE_LOGIN: 'maybe',
+    });
+    expect(code, `--- stdout ---\n${out}\n--- stderr ---\n${err}`).toBe(0);
+    const verdict = JSON.parse(out);
+    expect(verdict.ok).toBe(true);
+    expect(verdict.errors).toEqual([]);
   });
 
   it('names the .env files its auto-loader searched — the usual cause of a disputed "unset"', async () => {
@@ -251,9 +287,15 @@ maybeDescribe('rayspec deploy --check-env — it opens no socket, no database, n
       RAYSPEC_JWT_SIGNING_KEY: secret,
       RAYSPEC_API_KEY_PEPPER: secret,
       ANTHROPIC_API_KEY: secret,
+      // The posture flag is the ONE variable whose value the verdict judges, and an unrecognised one
+      // is the case that judges it — so the sentinel is planted THERE too, on the only path that
+      // could ever have echoed. Without this the claim holds only where nothing reads a value.
+      RAYSPEC_ANTHROPIC_REUSE_LOGIN: secret,
     });
     expect(out).not.toContain(secret);
-    expect(JSON.parse(out).required[0].set).toBe(true);
+    const verdict = JSON.parse(out);
+    expect(verdict.required[0].set).toBe(true);
+    expect(verdict.errors).toHaveLength(1);
   });
 });
 

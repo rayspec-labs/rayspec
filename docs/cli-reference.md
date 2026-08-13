@@ -727,9 +727,13 @@ change is applied by the explicit `--apply-migration` flag below.
 - **`--check-env`** is the other **one-shot**, DB-free, network-free check: the
   environment variables **this document's boot will require**, each with its
   `<VAR>_FILE` equivalent where it has one, **why** it is required, and whether it is
-  currently set. Exit `0` when every demand is met, `1` when one is not — `missing`
-  lists the unmet ones. It is the answer a refused `deploy` used to be the only way to
-  get, and that answer is not cheap: the demands a declared `stream` route, playback
+  currently set. Exit `0` when every demand is met **and** no refusal is already
+  visible, `1` otherwise — `missing` lists the unmet demands, and `errors` names a
+  refusal that is *not* an unset variable (a document that does not validate, an agent
+  selecting a backend that is not wired, an `stt.*` step declared without the audio
+  capability, an unrecognised `RAYSPEC_ANTHROPIC_REUSE_LOGIN` on a document that selects
+  the `anthropic` backend). It is the answer a refused `deploy` used to be the only way
+  to get, and that answer is not cheap: the demands a declared `stream` route, playback
   route or `cron` trigger raise are reached only **after** the boot has opened the
   database and applied the whole committed migration chain.
 
@@ -738,13 +742,20 @@ change is applied by the explicit `--apply-migration` flag below.
   ```
 
   It reads the **document and the environment**, and it needs both — some demands have
-  no document signal at all. Setting `STT_PROVIDER=deepgram` makes `DEEPGRAM_API_KEY`
-  required and `TTS_PROVIDER=openai` makes `OPENAI_API_KEY` required, whatever the
-  document says. A provider **selector is never itself an unconditional demand**: on a
+  no document signal at all. On a **backend** document, setting `STT_PROVIDER=deepgram`
+  makes `DEEPGRAM_API_KEY` required and `TTS_PROVIDER=openai` makes `OPENAI_API_KEY`
+  required, whatever that document declares — the two speech capabilities are wired from
+  the environment alone. (It is a backend-document law: a **product** document reads
+  `STT_PROVIDER` on its own terms below and never reads `TTS_PROVIDER` at all, and a
+  frontend-only one reads neither.) A provider **selector is never itself an
+  unconditional demand**: on a
   backend document, leaving either unset means that capability is simply absent, which
   is not a boot error, so both are reported under `optional` saying exactly that; on a
   product document `STT_PROVIDER` *is* demanded, but only when the document declares an
-  `stt.*` step. In neither case does a credential become a demand before a provider has
+  `stt.*` step **alongside the audio capability** — a document that declares `stt.*`
+  without audio is refused on its shape, before the boot reads the selector at all, and
+  the verdict reports that refusal instead of a demand no value would satisfy. In
+  neither case does a credential become a demand before a provider has
   been selected. Each profile is answered on its own
   terms — a frontend-only (static) document is told it needs **none** of the three
   platform secrets, and a product document gets `RAYSPEC_PRODUCT_TENANT_ID` plus the
@@ -763,14 +774,27 @@ change is applied by the explicit `--apply-migration` flag below.
 
   What it deliberately does not do is in the verdict's `notChecked`, not left to
   inference. It opens **no socket, no database and no credential**, and it loads **no
-  extension pack** — running pack code is what would break that promise — so a
-  pack-supplied blob backend (which *removes* the `RAYSPEC_BLOB_ROOT` demand) and a
-  pack-contributed agent (which *adds* a backend credential demand) are both invisible
-  here. A set `<VAR>_FILE` mount counts as set from the variable alone: the file is
+  extension pack** — running pack code is what would break that promise — so every
+  demand a pack changes is invisible here. It runs in **both** directions: a
+  pack-supplied blob backend *removes* the `RAYSPEC_BLOB_ROOT` demand, while a
+  pack-contributed `api` route *adds* the `RAYSPEC_BLOB_ROOT` demand (any
+  `kind: stream`) and the `RAYSPEC_MEDIA_SIGNING_KEY` demand (`mode: playback`), and a
+  pack-contributed agent *adds* its backend's credential demand. The boot guards ask
+  their questions of the **post-merge** document; this reads the base one — so a
+  document whose whole route surface arrives from a pack (the
+  [`stream-backend` example](../examples/stream-backend/rayspec.yaml) is exactly that
+  shape) reports the three unconditional secrets and nothing more. To keep that from
+  reading as a clean bill of health, the verdict **names the packs the document
+  declares** — parsed off `extensions[]`, never loaded. A set `<VAR>_FILE` mount counts
+  as set from the variable alone: the file is
   never opened, so a missing, unreadable or empty secret file still refuses the boot.
   And **no value is validated** — a malformed PKCS#8 PEM, a non-UUID
   `RAYSPEC_CRON_TENANT_ID` or a media key under 32 bytes is reported as set and still
-  refuses. No environment value is ever printed; every variable is a `set` boolean. The
+  refuses. A value is *read* only where it decides **which** demands apply: a selected
+  `STT_PROVIDER` / `TTS_PROVIDER`, and `RAYSPEC_ANTHROPIC_REUSE_LOGIN`, whose
+  unrecognised value *is* reported because it decides whether the anthropic token demand
+  exists at all. No environment value is ever printed; every variable is a `set` boolean
+  and the one refusal about a value names the variable without quoting it. The
   verdict also names the `.env` files the CLI's loader searched (`searchedDotenv`),
   which is usually the answer to a disputed "unset". It is rejected with `--dry-run`
   (each emits its own verdict) and with `--apply-migration` / `--allowlist` (it opens no
