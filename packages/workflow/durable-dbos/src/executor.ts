@@ -123,6 +123,25 @@ export interface DbosExecutorConfig {
    */
   readonly systemDatabaseUrl: string;
   /**
+   * The DBOS APPLICATION VERSION this worker runs as — the ONLY discriminator DBOS's dequeue is
+   * scoped by (`application_version IS NULL OR application_version = $3` in
+   * `findAndMarkStartableWorkflows`; the other column it could have used, `executor_id`, is not a
+   * discriminator here because nothing in this repo sets `DBOSConfig.executorID` and DBOS then
+   * defaults it to the same constant in every process).
+   * Supply it to fence a deployment to the work its OWN document enqueued: two processes sharing one
+   * DATABASE_URL, and therefore one DBOS system database and one set of queue names, otherwise
+   * dequeue each other's jobs.
+   *
+   * OPTIONAL, and the omission is meaningful: with no value DBOS computes its own version (an md5
+   * over the registered workflow functions' source plus the SDK version). Every caller that has no
+   * document to name — the test harnesses — keeps that computed hash. The composition roots derive
+   * theirs from the deployed document's identity (`deriveDbosApplicationVersion` in @rayspec/server).
+   * Supplying it means the SDK version and the wrapper source no longer participate in the value;
+   * what pins those instead is the exact `@dbos-inc/dbos-sdk` version in this package's package.json
+   * plus the compile-time key assertions in `wire-shape-assertions.ts`.
+   */
+  readonly applicationVersion?: string;
+  /**
    * The queue's worker concurrency cap (the concurrency-semaphore discipline; a conservative
    * default). Bounds how many `runAgentJob`s this worker runs at once.
    */
@@ -542,6 +561,16 @@ export class DbosDurableExecutor implements DurableExecutor {
       // `runtimeConfig:{ runAdminServer }` nesting — `DBOSConfig` has no `runtimeConfig` field, so the
       // top-level field is the correct + only typeable shape for the programmatic setConfig surface.)
       runAdminServer: false,
+      // FENCE (issue #359): the per-document application version, when the deployment named one.
+      // `applicationVersion` is a TOP-LEVEL `DBOSConfig` field (dbos-executor.d.ts:56, one line below
+      // `runAdminServer` above) and `DBOS.launch` copies it into `globalParams.appVersion` BEFORE
+      // `init()` reaches the `if (globalParams.appVersion === '')` compute branch — so supplying it
+      // here replaces DBOS's own hash rather than racing it. Spread CONDITIONALLY: an executor
+      // constructed without one must send NO key, so DBOS still computes its version (the shape every
+      // test harness relies on).
+      ...(this.#config.applicationVersion
+        ? { applicationVersion: this.#config.applicationVersion }
+        : {}),
       ...(this.#config.logger ? { logger: this.#config.logger } : {}),
     });
 
@@ -564,8 +593,13 @@ export class DbosDurableExecutor implements DurableExecutor {
     await DBOS.launch();
 
     // The off-request queue (DBOS-native worker-concurrency cap — the SAFE-half semaphore).
+    // `onConflict:'always_update'` is REQUIRED once `applicationVersion` is per-document: the DBOS
+    // default (`update_if_latest_version`) only writes the queue row when THIS process's version is
+    // the newest row in `application_versions`, and otherwise degrades the upsert to ON CONFLICT DO
+    // NOTHING — so a second deployment's `workerConcurrency` would look accepted and never apply.
     await DBOS.registerQueue(AGENT_RUNS_QUEUE, {
       workerConcurrency: this.#config.workerConcurrency ?? DEFAULT_WORKER_CONCURRENCY,
+      onConflict: 'always_update',
     });
 
     this.#started = true;

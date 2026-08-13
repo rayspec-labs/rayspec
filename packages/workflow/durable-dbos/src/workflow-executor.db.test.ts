@@ -9,6 +9,10 @@
  *  2. SINGLE-FLIGHT: enqueueing the SAME (tenant, workflow, idempotency) twice — the DBOS
  *     workflowID is the tenant-namespaced durableWorkflowRunId — runs the engine (and its nodes)
  *     EXACTLY once (a node counter proves it), and the second enqueue reports deduped.
+ *  3. FENCE: the `applicationVersion` the executor is booted with lands in the DBOS system database's
+ *     `workflow_status.application_version` — the column DBOS's dequeue predicate is scoped by.
+ *  4. TERMINAL JOURNAL: a job whose resolver THROWS still gets a `workflow_runs` row, settled at
+ *     `terminal_failure`, plus the one log line — and the original resolver error still fails the job.
  *
  * Booted like executor.db.test.ts (drop sys db → makeDbWithSchema → spine+workflow DDL → one launch).
  */
@@ -30,7 +34,12 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DbosDurableExecutor, type DbosExecutorDeps, type ResolvedRun } from './executor.js';
 import { buildSpineSchemaSql } from './test-support/schema-ddl.js';
-import { DbosWorkflowExecutor, type WorkflowJob } from './workflow-executor.js';
+import {
+  DbosWorkflowExecutor,
+  WORKFLOW_RESOLVE_FAILED_CODE,
+  type WorkflowJob,
+  workflowResolveFailureLog,
+} from './workflow-executor.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const envPath = join(here, '..', '..', '..', '..', '.env');
@@ -40,9 +49,15 @@ const PID = process.pid;
 const APP_SCHEMA = `rayspec_test_wf_spine_${PID}`;
 const DBOS_SYS_DB = `rayspec_wf_spine_${PID}_sys`;
 const TENANT = '00000000-0000-0000-0000-0000000000ab';
+/** The per-document DBOS application version this launch is fenced to (shape: the server's helper). */
+const DOC_APP_VERSION = 'doc-0f1e2d3c4b5a6978';
+/** A workflow id the module-level resolver refuses — the shape of a foreign / undeployed document. */
+const UNKNOWN_WORKFLOW_ID = 'not_deployed_here';
 
 // A module-level node counter proving single-flight: the capability node bumps it on each REAL run.
 let nodeRuns = 0;
+// Every line the workflow executor's injected logger sink received (asserted by the terminal-journal test).
+const workerWarnings: string[] = [];
 
 type DbHandle = ReturnType<typeof makeDbWithSchema>;
 let db: DbHandle;
@@ -74,7 +89,13 @@ function counterWorkflow(): WorkflowSpec {
   };
 }
 
-function resolveWorkflowRun(_job: WorkflowJob, tdb: ReturnType<typeof forTenant>) {
+function resolveWorkflowRun(job: WorkflowJob, tdb: ReturnType<typeof forTenant>) {
+  // The production resolvers throw exactly here for a workflow id the deployed document does not
+  // carry (product-boot.ts's "durable worker: unknown workflow '…' (fail-closed)."). Reproducing that
+  // throw on a sentinel id reuses this file's single DBOS launch.
+  if (job.workflowId === UNKNOWN_WORKFLOW_ID) {
+    throw new Error(`durable worker: unknown workflow '${job.workflowId}' (fail-closed).`);
+  }
   const registry = new CapabilityRegistry();
   registry.register('count.increment', ({ step }) => {
     nodeRuns += 1;
@@ -181,8 +202,13 @@ beforeAll(async () => {
   executor = new DbosDurableExecutor(deps, {
     name: `rayspec-wf-spine-${PID}`,
     systemDatabaseUrl: withDbName(url, DBOS_SYS_DB),
+    applicationVersion: DOC_APP_VERSION,
   });
-  wfExecutor = new DbosWorkflowExecutor({ db: db as unknown as Db, resolveWorkflowRun });
+  wfExecutor = new DbosWorkflowExecutor({
+    db: db as unknown as Db,
+    resolveWorkflowRun,
+    logger: { warn: (m) => workerWarnings.push(m) },
+  });
   executor.attachPreLaunchHook(() => wfExecutor.registerWorkflowJob());
   await executor.start();
   await wfExecutor.registerQueueAfterLaunch();
@@ -190,6 +216,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   nodeRuns = 0;
+  workerWarnings.length = 0;
   await db.$client.unsafe(
     'TRUNCATE workflow_runs, workflow_node_states, workflow_artifacts CASCADE',
   );
@@ -300,5 +327,90 @@ describe('DBOS workflow spine — engine.execute off-request', () => {
     expect(a.workflowRunId).toBe(b.workflowRunId); // both resolve the same tenant-namespaced durable id
     await waitForTerminal(a.workflowRunId);
     expect(nodeRuns).toBe(1); // DBOS workflowID idempotency ⇒ the engine + its node ran EXACTLY once
+  });
+
+  it('the enqueued job carries the boot application version in the DBOS fence column', async () => {
+    // GROUND TRUTH for the fence: `DbosExecutorConfig.applicationVersion` → `DBOS.setConfig` →
+    // `globalParams.appVersion` → the `application_version` column DBOS's dequeue predicate is scoped
+    // by (`application_version IS NULL OR application_version = $3`, system_database.js:1824). This
+    // asserts the VALUE lands in that column; it does not run a second process (DBOS's config and
+    // launch state are process-global, so one process holds exactly one version at a time).
+    const { workflowRunId } = await wfExecutor.enqueueWorkflowRun({
+      tenantId: TENANT,
+      workflow: counterWorkflow(),
+      event: event(),
+      idempotencyKey: 'k-appversion',
+    });
+    expect(await waitForTerminal(workflowRunId)).toBe('succeeded');
+
+    const sys = postgres(withDbName(appBaseUrl, DBOS_SYS_DB), { max: 1 });
+    try {
+      const rows = await sys.unsafe(
+        'SELECT application_version FROM dbos.workflow_status WHERE workflow_uuid = $1',
+        [workflowRunId],
+      );
+      expect(rows).toHaveLength(1);
+      expect((rows[0] as { application_version: string }).application_version).toBe(
+        DOC_APP_VERSION,
+      );
+    } finally {
+      await sys.end();
+    }
+  });
+
+  it('a resolver failure is JOURNALLED as a terminal run and still fails the durable job', async () => {
+    // The fail-closed resolver throws BEFORE the engine is constructed, so neither `ensureRun` nor
+    // `finalizeRun` is ever reached and the run has no header at all — the loss the journal is meant
+    // to record. The worker now writes the terminal header itself, best-effort, and rethrows.
+    const { workflowRunId } = await wfExecutor.enqueueWorkflowRun({
+      tenantId: TENANT,
+      workflow: { ...counterWorkflow(), id: UNKNOWN_WORKFLOW_ID },
+      event: event(),
+      idempotencyKey: 'k-unknown',
+    });
+
+    expect(await waitForTerminal(workflowRunId)).toBe('failed'); // the original error still surfaces
+    expect(nodeRuns).toBe(0); // nothing ran
+
+    const runs = await db.$client.unsafe(
+      'SELECT status, trigger_event, error, resumable, attempts FROM workflow_runs ' +
+        'WHERE workflow_run_id = $1 AND tenant_id = $2',
+      [workflowRunId, TENANT],
+    );
+    expect(runs).toHaveLength(1); // EXACTLY one header — today there is none
+    const row = runs[0] as {
+      status: string;
+      trigger_event: string;
+      error: { code: string; message: string; retryable: boolean };
+      resumable: boolean;
+      attempts: string;
+    };
+    expect(row.status).toBe('terminal_failure');
+    expect(row.trigger_event).toBe('thing.happened'); // the job's own event type
+    expect(row.error.code).toBe(WORKFLOW_RESOLVE_FAILED_CODE);
+    expect(row.error.message).toContain(UNKNOWN_WORKFLOW_ID); // the resolver's own reason is on the row
+    expect(row.error.retryable).toBe(false);
+    expect(row.resumable).toBe(false);
+    expect(Number(row.attempts)).toBe(0);
+
+    // No node states were invented for a run that never entered the engine.
+    const nodes = await db.$client.unsafe(
+      'SELECT node_id FROM workflow_node_states WHERE workflow_run_id = $1',
+      [workflowRunId],
+    );
+    expect(nodes).toHaveLength(0);
+
+    // The header exists and is settled ⇒ liveness is `terminal` (it was `absent` before this).
+    expect(await wfExecutor.liveness(TENANT, workflowRunId)).toBe('terminal');
+
+    // …and the deployment's own log surface carries the one line, with the same wording the pure
+    // builder produces (pinned in workflow-resolve-failure.unit.test.ts).
+    expect(workerWarnings).toContain(
+      workflowResolveFailureLog({
+        workflowRunId,
+        tenantId: TENANT,
+        workflowId: UNKNOWN_WORKFLOW_ID,
+      }),
+    );
   });
 });

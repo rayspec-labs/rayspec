@@ -38,6 +38,11 @@ type _RetriesAllowed = AssertTrue<HasKey<StepConfig, 'retriesAllowed'>>;
 type _RunAdminServer = AssertTrue<HasKey<DBOSConfig, 'runAdminServer'>>;
 type _SystemDatabaseUrl = AssertTrue<HasKey<DBOSConfig, 'systemDatabaseUrl'>>;
 type _Logger = AssertTrue<HasKey<DBOSConfig, 'logger'>>;
+// DBOSConfig.applicationVersion — the per-document DBOS dequeue fence. The executor passes it through
+// a CONDITIONAL SPREAD, and TypeScript does not excess-property-check a spread, so a rename/removal of
+// this field would otherwise be silent: the config would carry an ignored key, DBOS would fall back to
+// its own computed hash, and two deployments on one system database would share a version again.
+type _ApplicationVersion = AssertTrue<HasKey<DBOSConfig, 'applicationVersion'>>;
 
 // 4. registerQueue's params carry `workerConcurrency` — the worker-concurrency cap. We derive
 //    the param type from the INSTALLED function signature (QueueParameters is not publicly exported),
@@ -79,6 +84,7 @@ type _WireShapeAssertions = [
   _RunAdminServer,
   _SystemDatabaseUrl,
   _Logger,
+  _ApplicationVersion,
   _WorkerConcurrency,
   _WorkflowID,
   _QueueName,

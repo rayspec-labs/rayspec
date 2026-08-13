@@ -435,6 +435,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The durable worker is now fenced to its own document, so two deployments sharing one
+  `DATABASE_URL` stop dequeuing each other's off-request work — and a job whose workflow the consuming
+  worker cannot resolve is now written to the `workflow_runs` journal instead of vanishing from it.**
+  Two independent defects produced one loss. DBOS scopes its dequeue by *application version*, and
+  with nothing supplying one it derives that version by hashing the registered workflow functions'
+  source plus the SDK version — and the four functions this platform registers are thin wrappers that
+  carry nothing from the deployed document, so every deployment computed the same value (`Application
+  version: 996e39929f1554623be6f051725a80ff` on this repo's own workflow spine test before the change).
+  Two processes on one `DATABASE_URL` also derive the same DBOS system database and register the same
+  two queue names, and the only other column DBOS's dequeue could have discriminated on — the executor
+  id — is no help either, because nothing here sets it and DBOS defaults it to the same constant in
+  every process. So nothing
+  at all distinguished them: either worker could claim either deployment's job, and on claiming a
+  foreign one its fail-closed resolver killed the run terminally. That resolver throws *before* the
+  workflow engine is constructed, and the engine is the only writer of the journal's run header — so
+  the killed run left **no row at all** in `workflow_runs`, not even an orphaned `running` header, and
+  the stack trace landed on the stderr of the process that consumed the job rather than the one that
+  accepted it.
+  A durable worker now boots with `applicationVersion` derived from the deployed document's
+  **identity** — `product.id` for a Product-YAML boot, `metadata.name` for a backend spec, each
+  namespaced by profile and hashed to a short prefixed digest (`doc-` plus 16 hex characters). Two
+  different documents are fenced from each other; the same document keeps the same version across
+  redeploys, so a redeployed process comes back and consumes the work it queued before it restarted.
+  Deriving it from document *content* was rejected deliberately: a row whose version matches no
+  running worker is inert in both directions — never dequeued, never recovered — and this deployment
+  has no way back out of that state, because resuming a workflow does not reset the column, DBOS's
+  garbage collection skips exactly the pending and enqueued rows, and the HTTP escape hatches live on
+  the admin server the platform deliberately never binds. A content hash would therefore have turned
+  every document edit into permanent work-stranding.
+  Both queue registrations now also pass `onConflict: "always_update"`. That is not cosmetic: DBOS's
+  default only writes the queue row when the running version is the newest one registered, which
+  per-document versions make the *un*common case — a second deployment's `workerConcurrency` would
+  have looked accepted and silently not applied.
+  **What an operator observes.** The `Application version` DBOS prints as it initializes — and the
+  `applicationVersion` field the public `GET /recovery-scope` readiness probe reports — is now a
+  `doc-…` value rather than a platform hash. It is still an opaque digest and still discloses nothing
+  about the document beyond distinguishing it, and the probe's fail-closed contract is unchanged: both
+  fields non-empty, else `503`. Where two documents share one DBOS system database
+  **both** will print
+  DBOS's own `Current version '…' is not the latest version.` warning on every boot — expected, and
+  the diagnostic that was missing before. A run whose workflow the worker cannot resolve now leaves a
+  `workflow_runs` row with `status = "terminal_failure"`, `resumable = false`, `attempts = 0` and the
+  resolver's own message under `error` (code `workflow_resolve_failed`), and the worker emits one line
+  naming the workflow, the tenant and the run id through an injectable sink that defaults to
+  `console.warn`. The run's reconciled liveness for such a run is now `terminal` where it was
+  `absent`. `rayspec`'s live-smoke run diagnostics consequently print the workflow-journal line for
+  these runs instead of reporting the run in neither journal.
+  **What did not change.** The happy path writes exactly what it wrote before — same header, same node
+  states, same artifacts. The new journal write is scoped to the resolver alone and never widened over
+  the engine, which keeps its invariant that an invalid spec never creates a run header; it is
+  best-effort and cannot mask a failure, since it goes through the tenant chokepoint inside its own
+  `try`/`catch` and the original resolver error is rethrown either way, so the durable job still fails.
+  A worker constructed without a document — every test harness — still gets DBOS's own computed
+  version. And the bound of the fence is exactly what it says: it separates **distinct** documents. A
+  second process running the **same** document still consumes that document's jobs, which is correct —
+  it has those workflows registered and can run them. Supplying a version also means the SDK version
+  and the wrapper source no longer participate in it; what pins those instead is the exact
+  `@dbos-inc/dbos-sdk` version this package depends on and the compile-time DBOS key assertions that
+  break `tsc -b` if the config field is renamed or removed. (Issue #359.)
 - **`rayspec deploy --dry-run` now judges a backend-profile document by the backend grammar, so a
   document `deploy` validates and boots is no longer reported `ok: false` by its own preview.** The
   dry run applied the **product** ruleset to every document: a product document was parsed by it, a

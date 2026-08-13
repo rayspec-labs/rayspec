@@ -150,6 +150,7 @@ import {
   resolveLiveTenantOrgId,
   type ServerConfig,
 } from './composition-root.js';
+import { deriveDbosApplicationVersion } from './durable-app-version.js';
 
 /** A fail-closed product-boot config defect (a missing/invalid env or config file). */
 export class ProductBootError extends Error {
@@ -2681,7 +2682,15 @@ export async function deployProductYamlSpec(
         );
       },
     },
-    { name: spec.product.id, systemDatabaseUrl: config.dbosSystemDatabaseUrl },
+    {
+      name: spec.product.id,
+      systemDatabaseUrl: config.dbosSystemDatabaseUrl,
+      // FENCE (issue #359): scope DBOS's dequeue to THIS document. Two processes on one DATABASE_URL
+      // share one DBOS system database and one set of queue names, and the application version is the
+      // only discriminator DBOS's dequeue offers — so without this a worker claims (and fail-closed
+      // kills) a job belonging to the other deployment's product.
+      applicationVersion: deriveDbosApplicationVersion('product', spec.product.id),
+    },
   );
   executor.attachPreLaunchHook(() => wfExecutor.registerWorkflowJob());
 
