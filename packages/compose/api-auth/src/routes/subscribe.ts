@@ -17,6 +17,9 @@
  *     nominal on purpose: a topic is author data, so a handler could emit `rayspec.truncated` itself
  *     — but it could never emit a frame WITHOUT an id, because every event has a sequence number.
  *     A client that keys on the presence of `id:` cannot be spoofed by a topic name.
+ *   - A RESUME CHECKPOINT is an `id:` line and nothing else — no frame at all. See
+ *     `formatResumeCheckpoint`, which is what keeps the server's own mandatory close from costing a
+ *     subscriber events.
  *   - `at` is NOT on the wire. It is transaction-start time while `seq` is flush time, so the two
  *     disagree on order under concurrency; shipping it would invite clients to sort by it. A handler
  *     that wants a timestamp puts one in its payload.
@@ -40,6 +43,15 @@
  * other route gets. A second, bespoke re-authorization path inside the loop was rejected: it would be
  * a parallel authorization implementation that could drift from the middleware, and the reconnect
  * already re-runs the real one.
+ *
+ * THE CAP IS THE SERVER'S OWN CLOSE, SO THE RESUME POSITION MUST ALWAYS BE ON THE WIRE BEFORE IT.
+ * That is `formatResumeCheckpoint`, and it is the reason this route can promise a reconnect costs no
+ * events. Without it the cap is a silent-loss window: an `EventSource` last-event-ID starts EMPTY and
+ * is only ever set by an `id:`, control frames deliberately carry none, and a cursor-less subscriber
+ * therefore reaches the cap holding nothing to send back — its automatic reconnect omits
+ * `Last-Event-ID` entirely, lands in the no-cursor branch below, and resumes at the NEW tail, so
+ * everything emitted during the browser's reconnect delay is skipped while `rayspec.live` asserts the
+ * backlog is drained.
  */
 
 import type { OpenAPIHono } from '@hono/zod-openapi';
@@ -52,6 +64,9 @@ import { requireAuth, requirePermission, resolveTenant } from '../http/middlewar
 
 /** The separator between a cursor's tenant tag and its sequence number. */
 const CURSOR_SEPARATOR = ':';
+
+/** The ONLY shape a cursor's sequence half may take — see `parseEventCursor` for why it is lexical. */
+const DECIMAL_SEQUENCE = /^[0-9]+$/;
 
 /**
  * How long a subscriber waits for a wake before reading anyway — the correctness BACKSTOP and the
@@ -73,7 +88,7 @@ const CURSOR_SEPARATOR = ':';
 export const DEFAULT_EVENT_POLL_INTERVAL_MS = 5_000;
 
 /** Rows scanned per read. The (tenant_id, seq) primary key makes this an ordered range scan. */
-const EVENT_PAGE_LIMIT = 500;
+export const EVENT_PAGE_LIMIT = 500;
 
 /** The most topics one subscription may filter on (a bound on the filter, not a product limit). */
 const MAX_SUBSCRIBE_TOPICS = 64;
@@ -87,6 +102,33 @@ export const LIVE_FRAME_EVENT = 'rayspec.live';
 /** Format the SSE `id:` for one event — the tenant-qualified cursor a client resumes from. */
 export function formatEventCursor(tenantId: string, seq: number): string {
   return `${tenantId}${CURSOR_SEPARATOR}${seq}`;
+}
+
+/**
+ * The RESUME CHECKPOINT: an `id:` line, a blank line, and nothing else.
+ *
+ * WHY IT EXISTS. This server forces a close on every subscription (the lifetime cap), so a reconnect
+ * is not an accident to tolerate but a step in the protocol — and a reconnect only resumes if the
+ * client is holding a cursor. An `EventSource`'s last-event-ID string starts EMPTY and is set by
+ * nothing but an `id:` field, while control frames deliberately carry none. A subscriber that has not
+ * yet been handed a DATA frame therefore reaches the cap with nothing to send back: its automatic
+ * reconnect omits `Last-Event-ID`, the server reads that as "fresh subscriber", starts it at the tail
+ * it probes THEN, and everything emitted during the reconnect delay is gone — silently, with
+ * `rayspec.live` announcing the backlog is drained. That is the exact class of failure this whole
+ * protocol exists to remove, arriving through a close the server itself schedules.
+ *
+ * WHY IT IS NOT A FRAME. Per the HTML event-stream grammar, dispatching sets the last-event-ID string
+ * from the id buffer BEFORE it returns early on an empty data buffer. So an `id:`-only block updates
+ * exactly one thing — what the client will send back — and dispatches no event at all. Nothing in the
+ * frame contract moves: a data frame still carries an `id:`, a control frame still carries none, and
+ * a client that discriminates on that is unaffected because it never sees this block.
+ *
+ * IT IS WRITTEN WHENEVER THE CURSOR MOVES WITHOUT A DELIVERY — a fresh subscriber parked at the tail,
+ * and a topic-filtered one whose window matched nothing (there the cursor legitimately runs ahead of
+ * the last delivered seq). When a delivery already published the position, nothing is written.
+ */
+export function formatResumeCheckpoint(tenantId: string, seq: number): string {
+  return `id: ${formatEventCursor(tenantId, seq)}\n\n`;
 }
 
 /**
@@ -108,8 +150,15 @@ export function sseEventName(topic: string): string {
  * Parse a client-supplied cursor against the request's SERVER-DERIVED tenant.
  *
  * Refuses, rather than coerces, on every failure: a malformed cursor, a cursor carrying another
- * tenant's tag, and a negative/non-integer sequence. Coercing any of these would resume the
+ * tenant's tag, and a sequence that is not decimal digits. Coercing any of these would resume the
  * subscriber somewhere it did not ask for and look successful while doing it.
+ *
+ * THE SEQUENCE IS CHECKED LEXICALLY BEFORE IT IS CONVERTED, which is not pedantry: `Number()` accepts
+ * hexadecimal, exponent, fractional, signed and whitespace-padded forms AND the empty string, and
+ * every one of those coerces to a perfectly plausible sequence. `<tenant>:0x10` would resume at 16
+ * and silently skip fifteen events; `<tenant>:` would coerce to 0 and replay the whole stream. Both
+ * are a `200` that reads exactly like a working subscription — the failure this route exists to make
+ * impossible — so only `[0-9]+` is a cursor.
  */
 export function parseEventCursor(raw: string, tenantId: string): number {
   const at = raw.indexOf(CURSOR_SEPARATOR);
@@ -130,14 +179,17 @@ export function parseEventCursor(raw: string, tenantId: string): number {
         'events. Start a fresh subscription (omit `since`) after switching orgs.',
     );
   }
-  const seq = Number(raw.slice(at + 1));
-  if (!Number.isSafeInteger(seq) || seq < 0) {
+  const rest = raw.slice(at + 1);
+  if (!DECIMAL_SEQUENCE.test(rest) || !Number.isSafeInteger(Number(rest))) {
     throw new ApiError(
       'VALIDATION_ERROR',
-      'The subscription cursor carries a sequence that is not a non-negative whole number.',
+      'The subscription cursor carries a sequence that is not a non-negative whole number. It must ' +
+        'be decimal digits, exactly as this stream wrote them: a hexadecimal, exponent, fractional, ' +
+        'signed, padded or empty sequence is refused rather than coerced, because coercing it would ' +
+        'resume the subscriber at a position it never asked for and look successful while doing it.',
     );
   }
-  return seq;
+  return Number(rest);
 }
 
 /**
@@ -224,6 +276,9 @@ async function subscribeToTenantEvents(c: Context<AppEnv>, deps: AppDeps): Promi
     // read is one round trip and not two.
     let prefetched: TenantEventPage | undefined = opening.page;
     let announcedLive = false;
+    // The cursor the CLIENT is holding — what its reconnect would send back. Every data frame sets
+    // it, and `formatResumeCheckpoint` publishes it whenever the server's cursor moved without one.
+    let published: number | undefined;
 
     // The wake: one process-local listener fans out to this subscriber. A wake is a hint to read NOW;
     // the poll below is what makes a MISSED wake cost latency instead of an event. A wake that cannot
@@ -281,11 +336,20 @@ async function subscribeToTenantEvents(c: Context<AppEnv>, deps: AppDeps): Promi
             event: sseEventName(event.topic),
             data: JSON.stringify(event.payload ?? null),
           });
+          published = event.seq;
         }
         // Advance past everything SCANNED, not just what was delivered: a window whose rows were all
         // filtered out still moves the cursor, or a topic-filtered subscriber would re-scan the same
         // window forever and never reach the events it does want.
         cursor = Math.max(cursor, page.scannedThrough);
+
+        // Put the resume position on the wire BEFORE this connection can end — the cap can close it
+        // at any await from here on, and a client holding no cursor resumes at the tail. See
+        // `formatResumeCheckpoint`.
+        if (cursor !== published) {
+          published = cursor;
+          await stream.write(formatResumeCheckpoint(tenantId, cursor));
+        }
 
         // More backlog behind this page — drain it without waiting.
         if (page.scannedThrough < page.lastSeq) continue;
@@ -323,6 +387,8 @@ async function subscribeToTenantEvents(c: Context<AppEnv>, deps: AppDeps): Promi
     }
     // Falling out of the loop CLOSES the stream (the lifetime cap, or the client leaving). A client
     // reconnects with its `Last-Event-ID`, which re-runs the whole auth chain — see the file header.
+    // That header is never empty by the time this line is reached: the checkpoint above published the
+    // cursor, so the reconnect resumes rather than restarting at the tail.
   });
 }
 
@@ -340,7 +406,8 @@ interface OpeningRead {
  * cursor is the head, which is by construction at or above the floor. Treating "cursor 0" as "below
  * the floor" would hand every first-time subscriber of an aged stream a spurious truncation notice —
  * telling it that it lost history it never had, and training clients to ignore the one signal that
- * matters.
+ * matters. That tail is then PUBLISHED as a resume checkpoint by the loop above, so "no cursor" means
+ * "start here" exactly once and never again silently re-means it on the reconnect the cap forces.
  *
  * A CURSOR FROM THE FUTURE IS REFUSED. A sequence above the head was never issued to this tenant, so
  * it cannot be resumed; served as an ordinary subscription it would be an "ok" stream that stays

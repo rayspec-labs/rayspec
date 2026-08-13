@@ -1598,6 +1598,13 @@ es.addEventListener('note.created', (e) => render(JSON.parse(e.data)))
 - The event's timestamp is **not on the wire**. It is transaction-start time and is
   not monotone with `seq`, so shipping it would only invite clients to sort by it. A
   handler that wants a timestamp puts one in its payload.
+- Between frames you may see a block that is an `id:` line and nothing else — the
+  **resume checkpoint**. It is not a frame and dispatches no event; it exists so that
+  a subscriber which has not been handed a data frame yet is still holding a cursor
+  when the lifetime cap closes the stream (see *Delivery, and what bounds it*).
+  `EventSource` consumes it for you; a hand-written parser must treat a block with no
+  `data:` as a cursor update rather than as an event, which is what the event-stream
+  grammar already says.
 
 ### The cursor
 
@@ -1609,7 +1616,10 @@ environments. Four refusals, each a `400` rather than a plausible-looking stream
 
 - a cursor that is not `<tenant_id>:<seq>`;
 - a cursor tagged with a **different tenant** than the request's;
-- a cursor whose sequence is not a non-negative whole number;
+- a cursor whose sequence is not **decimal digits** — a hexadecimal, exponent,
+  fractional, signed, padded or empty sequence is refused rather than coerced, because
+  coercing it resumes the subscriber at a position it never asked for (`:0x10` would
+  quietly start at 16) and looks successful while doing it;
 - a cursor **ahead of the stream** — no such sequence was ever issued to this tenant,
   and serving it would look exactly like a healthy stream that has gone quiet.
 
@@ -1635,8 +1645,14 @@ filter does not slow your resume down — the cursor advances past the events it
   and your client reconnects. That reconnect is a fresh request through the whole auth
   chain, which is what makes a revoked principal stop receiving events; permission is
   middleware and is otherwise only checked at connect.
-- **A reconnect is free.** `EventSource` resends the last `id:` it saw as
-  `Last-Event-ID`, so the lifetime cap costs a round trip and no events.
+- **A reconnect is free**, and the server is what makes it so. `EventSource` resends
+  the last `id:` it saw as `Last-Event-ID` — but its last-event-ID string starts
+  *empty* and is set by nothing except an `id:`, so a subscriber on a quiet workspace
+  would reach the cap having seen none and reconnect with no cursor at all, landing
+  back at the tail with whatever arrived in between skipped. The route therefore
+  publishes a **resume checkpoint** whenever its cursor moves without a delivery, so
+  the position is always on the wire before the close it schedules. The cap costs a
+  round trip and no events.
 
 There is no WebSocket surface, and none is planned: SSE plus a durable cursor covers
 the workspace-UI case, and the durable rows — not the connection — are what make a

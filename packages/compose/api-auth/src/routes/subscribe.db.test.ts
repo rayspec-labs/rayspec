@@ -12,11 +12,14 @@
  *   - COUNTERPROOF — an event emitted AFTER the subscriber connected arrives.
  *   - RESUME under concurrency — a subscriber that disconnects mid-flight and reconnects with its last
  *     id receives exactly the events it missed: none skipped, none duplicated, in seq order.
- *   - R3 — an OMITTED `topics` delivers every topic; a filter delivers only its topics and still
- *     advances past the ones it skipped; an EXPLICITLY EMPTY `?topics=` is a 400.
+ *   - R3 — an OMITTED `topics` delivers every topic; a filter delivers only its topics; a filter
+ *     crosses a WHOLE PAGE of rows it skipped to reach its own event; an EXPLICITLY EMPTY
+ *     `?topics=` is a 400.
  *   - R4 — a cursor tagged with another tenant is refused, and cross-tenant delivery is impossible.
  *   - R5 — a FRESH subscriber on a stream with a non-zero retention floor gets NO truncation signal.
- *   - R6 — a cursor above the high-water mark is refused, not served as an empty stream.
+ *   - R6 — a cursor above the high-water mark is refused, not served as an empty stream, and a
+ *     sequence `Number()` would happily coerce (hex, exponent, fraction, sign, padding, empty) is
+ *     refused rather than resumed somewhere the client never asked for.
  *   - TRUNCATION — a cursor retained away produces the control frame (which carries NO `id:`, so it
  *     can never come back as a cursor) and the subscriber recovers and receives what survived.
  *
@@ -26,7 +29,10 @@
  *     reaches it as a truncation frame, not as a hole.
  *
  *  LIFETIME suite (the cap set by the access-token TTL):
- *   - the cap CLOSES the stream, and the reconnect the client must make re-runs the whole auth chain.
+ *   - the cap CLOSES the stream, and the reconnect the client must make re-runs the whole auth chain;
+ *   - the cap costs NO EVENTS even for a subscriber that never received a data frame — the resume
+ *     checkpoint is on the wire before the server closes, so the reconnect resumes rather than
+ *     restarting at a freshly probed tail.
  *
  *  ACCEPT CONTROL (no bus enabled): the route fail-closes 501 and reads nothing.
  *
@@ -41,6 +47,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { makeTenantEventBus } from '../engine/event-bus.js';
 import { makeTenantEventWake, type TenantEventWakeHub } from '../engine/event-wake.js';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
+import { EVENT_PAGE_LIMIT } from './subscribe.js';
 
 const hasDb = Boolean(process.env.DATABASE_URL);
 const requireDb = process.env.CI === 'true' || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -102,14 +109,21 @@ const handlers = new Map<string, ResolvedHandler>([['emit_handler', emitHandler]
 // ---------------------------------------------------------------------------------------------
 
 interface Frame {
+  /** The `id:` field of THIS block — the wire-level discriminator, absent on a control frame. */
   id?: string;
   event?: string;
   data: string;
 }
 
-/** A live SSE read: the frames seen, plus whether the SERVER closed the stream inside the budget. */
+/** A live SSE read: what a client saw, and whether the SERVER closed the stream inside the budget. */
 interface StreamRead {
   frames: Frame[];
+  /**
+   * What this client would send as `Last-Event-ID` on a reconnect — `undefined` until an `id:` has
+   * been seen, exactly as an `EventSource`'s last-event-ID string starts empty and is only ever set
+   * by an `id:` field. This is the value the resume protocol actually turns on.
+   */
+  lastEventId?: string;
   closed: boolean;
   elapsedMs: number;
 }
@@ -117,8 +131,14 @@ interface StreamRead {
 /**
  * Read a LIVE SSE response until `stop` is satisfied, the server closes the stream, or the budget
  * runs out. Cancels the reader on the way out (which aborts the server-side loop) unless the server
- * already closed. Control frames (no `id:`) and data frames are both returned; SSE COMMENTS (the
- * heartbeat) are dropped, exactly as a client parser drops them.
+ * already closed.
+ *
+ * THIS PARSER FOLLOWS THE HTML EVENT-STREAM GRAMMAR RATHER THAN GUESSING, because the resume
+ * protocol's correctness is a statement about what a REAL client does: dispatching sets the
+ * last-event-ID string from the id buffer BEFORE returning early on an empty data buffer, so a block
+ * carrying an `id:` and no `data:` moves the reconnect cursor and dispatches NO event. Modelling that
+ * loosely is how a suite comes to believe a reconnect resumes when a browser's would not. SSE
+ * COMMENTS (the heartbeat) are dropped, as a client parser drops them.
  */
 async function readStream(
   res: Response,
@@ -132,6 +152,7 @@ async function readStream(
   const deadline = started + budgetMs;
   let buffer = '';
   let closed = false;
+  let lastEventId: string | undefined;
   const frames: Frame[] = [];
   while (!stop(frames) && Date.now() < deadline) {
     const chunk = await Promise.race([
@@ -148,14 +169,23 @@ async function readStream(
     buffer += decoder.decode(chunk.value, { stream: true });
     let idx = buffer.indexOf('\n\n');
     while (idx >= 0) {
-      const frame = parseBlock(buffer.slice(0, idx));
+      const block = parseBlock(buffer.slice(0, idx));
       buffer = buffer.slice(idx + 2);
-      if (frame) frames.push(frame);
+      if (block) {
+        // Set the last-event-ID string first, and only THEN decide whether anything dispatches.
+        if (block.id !== undefined) lastEventId = block.id;
+        if (block.data !== '') frames.push(block);
+      }
       idx = buffer.indexOf('\n\n');
     }
   }
   if (!closed) await reader.cancel().catch(() => {});
-  return { frames, closed, elapsedMs: Date.now() - started };
+  return {
+    frames,
+    ...(lastEventId !== undefined ? { lastEventId } : {}),
+    closed,
+    elapsedMs: Date.now() - started,
+  };
 }
 
 function parseBlock(block: string): Frame | undefined {
@@ -338,9 +368,12 @@ describe.skipIf(!hasDb)('GET /v1/subscribe — wake-driven delivery + resume', (
     expect(seen.length).toBeGreaterThanOrEqual(4);
     const lastId = dataFrames(before.frames).at(-1)?.id as string;
     expect(lastId).toBe(`${orgId}:${seen.at(-1)}`);
+    // …and that is what the client is actually holding: the reconnect below is driven by the tracked
+    // last-event-ID string, not by an id picked out of the transcript by the test.
+    expect(before.lastEventId).toBe(lastId);
 
     // Reconnect with the SSE reconnect header — the mechanism a browser uses without being told to.
-    const second = await subscribe(h, token, '', { 'last-event-id': lastId });
+    const second = await subscribe(h, token, '', { 'last-event-id': before.lastEventId as string });
     expect(second.status).toBe(200);
     const after = await readStream(second, untilData(TOTAL - seen.length), 15_000);
     const resumed = seqs(after.frames);
@@ -353,7 +386,7 @@ describe.skipIf(!hasDb)('GET /v1/subscribe — wake-driven delivery + resume', (
     expect(after.frames.some((f) => f.event === 'rayspec.truncated')).toBe(false);
   });
 
-  it('R3: OMITTED topics delivers EVERY topic; a filter delivers only its own and still advances past the rest', async () => {
+  it('R3: OMITTED topics delivers EVERY topic; a filter delivers only its own', async () => {
     const { orgId, token } = await principal(h, 'topics@example.com', 'TopicsOrg');
     await emit(h, token, [
       { topic: 'alpha', payload: 1 },
@@ -373,12 +406,39 @@ describe.skipIf(!hasDb)('GET /v1/subscribe — wake-driven delivery + resume', (
       'alpha',
     ]);
 
-    // Filtered ⇒ only those topics, and the cursor advances PAST the skipped rows: the last delivered
-    // frame is seq 4, which is only reachable if the scan moved through 2 and 3.
+    // Filtered ⇒ only those topics. This says NOTHING about how the cursor advances: all four rows
+    // sit inside one page, so seq 4 is delivered from the same read however the cursor moves. The
+    // arm below is the one that measures that.
     const filtered = await subscribe(h, token, `?topics=alpha&since=${orgId}:0`);
     const filteredRead = await readStream(filtered, untilEvent('rayspec.live'));
     expect(seqs(filteredRead.frames)).toEqual([1, 4]);
     expect(dataFrames(filteredRead.frames).every((f) => f.event === 'alpha')).toBe(true);
+  });
+
+  it('R3: a filter advances past a WHOLE PAGE of rows it skipped and still reaches its own event', async () => {
+    const { orgId, token } = await principal(h, 'scanned@example.com', 'ScannedOrg');
+    // A full page of rows the filter does not want, and ONE it does behind them. The route advances
+    // its cursor on how far the read SCANNED, not on what it delivered, and that only becomes
+    // observable across a page boundary — inside one page the wanted row arrives from the same read
+    // whichever rule is used. Advance on the last DELIVERED seq instead and this subscriber never
+    // moves: every read returns nothing, `scannedThrough < lastSeq` stays true, and the loop re-reads
+    // the same window with no wait and no heartbeat until the lifetime cap — a hot spin per
+    // subscriber against the request pool, and an event it asked for that never arrives.
+    const skipped = EVENT_PAGE_LIMIT + 20;
+    await emit(
+      h,
+      token,
+      Array.from({ length: skipped }, (_, i) => ({ topic: 'beta', payload: i })),
+    );
+    await emit(h, token, [{ topic: 'alpha', payload: 'behind the page' }]);
+
+    const res = await subscribe(h, token, `?topics=alpha&since=${orgId}:0`);
+    const read = await readStream(res, untilEvent('rayspec.live'));
+    expect(seqs(read.frames)).toEqual([skipped + 1]);
+    expect(JSON.parse(dataFrames(read.frames)[0]?.data ?? 'null')).toBe('behind the page');
+    // …and it reports itself live FROM there, so the cursor really did cross the skipped rows.
+    const live = read.frames.find((f) => f.event === 'rayspec.live');
+    expect(JSON.parse(live?.data ?? '{}')).toEqual({ from: skipped + 1 });
   });
 
   it('R3: an EXPLICITLY EMPTY topics filter is a 400, never a silent dead stream', async () => {
@@ -479,6 +539,46 @@ describe.skipIf(!hasDb)('GET /v1/subscribe — wake-driven delivery + resume', (
     const bare = await subscribe(h, token, '?since=1');
     expect(bare.status).toBe(400);
     expect((await bare.json()).error.message).toContain('<tenant_id>:<seq>');
+  });
+
+  it('R6: a cursor sequence is REFUSED rather than coerced — hex, exponent, fraction, sign, padding, empty', async () => {
+    const { orgId, token } = await principal(h, 'coerced@example.com', 'CoercedOrg');
+    await emit(
+      h,
+      token,
+      Array.from({ length: 20 }, (_, i) => ({ topic: 'row', payload: i + 1 })),
+    );
+
+    // `Number()` turns every one of these into a perfectly plausible sequence. Served, each would be
+    // a 200 that silently skips events (`:0x10` resumes at 16) or replays the whole stream (`:`
+    // coerces to 0) — a stream that reads exactly like a healthy one, which is the failure mode the
+    // refusals beside it exist to prevent.
+    const coercible = [
+      '0x10',
+      '1e1',
+      ' 5 ',
+      '5.0',
+      '+7',
+      '\t3',
+      '',
+      '-1',
+      'Infinity',
+      '9007199254740993',
+    ];
+    for (const seq of coercible) {
+      const res = await subscribe(h, token, `?since=${encodeURIComponent(`${orgId}:${seq}`)}`);
+      expect(res.status, `since sequence ${JSON.stringify(seq)}`).toBe(400);
+      const body = await res.json();
+      expect(body.error.code).toBe('VALIDATION_ERROR');
+      expect(body.error.message).toContain('not a non-negative whole number');
+    }
+
+    // THE ACCEPT CONTROL — the same cursor in the shape this stream actually writes IS served, so the
+    // refusals above are the coercion check and not a route that rejects everything.
+    const ok = await subscribe(h, token, `?since=${orgId}:16`);
+    expect(ok.status).toBe(200);
+    const read = await readStream(ok, untilEvent('rayspec.live'));
+    expect(seqs(read.frames)).toEqual([17, 18, 19, 20]);
   });
 
   it('TRUNCATION: a cursor retained away produces the control frame, and the subscriber recovers from it', async () => {
@@ -612,6 +712,36 @@ describe.skipIf(!hasDb)('GET /v1/subscribe — the stream lifetime cap', () => {
     expect(read.closed).toBe(true);
     expect(read.elapsedMs).toBeGreaterThan(3_000);
     expect(read.elapsedMs).toBeLessThan(20_000);
+  });
+
+  it('the cap costs a round trip and NO events, even for a subscriber that never received a data frame', async () => {
+    const { orgId, token } = await principal(h, 'gap@example.com', 'GapOrg');
+
+    // The exact client this route targets: a fresh subscriber on a quiet workspace. It is handed no
+    // data frame at all before the server's OWN close, so the only cursor it can ever hold is the one
+    // the route publishes for it.
+    const first = await subscribe(h, token);
+    expect(first.status).toBe(200);
+    const opened = await readStream(first, () => false, 30_000);
+    expect(opened.closed).toBe(true);
+    expect(dataFrames(opened.frames)).toEqual([]);
+    // …and it IS holding one. Without the resume checkpoint this is `undefined`: an `EventSource`'s
+    // last-event-ID string starts empty and only an `id:` sets it, control frames deliberately carry
+    // none, so the automatic reconnect would omit `Last-Event-ID` entirely, land in the no-cursor
+    // branch, and resume at the tail the server probes THEN — every event below skipped for good,
+    // with `rayspec.live` asserting the backlog is drained.
+    expect(opened.lastEventId).toBe(`${orgId}:0`);
+
+    // The gap: emitted while the client is between connections.
+    await emit(h, token, [{ topic: 'in.the.gap', payload: { n: 1 } }]);
+
+    // The reconnect an EventSource makes on its own: same URL, its last-event-ID string as the header.
+    const second = await subscribe(h, token, '', { 'last-event-id': opened.lastEventId as string });
+    expect(second.status).toBe(200);
+    const resumed = await readStream(second, untilData(1), 15_000);
+    expect(dataFrames(resumed.frames).map((f) => f.event)).toEqual(['in.the.gap']);
+    expect(seqs(resumed.frames)).toEqual([1]);
+    expect(resumed.frames.some((f) => f.event === 'rayspec.truncated')).toBe(false);
   });
 
   it('the reconnect re-runs the WHOLE auth chain — a credential revoked while the stream was open does not reopen it', async () => {

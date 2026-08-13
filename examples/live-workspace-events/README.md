@@ -53,7 +53,11 @@ Authorization: Bearer <token>          # needs the events:read permission
     `{ truncatedThrough, requestedFrom }`; refetch your state and keep reading.
 - **The cursor is `<tenant_id>:<seq>`**, not a bare number. Sequences are per tenant, so an untagged
   cursor would silently resume against the wrong stream after an org switch. A cursor tagged with
-  another tenant is refused, and so is one from the future.
+  another tenant is refused, so is one from the future, and so is a sequence that is not plain
+  decimal digits — `:0x10` is a **400**, not a stream that quietly starts at 16.
+- **A block that is an `id:` line and nothing else** is the *resume checkpoint*, not a frame: it
+  dispatches no event and only updates the cursor your client will send back. `EventSource` handles it
+  for you; a hand-written parser must not treat a block with no `data:` as an event.
 - **Omitting `topics` means every topic.** An explicitly empty `?topics=` is a **400**, not a stream
   that quietly delivers nothing.
 - **The stream is closed after a bounded lifetime** (at most the access-token TTL) and your client
@@ -69,7 +73,10 @@ es.addEventListener('task.completed', (e) => board.complete(JSON.parse(e.data)))
 ```
 
 `EventSource` resends the last `id:` it saw as `Last-Event-ID` on every reconnect, so the resume is
-free — including across the server's lifetime cap.
+free — including across the server's lifetime cap. That holds even on a workspace so quiet that this
+client has never received an event: its last-event-ID string would otherwise still be empty at the
+cap, and it would come back with no cursor and silently skip whatever was created in the gap. The
+route publishes the resume checkpoint above precisely so that cannot happen.
 
 ## Validate (no DB, no deploy)
 

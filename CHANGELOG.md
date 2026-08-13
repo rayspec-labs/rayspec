@@ -33,7 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Last-Event-ID` reconnect header or as `?since=`: a sequence means something different in every
   tenant's stream, so an untagged cursor would resume silently at the wrong place after an org switch.
   Four cursor shapes are refused with a `400` rather than served — a malformed one, one tagged with
-  another tenant, a non-integer sequence, and one **ahead** of the stream. Omitting the cursor starts
+  another tenant, a sequence that is not plain decimal digits (a hexadecimal, exponent, fractional,
+  signed, padded or empty one is refused rather than **coerced**, since coercing resumes the
+  subscriber somewhere it never asked for while looking successful), and one **ahead** of the stream.
+  Omitting the cursor starts
   at the tail and is **not** a truncation, however old the stream's floor is. Omitting `topics` means
   **every** topic; an explicitly empty `?topics=` is a `400`, because an empty filter can only match
   nothing and that is indistinguishable from a healthy stream on a quiet workspace.
@@ -49,7 +52,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The server **closes a stream after a bounded lifetime** — the access-token TTL — and the client
   reconnects. Permission is middleware, so it is checked once at connect; the reconnect is a fresh
   request through the whole chain, and that is what makes a revoked principal stop receiving events.
-  No second, bespoke mid-stream authorization path exists. There is no WebSocket surface, and none is
+  No second, bespoke mid-stream authorization path exists. Because that close is the server's own, the
+  route also puts the resume position on the wire before it can happen: an `EventSource`'s
+  last-event-ID string starts empty and is set by nothing but an `id:`, and control frames carry none,
+  so a subscriber on a quiet workspace would otherwise reach the cap holding no cursor, reconnect
+  without `Last-Event-ID`, and be started at a freshly probed tail — skipping everything emitted in
+  the reconnect gap while `rayspec.live` reported the backlog drained. A **resume checkpoint** (an
+  `id:` line and nothing else, which the event-stream grammar defines as a cursor update that
+  dispatches no event) is written whenever the cursor moves without a delivery, so the cap costs a
+  round trip and no events. There is no WebSocket surface, and none is
   planned: SSE plus a durable cursor covers the case, and the durable rows — not the connection — are
   what make a resume correct. `examples/live-workspace-events` is the whole loop in one bootable
   document.
