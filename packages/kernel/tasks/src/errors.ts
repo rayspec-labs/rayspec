@@ -48,6 +48,19 @@ export class TaskRowCorruptError extends Error {
   }
 }
 
+/** The stored budgets declaration fails the strict schema — refuse to enforce a guess. */
+export class WorkforceBudgetsInvalidError extends Error {
+  readonly workforceId: string;
+  constructor(workforceId: string, detail: string) {
+    super(
+      `workforce '${workforceId}' carries a budgets declaration outside the strict schema — ` +
+        `refusing to enforce a guess. Fail-closed. (${detail})`,
+    );
+    this.name = 'WorkforceBudgetsInvalidError';
+    this.workforceId = workforceId;
+  }
+}
+
 /** The named workforce has no runtime row (never initialized under this tenant). */
 export class WorkforceUnknownError extends Error {
   readonly workforceId: string;

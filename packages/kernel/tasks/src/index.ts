@@ -9,6 +9,19 @@
  */
 export { type ApplyTransitionInput, applyTransition, type TaskRecord } from './apply-transition.js';
 export {
+  authorizeTurn,
+  BUDGET_WINDOWS,
+  type BudgetWindow,
+  EPOCH_WINDOW_START,
+  LedgerCostPolicy,
+  ledgerScopesFor,
+  resolveWorkforceBudgets,
+  settleTurn,
+  type WorkforceBudgets,
+  windowStartFor,
+  workforceBudgetsSchema,
+} from './budget.js';
+export {
   type ChildTaskSpec,
   type CreateRootTaskInput,
   childTaskSpecSchema,
@@ -22,6 +35,7 @@ export {
   TaskNotFoundError,
   TaskRowCorruptError,
   TaskVersionConflictError,
+  WorkforceBudgetsInvalidError,
   WorkforceUnknownError,
 } from './errors.js';
 export {
@@ -35,6 +49,11 @@ export {
   workforceJournalEventSchema,
 } from './events.js';
 export { deterministicChildTaskId, newRootTaskId } from './ids.js';
+export {
+  ensureWorkforceRuntime,
+  readWorkforceRuntime,
+  type WorkforceRuntimeRecord,
+} from './runtime.js';
 export {
   ALLOWED_TRANSITIONS,
   assertTransition,
