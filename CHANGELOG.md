@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A boot warning when a served page carries an inline `<style>` / `<script>` / `style=` / `on*=`
+  that the active Content-Security-Policy does not permit.** The default policy for a served frontend
+  is `default-src 'self'` with no `'unsafe-inline'`, and a page that violates it fails in a way
+  nothing on the server side shows: the response is `200`, the bytes are exactly what the build
+  produced, and only the browser applies the policy. It need not say so there either — a refused
+  inline `<style>` can produce no console message at all, which is why the warning tells the reader
+  the browser console is not a way to check this. The signal now arrives at boot, naming the file.
+  It rides the pass over the declared mounts that already runs once per boot to compute what
+  `/health` reports as `frontend`, so no `/health` request re-reads anything, and it covers **both**
+  boot shapes that serve `frontend[]` mounts — the static (frontend-only) profile and a full-backend
+  boot — because both stamp the same headers on mount responses.
+  It is **warn-only and cannot fail a boot**, and what makes that true is that the scan's only
+  product is a string handed to the boot's warn sink that no caller reads back — the readiness
+  `/health` reports is computed without it — while every filesystem call it makes is individually
+  wrapped, so an unreadable directory or file is skipped rather than raised. Serving a page the
+  policy blocks is a deployment's choice, and `RAYSPEC_FRONTEND_CSP` is how it overrides the
+  baseline. It judges the page against the **active** policy, not the shipped default: a policy that
+  carries `'unsafe-inline'` for the directive governing a shape says nothing about that shape, and a
+  policy governing none of them is not scanned at all — the four shapes are resolved through their
+  own CSP fallback chains (`style-src-elem` / `style-src-attr` / `script-src-elem` /
+  `script-src-attr` → `style-src` / `script-src` → `default-src`), and the warning names the
+  directive that decided.
+  Nothing about its reach is left implicit. **The bounds**: at most 200 HTML files per boot across
+  all mounts, at most the first 1 MiB of any one file, at most 5 offending files named (the rest are
+  counted). Each of the three appears in the message when it truncates — the file-count line is
+  printed off the file the scan actually DECLINED to open, not off the budget being spent, so a build
+  of exactly 200 pages is never told anything was skipped. **The fidelity**: it is a heuristic text
+  scan, not an HTML parser — it strips comments, skips `<script>`/`<style>` bodies as raw text, and
+  reads attributes off start tags (every start tag, so an `on*=` handler on a `<script src=…>` is
+  reported like any other element's), but markup quoted inside an attribute or a string can still be
+  named and unusual markup can be missed. It also computes no hashes, so a policy carrying a hash or
+  nonce source is treated as permitting that shape. The message says all of this in the same breath
+  as the finding. **The coverage**: the walk runs the mount's own three request-path checks as it
+  goes, so it does not name a page one of them refuses — a dot-segment path, a symlink whose real
+  path escapes the served directory, and, under a `/` mount, anything beneath the reserved `/v1`,
+  `/health` and `/oidc` namespaces, which the mount declines before the file server ever runs. An
+  in-tree symlink it does follow, because the mount serves those. It is not a fetch, and the converse
+  is not claimed: clearing those three checks is not a proof that the page resolves.
+  (Issues #355, #345, #313.)
+
 - **`GET /v1/subscribe` — an SSE subscription over the tenant event stream, with a resume protocol
   that cannot silently drop frames.** The emit half gave a handler somewhere durable to announce a
   change; this is the half a client reads it back from, so a workspace UI holds one connection open

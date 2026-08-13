@@ -89,17 +89,31 @@
  * surface, whose header chain stays byte-identical. The static (frontend-only) boot OMITS the
  * parameter — `assembleStaticServer` already applies the same two values app-wide, so the static
  * profile's emission stays single-sourced (no double stamp, no drift).
+ *
+ * INLINE ASSETS vs. THE ACTIVE POLICY — that same Content-Security-Policy is what a served page has to
+ * satisfy, and a page that does not satisfy it fails INVISIBLY on this side: the response is 200 and
+ * the bytes are whatever the build produced, and only the browser applies the policy. So the boot's
+ * one pass over the declared mounts (`frontendMountsReadiness`) also scans their HTML for the inline
+ * shapes the ACTIVE policy has no `'unsafe-inline'` for and emits ONE warn-only line naming the files
+ * (`blockedInlineAssetWarning`). It is a bounded, heuristic text scan, and what it produces is a
+ * string for a warn sink that no caller reads back — serving a page the policy blocks is a
+ * deployment's choice to make, and RAYSPEC_FRONTEND_CSP is how it overrides the baseline.
  */
 import {
   accessSync,
+  closeSync,
   constants,
+  type Dirent,
   existsSync,
+  openSync,
+  readdirSync,
   readFileSync,
+  readSync,
   realpathSync,
   type Stats,
   statSync,
 } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { errorEnvelope } from '@rayspec/auth-core';
 import { type FrontendSpec, RESERVED_ROUTE_PREFIXES } from '@rayspec/spec';
@@ -400,15 +414,542 @@ export function mountUnservableReason(
  *
  * CALL THIS ONCE AT BOOT and cache the result. `/health` is polled by load balancers every second; the
  * probe must answer from the cached value and touch no filesystem per call.
+ *
+ * `inlineScan`, when supplied, ALSO runs the bounded inline-asset scan below against the SAME mounts
+ * and emits its one warning on the supplied sink. This is the boot's single pass over the declared
+ * mounts, which is the whole reason the scan is docked here rather than on its own hook: both callers
+ * (`assembleStaticServer` and `assembleServer`) call this once and hand only the RETURNED value to
+ * `registerHealthRoute`, so no `/health` request re-enters it. The scan is EMIT-ONLY: the readiness
+ * returned below is computed from `mountUnservableReason` alone, and the scan's own product is a
+ * string passed to `warn`. A caller that omits `inlineScan` runs the same loop it always did.
  */
 export function frontendMountsReadiness(
   mounts: readonly FrontendSpec[],
   specDir: string,
+  inlineScan?: InlineAssetScan,
 ): FrontendReadiness {
+  if (inlineScan !== undefined) {
+    const warning = blockedInlineAssetWarning(mounts, specDir, inlineScan.csp);
+    if (warning !== undefined) inlineScan.warn(warning);
+  }
   for (const mount of mounts) {
     if (mountUnservableReason(mount, specDir) !== undefined) return 'unavailable';
   }
   return 'ok';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Inline assets vs. the ACTIVE Content-Security-Policy — the boot-time warning (see the module
+// header's INLINE ASSETS section).
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** The boot-time inline-asset scan's inputs: the policy to judge against, and where to report. */
+export interface InlineAssetScan {
+  /**
+   * The ACTIVE Content-Security-Policy value — what the boot will actually stamp on this mount's
+   * responses (RAYSPEC_FRONTEND_CSP when set, else the shipped default). Judging a page against the
+   * DEFAULT while the deployment serves something else would warn about a policy nobody is using.
+   */
+  csp: string;
+  /** Where the ONE warning goes — the boot's warn sink. */
+  warn: (message: string) => void;
+}
+
+/**
+ * THE BOUND, part 1: how many HTML files one boot may open, across ALL declared mounts together. A
+ * build can carry thousands of pages and a boot must not pay for them; the file this budget makes
+ * the scan DECLINE is what sets `filesTruncated` and prints the bound's line, so the number is never
+ * a silent claim of full coverage — and a build of exactly this many pages, which cost the scan
+ * nothing it refused, is never told otherwise.
+ */
+export const INLINE_ASSET_SCAN_FILE_LIMIT = 200;
+
+/**
+ * THE BOUND, part 2: how many bytes of ONE file the scan reads. Only this prefix is examined; an
+ * inline block past it is not seen, and the warning says so when at least one file was longer.
+ */
+export const INLINE_ASSET_SCAN_BYTE_LIMIT = 1024 * 1024;
+
+/**
+ * THE BOUND, part 3: how many offending FILES the warning names. The rest are counted, not listed —
+ * a boot log is not a report, and the count is what tells the reader the list is partial.
+ */
+export const INLINE_ASSET_SCAN_REPORT_LIMIT = 5;
+
+/** The four inline shapes that fall back to `default-src` when no more specific directive is set. */
+type InlineAssetKind = 'style-element' | 'script-element' | 'style-attribute' | 'event-attribute';
+
+/**
+ * For each shape: what to call it in the warning, and the CSP fallback chain that governs it — the
+ * specific directive first, then the shape's `-src`, then `default-src`. That is the CSP Level 3
+ * fallback: `style-src-elem`/`style-src-attr` fall back to `style-src`, `script-src-elem`/
+ * `script-src-attr` to `script-src`, and both `-src` directives fall back to `default-src`. The FIRST
+ * directive of the chain that is present in the policy is the one that decides; the later ones are
+ * not consulted.
+ */
+const INLINE_ASSET_KINDS: Readonly<
+  Record<InlineAssetKind, { readonly label: string; readonly chain: readonly string[] }>
+> = {
+  'style-element': {
+    label: 'inline <style> element',
+    chain: ['style-src-elem', 'style-src', 'default-src'],
+  },
+  'script-element': {
+    label: 'inline <script> element',
+    chain: ['script-src-elem', 'script-src', 'default-src'],
+  },
+  'style-attribute': {
+    label: 'style= attribute',
+    chain: ['style-src-attr', 'style-src', 'default-src'],
+  },
+  'event-attribute': {
+    label: 'on*= handler attribute',
+    chain: ['script-src-attr', 'script-src', 'default-src'],
+  },
+};
+
+/**
+ * Split a policy string into `directive-name → source list`, both lower-cased. A directive that
+ * appears twice keeps its FIRST occurrence, which is how CSP Level 3 has a user agent treat a
+ * repeated directive name, and an empty segment — a trailing `;`, a `;;` — is skipped.
+ */
+function parseContentSecurityPolicy(policy: string): ReadonlyMap<string, readonly string[]> {
+  const directives = new Map<string, readonly string[]>();
+  for (const segment of policy.split(';')) {
+    const tokens = segment.trim().split(/\s+/).filter(Boolean);
+    const name = tokens[0]?.toLowerCase();
+    if (name === undefined) continue;
+    if (!directives.has(name))
+      directives.set(
+        name,
+        tokens.slice(1).map((t) => t.toLowerCase()),
+      );
+  }
+  return directives;
+}
+
+/** A hash or nonce source expression, whose content this scan does not evaluate (see below). */
+function isHashOrNonceSource(source: string): boolean {
+  return (
+    source.startsWith("'nonce-") ||
+    source.startsWith("'sha256-") ||
+    source.startsWith("'sha384-") ||
+    source.startsWith("'sha512-")
+  );
+}
+
+/**
+ * Which directive of `kind`'s chain BLOCKS an inline block of that shape — `undefined` when nothing
+ * in the policy does, which is the answer that keeps the boot quiet.
+ *
+ * Three ways to come back `undefined`. The first two follow from the policy text; the third is a
+ * deliberate silence:
+ *   - no directive of the chain is in the policy at all ⇒ nothing in it governs the shape;
+ *   - the governing directive carries `'unsafe-inline'` ⇒ allowed, which is what that keyword is;
+ *   - the governing directive carries a HASH or NONCE source. This scan does NOT compute the digest
+ *     of the block it found or read a page's nonce attributes, so it cannot tell an allow-listed
+ *     block from a stale one — and a deployment that went to the trouble of listing hashes is the
+ *     one that has already done this work. It stays silent rather than accuse it wrongly; the cost
+ *     is that a NON-matching block under such a policy is missed. Stated in the warning's own
+ *     heuristic note and in the tests that pin it.
+ */
+function blockingDirective(
+  policy: ReadonlyMap<string, readonly string[]>,
+  kind: InlineAssetKind,
+): string | undefined {
+  for (const name of INLINE_ASSET_KINDS[kind].chain) {
+    const sources = policy.get(name);
+    if (sources === undefined) continue;
+    if (sources.some(isHashOrNonceSource)) return undefined;
+    if (sources.includes("'unsafe-inline'")) return undefined;
+    return name;
+  }
+  return undefined;
+}
+
+/**
+ * Pull an HTML start tag's attributes out of its raw attribute text, lower-casing names and
+ * unquoting values. Deliberately small: it recognises `name`, `name=value`, `name="value"` and
+ * `name='value'`, which is what the shapes below need to decide (`src`, `type`, `style`, `on*`).
+ */
+function parseTagAttributes(raw: string): ReadonlyMap<string, string> {
+  const attributes = new Map<string, string>();
+  const pattern = /([^\s"'>/=]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'`=<>]*))?/g;
+  for (let m = pattern.exec(raw); m !== null; m = pattern.exec(raw)) {
+    const name = m[1]?.toLowerCase();
+    if (name === undefined) continue;
+    const value = m[2] ?? '';
+    const unquoted =
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+        ? value.slice(1, -1)
+        : value;
+    if (!attributes.has(name)) attributes.set(name, unquoted);
+  }
+  return attributes;
+}
+
+/**
+ * A `<script>` whose `type` names a DATA block (`application/json`, `application/ld+json`, any
+ * `+json`) — a browser does not execute one, and reporting it would be a false positive on a shape
+ * generated builds emit constantly. Everything else without a `src` is treated as inline code,
+ * including `type="module"`, `type="importmap"` and any type this scan does not recognise: on an
+ * unknown type it errs toward reporting.
+ */
+function isDataScriptType(type: string | undefined): boolean {
+  if (type === undefined) return false;
+  const normalized = type.trim().toLowerCase();
+  return normalized.endsWith('+json') || normalized === 'application/json';
+}
+
+/**
+ * Which of the four inline shapes does `html` carry? A HEURISTIC text scan, NOT an HTML parser —
+ * what it does do, so a reader knows what the answer is worth:
+ *   - HTML comments are removed first, so a commented-out `<style>` is not reported;
+ *   - `<script>` and `<style>` bodies are skipped as raw text (the spec's raw-text elements), so a
+ *     `style="…"` inside a JS string or a CSS `content` value is not reported as an attribute; a
+ *     body that is only whitespace is not reported as an inline block either;
+ *   - attributes are read off START TAGS only, so the words `style=` / `onclick=` in page COPY are
+ *     not reported — and off EVERY start tag, `<script>` and `<style>` included, whose `on*=` and
+ *     `style=` the policy governs exactly like any other element's (only their BODIES are skipped).
+ * What it does NOT do: resolve malformed markup the way a browser's tokenizer would, follow
+ * `<template>` or `srcdoc` content, or evaluate anything a script writes at runtime. False positives
+ * and misses both remain possible, which is exactly why this is warn-only and says so in the message.
+ */
+function inlineAssetKinds(html: string): ReadonlySet<InlineAssetKind> {
+  const source = html.replace(/<!--[\s\S]*?-->/g, ' ');
+  // One lower-cased copy for the end-tag search below — a per-tag `toLowerCase()` would re-copy the
+  // whole file for every `<script>`/`<style>` on it.
+  const lowered = source.toLowerCase();
+  const found = new Set<InlineAssetKind>();
+  const tagPattern = /<([a-zA-Z][a-zA-Z0-9-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
+  for (let m = tagPattern.exec(source); m !== null; m = tagPattern.exec(source)) {
+    const name = m[1]?.toLowerCase();
+    if (name === undefined) continue;
+    const attributes = parseTagAttributes(m[2] ?? '');
+
+    // Attributes come off EVERY start tag, `<script>`/`<style>` included: a `<script src=… onerror=…>`
+    // or a `<style onload=…>` carries a handler the policy governs exactly like any other element's,
+    // and it is the raw-text BODY skip below — not skipping these tags — that keeps a `style="…"`
+    // inside a JS string or a CSS value from being read as an attribute.
+    if (attributes.has('style')) found.add('style-attribute');
+    // `on` + at least three letters — the shortest real handler names (`onblur`, `oncut`) clear it,
+    // while an ordinary `once`/`on` attribute does not. Heuristic, like the rest of this scan.
+    for (const attribute of attributes.keys()) {
+      if (/^on[a-z]{3,}$/.test(attribute)) {
+        found.add('event-attribute');
+        break;
+      }
+    }
+
+    if (name === 'script' || name === 'style') {
+      // Consume the raw-text body up to the matching end tag (or to EOF when it is unterminated),
+      // both to judge emptiness and so its content cannot masquerade as markup below.
+      const bodyStart = tagPattern.lastIndex;
+      const closeAt = lowered.indexOf(`</${name}`, bodyStart);
+      const body = source.slice(bodyStart, closeAt === -1 ? undefined : closeAt);
+      if (closeAt !== -1) tagPattern.lastIndex = closeAt + name.length + 2;
+      const external = name === 'script' && attributes.has('src');
+      const data = name === 'script' && isDataScriptType(attributes.get('type'));
+      if (!external && !data && body.trim() !== '') {
+        found.add(name === 'script' ? 'script-element' : 'style-element');
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * Read at most `INLINE_ASSET_SCAN_BYTE_LIMIT` bytes of a file; `truncated` when it is longer. The
+ * buffer is sized to the file (capped), so a directory of small pages never allocates the cap.
+ */
+function readHtmlPrefix(file: string, size: number): { text: string; truncated: boolean } {
+  const fd = openSync(file, 'r');
+  try {
+    const wanted = Math.min(size, INLINE_ASSET_SCAN_BYTE_LIMIT);
+    const buffer = Buffer.alloc(wanted);
+    const read = readSync(fd, buffer, 0, wanted, 0);
+    return {
+      text: buffer.toString('utf8', 0, read),
+      truncated: size > INLINE_ASSET_SCAN_BYTE_LIMIT,
+    };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** One offending file: its path relative to the spec, and the blocked shapes it carries. */
+interface InlineAssetFinding {
+  file: string;
+  detail: string;
+}
+
+/** What the scan of one mount tree accumulates, shared across mounts so the bound is a boot bound. */
+interface InlineAssetScanState {
+  readonly blocked: ReadonlyMap<InlineAssetKind, string>;
+  readonly specDir: string;
+  /** REAL paths of the files already examined — a link and its target are one file, examined once. */
+  readonly seen: Set<string>;
+  /**
+   * REAL paths of the directories already walked WITHIN THE CURRENT MOUNT'S WALK — what makes a
+   * symlink cycle terminate. Cleared per mount: two mounts over the SAME directory serve it under
+   * DIFFERENT request paths, and it is the request path that decides the reserved-namespace skip,
+   * so the second mount must walk the tree again rather than inherit the first mount's verdicts.
+   */
+  readonly seenDirs: Set<string>;
+  /**
+   * `route + NUL + real mount dir` of the mounts already walked. Keyed on the PAIR, not the
+   * directory: a `/` mount and an `/app` mount over one directory are two different served
+   * namespaces, and only an identical pair is genuinely redundant.
+   */
+  readonly seenMounts: Set<string>;
+  readonly findings: InlineAssetFinding[];
+  filesScanned: number;
+  /** Set ONLY when an HTML file was actually declined for want of budget — see `scanHtmlTree`. */
+  filesTruncated: boolean;
+  bytesTruncated: boolean;
+}
+
+/**
+ * What one directory entry resolves to, when the mount would serve it at all: its REAL path (the
+ * file's identity, so a link and its target are not examined twice) and its kind. `undefined` when
+ * the entry cannot be resolved or stat'ed, and when its real path lies OUTSIDE `realMountDir` —
+ * `isSafeStaticPath`'s check (c) applies the same `realpathSync`-inside-`realBaseDir` test to every
+ * request, so an escaping symlink is refused by the mount and a finding on it would name a file the
+ * mount never hands out.
+ *
+ * `realDir` is the caller's ALREADY-REAL directory path, so a non-symlink entry's real path is
+ * `join(realDir, name)` — no syscall — and containment holds by construction. Only a symlink pays
+ * for a `realpathSync`.
+ */
+function resolveScanEntry(
+  entry: Dirent,
+  realDir: string,
+  realMountDir: string,
+): { real: string; isDirectory: boolean; isFile: boolean } | undefined {
+  if (!entry.isSymbolicLink()) {
+    return {
+      real: join(realDir, entry.name),
+      isDirectory: entry.isDirectory(),
+      isFile: entry.isFile(),
+    };
+  }
+  let real: string;
+  let stats: Stats;
+  try {
+    real = realpathSync(join(realDir, entry.name));
+    stats = statSync(real);
+  } catch {
+    return undefined; // broken link, or unreadable — the mount misses on it too
+  }
+  if (real !== realMountDir && !real.startsWith(realMountDir + sep)) return undefined;
+  return { real, isDirectory: stats.isDirectory(), isFile: stats.isFile() };
+}
+
+/**
+ * Walk one directory tree, examining its `.html`/`.htm` files until the file bound is spent. Entries
+ * are sorted so a truncated scan covers the same files on every boot. `dir` is the path the mount
+ * SERVES this tree at (what a finding is named by); `realDir` is its resolved real path; `servedPath`
+ * is the REQUEST path this directory answers at, built the way `mountFrontend` takes one apart
+ * (`route` for a non-root mount, `''` for `route: '/'`, plus one `/name` per level walked).
+ *
+ * THREE of the skips below exist to keep the walk off pages `mountFrontend` REFUSES. Each applies the
+ * same predicate that guard applies per request, and each is pinned by an arm of
+ * `frontend-inline-asset-csp.test.ts` that requests the page against a real boot and asserts BOTH a
+ * 404 and that the warning does not name it:
+ *   - a RESERVED-NAMESPACE entry is skipped — `mountFrontend` declines a request under `/v1`,
+ *     `/health` or `/oidc` before the file server ever runs, so this walk puts `servedPath` through
+ *     the very same `isReservedRoutePath`. It is the REQUEST path that decides and not the directory
+ *     name: only a `route: '/'` mount can produce one, and the `/app` mount serving
+ *     `/app/v1/page.html` is walked (that arm asserts 200 + named, so a skip by name goes red);
+ *   - a DOT-SEGMENT entry is skipped — `isSafeStaticPath`'s check (a) refuses any REQUEST-path
+ *     segment beginning with `.`, so nothing under it is servable UNDER THAT NAME. Reachable it may
+ *     still be, through an in-tree link from elsewhere in the tree; that is the next bullet's job,
+ *     and it is how a `dist/index.html -> dist/.build/index.html` build gets covered;
+ *   - a SYMLINK is FOLLOWED when `resolveScanEntry` proves its target inside the mount's real
+ *     directory, because the mount serves it — `isSafeStaticPath` refuses symlink-ESCAPE only, so
+ *     skipping in-tree links would leave a served page unscanned — and skipped when it escapes,
+ *     which that same check (c) refuses per request.
+ *
+ * The fourth skip is DEDUPLICATION and not a refusal: a directory whose REAL path was already walked
+ * is skipped, which is what terminates a link cycle (`dist/self -> dist`) and what makes two mounts
+ * over one directory one walk.
+ *
+ * What is NOT claimed is the converse. Clearing the three guards above is not a proof of fetchability
+ * — nothing here re-derives `serveStatic`'s own path resolution — so read a finding as "no mount
+ * guard refuses this path", not as "this page was fetched".
+ *
+ * THE FILE BOUND is recorded, never inferred: `filesTruncated` is set at the moment an HTML file is
+ * DECLINED for want of budget, so a build of exactly `INLINE_ASSET_SCAN_FILE_LIMIT` pages — budget
+ * spent, nothing left — reports no truncation. Once a file has been declined the answer cannot
+ * change, so the walk stops there rather than keep looking for more it will not read.
+ *
+ * An unreadable directory or file is skipped, not reported: this is a warning path, and
+ * `frontendMountsReadiness` is what answers for a mount that cannot be served.
+ */
+function scanHtmlTree(
+  dir: string,
+  realDir: string,
+  realMountDir: string,
+  servedPath: string,
+  state: InlineAssetScanState,
+): void {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of [...entries].sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    if (state.filesTruncated) return; // a declined file already settled it
+    if (entry.name.startsWith('.')) continue;
+    const served = `${servedPath}/${entry.name}`;
+    if (isReservedRoutePath(served)) continue; // the mount declines this request before serving
+    const resolved = resolveScanEntry(entry, realDir, realMountDir);
+    if (resolved === undefined) continue;
+    const full = join(dir, entry.name);
+    if (resolved.isDirectory) {
+      if (state.seenDirs.has(resolved.real)) continue;
+      state.seenDirs.add(resolved.real);
+      scanHtmlTree(full, resolved.real, realMountDir, served, state);
+      continue;
+    }
+    if (!resolved.isFile || !/\.html?$/i.test(entry.name)) continue;
+    if (state.seen.has(resolved.real)) continue; // already examined under another servable path
+    state.seen.add(resolved.real);
+    if (state.filesScanned >= INLINE_ASSET_SCAN_FILE_LIMIT) {
+      state.filesTruncated = true;
+      return;
+    }
+    state.filesScanned += 1;
+    let prefix: { text: string; truncated: boolean };
+    try {
+      prefix = readHtmlPrefix(full, statSync(full).size);
+    } catch {
+      continue;
+    }
+    if (prefix.truncated) state.bytesTruncated = true;
+    const detail = [...inlineAssetKinds(prefix.text)]
+      .flatMap((kind) => {
+        const directive = state.blocked.get(kind);
+        return directive === undefined ? [] : [`${INLINE_ASSET_KINDS[kind].label} (${directive})`];
+      })
+      .sort();
+    if (detail.length > 0) {
+      state.findings.push({
+        file: relative(state.specDir, full).split(sep).join('/'),
+        detail: detail.join(', '),
+      });
+    }
+  }
+}
+
+/**
+ * The ONE boot warning for served pages carrying an inline block the ACTIVE policy blocks —
+ * `undefined` when there is nothing to say, which is every clean build and every deployment whose
+ * policy already permits the shapes it ships. A scan that found NOTHING is silent even when a bound
+ * truncated it: this warning exists to name offending files, and a boot line reporting only how far
+ * a scan got would fire on every large clean build forever.
+ *
+ * Order of work, cheapest first: decide from the POLICY ALONE which of the four shapes could be
+ * blocked at all, and when none can be, return without opening a single file — a deployment that
+ * set `RAYSPEC_FRONTEND_CSP` to something permissive pays nothing for this. Only then walk the
+ * mounts, under the three bounds above.
+ *
+ * Every filesystem call below is individually wrapped — an unreadable directory or file is skipped
+ * rather than raised — and the returned string is handed to a warn sink whose value nothing reads
+ * back, so whatever this finds (or fails to read), the boot proceeds as it would have.
+ */
+export function blockedInlineAssetWarning(
+  mounts: readonly FrontendSpec[],
+  specDir: string,
+  csp: string,
+): string | undefined {
+  const policy = parseContentSecurityPolicy(csp);
+  const blocked = new Map<InlineAssetKind, string>();
+  for (const kind of Object.keys(INLINE_ASSET_KINDS) as InlineAssetKind[]) {
+    const directive = blockingDirective(policy, kind);
+    if (directive !== undefined) blocked.set(kind, directive);
+  }
+  if (blocked.size === 0) return undefined;
+
+  const state: InlineAssetScanState = {
+    blocked,
+    specDir,
+    seen: new Set(),
+    seenDirs: new Set(),
+    seenMounts: new Set(),
+    findings: [],
+    filesScanned: 0,
+    filesTruncated: false,
+    bytesTruncated: false,
+  };
+  for (const mount of mounts) {
+    if (state.filesTruncated) break;
+    const dir = resolve(specDir, mount.dir);
+    // The mount's own real base directory, resolved exactly as `mountFrontend` resolves it (same
+    // fallback on failure), so the walk's containment test and the request guard's agree.
+    let realDir: string;
+    try {
+      realDir = realpathSync(dir);
+    } catch {
+      realDir = dir;
+    }
+    // Two mounts may declare the same directory under DIFFERENT routes; only an identical
+    // (route, directory) pair is redundant. Keying on the directory alone would let the first
+    // mount's walk decide the reserved-namespace skip for the second one's request paths — an
+    // `/app` mount's `/app/v1/page.html` is servable where a `/` mount's `/v1/page.html` is not.
+    const mountKey = `${mount.route}\u0000${realDir}`;
+    if (state.seenMounts.has(mountKey)) continue;
+    state.seenMounts.add(mountKey);
+    // Directory-cycle protection is per WALK, not global: this tree may legitimately be walked
+    // again under another mount's route.
+    state.seenDirs.clear();
+    state.seenDirs.add(realDir);
+    // The mount's route is what turns a walked path into the REQUEST path it is served at, which is
+    // what the reserved-namespace skip inside the walk tests. Split exactly as `mountFrontend`'s
+    // handler splits an incoming path, so the two agree on which requests exist.
+    scanHtmlTree(dir, realDir, realDir, mount.route === '/' ? '' : mount.route, state);
+  }
+  if (state.findings.length === 0) return undefined;
+
+  const total = state.findings.length;
+  const listed = state.findings.slice(0, INLINE_ASSET_SCAN_REPORT_LIMIT);
+  const lines = [
+    `warning: ${total} served HTML ${total === 1 ? 'file carries' : 'files carry'} an inline ` +
+      'block that the ACTIVE Content-Security-Policy does not permit. The mount serves them 200 ' +
+      'with the bytes unchanged and the browser is the only thing that applies the policy — and it ' +
+      'need not say so either: a refused inline <style> can produce no console message at all, so ' +
+      'the browser console is not a reliable way to check this.',
+    ...listed.map((f) => `  ${f.file} — ${f.detail}`),
+  ];
+  if (total > listed.length) {
+    lines.push(
+      `  … and ${total - listed.length} more — this warning names the first ` +
+        `${INLINE_ASSET_SCAN_REPORT_LIMIT}.`,
+    );
+  }
+  if (state.filesTruncated) {
+    lines.push(
+      `  Bound: the scan stopped after ${INLINE_ASSET_SCAN_FILE_LIMIT} HTML files — at least one ` +
+        'more served HTML file was NOT examined.',
+    );
+  }
+  if (state.bytesTruncated) {
+    lines.push(
+      `  Bound: at least one file is larger than ${INLINE_ASSET_SCAN_BYTE_LIMIT} bytes — only that ` +
+        'much of it was examined.',
+    );
+  }
+  lines.push(
+    '  This is a HEURISTIC text scan of the served HTML, not an HTML parser, and it does not ' +
+      'compute hashes: markup quoted inside an attribute or a string can be named here, unusual ' +
+      'markup can be missed, and a policy carrying a hash or nonce source is treated as permitting ' +
+      'that shape.',
+    '  Either move the inline block into a served file, or set RAYSPEC_FRONTEND_CSP to a policy ' +
+      'that permits it. The boot is unaffected either way — this is a warning, not a refusal.',
+  );
+  return lines.join('\n');
 }
 
 /**
