@@ -148,7 +148,10 @@ describe('init.emit — the BUFFERED (route) form', () => {
   it('a one-argument emit is a topic-only event, stored as JSON null (not a mis-call)', async () => {
     const tdb = fakeTdb();
     const { emit, flush } = makeTenantEventBus().buffered(tdb);
-    await (emit as unknown as (t: string) => Promise<void>)('heartbeat');
+    // Called UNCAST through the published `EmitEvent` type: a mis-call needs a cast to write, and this
+    // form is not one — so the absence of a cast here is also the compile-time assertion that the type
+    // admits the call the docs and the guard above both call legitimate.
+    await emit('heartbeat');
     await flush();
     expect(tdb.batches).toEqual([[{ topic: 'heartbeat', payload: undefined }]]);
   });

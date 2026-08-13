@@ -426,6 +426,9 @@ export interface HandlerInit {
  *
  * `emit(topic, payload)` is POSITIONAL: the topic is the author's own vocabulary (the platform never
  * interprets it) and the payload is any JSON-serializable value, stored verbatim as the event body.
+ * The payload is OPTIONAL — a one-argument `emit('heartbeat')` is a legitimate topic-only event whose
+ * body is stored as JSON `null`, not a mis-call (the signature below admits it deliberately, so a
+ * TypeScript handler can write the form the runtime accepts).
  *
  * SECURITY (the external-exposure isolate makes the real guarantee; this is the in-process contract):
  *  - TENANT-BOUND BY CONSTRUCTION: there is NO `tenantId` parameter. The engine captured the run's
@@ -471,7 +474,7 @@ export interface HandlerInit {
  * (an explicit emit RPC); the arguments it carries (a string + a JSON value) already are the
  * serializable part. The in-process call is correct — the tenant is engine-bound, not handler-supplied.
  */
-export type EmitEvent = (topic: string, payload: unknown) => Promise<void>;
+export type EmitEvent = (topic: string, payload?: unknown) => Promise<void>;
 
 /**
  * What a TOOL handler receives. Identical to `HandlerInit` today; named distinctly so the contract
