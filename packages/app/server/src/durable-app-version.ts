@@ -57,6 +57,13 @@ export const DURABLE_APP_VERSION_DIGEST_CHARS = 16;
  *
  * The digest input is namespaced and versioned so the derivation can change later without a silent
  * collision with values already registered in a system database's `application_versions` table.
+ *
+ * NOT A SECRET, and it is served publicly: the unauthenticated `GET /recovery-scope` probe reports the
+ * live value. The input format is fixed and this repo is source-available, so the digest CONFIRMS a
+ * guessed product id / spec name rather than hiding it. It exists to distinguish deployments, not to
+ * conceal which document one serves — never treat it as an opaque token. Making it unguessable would
+ * mean mixing in a deployment-held secret that is identical across every process of a deployment and
+ * stable across redeploys, since both properties are what the fence is built on.
  */
 export function deriveDbosApplicationVersion(
   profile: DurableDocumentProfile,
