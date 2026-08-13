@@ -66,6 +66,7 @@
         "packages/kernel/platform/src/**/*.ts",
         "packages/compose/api-auth/src/**/*.ts",
         "packages/workflow/durable-dbos/src/**/*.ts",
+        "packages/kernel/tasks/src/**/*.ts",
         "!**/*.test.ts",
         "!**/test-support/**"
       ],

@@ -66,6 +66,7 @@ const CHOKEPOINT_ROOTS = [
   'packages/kernel/platform/src',
   'packages/compose/api-auth/src',
   'packages/workflow/durable-dbos/src',
+  'packages/kernel/tasks/src',
   'packages/kernel/db/src',
 ];
 const ADAPTER_ROOTS = [

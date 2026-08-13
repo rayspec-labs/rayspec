@@ -47,6 +47,9 @@ const SCOPED_ROOTS = [
   'packages/kernel/platform/src',
   'packages/compose/api-auth/src',
   'packages/workflow/durable-dbos/src',
+  // The task engine writes tenant-owned rows on every code path; it holds a TenantDb handed in by
+  // its caller and must never name a raw factory or unscoped() — no exemption entries.
+  'packages/kernel/tasks/src',
 ];
 
 // packages/kernel/db/src is the chokepoint's OWN home (it DEFINES makeDb/unscoped()/forTenant), so it is
