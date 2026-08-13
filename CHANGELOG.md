@@ -341,6 +341,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   included. A backend that could honor neither level is rejected at validation time with a
   `capability_violation` (never a silent no-op); every wired backend honors it today.
 
+- **`rayspec deploy --check-env <spec>` — the environment a document's boot will require, answered
+  without attempting one.** Until now the only way to learn what a document needed was to deploy it
+  and read the refusal, and that refusal is not cheap: the demands a declared `stream` route,
+  playback route or `cron` trigger raise are reached only **after** the boot has opened the database
+  and applied the whole committed migration chain. The new flag emits a JSON verdict naming every
+  variable the boot will require, its `<VAR>_FILE` equivalent where it has one, **why** this document
+  or this environment demands it, and whether it is currently set. Exit 0 when every demand is met, 1
+  when one is not; `missing` lists the unmet ones.
+  It reads the **document and the environment**, and it has to read both. Some demands have no
+  document signal at all: setting `STT_PROVIDER=deepgram` makes `DEEPGRAM_API_KEY` a demand, and
+  `TTS_PROVIDER=openai` makes `OPENAI_API_KEY` one, whatever the document says. A provider
+  **selector is never itself an unconditional demand**: on a backend document, leaving `STT_PROVIDER`
+  or `TTS_PROVIDER` unset means that capability is simply absent, which is not a boot error, so both
+  are reported as optional saying exactly that; on a product document `STT_PROVIDER` *is* demanded,
+  but only when the document declares an `stt.*` step. In neither case does a credential become a
+  demand before a provider has been selected. Each of the three boot profiles gets its own answer: a
+  frontend-only (static-profile) document is told it needs **none** of the three platform secrets,
+  and a product document gets its own set (`RAYSPEC_PRODUCT_TENANT_ID` plus the
+  capability-conditional demands its declarations raise).
+  The demands are **not** re-derived CLI-side. They come from the same records `@rayspec/server`
+  composes its boot refusals from, and the deploy guards ask their conditions through the same shared
+  predicates, so a demand the boot raises is a demand this prints. Every existing boot refusal keeps
+  its exact wording.
+  The command opens **no socket, no database and no credential**, and it loads **no extension pack** —
+  running pack code is what would break that promise. The consequences run in both directions (a pack
+  can supply a blob backend that removes a demand, and contribute an agent that adds one) and are
+  stated in the verdict's `notChecked`, together with the rest of the boundary: a set `<VAR>_FILE`
+  mount counts as set from the variable alone (the file is never opened, so a missing or empty secret
+  file still refuses the boot), and **no value is validated** — a malformed PEM, a non-UUID cron
+  tenant or a media key under 32 bytes is reported as "set" and still refuses. No environment value is
+  ever printed; every variable is reported as a `set` boolean. The verdict also names the `.env` files
+  the CLI's auto-loader searched, which is usually the answer to a disputed "unset".
+
 ### Fixed
 
 - **`rayspec deploy --dry-run` now judges a backend-profile document by the backend grammar, so a

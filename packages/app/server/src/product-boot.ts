@@ -127,6 +127,24 @@ import {
   type SttMediaSource,
 } from '@rayspec/stt-port';
 import type { PgTable } from 'drizzle-orm/pg-core';
+// The environment demands this boot raises, from the one module that states them — each `requireEnv`
+// below names a CATALOGUE RECORD instead of repeating a variable name and a prose clause, so the
+// read-only environment report enumerates exactly what this boot will require. See boot-env-demands.ts.
+import {
+  ANTHROPIC_CONFIG_ROOT,
+  anthropicReuseLogin,
+  type BootEnvVar,
+  CODEX_HOME,
+  DEEPGRAM_API_KEY,
+  declaresSttStep,
+  EXTRACTION_MODE,
+  NORMALIZE_MODE,
+  OPENAI_API_KEY_FOR_OPENAI,
+  OPENAI_API_KEY_FOR_PI,
+  PRODUCT_TENANT_ID,
+  RESPONDER_MODE,
+  STT_PROVIDER,
+} from './boot-env-demands.js';
 import {
   type BootedServer,
   resolveLiveTenantOrgId,
@@ -219,9 +237,17 @@ export interface DeployProductYamlOpts {
   agentBackendsFactory?: ProductAgentBackendsFactory;
 }
 
-function requireEnv(env: NodeJS.ProcessEnv, name: string, why: string): string {
-  const v = env[name]?.trim();
-  if (!v) throw new ProductBootError(`${name} is required (${why}). Fail-closed.`);
+/**
+ * Demand one environment variable, fail-closed and named. It takes the CATALOGUE RECORD
+ * (`boot-env-demands.ts`) rather than a loose name + prose pair, so the variable this boot requires and
+ * the clause the refusal describes it with are the same datum the read-only environment report reads —
+ * a demand cannot be added here without the report learning about it. The message is unchanged:
+ * `<VAR> is required (<what>). Fail-closed.`, which `ProductBootError` prefixes, and whose "is
+ * required" wording the CLI matches on to append its searched-`.env`-paths diagnostic.
+ */
+function requireEnv(env: NodeJS.ProcessEnv, demand: BootEnvVar): string {
+  const v = env[demand.name]?.trim();
+  if (!v) throw new ProductBootError(`${demand.name} is required (${demand.what}). Fail-closed.`);
   return v;
 }
 
@@ -707,14 +733,10 @@ export function buildSttAdapter(
   blob: ReturnType<BlobStoreFactory>,
   defaultModel: string | undefined,
 ): SttAdapter {
-  const provider = requireEnv(env, 'STT_PROVIDER', "the STT provider: 'deepgram' | 'fake'");
+  const provider = requireEnv(env, STT_PROVIDER);
   if (provider === 'fake') return new FakeSttAdapter({ fixtures: [] });
   if (provider === 'deepgram') {
-    const apiKey = requireEnv(
-      env,
-      'DEEPGRAM_API_KEY',
-      'the Deepgram API key (STT_PROVIDER=deepgram)',
-    );
+    const apiKey = requireEnv(env, DEEPGRAM_API_KEY);
     return new DeepgramSttAdapter({
       apiKey,
       ...(defaultModel ? { model: defaultModel } : {}),
@@ -812,10 +834,13 @@ export function anthropicApiKeyOverrideWarning(env: NodeJS.ProcessEnv): string |
  * declared env fail-closes on an invalid value).
  */
 export function anthropicReuseLoginEnabled(env: NodeJS.ProcessEnv): boolean {
-  const raw = env.RAYSPEC_ANTHROPIC_REUSE_LOGIN?.trim().toLowerCase();
-  if (raw === undefined || raw === '' || raw === 'false' || raw === '0' || raw === 'off')
-    return false;
-  if (raw === 'true' || raw === '1' || raw === 'on') return true;
+  // The recognised-value decision is `anthropicReuseLogin` (boot-env-demands.ts) and lives there
+  // because the read-only environment report has to reach the SAME verdict: this flag RELAXES the
+  // anthropic token demand, so a report that disagreed about it would invent a missing credential the
+  // boot does not want (or hide one it does). It answers, it never disposes — the fail-closed throw for
+  // an unrecognised value stays here, byte-identical.
+  const posture = anthropicReuseLogin(env);
+  if (posture !== 'unsupported') return posture;
   throw new ProductBootError(
     `RAYSPEC_ANTHROPIC_REUSE_LOGIN '${env.RAYSPEC_ANTHROPIC_REUSE_LOGIN}' is not supported ` +
       '(wired: true | false; unset ⇒ false). Fail-closed.',
@@ -873,11 +898,7 @@ export function anthropicReuseLoginBanner(env: NodeJS.ProcessEnv): string | null
 export function makeExtractionBackend(env: NodeJS.ProcessEnv, backend: string): Backend {
   switch (backend) {
     case 'openai': {
-      const apiKey = requireEnv(
-        env,
-        'OPENAI_API_KEY',
-        "the OpenAI API key (extraction backend 'openai')",
-      );
+      const apiKey = requireEnv(env, OPENAI_API_KEY_FOR_OPENAI);
       // Optional request-level bounds. Each is omitted when its variable is unset or unusable, so
       // with neither set the options are the single `apiKey` they have always been and the adapter
       // registers auth exactly as before.
@@ -912,27 +933,15 @@ export function makeExtractionBackend(env: NodeJS.ProcessEnv, backend: string): 
       // Reuse-login shadow footgun: a token/key present alongside the flag shadows the seeded login.
       const shadowWarning = anthropicReuseLoginShadowWarning(env);
       if (shadowWarning) console.warn(shadowWarning);
-      const configRoot = requireEnv(
-        env,
-        'RAYSPEC_ANTHROPIC_CONFIG_ROOT',
-        "the per-tenant CLAUDE_CONFIG_DIR root dir (extraction backend 'anthropic')",
-      );
+      const configRoot = requireEnv(env, ANTHROPIC_CONFIG_ROOT);
       return new AnthropicAdapter({ configRoot });
     }
     case 'pi': {
-      const apiKey = requireEnv(
-        env,
-        'OPENAI_API_KEY',
-        "the OpenAI API key — Pi runs on it (extraction backend 'pi')",
-      );
+      const apiKey = requireEnv(env, OPENAI_API_KEY_FOR_PI);
       return new PiAdapter({ apiKey });
     }
     case 'codex': {
-      const codexHome = requireEnv(
-        env,
-        'CODEX_HOME',
-        "the codex home dir holding the ChatGPT-OAuth auth.json (extraction backend 'codex')",
-      );
+      const codexHome = requireEnv(env, CODEX_HOME);
       return new CodexAdapter({ codexHome });
     }
     default:
@@ -1932,11 +1941,7 @@ export function buildTurnResponder(
   opts: DeployProductYamlOpts,
   backends: ProductBackendSource = envProductBackends(env),
 ): ConversationTurnResponderFactory {
-  const mode = requireEnv(
-    env,
-    'RAYSPEC_RESPONDER_MODE',
-    "the conversation reply executor: 'live' (real runAgent) | 'deterministic' (injected Backend, dev/CI)",
-  );
+  const mode = requireEnv(env, RESPONDER_MODE);
   const cfg = resolveResponderConfig(specPath, spec);
   const storeContext = resolveResponderStoreContext(cfg);
   const historyWindow = {
@@ -2238,11 +2243,7 @@ export function buildRecordNormalizer(
   decl: NonNullable<ReturnType<typeof recordInputNormalize>>,
   backends: ProductBackendSource = envProductBackends(env),
 ): NonNullable<NonNullable<ProductYamlRollout['record']>['normalizer']> {
-  const mode = requireEnv(
-    env,
-    'RAYSPEC_NORMALIZE_MODE',
-    "the record input-normalize executor: 'live' (real runAgent) | 'deterministic' (injected Backend, dev/CI)",
-  );
+  const mode = requireEnv(env, NORMALIZE_MODE);
   const cfg = resolveRecordNormalizerConfig(specPath, decl.agent);
   const outputSchema = {
     name: 'normalized_record',
@@ -2398,14 +2399,7 @@ export async function deployProductYamlSpec(
 
   // The deployment binds to the org as the DATABASE stores it, not to the spelling the operator
   // configured — see `assertProductTenantBootable`, which returns that canonical form.
-  const tenantId = await assertProductTenantBootable(
-    db,
-    requireEnv(
-      env,
-      'RAYSPEC_PRODUCT_TENANT_ID',
-      'the deployment tenant every workflow run + dispatcher binds to (single-node posture)',
-    ),
-  );
+  const tenantId = await assertProductTenantBootable(db, requireEnv(env, PRODUCT_TENANT_ID));
 
   // ── DOC-DRIVEN env demands — each capability's env is demanded iff the spec USES it ────────
   // `withAudio` (declares audio_input/media_playback — the SAME predicate compose's conditional mount
@@ -2430,7 +2424,7 @@ export async function deployProductYamlSpec(
   // declaring doc without a wired normalizer). A record_input doc WITHOUT input_normalize demands
   // NEITHER — the responder-mirror conditional demand.
   const recordNormalizeDecl = declaresRecordInput(spec) ? recordInputNormalize(spec) : undefined;
-  const usesStt = spec.workflows.some((wf) => wf.steps.some((s) => s.use?.startsWith('stt.')));
+  const usesStt = declaresSttStep(spec);
   const hasAgents = spec.extractors.length > 0;
 
   // ── 1. derive the Tier-A store bindings from the YAML (product-free) ──────────────────────────
@@ -2596,11 +2590,7 @@ export async function deployProductYamlSpec(
   let liveAgent: ProductYamlRollout['liveAgent'] | undefined;
   let agents: AgentRuntimeRegistry | undefined;
   if (hasAgents) {
-    extractionMode = requireEnv(
-      env,
-      'RAYSPEC_EXTRACTION_MODE',
-      "the extraction executor: 'live' (real runAgent/gpt-5) | 'deterministic' (injected, dev/CI)",
-    );
+    extractionMode = requireEnv(env, EXTRACTION_MODE);
     if (extractionMode === 'live') {
       // `undefined` triggers the parameter default, so an omitting boot builds exactly as before.
       liveAgent = buildLiveAgent(env, specPath, spec, productBackends);

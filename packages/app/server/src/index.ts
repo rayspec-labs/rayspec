@@ -32,6 +32,28 @@ export {
   resolveAgentTracing,
 } from './agent-tracing.js';
 export { bootBanner, bootBaseUrl, staticBootBanner } from './banner.js';
+// The boot's ENVIRONMENT DEMANDS — the single source of truth the boot refusals are composed from and
+// the read-only `rayspec deploy --check-env` report is enumerated from. Re-exported here for embedders,
+// but the CLI imports `checkBootEnv` through the `@rayspec/server/boot-env` SUBPATH instead: that module
+// pulls in no adapter, no durable engine and no database driver, so a read-only environment check loads
+// none of them — the same reason `agent-tracing` has a subpath of its own.
+export {
+  AGENT_BACKEND_DEMANDS,
+  type AgentBackendDemand,
+  anthropicReuseLogin,
+  type BootEnvOptional,
+  type BootEnvReport,
+  type BootEnvRequirement,
+  type BootEnvVar,
+  type BootEnvVarState,
+  checkBootEnv,
+  declaredAgentBackends,
+  declaresPlaybackRoute,
+  declaresStreamRoute,
+  fireableTriggers,
+  PROVISION_BOOT_SECRETS,
+  SERVER_BOOT_SECRETS,
+} from './boot-env-demands.js';
 // The boot-timeout guard — shared by the `rayspec-serve` bin (serve.ts) and the local-boot dev wrapper
 // so a hung assemble step is diagnosed rather than silent. Pure (timer race); no entrypoint side effect.
 export {

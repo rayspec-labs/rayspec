@@ -664,6 +664,7 @@ Against an existing organization, skip steps 1–2 entirely and set
 rayspec deploy <spec.yaml> [--port <n>]
 rayspec deploy <spec.yaml> --apply-migration <delta.sql> [--allowlist <file.json>] [--port <n>]
 rayspec deploy --dry-run <spec.yaml>
+rayspec deploy --check-env <spec.yaml>
 ```
 
 **Production-mutating.** `deploy` boots the platform from the ambient environment,
@@ -723,6 +724,57 @@ change is applied by the explicit `--apply-migration` flag below.
   not prove narrows instead: it reads only the document, so it says nothing about
   whether the declared directories hold built assets, or that the app serves.
 
+- **`--check-env`** is the other **one-shot**, DB-free, network-free check: the
+  environment variables **this document's boot will require**, each with its
+  `<VAR>_FILE` equivalent where it has one, **why** it is required, and whether it is
+  currently set. Exit `0` when every demand is met, `1` when one is not — `missing`
+  lists the unmet ones. It is the answer a refused `deploy` used to be the only way to
+  get, and that answer is not cheap: the demands a declared `stream` route, playback
+  route or `cron` trigger raise are reached only **after** the boot has opened the
+  database and applied the whole committed migration chain.
+
+  ```
+  rayspec deploy --check-env ./rayspec.yaml
+  ```
+
+  It reads the **document and the environment**, and it needs both — some demands have
+  no document signal at all. Setting `STT_PROVIDER=deepgram` makes `DEEPGRAM_API_KEY`
+  required and `TTS_PROVIDER=openai` makes `OPENAI_API_KEY` required, whatever the
+  document says. A provider **selector is never itself an unconditional demand**: on a
+  backend document, leaving either unset means that capability is simply absent, which
+  is not a boot error, so both are reported under `optional` saying exactly that; on a
+  product document `STT_PROVIDER` *is* demanded, but only when the document declares an
+  `stt.*` step. In neither case does a credential become a demand before a provider has
+  been selected. Each profile is answered on its own
+  terms — a frontend-only (static) document is told it needs **none** of the three
+  platform secrets, and a product document gets `RAYSPEC_PRODUCT_TENANT_ID` plus the
+  capability-conditional demands its own declarations raise.
+
+  The demands are not re-derived by the CLI: they come from the same records
+  `@rayspec/server` composes its boot refusals from, so a demand the boot raises is a
+  demand this prints.
+
+  It generalizes a surface that already existed for exactly one variable.
+  [`doctor`](#doctor) raises a `cron_tenant_required` **advisory** for every declared
+  `cron` / `manual` trigger, naming `RAYSPEC_CRON_TENANT_ID` — and it can only be an
+  advisory, because the lint pass is pure over the document and cannot read an
+  environment. `--check-env` says the same thing about the same trigger *and* reports
+  whether the variable is set; both statements stay true, and the advisory is unchanged.
+
+  What it deliberately does not do is in the verdict's `notChecked`, not left to
+  inference. It opens **no socket, no database and no credential**, and it loads **no
+  extension pack** — running pack code is what would break that promise — so a
+  pack-supplied blob backend (which *removes* the `RAYSPEC_BLOB_ROOT` demand) and a
+  pack-contributed agent (which *adds* a backend credential demand) are both invisible
+  here. A set `<VAR>_FILE` mount counts as set from the variable alone: the file is
+  never opened, so a missing, unreadable or empty secret file still refuses the boot.
+  And **no value is validated** — a malformed PKCS#8 PEM, a non-UUID
+  `RAYSPEC_CRON_TENANT_ID` or a media key under 32 bytes is reported as set and still
+  refuses. No environment value is ever printed; every variable is a `set` boolean. The
+  verdict also names the `.env` files the CLI's loader searched (`searchedDotenv`),
+  which is usually the answer to a disputed "unset". It is rejected with `--dry-run`
+  (each emits its own verdict) and with `--apply-migration` / `--allowlist` (it opens no
+  database, so a delta handed to it would be dropped).
 - **`--apply-migration <delta.sql>`** applies a **reviewed forward migration** in
   place before serving — the supported path for evolving an existing deployment's
   schema (author the delta with [`plan --against`](#plan)). It reaches the same gated
@@ -752,7 +804,8 @@ change is applied by the explicit `--apply-migration` flag below.
   and the boot cannot disagree. See
   [getting-started → a frontend-only (static) deployment](./getting-started.md#a-frontend-only-static-deployment).
 - **Flags:** `--port <n>` overrides `PORT` (serve path); `--dry-run` selects the
-  one-shot compose check; `--apply-migration <delta.sql>` applies a reviewed forward
+  one-shot compose check; `--check-env` selects the one-shot boot-environment check;
+  `--apply-migration <delta.sql>` applies a reviewed forward
   migration; `--allowlist <file.json>` (requires `--apply-migration`) covers reviewed
   destructive statements in that delta.
 - **Exit:** the serve path stays up until a signal; a fail-closed boot error (a

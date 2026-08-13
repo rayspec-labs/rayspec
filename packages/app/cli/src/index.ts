@@ -155,7 +155,20 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 NO DB, NO network. Emits a JSON verdict. Does NOT prove: the
                                 migration, boot-env sufficiency, any provider credential, live-schema
                                 drift, or that the app serves — the verdict's notProven lists what
-                                each profile leaves open. Exit 0 ok / 1 not.`,
+                                each profile leaves open. Exit 0 ok / 1 not.
+  rayspec deploy --check-env <spec.yaml>
+                                One-shot: the environment variables THIS document's boot will
+                                require, each with its <VAR>_FILE equivalent, why the document (or
+                                the environment) demands it, and whether it is currently set — the
+                                answer a refused deploy used to be the only way to get. Reads the
+                                document AND the environment: a selected STT_PROVIDER/TTS_PROVIDER
+                                makes that provider's credential a demand no document could have
+                                predicted, while an UNSET selector is never a boot error. Opens no
+                                socket, no database and no credential, and loads NO extension pack —
+                                so a pack-supplied blob backend (which removes a demand) and a
+                                pack-contributed agent (which adds one) are both invisible; the
+                                verdict's notChecked states that and the rest of the boundary. Prints
+                                no value, only set/unset. Exit 0 if every demand is met / 1 if not.`,
       },
     ],
   },
@@ -463,7 +476,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
         if (e instanceof DeployCliError) throw new CliError(e.message);
         throw e;
       }
-      if (outcome.kind === 'dry-run') {
+      if (outcome.kind === 'dry-run' || outcome.kind === 'check-env') {
         await emit(outcome.result);
         return outcome.result.ok ? 0 : 1;
       }

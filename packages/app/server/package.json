@@ -16,6 +16,10 @@
     "./agent-tracing": {
       "types": "./dist/agent-tracing.d.ts",
       "default": "./dist/agent-tracing.js"
+    },
+    "./boot-env": {
+      "types": "./dist/boot-env-demands.d.ts",
+      "default": "./dist/boot-env-demands.js"
     }
   },
   "main": "./dist/index.js",

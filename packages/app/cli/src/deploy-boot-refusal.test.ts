@@ -16,7 +16,13 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { format } from 'node:util';
-import { BootConfigError, ProductBootError } from '@rayspec/server';
+import {
+  BootConfigError,
+  loadServerConfig,
+  loadTenantProvisionSecrets,
+  makeExtractionBackend,
+  ProductBootError,
+} from '@rayspec/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The error `assembleServer` throws, set per test. vi.mock is hoisted above the imports, so the factory
@@ -179,6 +185,36 @@ describe('rayspec deploy — a fail-closed boot refusal prints the diagnosis and
     const { stderr } = await bootRefusal(CLEAN_PRINT[0].err);
     expect(stderr.startsWith('[rayspec deploy] Boot aborted (Product-YAML) — ')).toBe(true);
     expect(stderr).toContain('RAYSPEC_PRODUCT_TENANT_ID=');
+  });
+
+  /**
+   * The suffix above is keyed on the WORDING @rayspec/server raises, not on a flag or an error class —
+   * `missingEnvSearchedSuffix` matches `required env var(s) missing: …` and `<VAR> is required (…)`.
+   * The samples in CLEAN_PRINT are hand-written copies of that wording, so on their own they would
+   * stay green through a rename on the server side and the operator would silently lose the
+   * diagnostic. These drive the REAL refusals — raised by the real functions, against a real empty
+   * environment — so the coupling is pinned to the wording that actually ships. FAIL-THE-FIX: fold the
+   * two phrasings into one normalized message and every case here REDs.
+   */
+  it('the REAL missing-required refusals still earn the suffix (the wording is the key)', async () => {
+    const real: readonly { readonly name: string; readonly raise: () => void }[] = [
+      { name: 'loadServerConfig', raise: () => loadServerConfig({}, () => {}) },
+      { name: 'loadTenantProvisionSecrets', raise: () => loadTenantProvisionSecrets({}, () => {}) },
+      { name: "makeExtractionBackend 'openai'", raise: () => makeExtractionBackend({}, 'openai') },
+      { name: "makeExtractionBackend 'codex'", raise: () => makeExtractionBackend({}, 'codex') },
+    ];
+    for (const { name, raise } of real) {
+      let raised: unknown;
+      try {
+        raise();
+      } catch (e) {
+        raised = e;
+      }
+      if (!(raised instanceof Error)) throw new Error(`${name} raised no refusal to assert on`);
+      const { stderr, exitCode } = await bootRefusal(raised);
+      expect(stderr, name).toBe(`[rayspec deploy] ${raised.message}${SEARCHED_SUFFIX}\n`);
+      expect(exitCode, name).toBe(1);
+    }
   });
 
   it('RAYSPEC_SKIP_DOTENV=1 → the missing-variable refusal stays bare (nothing was searched)', async () => {

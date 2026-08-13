@@ -27,6 +27,7 @@
  */
 import type { Backend, BackendId } from '@rayspec/core';
 import { parseAnySpec } from '@rayspec/spec';
+import { declaredAgentBackends } from './boot-env-demands.js';
 import { type AgentBackendsFactory, BootConfigError } from './composition-root.js';
 import {
   anthropicApiKeyOverrideWarning,
@@ -48,14 +49,15 @@ function buildDeclaredBackends(
   existing?: ReadonlyMap<BackendId, Backend>,
 ): ReadonlyMap<BackendId, Backend> {
   // Distinct NEW backends (not already in `existing`) → which agent id(s) select each (for the message).
-  const backendToAgents = new Map<BackendId, string[]>();
-  for (const agent of agents) {
-    const id = agent.backend as BackendId;
-    if (existing?.has(id)) continue; // already wired (eager base build) — do not rebuild.
-    const selectors = backendToAgents.get(id) ?? [];
-    selectors.push(agent.id);
-    backendToAgents.set(id, selectors);
-  }
+  // The grouping is the SHARED `declaredAgentBackends` (boot-env-demands.ts), so the read-only
+  // environment report names exactly the backends this build would construct — and therefore exactly
+  // the per-backend credentials it would demand. Already-wired backends are filtered out first: only
+  // NEW ones are built here, and only new ones can raise a missing-env refusal.
+  const unwired = agents.filter((agent) => !existing?.has(agent.backend as BackendId));
+  const backendToAgents = declaredAgentBackends(unwired) as ReadonlyMap<
+    BackendId,
+    readonly string[]
+  >;
   // Nothing new to build ⇒ return the existing map unchanged (base-only deploys stay byte-identical).
   if (backendToAgents.size === 0) return existing ?? new Map<BackendId, Backend>();
 
