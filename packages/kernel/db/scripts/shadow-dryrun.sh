@@ -308,6 +308,52 @@ assert_eq "1" \
 # Clean up the 0010 rows + their org so the journal_steps cascade assertion below starts from 0 rows.
 psql -d "$DRYRUN_DB" -c "DELETE FROM orgs WHERE id='00000000-0000-0000-0000-0000000000e5';" >/dev/null
 
+echo "== ASSERT 0011 end state (tenant event bus: the stream + its counter/floor row) =="
+# 0011 created both tables.
+assert_eq "2" \
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('tenant_events','tenant_event_streams');" \
+  "0011 created tenant_events + tenant_event_streams"
+# The stream is keyed (tenant_id, seq) — that composite PK is BOTH the uniqueness guarantee and the
+# ordered resume read path, so a single-column key here would be a silent regression.
+assert_eq "tenant_id,seq" \
+  "SELECT string_agg(a.attname, ',' ORDER BY k.ord) FROM pg_constraint c JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum WHERE c.conrelid = 'tenant_events'::regclass AND c.contype = 'p';" \
+  "tenant_events PRIMARY KEY is (tenant_id, seq)"
+# The counter columns are bigint (a bigserial would hand out numbers BEFORE commit — the exact
+# ordering this design exists to avoid) and NOT NULL with a 0 default.
+assert_eq "bigint|bigint" \
+  "SELECT string_agg(data_type, '|' ORDER BY column_name) FROM information_schema.columns WHERE table_schema='public' AND table_name='tenant_event_streams' AND column_name IN ('last_seq','truncated_through');" \
+  "tenant_event_streams last_seq + truncated_through are bigint"
+assert_eq "NO|NO" \
+  "SELECT string_agg(is_nullable, '|' ORDER BY column_name) FROM information_schema.columns WHERE table_schema='public' AND table_name='tenant_event_streams' AND column_name IN ('last_seq','truncated_through');" \
+  "tenant_event_streams last_seq + truncated_through are NOT NULL"
+# Both orgs FKs exist (a GDPR org-delete takes the tenant's stream AND its counter).
+assert_eq "2" \
+  "SELECT count(*) FROM pg_constraint WHERE conname IN ('tenant_events_tenant_id_orgs_id_fk','tenant_event_streams_tenant_id_orgs_id_fk');" \
+  "tenant_events + tenant_event_streams -> orgs FKs exist"
+# The retention sweep's age index (it scans `at < cutoff`; `at` is NOT a read-ordering key).
+assert_eq "1" \
+  "SELECT count(*) FROM pg_indexes WHERE indexname='tenant_events_at_idx' AND indexdef ILIKE '%(at)%';" \
+  "tenant_events_at_idx on (at) exists"
+# A REAL write through the pair: one tenant's counter issues 1..2, and the composite PK REFUSES a
+# duplicate (tenant, seq) — the structural guarantee a subscriber's cursor arithmetic rests on.
+psql -d "$DRYRUN_DB" >/dev/null <<'SQL'
+INSERT INTO orgs (id, name, slug) VALUES ('00000000-0000-0000-0000-0000000000b1', 'BusOrg', 'busorg');
+INSERT INTO tenant_event_streams (tenant_id, last_seq) VALUES ('00000000-0000-0000-0000-0000000000b1', 2);
+INSERT INTO tenant_events (tenant_id, seq, topic, payload) VALUES
+  ('00000000-0000-0000-0000-0000000000b1', 1, 'note.created', '{"id":1}'::jsonb),
+  ('00000000-0000-0000-0000-0000000000b1', 2, 'note.updated', '{"id":1}'::jsonb);
+SQL
+assert_eq "2" \
+  "SELECT count(*) FROM tenant_events WHERE tenant_id='00000000-0000-0000-0000-0000000000b1';" \
+  "0011 two events insert cleanly under one tenant"
+assert_eq "duplicate" \
+  "SELECT CASE WHEN count(*) = 1 THEN 'duplicate' ELSE 'no-key' END FROM pg_constraint WHERE conrelid='tenant_events'::regclass AND contype='p';" \
+  "0011 the composite PK is the duplicate-(tenant,seq) guard"
+# FK CASCADE: deleting the org removes BOTH the events and the counter row.
+psql -d "$DRYRUN_DB" -c "DELETE FROM orgs WHERE id='00000000-0000-0000-0000-0000000000b1';" >/dev/null
+assert_eq "0" "SELECT count(*) FROM tenant_events;" "tenant_events cascaded away after org delete"
+assert_eq "0" "SELECT count(*) FROM tenant_event_streams;" "tenant_event_streams cascaded away after org delete"
+
 echo "== ASSERT run_events FK CASCADE: deleting an org removes its run_events rows =="
 psql -d "$DRYRUN_DB" >/dev/null <<'SQL'
 INSERT INTO orgs (id, name, slug) VALUES ('00000000-0000-0000-0000-0000000000e1', 'EventsOrg', 'eventsorg');

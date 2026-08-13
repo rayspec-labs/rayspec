@@ -33,6 +33,7 @@ import type { NeutralTool } from '@rayspec/core';
 import type { TenantDb } from '@rayspec/db';
 import type {
   BlobStoreFactory,
+  EmitEvent,
   FsSourceFactory,
   SttCapability,
   ToolHandler,
@@ -41,6 +42,7 @@ import type {
 } from '@rayspec/handler-sdk';
 import type { RaySpec, ToolSpecConfig } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
+import type { TenantEventBus } from './event-bus.js';
 import { getHandlerRuntime, type ResolvedHandler } from './handler-runtime.js';
 import { makeHandlerDb } from './store-facade.js';
 
@@ -71,6 +73,13 @@ export type ToolFactory = (tdb: TenantDb) => NeutralTool[];
  * An OPTIONAL `tts` adds `init.tts` — the text-to-speech capability, the egress twin of `stt` (no
  * tenant argument: it speaks the text the tool hands it). Omitted ⇒ `init.tts` is ABSENT (no provider
  * configured; a tool that needs it fail-closes loudly on `undefined`, like `init.blob`).
+ *
+ * An OPTIONAL `eventBus` adds `init.emit` — the tenant-scoped event-bus append, built from the run's
+ * TenantDb so it is bound to the run's SERVER-DERIVED tenant (never a tool/arg-supplied value), like
+ * `init.blob`. It is the IMMEDIATE form: a tool handler has NO outer transaction (see the header), so
+ * there is no boundary to flush at and each emit is its own durable statement — the deliberate
+ * asymmetry with the route arm, which buffers and flushes at its transaction boundary. Omitted ⇒
+ * `init.emit` is ABSENT (the deployment did not enable the bus; a tool that needs it fail-closes).
  */
 function buildNeutralTool(
   tool: ToolSpecConfig,
@@ -81,6 +90,7 @@ function buildNeutralTool(
   fsSourceFactory?: FsSourceFactory,
   stt?: SttCapability,
   tts?: TtsCapability,
+  emit?: EmitEvent,
 ): NeutralTool {
   return {
     spec: {
@@ -107,6 +117,8 @@ function buildNeutralTool(
         // The text-to-speech capability (spread so ABSENT when no TTS provider is configured).
         // Mirrors invokeRouteHandler exactly (the SAME composition-root handle the route arm gets).
         ...(tts ? { tts } : {}),
+        // The tenant-bound event-bus emit (spread so ABSENT when the bus is not enabled).
+        ...(emit ? { emit } : {}),
       };
       return getHandlerRuntime().invokeTool(fn, rawArgs, init);
     },
@@ -143,6 +155,10 @@ function buildNeutralTool(
  * @param tts           OPTIONAL composition-root `TtsCapability` — when wired, each tool init carries
  *                      `init.tts` (synthesize audio from text through the deployment's configured TTS
  *                      provider); absent on a deploy with no `TTS_PROVIDER` configured.
+ * @param eventBus      OPTIONAL composition-root `TenantEventBus` — when the deployment enabled the
+ *                      bus, each tool init carries `init.emit`, built PER RUN from the run's
+ *                      tenant-bound `TenantDb` (the immediate form — a tool has no outer transaction);
+ *                      absent on a deploy that did not enable it.
  */
 export function buildToolFactory(
   spec: RaySpec,
@@ -153,6 +169,7 @@ export function buildToolFactory(
   fsSourceFactory?: FsSourceFactory,
   stt?: SttCapability,
   tts?: TtsCapability,
+  eventBus?: TenantEventBus,
 ): ToolFactory {
   const toolById = new Map(spec.tooling.map((t) => [t.id, t]));
 
@@ -181,8 +198,12 @@ export function buildToolFactory(
     resolved.push({ tool, fn: handler.fn as ToolHandler });
   }
 
-  return (tdb: TenantDb): NeutralTool[] =>
-    resolved.map(({ tool, fn }) =>
-      buildNeutralTool(tool, fn, tdb, productTables, blobFactory, fsSourceFactory, stt, tts),
+  return (tdb: TenantDb): NeutralTool[] => {
+    // Built ONCE per run from the run's tenant-bound handle, then shared by every tool of that run —
+    // the same per-run, tenant-bound construction `init.blob` gets.
+    const emit = eventBus?.immediate(tdb);
+    return resolved.map(({ tool, fn }) =>
+      buildNeutralTool(tool, fn, tdb, productTables, blobFactory, fsSourceFactory, stt, tts, emit),
     );
+  };
 }

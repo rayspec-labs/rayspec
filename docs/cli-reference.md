@@ -852,9 +852,10 @@ deployment sets its configuration through its orchestrator or secret manager.
   set for you; see
   [getting-started](./getting-started.md#serving-your-declared-backend).)
 - A **frontend-only** spec — one that declares only a `frontend` (no `stores`,
-  `api`, `agents`, `tooling`, `triggers`, `handlers`, or `extensions`, and no
-  durable worker) — boots as a **static profile**: it requires **none** of the
-  three boot secrets and mounts **no** auth / OIDC / run route (`/health` runs no
+  `api`, `agents`, `tooling`, `triggers`, `handlers`, or `extensions`, no
+  durable worker and no enabled event bus) — boots as a **static profile**: it
+  requires **none** of the three boot secrets and mounts **no** auth / OIDC / run
+  route (`/health` runs no
   database probe; it reports the declared mounts' readiness as `frontend`). It emits
   its own `Content-Security-Policy`
   and `Permissions-Policy` response headers, read from `RAYSPEC_FRONTEND_CSP` and

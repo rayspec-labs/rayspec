@@ -167,6 +167,17 @@ describe('negative — unknown_field (strict, fail-closed)', () => {
     );
     expectRejection(yaml, 'unknown_field');
   });
+
+  it('rejects an unknown sub-key inside deployment.eventBus (strict all the way down)', () => {
+    // `retentionMinutes` is the plausible typo for the one knob this section HAS, and the section is
+    // .strict() for the same reason the parent is: a window written in a key nothing reads would leave
+    // the deployment silently on the default while the document claims otherwise.
+    const yaml = BASE.replace(
+      'deployment:\n  durableWorker: true\n',
+      'deployment:\n  durableWorker: true\n  eventBus:\n    enabled: true\n    retentionMinutes: 30\n',
+    );
+    expectRejection(yaml, 'unknown_field');
+  });
 });
 
 describe('negative — schema_violation', () => {
@@ -191,6 +202,29 @@ describe('negative — schema_violation', () => {
         'schema_violation',
       );
     }
+  });
+
+  it('rejects a non-whole / non-positive deployment.eventBus.retentionHours, and a scalar eventBus', () => {
+    // The window is an AGE in whole hours. `0` and `-1` would name a window that cannot exist, and
+    // `1.5` a precision the sweep does not have — each must be refused at parse rather than silently
+    // floored or ignored at boot. A SCALAR `eventBus: true` is the shape an author who knows
+    // `durableWorker: true` reaches for first, so it is refused explicitly too.
+    for (const bad of ['0', '-1', '1.5']) {
+      expectRejection(
+        BASE.replace(
+          'deployment:\n  durableWorker: true\n',
+          `deployment:\n  durableWorker: true\n  eventBus:\n    enabled: true\n    retentionHours: ${bad}\n`,
+        ),
+        'schema_violation',
+      );
+    }
+    expectRejection(
+      BASE.replace(
+        'deployment:\n  durableWorker: true\n',
+        'deployment:\n  durableWorker: true\n  eventBus: true\n',
+      ),
+      'schema_violation',
+    );
   });
 
   it('rejects a tool MISSING the required idempotent field (no default — reviewed declaration)', () => {

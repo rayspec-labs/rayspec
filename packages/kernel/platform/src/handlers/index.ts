@@ -11,10 +11,13 @@
  *                           per-tenant isolate seam) + the in-process impl + the install/restore seam.
  *  - store-facade.ts        the serializable-shaped `HandlerDb` over the real `TenantDb` chokepoint
  *                           (the engine builds the init, dispatch.ts is UNCHANGED).
+ *  - event-bus.ts           the tenant event-bus injection seam (the buffered route form + the
+ *                           immediate tool form) the composition root wires when the bus is enabled.
  *  - resolve-tools.ts   (2) declared `tooling[]` → `NeutralTool[]` factory (per-run, tenant-bound).
  *  - route-init.ts          builders for the route/trigger `HandlerInit` (the transaction-wrapped
  *                           route/trigger path).
  */
+export type { BufferedTenantEmit, TenantEventBus } from './event-bus.js';
 export {
   getHandlerRuntime,
   type HandlerRuntime,

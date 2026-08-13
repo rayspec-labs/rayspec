@@ -44,6 +44,7 @@ import {
   type DeployTarget,
   deploy,
   eraseTenant,
+  makeTenantEventBus,
   type PlannedMigration,
   runScheduledCleanup,
   type SessionReprocessor,
@@ -109,6 +110,7 @@ import {
 import {
   assertProductScope,
   assertSafeIdentifier,
+  DEFAULT_EVENT_BUS_RETENTION_HOURS,
   ProductScopeError,
   type ProductSpec,
   parseProductSpec,
@@ -2708,6 +2710,10 @@ export async function deployProductYamlSpec(
         config: {
           gdprPurgeEnabled: config.cleanup.gdprPurgeEnabled,
           gdprRetentionDays: config.cleanup.gdprRetentionDays,
+          // A product deployment ALWAYS has the event bus (see the engine wiring below), so its
+          // retention sweep always runs — on the default window, since the product grammar has no key
+          // to override it with.
+          eventBusRetentionHours: DEFAULT_EVENT_BUS_RETENTION_HOURS,
         },
       }),
     schedule: config.cleanup.schedule,
@@ -2870,6 +2876,11 @@ export async function deployProductYamlSpec(
           // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.
           ...(fsSourceFactory ? { fsSourceFactory } : {}),
           ...(mediaTokenService ? { mediaTokenService } : {}),
+          // The tenant event bus is on STRUCTURALLY here — no declaration, and no key in the product
+          // grammar to write one in. Same rule by which a product deployment gets its durable worker:
+          // the profile's contract is that the platform's runtime is present, so a product's handlers
+          // and tools can emit without the document having to ask for it.
+          eventBus: makeTenantEventBus(),
         };
         return createAuthApp({
           ...baseDeps,

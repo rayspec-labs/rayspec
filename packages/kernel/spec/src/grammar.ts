@@ -60,6 +60,46 @@ export type Metadata = z.infer<typeof Metadata>;
 // ---------------------------------------------------------------------------------------
 
 /**
+ * The tenant-scoped EVENT BUS a deployment turns on. Two knobs, no provider and no credential: the
+ * backend is the database the boot already required, so — unlike the stt/tts capabilities, which name
+ * an external provider through an env var — there is nothing here to select or authenticate. The key
+ * is therefore the WHOLE enablement surface.
+ *
+ *  - `enabled` — when true, a `{handler}` route init and a tool init carry `init.emit(topic, payload)`,
+ *    which appends a durable, per-tenant-sequenced event. Absent/false ⇒ the capability is ABSENT from
+ *    the init (the `blob`/`enqueue` posture: a handler that needs it fail-closes loudly, never a silent
+ *    no-op).
+ *  - `retentionHours` — the AGE window an emitted event is kept for. APPROXIMATE by construction: the
+ *    sweep runs on the daily platform-housekeeping pass, so a tenant's oldest events can outlive the
+ *    nominal window by up to one sweep interval, and a bursting tenant can exceed its nominal size
+ *    until the next pass. It is an age window, NOT a row cap: nothing is deleted inside a product
+ *    request. Default {@link DEFAULT_EVENT_BUS_RETENTION_HOURS} when omitted. That housekeeping pass
+ *    runs on the DURABLE WORKER, so on a deployment that enables the bus without `durableWorker` the
+ *    window sweeps nothing and the stream is unbounded — the boot says so, and the two keys stay
+ *    INDEPENDENT here deliberately: unlike a cron trigger (which can do nothing at all without the
+ *    worker), the bus without it still emits, orders and serves, so refusing the document would break
+ *    a working posture rather than protect one.
+ */
+export const EventBusSpec = z
+  .object({
+    enabled: z.boolean().optional(),
+    retentionHours: z
+      .number()
+      .int('deployment.eventBus `retentionHours` must be a whole number of hours')
+      .positive('deployment.eventBus `retentionHours` must be greater than zero')
+      .optional(),
+  })
+  .strict();
+export type EventBusSpec = z.infer<typeof EventBusSpec>;
+
+/**
+ * The retention window (hours) an event-bus deployment gets when it declares no `retentionHours`. One
+ * day: long enough that a client which drops off overnight can still resume from its cursor, short
+ * enough that the table stays a live stream rather than an archive.
+ */
+export const DEFAULT_EVENT_BUS_RETENTION_HOURS = 24;
+
+/**
  * Deployment-level properties of a backend. These describe HOW the
  * deployment runs, NOT what any SDK can do — so `async`/off-request execution belongs HERE, on the
  * spec, gated by "is a durable worker configured?", and is INVISIBLE to the neutral `Backend`
@@ -72,10 +112,15 @@ export type Metadata = z.infer<typeof Metadata>;
  *    A lint rule (lint.ts) enforces it: a spec must not be deployed expecting async without it — but
  *    the LOAD-BEARING gate is the RUNTIME one (the run surface 501s if no executor is wired,
  *    regardless of this flag), so this is a declaration + a static best-effort check, defense-in-depth.
+ *  - `eventBus` — the tenant-scoped event bus (see `EventBusSpec`). Like `durableWorker` it is a
+ *    DEPLOYMENT property, not a capability: it says the deployment keeps a durable per-tenant event
+ *    stream, and the runtime gate stays the injected capability (an init carries `emit` only when the
+ *    composition root wired the bus).
  */
 export const DeploymentSpec = z
   .object({
     durableWorker: z.boolean().optional(),
+    eventBus: EventBusSpec.optional(),
   })
   .strict();
 export type DeploymentSpec = z.infer<typeof DeploymentSpec>;

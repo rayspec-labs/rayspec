@@ -398,7 +398,83 @@ export interface HandlerInit {
    * work through a `handler`-kind route or a tool.
    */
   readonly tts?: TtsCapability;
+  /**
+   * The TENANT-SCOPED EVENT-BUS emit capability (see `EmitEvent`) — append a durable,
+   * per-tenant-sequenced event other requests can subscribe to. OPTIONAL: present only when the
+   * deployment turned the bus on (`deployment.eventBus.enabled`), so a handler that needs it
+   * fail-closes loudly on `undefined` rather than the engine forcing an event stream onto every
+   * deployment (mirrors `blob`/`fsSource`/`stt`/`tts`). There is NO provider and NO credential to
+   * configure: the backend is the database the boot already required.
+   *
+   * POPULATED ON `handler`-KIND ROUTE INITS + TOOL INITS. A `stream`-kind route init carries only its
+   * byte-moving surface (the raw request plus the REQUIRED `blob`) and a TRIGGER init carries only
+   * `{ tenantId, db, triggerName }` at runtime — neither builder injects this capability, the same
+   * boundary `fsSource`/`stt`/`tts` already have — so work that must emit does it through a
+   * `handler`-kind route or a tool.
+   *
+   * UNLIKE the `stt`/`tts` handles (one deployment-static provider read once at registration), this
+   * one is TENANT-BOUND and built PER REQUEST from the run's server-derived tenant, exactly like
+   * `enqueue`: the closure has no tenant parameter, so a handler can never emit into another tenant.
+   */
+  readonly emit?: EmitEvent;
 }
+
+/**
+ * The tenant-scoped event-bus emit seam. A ROUTE or TOOL handler calls it to append ONE durable event
+ * to its tenant's stream — the primitive a product's live UI reads back, instead of every product
+ * rebuilding a polled events table of its own.
+ *
+ * `emit(topic, payload)` is POSITIONAL: the topic is the author's own vocabulary (the platform never
+ * interprets it) and the payload is any JSON-serializable value, stored verbatim as the event body.
+ * The payload is OPTIONAL — a one-argument `emit('heartbeat')` is a legitimate topic-only event whose
+ * body is stored as JSON `null`, not a mis-call (the signature below admits it deliberately, so a
+ * TypeScript handler can write the form the runtime accepts).
+ *
+ * SECURITY (the external-exposure isolate makes the real guarantee; this is the in-process contract):
+ *  - TENANT-BOUND BY CONSTRUCTION: there is NO `tenantId` parameter. The engine captured the run's
+ *    SERVER-DERIVED tenant when it built this closure (`init.tenantId`), so a handler can NEVER emit
+ *    into another tenant — the closure has no path to one.
+ *  - FAIL-CLOSED WHEN UNWIRED: the capability is ABSENT on a deployment that did not enable the bus —
+ *    a handler that needs it fail-closes loudly on `undefined` (mirrors `blob`/`enqueue`), never a
+ *    silent no-op that drops events on the floor.
+ *  - FAIL-CLOSED ON A MALFORMED CALL: a call whose first argument is not a non-empty string, or whose
+ *    payload cannot be JSON-serialized, is refused with a clear error naming the expected
+ *    `emit(topic, payload)` shape. A handler ships as an `.mjs` module, where the type below does not
+ *    reach the call site — and the sibling `init.enqueue` takes ONE request object, so
+ *    `emit({ topic, payload })` is exactly the mis-call to expect; without the refusal it would write
+ *    a row whose topic is `[object Object]` and silently corrupt the stream.
+ *
+ * ORDERING + DURABILITY (what a subscriber may rely on):
+ *  - Every event gets a per-tenant sequence number, and ALLOCATION ORDER EQUALS COMMIT ORDER — so a
+ *    subscriber resuming from a cursor with `seq > cursor` can never skip an event that committed
+ *    after it read. The sequence is GAP-FREE: a rolled-back emit returns its number and the next emit
+ *    reissues it, which is what makes a hole a REAL signal (retention) rather than noise.
+ *  - ATOMIC WITH THE HANDLER'S OWN WRITES on a route handler: the engine appends the request's events
+ *    as the last statement before its transaction commits, so a subscriber can never observe an event
+ *    announcing a state change that is not yet readable. A tool handler has no outer transaction (by
+ *    design — see `HandlerDb`), so there each emit is its own statement, durable as it returns.
+ *  - `await` is the durability boundary a caller sees on a tool; on a route the call BUFFERS and the
+ *    engine flushes at the transaction boundary — deliberately, because allocating at the call site
+ *    would hold the tenant's counter lock for the rest of the handler and serialise the whole tenant
+ *    on its slowest run. One consequence is worth stating outright: on a route, emit from the handler
+ *    BODY, before it returns. A call from inside a STREAMING (`sseResponse`) producer arrives after
+ *    the flush and after the route transaction closed, so there is nothing left to append to — that
+ *    call is REFUSED with a clear error rather than accepted and silently lost.
+ *
+ * RETENTION: events are kept for the deployment's declared age window and swept by the platform's
+ * scheduled housekeeping. The bound is APPROXIMATE — the sweep runs on that schedule, so a tenant's
+ * oldest events can outlive the nominal window until the next pass. It is also a DEPLOYMENT property,
+ * not a promise of this call: that housekeeping runs on the durable worker, so a deployment that
+ * enabled the bus without one emits and serves exactly as described above and simply never sweeps
+ * (its boot says so). Nothing here changes for the handler either way.
+ *
+ * ⚠ ISOLATE-READINESS (honest — like `db.transaction`, `mintPlayToken` and `enqueue`): `emit` is a
+ * CLOSURE over the engine's tenant-bound handle, so it does NOT trivially cross an external-exposure
+ * isolate boundary (a closure cannot be serialized). The cross-isolate emit is an isolate design point
+ * (an explicit emit RPC); the arguments it carries (a string + a JSON value) already are the
+ * serializable part. The in-process call is correct — the tenant is engine-bound, not handler-supplied.
+ */
+export type EmitEvent = (topic: string, payload?: unknown) => Promise<void>;
 
 /**
  * What a TOOL handler receives. Identical to `HandlerInit` today; named distinctly so the contract

@@ -197,6 +197,11 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
     'workflow_runs',
     'workflow_node_states',
     'workflow_artifacts',
+    // the tenant event bus is tenant-scoped (CORE_TENANT_SCOPED_TABLES), so tenant erasure covers the
+    // stream AND its counter row — a product's events are product data. SEEDED below (not a 0-count
+    // line), so the coverage is proven rather than merely reported.
+    'tenant_events',
+    'tenant_event_streams',
   ] as const;
   type CoreName = (typeof CORE_NAMES)[number];
   const coreTable: Record<CoreName, never> = {
@@ -209,6 +214,8 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
     workflow_runs: schema.workflowRuns as never,
     workflow_node_states: schema.workflowNodeStates as never,
     workflow_artifacts: schema.workflowArtifacts as never,
+    tenant_events: schema.tenantEvents as never,
+    tenant_event_streams: schema.tenantEventStreams as never,
   };
   async function coreRowCount(tenantId: string, name: CoreName): Promise<number> {
     return (await forTenant(db, tenantId).select(coreTable[name]).all()).length;
@@ -303,6 +310,12 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
       bodyHash: 'bh',
       snapshot: {},
     });
+    // The tenant's event stream + its counter row (the bus is tenant data like any other).
+    await tdb.insert(schema.tenantEvents as never, [
+      { seq: 1, topic: 'note.created', payload: { text: `${tenantId}-raw-event-1` } },
+      { seq: 2, topic: 'note.updated', payload: { text: `${tenantId}-raw-event-2` } },
+    ]);
+    await tdb.insert(schema.tenantEventStreams as never, { lastSeq: 2, truncatedThrough: 0 });
     return {
       runs: 1,
       journal_steps: 2,
@@ -310,13 +323,17 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
       run_events: 1,
       idempotency_keys: 1,
       // invites — not seeded here, so the erase reports them at 0 (still covered by tenant erasure;
-      // coreTotalRows stays 7 = 1 + 2 + 2 + 1 + 1).
+      // coreTotalRows is 10 = 1 + 2 + 2 + 1 + 1 + 2 + 1).
       invites: 0,
       // workflow journal tables — not seeded here, so the erase reports them at 0 (they are still
-      // covered by tenant erasure; coreTotalRows stays 7 = 1 + 2 + 2 + 1 + 1).
+      // covered by tenant erasure; coreTotalRows is 10 = 1 + 2 + 2 + 1 + 1 + 2 + 1).
       workflow_runs: 0,
       workflow_node_states: 0,
       workflow_artifacts: 0,
+      // the event bus IS seeded (2 events + the tenant's counter row), so the erasure of a tenant's
+      // event stream is asserted on real rows.
+      tenant_events: 2,
+      tenant_event_streams: 1,
     };
   }
 
@@ -535,7 +552,7 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
       expect(res.mode).toBe('deleted');
       // The core-table counts are reported DISTINCTLY from the product `tables`.
       expect(res.coreTables).toEqual(t1Core);
-      expect(res.coreTotalRows).toBe(7); // 1 + 2 + 2 + 1 + 1
+      expect(res.coreTotalRows).toBe(10); // 1 + 2 + 2 + 1 + 1 + 2 (events) + 1 (event counter)
       // Product counts are unchanged (the product half stays its own dimension).
       expect(res.tables).toEqual({ revisions: 3, documents: 2 });
       expect(res.totalRows).toBe(5);
@@ -556,7 +573,7 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
       const erasure = rows.find((r) => r.event === 'tenant_data_erased');
       const meta = erasure?.meta as { coreTables: Record<string, number>; coreTotalRows: number };
       expect(meta.coreTables).toEqual(t1Core);
-      expect(meta.coreTotalRows).toBe(7);
+      expect(meta.coreTotalRows).toBe(10);
       scenariosRan++;
     },
   );

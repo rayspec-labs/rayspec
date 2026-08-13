@@ -195,6 +195,12 @@ export function makeRouteHandler(args: {
   // `init.tts` is omitted (a handler that reads it fail-closes loudly on `undefined`). Read once at
   // registration, exactly like `sttCapability`.
   const ttsCapability = deps.engine?.ttsCapability;
+  // the deployment's tenant event bus (present iff the deployed spec enabled it). Read once at
+  // registration like the capabilities above — but what is read here is a pair of CONSTRUCTORS, not a
+  // handle: `init.emit` itself is built PER REQUEST, inside the route transaction, from the run's
+  // tenant-bound TenantDb (so it is tenant-bound by construction, like `init.enqueue`). Absent ⇒
+  // `init.emit` is omitted (a handler that reads it fail-closes loudly on `undefined`).
+  const eventBus = deps.engine?.eventBus;
   if (handler.kind !== 'route') {
     // Guarded again at registration; narrows the ResolvedHandler union so `handler.fn` is a RouteHandler.
     throw new Error(`makeRouteHandler: expected a 'route' handler, got '${handler.kind}'.`);
@@ -278,6 +284,10 @@ export function makeRouteHandler(args: {
       // the text-to-speech capability (the deployment's configured provider). Absent ⇒ init.tts
       // is omitted (a handler that needs it fail-closes loudly on `undefined`).
       ttsCapability,
+      // the tenant event bus. invokeRouteHandler binds it to the TRANSACTIONAL handle and flushes
+      // the request's buffered events as the last statement before COMMIT. Absent ⇒ init.emit is
+      // omitted (a handler that needs it fail-closes loudly on `undefined`).
+      eventBus,
     );
     // a BRANDED enriched return chooses the status + headers; a plain return keeps the
     // existing behavior (HTTP 200 + that value as the JSON body). The brand check is unambiguous — a

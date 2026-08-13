@@ -238,6 +238,11 @@ describe.skipIf(!baseUrl)(
         expect(result.gdpr.oldestTombstoneAgeDays).toBeGreaterThanOrEqual(OLD_TOMBSTONE_DAYS);
         expect(result.gdpr.memberships).toBe(0);
         expect(result.oidcPruned).toBeGreaterThanOrEqual(0);
+        // THE CONTROL for the product-profile arm: this backend spec does not declare
+        // `deployment.eventBus`, so there is no stream to sweep and the event-bus half of the result
+        // is ABSENT — not a fabricated `{ deleted: 0 }`, which would read as a bus that is running
+        // and empty.
+        expect('eventBus' in result).toBe(false);
 
         expect(await userExists(tombstone)).toBe(true);
         await new Promise((r) => setTimeout(r, 3_000));

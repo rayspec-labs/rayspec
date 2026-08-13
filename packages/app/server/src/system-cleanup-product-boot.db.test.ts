@@ -242,6 +242,33 @@ describe.skipIf(!baseUrl)(
       },
       120_000,
     );
+
+    maybe(
+      'THE PRODUCT PROFILE SWEEPS A STREAM WITHOUT DECLARING ONE: the cleanup result carries the event-bus half',
+      async () => {
+        armsRan += 1;
+        // The product document below declares NOTHING about an event bus — the product grammar has no
+        // key to declare one with (no `deployment` section exists there at all). What this arm pins is
+        // the RETENTION half of that structural posture: the product boot hands the housekeeping pass a
+        // window, so the sweep runs on a document that asked for nothing.
+        //
+        // WHAT IT DOES NOT PIN, stated so nobody reads more into it: this says nothing about a product
+        // handler receiving `init.emit`. It cannot — a product document declares no handlers, no
+        // tooling and no api (`ProductSpec`, product-grammar.ts), and the composed engine spec is built
+        // with `agents: [], tooling: [], handlers: []` (buildProductEngineSpec, compose.ts), so there is
+        // no product-authored code on this profile to observe the capability from. The emit path itself
+        // is proven where author code exists: the backend profile's boot arm
+        // (event-bus-capability-boot.db.test.ts) and the engine seam
+        // (api-auth/src/engine/route-handler-emit.db.test.ts).
+        const result = await server!.runCleanupNow!();
+        expect(result.eventBus).toBeDefined();
+        // Nothing has been emitted on this boot, so the sweep is a well-defined no-op — the POINT is
+        // that it ran. (A backend-profile boot that did not enable the bus reports no such half; that
+        // control is asserted in system-cleanup-classic-boot.db.test.ts.)
+        expect(result.eventBus).toEqual({ deleted: 0, tenants: 0 });
+      },
+      120_000,
+    );
   },
 );
 
@@ -253,7 +280,7 @@ describe.skipIf(!baseUrl)(
 describe('Product-YAML system cleanup — ran-guard (the wiring proof must not silently skip)', () => {
   it('the cleanup-wiring arms ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (dbRequired) {
-      expect(armsRan).toBe(2);
+      expect(armsRan).toBe(3);
     } else {
       expect(dbRequired).toBe(false);
     }

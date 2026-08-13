@@ -224,12 +224,31 @@ function buildFullSchemaSql(SCHEMA: string): string {
   );
   CREATE INDEX run_events_run_seq_idx ON run_events (run_id, seq);
   CREATE UNIQUE INDEX run_events_tenant_run_seq_idx ON run_events (tenant_id, run_id, seq);
+
+  -- the tenant event bus: the per-tenant counter/floor row + the stream (mirrors migration 0011).
+  CREATE TABLE tenant_event_streams (
+    tenant_id uuid PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    last_seq bigint NOT NULL DEFAULT 0,
+    truncated_through bigint NOT NULL DEFAULT 0,
+    updated_at timestamptz NOT NULL DEFAULT now()
+  );
+
+  CREATE TABLE tenant_events (
+    tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    seq bigint NOT NULL,
+    topic text NOT NULL,
+    payload jsonb NOT NULL,
+    at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT tenant_events_tenant_id_seq_pk PRIMARY KEY (tenant_id, seq)
+  );
+  CREATE INDEX tenant_events_at_idx ON tenant_events (at);
 `;
 }
 
 const ALL_TABLES =
   'orgs, users, memberships, sessions, api_keys, auth_audit, oidc_models, ' +
-  'idempotency_keys, invites, journal_steps, conversation_items, runs, run_events';
+  'idempotency_keys, invites, journal_steps, conversation_items, runs, run_events, ' +
+  'tenant_events, tenant_event_streams';
 
 /**
  * Build the harness: isolated schema, real signing key, wired app. `withOidc` mounts the provider;
@@ -298,6 +317,13 @@ export async function createHarness(
      * fail-closes loudly — the deploy posture a test can also exercise).
      */
     ttsCapability?: NonNullable<NonNullable<AppDeps['engine']>['ttsCapability']>;
+    /**
+     * the tenant event bus wired into `deps.engine.eventBus` (a route/tool handler's `init.emit`).
+     * An emit test passes the REAL `makeTenantEventBus()` — the capability's whole contract is the
+     * rows it leaves, so a stand-in would prove nothing. Omit ⇒ `init.emit` is ABSENT (the deployment
+     * shape of a spec that did not enable the bus, which a test can also exercise).
+     */
+    eventBus?: NonNullable<NonNullable<AppDeps['engine']>['eventBus']>;
     /**
      * the media-token service wired into `deps.engine.mediaTokenService` (the playback
      * route's 2nd auth path + the mint capability). A playback test passes a service built over a test
@@ -425,6 +451,9 @@ export async function createHarness(
       // the text-to-speech capability a route/tool handler reads as `init.tts` (omit ⇒ ABSENT,
       // so a handler that needs speech fail-closes loudly).
       ...(opts.ttsCapability ? { ttsCapability: opts.ttsCapability } : {}),
+      // the tenant event bus a route/tool handler's `init.emit` is built from (omit ⇒ ABSENT, so a
+      // handler that needs the bus fail-closes loudly).
+      ...(opts.eventBus ? { eventBus: opts.eventBus } : {}),
       // the media-token service for declared `stream` playback routes + the mint capability
       // (omit ⇒ a playback route fails closed at boot — the deploy-guard a test can also exercise).
       ...(opts.mediaTokenService ? { mediaTokenService: opts.mediaTokenService } : {}),

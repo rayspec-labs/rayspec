@@ -41,6 +41,7 @@ import {
   type FsSourceFactory,
   type ResolvedHandler,
   type SttCapability,
+  type TenantEventBus,
   type TtsCapability,
 } from '@rayspec/platform';
 import type { AgentSpecConfig, RaySpec } from '@rayspec/spec';
@@ -86,6 +87,14 @@ export interface BuildAgentRegistryConfig {
    * tool's `init.tts` is then undefined, fail-closed loudly).
    */
   ttsCapability?: TtsCapability;
+  /**
+   * the composition-root `TenantEventBus` (the SAME one the route arm uses). When the deployment
+   * enabled the bus, each declared tool's per-run `ToolHandlerInit` carries `init.emit` — built from
+   * the run's tenant-bound `TenantDb`, so it is bound to the run's SERVER-DERIVED tenant. Optional:
+   * absent when the deployment did not enable the bus (the tool's `init.emit` is then undefined,
+   * fail-closed loudly).
+   */
+  eventBus?: TenantEventBus;
 }
 
 /** Build the base neutral `AgentSpec` for a declared agent (the per-request `input` is a placeholder). */
@@ -124,6 +133,7 @@ export function buildAgentRegistry(config: BuildAgentRegistryConfig): AgentRegis
     fsSourceFactory,
     sttCapability,
     ttsCapability,
+    eventBus,
   } = config;
   const registry = new Map<string, AgentRegistryEntry>();
 
@@ -142,7 +152,7 @@ export function buildAgentRegistry(config: BuildAgentRegistryConfig): AgentRegis
     // wired) lets each tool init carry a tenant-bound `init.blob`; the fsSourceFactory (when wired) lets
     // each tool init carry a READ-ONLY, path-jailed `init.fsSource`; the sttCapability (when wired)
     // lets each tool init carry `init.stt`; the ttsCapability (when wired) lets each tool init carry
-    // `init.tts`.
+    // `init.tts`; the eventBus (when enabled) lets each tool init carry `init.emit`.
     const toolFactory = buildToolFactory(
       spec,
       handlers,
@@ -152,6 +162,7 @@ export function buildAgentRegistry(config: BuildAgentRegistryConfig): AgentRegis
       fsSourceFactory,
       sttCapability,
       ttsCapability,
+      eventBus,
     );
 
     registry.set(agent.id, {

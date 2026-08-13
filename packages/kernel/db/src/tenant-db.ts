@@ -28,6 +28,11 @@
 import { and, eq, getTableColumns, type SQL, sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { Db } from './client.js';
+import {
+  appendTenantEvents,
+  type TenantEventAppendResult,
+  type TenantEventInput,
+} from './event-bus.js';
 import { runs, TENANT_SCOPED_TABLES } from './schema.js';
 
 /**
@@ -264,6 +269,27 @@ export class TenantDb {
     const owner = rows[0]?.tenantId;
     if (owner === undefined) return 'absent';
     return owner === this.tenantId ? 'owned' : 'foreign';
+  }
+
+  /**
+   * Append events to THIS tenant's event-bus stream (encapsulated, like `runHeaderOwnership`).
+   *
+   * The append is ONE statement whose correctness is Postgres-internal — the counter row's lock is
+   * what makes allocation order equal commit order (see event-bus.ts) — so it cannot be expressed
+   * through the query-builder methods above without becoming several statements. Rather than hand a
+   * caller the raw handle to run it (the reach-around the chokepoint gate exists to catch), the call
+   * lives HERE: the tenant comes from `this.tenantId`, so the statement has no tenant parameter a
+   * caller could supply, and the capability a handler receives is bound to the run's server-derived
+   * tenant BY CONSTRUCTION.
+   *
+   * Called on the TRANSACTIONAL handle inside a route handler's engine-opened transaction (the events
+   * commit with the handler's own writes), and on a plain handle from a tool handler (which has no
+   * outer transaction by design). Returns the allocated seq range, or undefined for an empty batch.
+   */
+  async appendEvents(
+    events: readonly TenantEventInput[],
+  ): Promise<TenantEventAppendResult | undefined> {
+    return appendTenantEvents(this.raw, this.tenantId, events);
   }
 
   /**
