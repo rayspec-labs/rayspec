@@ -52,7 +52,7 @@
  * secrets: the DB URL / credentials are NEVER echoed (only a throwaway DB NAME, which is non-sensitive).
  *
  * NON-FATAL DOCUMENT ADVISORIES: a valid backend-profile doc is additionally run through
- * `lintSpecWarnings` — the same advisory pass `doctor` reports — and any finding is carried in the
+ * `lintSpecWarnings` — the same advisory pass `doctor` runs — and any finding is carried in the
  * additive `specWarnings` / `specWarningSummary` fields. `plan` is a PRE-DEPLOY command, so an
  * advisory like "this document needs a build step before deploy" must not go unmentioned by the
  * command that certifies the document. An advisory NEVER affects `ok` (it is not a gate).
@@ -174,7 +174,9 @@ export interface PlanResult {
   /**
    * NON-FATAL ADVISORIES about the DOCUMENT itself (`lintSpecWarnings`) — a permitted-but-footgunny
    * declaration such as a handler module the deploy loader will refuse, surfaced so a pre-deploy plan
-   * never certifies it silently. Same entries `doctor` reports in its own `warnings` field.
+   * never certifies it silently. The RAW findings of the pass `doctor` runs: applying a document's
+   * `lintSuppress` acknowledgements is `doctor`'s (`applyLintSuppressions`, its only caller), so an
+   * acknowledged finding is moved out of `doctor`'s `warnings` and is still reported here.
    *
    * These are DOCUMENT findings, NOT the operational stderr diagnostics the read-only shadow guard
    * emits (a broken `DATABASE_URL_FILE` mount) — those stay on stderr and never enter this envelope.
