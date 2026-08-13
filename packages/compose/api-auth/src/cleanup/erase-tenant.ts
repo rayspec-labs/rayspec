@@ -110,8 +110,11 @@ export interface EraseResult {
    * Per CORE tenant-scoped table (name → rows deleted / would-delete), kept DISTINCT from `tables` so a
    * caller/operator sees the platform run-journal/transcript erasure separately from the product stores.
    * Keys are the SQL table names in `CORE_TENANT_SCOPED_TABLES`: `runs`, `journal_steps`,
-   * `conversation_items`, `run_events`, `idempotency_keys`, and the workflow journal
-   * `workflow_runs`, `workflow_node_states`, `workflow_artifacts`.
+   * `conversation_items`, `run_events`, `idempotency_keys`, the workflow journal
+   * `workflow_runs`, `workflow_node_states`, `workflow_artifacts`, and the task-engine set
+   * `workforce_tasks`, `workforce_task_transitions`, `workforce_task_signals`,
+   * `workforce_delegations`, `workforce_approvals`, `workforce_reviews`, `workforce_messages`,
+   * `workforce_budget_ledger`, `workforce_runtime`.
    */
   readonly coreTables: Record<string, number>;
   /** Total CORE rows across every core tenant-scoped table (deleted, or would-delete). */

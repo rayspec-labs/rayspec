@@ -354,6 +354,69 @@ psql -d "$DRYRUN_DB" -c "DELETE FROM orgs WHERE id='00000000-0000-0000-0000-0000
 assert_eq "0" "SELECT count(*) FROM tenant_events;" "tenant_events cascaded away after org delete"
 assert_eq "0" "SELECT count(*) FROM tenant_event_streams;" "tenant_event_streams cascaded away after org delete"
 
+echo "== ASSERT 0012 end state (task engine: tasks, transitions, signals, ledger, runtime) =="
+# 0012 created all nine tables.
+assert_eq "9" \
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('workforce_tasks','workforce_task_transitions','workforce_task_signals','workforce_delegations','workforce_approvals','workforce_reviews','workforce_messages','workforce_budget_ledger','workforce_runtime');" \
+  "0012 created the nine workforce tables"
+# The task PK is the text task_id (root: random; child: deterministic — the fan-out idempotency key).
+assert_eq "task_id" \
+  "SELECT string_agg(a.attname, ',' ORDER BY k.ord) FROM pg_constraint c JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum WHERE c.conrelid = 'workforce_tasks'::regclass AND c.contype = 'p';" \
+  "workforce_tasks PRIMARY KEY is (task_id)"
+# The compare-and-swap token and the journal seq HEAD are integer NOT NULL with their documented
+# defaults — a nullable or default-less version column would silently break every transition CAS.
+assert_eq "NO|NO" \
+  "SELECT string_agg(is_nullable, '|' ORDER BY column_name) FROM information_schema.columns WHERE table_schema='public' AND table_name='workforce_tasks' AND column_name IN ('last_event_seq','version');" \
+  "workforce_tasks version + last_event_seq are NOT NULL"
+# The scheduler reserve scan index carries EXACTLY (tenant_id, status, priority, queued_at).
+assert_eq "1" \
+  "SELECT count(*) FROM pg_indexes WHERE indexname='workforce_tasks_tenant_status_priority_queued_idx' AND indexdef ILIKE '%(tenant_id, status, priority, queued_at)%';" \
+  "workforce_tasks reserve index on (tenant_id, status, priority, queued_at) exists"
+# The turn receipt is a PARTIAL UNIQUE: one final application per (task, turn), NULLs unconstrained.
+assert_eq "1" \
+  "SELECT count(*) FROM pg_indexes WHERE indexname='workforce_transitions_turn_receipt_idx' AND indexdef ILIKE 'CREATE UNIQUE INDEX%' AND indexdef ILIKE '%WHERE%turn_number IS NOT NULL%';" \
+  "workforce_task_transitions turn receipt is a partial UNIQUE on (tenant_id, task_id, turn_number)"
+# Signal delivery and ledger scope rows are UNIQUE-keyed (idempotent delivery / one lock identity).
+assert_eq "1" \
+  "SELECT count(*) FROM pg_indexes WHERE indexname='workforce_signals_tenant_task_key_idx' AND indexdef ILIKE 'CREATE UNIQUE INDEX%';" \
+  "workforce_task_signals (tenant_id, task_id, signal_key) is UNIQUE"
+assert_eq "1" \
+  "SELECT count(*) FROM pg_indexes WHERE indexname='workforce_ledger_scope_idx' AND indexdef ILIKE 'CREATE UNIQUE INDEX%' AND indexdef ILIKE '%(tenant_id, scope_kind, scope_id, window_start)%';" \
+  "workforce_budget_ledger (tenant_id, scope_kind, scope_id, window_start) is UNIQUE"
+# All nine orgs FKs exist (a GDPR org-delete takes the tenant's whole task graph).
+assert_eq "9" \
+  "SELECT count(*) FROM pg_constraint WHERE conname IN ('workforce_tasks_tenant_id_orgs_id_fk','workforce_task_transitions_tenant_id_orgs_id_fk','workforce_task_signals_tenant_id_orgs_id_fk','workforce_delegations_tenant_id_orgs_id_fk','workforce_approvals_tenant_id_orgs_id_fk','workforce_reviews_tenant_id_orgs_id_fk','workforce_messages_tenant_id_orgs_id_fk','workforce_budget_ledger_tenant_id_orgs_id_fk','workforce_runtime_tenant_id_orgs_id_fk');" \
+  "all nine workforce -> orgs FKs exist"
+# A REAL write through the set: a task, its transition log, an idempotent signal, a ledger row and
+# the runtime row insert cleanly; a duplicate signal key REFUSES (the idempotent-delivery guard);
+# two receipt-less transition rows coexist (the partial WHERE leaves NULL turn_numbers alone).
+psql -d "$DRYRUN_DB" >/dev/null <<'SQL'
+INSERT INTO orgs (id, name, slug) VALUES ('00000000-0000-0000-0000-0000000000d2', 'TaskOrg', 'taskorg');
+INSERT INTO workforce_tasks (task_id, tenant_id, workforce_id, root_task_id, title, goal, owner, requested_by, status)
+VALUES ('t-root', '00000000-0000-0000-0000-0000000000d2', 'wf-a', 't-root', 'Root', 'Do the thing', 'user', 'user', 'planned');
+INSERT INTO workforce_task_transitions (tenant_id, task_id, from_status, to_status, actor)
+VALUES ('00000000-0000-0000-0000-0000000000d2', 't-root', 'planned', 'queued', 'scheduler'),
+       ('00000000-0000-0000-0000-0000000000d2', 't-root', 'queued', 'working', 'scheduler');
+INSERT INTO workforce_task_signals (tenant_id, task_id, kind, signal_key)
+VALUES ('00000000-0000-0000-0000-0000000000d2', 't-root', 'manual_unblock', 'sig-1');
+INSERT INTO workforce_budget_ledger (tenant_id, scope_kind, scope_id, window_start)
+VALUES ('00000000-0000-0000-0000-0000000000d2', 'task', 't-root', 'epoch'::timestamptz);
+INSERT INTO workforce_runtime (tenant_id, workforce_id) VALUES ('00000000-0000-0000-0000-0000000000d2', 'wf-a');
+SQL
+assert_eq "2" \
+  "SELECT count(*) FROM workforce_task_transitions WHERE task_id='t-root';" \
+  "0012 two receipt-less transition rows coexist under the partial UNIQUE"
+assert_eq "refused" \
+  "WITH dup AS (INSERT INTO workforce_task_signals (tenant_id, task_id, kind, signal_key) VALUES ('00000000-0000-0000-0000-0000000000d2', 't-root', 'manual_unblock', 'sig-1') ON CONFLICT DO NOTHING RETURNING 1) SELECT CASE WHEN count(*) = 0 THEN 'refused' ELSE 'duplicated' END FROM dup;" \
+  "0012 a duplicate signal key is refused, not duplicated"
+# FK CASCADE: deleting the org removes the whole graph — tasks, log, signals, ledger, runtime.
+psql -d "$DRYRUN_DB" -c "DELETE FROM orgs WHERE id='00000000-0000-0000-0000-0000000000d2';" >/dev/null
+assert_eq "0" "SELECT count(*) FROM workforce_tasks;" "workforce_tasks cascaded away after org delete"
+assert_eq "0" "SELECT count(*) FROM workforce_task_transitions;" "workforce_task_transitions cascaded away after org delete"
+assert_eq "0" "SELECT count(*) FROM workforce_task_signals;" "workforce_task_signals cascaded away after org delete"
+assert_eq "0" "SELECT count(*) FROM workforce_budget_ledger;" "workforce_budget_ledger cascaded away after org delete"
+assert_eq "0" "SELECT count(*) FROM workforce_runtime;" "workforce_runtime cascaded away after org delete"
+
 echo "== ASSERT run_events FK CASCADE: deleting an org removes its run_events rows =="
 psql -d "$DRYRUN_DB" >/dev/null <<'SQL'
 INSERT INTO orgs (id, name, slug) VALUES ('00000000-0000-0000-0000-0000000000e1', 'EventsOrg', 'eventsorg');

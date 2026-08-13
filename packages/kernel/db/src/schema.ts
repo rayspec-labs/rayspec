@@ -714,6 +714,360 @@ export const workflowArtifacts = pgTable(
   ],
 );
 
+// ---------------------------------------------------------------------------------------
+// Workforce task engine — durable tasks, wake signals, approvals, budget ledger, control.
+// ---------------------------------------------------------------------------------------
+
+/**
+ * workforce_tasks — the durable task record the task engine schedules and transitions.
+ *
+ * ONE ROW PER TASK, tenant-scoped. `task_id` is a text PK like `runs.run_id`: root tasks get a
+ * random UUID, child tasks get a DETERMINISTIC v5-shaped UUID derived from
+ * (parent task, turn, slot index) so a re-executed turn re-creating its children collides on the PK
+ * instead of duplicating them (the `durableWorkflowRunId` lesson applied to fan-out).
+ *
+ * `status` is a CLOSED nine-value set and `applyTransition()` in `@rayspec/tasks` is its ONLY
+ * writer — `version` is the compare-and-swap token every transition presents, so two schedulers
+ * racing the same task serialize on one UPDATE and the loser gets a typed conflict, never a double
+ * dispatch. `status_reason` is a closed typed set, never free text. The only way back into
+ * execution is `queued`; nothing resumes "in place".
+ *
+ * `last_event_seq` is the per-task journal sequence HEAD (the `tenant_event_streams.last_seq`
+ * pattern): the counter UPDATE's row lock makes allocation order equal commit order for the task's
+ * `run_events` journal rows, and because every transition already updates this row, allocation and
+ * status write share one lock.
+ *
+ * The `(tenant_id, status, priority, queued_at)` index is the scheduler's reserve scan — oldest
+ * queued work first within a priority band, always under the tenant predicate.
+ */
+export const workforceTasks = pgTable(
+  'workforce_tasks',
+  {
+    taskId: text('task_id').primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    /** The declared workforce this task belongs to; NULL for a bare platform task. */
+    workforceId: text('workforce_id'),
+    parentTaskId: text('parent_task_id'),
+    /** The subtree anchor: the root task's own id for a root; budget + cancellation scope. */
+    rootTaskId: text('root_task_id').notNull(),
+    /** Materialized ancestor task ids, root-first. Immutable; serves depth and cycle checks. */
+    ancestryPath: jsonb('ancestry_path').notNull().default(sql`'[]'::jsonb`),
+    title: text('title').notNull(),
+    /** The instruction the owner receives. DATA, never instructions to the platform. */
+    goal: text('goal').notNull(),
+    description: text('description'),
+    /** The owner handler/employee id, or 'user' for a human-owned task. */
+    owner: text('owner').notNull(),
+    requestedBy: text('requested_by').notNull(),
+    /** Cost-attribution scope for the ledger's department ceilings; NULL when unattributed. */
+    department: text('department'),
+    status: text('status').notNull(),
+    statusReason: text('status_reason'),
+    priority: text('priority').notNull().default('normal'),
+    /** Task ids that must reach `completed` before this task leaves `planned`. */
+    dependencies: jsonb('dependencies').notNull().default(sql`'[]'::jsonb`),
+    /** How this task's children fan back in; NULL until a fan-out declares one. */
+    joinPolicy: jsonb('join_policy'),
+    artifacts: jsonb('artifacts').notNull().default(sql`'[]'::jsonb`),
+    /** The structured result the owner submitted. Opaque DATA; validated at intent time. */
+    result: jsonb('result'),
+    confidence: numeric('confidence'),
+    /** Aggregate settled cost (USD) rolled up from the ledger settlements. */
+    costUsd: numeric('cost_usd').notNull().default('0'),
+    tokenUsage: jsonb('token_usage').notNull().default(sql`'{}'::jsonb`),
+    turnsUsed: integer('turns_used').notNull().default(0),
+    /** The last journal seq ISSUED for this task's event stream (allocation lock lives here). */
+    lastEventSeq: integer('last_event_seq').notNull().default(0),
+    deadlineAt: timestamp('deadline_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    queuedAt: timestamp('queued_at', { withTimezone: true }),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    /** Optimistic-concurrency token; every applyTransition presents the expected value. */
+    version: integer('version').notNull().default(1),
+  },
+  (t) => [
+    // The scheduler reserve scan: queued work per tenant, priority band, oldest first.
+    index('workforce_tasks_tenant_status_priority_queued_idx').on(
+      t.tenantId,
+      t.status,
+      t.priority,
+      t.queuedAt,
+    ),
+    index('workforce_tasks_tenant_root_idx').on(t.tenantId, t.rootTaskId),
+    index('workforce_tasks_tenant_parent_idx').on(t.tenantId, t.parentTaskId),
+  ],
+);
+
+/**
+ * workforce_task_transitions — the APPEND-ONLY transition log: from, to, reason, actor, turn.
+ *
+ * The audit spine of the task engine: `applyTransition()` writes exactly one row here in the same
+ * transaction as the status UPDATE, so the log and the row can never disagree. Rows are never
+ * updated or deleted (append-only by discipline, like `journal_steps`).
+ *
+ * `turn_number` is set ONLY on the row a turn's final intent application writes, and the partial
+ * UNIQUE `(tenant_id, task_id, turn_number)` makes that row the turn's idempotency RECEIPT: a
+ * recovered turn workflow whose final transaction already committed finds its receipt and no-ops
+ * instead of applying its intents twice.
+ */
+export const workforceTaskTransitions = pgTable(
+  'workforce_task_transitions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    taskId: text('task_id').notNull(),
+    fromStatus: text('from_status').notNull(),
+    toStatus: text('to_status').notNull(),
+    statusReason: text('status_reason'),
+    /** Who drove the transition: an owner id, 'user', 'scheduler', or 'system'. */
+    actor: text('actor').notNull(),
+    /** The dispatched turn's workflow id, when the transition belongs to a turn. */
+    turnId: text('turn_id'),
+    /** Set only on a turn's final (intent-applying) transition — the turn's receipt. */
+    turnNumber: integer('turn_number'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('workforce_transitions_tenant_task_created_idx').on(t.tenantId, t.taskId, t.createdAt),
+    // One final application per (task, turn): the recovered-turn no-op detection key.
+    uniqueIndex('workforce_transitions_turn_receipt_idx')
+      .on(t.tenantId, t.taskId, t.turnNumber)
+      .where(sql`${t.turnNumber} is not null`),
+  ],
+);
+
+/**
+ * workforce_task_signals — pending and consumed wake signals; resume is a ROW, not a process.
+ *
+ * A signal writes one row here and re-queues the target task; the scheduler picks it up like any
+ * other queued task. `kind` is a CLOSED set (approval_decided | review_verdict | child_completed |
+ * dependency_completed | escalated | user_reply | budget_raised | manual_unblock | cancel).
+ * UNIQUE `(tenant_id, task_id, signal_key)` makes delivery IDEMPOTENT: a re-sent signal collides
+ * and no-ops instead of waking the task twice. `consumed_at` marks the dispatch that absorbed it.
+ */
+export const workforceTaskSignals = pgTable(
+  'workforce_task_signals',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    taskId: text('task_id').notNull(),
+    kind: text('kind').notNull(),
+    /** The caller-supplied idempotency key for this delivery (e.g. `approval:<id>`). */
+    signalKey: text('signal_key').notNull(),
+    payload: jsonb('payload').notNull().default(sql`'{}'::jsonb`),
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Idempotent delivery: one row per (task, signal key), re-sends collide and no-op.
+    uniqueIndex('workforce_signals_tenant_task_key_idx').on(t.tenantId, t.taskId, t.signalKey),
+  ],
+);
+
+/**
+ * workforce_delegations — one durable record per parent→child hand-off a fan-out opens.
+ *
+ * Written in the SAME transaction as the child `workforce_tasks` row and the parent's transition
+ * to `blocked(awaiting_children)`, so the delegation record, the child, and the parent state can
+ * never disagree. `depth` is the child's ancestry depth at acceptance (the ceiling check input).
+ * UNIQUE `(tenant_id, child_task_id)` — a child has exactly one opening delegation, which also
+ * makes a re-executed fan-out idempotent alongside the deterministic child ids.
+ */
+export const workforceDelegations = pgTable(
+  'workforce_delegations',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    workforceId: text('workforce_id'),
+    parentTaskId: text('parent_task_id').notNull(),
+    childTaskId: text('child_task_id').notNull(),
+    delegatedBy: text('delegated_by').notNull(),
+    delegatedTo: text('delegated_to').notNull(),
+    resolvedOwner: text('resolved_owner').notNull(),
+    goal: text('goal').notNull(),
+    expectedOutput: text('expected_output').notNull(),
+    depth: integer('depth').notNull(),
+    status: text('status').notNull(),
+    rejectionReason: text('rejection_reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+  },
+  (t) => [
+    index('workforce_delegations_tenant_parent_idx').on(t.tenantId, t.parentTaskId),
+    // A child is opened by exactly one delegation; re-executed fan-outs collide here and no-op.
+    uniqueIndex('workforce_delegations_tenant_child_idx').on(t.tenantId, t.childTaskId),
+  ],
+);
+
+/**
+ * workforce_approvals — approval requests, decisions, and their ENFORCED timeout fates.
+ *
+ * `request_approval` writes a row here, parks the task in `waiting_for_user(approval_pending)`,
+ * and ends the turn — NO process waits on a human. The decide route resolves the row, writes an
+ * `approval_decided` signal, and the task re-queues. Every request declares `timeout_at` and an
+ * `on_timeout` of `fail | escalate`, swept by the scheduler: a hung approval always has an
+ * enforced fate, silent indefinite waiting is a defect. `escalate` re-issues the request to the
+ * declared `escalate_to` approver (required at request time when `on_timeout` is `escalate` —
+ * fail-closed, there is no implicit escalation target).
+ */
+export const workforceApprovals = pgTable(
+  'workforce_approvals',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    taskId: text('task_id').notNull(),
+    /** The typed question the human decides. DATA on read, never instructions. */
+    question: text('question').notNull(),
+    options: jsonb('options').notNull().default(sql`'[]'::jsonb`),
+    /** Who may decide: 'user' or a named approver id. */
+    approver: text('approver').notNull(),
+    /** pending | approved | rejected | timed_out | escalated. */
+    status: text('status').notNull(),
+    decision: text('decision'),
+    decidedBy: text('decided_by'),
+    reason: text('reason'),
+    timeoutAt: timestamp('timeout_at', { withTimezone: true }),
+    onTimeout: text('on_timeout').notNull(),
+    escalateTo: text('escalate_to'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+  },
+  (t) => [
+    index('workforce_approvals_tenant_status_idx').on(t.tenantId, t.status),
+    // The timeout sweep's due scan (`status = pending AND timeout_at < now()`).
+    index('workforce_approvals_tenant_timeout_idx').on(t.tenantId, t.timeoutAt),
+  ],
+);
+
+/**
+ * workforce_reviews — review requests, verdicts, and the per-task round counter the
+ * `maxReviewRounds` ceiling is enforced against. A verdict is applied at the engine, never by
+ * prose: `reject` re-queues the task for rework, round exhaustion parks it in `waiting_for_user`.
+ */
+export const workforceReviews = pgTable(
+  'workforce_reviews',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    taskId: text('task_id').notNull(),
+    reviewer: text('reviewer').notNull(),
+    /** 1-based review round for this task; the maxReviewRounds ceiling input. */
+    round: integer('round').notNull(),
+    /** accept | reject; NULL while the review is pending. */
+    verdict: text('verdict'),
+    reasons: jsonb('reasons').notNull().default(sql`'[]'::jsonb`),
+    requiredChanges: jsonb('required_changes').notNull().default(sql`'[]'::jsonb`),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+  },
+  (t) => [index('workforce_reviews_tenant_task_idx').on(t.tenantId, t.taskId, t.round)],
+);
+
+/**
+ * workforce_messages — task-scoped messages between task owners. Messages are CONTEXT for a later
+ * turn, never instructions to the platform; the body is untrusted DATA end to end.
+ */
+export const workforceMessages = pgTable(
+  'workforce_messages',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    taskId: text('task_id').notNull(),
+    sender: text('sender').notNull(),
+    recipient: text('recipient').notNull(),
+    body: text('body').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('workforce_messages_tenant_task_created_idx').on(t.tenantId, t.taskId, t.createdAt),
+  ],
+);
+
+/**
+ * workforce_budget_ledger — reservations and settlements per enforcement scope.
+ *
+ * ONE ROW PER `(tenant, scope_kind, scope_id, window_start)`: `task`, `root` (subtree),
+ * `department` and `workforce` scopes; `window_start` is the window bucket for windowed workforce
+ * ceilings and a fixed epoch sentinel for the un-windowed scopes so the UNIQUE key stays total.
+ *
+ * The authorize/settle protocol locks rows via `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`
+ * (a REAL update — `DO NOTHING` would not lock the existing row) in ONE canonical order
+ * (task < root < department < workforce), checks ceilings on the locked values, and only then
+ * reserves. Settlement may exceed the reservation ONCE (a turn is never aborted mid-flight);
+ * the overrun counts against the next authorize. Denial mutates NOTHING.
+ */
+export const workforceBudgetLedger = pgTable(
+  'workforce_budget_ledger',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    /** task | root | department | workforce. */
+    scopeKind: text('scope_kind').notNull(),
+    scopeId: text('scope_id').notNull(),
+    /** Window bucket start for windowed ceilings; the epoch sentinel for un-windowed scopes. */
+    windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
+    reservedUsd: numeric('reserved_usd').notNull().default('0'),
+    settledUsd: numeric('settled_usd').notNull().default('0'),
+    settledTurns: integer('settled_turns').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // One ledger row per scope per window — the upsert conflict target and the lock identity.
+    uniqueIndex('workforce_ledger_scope_idx').on(t.tenantId, t.scopeKind, t.scopeId, t.windowStart),
+  ],
+);
+
+/**
+ * workforce_runtime — ONE row per workforce: operator control state and declared ceilings.
+ *
+ * `paused` is deliberately a flag HERE and not a task status: a paused workforce's tasks stay
+ * visibly `queued` (the scheduler just stops reserving them), so pausing at night and resuming in
+ * the morning loses nothing and burns nothing. `budgets` is the strict-validated ceiling
+ * declaration the ledger enforces (usd/turns per scope, per-department ceilings, delegation depth
+ * and fan-out caps, worker concurrency, wall clock, review rounds, exhaustion policy).
+ * `last_event_seq` is the seq HEAD for the workforce's own control-event journal stream.
+ */
+export const workforceRuntime = pgTable(
+  'workforce_runtime',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    workforceId: text('workforce_id').notNull(),
+    paused: boolean('paused').notNull().default(false),
+    pausedAt: timestamp('paused_at', { withTimezone: true }),
+    pausedBy: text('paused_by'),
+    haltReason: text('halt_reason'),
+    haltedAt: timestamp('halted_at', { withTimezone: true }),
+    /** The declared ceiling configuration (strict-validated on write; closed keys). */
+    budgets: jsonb('budgets').notNull().default(sql`'{}'::jsonb`),
+    /** The last journal seq ISSUED for this workforce's control-event stream. */
+    lastEventSeq: integer('last_event_seq').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('workforce_runtime_tenant_workforce_idx').on(t.tenantId, t.workforceId)],
+);
+
 /**
  * The set of tenant-scoped tables that the TenantDb chokepoint auto-scopes by tenant_id.
  * DENY-BY-DEFAULT: a tenant-scoped table NOT registered here throws on access (it must
@@ -733,6 +1087,15 @@ export const CORE_TENANT_SCOPED_TABLES = [
   workflowArtifacts,
   tenantEvents,
   tenantEventStreams,
+  workforceTasks,
+  workforceTaskTransitions,
+  workforceTaskSignals,
+  workforceDelegations,
+  workforceApprovals,
+  workforceReviews,
+  workforceMessages,
+  workforceBudgetLedger,
+  workforceRuntime,
 ] as const;
 
 /**

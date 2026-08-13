@@ -44,13 +44,24 @@ import {
   workflowArtifacts,
   workflowNodeStates,
   workflowRuns,
+  workforceApprovals,
+  workforceBudgetLedger,
+  workforceDelegations,
+  workforceMessages,
+  workforceReviews,
+  workforceRuntime,
+  workforceTaskSignals,
+  workforceTasks,
+  workforceTaskTransitions,
 } from '../src/schema.js';
 
 // The full core platform table set. Drift on ANY of these fails the gate. The base 12 platform
 // tables the PRD enumerates + the workflow-runtime journal trio (workflow_runs /
 // workflow_node_states / workflow_artifacts), so the from-clean-DB structural oracle covers the
 // durable workflow journal too, + the tenant event-bus pair (tenant_events / tenant_event_streams),
-// whose composite PK and bigint counter columns are load-bearing for the stream's ordering.
+// whose composite PK and bigint counter columns are load-bearing for the stream's ordering, + the
+// task-engine set (workforce_*), whose partial turn-receipt UNIQUE, ledger scope UNIQUE and
+// scheduler reserve index are load-bearing for exactly-once dispatch and budget enforcement.
 const CORE_PLATFORM_TABLES: PgTable[] = [
   orgs,
   users,
@@ -70,6 +81,15 @@ const CORE_PLATFORM_TABLES: PgTable[] = [
   workflowArtifacts,
   tenantEvents,
   tenantEventStreams,
+  workforceTasks,
+  workforceTaskTransitions,
+  workforceTaskSignals,
+  workforceDelegations,
+  workforceApprovals,
+  workforceReviews,
+  workforceMessages,
+  workforceBudgetLedger,
+  workforceRuntime,
 ];
 
 const url = process.env.MIGRATE_CLEAN_URL;
