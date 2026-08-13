@@ -94,9 +94,9 @@ view mounts in code. This package produces fragments a deployment composes in co
 `emitProductViewsOpenApi` derives an OpenAPI 3.1 document from the declarations: preset param
 schemas + enums, pagination clamp documentation, the response contract translated from the closed
 contract vocabulary (`ref` → `$ref` into `components.schemas`, `nullable` → 3.1 type unions), and the
-declared 409/304 behaviors. Documented responses are exactly the PRODUCIBLE set
-(`producibleViewResponseStatuses`): a 400 is documented ONLY when the view declares params —
-pagination params clamp and can never 400.
+declared 409/404/304 behaviors (`not_ready_409` / `not_found_404` / `conditional_read: etag`).
+Documented responses are exactly the PRODUCIBLE set (`producibleViewResponseStatuses`): a 400 is
+documented ONLY when the view declares params — pagination params clamp and can never 400.
 
 ## Testing
 

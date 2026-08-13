@@ -2,7 +2,7 @@
  * The views produce an INSPECTABLE API-contract document. Asserts: paths/methods/params
  * derive from the declarations (preset schemas, enums, the pagination clamp docs), the 200 schema is
  * the translated response contract (`ref` → resolvable `$ref`s into components.schemas, `nullable` →
- * a 3.1 type union), the conditional/absent behaviors document their 304/409, and EVERY emitted
+ * a 3.1 type union), the conditional/absent behaviors document their 304/409/404, and EVERY emitted
  * `$ref` resolves inside the document (no dangling contract pointers).
  */
 import { readFileSync } from 'node:fs';

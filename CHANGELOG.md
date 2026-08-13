@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`absent_state: not_found_404` — a view can now answer an unknown reference with a 404.** The
-  member applies to a `single` read and decides what the view serves when the read matches no row:
+  member decides what a `single` read serves when it matches no row:
   `404 { error: 'not_found', detail }` alongside the existing `empty_200` (the declared `read.absent`
   DTO at `200`) and `not_ready_409`. Neither existing member has ever produced a 404, and until now
   there was no way to say that a reference does not exist at all.

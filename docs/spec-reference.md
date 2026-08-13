@@ -2357,8 +2357,8 @@ views:
   requires bounded `pagination` (`limit_param` + `offset_param` + `max_limit`) and
   a `page_items` envelope.
 - `pagination` — required for a `list` read; otherwise optional.
-- `absent_state` — optional: `empty_200`, `not_ready_409`, or `not_found_404`.
-  It applies to a `single` read only and decides what the view answers when the
+- `absent_state` — optional in the grammar: `empty_200`, `not_ready_409`, or
+  `not_found_404`. On a `single` read it decides what the view answers when the
   read matches no row. **Neither `empty_200` nor `not_ready_409` ever produces a
   404**: `empty_200` serves the declared `read.absent` DTO with status `200`, and
   `not_ready_409` serves `409 { error: 'not_ready', detail }`. `not_found_404`
@@ -2374,10 +2374,22 @@ views:
   client that its reference does not exist. Declare `empty_200` (with a
   `read.absent` shape) or `not_ready_409` for that case.
 
-  Lint rejects the combinations that cannot mean anything: `empty_200` without
-  `read.absent`, `not_ready_409` or `not_found_404` **with** `read.absent` (a
-  fixed error body leaves nothing to project), and `not_ready_409` or
-  `not_found_404` on a `list`/`collect` read.
+  On a `list` or `collect` read the field decides nothing at runtime — the absent
+  answer is served from the `single` branch of the interpreter alone, so
+  `empty_200` is accepted there but inert (several of the shipped example
+  documents declare it on their list view). On a view with **no** `read` — a
+  `capability`-sourced view, whose behavior is the capability's own handler — it
+  is declared knowledge for the generated contract: the OpenAPI emitter documents
+  the `409` (`not_ready_409`) or `404` (`not_found_404`) the view names, which is
+  where the `409` on the playback-token route of
+  [`examples/acme-notes`](../examples/acme-notes/acme-notes.product.yaml) comes
+  from.
+
+  Lint keys its laws on the read mode. On a `single` read the field is
+  **required**: `empty_200` demands a `read.absent` shape, and `not_ready_409` or
+  `not_found_404` forbid one (a fixed error body leaves nothing to project). On a
+  `list`/`collect` read `not_ready_409` and `not_found_404` are rejected — a read
+  with no matches is an empty page, not an un-ready or a nonexistent one.
 - `conditional_read` — optional (e.g. strong ETag + `If-None-Match` on `GET`).
 
 ## `deployment_overrides`
