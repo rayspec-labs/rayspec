@@ -11,6 +11,12 @@
  *                                            profile it boots — and, for a product doc, COMPOSE it
  *                                            against a stubbed rollout (NO DB, NO network). Emits a
  *                                            JSON verdict.
+ *   rayspec deploy --check-env <spec.yaml>  ONE-SHOT: enumerate the environment variables THIS document's
+ *                                            boot will require, with their <VAR>_FILE equivalents and
+ *                                            their set/unset state. Reads the document AND the
+ *                                            environment; opens no socket, no database and no
+ *                                            credential, and loads no extension pack. Emits a JSON
+ *                                            verdict.
  *
  * WHAT deploy IS. It is `deployments/acme-notes/serve.mts` as a first-class operator command: it wraps
  * `assembleServer` (NOT the frozen-surface `deploy()` — that stays inside the composition root) and injects
@@ -29,6 +35,10 @@
 
 import { parseArgs } from 'node:util';
 import type { ProductYamlRollout } from '@rayspec/product-yaml';
+// TYPE-ONLY (erased at runtime): the shape of the boot-environment report `--check-env` emits. The
+// FUNCTION that produces it is imported dynamically, on that flag's path alone, so a `deploy` without
+// it — and every other subcommand — loads none of @rayspec/server.
+import type { BootEnvReport } from '@rayspec/server/boot-env';
 import type { FrontendSpec, SpecError } from '@rayspec/spec';
 import { dotenvCandidatePaths } from './read-env.js';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
@@ -153,20 +163,40 @@ const BACKEND_DRY_RUN_NOT_PROVEN = [
   'that the declared frontend directories hold servable built assets (only the document was read; an unservable mount is refused fail-closed at boot)',
 ] as const;
 
-/** The discriminated outcome of `runDeploy`: a dry-run verdict to emit, or a served (long-running) boot. */
+/**
+ * The `--check-env` verdict (JSON, stdout). It is the `@rayspec/server` boot-environment report — the
+ * demands the BOOT itself raises, read out of the one module that states them — plus the ONE fact only
+ * the CLI knows: which `.env` files its auto-loader searched before this environment was read.
+ *
+ * That last field exists because "unset" is the answer an operator is most likely to dispute, and the
+ * usual cause is a populated `.env` that was never a candidate (the same diagnostic the missing-required
+ * boot refusal appends as its `(searched: …)` suffix). PATHS ONLY — never file contents, never a value.
+ * Empty under `RAYSPEC_SKIP_DOTENV=1`: nothing was searched, so claiming otherwise would be false.
+ */
+export interface DeployCheckEnvResult extends BootEnvReport {
+  /** The `.env` candidate paths the auto-loader searched, in precedence order (paths only). */
+  readonly searchedDotenv: readonly string[];
+}
+
+/**
+ * The discriminated outcome of `runDeploy`: a one-shot verdict to emit (`--dry-run` or `--check-env`),
+ * or a served (long-running) boot.
+ */
 export type DeployOutcome =
   | { readonly kind: 'dry-run'; readonly result: DeployDryRunResult }
+  | { readonly kind: 'check-env'; readonly result: DeployCheckEnvResult }
   | { readonly kind: 'served' };
 
 /**
- * Parse `deploy`'s args: exactly one positional spec path, plus `--dry-run`, an optional `--port` and
- * `--host` (the listen interface — LOOPBACK unless explicitly set), and the reviewed-forward-migration
- * flags `--apply-migration <delta.sql>` (+ its optional `--allowlist <file.json>`). An unknown flag is a
- * strict parse error (mapped to exit 2).
+ * Parse `deploy`'s args: exactly one positional spec path, plus `--dry-run` / `--check-env`, an optional
+ * `--port` and `--host` (the listen interface — LOOPBACK unless explicitly set), and the
+ * reviewed-forward-migration flags `--apply-migration <delta.sql>` (+ its optional
+ * `--allowlist <file.json>`). An unknown flag is a strict parse error (mapped to exit 2).
  */
 export function parseDeployArgs(args: readonly string[]): {
   positionals: string[];
   dryRun: boolean;
+  checkEnv: boolean;
   port?: string;
   host?: string;
   applyMigration?: string;
@@ -179,6 +209,7 @@ export function parseDeployArgs(args: readonly string[]): {
       strict: true,
       options: {
         'dry-run': { type: 'boolean' },
+        'check-env': { type: 'boolean' },
         port: { type: 'string' },
         host: { type: 'string' },
         'apply-migration': { type: 'string' },
@@ -188,6 +219,7 @@ export function parseDeployArgs(args: readonly string[]): {
     return {
       positionals,
       dryRun: values['dry-run'] === true,
+      checkEnv: values['check-env'] === true,
       ...(values.port !== undefined ? { port: values.port } : {}),
       ...(values.host !== undefined ? { host: values.host } : {}),
       ...(values['apply-migration'] !== undefined
@@ -207,7 +239,17 @@ export function parseDeployArgs(args: readonly string[]): {
  * open port + signal handlers keep the process alive until SIGINT/SIGTERM).
  */
 export async function runDeploy(args: readonly string[]): Promise<DeployOutcome> {
-  const { positionals, dryRun, port, host, applyMigration, allowlist } = parseDeployArgs(args);
+  const { positionals, dryRun, checkEnv, port, host, applyMigration, allowlist } =
+    parseDeployArgs(args);
+  // The two one-shot modes answer different questions and neither is a stage of the other: --dry-run
+  // reads the DOCUMENT, --check-env reads the document AND THE ENVIRONMENT. Accepting both would have to
+  // pick one verdict to print and silently drop the other, so refuse the combination outright.
+  if (dryRun && checkEnv) {
+    throw new DeployCliError(
+      '--dry-run and --check-env cannot be combined (each emits its own one-shot verdict); run them ' +
+        'one at a time',
+    );
+  }
 
   // Pre-flight the spec path (jail + size cap). assembleServer RE-READS it via RAYSPEC_SPEC_PATH; this
   // early read gives an actionable error before any boot side effect + jails the operator-supplied path.
@@ -231,6 +273,18 @@ export async function runDeploy(args: readonly string[]): Promise<DeployOutcome>
       );
     }
     return { kind: 'dry-run', result: await dryRunCompose(specPath, specText) };
+  }
+
+  if (checkEnv) {
+    // Same rule, same reason: --check-env opens no database, so a reviewed delta handed to it would be
+    // accepted and then dropped behind a verdict that says nothing about it.
+    if (applyMigration !== undefined || allowlist !== undefined) {
+      throw new DeployCliError(
+        '--apply-migration/--allowlist cannot be combined with --check-env (a check-env touches no ' +
+          'DB, so it applies no migration)',
+      );
+    }
+    return { kind: 'check-env', result: await checkDeployEnv(specPath, specText) };
   }
 
   // Resolve + JAIL the reviewed forward-DELTA (and its optional reviewed allowlist) with the FULL spec-
@@ -287,6 +341,43 @@ export async function runDeploy(args: readonly string[]): Promise<DeployOutcome>
 
   await serveDeployment(specPath, port, migrationPath, allowlistPath, host);
   return { kind: 'served' };
+}
+
+/**
+ * `--check-env`: enumerate the boot-environment demands of THIS document against THIS environment, and
+ * report each one's set/unset state — WITHOUT attempting a boot. It answers the question `doctor`,
+ * `plan` and `--dry-run` leave open and that only a refused `deploy` used to answer — and that answer
+ * is not cheap: the demands a declared `stream` route, playback route or `cron` trigger raise are
+ * reached only AFTER the boot has opened the database and applied the whole committed migration
+ * chain.
+ *
+ * IT IS NOT A CLI-SIDE REIMPLEMENTATION. The demands come from `@rayspec/server`'s own
+ * `checkBootEnv` — the module the boot refusals themselves are composed from — so a demand the boot
+ * raises is a demand this prints. A CLI-side copy would fail OPEN: it would report a clean environment
+ * for every demand it had not been taught about, which is exactly the failure this command exists to
+ * prevent. Imported through the `@rayspec/server/boot-env` SUBPATH, which pulls in no adapter, no
+ * durable engine and no database driver — the same reason `serveDeployment` reaches for the
+ * `agent-tracing` subpath before the barrel.
+ *
+ * NO PACK IS LOADED. An extension pack is arbitrary code; running it is precisely what would open a
+ * socket, a database or a credential, which is the promise this command is FOR. The consequence runs in
+ * both directions — a pack can supply a blob backend that REMOVES a demand, and it ADDS demands two
+ * ways: a contributed `kind:'stream'` / `mode:'playback'` route raises the blob-root and media-key
+ * demands, and a contributed agent raises its backend's credential demand. The boot guards ask their
+ * questions of the POST-merge document; this reads the base one. That is stated in the verdict's
+ * `notChecked`, which also NAMES the packs the document declares, rather than left for the operator to
+ * discover from a refusal.
+ *
+ * NO VALUE IS PRINTED. Every variable is reported as a `set` boolean; no environment value, no `.env`
+ * content and no secret-file content is read out or echoed.
+ */
+async function checkDeployEnv(specPath: string, specText: string): Promise<DeployCheckEnvResult> {
+  const { checkBootEnv } = await import('@rayspec/server/boot-env');
+  const report = await checkBootEnv(specPath, specText, process.env);
+  return {
+    ...report,
+    searchedDotenv: process.env.RAYSPEC_SKIP_DOTENV === '1' ? [] : dotenvCandidatePaths(),
+  };
 }
 
 /** Render a parser's `SpecError`s as the verdict's `errors` lines — one wording, whichever grammar judged the doc. */

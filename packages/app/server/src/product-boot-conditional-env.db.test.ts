@@ -216,12 +216,42 @@ describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands', () => 
     armsRan += 1;
   }, 120_000);
 
+  // The demand is composed from the boot-env catalogue's record (`requireEnv` takes it), so the WHOLE
+  // refusal is pinned here rather than its variable-name prefix: this is the only place the
+  // RAYSPEC_EXTRACTION_MODE abort can be provoked (it is raised from inside deployProductYamlSpec,
+  // after a migrated database), and without a whole-string pin a `what` clause edited in the catalogue
+  // rewords a shipped boot abort with every suite green. Same for the tenant arm below.
   it('acme-notes demands RAYSPEC_EXTRACTION_MODE (agents declared)', async () => {
     setAllFour();
     delete process.env.RAYSPEC_EXTRACTION_MODE;
     await expect(boot(ACME_YAML, demandDbUrl, { stt: false, agents: true })).rejects.toThrow(
-      /RAYSPEC_EXTRACTION_MODE is required/,
+      "RAYSPEC_EXTRACTION_MODE is required (the extraction executor: 'live' (real runAgent/gpt-5) | " +
+        "'deterministic' (injected, dev/CI)). Fail-closed.",
     );
+    armsRan += 1;
+  }, 120_000);
+
+  // The product profile's ONE unconditional demand, which only a real boot can provoke: it is read at
+  // the top of deployProductYamlSpec, after the migrated database exists. Pinned as a whole string for
+  // the same reason as the extraction arm above — nothing else in the tree asserts this refusal, so
+  // its `what` clause was reword-able with every suite green.
+  it('every product document demands RAYSPEC_PRODUCT_TENANT_ID, whatever it declares', async () => {
+    setAllFour();
+    const tenant = process.env.RAYSPEC_PRODUCT_TENANT_ID;
+    delete process.env.RAYSPEC_PRODUCT_TENANT_ID;
+    try {
+      await expect(
+        boot(NON_AUDIO_YAML, demandDbUrl, { stt: false, agents: false }),
+      ).rejects.toThrow(
+        'RAYSPEC_PRODUCT_TENANT_ID is required (the deployment tenant every workflow run + ' +
+          'dispatcher binds to (single-node posture)). Fail-closed.',
+      );
+    } finally {
+      // Restored for the arms that follow — a stray delete here would make every later boot refuse on
+      // the tenant instead of on the variable it is testing.
+      if (tenant === undefined) delete process.env.RAYSPEC_PRODUCT_TENANT_ID;
+      else process.env.RAYSPEC_PRODUCT_TENANT_ID = tenant;
+    }
     armsRan += 1;
   }, 120_000);
 
@@ -352,9 +382,9 @@ describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands', () => 
 // DATABASE_URL would otherwise SILENTLY SKIP the whole boot-demand proof and read GREEN.
 describe('boot-demand ran-guard', () => {
   it('the doc-driven env-demand arms ran under a required DB run', () => {
-    // 4 acme-notes demands + the agent-only arm (non-audio agent) + the stt-only arm (stt-without-audio) + the file-only
-    // blob demand + Arm B (the intake launch).
-    if (dbRequired) expect(armsRan).toBeGreaterThanOrEqual(8);
+    // 4 acme-notes demands + the product-tenant demand + the agent-only arm (non-audio agent) + the
+    // stt-only arm (stt-without-audio) + the file-only blob demand + Arm B (the intake launch).
+    if (dbRequired) expect(armsRan).toBeGreaterThanOrEqual(9);
     else expect(true).toBe(true);
   });
 });

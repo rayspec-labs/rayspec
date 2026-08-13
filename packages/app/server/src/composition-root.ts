@@ -119,6 +119,18 @@ import { exportJWK, importPKCS8 } from 'jose';
 import { stringify as stringifyYaml } from 'yaml';
 import { type AgentTracingPosture, observedAgentTracing } from './agent-tracing.js';
 import { BootConfigError } from './boot-config-error.js';
+// The boot's ENVIRONMENT DEMANDS, from the one module that states them. The refusals below are
+// COMPOSED from these records rather than restating them, and the deploy guards ask their conditions
+// through the shared predicates — so the read-only report (`rayspec deploy --check-env`) and this boot
+// cannot disagree about what a document needs. See boot-env-demands.ts.
+import {
+  declaresPlaybackRoute,
+  declaresStreamRoute,
+  fireableTriggers,
+  isStaticProfile,
+  PROVISION_BOOT_SECRETS,
+  SERVER_BOOT_SECRETS,
+} from './boot-env-demands.js';
 import {
   deployProductYamlSpec,
   makeSchemaProbe,
@@ -960,23 +972,31 @@ export function loadTenantProvisionSecrets(
   env: NodeJS.ProcessEnv = process.env,
   warn: BootWarnSink = consoleWarn,
 ): TenantProvisionSecrets {
+  // PROVISION_BOOT_SECRETS — a SEPARATE catalogue entry from the boot's three, with its own `what`
+  // clauses, because this refusal says something different about the same two variables (which database
+  // is being provisioned; why the pepper must match the target deployment's). Its deliberate omission of
+  // the JWT signing key is a property of that list, so nothing can quietly add the key back here.
   const missing: string[] = [];
-  const databaseUrl = resolveBootSecret(env, 'DATABASE_URL', warn);
-  if (!databaseUrl) missing.push('DATABASE_URL');
-  const apiKeyPepper = resolveBootSecret(env, 'RAYSPEC_API_KEY_PEPPER', warn);
-  if (!apiKeyPepper || apiKeyPepper.trim().length === 0) missing.push('RAYSPEC_API_KEY_PEPPER');
+  const resolvedSecrets = new Map<string, string>();
+  for (const secret of PROVISION_BOOT_SECRETS) {
+    const value = resolveBootSecret(env, secret.name, warn);
+    if (!value || value.trim().length === 0) missing.push(secret.name);
+    else resolvedSecrets.set(secret.name, value);
+  }
   if (missing.length > 0) {
     throw new BootConfigError(
       `Refusing to provision — required env var(s) missing: ${missing.join(', ')}. ` +
-        'DATABASE_URL is the Postgres connection string of the database to provision; ' +
-        'RAYSPEC_API_KEY_PEPPER is the api-key pepper the invite token is hashed with, and it must ' +
-        'be the SAME value the target deployment runs with or the invite can never be redeemed. ' +
-        'Each also accepts a <VAR>_FILE variant — DATABASE_URL_FILE, RAYSPEC_API_KEY_PEPPER_FILE — ' +
+        `${PROVISION_BOOT_SECRETS.map((s) => `${s.name} is ${s.what}`).join('; ')}. ` +
+        'Each also accepts a <VAR>_FILE variant — ' +
+        `${PROVISION_BOOT_SECRETS.map((s) => s.fileVariant).join(', ')} — ` +
         'naming a file to read the value from, which TAKES PRECEDENCE over the plain variable when ' +
         'set. Fail-closed.',
     );
   }
-  return { databaseUrl: databaseUrl as string, apiKeyPepper: apiKeyPepper as string };
+  return {
+    databaseUrl: resolvedSecrets.get('DATABASE_URL') as string,
+    apiKeyPepper: resolvedSecrets.get('RAYSPEC_API_KEY_PEPPER') as string,
+  };
 }
 
 /**
@@ -1010,26 +1030,31 @@ export function loadServerConfig(
   env: NodeJS.ProcessEnv = process.env,
   warn: BootWarnSink = consoleWarn,
 ): ServerConfig {
+  // The three are resolved IN THE CATALOGUE'S ORDER (SERVER_BOOT_SECRETS), which is the order the
+  // refusal has always listed them in and the order `resolveBootSecret`'s normalization warnings have
+  // always been emitted in. The abort's per-variable "X is Y" clauses and its `<VAR>_FILE` list are
+  // COMPOSED from the same records, so a fourth boot secret cannot be added without the message and the
+  // read-only report both learning about it.
   const missing: string[] = [];
-  const databaseUrl = resolveBootSecret(env, 'DATABASE_URL', warn);
-  if (!databaseUrl) missing.push('DATABASE_URL');
-  const jwtSigningKeyPem = resolveBootSecret(env, 'RAYSPEC_JWT_SIGNING_KEY', warn);
-  if (!jwtSigningKeyPem || jwtSigningKeyPem.trim().length === 0) {
-    missing.push('RAYSPEC_JWT_SIGNING_KEY');
+  const resolvedSecrets = new Map<string, string>();
+  for (const secret of SERVER_BOOT_SECRETS) {
+    const value = resolveBootSecret(env, secret.name, warn);
+    if (!value || value.trim().length === 0) missing.push(secret.name);
+    else resolvedSecrets.set(secret.name, value);
   }
-  const apiKeyPepper = resolveBootSecret(env, 'RAYSPEC_API_KEY_PEPPER', warn);
-  if (!apiKeyPepper || apiKeyPepper.trim().length === 0) missing.push('RAYSPEC_API_KEY_PEPPER');
   if (missing.length > 0) {
     throw new BootConfigError(
       `Boot aborted — required env var(s) missing: ${missing.join(', ')}. ` +
-        'DATABASE_URL is the Postgres connection string; RAYSPEC_JWT_SIGNING_KEY is the RS256 ' +
-        'PKCS#8 PEM; RAYSPEC_API_KEY_PEPPER is the api-key pepper. These live in env / a secret ' +
-        'manager only (never DB/git). Each also accepts a <VAR>_FILE variant — DATABASE_URL_FILE, ' +
-        'RAYSPEC_JWT_SIGNING_KEY_FILE, RAYSPEC_API_KEY_PEPPER_FILE — naming a file to read the ' +
-        'value from, which TAKES PRECEDENCE over the plain variable when set. ' +
+        `${SERVER_BOOT_SECRETS.map((s) => `${s.name} is ${s.what}`).join('; ')}. ` +
+        'These live in env / a secret manager only (never DB/git). Each also accepts a <VAR>_FILE ' +
+        `variant — ${SERVER_BOOT_SECRETS.map((s) => s.fileVariant).join(', ')} — naming a file to ` +
+        'read the value from, which TAKES PRECEDENCE over the plain variable when set. ' +
         'Refusing to start (fail-closed).',
     );
   }
+  const databaseUrl = resolvedSecrets.get('DATABASE_URL') as string;
+  const jwtSigningKeyPem = resolvedSecrets.get('RAYSPEC_JWT_SIGNING_KEY') as string;
+  const apiKeyPepper = resolvedSecrets.get('RAYSPEC_API_KEY_PEPPER') as string;
 
   const port = parsePort(env.PORT);
 
@@ -1349,87 +1374,14 @@ function parsePort(raw: string | undefined): number {
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The top-level RaySpec sections `isStaticProfile` has reasoned about — a SEPARATE allowlist from the
- * grammar's own schema. FAIL-CLOSED tripwire: if the grammar ever grows a NEW top-level section, a
- * parsed doc carrying it has a key OUTSIDE this set and `isStaticProfile` returns false (⇒ the normal
- * boot with full auth, the safe direction). A new ROUTE-BEARING grammar field MUST be added here (and
- * emptiness-checked in `isStaticProfile`) or it can never silently pass the static gate.
+ * The frontend-only shape predicate now lives in `boot-env-demands.ts` and is RE-EXPORTED here, so every
+ * existing import site — `@rayspec/server` and `./composition-root.js` alike — keeps naming the SAME
+ * function. It moved for one reason: it is the predicate that decides whether the three unconditional
+ * boot secrets apply AT ALL, and the read-only environment report has to ask exactly that question. A
+ * second frontend-only grammar written to answer it would eventually tell a frontend-only deployment to
+ * set secrets it must not have. Its behaviour, its fail-closed allowlist and its wording are unchanged.
  */
-const STATIC_PROFILE_KNOWN_KEYS: ReadonlySet<string> = new Set([
-  'version',
-  'metadata',
-  'stores',
-  'api',
-  'agents',
-  'tooling',
-  'triggers',
-  'handlers',
-  'extensions',
-  'deployment',
-  'frontend',
-]);
-
-/**
- * Is `specSource` a STATIC-PROFILE backend document — a frontend-only spec SAFE to boot with NO
- * database, JWT signing key, or api-key pepper, mounting NO auth/OIDC/runs/API route?
- *
- * "Frontend-only" is an ABSENCE predicate, NOT a positive grammar shape: the auth surface
- * (`createAuthApp`) is not spec-derived — it mounts unconditionally — so a spec can only ADD routes,
- * never subtract the always-on auth surface. This predicate is therefore NECESSARY BUT NOT SUFFICIENT
- * on its own; the security guarantee comes from the caller BRANCHING to `assembleStaticServer` (a fresh
- * bare app that never constructs the auth/DB composition), never from a "static" verdict alone.
- *
- * FAIL-CLOSED throughout — any doubt resolves to false:
- *   - a product-profile doc is categorically never static;
- *   - a doc that does not parse as a valid backend RaySpec is not static (the normal path then surfaces
- *     the real parse error rather than silently serving a doc that never validated);
- *   - a doc carrying ANY top-level section outside `STATIC_PROFILE_KNOWN_KEYS` is not static (the
- *     future-grammar-field tripwire);
- *   - EVERY route/DB/agent/handler-bearing section must be empty — `extensions` INCLUDED, because
- *     `mergeExtensions` concatenates each pack's stores/handlers/tooling/api/agents onto the spec
- *     before deploy, so a non-empty `extensions[]` would smuggle in every route-bearing field the
- *     other empty checks catch;
- *   - a durable off-request worker (`deployment.durableWorker`) needs a DB, so it disqualifies;
- *   - an enabled tenant event bus (`deployment.eventBus.enabled`) needs a DB — its whole backend IS
- *     the database — so it disqualifies too. The keys-allowlist above does NOT catch this on its own:
- *     `deployment` is already a known key, so a NEW SUB-key inside it trips no tripwire and would
- *     otherwise pass the static gate silently;
- *   - `frontend` must be non-empty (a static boot with nothing to serve is not a static profile).
- */
-export function isStaticProfile(specSource: string): boolean {
-  // A product-profile doc implies capabilities/workflows/stores/views — never static.
-  if (detectSpecKind(specSource) === 'product') return false;
-  // Must parse as a valid backend RaySpec; a parse failure is NOT static (fail closed → the normal boot
-  // surfaces the real error instead of statically serving a doc that never validated).
-  const parsed = parseSpec(specSource);
-  if (!parsed.ok) return false;
-  const spec = parsed.value;
-  // FAIL-CLOSED keys-allowlist: a future top-level section this predicate has not reasoned about makes
-  // the doc non-static (see STATIC_PROFILE_KNOWN_KEYS).
-  for (const key of Object.keys(spec)) {
-    if (!STATIC_PROFILE_KNOWN_KEYS.has(key)) return false;
-  }
-  // No route/DB/agent/handler-bearing section (extensions INCLUDED — the pack-merge smuggle path).
-  if (
-    spec.stores.length > 0 ||
-    spec.api.length > 0 ||
-    spec.agents.length > 0 ||
-    spec.tooling.length > 0 ||
-    spec.triggers.length > 0 ||
-    spec.handlers.length > 0 ||
-    spec.extensions.length > 0
-  ) {
-    return false;
-  }
-  // A durable off-request worker needs a database — disqualifies the static boot.
-  if (spec.deployment?.durableWorker === true) return false;
-  // An enabled event bus needs a database (the stream IS database rows) — disqualifies it too. This
-  // check is NOT redundant with the keys-allowlist: that allowlist reasons about TOP-LEVEL sections,
-  // and `deployment` is already in it, so a new sub-key of an allowed section arrives unnoticed.
-  if (spec.deployment?.eventBus?.enabled === true) return false;
-  // The one field a static profile MUST carry: something to serve.
-  return spec.frontend !== undefined && spec.frontend.length > 0;
-}
+export { isStaticProfile } from './boot-env-demands.js';
 
 /**
  * If `specPath` names a STATIC-PROFILE (frontend-only) backend document, return the `assembleStaticServer`
@@ -2477,7 +2429,10 @@ async function deployDeclaredSpec(
   // later with a less actionable message. Build the fs BlobStoreFactory once (LOCAL/self-host, pre-
   // hardening); it is injected into the engine in buildApp (below). A spec with NO stream route needs no
   // blob backend (blobFactory stays undefined — exactly like agentBackends for an agent-free spec).
-  const hasStreamRoute = effectiveSpec.api.some((r) => r.action.kind === 'stream');
+  // Asked through the SHARED predicate (boot-env-demands.ts), on the POST-MERGE `effectiveSpec` — so
+  // the read-only report asks the identical question of the base document, and says in its own output
+  // that a pack could still supply a blob backend it cannot see.
+  const hasStreamRoute = declaresStreamRoute(effectiveSpec.api);
   let blobFactory: BlobStoreFactory | undefined;
   if (hasStreamRoute) {
     // A PACK may PROVIDE its own blob backend (an ExtensionCapabilities.blobFactory — e.g.
@@ -2529,9 +2484,7 @@ async function deployDeclaredSpec(
   // playback route without a verifier would be unauthenticated. The service ALSO powers the
   // `init.mintPlayToken` capability a mint `{handler}` route receives. Built once (LOCAL/self-host,
   // pre-hardening); injected into the engine in buildApp. A spec with no playback route needs none.
-  const hasPlaybackRoute = effectiveSpec.api.some(
-    (r) => r.action.kind === 'stream' && r.action.mode === 'playback',
-  );
+  const hasPlaybackRoute = declaresPlaybackRoute(effectiveSpec.api);
   let mediaTokenService: ReturnType<typeof createMediaTokenService> | undefined;
   if (hasPlaybackRoute) {
     if (!config.mediaSigningKey) {
@@ -2910,10 +2863,8 @@ async function deployDeclaredSpec(
   let fireCronNow: BootedServer['fireCronNow'];
   // FIREABLE = cron (scheduled + on-demand) OR manual (on-demand only). Both are fired by the durable
   // worker, so both demand it wired + a known tenant. webhook/event stay reserved (not fireable here).
-  const fireableTriggers = result.triggers
-    .list()
-    .filter((t) => t.kind === 'cron' || t.kind === 'manual');
-  if (fireableTriggers.length > 0) {
+  const fireable = fireableTriggers(result.triggers.list());
+  if (fireable.length > 0) {
     // (Fail-closed, defense-in-depth with the lint rule.) A cron/manual trigger is fired ONLY by the
     // durable off-request worker. If the spec declares one but no durable worker is wired (the spec
     // omitted deployment.durableWorker, or no agent backends were supplied), the trigger could never
@@ -2922,7 +2873,7 @@ async function deployDeclaredSpec(
     // runtime backstop for a code-built spec or a missing-backends boot.
     if (!(durableExecutorInstance && workerDbHandle)) {
       throw new BootConfigError(
-        `Boot aborted — the spec declares ${fireableTriggers.length} cron/manual trigger(s) but no ` +
+        `Boot aborted — the spec declares ${fireable.length} cron/manual trigger(s) but no ` +
           'durable worker is wired (deployment.durableWorker is not true, or no agent backends were ' +
           'supplied). A cron/manual trigger is fired by the durable worker; without it the trigger ' +
           'would never fire. Set deployment.durableWorker:true and supply agent backends, or remove ' +
@@ -2933,7 +2884,7 @@ async function deployDeclaredSpec(
     // one is declared but no tenant was configured — firing under an unknown tenant is never silently OK.
     if (!config.cronTenantId) {
       throw new BootConfigError(
-        `Boot aborted — the spec declares ${fireableTriggers.length} cron/manual trigger(s) but ` +
+        `Boot aborted — the spec declares ${fireable.length} cron/manual trigger(s) but ` +
           'RAYSPEC_CRON_TENANT_ID is not set. A cron/manual trigger fires under a known deployment ' +
           'tenant (single-deployment LOCAL posture; multi-tenant fan-out is reserved). Set ' +
           'RAYSPEC_CRON_TENANT_ID to the org id the trigger should fire under. Fail-closed.',

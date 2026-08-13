@@ -38,6 +38,11 @@ import {
   type TtsSynthesizeRequest,
 } from '@rayspec/tts-port';
 import { BootConfigError } from './boot-config-error.js';
+// The credential this capability demands, from the one module that states the boot's environment
+// demands — the record the read-only environment report enumerates for a selected TTS provider. It is
+// the SAME variable two extraction backends also want, under a DIFFERENT reason, which is why the
+// catalogue keeps them as separate records. See boot-env-demands.ts.
+import { OPENAI_API_KEY_FOR_TTS } from './boot-env-demands.js';
 
 /**
  * The loud NON-REAL-PROVIDER boot warning for `TTS_PROVIDER=fake` on this profile. Warn-only (a dev/CI
@@ -109,7 +114,7 @@ export function buildTtsCapability(config: TtsCapabilityConfig): TtsCapability |
     const apiKey = config.openaiApiKey;
     if (!apiKey) {
       throw new BootConfigError(
-        'Boot aborted — OPENAI_API_KEY is required (the OpenAI API key for TTS_PROVIDER=openai). ' +
+        `Boot aborted — ${OPENAI_API_KEY_FOR_TTS.name} is required (${OPENAI_API_KEY_FOR_TTS.what}). ` +
           'Fail-closed. Set the key, select TTS_PROVIDER=fake for an offline dev/CI boot, or unset ' +
           'TTS_PROVIDER to boot without the speech-synthesis capability.',
       );

@@ -43,6 +43,10 @@ import {
   type SttTranscriptionResult,
 } from '@rayspec/stt-port';
 import { BootConfigError } from './boot-config-error.js';
+// The credential this capability demands, from the one module that states the boot's environment
+// demands — the SAME record the product boot's `buildSttAdapter` raises it from, and the one the
+// read-only environment report enumerates. See boot-env-demands.ts.
+import { DEEPGRAM_API_KEY } from './boot-env-demands.js';
 
 /**
  * The synthetic track every capability call transcribes under. The port keys media by
@@ -265,7 +269,7 @@ export function buildSttCapability(config: SttCapabilityConfig): SttCapability |
     const apiKey = config.deepgramApiKey;
     if (!apiKey) {
       throw new BootConfigError(
-        'Boot aborted — DEEPGRAM_API_KEY is required (the Deepgram API key (STT_PROVIDER=deepgram)). ' +
+        `Boot aborted — ${DEEPGRAM_API_KEY.name} is required (${DEEPGRAM_API_KEY.what}). ` +
           'Fail-closed. Set the key, select STT_PROVIDER=fake for an offline dev/CI boot, or unset ' +
           'STT_PROVIDER to boot without the transcription capability.',
       );

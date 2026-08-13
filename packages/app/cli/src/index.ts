@@ -155,7 +155,26 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 NO DB, NO network. Emits a JSON verdict. Does NOT prove: the
                                 migration, boot-env sufficiency, any provider credential, live-schema
                                 drift, or that the app serves — the verdict's notProven lists what
-                                each profile leaves open. Exit 0 ok / 1 not.`,
+                                each profile leaves open. Exit 0 ok / 1 not.
+  rayspec deploy --check-env <spec.yaml>
+                                One-shot: the environment variables THIS document's boot will
+                                require, each with its <VAR>_FILE equivalent, why the document (or
+                                the environment) demands it, and whether it is currently set — the
+                                answer a refused deploy used to be the only way to get. Reads the
+                                document AND the environment: a selected STT_PROVIDER/TTS_PROVIDER
+                                makes that provider's credential a demand no document could have
+                                predicted, while an UNSET selector is never a boot error on a BACKEND
+                                document (on a product document STT_PROVIDER IS demanded, but only
+                                when the document declares an stt.* step alongside the audio
+                                capability whose chunks it transcribes). Opens no socket, no
+                                database and no credential, and loads NO extension pack — so every
+                                demand a pack changes is invisible: a pack REMOVES one by supplying a
+                                blob backend, and ADDS one by contributing a stream/playback route or
+                                an agent. The verdict's notChecked states that, names the packs the
+                                document declares, and carries the rest of the boundary. Prints no
+                                value, only set/unset. Exit 0 when every demand is met and no refusal
+                                is already visible / 1 otherwise — missing lists the unmet demands,
+                                errors names a refusal that is not an unset variable.`,
       },
     ],
   },
@@ -463,7 +482,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
         if (e instanceof DeployCliError) throw new CliError(e.message);
         throw e;
       }
-      if (outcome.kind === 'dry-run') {
+      if (outcome.kind === 'dry-run' || outcome.kind === 'check-env') {
         await emit(outcome.result);
         return outcome.result.ok ? 0 : 1;
       }
