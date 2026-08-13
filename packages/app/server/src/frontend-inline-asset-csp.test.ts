@@ -26,11 +26,17 @@
  *   scanned to that prefix and the message says so. Each truncation clause is asserted as TEXT, so a
  *   silent bound cannot pass — and so can its ABSENCE, so an over-claiming one cannot either.
  *
- *   COVERAGE = WHAT THE MOUNT SERVES — the walk's skips are checked against the mount itself, in the
- *   same boot: a page reachable only through an in-tree symlink (a file link and a directory link,
- *   both into a dot directory the walk never enters by name) is served 200 with the blocked bytes AND
- *   named, while a dotfile path and a symlink escaping the served directory — the two `isSafeStaticPath`
- *   refuses — come back 404 and are not named.
+ *   THE WALK'S SKIPS ARE THE MOUNT'S REFUSALS — every skip that exists to avoid naming an unservable
+ *   page is checked against the mount itself, in the same boot. A dotfile path, a symlink escaping the
+ *   served directory (the two `isSafeStaticPath` refuses) and, under a `route: '/'` mount, a page under
+ *   `/v1`, `/health` or `/oidc` (`isReservedRoutePath`, which `mountFrontend` applies before the file
+ *   server) each come back 404 AND are not named. Each has an accept control so a skip cannot pass by
+ *   being too broad: a page reachable only through an in-tree symlink into a dot directory is served
+ *   200 with the blocked bytes AND named, and a `v1` directory under a `/app` mount — served at
+ *   `/app/v1/…`, which no reserved prefix matches — is served 200 AND named.
+ *
+ *   The converse is deliberately NOT asserted anywhere here: these arms prove no NAMED page is refused
+ *   by a guard, not that every named page was fetched.
  */
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -260,7 +266,7 @@ describe('detection fidelity — what the heuristic does and does not report', (
   });
 });
 
-describe('what the walk covers is what the mount serves', () => {
+describe("the walk's skips are the mount's refusals", () => {
   /** A directory OUTSIDE the served tree, for the escaping-symlink arm. Removed with `root`. */
   let outside = '';
   beforeEach(() => {
@@ -312,6 +318,46 @@ describe('what the walk covers is what the mount serves', () => {
     expect(warnings).toEqual([]);
     expect((await server.app.request('/.hidden.html')).status).toBe(404);
     expect((await server.app.request('/escape.html')).status).toBe(404);
+  });
+
+  it("a ROOT mount's /v1, /health and /oidc pages are 404 from the mount — and are not named", async () => {
+    // `mountFrontend` declines a reserved-namespace request BEFORE the file server, so under a
+    // `route: '/'` mount none of these three pages has a servable path — naming one would send an
+    // operator to a page nobody can request.
+    writeAsset('index.html', CLEAN);
+    writeAsset('v1/page.html', ALL_FOUR);
+    writeAsset('oidc/callback.html', ALL_FOUR);
+    writeAsset('health/status.html', ALL_FOUR);
+
+    const warnings: string[] = [];
+    const server = assembleStaticServer(
+      loadStaticServerConfig({}),
+      { specPath: specPath(), frontend: [SPA_MOUNT] },
+      { bootWarn: (message) => warnings.push(message) },
+    );
+    expect(warnings).toEqual([]);
+    expect((await server.app.request('/v1/page.html')).status).toBe(404);
+    expect((await server.app.request('/oidc/callback.html')).status).toBe(404);
+    expect((await server.app.request('/health/status.html')).status).toBe(404);
+  });
+
+  it('the reserved skip is the REQUEST path, not the directory name: /app/v1/page.html IS served — and named', async () => {
+    // The accept control for the arm above: a `v1` directory under a NON-root mount is served at
+    // `/app/v1/...`, which no reserved prefix matches. A walk that skipped a directory by NAME would
+    // go silent here while the mount answers 200 with the blocked bytes.
+    writeAsset('v1/page.html', ALL_FOUR);
+
+    const warnings: string[] = [];
+    const server = assembleStaticServer(
+      loadStaticServerConfig({}),
+      { specPath: specPath(), frontend: [{ route: '/app', dir: 'web/dist', spa: false }] },
+      { bootWarn: (message) => warnings.push(message) },
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('web/dist/v1/page.html');
+    const page = await server.app.request('/app/v1/page.html');
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain('<style>body{color:red}</style>');
   });
 
   it('a link and its target are ONE file — examined once, named once', () => {

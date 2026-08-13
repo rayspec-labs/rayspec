@@ -738,11 +738,19 @@ function resolveScanEntry(
 /**
  * Walk one directory tree, examining its `.html`/`.htm` files until the file bound is spent. Entries
  * are sorted so a truncated scan covers the same files on every boot. `dir` is the path the mount
- * SERVES this tree at (what a finding is named by); `realDir` is its resolved real path.
+ * SERVES this tree at (what a finding is named by); `realDir` is its resolved real path; `servedPath`
+ * is the REQUEST path this directory answers at, built the way `mountFrontend` takes one apart
+ * (`route` for a non-root mount, `''` for `route: '/'`, plus one `/name` per level walked).
  *
- * What it walks is what the mount hands out, and each skip is the mount's own refusal — both
- * refusals are requested against a real boot, and asserted 404, by the coverage arms of
- * `frontend-inline-asset-csp.test.ts`:
+ * THREE of the skips below exist to keep the walk off pages `mountFrontend` REFUSES. Each applies the
+ * same predicate that guard applies per request, and each is pinned by an arm of
+ * `frontend-inline-asset-csp.test.ts` that requests the page against a real boot and asserts BOTH a
+ * 404 and that the warning does not name it:
+ *   - a RESERVED-NAMESPACE entry is skipped — `mountFrontend` declines a request under `/v1`,
+ *     `/health` or `/oidc` before the file server ever runs, so this walk puts `servedPath` through
+ *     the very same `isReservedRoutePath`. It is the REQUEST path that decides and not the directory
+ *     name: only a `route: '/'` mount can produce one, and the `/app` mount serving
+ *     `/app/v1/page.html` is walked (that arm asserts 200 + named, so a skip by name goes red);
  *   - a DOT-SEGMENT entry is skipped — `isSafeStaticPath`'s check (a) refuses any REQUEST-path
  *     segment beginning with `.`, so nothing under it is servable UNDER THAT NAME. Reachable it may
  *     still be, through an in-tree link from elsewhere in the tree; that is the next bullet's job,
@@ -750,9 +758,15 @@ function resolveScanEntry(
  *   - a SYMLINK is FOLLOWED when `resolveScanEntry` proves its target inside the mount's real
  *     directory, because the mount serves it — `isSafeStaticPath` refuses symlink-ESCAPE only, so
  *     skipping in-tree links would leave a served page unscanned — and skipped when it escapes,
- *     which that same check (c) refuses per request;
- *   - a directory whose REAL path was already walked is skipped, which is what terminates a link
- *     cycle (`dist/self -> dist`) and what makes two mounts over one directory one walk.
+ *     which that same check (c) refuses per request.
+ *
+ * The fourth skip is DEDUPLICATION and not a refusal: a directory whose REAL path was already walked
+ * is skipped, which is what terminates a link cycle (`dist/self -> dist`) and what makes two mounts
+ * over one directory one walk.
+ *
+ * What is NOT claimed is the converse. Clearing the three guards above is not a proof of fetchability
+ * — nothing here re-derives `serveStatic`'s own path resolution — so read a finding as "no mount
+ * guard refuses this path", not as "this page was fetched".
  *
  * THE FILE BOUND is recorded, never inferred: `filesTruncated` is set at the moment an HTML file is
  * DECLINED for want of budget, so a build of exactly `INLINE_ASSET_SCAN_FILE_LIMIT` pages — budget
@@ -766,6 +780,7 @@ function scanHtmlTree(
   dir: string,
   realDir: string,
   realMountDir: string,
+  servedPath: string,
   state: InlineAssetScanState,
 ): void {
   let entries: Dirent[];
@@ -777,13 +792,15 @@ function scanHtmlTree(
   for (const entry of [...entries].sort((a, b) => (a.name < b.name ? -1 : 1))) {
     if (state.filesTruncated) return; // a declined file already settled it
     if (entry.name.startsWith('.')) continue;
+    const served = `${servedPath}/${entry.name}`;
+    if (isReservedRoutePath(served)) continue; // the mount declines this request before serving
     const resolved = resolveScanEntry(entry, realDir, realMountDir);
     if (resolved === undefined) continue;
     const full = join(dir, entry.name);
     if (resolved.isDirectory) {
       if (state.seenDirs.has(resolved.real)) continue;
       state.seenDirs.add(resolved.real);
-      scanHtmlTree(full, resolved.real, realMountDir, state);
+      scanHtmlTree(full, resolved.real, realMountDir, served, state);
       continue;
     }
     if (!resolved.isFile || !/\.html?$/i.test(entry.name)) continue;
@@ -868,7 +885,10 @@ export function blockedInlineAssetWarning(
     }
     if (state.seenDirs.has(realDir)) continue; // two mounts may declare the same directory
     state.seenDirs.add(realDir);
-    scanHtmlTree(dir, realDir, realDir, state);
+    // The mount's route is what turns a walked path into the REQUEST path it is served at, which is
+    // what the reserved-namespace skip inside the walk tests. Split exactly as `mountFrontend`'s
+    // handler splits an incoming path, so the two agree on which requests exist.
+    scanHtmlTree(dir, realDir, realDir, mount.route === '/' ? '' : mount.route, state);
   }
   if (state.findings.length === 0) return undefined;
 

@@ -41,10 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reported like any other element's), but markup quoted inside an attribute or a string can still be
   named and unusual markup can be missed. It also computes no hashes, so a policy carrying a hash or
   nonce source is treated as permitting that shape. The message says all of this in the same breath
-  as the finding. **The coverage** is the set of pages the mount hands out: the walk follows a
-  symlink whose real path stays inside the served directory — the containment test the per-request
-  path guard applies — and skips one that escapes, along with dot-segment paths, because those are
-  the two shapes that guard answers with a 404.
+  as the finding. **The coverage**: the walk runs the mount's own three request-path checks as it
+  goes, so it does not name a page one of them refuses — a dot-segment path, a symlink whose real
+  path escapes the served directory, and, under a `/` mount, anything beneath the reserved `/v1`,
+  `/health` and `/oidc` namespaces, which the mount declines before the file server ever runs. An
+  in-tree symlink it does follow, because the mount serves those. It is not a fetch, and the converse
+  is not claimed: clearing those three checks is not a proof that the page resolves.
   (Issues #355, #345, #313.)
 
 - **`GET /v1/subscribe` — an SSE subscription over the tenant event stream, with a resume protocol
