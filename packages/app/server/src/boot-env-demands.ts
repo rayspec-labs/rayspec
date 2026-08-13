@@ -14,9 +14,11 @@
  * the other one. Neither has its own copy.
  *
  * BEHAVIOUR-NEUTRAL BY CONSTRUCTION. Every refusal this module feeds keeps the wording it had, byte for
- * byte. The records carry the exact `what` clause each message already contained — `DATABASE_URL is the
- * Postgres connection string`, `the Deepgram API key (STT_PROVIDER=deepgram)` — so the message is
- * COMPOSED from the record instead of repeating it. Two of those wordings are additionally load-bearing
+ * byte: where a boot site consumes a record, that record carries the exact `what` clause the message
+ * already contained — `DATABASE_URL is the Postgres connection string`, `the Deepgram API key
+ * (STT_PROVIDER=deepgram)` — so the message is COMPOSED from the record instead of repeating it. The
+ * records NO boot site consumes feed only the read-only report and compose no refusal at all; `what`
+ * below says which those are and why. Two of the composed wordings are additionally load-bearing
  * OUTSIDE this package: the CLI appends its searched-`.env`-paths diagnostic by matching
  * `required env var(s) missing: …` and `<VAR> is required (…)` (see `missingEnvSearchedSuffix` in
  * packages/app/cli/src/deploy.ts). Both survive here unchanged, and must.
@@ -39,11 +41,18 @@ import {
 /**
  * ONE environment variable the boot reads, described once.
  *
- * `what` is the clause the refusal already used for it, kept verbatim so the refusal can be composed
- * from this record rather than restating it — that is what makes the record load-bearing instead of
- * documentation. A variable that is demanded from two different places with two different reasons gets
- * two records (`OPENAI_API_KEY` has three: the `openai` extraction backend, the `pi` backend, and
- * `TTS_PROVIDER=openai`), because the reason is what an operator needs and it genuinely differs.
+ * `what` is what the variable IS, in one clause. For a record a BOOT SITE consumes it is the clause that
+ * site's refusal already used, kept verbatim so the refusal is composed from this record rather than
+ * restating it — that is what makes those records load-bearing instead of documentation, and it is why
+ * editing one of them reds a suite. The others are read by the REPORT alone: `RAYSPEC_BLOB_ROOT`,
+ * `RAYSPEC_MEDIA_SIGNING_KEY`, `RAYSPEC_CRON_TENANT_ID`, the two anthropic credentials,
+ * `RAYSPEC_ANTHROPIC_REUSE_LOGIN`, `TTS_PROVIDER` and `RAYSPEC_FS_SOURCE_ROOT` are imported by no boot
+ * site, because their guards say more than a `what` clause can (the anthropic credential names a CHOICE
+ * of two; the deploy guards spend a sentence each on what a stream route or a cron trigger is). For
+ * those, `what` is the report's own description and changing it changes no refusal. A variable that is
+ * demanded from two different places with two different reasons gets two records (`OPENAI_API_KEY` has
+ * three: the `openai` extraction backend, the `pi` backend, and `TTS_PROVIDER=openai`), because the
+ * reason is what an operator needs and it genuinely differs.
  */
 export interface BootEnvVar {
   /** The variable name, as the environment spells it. */
@@ -54,7 +63,7 @@ export interface BootEnvVar {
    * secrets have one — a `<VAR>_FILE` variant is not a naming convention every variable follows.
    */
   readonly fileVariant: string | null;
-  /** What the variable IS — the exact clause the boot refusal names it with. */
+  /** What the variable IS — the refusal's own clause, verbatim, wherever a boot site composes from it. */
   readonly what: string;
 }
 

@@ -4,14 +4,25 @@
  *
  * 1. BEHAVIOUR-NEUTRALITY (the accept control). The refusals that are now COMPOSED from the catalogue
  *    rather than restating it must be byte-identical to the ones they replaced. Each is pinned as a
- *    whole literal string, per refusal, so a `what` clause edited in the catalogue REDS a suite
- *    instead of silently rewording a boot abort — and so the two wordings the CLI matches on to append
- *    its searched-`.env`-paths diagnostic (`required env var(s) missing: …` and `<VAR> is required
- *    (…)`) cannot be normalized away. Every refusal reachable WITHOUT a database is pinned here; the
- *    two that are raised only from inside `deployProductYamlSpec` — `RAYSPEC_PRODUCT_TENANT_ID` and
- *    `RAYSPEC_EXTRACTION_MODE` — are pinned as whole literal strings in
+ *    whole literal string, per refusal, so an edit to a `what` clause ONE OF THEM COMPOSES FROM reds a
+ *    suite instead of silently rewording a boot abort — and so the two wordings the CLI matches on to
+ *    append its searched-`.env`-paths diagnostic (`required env var(s) missing: …` and `<VAR> is required
+ *    (…)`) cannot be normalized away. The rule is per RECORD: a record a boot site consumes composes
+ *    that site's refusal, and every such record is pinned as a whole literal string. The ones reachable
+ *    WITHOUT a database are pinned here; the two raised only from inside `deployProductYamlSpec` —
+ *    `RAYSPEC_PRODUCT_TENANT_ID` and `RAYSPEC_EXTRACTION_MODE` — are pinned in
  *    `product-boot-conditional-env.db.test.ts`, through a real boot, because that is the only place
- *    they can be provoked. Between the two files every `what` clause in the catalogue is covered.
+ *    they can be provoked. Measured by replacing each `what` in turn with a marker: 16 of the 24
+ *    records red one of the two files — 14 here, 2 there.
+ *
+ *    THE REMAINING EIGHT COMPOSE NO REFUSAL, and nothing pins them. `RAYSPEC_BLOB_ROOT`,
+ *    `RAYSPEC_MEDIA_SIGNING_KEY`, `RAYSPEC_CRON_TENANT_ID`, `CLAUDE_CODE_OAUTH_TOKEN`,
+ *    `ANTHROPIC_API_KEY`, `RAYSPEC_ANTHROPIC_REUSE_LOGIN`, `TTS_PROVIDER` and `RAYSPEC_FS_SOURCE_ROOT`
+ *    are imported by no boot site: their guards say more than a `what` clause can — the anthropic
+ *    credential's "neither is set" names a CHOICE of two, the deploy guards spend a sentence each on
+ *    what a stream route or a cron trigger is — so those refusals keep their own wording and these
+ *    records exist to give the read-only report its reason clause. Editing one of the eight moves that
+ *    `because` line and nothing else. Wire one of them into a refusal and it needs a pin here too.
  *
  * 2. The REPORT agrees with the boot. `checkBootEnv` is not allowed to answer a question the boot would
  *    answer differently, so the cases below drive the distinctions that were easiest to get wrong: the
