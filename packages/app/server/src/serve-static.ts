@@ -457,8 +457,10 @@ export interface InlineAssetScan {
 
 /**
  * THE BOUND, part 1: how many HTML files one boot may open, across ALL declared mounts together. A
- * build can carry thousands of pages and a boot must not pay for them; past this many the scan stops
- * and the warning SAYS it stopped, so the number is never a silent claim of full coverage.
+ * build can carry thousands of pages and a boot must not pay for them; the file this budget makes
+ * the scan DECLINE is what sets `filesTruncated` and prints the bound's line, so the number is never
+ * a silent claim of full coverage — and a build of exactly this many pages, which cost the scan
+ * nothing it refused, is never told otherwise.
  */
 export const INLINE_ASSET_SCAN_FILE_LIMIT = 200;
 
@@ -607,8 +609,9 @@ function isDataScriptType(type: string | undefined): boolean {
  *   - `<script>` and `<style>` bodies are skipped as raw text (the spec's raw-text elements), so a
  *     `style="…"` inside a JS string or a CSS `content` value is not reported as an attribute; a
  *     body that is only whitespace is not reported as an inline block either;
- *   - attributes are read off start tags only, so the words `style=` / `onclick=` in page COPY are
- *     not reported.
+ *   - attributes are read off START TAGS only, so the words `style=` / `onclick=` in page COPY are
+ *     not reported — and off EVERY start tag, `<script>` and `<style>` included, whose `on*=` and
+ *     `style=` the policy governs exactly like any other element's (only their BODIES are skipped).
  * What it does NOT do: resolve malformed markup the way a browser's tokenizer would, follow
  * `<template>` or `srcdoc` content, or evaluate anything a script writes at runtime. False positives
  * and misses both remain possible, which is exactly why this is warn-only and says so in the message.
@@ -625,6 +628,20 @@ function inlineAssetKinds(html: string): ReadonlySet<InlineAssetKind> {
     if (name === undefined) continue;
     const attributes = parseTagAttributes(m[2] ?? '');
 
+    // Attributes come off EVERY start tag, `<script>`/`<style>` included: a `<script src=… onerror=…>`
+    // or a `<style onload=…>` carries a handler the policy governs exactly like any other element's,
+    // and it is the raw-text BODY skip below — not skipping these tags — that keeps a `style="…"`
+    // inside a JS string or a CSS value from being read as an attribute.
+    if (attributes.has('style')) found.add('style-attribute');
+    // `on` + at least three letters — the shortest real handler names (`onblur`, `oncut`) clear it,
+    // while an ordinary `once`/`on` attribute does not. Heuristic, like the rest of this scan.
+    for (const attribute of attributes.keys()) {
+      if (/^on[a-z]{3,}$/.test(attribute)) {
+        found.add('event-attribute');
+        break;
+      }
+    }
+
     if (name === 'script' || name === 'style') {
       // Consume the raw-text body up to the matching end tag (or to EOF when it is unterminated),
       // both to judge emptiness and so its content cannot masquerade as markup below.
@@ -636,17 +653,6 @@ function inlineAssetKinds(html: string): ReadonlySet<InlineAssetKind> {
       const data = name === 'script' && isDataScriptType(attributes.get('type'));
       if (!external && !data && body.trim() !== '') {
         found.add(name === 'script' ? 'script-element' : 'style-element');
-      }
-      continue;
-    }
-
-    if (attributes.has('style')) found.add('style-attribute');
-    // `on` + at least three letters — the shortest real handler names (`onblur`, `oncut`) clear it,
-    // while an ordinary `once`/`on` attribute does not. Heuristic, like the rest of this scan.
-    for (const attribute of attributes.keys()) {
-      if (/^on[a-z]{3,}$/.test(attribute)) {
-        found.add('event-attribute');
-        break;
       }
     }
   }
@@ -682,20 +688,86 @@ interface InlineAssetFinding {
 interface InlineAssetScanState {
   readonly blocked: ReadonlyMap<InlineAssetKind, string>;
   readonly specDir: string;
+  /** REAL paths of the files already examined — a link and its target are one file, examined once. */
   readonly seen: Set<string>;
+  /** REAL paths of the directories already walked — what makes a symlink cycle terminate. */
+  readonly seenDirs: Set<string>;
   readonly findings: InlineAssetFinding[];
   filesScanned: number;
+  /** Set ONLY when an HTML file was actually declined for want of budget — see `scanHtmlTree`. */
+  filesTruncated: boolean;
   bytesTruncated: boolean;
 }
 
 /**
- * Walk one directory tree, examining its `.html`/`.htm` files until the file bound is spent. Entries
- * are sorted so a truncated scan covers the same files on every boot. Skips dot-segments and symlinks
- * — `mountFrontend`'s fail-closed guard refuses to serve either, so a finding there would name a file
- * the mount will never hand out. An unreadable directory or file is skipped, not reported: this is a
- * warning path, and `frontendMountsReadiness` is what answers for a mount that cannot be served.
+ * What one directory entry resolves to, when the mount would serve it at all: its REAL path (the
+ * file's identity, so a link and its target are not examined twice) and its kind. `undefined` when
+ * the entry cannot be resolved or stat'ed, and when its real path lies OUTSIDE `realMountDir` —
+ * `isSafeStaticPath`'s check (c) applies the same `realpathSync`-inside-`realBaseDir` test to every
+ * request, so an escaping symlink is refused by the mount and a finding on it would name a file the
+ * mount never hands out.
+ *
+ * `realDir` is the caller's ALREADY-REAL directory path, so a non-symlink entry's real path is
+ * `join(realDir, name)` — no syscall — and containment holds by construction. Only a symlink pays
+ * for a `realpathSync`.
  */
-function scanHtmlTree(dir: string, state: InlineAssetScanState): void {
+function resolveScanEntry(
+  entry: Dirent,
+  realDir: string,
+  realMountDir: string,
+): { real: string; isDirectory: boolean; isFile: boolean } | undefined {
+  if (!entry.isSymbolicLink()) {
+    return {
+      real: join(realDir, entry.name),
+      isDirectory: entry.isDirectory(),
+      isFile: entry.isFile(),
+    };
+  }
+  let real: string;
+  let stats: Stats;
+  try {
+    real = realpathSync(join(realDir, entry.name));
+    stats = statSync(real);
+  } catch {
+    return undefined; // broken link, or unreadable — the mount misses on it too
+  }
+  if (real !== realMountDir && !real.startsWith(realMountDir + sep)) return undefined;
+  return { real, isDirectory: stats.isDirectory(), isFile: stats.isFile() };
+}
+
+/**
+ * Walk one directory tree, examining its `.html`/`.htm` files until the file bound is spent. Entries
+ * are sorted so a truncated scan covers the same files on every boot. `dir` is the path the mount
+ * SERVES this tree at (what a finding is named by); `realDir` is its resolved real path.
+ *
+ * What it walks is what the mount hands out, and each skip is the mount's own refusal — both
+ * refusals are requested against a real boot, and asserted 404, by the coverage arms of
+ * `frontend-inline-asset-csp.test.ts`:
+ *   - a DOT-SEGMENT entry is skipped — `isSafeStaticPath`'s check (a) refuses any REQUEST-path
+ *     segment beginning with `.`, so nothing under it is servable UNDER THAT NAME. Reachable it may
+ *     still be, through an in-tree link from elsewhere in the tree; that is the next bullet's job,
+ *     and it is how a `dist/index.html -> dist/.build/index.html` build gets covered;
+ *   - a SYMLINK is FOLLOWED when `resolveScanEntry` proves its target inside the mount's real
+ *     directory, because the mount serves it — `isSafeStaticPath` refuses symlink-ESCAPE only, so
+ *     skipping in-tree links would leave a served page unscanned — and skipped when it escapes,
+ *     which that same check (c) refuses per request;
+ *   - a directory whose REAL path was already walked is skipped, which is what terminates a link
+ *     cycle (`dist/self -> dist`) and what makes two mounts over one directory one walk.
+ *
+ * THE FILE BOUND is recorded, never inferred: `filesTruncated` is set at the moment an HTML file is
+ * DECLINED for want of budget, so a build of exactly `INLINE_ASSET_SCAN_FILE_LIMIT` pages — budget
+ * spent, nothing left — reports no truncation. Once a file has been declined the answer cannot
+ * change, so the walk stops there rather than keep looking for more it will not read.
+ *
+ * An unreadable directory or file is skipped, not reported: this is a warning path, and
+ * `frontendMountsReadiness` is what answers for a mount that cannot be served.
+ */
+function scanHtmlTree(
+  dir: string,
+  realDir: string,
+  realMountDir: string,
+  state: InlineAssetScanState,
+): void {
   let entries: Dirent[];
   try {
     entries = readdirSync(dir, { withFileTypes: true });
@@ -703,16 +775,24 @@ function scanHtmlTree(dir: string, state: InlineAssetScanState): void {
     return;
   }
   for (const entry of [...entries].sort((a, b) => (a.name < b.name ? -1 : 1))) {
-    if (state.filesScanned >= INLINE_ASSET_SCAN_FILE_LIMIT) return;
-    if (entry.name.startsWith('.') || entry.isSymbolicLink()) continue;
+    if (state.filesTruncated) return; // a declined file already settled it
+    if (entry.name.startsWith('.')) continue;
+    const resolved = resolveScanEntry(entry, realDir, realMountDir);
+    if (resolved === undefined) continue;
     const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      scanHtmlTree(full, state);
+    if (resolved.isDirectory) {
+      if (state.seenDirs.has(resolved.real)) continue;
+      state.seenDirs.add(resolved.real);
+      scanHtmlTree(full, resolved.real, realMountDir, state);
       continue;
     }
-    if (!entry.isFile() || !/\.html?$/i.test(entry.name)) continue;
-    if (state.seen.has(full)) continue; // two mounts may declare the same dir
-    state.seen.add(full);
+    if (!resolved.isFile || !/\.html?$/i.test(entry.name)) continue;
+    if (state.seen.has(resolved.real)) continue; // already examined under another servable path
+    state.seen.add(resolved.real);
+    if (state.filesScanned >= INLINE_ASSET_SCAN_FILE_LIMIT) {
+      state.filesTruncated = true;
+      return;
+    }
     state.filesScanned += 1;
     let prefix: { text: string; truncated: boolean };
     try {
@@ -739,7 +819,9 @@ function scanHtmlTree(dir: string, state: InlineAssetScanState): void {
 /**
  * The ONE boot warning for served pages carrying an inline block the ACTIVE policy blocks —
  * `undefined` when there is nothing to say, which is every clean build and every deployment whose
- * policy already permits the shapes it ships.
+ * policy already permits the shapes it ships. A scan that found NOTHING is silent even when a bound
+ * truncated it: this warning exists to name offending files, and a boot line reporting only how far
+ * a scan got would fire on every large clean build forever.
  *
  * Order of work, cheapest first: decide from the POLICY ALONE which of the four shapes could be
  * blocked at all, and when none can be, return without opening a single file — a deployment that
@@ -767,13 +849,26 @@ export function blockedInlineAssetWarning(
     blocked,
     specDir,
     seen: new Set(),
+    seenDirs: new Set(),
     findings: [],
     filesScanned: 0,
+    filesTruncated: false,
     bytesTruncated: false,
   };
   for (const mount of mounts) {
-    if (state.filesScanned >= INLINE_ASSET_SCAN_FILE_LIMIT) break;
-    scanHtmlTree(resolve(specDir, mount.dir), state);
+    if (state.filesTruncated) break;
+    const dir = resolve(specDir, mount.dir);
+    // The mount's own real base directory, resolved exactly as `mountFrontend` resolves it (same
+    // fallback on failure), so the walk's containment test and the request guard's agree.
+    let realDir: string;
+    try {
+      realDir = realpathSync(dir);
+    } catch {
+      realDir = dir;
+    }
+    if (state.seenDirs.has(realDir)) continue; // two mounts may declare the same directory
+    state.seenDirs.add(realDir);
+    scanHtmlTree(dir, realDir, realDir, state);
   }
   if (state.findings.length === 0) return undefined;
 
@@ -793,10 +888,10 @@ export function blockedInlineAssetWarning(
         `${INLINE_ASSET_SCAN_REPORT_LIMIT}.`,
     );
   }
-  if (state.filesScanned >= INLINE_ASSET_SCAN_FILE_LIMIT) {
+  if (state.filesTruncated) {
     lines.push(
-      `  Bound: the scan stopped after ${INLINE_ASSET_SCAN_FILE_LIMIT} HTML files — the rest of ` +
-        'the declared mounts were NOT examined.',
+      `  Bound: the scan stopped after ${INLINE_ASSET_SCAN_FILE_LIMIT} HTML files — at least one ` +
+        'more served HTML file was NOT examined.',
     );
   }
   if (state.bytesTruncated) {

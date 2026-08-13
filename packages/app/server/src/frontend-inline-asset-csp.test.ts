@@ -19,10 +19,18 @@
  *   the style, so the arm cannot pass by ignoring the policy altogether.
  *
  *   THE BOUNDS — pinned by construction at the exported limits: `INLINE_ASSET_SCAN_FILE_LIMIT` + 1
- *   offending files produce a scan that stops at the limit AND says so; more than
- *   `INLINE_ASSET_SCAN_REPORT_LIMIT` offenders are listed up to the limit and the remainder counted;
- *   a file over `INLINE_ASSET_SCAN_BYTE_LIMIT` is scanned to that prefix and the message says so.
- *   Each truncation clause is asserted as TEXT, so a silent bound cannot pass.
+ *   offending files produce a scan that stops at the limit AND says so, while EXACTLY
+ *   `INLINE_ASSET_SCAN_FILE_LIMIT` files — the boundary, where the budget is spent but nothing was
+ *   declined — say nothing about truncation; more than `INLINE_ASSET_SCAN_REPORT_LIMIT` offenders are
+ *   listed up to the limit and the remainder counted; a file over `INLINE_ASSET_SCAN_BYTE_LIMIT` is
+ *   scanned to that prefix and the message says so. Each truncation clause is asserted as TEXT, so a
+ *   silent bound cannot pass — and so can its ABSENCE, so an over-claiming one cannot either.
+ *
+ *   COVERAGE = WHAT THE MOUNT SERVES — the walk's skips are checked against the mount itself, in the
+ *   same boot: a page reachable only through an in-tree symlink (a file link and a directory link,
+ *   both into a dot directory the walk never enters by name) is served 200 with the blocked bytes AND
+ *   named, while a dotfile path and a symlink escaping the served directory — the two `isSafeStaticPath`
+ *   refuses — come back 404 and are not named.
  */
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -230,14 +238,98 @@ describe('detection fidelity — what the heuristic does and does not report', (
     expect(warningFor(DEFAULT_FRONTEND_CSP)).toContain('web/dist/docs/guide/index.html');
   });
 
-  it('dotfiles and symlinks are skipped — `mountFrontend` refuses to serve either', () => {
-    writeAsset('.hidden/index.html', ALL_FOUR);
+  it('an `on*=` handler on a <script>/<style> START TAG is reported — only their bodies are skipped', () => {
+    // `<script src>` is not inline CODE (no element finding) but its handler attribute still falls
+    // back to script-src-attr → default-src, and a `<style onload>` carries both shapes.
+    writeAsset('index.html', '<script src="/a.js" onerror="boom()"></script>');
+    const external = warningFor(DEFAULT_FRONTEND_CSP);
+    expect(external).toContain('on*= handler attribute (default-src)');
+    expect(external).not.toContain('inline <script> element');
+
+    writeAsset('index.html', '<style onload="boom()">a{}</style>');
+    const styled = warningFor(DEFAULT_FRONTEND_CSP);
+    expect(styled).toContain('inline <style> element (default-src)');
+    expect(styled).toContain('on*= handler attribute (default-src)');
+
+    // …and the body skip that prevents the false positives is still in force: the same handler text
+    // inside a script BODY is not an attribute finding.
+    writeAsset('index.html', `<script>el.innerHTML = '<img onerror="y()">';</script>`);
+    const inBody = warningFor(DEFAULT_FRONTEND_CSP);
+    expect(inBody).toContain('inline <script> element');
+    expect(inBody).not.toContain('on*= handler attribute');
+  });
+});
+
+describe('what the walk covers is what the mount serves', () => {
+  /** A directory OUTSIDE the served tree, for the escaping-symlink arm. Removed with `root`. */
+  let outside = '';
+  beforeEach(() => {
+    outside = mkdtempSync(join(tmpdir(), 'rayspec-inline-asset-outside-'));
+  });
+  afterEach(() => {
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  it('a page reachable only through an in-tree symlink is SERVED 200 with the blocked bytes — and named', async () => {
+    // `isSafeStaticPath` refuses a dot SEGMENT of the REQUEST path and a symlink whose real path
+    // ESCAPES the mount — it does not refuse an in-tree symlink, so `/index.html` and
+    // `/docs/guide.html` below are served, and a walk that skipped links would miss both.
+    writeAsset('.build/index.html', ALL_FOUR);
+    symlinkSync(join(dist(), '.build', 'index.html'), join(dist(), 'index.html'));
+    writeAsset('.build/docs/guide.html', '<div style="x">');
+    symlinkSync(join(dist(), '.build', 'docs'), join(dist(), 'docs'));
+
+    const warnings: string[] = [];
+    const server = assembleStaticServer(
+      loadStaticServerConfig({}),
+      { specPath: specPath(), frontend: [SPA_MOUNT] },
+      { bootWarn: (message) => warnings.push(message) },
+    );
+    expect(warnings).toHaveLength(1);
+    // Named by the path the mount SERVES them at, not by the link target.
+    expect(warnings[0]).toContain('web/dist/index.html — inline <script> element');
+    expect(warnings[0]).toContain('web/dist/docs/guide.html — style= attribute');
+
+    const page = await server.app.request('/index.html');
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain('<style>body{color:red}</style>');
+    expect((await server.app.request('/docs/guide.html')).status).toBe(200);
+  });
+
+  it('a dotfile page and an ESCAPING symlink are 404 from the mount — and are not named', async () => {
+    writeAsset('index.html', CLEAN);
+    writeAsset('.hidden.html', ALL_FOUR);
+    writeFileSync(join(outside, 'escape.html'), ALL_FOUR, 'utf8');
+    symlinkSync(join(outside, 'escape.html'), join(dist(), 'escape.html'));
+
+    const warnings: string[] = [];
+    const server = assembleStaticServer(
+      loadStaticServerConfig({}),
+      { specPath: specPath(), frontend: [SPA_MOUNT] },
+      { bootWarn: (message) => warnings.push(message) },
+    );
+    // Both carry all four shapes; neither has a servable path, so neither is a finding.
+    expect(warnings).toEqual([]);
+    expect((await server.app.request('/.hidden.html')).status).toBe(404);
+    expect((await server.app.request('/escape.html')).status).toBe(404);
+  });
+
+  it('a link and its target are ONE file — examined once, named once', () => {
     const real = writeAsset('real.html', ALL_FOUR);
     symlinkSync(real, join(dist(), 'link.html'));
-    const warning = warningFor(DEFAULT_FRONTEND_CSP);
-    expect(warning).toContain('web/dist/real.html');
-    expect(warning).not.toContain('.hidden');
-    expect(warning).not.toContain('link.html');
+    const warning = warningFor(DEFAULT_FRONTEND_CSP) ?? '';
+    expect(warning).toContain('1 served HTML file carries');
+    // The walk is sorted, so it is always the first servable path that names it.
+    expect(warning).toContain('web/dist/link.html');
+    expect(warning).not.toContain('web/dist/real.html');
+  });
+
+  it('a symlink cycle terminates — the tree is walked once, by real path', () => {
+    writeAsset('sub/page.html', '<div style="x">');
+    symlinkSync(dist(), join(dist(), 'sub', 'self'));
+    const warning = warningFor(DEFAULT_FRONTEND_CSP) ?? '';
+    expect(warning).toContain('1 served HTML file carries');
+    expect(warning).toContain('web/dist/sub/page.html');
   });
 });
 
@@ -274,7 +366,7 @@ describe('the bounds — stated in the message whenever they bite', () => {
     expect(warning).toContain(
       `Bound: the scan stopped after ${INLINE_ASSET_SCAN_FILE_LIMIT} HTML files`,
     );
-    expect(warning).toContain('were NOT examined');
+    expect(warning).toContain('at least one more served HTML file was NOT examined');
     // Deterministic truncation: entries are walked in sorted order, so it is always the LAST file
     // that goes unexamined — never a different one per boot.
     expect(warning).not.toContain(`page-${String(files - 1).padStart(4, '0')}.html`);
@@ -288,6 +380,20 @@ describe('the bounds — stated in the message whenever they bite', () => {
     expect(warning).toContain(
       `Bound: at least one file is larger than ${INLINE_ASSET_SCAN_BYTE_LIMIT} bytes`,
     );
+  });
+
+  it(`EXACTLY ${INLINE_ASSET_SCAN_FILE_LIMIT} files: the budget is spent, nothing was declined, nothing is claimed`, () => {
+    // The boundary the LIMIT+1 arm above cannot reach: every file on disk WAS examined. A truncation
+    // line inferred from "budget spent" instead of a declined file would fire here and tell the
+    // operator files were skipped that were not. The trailing `.css` sorts last on purpose — the walk
+    // reaches it with the budget already spent, and it is still nothing the scan would have read.
+    for (let i = 0; i < INLINE_ASSET_SCAN_FILE_LIMIT; i += 1) {
+      writeAsset(`page-${String(i).padStart(4, '0')}.html`, '<div style="x">');
+    }
+    writeAsset('zz-styles.css', 'body{color:red}');
+    const warning = warningFor(DEFAULT_FRONTEND_CSP) ?? '';
+    expect(warning).toContain(`${INLINE_ASSET_SCAN_FILE_LIMIT} served HTML files carry`);
+    expect(warning).not.toContain('Bound: the scan stopped');
   });
 
   it('a bound that did not bite is not mentioned', () => {

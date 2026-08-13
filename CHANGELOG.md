@@ -20,8 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/health` reports as `frontend`, so no `/health` request re-reads anything, and it covers **both**
   boot shapes that serve `frontend[]` mounts — the static (frontend-only) profile and a full-backend
   boot — because both stamp the same headers on mount responses.
-  It is **warn-only and cannot fail a boot**: serving a page the policy blocks is a deployment's
-  choice, and `RAYSPEC_FRONTEND_CSP` is how a deployment overrides the baseline. It judges the page
+  It is **warn-only and cannot fail a boot**, and what makes that true is that the scan's only
+  product is a string handed to the boot's warn sink that no caller reads back — the readiness
+  `/health` reports is computed without it — while every filesystem call it makes is individually
+  wrapped, so an unreadable directory or file is skipped rather than raised. Serving a page the
+  policy blocks is a deployment's choice, and `RAYSPEC_FRONTEND_CSP` is how it overrides the
+  baseline. It judges the page
   against the **active** policy, not the shipped default: a policy that carries `'unsafe-inline'` for
   the directive governing a shape says nothing about that shape, and a policy governing none of them
   is not scanned at all — the four shapes are resolved through their own CSP fallback chains
@@ -29,12 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `script-src` → `default-src`), and the warning names the directive that decided.
   Two limits are stated rather than assumed. **The bounds**: at most 200 HTML files per boot across
   all mounts, at most the first 1 MiB of any one file, at most 5 offending files named (the rest are
-  counted). Each of the three appears in the message when it truncates, so the warning never implies
-  coverage it did not have. **The fidelity**: it is a heuristic text scan, not an HTML parser — it
-  strips comments, skips `<script>`/`<style>` bodies as raw text, and reads attributes off start tags
-  only, but markup quoted inside an attribute or a string can still be named and unusual markup can
-  be missed. It also computes no hashes, so a policy carrying a hash or nonce source is treated as
-  permitting that shape. The message says all of this in the same breath as the finding.
+  counted). Each of the three appears in the message when it truncates — the file-count line is
+  printed off the file the scan actually DECLINED to open, not off the budget being spent, so a build
+  of exactly 200 pages is never told anything was skipped. **The fidelity**: it is a heuristic text
+  scan, not an HTML parser — it strips comments, skips `<script>`/`<style>` bodies as raw text, and
+  reads attributes off start tags (every start tag, so an `on*=` handler on a `<script src=…>` is
+  reported like any other element's), but markup quoted inside an attribute or a string can still be
+  named and unusual markup can be missed. It also computes no hashes, so a policy carrying a hash or
+  nonce source is treated as permitting that shape. The message says all of this in the same breath
+  as the finding. **The coverage** is the set of pages the mount hands out: the walk follows a
+  symlink whose real path stays inside the served directory — the containment test the per-request
+  path guard applies — and skips one that escapes, along with dot-segment paths, because those are
+  the two shapes that guard answers with a 404.
   (Issues #355, #345, #313.)
 
 - **`GET /v1/subscribe` — an SSE subscription over the tenant event stream, with a resume protocol
