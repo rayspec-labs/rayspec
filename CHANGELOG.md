@@ -471,7 +471,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Deriving it from document *content* was rejected deliberately: a row whose version matches no
   running worker is inert in both directions — never dequeued, never recovered — and this deployment
   has no way back out of that state, because resuming a workflow does not reset the column, DBOS's
-  garbage collection skips exactly the pending and enqueued rows, and the HTTP escape hatches live on
+  garbage collection skips the pending, enqueued and delayed rows, and the HTTP escape hatches live on
   the admin server the platform deliberately never binds. A content hash would therefore have turned
   every document edit into permanent work-stranding.
   Both queue registrations now also pass `onConflict: "always_update"`. That is not cosmetic: DBOS's

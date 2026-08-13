@@ -13,10 +13,13 @@
  * the only discriminator available. Left to itself DBOS computes it as a hash over the source of the
  * workflow functions registered in the process plus the SDK version. Every function this platform
  * registers is a thin delegating wrapper, and nothing in that input comes from the workflows the
- * deployed document declares — so two documents booted through the same profile produce the SAME
- * version, and a worker happily claims a job for a workflow it has never heard of. (The registered
- * set is not identical everywhere: it differs per profile, and a backend boot adds one function per
- * cron trigger the document declares. It just never varies with the document's workflows.)
+ * deployed document declares — so two documents that register the same SET of functions produce the
+ * SAME version, whatever they declare. Two Product-YAML boots always do: that profile registers the
+ * same three wrappers on every boot and starts no cron scheduler, which is the pair issue #359
+ * measured. A backend boot's set also grows by one registered function per cron trigger the document
+ * declares, and identical source text is never collapsed, so two backend documents matched only when
+ * their declared trigger counts did. In no case does the version vary with the document's WORKFLOWS —
+ * the input that mattered — and a worker happily claims a job for a workflow it has never heard of.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * WHY THE DOCUMENT'S IDENTITY AND NOT ITS CONTENT.

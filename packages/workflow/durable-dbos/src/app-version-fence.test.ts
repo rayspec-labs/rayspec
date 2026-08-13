@@ -7,8 +7,10 @@
  * workflow functions registered in the process plus the SDK version (dbos-executor.js:887-898). Every
  * function this platform registers is a thin delegating wrapper carrying nothing from the deployed
  * document, and `executorID` is the literal `'local'` in every process (utils.js:54) — so two
- * processes running DIFFERENT documents through the same profile against one DATABASE_URL derive the
- * SAME version and dequeue each other's jobs.
+ * processes whose registered SETS match derive the SAME version against one DATABASE_URL and dequeue
+ * each other's jobs. Two Product-YAML deployments always match (the same three wrappers on every boot,
+ * no cron scheduler); a backend boot's set grows by one registered function per declared cron trigger,
+ * so two backend documents matched only when their trigger counts did.
  * `DbosExecutorConfig.applicationVersion` is the seam that separates them: `DBOS.launch`
  * assigns it to `globalParams.appVersion` (dbos.js:172-175) BEFORE `init()` reaches the
  * `if (globalParams.appVersion === '')` compute branch (dbos-executor.js:140-144).
