@@ -72,8 +72,14 @@ view mounts in code. This package produces fragments a deployment composes in co
 - **Ordering**: rows are ordered by the declared `order_by` columns, and there is no implicit
   tiebreak — so rows with EQUAL sort keys have a DB-unspecified relative order. A read or sub-read
   that declares NO `order_by` comes back in the read surface's default order, `id` ascending.
-- **Absent** (`single`): no row → the DECLARED `read.absent` DTO (`empty_200`) or
-  `409 { error: 'not_ready' }` (`not_ready_409`) — never an improvised shape, never a 404.
+- **Absent** (`single`): no row → the DECLARED `read.absent` DTO (`empty_200`),
+  `409 { error: 'not_ready' }` (`not_ready_409`), or `404 { error: 'not_found' }` (`not_found_404`) —
+  never an improvised shape, and never a 404 the declaration did not ask for. Which member is right
+  is decided by WHEN the row appears, not by the view: `not_found_404` fits a read model whose row
+  exists as soon as the reference is valid (a catalog or reference store), and is wrong for a store a
+  workflow step writes — there an absent row is a job still running, which a 404 would report as a
+  reference that does not exist. The 409 and 404 `detail` strings are CONSTANT: this body is
+  serialized verbatim, so nothing derived from the request is echoed back into it.
 - **Sub-reads** (`list`/`lookup`/`counts.of`): keyed equality matches; an unresolved
   (`undefined`/`null`) match value yields NO rows — never an unfiltered read. Identical sub-reads
   are MEMOIZED per request on the full query signature — several lookups on one

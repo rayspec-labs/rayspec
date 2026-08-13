@@ -503,6 +503,32 @@ describe('absent_state not_ready_409 (the readiness gate)', () => {
   });
 });
 
+describe('absent_state not_found_404 (the unknown-reference answer)', () => {
+  it('returns a 404 with a CONSTANT detail when no row matches, and the DTO when one does', async () => {
+    const surface = new FakeReadSurface(STORES);
+    const view = singleView(
+      { state: { kind: 'column', column: 'state', type: 'string', default: '' } },
+      { absent_state: 'not_found_404' },
+    );
+    // lint forbids read.absent with not_found_404 — drop it from the base view.
+    delete (view.read as { absent?: unknown }).absent;
+    const missing = await run(view, surface, { order_id: 'no-such-order' });
+    expect(missing.status).toBe(404);
+    const body = missing.body as Record<string, unknown>;
+    expect(body.error).toBe('not_found');
+    // The body must not echo the caller's reference: this response is serialized verbatim by the
+    // route layer, so the detail is the same string for every unknown reference.
+    expect(body.detail).not.toContain('no-such-order');
+    const other = await run(view, surface, { order_id: 'also-missing' });
+    expect(other.body).toEqual(body);
+
+    surface.seed(TENANT, 'orders', { order_id: 'o1', state: 'ready', qty: 1, rush: false });
+    const found = await run(view, surface, { order_id: 'o1' });
+    expect(found.status).toBe(200);
+    expect((found.body as Record<string, unknown>).state).toBe('ready');
+  });
+});
+
 describe('ETag validator forms', () => {
   function etagView(): ProductViewSpec {
     return singleView(

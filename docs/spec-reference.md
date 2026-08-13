@@ -2357,7 +2357,27 @@ views:
   requires bounded `pagination` (`limit_param` + `offset_param` + `max_limit`) and
   a `page_items` envelope.
 - `pagination` — required for a `list` read; otherwise optional.
-- `absent_state` — optional: `empty_200` or `not_ready_409`.
+- `absent_state` — optional: `empty_200`, `not_ready_409`, or `not_found_404`.
+  It applies to a `single` read only and decides what the view answers when the
+  read matches no row. **Neither `empty_200` nor `not_ready_409` ever produces a
+  404**: `empty_200` serves the declared `read.absent` DTO with status `200`, and
+  `not_ready_409` serves `409 { error: 'not_ready', detail }`. `not_found_404`
+  serves `404 { error: 'not_found', detail }` — the `detail` is a fixed string and
+  never echoes the request.
+
+  Which one is correct is decided by **when the backing row appears**, not by the
+  view — the read sees zero rows either way. Choose `not_found_404` for a read
+  model whose row exists from the moment the reference is valid: a catalog or
+  reference store materialized before any workflow runs, or a store written at
+  acceptance. Do **not** choose it for a store that a workflow step writes: there
+  an absent row means the job has not finished yet, and a 404 would tell a polling
+  client that its reference does not exist. Declare `empty_200` (with a
+  `read.absent` shape) or `not_ready_409` for that case.
+
+  Lint rejects the combinations that cannot mean anything: `empty_200` without
+  `read.absent`, `not_ready_409` or `not_found_404` **with** `read.absent` (a
+  fixed error body leaves nothing to project), and `not_ready_409` or
+  `not_found_404` on a `list`/`collect` read.
 - `conditional_read` — optional (e.g. strong ETag + `If-None-Match` on `GET`).
 
 ## `deployment_overrides`

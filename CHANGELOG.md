@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`absent_state: not_found_404` — a view can now answer an unknown reference with a 404.** The
+  member applies to a `single` read and decides what the view serves when the read matches no row:
+  `404 { error: 'not_found', detail }` alongside the existing `empty_200` (the declared `read.absent`
+  DTO at `200`) and `not_ready_409`. Neither existing member has ever produced a 404, and until now
+  there was no way to say that a reference does not exist at all.
+  **Which member is correct is decided by when the backing row appears, not by the view** — the read
+  sees zero rows either way. `not_found_404` fits a read model whose row exists from the moment the
+  reference is valid: a catalog or reference store materialized before any workflow runs, or a store
+  written at acceptance. It is wrong for a store that a workflow step writes, because there an absent
+  row is a job that has not finished, and a 404 would tell a polling client that its reference does
+  not exist. The reference page and the views-runtime README now state that precondition next to the
+  vocabulary, and lint rejects the declarations that cannot mean anything: `not_found_404` together
+  with a `read.absent` shape (a fixed error body leaves nothing to project) and `not_found_404` on a
+  `list`/`collect` read.
+  The `detail` on the 404 is a **constant string** and carries nothing derived from the request. What
+  makes that hold is where the body is built: a view returns its response from the interpreter and
+  the route layer serializes it verbatim, so it does not pass the auth-core error chokepoint that
+  strips `details` from a 404 — there is no later stage that could remove an echoed path or filter
+  value, so none is put in. The status choice leaks nothing either way: the read is tenant-bound, so
+  a foreign row and an absent row both yield zero rows and take the same arm under every member.
+  **Nothing else changed.** This is a vocabulary addition, not a migration: no shipped example or
+  fixture document was touched, all 24 `absent_state` declarations in the tree still read `empty_200`
+  or `not_ready_409`, and both existing members behave exactly as before — the interpreter and the
+  OpenAPI emitter each gained one arm keyed on the new member and left the others untouched.
 - **A boot warning when a served page carries an inline `<style>` / `<script>` / `style=` / `on*=`
   that the active Content-Security-Policy does not permit.** The default policy for a served frontend
   is `default-src 'self'` with no `'unsafe-inline'`, and a page that violates it fails in a way

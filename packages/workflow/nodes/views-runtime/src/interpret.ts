@@ -23,8 +23,10 @@
  *    total (wire-identical to the canonical full-read-and-slice math, without the unbounded
  *    within-tenant read); falls back to the full read + in-interpreter slice when the facade offers
  *    no `count` or the view declares an in-memory `exclude`.
- *  - ABSENT (single): no row → the DECLARED `read.absent` DTO (200) or `409 { error: 'not_ready' }`
- *    per `absent_state` — never an improvised shape, never a 404 for a mid-processing read model.
+ *  - ABSENT (single): no row → the DECLARED `read.absent` DTO (200), `409 { error: 'not_ready' }`, or
+ *    `404 { error: 'not_found' }` per `absent_state` — never an improvised shape, and never a 404 that
+ *    the declaration did not ask for (a mid-processing read model declares `empty_200`/`not_ready_409`,
+ *    whose arms below are unchanged). The 409/404 details are CONSTANT strings — see `finishAbsent`.
  *  - CONDITIONAL READ (`conditional_read: etag`, GET) — ADDITIVE vs the frozen precedent (the earlier
  *    read routes served neither an ETag nor a 304): a strong ETag (sha-256 of the canonical DTO
  *    JSON) is set on the 200; a matching `If-None-Match` → bodyless 304 with the same ETag.
@@ -609,6 +611,16 @@ function finishAbsent(
     return httpResponse({
       status: 409,
       body: { error: 'not_ready', detail: 'the requested resource is not ready yet.' },
+    });
+  }
+  if (view.absent_state === 'not_found_404') {
+    // The detail is a CONSTANT — it must never carry the caller's ref, path or filter value. This
+    // body is returned by the handler and serialized verbatim by the route layer, so it does NOT
+    // pass the auth-core error chokepoint that strips `details` from a 404; there is no later stage
+    // that could remove an echoed input, so nothing derived from the request goes in here.
+    return httpResponse({
+      status: 404,
+      body: { error: 'not_found', detail: 'no such resource.' },
     });
   }
   // empty_200 (lint guarantees read.absent for single mode; list/collect never reach here).

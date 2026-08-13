@@ -72,7 +72,9 @@ describe('product grammar shape pins', () => {
   });
 
   it('ViewAbsentState omits the draft-banned processing_200 (fail-closed by construction)', () => {
-    expect(ViewAbsentState.options.sort()).toEqual(['empty_200', 'not_ready_409'].sort());
+    expect(ViewAbsentState.options.sort()).toEqual(
+      ['empty_200', 'not_ready_409', 'not_found_404'].sort(),
+    );
     expect(ViewAbsentState.options).not.toContain('processing_200');
   });
 
