@@ -435,6 +435,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A deploy that is refused *after* its product-store DDL applied now names the tables it already
+  committed, instead of reading as if nothing had happened.** Each migration is applied in its own
+  transaction, so it is committed the moment it returns; every refusal raised after the migrate step
+  — `deploy()`'s own `[roll out]` gate (a handler module that does not load, a product table that
+  never reached the tenant chokepoint) and the boot gates that run on the deploy result (a
+  `cron`/`manual` trigger with no durable worker wired, an unset or malformed
+  `RAYSPEC_CRON_TENANT_ID`) — therefore left the `CREATE TABLE`s standing and said nothing about
+  them. An operator who read the refusal as "nothing happened" and edited the spec's `stores` next
+  met a drift refusal on what they believed was a first deploy. Such a refusal now carries a note
+  naming the migrations that were applied and the tables this deployment's stores materialize,
+  stating that a table this deploy created is committed and empty, and giving both ways forward: fix
+  the refusal and re-deploy the **same** spec — a live schema that matches it classifies
+  present-matching and MOUNTS those tables, applying no product DDL, with no cleanup step in between
+  — or, having changed the `stores` first, reconcile the drift with a reviewed forward migration
+  (`rayspec plan <new-spec> --against <old-spec>`, then
+  `rayspec deploy --apply-migration <delta.sql>`). It names `rayspec dev db --reset --yes` only as
+  the throwaway-database remedy it is, with its real blast radius: that command DROPs the whole
+  database **and** its `_dbos_sys` sibling and re-creates one empty database, so the platform tables
+  and every org registered in them go with it — it is not a table-level cleanup.
+  **What is unchanged:** the DDL is still committed and still not rolled back. There are no
+  down-migrations in RaySpec and recovery stays forward-fix, so the refusal states the mid-state
+  rather than undoing it. The note is appended to the refusal **in place**, so the error keeps its
+  class and its existing wording verbatim, with the note on a following line — the CLI and
+  `rayspec-serve` print it exactly as they printed that refusal before. A refusal raised **before**
+  the migrate step carries no note at all: the fact is derived from the migrations the deployer
+  actually applied, not from what the boot planned, so a document whose deploy is refused at
+  validation says nothing about a schema it never touched. The two post-update drift refusals, whose
+  own text already states it, are left alone rather than made to say it twice. Both boot paths carry
+  it — the classic backend deploy and the Product-YAML boot. (Issue #361.)
 - **The durable worker is now fenced to its own document, so two deployments sharing one
   `DATABASE_URL` stop dequeuing each other's off-request work — and a job whose workflow the consuming
   worker cannot resolve is now written to the `workflow_runs` journal instead of vanishing from it.**

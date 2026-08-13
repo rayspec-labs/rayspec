@@ -41,6 +41,7 @@ import {
   createAuthApp,
   createMediaTokenService,
   type DeclarativeEngine,
+  type DeployResult,
   type DeployTarget,
   deploy,
   eraseTenant,
@@ -146,6 +147,7 @@ import {
   STT_PROVIDER,
 } from './boot-env-demands.js';
 import {
+  attachAppliedProductDdlNote,
   type BootedServer,
   resolveLiveTenantOrgId,
   type ServerConfig,
@@ -2844,6 +2846,12 @@ export async function deployProductYamlSpec(
   const eventWake = makeTenantEventWake(db);
 
   const PROBE_TENANT = '00000000-0000-0000-0000-0000000000aa';
+  // The product DDL this boot has actually COMMITTED — appended to inside applyMigration below, the
+  // ONE place this deployer executes product DDL, so it counts APPLIED migrations and never planned
+  // ones (`migrations` and `deployMode` are both fixed above, while deploy() still refuses at
+  // [validate] / [unsupported_spec] / [lint/gate] before its migrate stage). Mirrors the classic
+  // composition-root deployer.
+  const appliedMigrations: string[] = [];
   const target: DeployTarget = {
     driftSchema: 'public',
     async applyMigration(migration: PlannedMigration): Promise<void> {
@@ -2851,6 +2859,8 @@ export async function deployProductYamlSpec(
       await db.$client.begin(async (tx) => {
         await tx.unsafe(ddl);
       });
+      // AFTER the transaction resolves: a migration that threw is rolled back and never recorded.
+      appliedMigrations.push(migration.name);
     },
     verifyTenantScoped(table: PgTable): void {
       const tdb = forTenant(db, PROBE_TENANT);
@@ -2859,81 +2869,103 @@ export async function deployProductYamlSpec(
     query: queryFn,
   };
 
-  const result = await deploy<ReturnType<typeof createAuthApp>>({
-    specSource,
-    migrations,
-    target,
-    rollout: {
-      productTables,
-      escapeHatchRoot,
-      buildApp<App>(engine: DeclarativeEngine): App {
-        // the byte-movers ride only when the doc demands them — the blob
-        // factory for audio OR file_input (stream routes), the media-token service for audio only
-        // (both `undefined` otherwise — DeclarativeEngine.blobFactory/mediaTokenService are optional).
-        const engineWithByteMovers: DeclarativeEngine = {
-          ...engine,
-          // Thread the product-profile conflict-key carve-out (computed above from
-          // `deriveConflictKeys`) onto the engine so a store-route 409 on a GLOBAL-unique key column
-          // uses the generic message (no cross-tenant existence oracle), while a tenant-scoped author-
-          // `unique` column is still named. deploy() builds `engine` WITHOUT this (a frozen surface);
-          // we add it HERE, in the deployer-owned buildApp seam, so the frozen surface stays untouched.
-          conflictKeys,
-          ...(blobFactory ? { blobFactory } : {}),
-          // the READ-ONLY fs-source (when a root is configured) so a tool/route handler's
-          // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.
-          ...(fsSourceFactory ? { fsSourceFactory } : {}),
-          ...(mediaTokenService ? { mediaTokenService } : {}),
-          // The tenant event bus is on STRUCTURALLY here — no declaration, and no key in the product
-          // grammar to write one in. Same rule by which a product deployment gets its durable worker:
-          // the profile's contract is that the platform's runtime is present, so a product's handlers
-          // and tools can emit without the document having to ask for it.
-          eventBus: makeTenantEventBus(),
-          // …and the wake beside it, so this profile's subscribers are woken by the emitting
-          // transaction rather than by their next read.
-          eventWake,
-        };
-        return createAuthApp({
-          ...baseDeps,
-          ...(sessionReprocessor ? { sessionReprocessor } : {}),
-          engine: engineWithByteMovers,
-        }) as App;
+  // ── deploy() + the post-deploy boot GATES, under one committed-DDL catch ──────────────────────
+  // From here through the gates below, a refusal is raised on a schema that may ALREADY carry this
+  // boot's product DDL (applyMigration commits each migration in its own transaction, so a refusal
+  // after the migrate step leaves it standing — there is no rollback, and none is wanted: recovery
+  // in RaySpec is a reviewed FORWARD migration). The catch appends that fact to the caught error IN
+  // PLACE and rethrows the SAME object, so the ProductBootError class — and its single "Boot aborted
+  // (Product-YAML) — " prefix, which a re-wrap would double — survives. Same shape as the classic
+  // composition-root path. `result` is declared out here because the return below reads it.
+  let result: DeployResult<ReturnType<typeof createAuthApp>>;
+  try {
+    result = await deploy<ReturnType<typeof createAuthApp>>({
+      specSource,
+      migrations,
+      target,
+      rollout: {
+        productTables,
+        escapeHatchRoot,
+        buildApp<App>(engine: DeclarativeEngine): App {
+          // the byte-movers ride only when the doc demands them — the blob
+          // factory for audio OR file_input (stream routes), the media-token service for audio only
+          // (both `undefined` otherwise — DeclarativeEngine.blobFactory/mediaTokenService are optional).
+          const engineWithByteMovers: DeclarativeEngine = {
+            ...engine,
+            // Thread the product-profile conflict-key carve-out (computed above from
+            // `deriveConflictKeys`) onto the engine so a store-route 409 on a GLOBAL-unique key column
+            // uses the generic message (no cross-tenant existence oracle), while a tenant-scoped author-
+            // `unique` column is still named. deploy() builds `engine` WITHOUT this (a frozen surface);
+            // we add it HERE, in the deployer-owned buildApp seam, so the frozen surface stays untouched.
+            conflictKeys,
+            ...(blobFactory ? { blobFactory } : {}),
+            // the READ-ONLY fs-source (when a root is configured) so a tool/route handler's
+            // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.
+            ...(fsSourceFactory ? { fsSourceFactory } : {}),
+            ...(mediaTokenService ? { mediaTokenService } : {}),
+            // The tenant event bus is on STRUCTURALLY here — no declaration, and no key in the product
+            // grammar to write one in. Same rule by which a product deployment gets its durable worker:
+            // the profile's contract is that the platform's runtime is present, so a product's handlers
+            // and tools can emit without the document having to ask for it.
+            eventBus: makeTenantEventBus(),
+            // …and the wake beside it, so this profile's subscribers are woken by the emitting
+            // transaction rather than by their next read.
+            eventWake,
+          };
+          return createAuthApp({
+            ...baseDeps,
+            ...(sessionReprocessor ? { sessionReprocessor } : {}),
+            engine: engineWithByteMovers,
+          }) as App;
+        },
+        productYaml,
       },
-      productYaml,
-    },
-  });
+    });
 
-  // ── 7b. the post-UPDATE drift GATE (fail-closed on an under-reconciling reviewed delta) ─
-  // SCOPED to the branch that ACTUALLY applied a reviewed delta (deployMode === 'updated' — a 'drifted'
-  // classify OR a 'present-matching' classify whose reviewed drop target still existed).
-  // `deploy()`'s drift step is REPORT-ONLY: it returns `result.drift` but never aborts. A mount/materialize
-  // boot (and an update env that classified 'present-matching' as a genuine LEFTOVER and
-  // short-circuited to MOUNT) already has a drift-clean live schema, so this gate never fires for them;
-  // only the 'updated' branch APPLIED a delta whose completeness `result.drift` must confirm — including a
-  // present-matching subset DROP that must fully reconcile to the smaller spec. A delta that applies cleanly but UNDER-reconciles
-  // (e.g. adds one of two new stores) would otherwise boot GREEN as `deployMode: 'updated'` — and the NEXT
-  // plain reboot (no update env) would then classify 'drifted' and fail-close, bricking the live deployment
-  // on a DELAY. We fail NOW instead (BEFORE the DBOS launch below). This mirrors the composition-root drift
-  // gate exactly, for the LIVE env-driven boot path.
-  if (deployMode === 'updated' && result.drift.length > 0) {
-    throw new ProductBootError(
-      `the reviewed UPDATE delta applied but the live product schema is STILL DRIFTED from the NEW ` +
-        `spec at ${specPath} (the delta UNDER-reconciled — it did not fully close the gap):\n` +
-        `${formatDrift(result.drift)}\n` +
-        'IMPORTANT — the delta migration(s) are ALREADY COMMITTED: deploy() applies each migration in ' +
-        'its own transaction and this drift check fires POST-migrate, so the schema is now in a ' +
-        'partially-evolved MID-STATE. This gate fails the update NOW rather than booting green as ' +
-        "'updated' and letting the NEXT plain reboot fail-close on the residual drift (a delayed brick). " +
-        'Recovery (FORWARD-FIX discipline — NEVER a down-migration / hand-patch): re-diff the live ' +
-        'schema vs the NEW spec, author the COMPLETING forward migration that closes the remaining ' +
-        'drift, and re-run the update with it. Fail-closed.',
+    // ── 7b. the post-UPDATE drift GATE (fail-closed on an under-reconciling reviewed delta) ─
+    // SCOPED to the branch that ACTUALLY applied a reviewed delta (deployMode === 'updated' — a 'drifted'
+    // classify OR a 'present-matching' classify whose reviewed drop target still existed).
+    // `deploy()`'s drift step is REPORT-ONLY: it returns `result.drift` but never aborts. A mount/materialize
+    // boot (and an update env that classified 'present-matching' as a genuine LEFTOVER and
+    // short-circuited to MOUNT) already has a drift-clean live schema, so this gate never fires for them;
+    // only the 'updated' branch APPLIED a delta whose completeness `result.drift` must confirm — including a
+    // present-matching subset DROP that must fully reconcile to the smaller spec. A delta that applies cleanly but UNDER-reconciles
+    // (e.g. adds one of two new stores) would otherwise boot GREEN as `deployMode: 'updated'` — and the NEXT
+    // plain reboot (no update env) would then classify 'drifted' and fail-close, bricking the live deployment
+    // on a DELAY. We fail NOW instead (BEFORE the DBOS launch below). This mirrors the composition-root drift
+    // gate exactly, for the LIVE env-driven boot path.
+    if (deployMode === 'updated' && result.drift.length > 0) {
+      throw new ProductBootError(
+        `the reviewed UPDATE delta applied but the live product schema is STILL DRIFTED from the NEW ` +
+          `spec at ${specPath} (the delta UNDER-reconciled — it did not fully close the gap):\n` +
+          `${formatDrift(result.drift)}\n` +
+          'IMPORTANT — the delta migration(s) are ALREADY COMMITTED: deploy() applies each migration in ' +
+          'its own transaction and this drift check fires POST-migrate, so the schema is now in a ' +
+          'partially-evolved MID-STATE. This gate fails the update NOW rather than booting green as ' +
+          "'updated' and letting the NEXT plain reboot fail-close on the residual drift (a delayed brick). " +
+          'Recovery (FORWARD-FIX discipline — NEVER a down-migration / hand-patch): re-diff the live ' +
+          'schema vs the NEW spec, author the COMPLETING forward migration that closes the remaining ' +
+          'drift, and re-run the update with it. Fail-closed.',
+      );
+    }
+
+    // ── 8. bind the composed product, THEN launch (a recovered job resolves cleanly) ──────────────
+    composedProduct = result.product;
+    if (!composedProduct) {
+      throw new ProductBootError('deploy() returned no composed product runtime (unexpected).');
+    }
+  } catch (e) {
+    // Everything above this point runs on a schema that may already carry this boot's product DDL.
+    // Say what was committed, without re-wrapping, and without repeating the post-UPDATE drift gate,
+    // whose own text already states it. The launch below is deliberately OUTSIDE: it is not a gate,
+    // and it runs workflows, so the note's "nothing has served" reading would stop being true.
+    throw attachAppliedProductDdlNote(
+      e,
+      appliedMigrations,
+      composedStores.map((s) => s.name),
     );
   }
 
-  // ── 8. bind the composed product, THEN launch (a recovered job resolves cleanly) ──────────────
-  composedProduct = result.product;
-  if (!composedProduct) {
-    throw new ProductBootError('deploy() returned no composed product runtime (unexpected).');
-  }
   await executor.start();
   await wfExecutor.registerQueueAfterLaunch();
 

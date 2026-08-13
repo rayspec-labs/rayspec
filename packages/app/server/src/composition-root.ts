@@ -43,6 +43,7 @@ import {
   createOidcProvider,
   DEFAULT_GDPR_RETENTION_DAYS,
   type DeclarativeEngine,
+  type DeployResult,
   type DeployTarget,
   deploy,
   type EraseResult,
@@ -1722,6 +1723,82 @@ export function eventBusUnsweptBootNotice(retentionHours: number): string {
 }
 
 /**
+ * The phrase a refusal carries once it ALREADY states that applied product DDL is committed. Both
+ * post-UPDATE drift gates say it in their own words, so keying the attachment below on this ONE
+ * substring is what stops a refusal from saying it twice — and makes a second attachment a no-op.
+ */
+const COMMITTED_PRODUCT_DDL_MARKER = 'ALREADY COMMITTED';
+
+/**
+ * The note a fail-closed refusal carries when the SAME boot already applied product-store DDL. Pure +
+ * exported so its wording has a single source of truth and is directly assertable, exactly like the
+ * two boot notices above.
+ *
+ * WHY IT EXISTS. `applyMigration` (both deployers below wrap one migration in one transaction) COMMITS
+ * each migration as it returns, so every refusal raised AFTER the migrate step — deploy()'s own
+ * [roll out] gate and the boot gates run on the deploy result — leaves that DDL standing and, until
+ * now, said nothing about it. An operator who reads such a refusal as "nothing happened" then edits
+ * the spec's stores and meets a DRIFT refusal on what they believe is a first deploy. The note states
+ * what was left behind rather than undoing it: there are NO down-migrations anywhere in RaySpec, and
+ * the only generated DROP is exactly what the migration gate blocks without a reviewed allowlist.
+ *
+ * KEYED ON WHAT WAS APPLIED, NEVER ON WHAT WAS PLANNED. `appliedMigrations` is appended to inside
+ * `applyMigration` AFTER its transaction resolves. The planned `migrations` array and the deployMode
+ * are both fixed BEFORE deploy() runs, and deploy() refuses at [validate] / [unsupported_spec] /
+ * [lint/gate] before its migrate stage — a note keyed on either would tell an operator their schema
+ * sits in a committed mid-state when nothing was applied at all.
+ */
+export function appliedProductDdlBootNote(
+  appliedMigrations: readonly string[],
+  storeTables: readonly string[],
+): string {
+  if (appliedMigrations.length === 0) return '';
+  // A store name IS its table name (`generateProductSql` emits `CREATE TABLE "<store.name>"`), so the
+  // declared stores name the tables. Omitted for a store-less deployment, which materializes none.
+  const tables =
+    storeTables.length === 0
+      ? ''
+      : ` The tables this deployment's stores materialize are: ${storeTables.join(', ')} — one this ` +
+        'deploy CREATED is committed and EMPTY (the boot refused before the deployment served ' +
+        'anything).';
+  return (
+    `IMPORTANT — the product-store DDL this boot applied is ${COMMITTED_PRODUCT_DDL_MARKER}: each ` +
+    'migration is applied in its OWN transaction and this refusal fired AFTER the migrate step, so ' +
+    `nothing was rolled back. Applied: ${appliedMigrations.length} migration(s) — ` +
+    `${appliedMigrations.join(', ')}.${tables} Fix the refusal above and re-deploy the SAME spec: a ` +
+    'live schema that matches it classifies present-matching and MOUNTS these tables, applying NO ' +
+    'product DDL — no cleanup in between. ' +
+    "Editing the spec's stores FIRST is what turns this into a second, confusing failure: the live " +
+    'schema is then DRIFTED against the edited spec and that boot fail-closes on the drift — ' +
+    'reconcile it with a reviewed FORWARD migration (`rayspec plan <new-spec> --against <old-spec>`, ' +
+    'then `rayspec deploy --apply-migration <delta.sql>`), never a hand-written down-migration; ' +
+    'there are none. On a THROWAWAY local database `rayspec dev db --reset --yes` starts over ' +
+    'instead — it is NOT a table-level cleanup: it DROPs the whole database AND its `_dbos_sys` ' +
+    'sibling WITH (FORCE) and re-creates one empty database, so the platform tables and every org ' +
+    'registered in them go with it.'
+  );
+}
+
+/**
+ * Append `appliedProductDdlBootNote` to a refusal IN PLACE and hand back the SAME object, so the
+ * error's CLASS survives: `rayspec deploy` and `rayspec-serve` both print a DeployError differently
+ * from a BootConfigError/ProductBootError (`instanceof`), and re-wrapping would re-add the class's own
+ * message prefix. Attaches nothing when the boot applied no DDL, and nothing when the message already
+ * states the fact — which is what keeps the post-UPDATE drift gates, whose text says it, from
+ * saying it twice.
+ */
+export function attachAppliedProductDdlNote(
+  err: unknown,
+  appliedMigrations: readonly string[],
+  storeTables: readonly string[],
+): unknown {
+  if (!(err instanceof Error) || err.message.includes(COMMITTED_PRODUCT_DDL_MARKER)) return err;
+  const note = appliedProductDdlBootNote(appliedMigrations, storeTables);
+  if (note !== '') err.message = `${err.message}\n${note}`;
+  return err;
+}
+
+/**
  * Assemble the full platform app from a validated `ServerConfig`. Builds the raw Db, applies the
  * migration chain, derives the signer/JWKS + OIDC provider from the PEM, wires the five stores +
  * AuthService, optionally runs the REAL `deploy()` for an injected spec, and returns the running app
@@ -2750,6 +2827,12 @@ async function deployDeclaredSpec(
   }
 
   const PROBE_TENANT = '00000000-0000-0000-0000-0000000000aa';
+  // The product DDL this boot has actually COMMITTED. Appended to inside applyMigration below — the
+  // ONE place this deployer executes product DDL — so it counts APPLIED migrations, never planned
+  // ones: `migrations` and `deployMode` are both fixed far above, while deploy() still refuses at
+  // [validate] / [unsupported_spec] / [lint/gate] before its migrate stage. The catch around the
+  // deploy + the post-deploy gates reads it to tell an operator what a refusal left behind.
+  const appliedMigrations: string[] = [];
   const target: DeployTarget = {
     driftSchema: 'public',
     async applyMigration(migration: PlannedMigration): Promise<void> {
@@ -2759,6 +2842,8 @@ async function deployDeclaredSpec(
       await db.$client.begin(async (tx) => {
         await tx.unsafe(ddl);
       });
+      // AFTER the transaction resolves: a migration that threw is rolled back and never recorded.
+      appliedMigrations.push(migration.name);
     },
     verifyTenantScoped(table: PgTable, _storeName: string): void {
       // Probe the REAL TenantDb chokepoint: building the select runs assertScoped, which THROWS
@@ -2769,206 +2854,226 @@ async function deployDeclaredSpec(
     query: queryFn, // the SAME thunk used for the pre-flight drift classification above.
   };
 
-  // The deploy<App> type arg fixes `result.app`'s type. `RolloutConfig.buildApp` is a GENERIC method
-  // `<App>(engine) => App` (App is bound per-call, not threaded from DeployConfig), so a real
-  // implementation can only satisfy it via the documented cast — exactly how the typechecked
-  // deploy() UNIT test's `rollout()` helper implements it (`buildApp<App>(_engine): App { return …
-  // as App }`). We are the FIRST shipped, tsc-typechecked consumer of `deploy()`'s buildApp (the
-  // dev-server + tests are tsc-excluded), so this surfaces the per-method-generic awkwardness; the
-  // cast here is the contract's intended usage, not a type hole — the runtime value IS the app.
-  const result = await deploy<ReturnType<typeof createAuthApp>>({
-    // deploy() re-parses + re-validates the MERGED spec (deployment ⊕ pack fragments) —
-    // so a pack store/route/handler is validated by the SAME parseSpec/lintSpec gate (no special
-    // pass), and a pack store rides the SAME migration SQL below. byte-unchanged deploy().
-    specSource: effectiveSpecSource,
-    // '0000_product_stores.sql' on a clean DB (materialize) — or [] on a reboot (MOUNT: no
-    // product DDL → existing data survives). A 'drifted' schema already failed closed above.
-    migrations,
-    target,
-    rollout: {
-      productTables,
-      escapeHatchRoot,
-      // The multi-root importer (a rewritten virtual pack-handler path → the real pack
-      // file, jailed against the PACK root; a deployment's own handler falls through to the default).
-      // This rides the EXISTING `rollout.importer` seam — `deploy()`/`loadHandlers` stay byte-unchanged.
-      ...(extensionImporter ? { importer: extensionImporter } : {}),
-      ...(agentBackends ? { agentBackends } : {}),
-      buildApp<App>(engine: DeclarativeEngine): App {
-        // Capture the SAME AgentRegistry the run surface builds, so the durable worker
-        // resolves a RunJob's agentId identically (the engine's loaded handlers are only available
-        // HERE — inside the rollout). Built only when the engine declares agents + backends.
-        if (engine.agentBackends && engine.spec.agents.length > 0) {
-          workerAgentRegistry = buildAgentRegistry({
-            spec: engine.spec,
-            agentBackends: engine.agentBackends,
-            handlers: engine.handlers ?? new Map(),
-            productTables: engine.productTables,
-            // Thread the SAME wired blob backend (assembled above, present iff the spec has a
-            // stream route) so a declared tool the OFF-REQUEST worker runs gets the SAME tenant-bound
-            // `init.blob` the sync run surface gives it — built from the run's server-derived tenant.
-            ...(blobFactory ? { blobFactory } : {}),
-          });
-        }
-        // Inject the tenant-bound blob backend into the engine (the `stream` route arm
-        // reads `engine.blobFactory` to build `init.blob`). `deploy()`/`RolloutConfig` is an unchanged
-        // platform contract that knows nothing of blobs, so the composition root — which OWNS
-        // buildApp + assembled blobFactory above (guarded: present iff the spec has a stream route) —
-        // augments the engine here, exactly as it injects `durableExecutor`. Spread so the field is
-        // ABSENT (not undefined) for a no-stream spec, keeping the engine shape exact.
-        const engineWithBlob: DeclarativeEngine = {
-          ...engine,
-          ...(blobFactory ? { blobFactory } : {}),
-          // Inject the READ-ONLY fs-source (when a root is configured) so a tool/route handler's
-          // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.
-          ...(fsSourceFactory ? { fsSourceFactory } : {}),
-          // Inject the media-token service (when wired) so the playback arm's 2nd auth path
-          // + the mint capability are available. Spread so ABSENT for a no-playback spec.
-          ...(mediaTokenService ? { mediaTokenService } : {}),
-          // Inject the speech-to-text capability (when a provider is configured) so a route/tool
-          // handler's `init.stt` transcribes through it. Spread so ABSENT when STT_PROVIDER is unset.
-          ...(sttCapability ? { sttCapability } : {}),
-          // Inject the text-to-speech capability (when a provider is configured) so a route/tool
-          // handler's `init.tts` synthesizes through it. Spread so ABSENT when TTS_PROVIDER is unset.
-          ...(ttsCapability ? { ttsCapability } : {}),
-          // Inject the tenant event bus (when the deployed spec enabled it) so a route/tool handler's
-          // `init.emit` appends to its tenant's stream. Spread so ABSENT otherwise — which is what
-          // makes the capability absent from every init rather than an undefined-valued key, AND
-          // what makes `GET /v1/subscribe` serve rather than answer its fail-closed 501.
-          ...(eventBus ? { eventBus } : {}),
-          // Inject the process wake beside it, so a subscriber is woken by the emitting transaction
-          // instead of waiting out its next read. Absent ⇒ subscribers poll only (later, never lossy).
-          ...(eventWake ? { eventWake } : {}),
-        };
-        // Inject the durable executor (when wired) so the run surface's async path can enqueue.
-        return createAuthApp({
-          ...baseDeps,
-          engine: engineWithBlob,
-          ...(durableExecutor ? { durableExecutor } : {}),
-          // Inject the manual-trigger fire seam (when the spec declares manual triggers) so
-          // POST /v1/triggers/:name/fire drives it; it reads the late-bound scheduler at request time.
-          ...(manualTriggerFirer ? { manualTriggerFirer } : {}),
-        }) as App;
-      },
-    },
-  });
-
-  // ── The post-UPDATE drift GATE (fail-closed on an under-reconciling reviewed delta) ────
-  // SCOPED to the UPDATE branch ONLY (opts.updateMigrations set + the spec has stores). deploy()'s
-  // drift step (step 6) is REPORT-ONLY: it returns `result.drift` but never aborts. For a mount/
-  // materialize boot that is correct (that path already fail-closed on 'drifted' BEFORE deploy, so its
-  // post-deploy drift is []); the UPDATE branch now classifies first too, but on the APPLY route
-  // deploy()'s report-only drift is the ONLY check that the reviewed delta actually CLOSED the gap. A
-  // delta that applies cleanly but UNDER-reconciles (e.g. adds one of two new columns) would otherwise
-  // boot GREEN as `deployMode:'updated'` — and the NEXT plain reboot (no updateMigrations) would then
-  // classify 'drifted' and fail-close, bricking the deployment on a DELAY. We fail NOW instead. Mount/
-  // materialize behavior stays byte-identical (this branch never runs for them); the auth-only update
-  // path (specStores.length === 0 ⇒ deployMode 'auth-only', deploy returns []) is untouched.
-  if (opts.updateMigrations !== undefined && specStores.length > 0 && result.drift.length > 0) {
-    throw new BootConfigError(
-      `Boot aborted — the reviewed UPDATE delta applied but the live product schema is STILL DRIFTED ` +
-        `from the NEW spec at ${specPath} (the delta UNDER-reconciled — it did not fully close the gap):\n` +
-        `${formatDrift(result.drift)}\n` +
-        'IMPORTANT — the delta migration(s) are ALREADY COMMITTED: deploy() applies each migration in ' +
-        'its own transaction and this drift check fires POST-migrate, so the schema is now in a ' +
-        'partially-evolved MID-STATE. This gate fails the update NOW rather than booting green as ' +
-        "'updated' and letting the NEXT plain reboot fail-close on the residual drift (a delayed brick). " +
-        'Recovery (FORWARD-FIX discipline — NEVER a down-migration / hand-patch): re-diff the live ' +
-        'schema vs the NEW spec, author the COMPLETING forward migration that closes the remaining ' +
-        'drift, and re-run update mode with it. Fail-closed.',
-    );
-  }
-
-  // ── Wire the trigger scheduler from the deployed trigger registry (BEFORE launch) ──────
-  // deploy() yields `result.triggers` (the registered descriptors). For each CRON trigger we register
-  // one DBOS scheduled-workflow — that registration MUST happen BEFORE DBOS.launch() (the
-  // ScheduledReceiver lifecycle callback starts the schedule loops at launch). So we attach the
-  // scheduler's `registerScheduledWorkflows` as a PRE-LAUNCH hook on the executor; `pendingExecutorStart`
-  // (= executor.start()) runs the hooks after registerWorkflow and before launch. A MANUAL trigger is
-  // NOT scheduled — it is fireable ON DEMAND via the same scheduler (the fire route). webhook/event
-  // descriptors stay RESERVED (neither scheduled nor fireable).
+  // ── deploy() + the post-deploy boot GATES, under one committed-DDL catch ────────────────
+  // From here through the cron gates below, a refusal is raised on a schema that may ALREADY carry
+  // this boot's product DDL (applyMigration commits each migration in its own transaction, so a
+  // refusal after the migrate step leaves it standing — there is no rollback, and none is wanted:
+  // recovery in RaySpec is a reviewed FORWARD migration). The catch appends that fact to the caught
+  // error IN PLACE and rethrows the SAME object, so the class every printer switches on survives.
+  // `result` and the two scheduler seams are declared out here because they outlive the try.
+  let result: DeployResult<ReturnType<typeof createAuthApp>>;
   let cronTriggerNames: string[] = [];
   // The on-demand fire delegate (the control seam), bound to the wired scheduler below.
   let fireCronNow: BootedServer['fireCronNow'];
-  // FIREABLE = cron (scheduled + on-demand) OR manual (on-demand only). Both are fired by the durable
-  // worker, so both demand it wired + a known tenant. webhook/event stay reserved (not fireable here).
-  const fireable = fireableTriggers(result.triggers.list());
-  if (fireable.length > 0) {
-    // (Fail-closed, defense-in-depth with the lint rule.) A cron/manual trigger is fired ONLY by the
-    // durable off-request worker. If the spec declares one but no durable worker is wired (the spec
-    // omitted deployment.durableWorker, or no agent backends were supplied), the trigger could never
-    // fire. Refuse to boot — a half-deployed fireable trigger is never silently OK. The static lint rule
-    // (lint.ts) already rejects cron/manual-without-durableWorker at parse/deploy time; this is the
-    // runtime backstop for a code-built spec or a missing-backends boot.
-    if (!(durableExecutorInstance && workerDbHandle)) {
-      throw new BootConfigError(
-        `Boot aborted — the spec declares ${fireable.length} cron/manual trigger(s) but no ` +
-          'durable worker is wired (deployment.durableWorker is not true, or no agent backends were ' +
-          'supplied). A cron/manual trigger is fired by the durable worker; without it the trigger ' +
-          'would never fire. Set deployment.durableWorker:true and supply agent backends, or remove ' +
-          'the trigger(s). Fail-closed.',
-      );
-    }
-    // A cron/manual trigger fires under a KNOWN tenant (single-deployment LOCAL posture). Fail closed if
-    // one is declared but no tenant was configured — firing under an unknown tenant is never silently OK.
-    if (!config.cronTenantId) {
-      throw new BootConfigError(
-        `Boot aborted — the spec declares ${fireable.length} cron/manual trigger(s) but ` +
-          'RAYSPEC_CRON_TENANT_ID is not set. A cron/manual trigger fires under a known deployment ' +
-          'tenant (single-deployment LOCAL posture; multi-tenant fan-out is reserved). Set ' +
-          'RAYSPEC_CRON_TENANT_ID to the org id the trigger should fire under. Fail-closed.',
-      );
-    }
-    // Validate the tenant SHAPE at BOOT: `forTenant` throws the fail-closed "tenantId must be a UUID"
-    // for a malformed id, which no amount of waiting could ever make valid.
-    await assertCronTenantBootable(db, config.cronTenantId);
-    // Whether that org EXISTS is a per-firing question, not a boot gate — it is normal for a cron
-    // deployment to come up BEFORE its tenant org has been registered against it. Announce the state
-    // once here so an operator watching the boot knows why nothing fires yet (and that it will, without
-    // a restart); the scheduler then re-asks per firing through the SAME probe.
-    const cronTenantId = config.cronTenantId;
-    if (!(await tenantOrgExists(db, cronTenantId))) {
-      bootWarn(cronTenantAbsentBootNotice(cronTenantId));
-    }
-    const cronScheduler = new DbosCronScheduler(result.triggers.list(), {
-      db: workerDbHandle,
-      tenantId: cronTenantId,
-      executor: durableExecutorInstance,
-      productTables,
-      invokeTriggerHandler,
-      // The per-firing existence probe. Bound to the WORKER pool (the pool the fire itself dispatches
-      // off) so the check never borrows an HTTP connection, and re-evaluated on every call — that is
-      // what makes an org created mid-life start firing without a restart. The tenant is the one the
-      // SCHEDULER hands over per firing, not one captured here, so the answer is always about the
-      // tenant that is actually about to fire.
-      tenantExists: (firingTenantId: string) =>
-        tenantOrgExists(workerDbHandle as Db, firingTenantId),
-      // The run-header identity for the PRE-ENQUEUE header an agent-action fire writes (the same
-      // header the HTTP async path writes at enqueue time in runs.ts, so a fire-returned runId
-      // resolves immediately on the run-read routes). Resolved off the SAME late-bound registry the
-      // executor's resolveRun reads — the two surfaces can never disagree about a run's identity.
-      // Answering undefined for an unknown agentId keeps the write best-effort (the scheduler then
-      // logs and skips it; the dispatch itself is never blocked on this advisory seam).
-      resolveRunHeaderIdentity: (agentId: string) => {
-        const entry = workerAgentRegistry?.get(agentId);
-        return entry
-          ? { backend: entry.backend.id, agentName: entry.spec.name, model: entry.spec.model }
-          : undefined;
+  try {
+    // The deploy<App> type arg fixes `result.app`'s type. `RolloutConfig.buildApp` is a GENERIC method
+    // `<App>(engine) => App` (App is bound per-call, not threaded from DeployConfig), so a real
+    // implementation can only satisfy it via the documented cast — exactly how the typechecked
+    // deploy() UNIT test's `rollout()` helper implements it (`buildApp<App>(_engine): App { return …
+    // as App }`). We are the FIRST shipped, tsc-typechecked consumer of `deploy()`'s buildApp (the
+    // dev-server + tests are tsc-excluded), so this surfaces the per-method-generic awkwardness; the
+    // cast here is the contract's intended usage, not a type hole — the runtime value IS the app.
+    result = await deploy<ReturnType<typeof createAuthApp>>({
+      // deploy() re-parses + re-validates the MERGED spec (deployment ⊕ pack fragments) —
+      // so a pack store/route/handler is validated by the SAME parseSpec/lintSpec gate (no special
+      // pass), and a pack store rides the SAME migration SQL below. byte-unchanged deploy().
+      specSource: effectiveSpecSource,
+      // '0000_product_stores.sql' on a clean DB (materialize) — or [] on a reboot (MOUNT: no
+      // product DDL → existing data survives). A 'drifted' schema already failed closed above.
+      migrations,
+      target,
+      rollout: {
+        productTables,
+        escapeHatchRoot,
+        // The multi-root importer (a rewritten virtual pack-handler path → the real pack
+        // file, jailed against the PACK root; a deployment's own handler falls through to the default).
+        // This rides the EXISTING `rollout.importer` seam — `deploy()`/`loadHandlers` stay byte-unchanged.
+        ...(extensionImporter ? { importer: extensionImporter } : {}),
+        ...(agentBackends ? { agentBackends } : {}),
+        buildApp<App>(engine: DeclarativeEngine): App {
+          // Capture the SAME AgentRegistry the run surface builds, so the durable worker
+          // resolves a RunJob's agentId identically (the engine's loaded handlers are only available
+          // HERE — inside the rollout). Built only when the engine declares agents + backends.
+          if (engine.agentBackends && engine.spec.agents.length > 0) {
+            workerAgentRegistry = buildAgentRegistry({
+              spec: engine.spec,
+              agentBackends: engine.agentBackends,
+              handlers: engine.handlers ?? new Map(),
+              productTables: engine.productTables,
+              // Thread the SAME wired blob backend (assembled above, present iff the spec has a
+              // stream route) so a declared tool the OFF-REQUEST worker runs gets the SAME tenant-bound
+              // `init.blob` the sync run surface gives it — built from the run's server-derived tenant.
+              ...(blobFactory ? { blobFactory } : {}),
+            });
+          }
+          // Inject the tenant-bound blob backend into the engine (the `stream` route arm
+          // reads `engine.blobFactory` to build `init.blob`). `deploy()`/`RolloutConfig` is an unchanged
+          // platform contract that knows nothing of blobs, so the composition root — which OWNS
+          // buildApp + assembled blobFactory above (guarded: present iff the spec has a stream route) —
+          // augments the engine here, exactly as it injects `durableExecutor`. Spread so the field is
+          // ABSENT (not undefined) for a no-stream spec, keeping the engine shape exact.
+          const engineWithBlob: DeclarativeEngine = {
+            ...engine,
+            ...(blobFactory ? { blobFactory } : {}),
+            // Inject the READ-ONLY fs-source (when a root is configured) so a tool/route handler's
+            // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.
+            ...(fsSourceFactory ? { fsSourceFactory } : {}),
+            // Inject the media-token service (when wired) so the playback arm's 2nd auth path
+            // + the mint capability are available. Spread so ABSENT for a no-playback spec.
+            ...(mediaTokenService ? { mediaTokenService } : {}),
+            // Inject the speech-to-text capability (when a provider is configured) so a route/tool
+            // handler's `init.stt` transcribes through it. Spread so ABSENT when STT_PROVIDER is unset.
+            ...(sttCapability ? { sttCapability } : {}),
+            // Inject the text-to-speech capability (when a provider is configured) so a route/tool
+            // handler's `init.tts` synthesizes through it. Spread so ABSENT when TTS_PROVIDER is unset.
+            ...(ttsCapability ? { ttsCapability } : {}),
+            // Inject the tenant event bus (when the deployed spec enabled it) so a route/tool handler's
+            // `init.emit` appends to its tenant's stream. Spread so ABSENT otherwise — which is what
+            // makes the capability absent from every init rather than an undefined-valued key, AND
+            // what makes `GET /v1/subscribe` serve rather than answer its fail-closed 501.
+            ...(eventBus ? { eventBus } : {}),
+            // Inject the process wake beside it, so a subscriber is woken by the emitting transaction
+            // instead of waiting out its next read. Absent ⇒ subscribers poll only (later, never lossy).
+            ...(eventWake ? { eventWake } : {}),
+          };
+          // Inject the durable executor (when wired) so the run surface's async path can enqueue.
+          return createAuthApp({
+            ...baseDeps,
+            engine: engineWithBlob,
+            ...(durableExecutor ? { durableExecutor } : {}),
+            // Inject the manual-trigger fire seam (when the spec declares manual triggers) so
+            // POST /v1/triggers/:name/fire drives it; it reads the late-bound scheduler at request time.
+            ...(manualTriggerFirer ? { manualTriggerFirer } : {}),
+          }) as App;
+        },
       },
     });
-    // Expose the wired scheduler to the late-bound manual-trigger firer (built above, injected into the
-    // app inside deploy()); the firer restricts on-demand fires to its manual triggers.
-    wiredCronScheduler = cronScheduler;
-    // Register the scheduled workflows in the pre-launch window (executor.start() runs this hook before
-    // DBOS.launch()). A manual-only spec registers ZERO scheduled workflows (nothing to schedule) but
-    // still wires the scheduler for on-demand fires. cron implies the worker is wired, so this is always
-    // paired with a launch.
-    durableExecutorInstance.attachPreLaunchHook(() => cronScheduler.registerScheduledWorkflows());
-    cronTriggerNames = cronScheduler.cronTriggerNames;
-    // Bind the on-demand fire delegate to the WIRED scheduler (the same instance the DBOS schedule
-    // loop fires) so an on-demand fire goes through the EXACT reserve→dispatch path + cross-dedups
-    // with a scheduled fire for the same instant (firingKey is instant-truncated). Generic control
-    // surface — the fire route, the deterministic tests, and the CEO demo all use it.
-    fireCronNow = (name: string, instant?: Date) => cronScheduler.fireNow(name, instant);
+
+    // ── The post-UPDATE drift GATE (fail-closed on an under-reconciling reviewed delta) ────
+    // SCOPED to the UPDATE branch ONLY (opts.updateMigrations set + the spec has stores). deploy()'s
+    // drift step (step 6) is REPORT-ONLY: it returns `result.drift` but never aborts. For a mount/
+    // materialize boot that is correct (that path already fail-closed on 'drifted' BEFORE deploy, so its
+    // post-deploy drift is []); the UPDATE branch now classifies first too, but on the APPLY route
+    // deploy()'s report-only drift is the ONLY check that the reviewed delta actually CLOSED the gap. A
+    // delta that applies cleanly but UNDER-reconciles (e.g. adds one of two new columns) would otherwise
+    // boot GREEN as `deployMode:'updated'` — and the NEXT plain reboot (no updateMigrations) would then
+    // classify 'drifted' and fail-close, bricking the deployment on a DELAY. We fail NOW instead. Mount/
+    // materialize behavior stays byte-identical (this branch never runs for them); the auth-only update
+    // path (specStores.length === 0 ⇒ deployMode 'auth-only', deploy returns []) is untouched.
+    if (opts.updateMigrations !== undefined && specStores.length > 0 && result.drift.length > 0) {
+      throw new BootConfigError(
+        `Boot aborted — the reviewed UPDATE delta applied but the live product schema is STILL DRIFTED ` +
+          `from the NEW spec at ${specPath} (the delta UNDER-reconciled — it did not fully close the gap):\n` +
+          `${formatDrift(result.drift)}\n` +
+          'IMPORTANT — the delta migration(s) are ALREADY COMMITTED: deploy() applies each migration in ' +
+          'its own transaction and this drift check fires POST-migrate, so the schema is now in a ' +
+          'partially-evolved MID-STATE. This gate fails the update NOW rather than booting green as ' +
+          "'updated' and letting the NEXT plain reboot fail-close on the residual drift (a delayed brick). " +
+          'Recovery (FORWARD-FIX discipline — NEVER a down-migration / hand-patch): re-diff the live ' +
+          'schema vs the NEW spec, author the COMPLETING forward migration that closes the remaining ' +
+          'drift, and re-run update mode with it. Fail-closed.',
+      );
+    }
+
+    // ── Wire the trigger scheduler from the deployed trigger registry (BEFORE launch) ──────
+    // deploy() yields `result.triggers` (the registered descriptors). For each CRON trigger we register
+    // one DBOS scheduled-workflow — that registration MUST happen BEFORE DBOS.launch() (the
+    // ScheduledReceiver lifecycle callback starts the schedule loops at launch). So we attach the
+    // scheduler's `registerScheduledWorkflows` as a PRE-LAUNCH hook on the executor; `pendingExecutorStart`
+    // (= executor.start()) runs the hooks after registerWorkflow and before launch. A MANUAL trigger is
+    // NOT scheduled — it is fireable ON DEMAND via the same scheduler (the fire route). webhook/event
+    // descriptors stay RESERVED (neither scheduled nor fireable). (Both seams are DECLARED above the
+    // try, because the wiring below the catch reads them.)
+    // FIREABLE = cron (scheduled + on-demand) OR manual (on-demand only). Both are fired by the durable
+    // worker, so both demand it wired + a known tenant. webhook/event stay reserved (not fireable here).
+    const fireable = fireableTriggers(result.triggers.list());
+    if (fireable.length > 0) {
+      // (Fail-closed, defense-in-depth with the lint rule.) A cron/manual trigger is fired ONLY by the
+      // durable off-request worker. If the spec declares one but no durable worker is wired (the spec
+      // omitted deployment.durableWorker, or no agent backends were supplied), the trigger could never
+      // fire. Refuse to boot — a half-deployed fireable trigger is never silently OK. The static lint rule
+      // (lint.ts) already rejects cron/manual-without-durableWorker at parse/deploy time; this is the
+      // runtime backstop for a code-built spec or a missing-backends boot.
+      if (!(durableExecutorInstance && workerDbHandle)) {
+        throw new BootConfigError(
+          `Boot aborted — the spec declares ${fireable.length} cron/manual trigger(s) but no ` +
+            'durable worker is wired (deployment.durableWorker is not true, or no agent backends were ' +
+            'supplied). A cron/manual trigger is fired by the durable worker; without it the trigger ' +
+            'would never fire. Set deployment.durableWorker:true and supply agent backends, or remove ' +
+            'the trigger(s). Fail-closed.',
+        );
+      }
+      // A cron/manual trigger fires under a KNOWN tenant (single-deployment LOCAL posture). Fail closed if
+      // one is declared but no tenant was configured — firing under an unknown tenant is never silently OK.
+      if (!config.cronTenantId) {
+        throw new BootConfigError(
+          `Boot aborted — the spec declares ${fireable.length} cron/manual trigger(s) but ` +
+            'RAYSPEC_CRON_TENANT_ID is not set. A cron/manual trigger fires under a known deployment ' +
+            'tenant (single-deployment LOCAL posture; multi-tenant fan-out is reserved). Set ' +
+            'RAYSPEC_CRON_TENANT_ID to the org id the trigger should fire under. Fail-closed.',
+        );
+      }
+      // Validate the tenant SHAPE at BOOT: `forTenant` throws the fail-closed "tenantId must be a UUID"
+      // for a malformed id, which no amount of waiting could ever make valid.
+      await assertCronTenantBootable(db, config.cronTenantId);
+      // Whether that org EXISTS is a per-firing question, not a boot gate — it is normal for a cron
+      // deployment to come up BEFORE its tenant org has been registered against it. Announce the state
+      // once here so an operator watching the boot knows why nothing fires yet (and that it will, without
+      // a restart); the scheduler then re-asks per firing through the SAME probe.
+      const cronTenantId = config.cronTenantId;
+      if (!(await tenantOrgExists(db, cronTenantId))) {
+        bootWarn(cronTenantAbsentBootNotice(cronTenantId));
+      }
+      const cronScheduler = new DbosCronScheduler(result.triggers.list(), {
+        db: workerDbHandle,
+        tenantId: cronTenantId,
+        executor: durableExecutorInstance,
+        productTables,
+        invokeTriggerHandler,
+        // The per-firing existence probe. Bound to the WORKER pool (the pool the fire itself dispatches
+        // off) so the check never borrows an HTTP connection, and re-evaluated on every call — that is
+        // what makes an org created mid-life start firing without a restart. The tenant is the one the
+        // SCHEDULER hands over per firing, not one captured here, so the answer is always about the
+        // tenant that is actually about to fire.
+        tenantExists: (firingTenantId: string) =>
+          tenantOrgExists(workerDbHandle as Db, firingTenantId),
+        // The run-header identity for the PRE-ENQUEUE header an agent-action fire writes (the same
+        // header the HTTP async path writes at enqueue time in runs.ts, so a fire-returned runId
+        // resolves immediately on the run-read routes). Resolved off the SAME late-bound registry the
+        // executor's resolveRun reads — the two surfaces can never disagree about a run's identity.
+        // Answering undefined for an unknown agentId keeps the write best-effort (the scheduler then
+        // logs and skips it; the dispatch itself is never blocked on this advisory seam).
+        resolveRunHeaderIdentity: (agentId: string) => {
+          const entry = workerAgentRegistry?.get(agentId);
+          return entry
+            ? { backend: entry.backend.id, agentName: entry.spec.name, model: entry.spec.model }
+            : undefined;
+        },
+      });
+      // Expose the wired scheduler to the late-bound manual-trigger firer (built above, injected into the
+      // app inside deploy()); the firer restricts on-demand fires to its manual triggers.
+      wiredCronScheduler = cronScheduler;
+      // Register the scheduled workflows in the pre-launch window (executor.start() runs this hook before
+      // DBOS.launch()). A manual-only spec registers ZERO scheduled workflows (nothing to schedule) but
+      // still wires the scheduler for on-demand fires. cron implies the worker is wired, so this is always
+      // paired with a launch.
+      durableExecutorInstance.attachPreLaunchHook(() => cronScheduler.registerScheduledWorkflows());
+      cronTriggerNames = cronScheduler.cronTriggerNames;
+      // Bind the on-demand fire delegate to the WIRED scheduler (the same instance the DBOS schedule
+      // loop fires) so an on-demand fire goes through the EXACT reserve→dispatch path + cross-dedups
+      // with a scheduled fire for the same instant (firingKey is instant-truncated). Generic control
+      // surface — the fire route, the deterministic tests, and the CEO demo all use it.
+      fireCronNow = (name: string, instant?: Date) => cronScheduler.fireNow(name, instant);
+    }
+  } catch (e) {
+    // Everything above this point runs on a schema that may already carry this boot's product DDL.
+    // Say what was committed, without re-wrapping (the message keeps its class and its prefix), and
+    // without repeating the post-UPDATE drift gate, whose own text already states it.
+    throw attachAppliedProductDdlNote(
+      e,
+      appliedMigrations,
+      specStores.map((s) => s.name),
+    );
   }
 
   // ── Wire the SYSTEM cleanup scheduled-workflow (BEFORE launch) ───────────────────────
