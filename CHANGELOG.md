@@ -511,7 +511,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports>' WHERE status IN ('ENQUEUED','PENDING') AND application_version <> '<same value>'`.
   Measured against a throwaway system database: an `ENQUEUED` row left on the old version was still
   queued after the new version had been running for twelve seconds, and ran within seconds of the
-  re-stamp.
+  re-stamp. One knob also stops working on a durable worker: DBOS seeds its version from
+  `DBOS__APPVERSION`, but `DBOS.launch` prefers the config field this platform now supplies, so that
+  environment value no longer decides the worker's version.
   **What did not change.** The happy path writes exactly what it wrote before — same header, same node
   states, same artifacts. The new journal write is scoped to the resolver alone and never widened over
   the engine, which keeps its invariant that an invalid spec never creates a run header; it is
