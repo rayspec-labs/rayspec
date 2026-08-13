@@ -43,6 +43,7 @@ import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  appliedProductDdlBootNote,
   assembleServer,
   BootConfigError,
   type BootedServer,
@@ -119,6 +120,28 @@ triggers:
 /** The SAME spec but WITHOUT the durable worker — the without-durable-worker fail-closed case. */
 const CRON_NO_WORKER_YAML = CRON_SPEC_YAML.replace('deployment:\n  durableWorker: true\n', '');
 
+/**
+ * The SAME cron spec, plus a product STORE — the fixture that has DDL to leave behind. Its boot
+ * materializes `cron_boot_notes` and only THEN reaches the cron gates, which is the whole subject of
+ * the post-migrate arm below. (`CRON_SPEC_YAML` declares no store on purpose: it is the control.)
+ */
+const CRON_STORE_SPEC_YAML = CRON_SPEC_YAML.replace(
+  'agents:\n',
+  'stores:\n  - name: cron_boot_notes\n    columns:\n      - { name: body, type: text }\nagents:\n',
+);
+
+/** The SAME store-declaring spec WITHOUT the durable worker — refused at validation (pre-migrate). */
+const CRON_STORE_NO_WORKER_YAML = CRON_STORE_SPEC_YAML.replace(
+  'deployment:\n  durableWorker: true\n',
+  '',
+);
+
+/** The store's table name (a store name IS its table name — `generateProductSql` emits it verbatim). */
+const STORE_TABLE = 'cron_boot_notes';
+
+/** The first-materialization migration both deployers plan for a clean database. */
+const MATERIALIZE_MIGRATION = '0000_product_stores.sql';
+
 const CRON_TENANT = '00000000-0000-0000-0000-0000000000cc';
 
 /**
@@ -146,6 +169,13 @@ function withDbName(url: string, dbName: string): string {
 
 const SUITE_DB = `rayspec_server_cron_${process.pid}`;
 const DBOS_SYS_DB = `${SUITE_DB}_dbos_sys`;
+/**
+ * The two store-declaring arms get their OWN throwaway databases: one asserts the store table IS
+ * there after the refusal, the other that it is NOT, so neither may inherit the other's schema (nor
+ * leave a product table in `SUITE_DB`, whose store-less specs must keep classifying as they do).
+ */
+const APPLIED_DB = `rayspec_server_cron_applied_${process.pid}`;
+const PREMIGRATE_DB = `rayspec_server_cron_premigrate_${process.pid}`;
 
 describe('cron-worker boot — composition root wires the scheduler + fail-closed boot guards', () => {
   const baseUrl = process.env.DATABASE_URL;
@@ -161,6 +191,8 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
   }
 
   let appDbUrl = '';
+  let appliedDbUrl = '';
+  let premigrateDbUrl = '';
   let tmpDir = '';
   const created: BootedServer[] = [];
   const savedEnv: Record<string, string | undefined> = {};
@@ -211,15 +243,33 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
     };
   }
 
+  /** Is a table present in the live public schema? (ground truth for CREATE / drift.) */
+  async function tableExists(dbUrl: string, table: string): Promise<boolean> {
+    const c = postgres(dbUrl, { max: 1 });
+    try {
+      const rows = await c`
+        select 1 from information_schema.tables
+        where table_schema = 'public' and table_name = ${table}`;
+      return rows.length > 0;
+    } finally {
+      await c.end();
+    }
+  }
+
   beforeAll(async () => {
     if (!baseUrl) return;
     appDbUrl = withDbName(baseUrl, SUITE_DB);
+    appliedDbUrl = withDbName(baseUrl, APPLIED_DB);
+    premigrateDbUrl = withDbName(baseUrl, PREMIGRATE_DB);
 
     const admin = postgres(adminUrl(baseUrl), { max: 1 });
     try {
-      await admin.unsafe(`DROP DATABASE IF EXISTS "${DBOS_SYS_DB}" WITH (FORCE)`);
-      await admin.unsafe(`DROP DATABASE IF EXISTS "${SUITE_DB}" WITH (FORCE)`);
-      await admin.unsafe(`CREATE DATABASE "${SUITE_DB}"`);
+      for (const d of [SUITE_DB, APPLIED_DB, PREMIGRATE_DB]) {
+        // The derived DBOS system sibling first (it is what holds a connection to nothing else).
+        await admin.unsafe(`DROP DATABASE IF EXISTS "${d}_dbos_sys" WITH (FORCE)`);
+        await admin.unsafe(`DROP DATABASE IF EXISTS "${d}" WITH (FORCE)`);
+        await admin.unsafe(`CREATE DATABASE "${d}"`);
+      }
     } finally {
       await admin.end();
     }
@@ -248,7 +298,12 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
       const admin = postgres(adminUrl(baseUrl), { max: 1 });
       try {
         await admin.unsafe(`DROP DATABASE IF EXISTS "${DBOS_SYS_DB}" WITH (FORCE)`);
-        await admin.unsafe(`DROP DATABASE IF EXISTS "${SUITE_DB}" WITH (FORCE)`);
+        for (const d of [SUITE_DB, APPLIED_DB, PREMIGRATE_DB]) {
+          // WITH (FORCE): a refused boot throws before anything closes its pool, so the throwaway
+          // databases the refusal arms below booted against still carry an open connection.
+          await admin.unsafe(`DROP DATABASE IF EXISTS "${d}_dbos_sys" WITH (FORCE)`);
+          await admin.unsafe(`DROP DATABASE IF EXISTS "${d}" WITH (FORCE)`);
+        }
       } finally {
         await admin.end();
       }
@@ -381,6 +436,63 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
       );
       expect(err).toBeInstanceOf(BootConfigError);
       expect((err as BootConfigError).message).toBe(UNSET_TENANT_ABORT);
+    },
+    120_000,
+  );
+
+  maybe(
+    'post-migrate refusal: the SAME unset-tenant abort on a STORE-declaring spec names the product-store DDL it already committed — and the table is really there',
+    async () => {
+      // The one arm that measures the DATABASE after a refusal. The store makes the boot materialize
+      // `cron_boot_notes` (the migrate step, committed in its own transaction) and only THEN reach
+      // the cron-tenant gate, so the refusal is raised on a schema that already carries the DDL.
+      process.env.DATABASE_URL = appliedDbUrl;
+      process.env.RAYSPEC_SPEC_PATH = writeSpec(CRON_STORE_SPEC_YAML, 'unset-tenant-store.yaml');
+      delete process.env.RAYSPEC_CRON_TENANT_ID;
+      const config = loadServerConfig();
+      const err = await assembleServer(config, assembleOpts()).then(
+        (s) => {
+          created.push(s);
+          return null;
+        },
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(BootConfigError);
+
+      // GROUND TRUTH: the store table survives the refusal — there is no rollback, and none is
+      // wanted (recovery in RaySpec is a reviewed forward migration).
+      expect(await tableExists(appliedDbUrl, STORE_TABLE)).toBe(true);
+
+      // …and the refusal SAYS so: the unchanged gate text, then the note, in the SAME error object
+      // (a re-wrap would have re-added the class's own prefix, which the CLI printer switches on).
+      expect((err as BootConfigError).message).toBe(
+        `${UNSET_TENANT_ABORT}\n${appliedProductDdlBootNote([MATERIALIZE_MIGRATION], [STORE_TABLE])}`,
+      );
+    },
+    120_000,
+  );
+
+  maybe(
+    'pre-migrate refusal: a store-declaring spec refused BEFORE the migrate step carries NO note, and left no table',
+    async () => {
+      // The counter-case for the predicate: this spec declares the same store, so a note keyed on the
+      // spec (or on the deploy mode) would fire here too — but the boot is refused at validation, so
+      // nothing was ever applied and telling the operator otherwise would be a lie.
+      process.env.DATABASE_URL = premigrateDbUrl;
+      process.env.RAYSPEC_SPEC_PATH = writeSpec(CRON_STORE_NO_WORKER_YAML, 'no-worker-store.yaml');
+      process.env.RAYSPEC_CRON_TENANT_ID = CRON_TENANT;
+      const config = loadServerConfig();
+      const err = await assembleServer(config, assembleOpts()).then(
+        (s) => {
+          created.push(s);
+          return null;
+        },
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).not.toContain('ALREADY COMMITTED');
+      // GROUND TRUTH for the same claim: the store table was never created.
+      expect(await tableExists(premigrateDbUrl, STORE_TABLE)).toBe(false);
     },
     120_000,
   );
