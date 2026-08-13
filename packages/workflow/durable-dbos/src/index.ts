@@ -68,5 +68,6 @@ export {
   type WorkflowExecutorLogger,
   type WorkflowJob,
   type WorkflowRunLiveness,
+  workflowResolveFailureHeaderKeptLog,
   workflowResolveFailureLog,
 } from './workflow-executor.js';

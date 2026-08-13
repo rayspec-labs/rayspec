@@ -127,6 +127,29 @@ export function workflowResolveFailureLog(job: {
   );
 }
 
+/**
+ * The line the worker emits INSTEAD when the run already had a `workflow_runs` header written by an
+ * earlier execution — a header this path must not overwrite. Pure + exported for the same reason as
+ * `workflowResolveFailureLog`.
+ *
+ * WHY THE HEADER IS KEPT. `ensureRun` is INSERT .. ON CONFLICT DO NOTHING, so a pre-existing header
+ * survives it untouched — but `finalizeRun` is a plain UPDATE. Applying this failure's patch to a
+ * header the ENGINE wrote would replace that row's real `attempts` (summed from the node journal) and
+ * its `resumable` flag with `0` / `false`, while `workflow_node_states` still holds the attempts the
+ * row would then deny. So the row is left as it is and this line carries the fact instead.
+ */
+export function workflowResolveFailureHeaderKeptLog(
+  job: { workflowRunId: string; tenantId: string; workflowId: string },
+  existingStatus: WorkflowRunStatus,
+): string {
+  return (
+    `[workflow] resolve FAILED for workflow '${job.workflowId}' (tenant ${job.tenantId}, run ` +
+    `${job.workflowRunId}) — an earlier execution of this run already wrote a workflow_runs header ` +
+    `(status '${existingStatus}'), which was LEFT UNCHANGED: this failure attempted no node and must ` +
+    'not overwrite that row. Its record is the DBOS workflow status and this line.'
+  );
+}
+
 /** Map DBOS's workflow status → the neutral job status (the asymmetry stays here; `unknown` fail-safe). */
 function toNeutralStatus(dbosStatus: string | null | undefined): DurableJobStatus {
   switch (dbosStatus) {
@@ -272,8 +295,13 @@ export class DbosWorkflowExecutor implements WorkflowEnqueuer {
    * exists — and an advisory record must never turn one failure into two. A failure is logged; the
    * caller rethrows the ORIGINAL resolver error either way.
    *
-   * Both calls are idempotent (ensureRun is INSERT .. ON CONFLICT DO NOTHING, finalizeRun a plain
-   * UPDATE), so a DBOS re-invocation of the same workflow re-writes the same row.
+   * NEVER OVERWRITES A HEADER SOMEONE ELSE WROTE. `ensureRun` reports whether it created the row, and
+   * the terminal patch is applied only to a row this path created (or to one it already settled at
+   * `terminal_failure`, which makes a DBOS re-invocation idempotent). A header an earlier ENGINE
+   * execution wrote — the reachable case is a crash mid-`engine.execute` followed by a recovery
+   * re-invocation against a document that no longer carries the workflow — is left exactly as it is,
+   * because `finalizeRun` is a plain UPDATE and would replace its real `attempts` / `resumable` /
+   * `error` with this failure's zeroes while `workflow_node_states` still holds the attempts.
    */
   async #journalResolveFailure(
     journal: TenantDbWorkflowJournalStore,
@@ -281,7 +309,7 @@ export class DbosWorkflowExecutor implements WorkflowEnqueuer {
     err: unknown,
   ): Promise<void> {
     try {
-      await journal.ensureRun({
+      const { run, created } = await journal.ensureRun({
         workflowRunId: job.workflowRunId,
         workflowId: job.workflowId,
         idempotencyKey: job.idempotencyKey,
@@ -292,8 +320,16 @@ export class DbosWorkflowExecutor implements WorkflowEnqueuer {
         triggerEvent: job.event.type,
         inputEvent: job.event,
       });
+      // A header this call did not create belongs to an earlier execution of the run: leave it, and
+      // say so on the log surface. The one exception is a row THIS path already settled — re-applying
+      // the identical patch keeps a DBOS re-invocation idempotent.
+      if (!created && run.status !== 'terminal_failure') {
+        this.#logger.warn(workflowResolveFailureHeaderKeptLog(job, run.status));
+        return;
+      }
       // ensureRun hard-codes status `running`; the terminal state is the finalize patch. `attempts:0`
-      // is exact — no node was attempted, because no engine was built.
+      // is exact for the row this line can reach: it was created just above, or was settled by an
+      // earlier pass of THIS path — no engine was built on either, so no node was ever attempted.
       await journal.finalizeRun(job.workflowRunId, {
         status: 'terminal_failure',
         resumable: false,

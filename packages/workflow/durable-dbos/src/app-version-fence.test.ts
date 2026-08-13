@@ -3,12 +3,13 @@
  *
  * DBOS scopes its dequeue by application version (`application_version IS NULL OR
  * application_version = $3` in `findAndMarkStartableWorkflows`, verified in the installed 4.21.6
- * system_database.js:1824), and when nothing supplies one it COMPUTES an md5 over the registered
- * workflow functions' source plus the SDK version (dbos-executor.js:887-898). Our four registered
- * functions are thin delegating wrappers that carry nothing from the deployed document, and
- * `executorID` is the literal `'local'` in every process (utils.js:54) — so two processes running
- * DIFFERENT documents against one DATABASE_URL derive the SAME version and dequeue each other's
- * jobs. `DbosExecutorConfig.applicationVersion` is the seam that separates them: `DBOS.launch`
+ * system_database.js:1824), and when nothing supplies one it COMPUTES an md5 over the source of the
+ * workflow functions registered in the process plus the SDK version (dbos-executor.js:887-898). Every
+ * function this platform registers is a thin delegating wrapper carrying nothing from the deployed
+ * document, and `executorID` is the literal `'local'` in every process (utils.js:54) — so two
+ * processes running DIFFERENT documents through the same profile against one DATABASE_URL derive the
+ * SAME version and dequeue each other's jobs.
+ * `DbosExecutorConfig.applicationVersion` is the seam that separates them: `DBOS.launch`
  * assigns it to `globalParams.appVersion` (dbos.js:172-175) BEFORE `init()` reaches the
  * `if (globalParams.appVersion === '')` compute branch (dbos-executor.js:140-144).
  *
@@ -16,7 +17,7 @@
  * / `DBOS.registerQueue` and stubs the rest of the lifecycle to no-ops, then reads the EXACT objects
  * the executor hands them. Fail-the-fix in both directions — a configured version must be forwarded
  * verbatim, and an executor constructed WITHOUT one must not send the key at all (DBOS then computes
- * its own hash, which is what every test harness and every pre-existing caller relies on).
+ * its own hash, the behaviour every caller that names no document keeps).
  */
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';

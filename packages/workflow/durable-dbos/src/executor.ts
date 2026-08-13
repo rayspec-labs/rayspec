@@ -133,8 +133,8 @@ export interface DbosExecutorConfig {
    * dequeue each other's jobs.
    *
    * OPTIONAL, and the omission is meaningful: with no value DBOS computes its own version (an md5
-   * over the registered workflow functions' source plus the SDK version). Every caller that has no
-   * document to name — the test harnesses — keeps that computed hash. The composition roots derive
+   * over the source of the workflow functions registered in the process plus the SDK version). Every
+   * caller that has no document to name keeps that computed hash. The composition roots derive
    * theirs from the deployed document's identity (`deriveDbosApplicationVersion` in @rayspec/server).
    * Supplying it means the SDK version and the wrapper source no longer participate in the value;
    * what pins those instead is the exact `@dbos-inc/dbos-sdk` version in this package's package.json
@@ -566,8 +566,8 @@ export class DbosDurableExecutor implements DurableExecutor {
       // `runAdminServer` above) and `DBOS.launch` copies it into `globalParams.appVersion` BEFORE
       // `init()` reaches the `if (globalParams.appVersion === '')` compute branch — so supplying it
       // here replaces DBOS's own hash rather than racing it. Spread CONDITIONALLY: an executor
-      // constructed without one must send NO key, so DBOS still computes its version (the shape every
-      // test harness relies on).
+      // constructed without one must send NO key, so DBOS still computes its version (the behaviour
+      // every caller that names no document keeps).
       ...(this.#config.applicationVersion
         ? { applicationVersion: this.#config.applicationVersion }
         : {}),

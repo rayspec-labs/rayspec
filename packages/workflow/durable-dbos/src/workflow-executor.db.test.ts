@@ -13,6 +13,8 @@
  *     `workflow_status.application_version` — the column DBOS's dequeue predicate is scoped by.
  *  4. TERMINAL JOURNAL: a job whose resolver THROWS still gets a `workflow_runs` row, settled at
  *     `terminal_failure`, plus the one log line — and the original resolver error still fails the job.
+ *  5. …and that write NEVER overwrites a header an earlier execution of the same run wrote: a
+ *     pre-seeded `running` header with real attempts survives the resolve failure untouched.
  *
  * Booted like executor.db.test.ts (drop sys db → makeDbWithSchema → spine+workflow DDL → one launch).
  */
@@ -28,7 +30,7 @@ import {
 } from '@rayspec/foundation';
 import { createArtifactPersistHandler } from '@rayspec/grounding-runtime';
 import type { RunJob } from '@rayspec/platform';
-import { TenantDbArtifactStore } from '@rayspec/workflow-durable';
+import { durableWorkflowRunId, TenantDbArtifactStore } from '@rayspec/workflow-durable';
 import { config as loadDotenv } from 'dotenv';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -38,6 +40,7 @@ import {
   DbosWorkflowExecutor,
   WORKFLOW_RESOLVE_FAILED_CODE,
   type WorkflowJob,
+  workflowResolveFailureHeaderKeptLog,
   workflowResolveFailureLog,
 } from './workflow-executor.js';
 
@@ -408,6 +411,88 @@ describe('DBOS workflow spine — engine.execute off-request', () => {
     expect(workerWarnings).toContain(
       workflowResolveFailureLog({
         workflowRunId,
+        tenantId: TENANT,
+        workflowId: UNKNOWN_WORKFLOW_ID,
+      }),
+    );
+  });
+
+  it('a resolver failure LEAVES a header an earlier execution wrote exactly as it is', async () => {
+    // The reachable shape: the engine ran nodes, the process died mid-run (header still `running`,
+    // node states carrying real attempt counts), and DBOS's crash recovery re-invokes the workflow
+    // against a document that no longer carries that workflow — so the resolver throws on a run that
+    // ALREADY has a journal header. `finalizeRun` is a plain UPDATE, so writing this failure's patch
+    // would replace that row's real `attempts`/`resumable`/`error` with zeroes while the node states
+    // below still hold the attempts. Pre-seed exactly that row, then drive the failing resolver.
+    const idempotencyKey = 'k-preexisting';
+    const runId = durableWorkflowRunId(TENANT, UNKNOWN_WORKFLOW_ID, idempotencyKey);
+    await db.$client.unsafe(
+      `INSERT INTO workflow_runs (workflow_run_id, tenant_id, workflow_id, idempotency_key,
+         trigger_event, input_event, status, resumable, error, attempts)
+       VALUES ($1, $2, $3, $4, 'thing.happened', $5, 'running', true, $6, '7')`,
+      [
+        runId,
+        TENANT,
+        UNKNOWN_WORKFLOW_ID,
+        idempotencyKey,
+        JSON.stringify(event()),
+        JSON.stringify({ code: 'node_boom', message: 'a node failed', retryable: true }),
+      ],
+    );
+    await db.$client.unsafe(
+      `INSERT INTO workflow_node_states (tenant_id, workflow_run_id, node_id, position, capability,
+         operation, status, attempt_count)
+       VALUES ($1, $2, 'count', '0', 'count', 'increment', 'completed', '3')`,
+      [TENANT, runId],
+    );
+
+    const { workflowRunId } = await wfExecutor.enqueueWorkflowRun({
+      tenantId: TENANT,
+      workflow: { ...counterWorkflow(), id: UNKNOWN_WORKFLOW_ID },
+      event: event(),
+      idempotencyKey,
+    });
+    expect(workflowRunId).toBe(runId);
+    expect(await waitForTerminal(workflowRunId)).toBe('failed'); // the resolver error still fails the job
+
+    const runs = await db.$client.unsafe(
+      'SELECT status, resumable, attempts, error FROM workflow_runs WHERE workflow_run_id = $1 AND tenant_id = $2',
+      [runId, TENANT],
+    );
+    expect(runs).toHaveLength(1);
+    const row = runs[0] as {
+      status: string;
+      resumable: boolean;
+      attempts: string;
+      error: { code: string };
+    };
+    // UNTOUCHED — every field the terminal patch would have overwritten.
+    expect(row.status).toBe('running');
+    expect(row.resumable).toBe(true);
+    expect(Number(row.attempts)).toBe(7);
+    expect(row.error.code).toBe('node_boom');
+    // …and the node journal that row accounts for is still there.
+    const nodes = await db.$client.unsafe(
+      'SELECT attempt_count FROM workflow_node_states WHERE workflow_run_id = $1',
+      [runId],
+    );
+    expect(nodes).toHaveLength(1);
+    expect(Number((nodes[0] as { attempt_count: string }).attempt_count)).toBe(3);
+
+    // A `running` header whose DBOS workflow is no longer active is the DEAD-LETTER classification —
+    // `stalled`, the state an operator must act on — not a manufactured `terminal`.
+    expect(await wfExecutor.liveness(TENANT, runId)).toBe('stalled');
+
+    // The log surface says which line it emitted: the header was kept, not rewritten.
+    expect(workerWarnings).toContain(
+      workflowResolveFailureHeaderKeptLog(
+        { workflowRunId: runId, tenantId: TENANT, workflowId: UNKNOWN_WORKFLOW_ID },
+        'running',
+      ),
+    );
+    expect(workerWarnings).not.toContain(
+      workflowResolveFailureLog({
+        workflowRunId: runId,
         tenantId: TENANT,
         workflowId: UNKNOWN_WORKFLOW_ID,
       }),

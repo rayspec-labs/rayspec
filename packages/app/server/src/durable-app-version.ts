@@ -10,10 +10,13 @@
  * its dequeue by application version (`application_version IS NULL OR application_version = $3`). The
  * other column it could have discriminated on, `executor_id`, is no help: nothing here sets
  * `DBOSConfig.executorID`, so DBOS defaults it to the same constant in every process. The version is
- * the only discriminator available. Left to itself DBOS computes it as a hash over the registered workflow
- * functions' source plus the SDK version, and our registered functions are thin delegating wrappers
- * that carry nothing from the deployed document: every deployment of this platform produces the SAME
- * version, and a worker happily claims a job for a workflow it has never heard of.
+ * the only discriminator available. Left to itself DBOS computes it as a hash over the source of the
+ * workflow functions registered in the process plus the SDK version. Every function this platform
+ * registers is a thin delegating wrapper, and nothing in that input comes from the workflows the
+ * deployed document declares — so two documents booted through the same profile produce the SAME
+ * version, and a worker happily claims a job for a workflow it has never heard of. (The registered
+ * set is not identical everywhere: it differs per profile, and a backend boot adds one function per
+ * cron trigger the document declares. It just never varies with the document's workflows.)
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * WHY THE DOCUMENT'S IDENTITY AND NOT ITS CONTENT.
