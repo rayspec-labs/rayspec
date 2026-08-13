@@ -15,9 +15,10 @@ export default defineConfig({
       // threshold holds in every lane, database or not. `include` keeps the report itself scoped to
       // the thresholded modules; everything else in the package is covered by its ordinary suites
       // without a numeric gate.
-      include: ['src/status.ts'],
+      include: ['src/status.ts', 'src/intent-applier.ts'],
       thresholds: {
         'src/status.ts': { branches: 100 },
+        'src/intent-applier.ts': { branches: 100 },
       },
     },
   },

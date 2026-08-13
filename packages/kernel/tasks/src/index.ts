@@ -7,7 +7,26 @@
  * live beside the existing durable infrastructure in @rayspec/durable-dbos and consume THIS
  * package; the HTTP and CLI surfaces consume it through the composition root.
  */
+export {
+  type ApplyTurnInput,
+  type ApplyTurnOutcome,
+  afterTaskTerminal,
+  applyBudgetExhausted,
+  applyTurnOutcome,
+  cancelDescendants,
+  TurnStateError,
+} from './apply-intents.js';
 export { type ApplyTransitionInput, applyTransition, type TaskRecord } from './apply-transition.js';
+export {
+  ApprovalAlreadyDecidedError,
+  type ApprovalDecisionInput,
+  ApprovalNotFoundError,
+  type ApprovalRecord,
+  type ApprovalSweepOutcome,
+  approvalDecisionSchema,
+  decideApproval,
+  sweepApprovalTimeouts,
+} from './approvals.js';
 export {
   authorizeTurn,
   BUDGET_WINDOWS,
@@ -21,6 +40,10 @@ export {
   windowStartFor,
   workforceBudgetsSchema,
 } from './budget.js';
+export {
+  type CancelCascadeOutcome,
+  cancelTaskCascade,
+} from './control.js';
 export {
   type ChildTaskSpec,
   type CreateRootTaskInput,
@@ -50,10 +73,49 @@ export {
 } from './events.js';
 export { deterministicChildTaskId, newRootTaskId } from './ids.js';
 export {
+  DELEGATION_REJECTION_REASONS,
+  type DelegationRejectionReason,
+  invalidIntentPlan,
+  type PlanTurnInput,
+  planTurnOutcome,
+  type ToolErrorFate,
+  type TurnIntent,
+  type TurnPlan,
+  turnIntentSchema,
+  type WorkerResult,
+  workerResultSchema,
+} from './intent-applier.js';
+export {
+  isJoinSatisfied,
+  type JoinPolicy,
+  joinPolicySchema,
+  type MergedChildResult,
+  mergeChildResults,
+} from './join.js';
+export {
+  applyReviewVerdict,
+  ReviewAlreadyDecidedError,
+  ReviewNotFoundError,
+  type ReviewRecord,
+  ReviewTaskStateError,
+  type ReviewVerdictInput,
+  reviewVerdictSchema,
+} from './reviews.js';
+export {
   ensureWorkforceRuntime,
   readWorkforceRuntime,
   type WorkforceRuntimeRecord,
 } from './runtime.js';
+export {
+  consumePendingSignals,
+  type DeliverSignalInput,
+  type DeliverSignalOutcome,
+  deliverSignal,
+  SIGNAL_KINDS,
+  type SignalKind,
+  type SignalRecord,
+  signalKindSchema,
+} from './signals.js';
 export {
   ALLOWED_TRANSITIONS,
   assertTransition,

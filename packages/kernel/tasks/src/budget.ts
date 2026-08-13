@@ -307,6 +307,75 @@ export async function authorizeTurn(
   return { allowed: true };
 }
 
+/** Thrown internally to unwind the probe's savepoint; never escapes. */
+class ProbeRollback extends Error {
+  readonly decision: PolicyDecision;
+  constructor(decision: PolicyDecision) {
+    super('budget probe complete — rolling back the savepoint.');
+    this.name = 'ProbeRollback';
+    this.decision = decision;
+  }
+}
+
+/**
+ * CHECK a spend against the wider scopes (root / department / workforce — a fan-out draws from the
+ * subtree up, not from the requesting task's own scope) WITHOUT reserving anything. Runs in a
+ * savepoint that is ALWAYS rolled back, so neither the check nor a first-touch row creation
+ * mutates the ledger — the caller decides what the verdict means (a denied fan-out blocks the
+ * parent with the typed reason; it never opens the children). Callable mid-transaction: the
+ * savepoint nests inside the caller's transaction.
+ */
+export async function probeSpend(
+  tdb: TenantDb,
+  budgets: WorkforceBudgets,
+  proposed: ProposedExecution,
+  turnCount: number,
+  now: Date = new Date(),
+): Promise<PolicyDecision> {
+  const scopes = ledgerScopesFor(proposed, budgets, now).filter((s) => s.scopeKind !== 'task');
+  try {
+    await tdb.transaction(async (tx) => {
+      for (const scope of scopes) {
+        const row = await lockLedgerRow(tx, scope);
+        const reserved = Number(row.reservedUsd);
+        const settled = Number(row.settledUsd);
+        if (
+          scope.ceilingUsd !== null &&
+          settled + reserved + proposed.estimateUsd > scope.ceilingUsd
+        ) {
+          throw new ProbeRollback({
+            allowed: false,
+            denial: {
+              scopeKind: scope.scopeKind,
+              scopeId: scope.scopeId,
+              ceiling: { kind: 'usd', limit: scope.ceilingUsd },
+              consumed: settled + reserved,
+            },
+          });
+        }
+        if (scope.ceilingTurns !== null && row.settledTurns + turnCount > scope.ceilingTurns) {
+          throw new ProbeRollback({
+            allowed: false,
+            denial: {
+              scopeKind: scope.scopeKind,
+              scopeId: scope.scopeId,
+              ceiling: { kind: 'turns', limit: scope.ceilingTurns },
+              consumed: row.settledTurns,
+            },
+          });
+        }
+      }
+      // All clear — still roll the savepoint back: a probe reserves NOTHING.
+      throw new ProbeRollback({ allowed: true });
+    });
+  } catch (err) {
+    if (err instanceof ProbeRollback) return err.decision;
+    throw err;
+  }
+  // Unreachable: the savepoint body always throws the sentinel.
+  return { allowed: true };
+}
+
 /**
  * Settle one turn's actual inside the turn's final transaction (which already holds the task row's
  * lock — task row FIRST, ledger rows after, always). Releases the reservation (floored at zero)
