@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   workflowResolveFailureHeaderKeptLog,
+  workflowResolveFailureJournalFailedLog,
   workflowResolveFailureLog,
 } from './workflow-executor.js';
 
@@ -49,5 +50,29 @@ describe('workflowResolveFailureHeaderKeptLog', () => {
 
   it('is a single line (it is a log line, not a report)', () => {
     expect(workflowResolveFailureHeaderKeptLog(JOB, 'quarantined')).not.toContain('\n');
+  });
+});
+
+describe('workflowResolveFailureJournalFailedLog', () => {
+  it('names the run and carries the reason the journal write failed', () => {
+    const line = workflowResolveFailureJournalFailedLog(JOB, new Error('orgs FK violation'));
+    expect(line).toContain("'code_invoice'");
+    expect(line).toContain('wfr_9e1c');
+    expect(line).toContain('orgs FK violation');
+  });
+
+  it('says the run is NOT recorded terminally, and does not claim otherwise', () => {
+    const line = workflowResolveFailureJournalFailedLog(JOB, new Error('boom'));
+    expect(line).toContain('NOT');
+    expect(line).toContain('workflow_runs');
+    expect(line).toContain('DBOS workflow status');
+  });
+
+  it('accepts a non-Error rejection without printing [object Object]', () => {
+    expect(workflowResolveFailureJournalFailedLog(JOB, 'plain string')).toContain('plain string');
+  });
+
+  it('is a single line (it is a log line, not a report)', () => {
+    expect(workflowResolveFailureJournalFailedLog(JOB, new Error('x'))).not.toContain('\n');
   });
 });

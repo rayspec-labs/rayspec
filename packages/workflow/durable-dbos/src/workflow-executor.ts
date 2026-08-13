@@ -150,6 +150,27 @@ export function workflowResolveFailureHeaderKeptLog(
   );
 }
 
+/**
+ * The line the worker emits when the terminal journal write ITSELF failed — the third and last shape
+ * this path can take. Pure + exported for the same reason as the other two: the wording has a single
+ * source of truth and is assertable without a DBOS launch.
+ *
+ * It says the run is not recorded TERMINALLY, which is exact in both sub-cases: `ensureRun` may have
+ * failed (no row at all) or `finalizeRun` may have failed after it (a `running` header that no engine
+ * will ever settle, because no engine was built).
+ */
+export function workflowResolveFailureJournalFailedLog(
+  job: { workflowRunId: string; tenantId: string; workflowId: string },
+  journalError: unknown,
+): string {
+  const reason = journalError instanceof Error ? journalError.message : String(journalError);
+  return (
+    `[workflow] resolve FAILED for workflow '${job.workflowId}' (tenant ${job.tenantId}, run ` +
+    `${job.workflowRunId}) and the terminal journal write ALSO failed (${reason}) — the run is NOT ` +
+    'recorded terminally in workflow_runs; its complete record is the DBOS workflow status and this line.'
+  );
+}
+
 /** Map DBOS's workflow status → the neutral job status (the asymmetry stays here; `unknown` fail-safe). */
 function toNeutralStatus(dbosStatus: string | null | undefined): DurableJobStatus {
   switch (dbosStatus) {
@@ -293,7 +314,10 @@ export class DbosWorkflowExecutor implements WorkflowEnqueuer {
    * chokepoint (never raw SQL), and emit the one line. BEST-EFFORT: `workflow_runs.tenant_id` is a
    * foreign key to `orgs(id)`, so this write can itself fail on a job for a tenant that no longer
    * exists — and an advisory record must never turn one failure into two. A failure is logged; the
-   * caller rethrows the ORIGINAL resolver error either way.
+   * caller rethrows the ORIGINAL resolver error either way. What ENFORCES that: this method has no
+   * throwing path. The journal work is caught, and the single emit sits OUTSIDE that try and is itself
+   * guarded — so neither a failed write nor a sink that throws can become the error the caller
+   * propagates in place of the resolver's.
    *
    * NEVER OVERWRITES A HEADER SOMEONE ELSE WROTE. `ensureRun` reports whether it created the row, and
    * the terminal patch is applied only to a row this path created or to one that CARRIES THIS PATH'S
@@ -311,6 +335,7 @@ export class DbosWorkflowExecutor implements WorkflowEnqueuer {
     job: WorkflowJob,
     err: unknown,
   ): Promise<void> {
+    let line: string;
     try {
       const { run, created } = await journal.ensureRun({
         workflowRunId: job.workflowRunId,
@@ -331,30 +356,32 @@ export class DbosWorkflowExecutor implements WorkflowEnqueuer {
       const isOwnSettledHeader =
         run.status === 'terminal_failure' && run.error?.code === WORKFLOW_RESOLVE_FAILED_CODE;
       if (!created && !isOwnSettledHeader) {
-        this.#logger.warn(workflowResolveFailureHeaderKeptLog(job, run.status));
-        return;
+        line = workflowResolveFailureHeaderKeptLog(job, run.status);
+      } else {
+        // ensureRun hard-codes status `running`; the terminal state is the finalize patch.
+        // `attempts:0` is exact for the row this line can reach: it was created just above, or it
+        // carries this path's own mark — no engine was built on either, so no node was ever attempted.
+        await journal.finalizeRun(job.workflowRunId, {
+          status: 'terminal_failure',
+          resumable: false,
+          error: {
+            code: WORKFLOW_RESOLVE_FAILED_CODE,
+            message: err instanceof Error ? err.message : String(err),
+            retryable: false,
+          },
+          attempts: 0,
+        });
+        line = workflowResolveFailureLog(job);
       }
-      // ensureRun hard-codes status `running`; the terminal state is the finalize patch. `attempts:0`
-      // is exact for the row this line can reach: it was created just above, or it carries this path's
-      // own mark — no engine was built on either, so no node was ever attempted.
-      await journal.finalizeRun(job.workflowRunId, {
-        status: 'terminal_failure',
-        resumable: false,
-        error: {
-          code: WORKFLOW_RESOLVE_FAILED_CODE,
-          message: err instanceof Error ? err.message : String(err),
-          retryable: false,
-        },
-        attempts: 0,
-      });
-      this.#logger.warn(workflowResolveFailureLog(job));
     } catch (journalErr) {
-      this.#logger.warn(
-        `[workflow] resolve FAILED for workflow '${job.workflowId}' (tenant ${job.tenantId}, run ` +
-          `${job.workflowRunId}) and the terminal journal write ALSO failed (${String(journalErr)}) ` +
-          '— the run is NOT recorded terminally in workflow_runs; its only complete record is the ' +
-          'DBOS workflow status.',
-      );
+      line = workflowResolveFailureJournalFailedLog(job, journalErr);
+    }
+    try {
+      this.#logger.warn(line);
+    } catch {
+      // A sink that throws — an injected logger, or `console.warn` on a closed stream — must not
+      // become the error the caller propagates: the caller's very next statement rethrows the
+      // ORIGINAL resolver error, and that is the error that matters. Nothing escapes here.
     }
   }
 
