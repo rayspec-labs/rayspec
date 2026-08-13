@@ -148,9 +148,11 @@ describe('init.emit — the BUFFERED (route) form', () => {
   it('a one-argument emit is a topic-only event, stored as JSON null (not a mis-call)', async () => {
     const tdb = fakeTdb();
     const { emit, flush } = makeTenantEventBus().buffered(tdb);
-    // Called UNCAST through the published `EmitEvent` type: a mis-call needs a cast to write, and this
-    // form is not one — so the absence of a cast here is also the compile-time assertion that the type
-    // admits the call the docs and the guard above both call legitimate.
+    // The RUNTIME half: a topic-only emit is stored as a topic-only row rather than treated as a
+    // mis-call. It cannot also assert the TYPE — vitest strips types, and every package `tsconfig`
+    // excludes `**/*.test.ts`, so this file would keep passing if `payload` became required. That
+    // compile-time guarantee lives in `handler-sdk/src/emit-contract-typepin.ts`, which `tsc -b`
+    // does compile.
     await emit('heartbeat');
     await flush();
     expect(tdb.batches).toEqual([[{ topic: 'heartbeat', payload: undefined }]]);
