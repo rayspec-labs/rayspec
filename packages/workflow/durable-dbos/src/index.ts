@@ -63,7 +63,12 @@ export {
   DEFAULT_WORKFLOW_WORKER_CONCURRENCY,
   type ResolvedWorkflowRun,
   reconcileWorkflowLiveness,
+  WORKFLOW_RESOLVE_FAILED_CODE,
   WORKFLOW_RUNS_QUEUE,
+  type WorkflowExecutorLogger,
   type WorkflowJob,
   type WorkflowRunLiveness,
+  workflowResolveFailureHeaderKeptLog,
+  workflowResolveFailureJournalFailedLog,
+  workflowResolveFailureLog,
 } from './workflow-executor.js';

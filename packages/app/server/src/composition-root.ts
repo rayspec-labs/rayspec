@@ -131,6 +131,7 @@ import {
   PROVISION_BOOT_SECRETS,
   SERVER_BOOT_SECRETS,
 } from './boot-env-demands.js';
+import { deriveDbosApplicationVersion } from './durable-app-version.js';
 import {
   deployProductYamlSpec,
   makeSchemaProbe,
@@ -2726,6 +2727,11 @@ async function deployDeclaredSpec(
       {
         name: effectiveSpec.metadata.name,
         systemDatabaseUrl: config.dbosSystemDatabaseUrl,
+        // FENCE (issue #359): scope DBOS's dequeue to THIS document. Two processes on one
+        // DATABASE_URL share one DBOS system database and one set of queue names, and the application
+        // version is the only discriminator DBOS's dequeue offers — so without this a worker claims
+        // (and fail-closed kills) a job belonging to the other deployment's spec.
+        applicationVersion: deriveDbosApplicationVersion('backend', effectiveSpec.metadata.name),
         workerConcurrency,
       },
     );
