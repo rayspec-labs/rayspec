@@ -36,6 +36,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { PlannedMigration } from '@rayspec/api-auth';
 import type { AgentSpec, Backend, BackendId, RunContext, RunResult } from '@rayspec/core';
 import { registerScopedTables } from '@rayspec/db/testing';
 import type { PgTable } from 'drizzle-orm/pg-core';
@@ -136,8 +137,35 @@ const CRON_STORE_NO_WORKER_YAML = CRON_STORE_SPEC_YAML.replace(
   '',
 );
 
+/**
+ * The SAME store-declaring spec after its `body` column was RENAMED to `title` — the next revision of
+ * a deployment whose store is already materialized. Against that live table it classifies `drifted`
+ * (no `title` column), which is the state `rayspec deploy --apply-migration <delta.sql>` exists for.
+ */
+const CRON_STORE_RENAMED_YAML = CRON_STORE_SPEC_YAML.replace(
+  '      - { name: body, type: text }',
+  '      - { name: title, type: text }',
+);
+
 /** The store's table name (a store name IS its table name — `generateProductSql` emits it verbatim). */
 const STORE_TABLE = 'cron_boot_notes';
+
+/** The column the renamed spec wants — absent from the live table until the delta applies. */
+const RENAMED_COLUMN = 'title';
+
+/**
+ * The reviewed forward delta for that rename, carrying NO allowlist entry for its `DROP COLUMN`.
+ * `rayspec deploy --apply-migration <delta.sql>` takes `--allowlist` separately and the CLI runs no
+ * destructive scan of its own, so omitting it is a legal command — and `deploy()`'s `[lint/gate]` step
+ * is what blocks the un-covered destructive statement, before its migrate step ever runs.
+ */
+const RENAME_DELTA: PlannedMigration = {
+  name: '0001_rename_body_to_title.sql',
+  sql:
+    `ALTER TABLE "${STORE_TABLE}" ADD COLUMN "${RENAMED_COLUMN}" text;\n` +
+    `ALTER TABLE "${STORE_TABLE}" DROP COLUMN "body";`,
+  allowlist: [],
+};
 
 /** The first-materialization migration both deployers plan for a clean database. */
 const MATERIALIZE_MIGRATION = '0000_product_stores.sql';
@@ -170,12 +198,14 @@ function withDbName(url: string, dbName: string): string {
 const SUITE_DB = `rayspec_server_cron_${process.pid}`;
 const DBOS_SYS_DB = `${SUITE_DB}_dbos_sys`;
 /**
- * The two store-declaring arms get their OWN throwaway databases: one asserts the store table IS
- * there after the refusal, the other that it is NOT, so neither may inherit the other's schema (nor
- * leave a product table in `SUITE_DB`, whose store-less specs must keep classifying as they do).
+ * The three store-declaring arms get their OWN throwaway databases: one asserts the store table IS
+ * there after the refusal, one that it is NOT, and one boots twice against a schema the first of its
+ * own boots materialized — so none may inherit another's schema (nor leave a product table in
+ * `SUITE_DB`, whose store-less specs must keep classifying as they do).
  */
 const APPLIED_DB = `rayspec_server_cron_applied_${process.pid}`;
 const PREMIGRATE_DB = `rayspec_server_cron_premigrate_${process.pid}`;
+const GATED_DB = `rayspec_server_cron_gated_${process.pid}`;
 
 describe('cron-worker boot — composition root wires the scheduler + fail-closed boot guards', () => {
   const baseUrl = process.env.DATABASE_URL;
@@ -193,6 +223,7 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
   let appDbUrl = '';
   let appliedDbUrl = '';
   let premigrateDbUrl = '';
+  let gatedDbUrl = '';
   let tmpDir = '';
   const created: BootedServer[] = [];
   const savedEnv: Record<string, string | undefined> = {};
@@ -256,15 +287,29 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
     }
   }
 
+  /** Is a COLUMN present on a live public table? (ground truth for a delta that did / did not apply.) */
+  async function columnExists(dbUrl: string, table: string, column: string): Promise<boolean> {
+    const c = postgres(dbUrl, { max: 1 });
+    try {
+      const rows = await c`
+        select 1 from information_schema.columns
+        where table_schema = 'public' and table_name = ${table} and column_name = ${column}`;
+      return rows.length > 0;
+    } finally {
+      await c.end();
+    }
+  }
+
   beforeAll(async () => {
     if (!baseUrl) return;
     appDbUrl = withDbName(baseUrl, SUITE_DB);
     appliedDbUrl = withDbName(baseUrl, APPLIED_DB);
     premigrateDbUrl = withDbName(baseUrl, PREMIGRATE_DB);
+    gatedDbUrl = withDbName(baseUrl, GATED_DB);
 
     const admin = postgres(adminUrl(baseUrl), { max: 1 });
     try {
-      for (const d of [SUITE_DB, APPLIED_DB, PREMIGRATE_DB]) {
+      for (const d of [SUITE_DB, APPLIED_DB, PREMIGRATE_DB, GATED_DB]) {
         // The derived DBOS system sibling first (it is what holds a connection to nothing else).
         await admin.unsafe(`DROP DATABASE IF EXISTS "${d}_dbos_sys" WITH (FORCE)`);
         await admin.unsafe(`DROP DATABASE IF EXISTS "${d}" WITH (FORCE)`);
@@ -298,7 +343,7 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
       const admin = postgres(adminUrl(baseUrl), { max: 1 });
       try {
         await admin.unsafe(`DROP DATABASE IF EXISTS "${DBOS_SYS_DB}" WITH (FORCE)`);
-        for (const d of [SUITE_DB, APPLIED_DB, PREMIGRATE_DB]) {
+        for (const d of [SUITE_DB, APPLIED_DB, PREMIGRATE_DB, GATED_DB]) {
           // WITH (FORCE): a refused boot throws before anything closes its pool, so the throwaway
           // databases the refusal arms below booted against still carry an open connection.
           await admin.unsafe(`DROP DATABASE IF EXISTS "${d}_dbos_sys" WITH (FORCE)`);
@@ -473,11 +518,15 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
   );
 
   maybe(
-    'pre-migrate refusal: a store-declaring spec refused BEFORE the migrate step carries NO note, and left no table',
+    'pre-migrate refusal, before deploy() is even called: a store-declaring spec rejected at spec ' +
+      'validation carries NO note, and left no table',
     async () => {
-      // The counter-case for the predicate: this spec declares the same store, so a note keyed on the
-      // spec (or on the deploy mode) would fire here too — but the boot is refused at validation, so
-      // nothing was ever applied and telling the operator otherwise would be a lie.
+      // The earliest refusal a store-declaring boot can meet: the spec is rejected by the boot's own
+      // parse/lint step, which runs before deploy() is called and before the migrations and the deploy
+      // mode are decided — so no note-attachment site is on this code path at all. What it measures is
+      // the DATABASE: a boot refused this early materializes nothing, so there is nothing to say.
+      // (The arm BELOW is the one that reaches the attachment site with a non-empty migration plan and
+      // still carries no note — that is where the applied-vs-planned predicate is discriminated.)
       process.env.DATABASE_URL = premigrateDbUrl;
       process.env.RAYSPEC_SPEC_PATH = writeSpec(CRON_STORE_NO_WORKER_YAML, 'no-worker-store.yaml');
       process.env.RAYSPEC_CRON_TENANT_ID = CRON_TENANT;
@@ -493,6 +542,63 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
       expect((err as Error).message).not.toContain('ALREADY COMMITTED');
       // GROUND TRUTH for the same claim: the store table was never created.
       expect(await tableExists(premigrateDbUrl, STORE_TABLE)).toBe(false);
+    },
+    120_000,
+  );
+
+  maybe(
+    "pre-migrate refusal INSIDE the note's own catch: deploy() blocks an un-allowlisted delta at " +
+      '[lint/gate] with a NON-EMPTY migration plan — and the refusal still carries NO note',
+    async () => {
+      // The arm that DISCRIMINATES the predicate. It reaches the same catch the post-migrate arm above
+      // goes through — deploy() raises this one itself, inside the try — and it gets there with a
+      // NON-EMPTY `migrations[]` and deployMode 'updated', both decided before deploy() ran. So a note
+      // keyed on what was PLANNED (or on the deploy mode) fires here, and one keyed on what
+      // `applyMigration` actually applied does not: the gate blocks before the migrate step.
+      process.env.DATABASE_URL = gatedDbUrl;
+
+      // Step 1 — a PRIOR deployment materializes the store on this database. Same fixture and same
+      // refusal as the post-migrate arm above: the CREATE TABLE is committed, then the boot is refused.
+      process.env.RAYSPEC_SPEC_PATH = writeSpec(CRON_STORE_SPEC_YAML, 'gated-store.yaml');
+      delete process.env.RAYSPEC_CRON_TENANT_ID;
+      await assembleServer(loadServerConfig(), assembleOpts()).then(
+        (s) => {
+          created.push(s);
+        },
+        () => {},
+      );
+      expect(await tableExists(gatedDbUrl, STORE_TABLE)).toBe(true);
+      expect(await columnExists(gatedDbUrl, STORE_TABLE, RENAMED_COLUMN)).toBe(false);
+
+      // Step 2 — the documented `rayspec deploy --apply-migration <delta.sql>` path WITHOUT
+      // `--allowlist`: the live schema is drifted against the renamed spec, so the boot routes APPLY and
+      // hands deploy() this delta — which deploy() then blocks at [lint/gate], its OWN pre-migrate step.
+      process.env.RAYSPEC_SPEC_PATH = writeSpec(
+        CRON_STORE_RENAMED_YAML,
+        'gated-store-renamed.yaml',
+      );
+      process.env.RAYSPEC_CRON_TENANT_ID = CRON_TENANT;
+      const err = await assembleServer(loadServerConfig(), {
+        ...assembleOpts(),
+        updateMigrations: [RENAME_DELTA],
+      }).then(
+        (s) => {
+          created.push(s);
+          return null;
+        },
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(Error);
+      // deploy()'s own gate refused it — the step name places the refusal inside the catch's span.
+      expect((err as Error).message).toContain('deploy aborted at [lint/gate]');
+      expect((err as Error).message).toContain(RENAME_DELTA.name);
+      // …and the refusal says NOTHING about committed DDL: this boot applied no migration.
+      expect((err as Error).message).not.toContain('ALREADY COMMITTED');
+
+      // GROUND TRUTH: the schema is exactly as step 1 left it — the delta's ADD COLUMN never ran, so
+      // the table an earlier boot committed is still there and still has no `title`.
+      expect(await tableExists(gatedDbUrl, STORE_TABLE)).toBe(true);
+      expect(await columnExists(gatedDbUrl, STORE_TABLE, RENAMED_COLUMN)).toBe(false);
     },
     120_000,
   );
