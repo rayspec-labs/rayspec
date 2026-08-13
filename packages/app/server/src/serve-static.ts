@@ -690,8 +690,19 @@ interface InlineAssetScanState {
   readonly specDir: string;
   /** REAL paths of the files already examined — a link and its target are one file, examined once. */
   readonly seen: Set<string>;
-  /** REAL paths of the directories already walked — what makes a symlink cycle terminate. */
+  /**
+   * REAL paths of the directories already walked WITHIN THE CURRENT MOUNT'S WALK — what makes a
+   * symlink cycle terminate. Cleared per mount: two mounts over the SAME directory serve it under
+   * DIFFERENT request paths, and it is the request path that decides the reserved-namespace skip,
+   * so the second mount must walk the tree again rather than inherit the first mount's verdicts.
+   */
   readonly seenDirs: Set<string>;
+  /**
+   * `route + NUL + real mount dir` of the mounts already walked. Keyed on the PAIR, not the
+   * directory: a `/` mount and an `/app` mount over one directory are two different served
+   * namespaces, and only an identical pair is genuinely redundant.
+   */
+  readonly seenMounts: Set<string>;
   readonly findings: InlineAssetFinding[];
   filesScanned: number;
   /** Set ONLY when an HTML file was actually declined for want of budget — see `scanHtmlTree`. */
@@ -867,6 +878,7 @@ export function blockedInlineAssetWarning(
     specDir,
     seen: new Set(),
     seenDirs: new Set(),
+    seenMounts: new Set(),
     findings: [],
     filesScanned: 0,
     filesTruncated: false,
@@ -883,7 +895,16 @@ export function blockedInlineAssetWarning(
     } catch {
       realDir = dir;
     }
-    if (state.seenDirs.has(realDir)) continue; // two mounts may declare the same directory
+    // Two mounts may declare the same directory under DIFFERENT routes; only an identical
+    // (route, directory) pair is redundant. Keying on the directory alone would let the first
+    // mount's walk decide the reserved-namespace skip for the second one's request paths — an
+    // `/app` mount's `/app/v1/page.html` is servable where a `/` mount's `/v1/page.html` is not.
+    const mountKey = `${mount.route}\u0000${realDir}`;
+    if (state.seenMounts.has(mountKey)) continue;
+    state.seenMounts.add(mountKey);
+    // Directory-cycle protection is per WALK, not global: this tree may legitimately be walked
+    // again under another mount's route.
+    state.seenDirs.clear();
     state.seenDirs.add(realDir);
     // The mount's route is what turns a walked path into the REQUEST path it is served at, which is
     // what the reserved-namespace skip inside the walk tests. Split exactly as `mountFrontend`'s

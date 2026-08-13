@@ -360,6 +360,32 @@ describe("the walk's skips are the mount's refusals", () => {
     expect(await page.text()).toContain('<style>body{color:red}</style>');
   });
 
+  it('a ROOT mount alongside an /app mount over ONE directory: the /app namespace is still walked', async () => {
+    // The regression this pins: the walk deduped mounts by DIRECTORY, so whichever mount reached a
+    // shared directory first decided the reserved-namespace skip for BOTH. With a `/` mount walking
+    // first, `v1/` was skipped as reserved and the `/app` mount was never walked at all — so
+    // `/app/v1/page.html` was served 200 with the blocked bytes and named by NOTHING. The dedup key
+    // is the (route, directory) PAIR: only an identical pair is genuinely redundant.
+    writeAsset('v1/page.html', ALL_FOUR);
+
+    const warnings: string[] = [];
+    const server = assembleStaticServer(
+      loadStaticServerConfig({}),
+      {
+        specPath: specPath(),
+        frontend: [SPA_MOUNT, { route: '/app', dir: 'web/dist', spa: false }],
+      },
+      { bootWarn: (message) => warnings.push(message) },
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('web/dist/v1/page.html');
+    // And the served reality the warning is about: reserved under `/`, ordinary under `/app`.
+    expect((await server.app.request('/v1/page.html')).status).toBe(404);
+    const viaApp = await server.app.request('/app/v1/page.html');
+    expect(viaApp.status).toBe(200);
+    expect(await viaApp.text()).toContain('<style>body{color:red}</style>');
+  });
+
   it('a link and its target are ONE file — examined once, named once', () => {
     const real = writeAsset('real.html', ALL_FOUR);
     symlinkSync(real, join(dist(), 'link.html'));
