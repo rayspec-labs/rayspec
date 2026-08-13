@@ -442,9 +442,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with nothing supplying one it derives that version by hashing the source of the workflow functions
   registered in the process plus the SDK version. Every function this platform registers is a thin
   wrapper, and nothing in that input comes from the workflows the deployed document declares — so two
-  documents booted through the same profile computed the same version. (It was never one value across
-  the whole platform: the registered set is per profile, and a backend boot adds one function per cron
-  trigger the document declares. What it never varied with is the thing that mattered.) With the
+  documents that registered the same *set* of functions computed the same version, whatever they
+  declared. Two Product-YAML boots always did: that profile registers the same three wrappers on every
+  boot and starts no cron scheduler, which is the pair issue #359 measured. A backend boot's set also
+  grows by one registered function per cron trigger the document declares, and the hash is taken over
+  the array of those sources with identical text never collapsed — so two backend documents landed on
+  the same version only when their declared trigger counts matched. With the
   change reverted, this repo's composition-root boot test (`durable-worker-boot.db.test.ts`) prints
   `Application version: e0b3d354857e6676f40a2867c79ae41d`; issue #359 reports one value across four
   boots of two different products.
