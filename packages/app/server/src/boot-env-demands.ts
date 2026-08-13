@@ -44,12 +44,17 @@ import {
  * `what` is what the variable IS, in one clause. For a record a BOOT SITE consumes it is the clause that
  * site's refusal already used, kept verbatim so the refusal is composed from this record rather than
  * restating it — that is what makes those records load-bearing instead of documentation, and it is why
- * editing one of them reds a suite. The others are read by the REPORT alone: `RAYSPEC_BLOB_ROOT`,
+ * editing one of them reds a suite. The others compose no refusal: `RAYSPEC_BLOB_ROOT`,
  * `RAYSPEC_MEDIA_SIGNING_KEY`, `RAYSPEC_CRON_TENANT_ID`, the two anthropic credentials,
  * `RAYSPEC_ANTHROPIC_REUSE_LOGIN`, `TTS_PROVIDER` and `RAYSPEC_FS_SOURCE_ROOT` are imported by no boot
  * site, because their guards say more than a `what` clause can (the anthropic credential names a CHOICE
  * of two; the deploy guards spend a sentence each on what a stream route or a cron trigger is). For
- * those, `what` is the report's own description and changing it changes no refusal. A variable that is
+ * those, `what` is the report's own description and changing it changes no refusal — and for four of
+ * them it changes nothing at all: `what` is read in exactly one place, `RequirementSet.demand`, so only
+ * `RAYSPEC_BLOB_ROOT`, `RAYSPEC_MEDIA_SIGNING_KEY`, `RAYSPEC_CRON_TENANT_ID` and the anthropic
+ * `anyOf` PRIMARY reach it. `ANTHROPIC_API_KEY`, `RAYSPEC_ANTHROPIC_REUSE_LOGIN`, `TTS_PROVIDER` and
+ * `RAYSPEC_FS_SOURCE_ROOT` appear only as an `optional` row or an `anyOf` sibling, and neither reads
+ * `what`. A variable that is
  * demanded from two different places with two different reasons gets two records (`OPENAI_API_KEY` has
  * three: the `openai` extraction backend, the `pi` backend, and `TTS_PROVIDER=openai`), because the
  * reason is what an operator needs and it genuinely differs.

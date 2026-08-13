@@ -20,9 +20,13 @@
  *    `ANTHROPIC_API_KEY`, `RAYSPEC_ANTHROPIC_REUSE_LOGIN`, `TTS_PROVIDER` and `RAYSPEC_FS_SOURCE_ROOT`
  *    are imported by no boot site: their guards say more than a `what` clause can — the anthropic
  *    credential's "neither is set" names a CHOICE of two, the deploy guards spend a sentence each on
- *    what a stream route or a cron trigger is — so those refusals keep their own wording and these
- *    records exist to give the read-only report its reason clause. Editing one of the eight moves that
- *    `because` line and nothing else. Wire one of them into a refusal and it needs a pin here too.
+ *    what a stream route or a cron trigger is — so those refusals keep their own wording. What those
+ *    eight records then do SPLITS, and only half of them do anything with `what` at all: measured, the
+ *    single reader is `RequirementSet.demand`, so `RAYSPEC_BLOB_ROOT`, `RAYSPEC_MEDIA_SIGNING_KEY`,
+ *    `RAYSPEC_CRON_TENANT_ID` and `CLAUDE_CODE_OAUTH_TOKEN` (as the `anyOf` primary) give the report its
+ *    `because` clause, and editing one of those four moves that clause. The other four reach the verdict
+ *    only as an `optional` row or an `anyOf` sibling, and neither shape reads `what` — theirs is inert
+ *    text. Wire any of the eight into a refusal and it needs a pin here too.
  *
  * 2. The REPORT agrees with the boot. `checkBootEnv` is not allowed to answer a question the boot would
  *    answer differently, so the cases below drive the distinctions that were easiest to get wrong: the
