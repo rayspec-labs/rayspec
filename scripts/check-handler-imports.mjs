@@ -45,6 +45,11 @@ const BASE_ESCAPE_HATCH_ROOTS = [
   // by `rayspec gen-handler` from committed holes). Scanned here so the import-boundary gate FIRES on
   // any forbidden import in generated code (the gate's "a real deployment adds its own root" pattern).
   'examples/expense-claim-coder/handlers',
+  // The event-bus example's handlers. Scanned here (and in check-extension-capability.mjs, in
+  // lockstep) because they are the reference for how a handler ANNOUNCES a change: the boundary that
+  // matters for `init.emit` is that a handler uses the INJECTED capability rather than reaching the
+  // append itself, and only these gates say so about example code.
+  'examples/live-workspace-events/handlers',
   // NOTE: the stream/blob backend's handlers live in its extension PACK
   // (examples/stream-backend/packs/stream-pack/handlers) — DISCOVERED below as a pack handler
   // root (manifest-derived), not a fixed base root.

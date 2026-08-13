@@ -44,18 +44,25 @@ export {
   markEnumWhitelist,
 } from './enum-whitelist-registry.js';
 // The tenant event bus: the per-tenant-sequenced append (reached through `TenantDb.appendEvents`, so
-// no caller needs the raw handle), the stream-state read a consumer classifies a cursor against, and
-// the age-window retention sweep the scheduled cleanup arm drives.
+// no caller needs the raw handle), the ONE-SNAPSHOT page read a subscriber resumes from (reached
+// through `TenantDb.readEventPage`, same reason), the stream-state read, the age-window retention
+// sweep the scheduled cleanup arm drives, and the process-wide LISTEN the composition root builds.
 export {
   appendTenantEvents,
   eventRetentionCutoff,
+  listenTenantEvents,
+  readTenantEventPage,
   readTenantEventStream,
   sweepTenantEvents,
   TENANT_EVENT_CHANNEL,
   type TenantEventAppendResult,
+  type TenantEventFrame,
   type TenantEventInput,
+  type TenantEventListenHandle,
+  type TenantEventPage,
   type TenantEventStreamState,
   type TenantEventSweepResult,
+  type TenantEventWakeNotice,
 } from './event-bus.js';
 // The full-text-search table-identity registry: `buildProductTables` marks a `fullTextSearch` store's
 // runtime table so a facade-level full-text consumer can resolve it by object identity (parity with the

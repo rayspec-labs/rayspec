@@ -52,6 +52,7 @@ import {
   InviteStore,
   type ManualTriggerFirer,
   makeTenantEventBus,
+  makeTenantEventWake,
   OrgStore,
   type PlannedMigration,
   runScheduledCleanup,
@@ -2591,6 +2592,12 @@ async function deployDeclaredSpec(
   // told so, once, below (`eventBusUnsweptBootNotice`, after the cleanup wiring decides).
   const eventBusDecl = effectiveSpec.deployment?.eventBus;
   const eventBus = eventBusDecl?.enabled === true ? makeTenantEventBus() : undefined;
+  // The WAKE half — ONE process LISTEN on the bus channel, fanned out in memory to whatever
+  // `GET /v1/subscribe` is serving. Built beside the bus, on the same enablement, because it is only
+  // ever useful when there is a stream to wake about. It is a LATENCY optimisation and nothing else:
+  // every subscriber also reads on its own interval, so a boot whose LISTEN fails logs and carries on
+  // rather than refusing — a deployment delivering one poll interval late is working.
+  const eventWake = eventBus ? makeTenantEventWake(db) : undefined;
   const eventBusRetentionHours =
     eventBusDecl?.enabled === true
       ? (eventBusDecl.retentionHours ?? DEFAULT_EVENT_BUS_RETENTION_HOURS)
@@ -2844,8 +2851,12 @@ async function deployDeclaredSpec(
           ...(ttsCapability ? { ttsCapability } : {}),
           // Inject the tenant event bus (when the deployed spec enabled it) so a route/tool handler's
           // `init.emit` appends to its tenant's stream. Spread so ABSENT otherwise — which is what
-          // makes the capability absent from every init rather than an undefined-valued key.
+          // makes the capability absent from every init rather than an undefined-valued key, AND
+          // what makes `GET /v1/subscribe` serve rather than answer its fail-closed 501.
           ...(eventBus ? { eventBus } : {}),
+          // Inject the process wake beside it, so a subscriber is woken by the emitting transaction
+          // instead of waiting out its next read. Absent ⇒ subscribers poll only (later, never lossy).
+          ...(eventWake ? { eventWake } : {}),
         };
         // Inject the durable executor (when wired) so the run surface's async path can enqueue.
         return createAuthApp({

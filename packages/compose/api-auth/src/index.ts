@@ -44,6 +44,7 @@ export type {
   ReprocessEnqueued,
   SessionReprocessor,
   SessionReprocessResult,
+  TenantEventWake,
 } from './app-context.js';
 // the platform-generic, operator-gated, fail-closed tenant DATA-ERASURE (product rows via the
 // TenantDb chokepoint + blobs via BlobStore.deleteTenant). The composition root wires it as the
@@ -91,6 +92,11 @@ export {
 // enabled the bus and injects it onto the engine, where its presence is what makes a route/tool init
 // carry `init.emit`.
 export { makeTenantEventBus } from './engine/event-bus.js';
+// the event-bus WAKE — ONE process LISTEN, fanned out in memory to the subscribers this process
+// serves. The composition root builds it beside the bus and injects it onto the engine; it makes
+// `GET /v1/subscribe` deliver immediately rather than within one poll interval, and nothing keys
+// correctness on it (a subscriber's own periodic read is the delivery guarantee).
+export { makeTenantEventWake, type TenantEventWakeHub } from './engine/event-wake.js';
 // the media-token service (the playback route's distinct HS256 auth path) + the
 // in-process revocation denylist. The composition root builds the service from the distinct
 // RAYSPEC_MEDIA_SIGNING_KEY and injects it into the engine. Zero product vocabulary (a generic

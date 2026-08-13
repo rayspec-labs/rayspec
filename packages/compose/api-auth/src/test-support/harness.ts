@@ -325,6 +325,27 @@ export async function createHarness(
      */
     eventBus?: NonNullable<NonNullable<AppDeps['engine']>['eventBus']>;
     /**
+     * the event-bus WAKE wired into `deps.engine.eventWake` (what makes `GET /v1/subscribe` deliver
+     * immediately rather than within one poll interval). A delivery test passes the REAL
+     * `makeTenantEventWake(db)` so the notify path itself is exercised. Omit ⇒ subscribers fall back
+     * to their periodic read — a SUPPORTED posture, and one a test should also cover, since a wake is
+     * a latency optimisation and never the delivery guarantee.
+     */
+    eventWake?: NonNullable<NonNullable<AppDeps['engine']>['eventWake']>;
+    /**
+     * override the subscriber poll interval (ms) wired into `deps.engine.eventPollIntervalMs`.
+     * Default UNSET ⇒ `DEFAULT_EVENT_POLL_INTERVAL_MS`. A wake-less delivery test sets it small so
+     * the backstop path is exercised in test time.
+     */
+    eventPollIntervalMs?: number;
+    /**
+     * override the per-subscription lifetime cap (seconds) wired into
+     * `deps.engine.eventStreamMaxSeconds`. Default UNSET ⇒ the access-token TTL (which is also the
+     * ceiling). A lifetime test sets it to a second or two so the cap closes the stream in test time
+     * WITHOUT shortening the token TTL out from under the rest of the suite.
+     */
+    eventStreamMaxSeconds?: number;
+    /**
      * the media-token service wired into `deps.engine.mediaTokenService` (the playback
      * route's 2nd auth path + the mint capability). A playback test passes a service built over a test
      * media secret. Omit ⇒ a declared `stream` playback route fails closed at boot (no media verifier).
@@ -452,8 +473,17 @@ export async function createHarness(
       // so a handler that needs speech fail-closes loudly).
       ...(opts.ttsCapability ? { ttsCapability: opts.ttsCapability } : {}),
       // the tenant event bus a route/tool handler's `init.emit` is built from (omit ⇒ ABSENT, so a
-      // handler that needs the bus fail-closes loudly).
+      // handler that needs the bus fail-closes loudly). Its presence is ALSO what makes
+      // `GET /v1/subscribe` serve rather than fail closed with a 501.
       ...(opts.eventBus ? { eventBus: opts.eventBus } : {}),
+      // the process wake for `GET /v1/subscribe` (omit ⇒ subscribers use their periodic read only).
+      ...(opts.eventWake ? { eventWake: opts.eventWake } : {}),
+      ...(opts.eventPollIntervalMs !== undefined
+        ? { eventPollIntervalMs: opts.eventPollIntervalMs }
+        : {}),
+      ...(opts.eventStreamMaxSeconds !== undefined
+        ? { eventStreamMaxSeconds: opts.eventStreamMaxSeconds }
+        : {}),
       // the media-token service for declared `stream` playback routes + the mint capability
       // (omit ⇒ a playback route fails closed at boot — the deploy-guard a test can also exercise).
       ...(opts.mediaTokenService ? { mediaTokenService: opts.mediaTokenService } : {}),

@@ -1545,14 +1545,118 @@ silent no-op:
   payload must have a JSON form. In particular `emit({ topic, payload })` — the shape
   the sibling `init.enqueue` takes — is refused naming `emit(topic, payload)`, instead
   of writing a row whose topic is `[object Object]`. A payload with no JSON form at
-  all (a function, a symbol) is refused for the same reason. A one-argument
-  `emit('heartbeat')` is a legitimate topic-only event, not a mis-call.
+  all (a function, a symbol) is refused for the same reason, and so is a topic
+  carrying a **line break** — a subscriber receives the topic as the SSE `event:`
+  field, whose grammar cannot carry one, so such an event could never be delivered
+  (multi-line content belongs in the payload, which is served verbatim). A
+  one-argument `emit('heartbeat')` is a legitimate topic-only event, not a mis-call.
 - **An emit after the handler returned.** On a route, emit from the **handler body**.
   A `{handler}` route may return a streaming envelope (`sseResponse`) whose producer
   runs after the route transaction closed; an `init.emit` call from inside it has no
   transaction left to append to, so it is refused rather than accepted and lost. (Note
   the name collision: the producer's own first argument is also called `emit` — that
   one writes an SSE frame to the open connection and is unrelated to this capability.)
+
+The read side of the same stream is the platform route below.
+
+## Subscribing to the tenant event stream
+
+```
+GET /v1/subscribe?topics=a,b&since=<cursor>
+Accept: text/event-stream
+Authorization: Bearer <token>
+```
+
+A **platform** route — nothing declares it. It serves whenever the deployment enabled
+the bus ([`deployment.eventBus`](#deployment)) and answers a clean **`501`** naming
+the key to set when it did not. It requires the **`events:read`** permission (granted
+to owner, admin and member, and grantable to an api-key), and the tenant is
+server-derived exactly as everywhere else: there is no query parameter through which
+another tenant could be named.
+
+A browser needs three lines, because everything below is what `EventSource` already
+does on its own:
+
+```js
+const es = new EventSource('/v1/subscribe?topics=note.created')
+es.addEventListener('note.created', (e) => render(JSON.parse(e.data)))
+```
+
+### Frames
+
+- A **data frame** is one event: `id:` is the cursor, `event:` is your topic,
+  `data:` is your payload as JSON (a topic-only emit arrives as `null`).
+- A **control frame carries no `id:`**, and that — not its name — is how you tell the
+  two apart. A topic is author data, so a handler could emit `rayspec.truncated`
+  itself; it could never emit a frame *without* an id, because every event has a
+  sequence number. It also means a control frame can never come back as a cursor:
+  - **`rayspec.live`** — your backlog is drained; everything after this is live.
+    `data` is `{ "from": <seq> }`.
+  - **`rayspec.truncated`** — the cursor you sent is older than retention. `data` is
+    `{ "truncatedThrough": <seq>, "requestedFrom": <seq> }`; the stream then resumes
+    at the floor, so refetch whatever state you were tracking and keep reading.
+- The event's timestamp is **not on the wire**. It is transaction-start time and is
+  not monotone with `seq`, so shipping it would only invite clients to sort by it. A
+  handler that wants a timestamp puts one in its payload.
+- Between frames you may see a block that is an `id:` line and nothing else — the
+  **resume checkpoint**. It is not a frame and dispatches no event; it exists so that
+  a subscriber which has not been handed a data frame yet is still holding a cursor
+  when the lifetime cap closes the stream (see *Delivery, and what bounds it*).
+  `EventSource` consumes it for you; a hand-written parser must treat a block with no
+  `data:` as a cursor update rather than as an event, which is what the event-stream
+  grammar already says.
+
+### The cursor
+
+The cursor is **`<tenant_id>:<seq>`**, never a bare number, and it arrives either as
+the standard `Last-Event-ID` reconnect header or as `?since=`. Sequences are
+per-tenant, so an untagged cursor means something different in every stream and would
+resume silently at the wrong place after an org switch or a copy between
+environments. Four refusals, each a `400` rather than a plausible-looking stream:
+
+- a cursor that is not `<tenant_id>:<seq>`;
+- a cursor tagged with a **different tenant** than the request's;
+- a cursor whose sequence is not **decimal digits** — a hexadecimal, exponent,
+  fractional, signed, padded or empty sequence is refused rather than coerced, because
+  coercing it resumes the subscriber at a position it never asked for (`:0x10` would
+  quietly start at 16) and looks successful while doing it;
+- a cursor **ahead of the stream** — no such sequence was ever issued to this tenant,
+  and serving it would look exactly like a healthy stream that has gone quiet.
+
+**Omitting the cursor is not a truncation.** A fresh subscriber starts at the tail and
+receives no truncation signal, however old the stream's floor is — it never had the
+history it is missing.
+
+### `topics`
+
+**Omitting `topics` means every topic.** An explicitly empty `?topics=` is a `400`,
+not a subscription that quietly delivers nothing: an empty filter can only ever match
+nothing, which is indistinguishable from a working stream on a quiet workspace. A
+filter does not slow your resume down — the cursor advances past the events it skips.
+
+### Delivery, and what bounds it
+
+- **Nothing is delivered twice and nothing is skipped.** Each read takes the events
+  above your cursor from one snapshot together with the stream's retention floor, so
+  a subscriber can never be told its cursor is fine about events that are already
+  gone. The floor is re-checked on **every** read, not once at connect, because a
+  long-lived subscription can outlive the retention of its own unread history.
+- **The stream is closed after a bounded lifetime** — at most the access-token TTL —
+  and your client reconnects. That reconnect is a fresh request through the whole auth
+  chain, which is what makes a revoked principal stop receiving events; permission is
+  middleware and is otherwise only checked at connect.
+- **A reconnect is free**, and the server is what makes it so. `EventSource` resends
+  the last `id:` it saw as `Last-Event-ID` — but its last-event-ID string starts
+  *empty* and is set by nothing except an `id:`, so a subscriber on a quiet workspace
+  would reach the cap having seen none and reconnect with no cursor at all, landing
+  back at the tail with whatever arrived in between skipped. The route therefore
+  publishes a **resume checkpoint** whenever its cursor moves without a delivery, so
+  the position is always on the wire before the close it schedules. The cap costs a
+  round trip and no events.
+
+There is no WebSocket surface, and none is planned: SSE plus a durable cursor covers
+the workspace-UI case, and the durable rows — not the connection — are what make a
+resume correct.
 
 ## `extensions`
 
@@ -1611,7 +1715,10 @@ deployment:
   `init.emit(topic, payload)`, which appends a durable event to that tenant's
   stream (the capability itself — its call shape, its reach and its two refusals —
   is `init.emit` under
-  [Optional handler capabilities](#optional-handler-capabilities)).
+  [Optional handler capabilities](#optional-handler-capabilities)), and the
+  platform route
+  [`GET /v1/subscribe`](#subscribing-to-the-tenant-event-stream) serves that
+  stream instead of answering its fail-closed `501`.
   There is no provider and no credential to configure — the backend is the
   database the deployment already has.
 

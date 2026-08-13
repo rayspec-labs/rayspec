@@ -1,5 +1,5 @@
 /**
- * The tenant event bus — the three statements the durable per-tenant event stream is made of.
+ * The tenant event bus — the statements the durable per-tenant event stream is made of.
  *
  * WHY THE SQL LIVES HERE, IN THE DB PACKAGE: each of these is ONE statement whose correctness comes
  * from what Postgres does inside it (a row lock held to COMMIT, a DELETE and its watermark write
@@ -55,6 +55,33 @@ export interface TenantEventStreamState {
   readonly lastSeq: number;
   /** The highest seq RETENTION has deleted (0 when nothing has aged out) — the floor. */
   readonly truncatedThrough: number;
+}
+
+/** One event as a READER sees it. `at` is deliberately absent — see `readTenantEventPage`. */
+export interface TenantEventFrame {
+  /** This event's sequence number — the tenant-scoped cursor a subscriber resumes from. */
+  readonly seq: number;
+  /** The author's topic, verbatim. */
+  readonly topic: string;
+  /** The author's payload, verbatim (JSON `null` for a topic-only emit). */
+  readonly payload: unknown;
+}
+
+/**
+ * ONE snapshot of a tenant's stream: where it ends, how far retention has eaten into its start, how
+ * far this read SCANNED, and the matching events in between. Every field comes from the SAME
+ * statement — see `readTenantEventPage` for why that is the whole point.
+ */
+export interface TenantEventPage extends TenantEventStreamState {
+  /**
+   * The highest seq this read LOOKED AT, whether or not it matched the topic filter (the cursor the
+   * caller advances to). Equals the caller's `after` when the window was empty. Without it, a page
+   * whose every row was filtered out would leave the cursor where it was and the reader would scan
+   * the same window forever.
+   */
+  readonly scannedThrough: number;
+  /** The matching events in the scanned window, ascending by seq. */
+  readonly events: readonly TenantEventFrame[];
 }
 
 /** What one retention sweep did, across all tenants. */
@@ -153,6 +180,107 @@ export async function readTenantEventStream(
 }
 
 /**
+ * Read ONE page of `tenantId`'s stream — the head, the retention floor, how far the read scanned, and
+ * the matching events — in ONE statement, therefore ONE snapshot.
+ *
+ * THE ONE-SNAPSHOT RULE IS THE WHOLE POINT, and it is why `readTenantEventStream` above is NOT the
+ * function a subscriber calls. Reading the floor and then reading the rows is two round trips, and
+ * the retention sweep can run BETWEEN them: the floor says "your cursor is fine", the sweep deletes
+ * the rows the cursor pointed at, and the row read returns the SURVIVORS. The subscriber is told
+ * everything is well and silently receives a stream with a hole in it — no error, no signal, nothing
+ * to retry. Both halves must therefore come from one statement, which under Postgres's read-committed
+ * default is one snapshot. A caller that re-assembles this from two reads reintroduces exactly that
+ * window, so this is the only sanctioned read path for a subscriber.
+ *
+ * THE FLOOR IS RETURNED ON EVERY PAGE, not just the first, because a subscriber outlives retention: a
+ * connection held open for hours can have its own unread history swept out from under it, and only a
+ * per-read floor catches that. The caller compares its cursor to `truncatedThrough` on EVERY page.
+ *
+ * `topics` OMITTED MEANS EVERY TOPIC — expressed by leaving the predicate out of the statement
+ * entirely, never by binding a null/empty filter. `topic = any(NULL)` is NULL for every row, so such
+ * a "filter" matches nothing and the subscriber gets a permanently silent stream that reports itself
+ * healthy. An EMPTY array is a caller bug for the same reason (it can only mean a dead stream) and is
+ * refused here rather than served; the HTTP surface rejects it as a 400 before it ever gets this far.
+ *
+ * `at` IS NOT READ AND NOT RETURNED. It is transaction-START time while `seq` is flush time, so the
+ * two disagree on order for a large share of adjacent rows under concurrency (see schema.ts). `seq`
+ * is the sole ordering authority; a reader that never receives `at` cannot accidentally sort by it.
+ * A handler that wants a timestamp on the wire puts one in its own payload.
+ */
+export async function readTenantEventPage(
+  db: Db,
+  tenantId: string,
+  opts: {
+    /** Deliver events with `seq > after`. */
+    readonly after: number;
+    /** Scan at most this many rows (the window, before the topic filter). */
+    readonly limit: number;
+    /** Deliver only these topics. OMIT for every topic; an empty array is refused. */
+    readonly topics?: readonly string[];
+  },
+): Promise<TenantEventPage> {
+  if (opts.topics !== undefined && opts.topics.length === 0) {
+    throw new Error(
+      'readTenantEventPage: `topics` was an EMPTY array, which can only ever match nothing. Omit ' +
+        'the option to read every topic — a filter that silently matches nothing is the failure ' +
+        'mode this refusal exists to prevent.',
+    );
+  }
+  // The filter travels as ONE jsonb parameter for the same reason the append's batch does: no
+  // per-element casting and no array-binding assumptions about the driver. When `topics` is omitted
+  // the predicate is not in the statement at all — an omitted filter must never become a bound null.
+  const topicFilter =
+    opts.topics === undefined
+      ? sql``
+      : sql`where topic in (select jsonb_array_elements_text(${JSON.stringify(opts.topics)}::jsonb))`;
+  const rows = (await db.execute(sql`
+    with state as (
+      select last_seq, truncated_through
+      from tenant_event_streams
+      where tenant_id = ${tenantId}::uuid
+    ), page as (
+      select seq, topic, payload
+      from tenant_events
+      where tenant_id = ${tenantId}::uuid and seq > ${opts.after}::bigint
+      order by seq
+      limit ${opts.limit}
+    )
+    select
+      coalesce((select last_seq from state), 0) as last_seq,
+      coalesce((select truncated_through from state), 0) as truncated_through,
+      coalesce((select max(seq) from page), ${opts.after}::bigint) as scanned_through,
+      coalesce(
+        (
+          select json_agg(json_build_object('seq', seq, 'topic', topic, 'payload', payload) order by seq)
+          from page
+          ${topicFilter}
+        ),
+        '[]'::json
+      ) as events
+  `)) as unknown as {
+    last_seq: unknown;
+    truncated_through: unknown;
+    scanned_through: unknown;
+    events: unknown;
+  }[];
+  const row = rows[0];
+  if (!row) return { lastSeq: 0, truncatedThrough: 0, scannedThrough: opts.after, events: [] };
+  const raw = Array.isArray(row.events)
+    ? (row.events as { seq: unknown; topic: unknown; payload: unknown }[])
+    : [];
+  return {
+    lastSeq: toNumber(row.last_seq),
+    truncatedThrough: toNumber(row.truncated_through),
+    scannedThrough: toNumber(row.scanned_through),
+    events: raw.map((e) => ({
+      seq: toNumber(e.seq),
+      topic: String(e.topic),
+      payload: e.payload ?? null,
+    })),
+  };
+}
+
+/**
  * Delete every event older than `cutoff` and raise each affected tenant's truncation floor — in ONE
  * statement, therefore ONE transaction and ONE snapshot. That is the whole point of the shape: a
  * consumer reading the floor can never land between the delete and the floor write and be told "you
@@ -198,4 +326,56 @@ export async function sweepTenantEvents(
 /** The cutoff instant for a retention window of `hours`, measured back from `now`. */
 export function eventRetentionCutoff(now: Date, hours: number): Date {
   return new Date(now.getTime() - hours * 60 * 60 * 1000);
+}
+
+/** What one wake carries: which tenant advanced, and how far. Never the payload. */
+export interface TenantEventWakeNotice {
+  /** The tenant whose stream advanced. */
+  readonly tenantId: string;
+  /** That tenant's new high-water seq. ADVISORY — the durable rows are the truth. */
+  readonly lastSeq: number;
+}
+
+/** A live LISTEN, and the way to stop it. */
+export interface TenantEventListenHandle {
+  /** Stop listening. Idempotent enough to call from a shutdown path that may run twice. */
+  unlisten(): Promise<void>;
+}
+
+/**
+ * LISTEN on the one bus channel and hand every wake to `onWake`. Built ONCE per process at the
+ * composition root; the process fans out to its subscribers in memory.
+ *
+ * WHY THIS LIVES HERE rather than in the route that wants it: LISTEN is not expressible through the
+ * query-builder facade at all — it needs the driver connection — and reaching for that from a scoped
+ * root is precisely the reach-around the tenant-chokepoint gate exists to catch. So the driver call
+ * lives in the chokepoint's own package, and the consumer receives a neutral callback carrying a
+ * tenant id and a number. (postgres-js opens a DEDICATED connection for listeners and re-issues the
+ * LISTEN itself after a reconnect, so this neither borrows from the request pool nor goes deaf when
+ * the connection drops.)
+ *
+ * A WAKE IS A HINT AND MAY BE WRONG IN ONE DIRECTION ONLY: it can be MISSED (a reconnect gap, a
+ * dropped frame), never fabricated — it is issued inside the appending statement, so it is delivered
+ * iff that transaction committed. A consumer must therefore treat it purely as "read again now", and
+ * must keep its own periodic read so a missed wake costs latency rather than an event. A malformed
+ * or foreign payload is DROPPED silently rather than thrown: this callback runs on the driver's
+ * connection, where a throw would take the listener down and make every subscriber in the process go
+ * quiet — and the periodic read already covers whatever the dropped wake would have announced.
+ */
+export async function listenTenantEvents(
+  db: Db,
+  onWake: (notice: TenantEventWakeNotice) => void,
+): Promise<TenantEventListenHandle> {
+  const listener = await db.$client.listen(TENANT_EVENT_CHANNEL, (raw: string) => {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (typeof parsed !== 'object' || parsed === null) return;
+      const { tenant, seq } = parsed as { tenant?: unknown; seq?: unknown };
+      if (typeof tenant !== 'string' || tenant.length === 0) return;
+      onWake({ tenantId: tenant, lastSeq: toNumber(seq) });
+    } catch {
+      /* a wake we cannot read is a wake we do without — the periodic read still covers it */
+    }
+  });
+  return { unlisten: () => listener.unlisten() };
 }

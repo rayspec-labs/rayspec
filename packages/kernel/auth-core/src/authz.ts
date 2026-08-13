@@ -18,12 +18,21 @@
  * store-specific (no `notebooks:*`): the platform stays product-free and one pair gates every
  * declared store route. `store:write` is SENSITIVE (a live-membership recheck on every mutation,
  * mirroring why a write must never trust a stale JWT claim — see the SENSITIVE set below).
+ *
+ * `events:read` gates the tenant event-stream subscription (`GET /v1/subscribe`). It is a SEPARATE
+ * permission rather than a reuse of `store:read`, on this codebase's own reuse test — reuse is right
+ * only when the new operation is a SUBSET of what the granted one already exposes, and this one is
+ * not: an event payload is whatever a handler passed to `init.emit`, so it can carry values derived
+ * from capabilities (a blob body, a transcript, a model output) that NO declared store route serves.
+ * Folding it into `store:read` would retroactively widen every api-key already minted with that
+ * scope, and an already-issued credential cannot be narrowed again.
  */
 export type Permission =
   | 'agent:run'
   | 'agent:read'
   | 'store:read'
   | 'store:write'
+  | 'events:read'
   | 'org:read'
   | 'org:member:add'
   | 'org:member:change'
@@ -39,6 +48,7 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     'agent:read',
     'store:read',
     'store:write',
+    'events:read',
     'org:read',
     'org:member:add',
     'org:member:change',
@@ -52,13 +62,22 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     'agent:read',
     'store:read',
     'store:write',
+    'events:read',
     'org:read',
     'org:switch',
     'apikey:read',
     'apikey:mint',
     'apikey:revoke',
   ],
-  member: ['agent:run', 'agent:read', 'store:read', 'store:write', 'org:read', 'org:switch'],
+  member: [
+    'agent:run',
+    'agent:read',
+    'store:read',
+    'store:write',
+    'events:read',
+    'org:read',
+    'org:switch',
+  ],
 };
 
 /**
@@ -103,6 +122,11 @@ export const API_KEY_GRANTABLE: readonly Permission[] = Object.freeze([
   'agent:read',
   'store:read',
   'store:write',
+  // `events:read` IS here for the same programmatic-consumer reason `store:read` is: the workspace UI
+  // / automation that subscribes to the tenant stream is exactly the machine principal an org-scoped
+  // key exists for. It is a pure READ of rows the tenant's own handlers wrote, and it stays outside
+  // the org-MANAGEMENT set above it, so granting it widens nothing but the stream.
+  'events:read',
   'org:read',
   'apikey:read',
 ]);

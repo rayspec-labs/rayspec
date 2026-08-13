@@ -45,6 +45,7 @@ import {
   deploy,
   eraseTenant,
   makeTenantEventBus,
+  makeTenantEventWake,
   type PlannedMigration,
   runScheduledCleanup,
   type SessionReprocessor,
@@ -2836,6 +2837,13 @@ export async function deployProductYamlSpec(
       : {}),
   };
 
+  // The event-bus WAKE — ONE process LISTEN on the bus channel, what makes `GET /v1/subscribe`
+  // deliver immediately rather than within one poll interval. Built HERE rather than inside
+  // `buildApp` below (where the stateless bus is built) precisely because it is NOT stateless: it
+  // holds a connection, so one per boot, not one per app construction. It is a latency optimisation
+  // only — every subscriber also reads on its own interval — and `close()` ends it with the pool.
+  const eventWake = makeTenantEventWake(db);
+
   const PROBE_TENANT = '00000000-0000-0000-0000-0000000000aa';
   const target: DeployTarget = {
     driftSchema: 'public',
@@ -2881,6 +2889,9 @@ export async function deployProductYamlSpec(
           // the profile's contract is that the platform's runtime is present, so a product's handlers
           // and tools can emit without the document having to ask for it.
           eventBus: makeTenantEventBus(),
+          // …and the wake beside it, so this profile's subscribers are woken by the emitting
+          // transaction rather than by their next read.
+          eventWake,
         };
         return createAuthApp({
           ...baseDeps,

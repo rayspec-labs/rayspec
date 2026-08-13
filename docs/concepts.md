@@ -355,6 +355,34 @@ returns `501`.
 
 ---
 
+## The tenant event stream
+
+A product whose screen reflects *everything happening in the workspace* needs a way to
+learn about changes made by **other** requests. RaySpec gives it one durable,
+tenant-scoped **event stream** rather than leaving every product to grow its own
+polled events table.
+
+A handler announces a change with `init.emit(topic, payload)` — a capability the
+deployment turns on with `deployment.eventBus`, tenant-bound by construction (it takes
+no tenant argument, so a handler cannot emit into somebody else's stream). Clients
+read it back by holding one `GET /v1/subscribe` connection open (SSE, `events:read`).
+
+Two properties are what make it usable rather than merely present:
+
+- **An event never announces something you cannot read yet.** On a route handler the
+  events are written as the last statement before that request's transaction commits,
+  so the row and the event become visible together — and a handler that fails after
+  emitting leaves neither.
+- **A hole in the stream is a real signal.** Sequence numbers are per-tenant,
+  gap-free, and handed out in commit order, so resuming from a cursor cannot skip an
+  event that committed late. The only thing that removes a number is retention — and
+  when a subscriber's cursor falls behind it, it is *told* with a control frame rather
+  than quietly resuming into a gap.
+
+`examples/live-workspace-events` is the whole loop in one bootable document.
+
+---
+
 ## Views and extraction (product profile)
 
 In the product profile, an **extractor** is a declarative extraction contract —

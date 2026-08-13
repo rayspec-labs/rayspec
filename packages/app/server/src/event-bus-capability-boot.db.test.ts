@@ -283,6 +283,67 @@ describe('event-bus capability boot — deployment.eventBus → engine → init.
     });
   }
 
+  /** Open the subscription surface (SSE) on a booted app. */
+  async function callSubscribe(
+    app: BootedServer['app'],
+    token: string,
+    query = '',
+  ): Promise<Response> {
+    return app.request(`/v1/subscribe${query}`, {
+      headers: { authorization: `Bearer ${token}`, accept: 'text/event-stream' },
+    });
+  }
+
+  /**
+   * Read `want` frames off a LIVE subscription and then cancel it. A subscription stays open for its
+   * whole lifetime (here the access-token TTL), so a test MUST cancel rather than drain to the end.
+   */
+  async function readSse(
+    res: Response,
+    want: number,
+    budgetMs = 20_000,
+  ): Promise<{ id?: string; event?: string }[]> {
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error('subscribe response carried no body stream');
+    const decoder = new TextDecoder();
+    const deadline = Date.now() + budgetMs;
+    const frames: { id?: string; event?: string }[] = [];
+    let buffer = '';
+    while (frames.length < want && Date.now() < deadline) {
+      const chunk = await Promise.race([
+        reader.read(),
+        new Promise<{ done: false; value: undefined }>((r) =>
+          setTimeout(
+            () => r({ done: false, value: undefined }),
+            Math.max(1, deadline - Date.now()),
+          ),
+        ),
+      ]);
+      if (chunk.done || chunk.value === undefined) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      let idx = buffer.indexOf('\n\n');
+      while (idx >= 0) {
+        const block = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const frame: { id?: string; event?: string } = {};
+        let sawField = false;
+        for (const line of block.split('\n')) {
+          if (line.startsWith('id:')) {
+            frame.id = line.slice(3).trim();
+            sawField = true;
+          } else if (line.startsWith('event:')) {
+            frame.event = line.slice(6).trim();
+            sawField = true;
+          } else if (line.startsWith('data:')) sawField = true;
+        }
+        if (sawField) frames.push(frame);
+        idx = buffer.indexOf('\n\n');
+      }
+    }
+    await reader.cancel().catch(() => {});
+    return frames;
+  }
+
   /** Ground truth: a tenant's event rows in seq order, read straight from the table. */
   async function eventsOf(tenantId: string): Promise<{ seq: number; topic: string }[]> {
     const rows = (await sql!.unsafe(
@@ -307,6 +368,12 @@ describe('event-bus capability boot — deployment.eventBus → engine → init.
       expect(await eventsOf(body.tenant)).toEqual([]);
       // No bus ⇒ nothing to sweep ⇒ no sweep notice.
       expect(warnings.filter((w) => w.startsWith('[events]'))).toEqual([]);
+      // …and no stream to read either: the subscription surface fail-closes on the SAME signal that
+      // decides whether the init carries `emit`, naming the key to set. Never a 404 (which would send
+      // an operator hunting for a routing fault), and never an empty stream that reports itself fine.
+      const sub = await callSubscribe(booted.app, token);
+      expect(sub.status).toBe(501);
+      expect((await sub.json()).error.message).toContain('deployment.eventBus.enabled');
       await booted.close();
       server = undefined;
     },
@@ -333,6 +400,20 @@ describe('event-bus capability boot — deployment.eventBus → engine → init.
       expect(await eventsOf(body.tenant)).toEqual([
         { seq: 1, topic: 'note.created' },
         { seq: 2, topic: 'note.updated' },
+      ]);
+
+      // The SAME key also opens the read side, through the SAME real composition root: a subscriber
+      // resuming from the start of this tenant's stream receives both events, with TENANT-QUALIFIED
+      // cursors, and then the backlog-drained control frame. This is the only place the boot's own
+      // wiring of the subscription surface (route mount + event bus + the process wake) is exercised
+      // — the api-auth suites inject those directly.
+      const sub = await callSubscribe(booted.app, token, `?since=${body.tenant}:0`);
+      expect(sub.status).toBe(200);
+      expect(sub.headers.get('content-type')).toContain('text/event-stream');
+      expect(await readSse(sub, 3)).toEqual([
+        { id: `${body.tenant}:1`, event: 'note.created' },
+        { id: `${body.tenant}:2`, event: 'note.updated' },
+        { event: 'rayspec.live' }, // a control frame carries NO id — it can never be sent back
       ]);
 
       // This boot declared no durable worker, so no housekeeping pass exists to sweep the window.
