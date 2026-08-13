@@ -67,6 +67,23 @@ function validateEmitCall(topic: unknown, payload: unknown): TenantEventInput {
         : CALL_FORM,
     );
   }
+  // A LINE BREAK IN A TOPIC IS NOT SERVABLE. A subscriber receives the topic as the SSE `event:`
+  // field, and that grammar has no representation for a line break — a frame carrying one cannot be
+  // written at all, and the naive attempt would be the one place an author's data wrote SSE FIELDS
+  // rather than a field value. Refused HERE, at the call, so the author learns immediately rather
+  // than through a stream that dies on this row and dies again on every reconnect that resumes from
+  // the cursor in front of it. (The subscription route also neutralises such a topic on read, for a
+  // row that reached the table some other way — but nothing this capability writes can be one.)
+  if (/[\r\n]/.test(topic)) {
+    throw malformedCapabilityCall(
+      'init.emit',
+      'a topic string WITHOUT a line break as its FIRST argument',
+      topic,
+      `${CALL_FORM} A subscriber receives the topic as the SSE 'event:' field, whose grammar cannot ` +
+        'carry a line break — so this event could not be delivered. Put multi-line content in the ' +
+        'payload, where it is stored and served verbatim.',
+    );
+  }
   let encoded: string | undefined;
   try {
     encoded = JSON.stringify(payload);

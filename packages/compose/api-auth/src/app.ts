@@ -37,6 +37,7 @@ import { registerOAuthRoutes } from './routes/oauth.js';
 import { registerOrgRoutes } from './routes/orgs.js';
 import { registerReprocessRoutes } from './routes/reprocess.js';
 import { registerRunsRoutes } from './routes/runs.js';
+import { registerSubscribeRoutes } from './routes/subscribe.js';
 import { registerTriggerRoutes } from './routes/triggers.js';
 
 /** A ContentfulStatusCode-compatible cast for Hono's c.json status arg. */
@@ -216,6 +217,12 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
   // the manual-trigger fire route (opt-in; 501 when no firer is wired). Same middleware chain
   // (server-derived tenant, store:write); the firer restricts to kind:'manual' fail-closed.
   registerTriggerRoutes(app, effectiveDeps);
+  // the tenant event-stream subscription (GET /v1/subscribe, SSE). Same middleware chain
+  // (server-derived tenant, events:read). Registered unconditionally and gated INSIDE on the same
+  // signal that decides whether a handler init carries `init.emit` — the injected event bus — so a
+  // deployment that did not enable the bus answers a clean fail-closed 501 rather than a 404 that
+  // would send an operator hunting for a routing fault.
+  registerSubscribeRoutes(app, effectiveDeps);
   // the declarative engine — interpret `api[]` and register each
   // declared route on THIS app behind the SAME middleware chain. The `{handler}` route now resolves
   // its declared handler from the boot-loaded map. Omitted ⇒ an auth-only app (the platform

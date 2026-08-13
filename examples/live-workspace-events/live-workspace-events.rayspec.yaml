@@ -1,0 +1,73 @@
+# Live Workspace Events — a backend-profile document whose UI is driven by ONE event stream.
+#
+# The shape a product reaches for when its screen must reflect everything happening in the workspace:
+# a change made by ANY request has to show up on every open client, without each client polling for
+# it. Before the event bus, the only way to build that on RaySpec was an append-only store plus a
+# timed poll on every client — a perceived-latency floor, a query per client per tick, and every
+# product reinventing the same thing slightly differently.
+#
+# Here the whole live surface is two lines of author code: the handlers call `init.emit(topic,
+# payload)`, and clients hold one `GET /v1/subscribe` connection open.
+#
+# WHY deployment.eventBus (and nothing else): the bus has NO provider and NO credential — its backend
+# is the database this deployment already required — so enabling it is the entire configuration.
+
+version: '1.0'
+
+metadata:
+  name: live-workspace-events
+  description: A shared task board whose clients are driven by one tenant-scoped event stream.
+
+# --- deployment -------------------------------------------------------------------------------
+deployment:
+  # The bus: `init.emit` on route/tool handler inits, and `GET /v1/subscribe` serving instead of
+  # answering its fail-closed 501.
+  eventBus:
+    enabled: true
+    # Keep two days of history, so a client that was closed over a weekend is TOLD its cursor aged
+    # out (one control frame) instead of silently resuming into a hole. The window is APPROXIMATE:
+    # the sweep runs on a schedule, so a bursting tenant can exceed it until the next pass.
+    #
+    # READ THE BOOT WARNING THIS EXAMPLE PRINTS. The sweep runs on the daily housekeeping pass, which
+    # runs on the DURABLE WORKER, which is only wired for a deployment that also supplies agent
+    # backends — and this example is deliberately agent-free so it boots with nothing but a database.
+    # So here the window is declared and NEVER APPLIED, and the boot says exactly that, once. Emitting
+    # and subscribing are completely unaffected; what is missing is only the pruning. A deployment
+    # that wants the window honoured declares `durableWorker: true` and wires its agent backends
+    # (see examples/lead-qualifier), or prunes the stream out of band.
+    retentionHours: 48
+
+# --- stores -----------------------------------------------------------------------------------
+# Authors declare BUSINESS columns only; the generator injects the tenancy/GDPR columns
+# (tenant_id, id, created_at, deleted_at, retention_days, region).
+stores:
+  - name: tasks
+    columns:
+      - { name: title, type: text }
+      - { name: assignee, type: text, nullable: true }
+      - { name: status, type: text }
+
+# --- api --------------------------------------------------------------------------------------
+# Two {handler} routes that write AND announce, plus a declarative read the client uses to fetch the
+# initial board before it subscribes.
+api:
+  - method: POST
+    path: /tasks
+    action: { kind: handler, handler: create_task }
+  - method: POST
+    path: /tasks/{id}/done
+    action: { kind: handler, handler: complete_task }
+  - { method: GET, path: '/tasks', action: { kind: store, store: tasks, op: list } }
+
+# --- handlers ---------------------------------------------------------------------------------
+# Logical id -> escape-hatch module + export + the chokepoint kind it dispatches through. Both live
+# in one native-ESM module the path-jailed loader resolves at boot (no build step for the example).
+handlers:
+  - id: create_task
+    module: handlers/task-handlers.mjs
+    export: createTask
+    kind: route
+  - id: complete_task
+    module: handlers/task-handlers.mjs
+    export: completeTask
+    kind: route

@@ -66,6 +66,22 @@ describe('init.emit — the fail-closed refusals', () => {
     expect(tdb.batches).toEqual([]);
   });
 
+  it('a topic carrying a LINE BREAK is refused — a subscriber could never be sent it', async () => {
+    // Fail-the-fix: a subscriber receives the topic as the SSE `event:` field, whose grammar has no
+    // representation for a line break. Stored, such a row cannot be written as a frame at all — the
+    // stream dies on it, and every reconnect resuming from the cursor in front of it dies on it
+    // again, so ONE row would silence that tenant permanently. It is also the only place an author's
+    // data could write SSE FIELDS rather than a field value.
+    const tdb = fakeTdb();
+    const { emit } = makeTenantEventBus().buffered(tdb);
+    for (const topic of ['note\ncreated', 'note\r\ncreated', 'x\nid: forged\ndata: forged']) {
+      const err = await emit(topic, { id: 1 }).catch((e: ApiError) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.message).toContain('WITHOUT a line break');
+    }
+    expect(tdb.batches).toEqual([]);
+  });
+
   it('a payload that cannot be JSON-serialized is refused AT THE CALL, not inside the engine later', async () => {
     const tdb = fakeTdb();
     const { emit, flush } = makeTenantEventBus().buffered(tdb);

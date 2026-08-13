@@ -30,8 +30,10 @@ import type { PgTable } from 'drizzle-orm/pg-core';
 import type { Db } from './client.js';
 import {
   appendTenantEvents,
+  readTenantEventPage,
   type TenantEventAppendResult,
   type TenantEventInput,
+  type TenantEventPage,
 } from './event-bus.js';
 import { runs, TENANT_SCOPED_TABLES } from './schema.js';
 
@@ -290,6 +292,24 @@ export class TenantDb {
     events: readonly TenantEventInput[],
   ): Promise<TenantEventAppendResult | undefined> {
     return appendTenantEvents(this.raw, this.tenantId, events);
+  }
+
+  /**
+   * Read ONE page of THIS tenant's event-bus stream — the head, the retention floor, how far the read
+   * scanned, and the matching events — from ONE snapshot (see `readTenantEventPage`).
+   *
+   * Here for the same reason `appendEvents` is: the read's correctness comes from the statement being
+   * ONE statement (the floor and the rows must not be able to disagree), which the query-builder
+   * methods above cannot express, and the alternative — handing the subscription route the raw handle
+   * — is the reach-around the chokepoint exists to catch. The tenant comes from `this.tenantId`, so
+   * there is no tenant parameter a cursor or a query string could ever supply.
+   */
+  async readEventPage(opts: {
+    readonly after: number;
+    readonly limit: number;
+    readonly topics?: readonly string[];
+  }): Promise<TenantEventPage> {
+    return readTenantEventPage(this.raw, this.tenantId, opts);
   }
 
   /**

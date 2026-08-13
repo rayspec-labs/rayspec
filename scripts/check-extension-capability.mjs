@@ -56,6 +56,11 @@ const BASE_ESCAPE_HATCH_ROOTS = [
   // so the capability-injection gate FIRES if generated code ever self-constructs a raw DB/blob handle.
   // Kept in LOCKSTEP with check-handler-imports.mjs's BASE_ESCAPE_HATCH_ROOTS.
   'examples/expense-claim-coder/handlers',
+  // The event-bus example's handlers. Kept in LOCKSTEP with check-handler-imports.mjs's
+  // BASE_ESCAPE_HATCH_ROOTS: they are the reference for announcing a change through the INJECTED
+  // `init.emit` rather than reaching the raw append (which takes a tenant argument), and the two
+  // new vectors below are what would fire if example code ever showed the wrong shape.
+  'examples/live-workspace-events/handlers',
   // NOTE: the stream/blob backend's handlers live in its extension PACK — DISCOVERED
   // below as a pack handler root (manifest-derived), not a fixed base root.
 ];
@@ -143,6 +148,30 @@ const SELF_CONSTRUCT_VECTORS = [
   {
     re: /\bnew\s+OpenAiTtsAdapter\s*\(/,
     what: 'new OpenAiTtsAdapter(...) (a raw provider adapter — use the injected init.tts handle)',
+  },
+  // A self-built EVENT BUS — constructing the deployment's bus, or reaching the append statement
+  // directly, instead of using the injected `init.emit`. Both defeat the same thing: `init.emit` is
+  // built from the run's tenant-bound TenantDb and has NO tenant parameter, so a handler cannot emit
+  // cross-tenant. `appendTenantEvents(db, tenantId, …)` DOES take a tenant, so a handler that reached
+  // it would be writing into a tenant it named itself — over a db handle it had to fabricate first.
+  {
+    re: /\bmakeTenantEventBus\s*\(/,
+    what: 'makeTenantEventBus(...) (self-constructing the deployment event bus — use the injected init.emit capability)',
+  },
+  {
+    re: /\bappendTenantEvents\s*\(/,
+    what: 'appendTenantEvents(...) (the raw event append, which takes a tenant argument — use the injected init.emit capability)',
+  },
+  // The wake/subscription side of the same seam: a handler LISTENing on the bus channel, or reading
+  // the stream directly, would be consuming events outside the tenant-scoped read the subscription
+  // route performs — and reading a page takes a tenant argument for the same reason the append does.
+  {
+    re: /\bmakeTenantEventWake\s*\(/,
+    what: 'makeTenantEventWake(...) (self-constructing the bus listener — a handler consumes events through the subscription surface, not the channel)',
+  },
+  {
+    re: /\breadTenantEventPage\s*\(/,
+    what: 'readTenantEventPage(...) (the raw event read, which takes a tenant argument — a handler reads its own data through init.db)',
   },
 ];
 
@@ -278,6 +307,24 @@ function selfTest() {
       expect: true,
     },
     { rel: 'h/x.ts', src: 'const a = new OpenAiTtsAdapter({ apiKey });', expect: true },
+    { rel: 'h/x.ts', src: 'const bus = makeTenantEventBus();', expect: true },
+    {
+      rel: 'h/x.ts',
+      src: "await appendTenantEvents(db, tenantId, [{ topic: 't', payload: {} }]);",
+      expect: true,
+    },
+    { rel: 'h/x.ts', src: 'const wake = makeTenantEventWake(db);', expect: true },
+    {
+      rel: 'h/x.ts',
+      src: 'const page = await readTenantEventPage(db, tenantId, { after: 0, limit: 10 });',
+      expect: true,
+    },
+    // …while the INJECTED capability is exactly what a handler is supposed to call.
+    {
+      rel: 'h/x.ts',
+      src: "export const h = async (init) => { await init.emit('workspace.updated', { id }); };",
+      expect: false,
+    },
     // a COMMENT mentioning a forbidden token — must NOT fire (prose, not code)
     {
       rel: 'h/x.ts',

@@ -77,6 +77,27 @@ export interface AgentRegistryEntry {
 export type AgentRegistry = ReadonlyMap<string, AgentRegistryEntry>;
 
 /**
+ * The event-bus WAKE seam — "this tenant's stream just advanced, read again now".
+ *
+ * OPAQUE to the route that consumes it, exactly like `SessionReprocessor` below: the implementation
+ * (one process LISTEN, fanned out in memory) is built at the composition root; the subscription route
+ * only ever registers a callback and calls the returned unsubscribe when its stream ends.
+ *
+ * A WAKE IS A HINT. It carries the tenant's new high-water sequence and NOTHING else — never the
+ * event, never the payload — because the durable rows read through the tenant chokepoint are the only
+ * truth, and a second delivery path carrying data would be one that no tenant predicate had touched.
+ * A consumer treats the number purely as "there may be something past X for you".
+ */
+export interface TenantEventWake {
+  /**
+   * Register `onWake` for `tenantId` and return the unsubscribe. `onWake` receives the tenant's new
+   * high-water seq. The callback runs on the listener's own path, so it must not throw and must not
+   * block — the shipped consumer only signals a waiting loop.
+   */
+  subscribe(tenantId: string, onWake: (lastSeq: number) => void): () => void;
+}
+
+/**
  * The declarative-engine input wired into `createAuthApp`. When supplied, the
  * composition root has loaded + validated a `RaySpec` and built the runtime product tables;
  * `createAuthApp` interprets `spec.api[]` and registers each declared route on the SAME app behind
@@ -193,6 +214,29 @@ export interface DeclarativeEngine {
    * (off-request) run carries no `init.emit` and fail-closes loudly there.
    */
   eventBus?: TenantEventBus;
+  /**
+   * the process-local WAKE for the event bus — what makes `GET /v1/subscribe` deliver immediately
+   * instead of within one poll interval. Built ONCE per process at the composition root (it holds the
+   * single LISTEN on the bus channel) and injected here beside the bus it belongs to.
+   *
+   * PURELY A LATENCY OPTIMISATION, and absent is a supported posture: every subscriber also reads on
+   * its own interval, so an unwired (or momentarily disconnected) wake makes delivery later, never
+   * lossy. Nothing keys correctness on it.
+   */
+  eventWake?: TenantEventWake;
+  /**
+   * the interval a subscriber waits for a wake before reading anyway — the delivery backstop that
+   * doubles as the SSE heartbeat. Absent ⇒ `DEFAULT_EVENT_POLL_INTERVAL_MS`. A test tunes it down so
+   * the poll path is exercised without waiting out the default.
+   */
+  eventPollIntervalMs?: number;
+  /**
+   * the cap on how long ONE subscription is served before the server closes it and the client
+   * reconnects. Absent ⇒ the access-token TTL, which is also the CEILING: a larger value is clamped
+   * back to the TTL, because this cap is what bounds how long a revoked principal's stream can
+   * outlive its authorization (see routes/subscribe.ts).
+   */
+  eventStreamMaxSeconds?: number;
   /**
    * the media-token service for the `stream` (mode:'playback') arm — the SECOND
    * auth path (HS256, distinct `RAYSPEC_MEDIA_SIGNING_KEY`). Injected exactly like `blobFactory` (the

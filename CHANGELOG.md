@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`GET /v1/subscribe` — an SSE subscription over the tenant event stream, with a resume protocol
+  that cannot silently drop frames.** The emit half gave a handler somewhere durable to announce a
+  change; this is the half a client reads it back from, so a workspace UI holds one connection open
+  instead of polling. It is a platform route (nothing declares it), on the same authenticated chain as
+  every other route, gated by a new **`events:read`** permission — granted to owner, admin and member,
+  and grantable on an api-key. That permission is deliberately **not** a reuse of `store:read`: an
+  event payload is whatever a handler passed to `init.emit`, so it can carry values from capabilities
+  no declared store route serves, and folding it in would have retroactively widened every api-key
+  already minted with that scope. It is **not** added to the OIDC scope list. The route serves
+  whenever the deployment enabled the bus (`deployment.eventBus.enabled`, or structurally on a product
+  deployment) and answers a clean **`501` naming the key to set** when it did not — never a `404`, and
+  never an empty stream that reports itself healthy.
+  What a subscriber observes: a **data frame** carries `id:` (the cursor), `event:` (the author's
+  topic) and `data:` (the payload as JSON); a **control frame carries no `id:`**, which is
+  the discriminator and is structural rather than nominal — a topic is author data, so a handler could
+  emit `rayspec.truncated` itself, but it could never emit a frame without a sequence number, and a
+  control frame therefore can never come back as a cursor. There are two: `rayspec.live` (your backlog
+  is drained) and `rayspec.truncated` (your cursor is older than retention; it carries the floor, and
+  the stream resumes there). The event timestamp is deliberately **not** on the wire — it is not
+  monotone with `seq`, so shipping it would only invite clients to sort by it.
+  The **cursor is `<tenant_id>:<seq>`**, not a bare number, and arrives either as the standard
+  `Last-Event-ID` reconnect header or as `?since=`: a sequence means something different in every
+  tenant's stream, so an untagged cursor would resume silently at the wrong place after an org switch.
+  Four cursor shapes are refused with a `400` rather than served — a malformed one, one tagged with
+  another tenant, a non-integer sequence, and one **ahead** of the stream. Omitting the cursor starts
+  at the tail and is **not** a truncation, however old the stream's floor is. Omitting `topics` means
+  **every** topic; an explicitly empty `?topics=` is a `400`, because an empty filter can only match
+  nothing and that is indistinguishable from a healthy stream on a quiet workspace.
+  Each read takes the events above the cursor together with the stream's retention floor **from one
+  snapshot**, so a subscriber can never be told its cursor is fine about events that are already gone,
+  and the floor is re-checked on **every** read rather than once at connect — a connection held open
+  for hours can outlive the retention of its own unread history. Delivery is immediate: the emitting
+  transaction wakes the process's one listener, which fans out in memory. Each subscriber **also**
+  reads on its own interval, and that timer is **on by default** — a departure from this project's
+  posture that interval knobs are opt-in, made deliberately because a wake is a hint that can be
+  missed (a listener reconnect, a deployment that wires none), and an opt-in backstop would mean the
+  default posture loses events until somebody notices. The same timer is the SSE heartbeat.
+  The server **closes a stream after a bounded lifetime** — the access-token TTL — and the client
+  reconnects. Permission is middleware, so it is checked once at connect; the reconnect is a fresh
+  request through the whole chain, and that is what makes a revoked principal stop receiving events.
+  No second, bespoke mid-stream authorization path exists. There is no WebSocket surface, and none is
+  planned: SSE plus a durable cursor covers the case, and the durable rows — not the connection — are
+  what make a resume correct. `examples/live-workspace-events` is the whole loop in one bootable
+  document.
+  One change to the emit side comes with this: **`init.emit` now refuses a topic carrying a line
+  break**, naming the reason. A subscriber receives the topic as the SSE `event:` field, whose grammar
+  cannot carry one — so such a row could not be delivered at all, and the stream would die on it and
+  die again on every reconnect that resumed from the cursor in front of it, silencing that tenant
+  permanently. Multi-line content belongs in the payload, which is stored and served verbatim.
+
 - **A tenant-scoped event bus: `deployment.eventBus` turns on `init.emit(topic, payload)`, a durable
   per-tenant event stream a route or tool handler appends to.** Everything real-time in RaySpec was
   scoped to a single agent run, so a product whose UI is driven by everything happening in a workspace
@@ -41,8 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has the worker, so it always sweeps.) `seq` is the only ordering authority the stream has; the `at`
   column is display only and is **not** monotone with `seq` under concurrency (it is transaction-start
   time while the number is issued at flush), so ordering or windowing a query by it reorders and drops
-  events. **The subscription surface from #314 (`GET /v1/subscribe`) is not part of this change** —
-  this is the emit and storage half.
+  events. This entry is the **emit and storage** half; the subscription surface it exists to feed
+  (`GET /v1/subscribe`) is the entry above.
 
 - **`cleanUrls: true` on a frontend mount — extensionless URLs resolve to `<path>.html`, so a
   generated multi-page site arrives with working links.** A static mount resolved a directory to its
