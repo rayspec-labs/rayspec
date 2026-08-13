@@ -956,6 +956,9 @@ importers:
       '@rayspec/platform':
         specifier: workspace:*
         version: link:../../kernel/platform
+      '@rayspec/tasks':
+        specifier: workspace:*
+        version: link:../../kernel/tasks
       '@rayspec/workflow-durable':
         specifier: workspace:*
         version: link:../workflow-durable

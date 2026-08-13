@@ -51,6 +51,27 @@ export {
   SystemCleanupScheduler,
   type SystemCleanupSchedulerDeps,
 } from './system-cleanup-scheduler.js';
+// The task-engine dispatcher: one DBOS workflow per dispatched turn (the workflow id IS the
+// claim), a scheduled reserve tick, and the approval-timeout sweep — on the SAME shared executor
+// launch via attachPreLaunchHook. The engine contract itself lives in @rayspec/tasks.
+export {
+  DbosTaskScheduler,
+  DEFAULT_TASK_RESERVE_SCHEDULE,
+  DEFAULT_TASK_SWEEP_SCHEDULE,
+  type ReservePassOutcome,
+  type ResolveTurnHandler,
+  TASK_RESERVE_WORKFLOW_NAME,
+  TASK_SWEEP_WORKFLOW_NAME,
+  TASK_TURN_WORKFLOW_NAME,
+  type TaskSchedulerDeps,
+  type TaskSchedulerLogger,
+  type TaskTurnContext,
+  type TaskTurnHandler,
+  type TaskTurnHandlerOutcome,
+  type TaskTurnJob,
+  taskTurnWorkflowId,
+  WORKFORCE_TURNS_QUEUE,
+} from './task-scheduler.js';
 // Compile-time DBOS wire-shape pins (doc-first): re-exported so the type assertions in this module
 // are part of the build graph (a DBOS config-key rename breaks `tsc -b` here). Erased at runtime.
 export { WIRE_SHAPE_PINNED } from './wire-shape-assertions.js';

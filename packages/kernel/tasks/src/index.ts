@@ -43,6 +43,12 @@ export {
 export {
   type CancelCascadeOutcome,
   cancelTaskCascade,
+  type HaltWorkforceOutcome,
+  haltWorkforce,
+  type PauseWorkforceInput,
+  pauseWorkforce,
+  resumeWorkforce,
+  WorkforceDrainTimeoutError,
 } from './control.js';
 export {
   type ChildTaskSpec,
