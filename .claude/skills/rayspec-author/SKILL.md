@@ -1959,7 +1959,14 @@ deletes/updates (a write is an UPSERT-only).
   source: { kind: artifact_query | capability | store, ref: <id> }   # OPTIONAL backing data.
   read: <ViewRead>              # OPTIONAL declarative read + DTO projection.
   pagination: { limit_param?, offset_param?, max_limit?, default_limit? }   # OPTIONAL.
-  absent_state: empty_200 | not_ready_409         # OPTIONAL (processing_200 is BANNED by construction).
+  absent_state: empty_200 | not_ready_409 | not_found_404   # OPTIONAL in the grammar (processing_200 is BANNED by construction);
+                                                  # lint REQUIRES it on a `single` read, where it is the no-row answer. On a
+                                                  # list/collect read lint rejects not_ready_409/not_found_404; on a read-less
+                                                  # capability view a declared not_ready_409/not_found_404 is what the emitted
+                                                  # OpenAPI documents as the 409/404.
+                                                  # not_found_404 ONLY when the row exists as soon as the reference is
+                                                  # valid (a catalog/reference store). For a store a workflow step writes,
+                                                  # an absent row is a PENDING job — use empty_200 or not_ready_409.
   conditional_read: <ViewConditionalRead>         # OPTIONAL (etag → 304).
   response_contract: <contract id>                # REQUIRED — the DTO contract (resolved against `contracts`).
 ```

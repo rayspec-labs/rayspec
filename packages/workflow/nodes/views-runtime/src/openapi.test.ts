@@ -2,7 +2,7 @@
  * The views produce an INSPECTABLE API-contract document. Asserts: paths/methods/params
  * derive from the declarations (preset schemas, enums, the pagination clamp docs), the 200 schema is
  * the translated response contract (`ref` → resolvable `$ref`s into components.schemas, `nullable` →
- * a 3.1 type union), the conditional/absent behaviors document their 304/409, and EVERY emitted
+ * a 3.1 type union), the conditional/absent behaviors document their 304/409/404, and EVERY emitted
  * `$ref` resolves inside the document (no dangling contract pointers).
  */
 import { readFileSync } from 'node:fs';
@@ -122,7 +122,7 @@ describe('emitProductViewsOpenApi', () => {
     }
   });
 
-  it('RC-1: producibleViewResponseStatuses derives exactly {200} ∪ 400(declared params) ∪ 409 ∪ 304', () => {
+  it('RC-1: producibleViewResponseStatuses derives exactly {200} ∪ 400(declared params) ∪ 409 ∪ 404 ∪ 304', () => {
     const base = {
       id: 'v',
       route: { method: 'GET' as const, path: '/x' },
@@ -147,6 +147,11 @@ describe('emitProductViewsOpenApi', () => {
         } as never),
       ].sort(),
     ).toEqual(['200', '304', '409']);
+    expect(
+      [
+        ...producibleViewResponseStatuses({ ...base, absent_state: 'not_found_404' } as never),
+      ].sort(),
+    ).toEqual(['200', '404']);
   });
 
   it('documents the 409 readiness gate for not_ready_409 views', () => {
@@ -183,6 +188,47 @@ views:
     });
     const op = gated.paths['/things/{id}/gate']?.get;
     expect(Object.keys(op?.responses ?? {}).sort()).toEqual(['200', '400', '409']);
+  });
+
+  it('documents the 404 for not_found_404 views, and documented still EQUALS producible', () => {
+    const res = parseProductSpec(`
+version: "1.0"
+product: { id: p, name: P }
+contracts:
+  p.r:
+    type: object
+    properties:
+      state: { type: string }
+    required: [state]
+views:
+  - id: lookup
+    route: { method: GET, path: "/things/{id}" }
+    auth: bearer_tenant
+    params:
+      id: { in: path, shape: safe_id }
+    source: { kind: store, ref: things }
+    absent_state: not_found_404
+    read:
+      mode: single
+      filter: { thing_id: { param: id } }
+      shape:
+        fields:
+          state: { kind: column, column: state, type: string, default: "" }
+    response_contract: p.r
+`);
+    if (!res.ok) throw new Error(JSON.stringify(res.errors, null, 2));
+    const emitted = emitProductViewsOpenApi({
+      views: res.value.views,
+      contracts: res.value.contracts,
+      info: { title: 't', version: '0' },
+    });
+    const op = emitted.paths['/things/{id}']?.get;
+    expect(Object.keys(op?.responses ?? {}).sort()).toEqual(['200', '400', '404']);
+    const view = res.value.views[0];
+    if (!view) throw new Error('expected one view');
+    expect(Object.keys(op?.responses ?? {}).sort()).toEqual(
+      [...producibleViewResponseStatuses(view)].sort(),
+    );
   });
 
   it('SEP-1: the session-list items emit REAL nested types (closed nodes), not bare object[]', () => {

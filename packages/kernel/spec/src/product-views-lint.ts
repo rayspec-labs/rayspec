@@ -420,7 +420,7 @@ export function lintProductViews(input: ViewLintInput): SpecError[] {
       if (view.absent_state === undefined) {
         invalid(
           `view '${view.id}' is a single-row view and must declare absent_state ` +
-            "('empty_200' with read.absent, or 'not_ready_409')",
+            "('empty_200' with read.absent, 'not_ready_409', or 'not_found_404')",
           `${base}.absent_state`,
         );
       } else if (view.absent_state === 'empty_200' && !read.absent) {
@@ -435,12 +435,25 @@ export function lintProductViews(input: ViewLintInput): SpecError[] {
             'a 409 has a fixed error body; declare exactly one absent behavior',
           `${readPath}.absent`,
         );
+      } else if (view.absent_state === 'not_found_404' && read.absent) {
+        invalid(
+          `view '${view.id}' declares BOTH absent_state 'not_found_404' and a read.absent shape — ` +
+            'a 404 has a fixed error body; declare exactly one absent behavior',
+          `${readPath}.absent`,
+        );
       }
     } else {
       if (view.absent_state === 'not_ready_409') {
         invalid(
           `view '${view.id}' declares absent_state 'not_ready_409' on a '${read.mode}' read — ` +
             'readiness gating applies to single-row views only (a list/collect read is empty, not un-ready)',
+          `${base}.absent_state`,
+        );
+      } else if (view.absent_state === 'not_found_404') {
+        invalid(
+          `view '${view.id}' declares absent_state 'not_found_404' on a '${read.mode}' read — ` +
+            'a missing reference is a single-row notion only (a list/collect read with no matches is an ' +
+            'empty page, not a nonexistent one)',
           `${base}.absent_state`,
         );
       }

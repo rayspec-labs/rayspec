@@ -12,7 +12,8 @@
  *     a `[type, 'null']` union — the 3.1 representation, mirroring emit-openapi.ts);
  *   - responses are the PRODUCIBLE set (RC-1, `producibleViewResponseStatuses`): a 400 ONLY when the
  *     view DECLARES params (pagination params clamp — they can never 400); a 409
- *     `{error:'not_ready'}` for `absent_state: not_ready_409`; a 304 (+ the ETag header on the 200)
+ *     `{error:'not_ready'}` for `absent_state: not_ready_409`; a 404 `{error:'not_found'}` for
+ *     `absent_state: not_found_404`; a 304 (+ the ETag header on the 200)
  *     for `conditional_read: etag`.
  *
  * The translation is FAITHFUL to the closed vocabulary only — the contract lint already rejected
@@ -57,6 +58,7 @@ function operationId(view: ProductViewSpec): string {
  *    declared-param validation. Pagination params CLAMP (never 400), so a list view without declared
  *    params documents NO 400 (the prior any-params rule documented a 400 the runtime could never emit);
  *  - `409` for `absent_state: not_ready_409`;
+ *  - `404` for `absent_state: not_found_404`;
  *  - `304` for `conditional_read: etag`.
  * For a DELEGATED capability view this is the declaration-derived knowledge (its real behavior is
  * capability code; the declaration is all an emitted contract can honestly claim).
@@ -65,6 +67,7 @@ export function producibleViewResponseStatuses(view: ProductViewSpec): ReadonlyS
   const out = new Set<string>(['200']);
   if (Object.keys(view.params ?? {}).length > 0) out.add('400');
   if (view.absent_state === 'not_ready_409') out.add('409');
+  if (view.absent_state === 'not_found_404') out.add('404');
   if (view.conditional_read === 'etag') out.add('304');
   return out;
 }
@@ -260,6 +263,21 @@ export function emitProductViewsOpenApi(config: {
     if (producible.has('409')) {
       responses['409'] = {
         description: "The resource is not ready yet — `{ error: 'not_ready', detail }`.",
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: { error: { type: 'string' }, detail: { type: 'string' } },
+              required: ['error', 'detail'],
+              additionalProperties: false,
+            },
+          },
+        },
+      };
+    }
+    if (producible.has('404')) {
+      responses['404'] = {
+        description: "No such reference — `{ error: 'not_found', detail }`.",
         content: {
           'application/json': {
             schema: {
