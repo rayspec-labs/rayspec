@@ -647,14 +647,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The transitive `nanoid` copy behind the test runner is raised from 3.3.17 to 3.3.18**
+  (GHSA-2v37-7h3g-55p8: `customAlphabet` and `customRandom` loop indefinitely when configured with a
+  size of 0, hanging the calling thread). That copy has exactly one dependent, `postcss`, which is
+  itself reached only through `vitest` → `vite`, so it never ships in a published package — and the
+  vulnerable functions are never entered on that path: `postcss` imports the plain generator from
+  `nanoid/non-secure` and calls it with a fixed size (`nanoid(6)`), never `customAlphabet` or
+  `customRandom`, and no source in this repository calls either. The fix is a patch release inside
+  `postcss`'s declared range (`^3.3.16`), so the copy is pinned forward via a scoped `pnpm.overrides`
+  entry (`nanoid@3`) rather than carried as a scanner exception. The dependency SBOM
+  (`docs/dependency-sbom.json`) is regenerated to match. The `nanoid` 5.x copy behind `oidc-provider`
+  is 5.1.16, past this advisory's fixed 5.1.6, and is unchanged; the graph still resolves to 485
+  distinct packages.
 - **The transitive `nanoid` copy behind `oidc-provider` is raised from 5.1.15 to 5.1.16**
   (GHSA-28wg-ghj8-5hjv / CVE-2026-67214: the `nanoid/non-secure` generators can loop indefinitely
   when given a negative size). The vulnerable module is not reachable here — `oidc-provider` only
   imports the secure `nanoid` entry point, with a fixed generator size — but the fix is a patch
   release inside `oidc-provider`'s declared range, so the copy is pinned forward via a scoped
   `pnpm.overrides` entry (`nanoid@5`) rather than carried as a scanner exception. The dependency
-  SBOM (`docs/dependency-sbom.json`) is regenerated to match. The separate `nanoid@3.3.17` copy
-  (dev-only, behind `postcss`) is not affected by the advisory and is unchanged.
+  SBOM (`docs/dependency-sbom.json`) is regenerated to match. The separate `nanoid` 3.x copy
+  (dev-only, behind `postcss`) is not affected by this advisory; it is raised for a different one,
+  above.
 
 ## [1.7.0] - 2026-08-05
 
