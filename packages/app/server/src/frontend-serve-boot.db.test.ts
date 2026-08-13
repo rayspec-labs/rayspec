@@ -160,6 +160,26 @@ describe('static frontend serving — composition root mounts declared frontend[
     expect(await res.text()).toContain(INDEX_SENTINEL);
   });
 
+  maybe(
+    '(g) SCRIPT ASSET: GET /app.js serves the script file itself (a JavaScript content type), not the SPA shell',
+    async () => {
+      if (!server) throw new Error('server did not boot');
+      // examples/notes-ui/web/dist/index.html loads its code from a FILE: `<script src="/app.js" defer>`.
+      // Rename web/dist/app.js away and (a)/(b) above stay green — the sentinel they read lives in
+      // index.html — and `biome check` never opens the asset either (biome.json's `!**/dist`). The missing
+      // file is not even a 404: the mount is `spa: true`, so the fallback (b) exercises answers `/app.js`
+      // with index.html — 200, `text/html; charset=utf-8` — which an `expect(res.status).toBe(200)` would
+      // accept while the example is broken. Browsers do not: api-auth's app-wide `securityHeaders` sets
+      // `X-Content-Type-Options: nosniff` on every response, so that body is refused as a script and the
+      // page renders and does nothing. The CONTENT TYPE is what tells the served file apart from the
+      // fallback, so it is what this arm asserts; the sentinel check is the same reading of the body.
+      const res = await server.app.request('/app.js');
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type') ?? '').toMatch(/javascript/i);
+      expect(await res.text()).not.toContain(INDEX_SENTINEL); // the file, NOT the SPA shell
+    },
+  );
+
   maybe('(d) RESERVED: GET /health returns the health JSON, never the / static mount', async () => {
     if (!server) throw new Error('server did not boot');
     const res = await server.app.request('/health');
