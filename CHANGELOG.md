@@ -25,13 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/health` reports is computed without it — while every filesystem call it makes is individually
   wrapped, so an unreadable directory or file is skipped rather than raised. Serving a page the
   policy blocks is a deployment's choice, and `RAYSPEC_FRONTEND_CSP` is how it overrides the
-  baseline. It judges the page
-  against the **active** policy, not the shipped default: a policy that carries `'unsafe-inline'` for
-  the directive governing a shape says nothing about that shape, and a policy governing none of them
-  is not scanned at all — the four shapes are resolved through their own CSP fallback chains
-  (`style-src-elem` / `style-src-attr` / `script-src-elem` / `script-src-attr` → `style-src` /
-  `script-src` → `default-src`), and the warning names the directive that decided.
-  Two limits are stated rather than assumed. **The bounds**: at most 200 HTML files per boot across
+  baseline. It judges the page against the **active** policy, not the shipped default: a policy that
+  carries `'unsafe-inline'` for the directive governing a shape says nothing about that shape, and a
+  policy governing none of them is not scanned at all — the four shapes are resolved through their
+  own CSP fallback chains (`style-src-elem` / `style-src-attr` / `script-src-elem` /
+  `script-src-attr` → `style-src` / `script-src` → `default-src`), and the warning names the
+  directive that decided.
+  Nothing about its reach is left implicit. **The bounds**: at most 200 HTML files per boot across
   all mounts, at most the first 1 MiB of any one file, at most 5 offending files named (the rest are
   counted). Each of the three appears in the message when it truncates — the file-count line is
   printed off the file the scan actually DECLINED to open, not off the budget being spent, so a build
