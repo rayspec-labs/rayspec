@@ -296,12 +296,15 @@ export class DbosWorkflowExecutor implements WorkflowEnqueuer {
    * caller rethrows the ORIGINAL resolver error either way.
    *
    * NEVER OVERWRITES A HEADER SOMEONE ELSE WROTE. `ensureRun` reports whether it created the row, and
-   * the terminal patch is applied only to a row this path created (or to one it already settled at
-   * `terminal_failure`, which makes a DBOS re-invocation idempotent). A header an earlier ENGINE
-   * execution wrote — the reachable case is a crash mid-`engine.execute` followed by a recovery
-   * re-invocation against a document that no longer carries the workflow — is left exactly as it is,
-   * because `finalizeRun` is a plain UPDATE and would replace its real `attempts` / `resumable` /
-   * `error` with this failure's zeroes while `workflow_node_states` still holds the attempts.
+   * the terminal patch is applied only to a row this path created or to one that CARRIES THIS PATH'S
+   * OWN MARK — `status = terminal_failure` AND `error.code = WORKFLOW_RESOLVE_FAILED_CODE`, the code
+   * no other writer sets (the engine's `finalizeRun` passes the first failed NODE's error). That
+   * property is on the row itself, so it is decidable from what was read; re-applying the patch to
+   * such a row keeps a DBOS re-invocation idempotent. Every other pre-existing header — including one
+   * the ENGINE settled at `terminal_failure`, reachable via a crash mid-`engine.execute` followed by a
+   * recovery re-invocation against a document that no longer carries the workflow — is left exactly as
+   * it is, because `finalizeRun` is a plain UPDATE and would replace its real `attempts` / `resumable`
+   * / `error` with this failure's zeroes while `workflow_node_states` still holds the attempts.
    */
   async #journalResolveFailure(
     journal: TenantDbWorkflowJournalStore,
@@ -321,15 +324,19 @@ export class DbosWorkflowExecutor implements WorkflowEnqueuer {
         inputEvent: job.event,
       });
       // A header this call did not create belongs to an earlier execution of the run: leave it, and
-      // say so on the log surface. The one exception is a row THIS path already settled — re-applying
-      // the identical patch keeps a DBOS re-invocation idempotent.
-      if (!created && run.status !== 'terminal_failure') {
+      // say so on the log surface. The one exception is a row already carrying THIS path's own mark
+      // (`terminal_failure` + `workflow_resolve_failed`) — no other writer produces that pair, so
+      // re-applying the patch to it keeps a DBOS re-invocation idempotent. A `terminal_failure` the
+      // ENGINE wrote carries a NODE's error code and its real `attempts`, so the check below keeps it.
+      const isOwnSettledHeader =
+        run.status === 'terminal_failure' && run.error?.code === WORKFLOW_RESOLVE_FAILED_CODE;
+      if (!created && !isOwnSettledHeader) {
         this.#logger.warn(workflowResolveFailureHeaderKeptLog(job, run.status));
         return;
       }
       // ensureRun hard-codes status `running`; the terminal state is the finalize patch. `attempts:0`
-      // is exact for the row this line can reach: it was created just above, or was settled by an
-      // earlier pass of THIS path — no engine was built on either, so no node was ever attempted.
+      // is exact for the row this line can reach: it was created just above, or it carries this path's
+      // own mark — no engine was built on either, so no node was ever attempted.
       await journal.finalizeRun(job.workflowRunId, {
         status: 'terminal_failure',
         resumable: false,

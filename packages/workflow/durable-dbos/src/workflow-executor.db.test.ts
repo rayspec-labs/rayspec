@@ -14,7 +14,10 @@
  *  4. TERMINAL JOURNAL: a job whose resolver THROWS still gets a `workflow_runs` row, settled at
  *     `terminal_failure`, plus the one log line — and the original resolver error still fails the job.
  *  5. …and that write NEVER overwrites a header an earlier execution of the same run wrote: a
- *     pre-seeded `running` header with real attempts survives the resolve failure untouched.
+ *     pre-seeded `running` header with real attempts survives the resolve failure untouched, and so
+ *     does a pre-seeded ENGINE-shaped `terminal_failure` header (a node's error code, real attempts).
+ *  6. The ONE header it does re-settle is a row carrying this path's own mark (`terminal_failure` +
+ *     `workflow_resolve_failed`) — what a DBOS re-invocation of this same path leaves behind.
  *
  * Booted like executor.db.test.ts (drop sys db → makeDbWithSchema → spine+workflow DDL → one launch).
  */
@@ -496,6 +499,154 @@ describe('DBOS workflow spine — engine.execute off-request', () => {
         tenantId: TENANT,
         workflowId: UNKNOWN_WORKFLOW_ID,
       }),
+    );
+  });
+
+  it('a resolver failure LEAVES a terminal_failure header the ENGINE settled exactly as it is', async () => {
+    // The same crash-recovery shape as above, but caught one step later: the engine had already
+    // reached `finalizeRun`, so the header is SETTLED at `terminal_failure` with the first failed
+    // node's error code and the attempts summed from the node journal. `terminal_failure` alone must
+    // not open the re-settle branch — only this path's OWN mark does — or the row would come back
+    // claiming `attempts: 0` / `workflow_resolve_failed` while `workflow_node_states` still holds 3.
+    const idempotencyKey = 'k-preexisting-engine-terminal';
+    const runId = durableWorkflowRunId(TENANT, UNKNOWN_WORKFLOW_ID, idempotencyKey);
+    await db.$client.unsafe(
+      `INSERT INTO workflow_runs (workflow_run_id, tenant_id, workflow_id, idempotency_key,
+         trigger_event, input_event, status, resumable, error, attempts)
+       VALUES ($1, $2, $3, $4, 'thing.happened', $5, 'terminal_failure', false, $6, '7')`,
+      [
+        runId,
+        TENANT,
+        UNKNOWN_WORKFLOW_ID,
+        idempotencyKey,
+        JSON.stringify(event()),
+        JSON.stringify({
+          code: 'node_boom',
+          message: 'a node failed terminally',
+          retryable: false,
+        }),
+      ],
+    );
+    await db.$client.unsafe(
+      `INSERT INTO workflow_node_states (tenant_id, workflow_run_id, node_id, position, capability,
+         operation, status, attempt_count)
+       VALUES ($1, $2, 'count', '0', 'count', 'increment', 'terminal_failure', '3')`,
+      [TENANT, runId],
+    );
+
+    const { workflowRunId } = await wfExecutor.enqueueWorkflowRun({
+      tenantId: TENANT,
+      workflow: { ...counterWorkflow(), id: UNKNOWN_WORKFLOW_ID },
+      event: event(),
+      idempotencyKey,
+    });
+    expect(workflowRunId).toBe(runId);
+    expect(await waitForTerminal(workflowRunId)).toBe('failed');
+
+    const runs = await db.$client.unsafe(
+      'SELECT status, attempts, error FROM workflow_runs WHERE workflow_run_id = $1 AND tenant_id = $2',
+      [runId, TENANT],
+    );
+    expect(runs).toHaveLength(1);
+    const row = runs[0] as {
+      status: string;
+      attempts: string;
+      error: { code: string; message: string };
+    };
+    // UNTOUCHED — the engine's own accounting, not this failure's zeroes.
+    expect(row.status).toBe('terminal_failure');
+    expect(Number(row.attempts)).toBe(7);
+    expect(row.error.code).toBe('node_boom');
+    expect(row.error.message).toBe('a node failed terminally');
+    // …and the node journal those 7 attempts account for is still there and still consistent with it.
+    const nodes = await db.$client.unsafe(
+      'SELECT attempt_count FROM workflow_node_states WHERE workflow_run_id = $1',
+      [runId],
+    );
+    expect(nodes).toHaveLength(1);
+    expect(Number((nodes[0] as { attempt_count: string }).attempt_count)).toBe(3);
+
+    // The log surface says the header was kept, and names the settled status it kept.
+    expect(workerWarnings).toContain(
+      workflowResolveFailureHeaderKeptLog(
+        { workflowRunId: runId, tenantId: TENANT, workflowId: UNKNOWN_WORKFLOW_ID },
+        'terminal_failure',
+      ),
+    );
+    expect(workerWarnings).not.toContain(
+      workflowResolveFailureLog({
+        workflowRunId: runId,
+        tenantId: TENANT,
+        workflowId: UNKNOWN_WORKFLOW_ID,
+      }),
+    );
+  });
+
+  it('a resolver failure RE-SETTLES a header carrying its OWN mark (a re-invocation is idempotent)', async () => {
+    // The exception the guard deliberately keeps open, and the only one: a header this same path
+    // already settled — `terminal_failure` WITH `workflow_resolve_failed` — which is what a DBOS
+    // re-invocation of this step finds. Re-applying the patch touches only fields this path itself
+    // wrote, so the row ends in the same state and the run is journalled, not left half-written.
+    const idempotencyKey = 'k-preexisting-own-mark';
+    const runId = durableWorkflowRunId(TENANT, UNKNOWN_WORKFLOW_ID, idempotencyKey);
+    await db.$client.unsafe(
+      `INSERT INTO workflow_runs (workflow_run_id, tenant_id, workflow_id, idempotency_key,
+         trigger_event, input_event, status, resumable, error, attempts)
+       VALUES ($1, $2, $3, $4, 'thing.happened', $5, 'terminal_failure', false, $6, '0')`,
+      [
+        runId,
+        TENANT,
+        UNKNOWN_WORKFLOW_ID,
+        idempotencyKey,
+        JSON.stringify(event()),
+        JSON.stringify({
+          code: WORKFLOW_RESOLVE_FAILED_CODE,
+          message: 'written by an earlier pass of this same path',
+          retryable: false,
+        }),
+      ],
+    );
+
+    const { workflowRunId } = await wfExecutor.enqueueWorkflowRun({
+      tenantId: TENANT,
+      workflow: { ...counterWorkflow(), id: UNKNOWN_WORKFLOW_ID },
+      event: event(),
+      idempotencyKey,
+    });
+    expect(workflowRunId).toBe(runId);
+    expect(await waitForTerminal(workflowRunId)).toBe('failed');
+
+    const runs = await db.$client.unsafe(
+      'SELECT status, resumable, attempts, error FROM workflow_runs WHERE workflow_run_id = $1 AND tenant_id = $2',
+      [runId, TENANT],
+    );
+    expect(runs).toHaveLength(1);
+    const row = runs[0] as {
+      status: string;
+      resumable: boolean;
+      attempts: string;
+      error: { code: string; message: string };
+    };
+    expect(row.status).toBe('terminal_failure');
+    expect(row.resumable).toBe(false);
+    expect(Number(row.attempts)).toBe(0);
+    expect(row.error.code).toBe(WORKFLOW_RESOLVE_FAILED_CODE);
+    // Re-applied by THIS pass: the message is this resolver's, not the seeded placeholder.
+    expect(row.error.message).toContain(UNKNOWN_WORKFLOW_ID);
+
+    // It journalled, so it emits the terminal line — never the header-kept one.
+    expect(workerWarnings).toContain(
+      workflowResolveFailureLog({
+        workflowRunId: runId,
+        tenantId: TENANT,
+        workflowId: UNKNOWN_WORKFLOW_ID,
+      }),
+    );
+    expect(workerWarnings).not.toContain(
+      workflowResolveFailureHeaderKeptLog(
+        { workflowRunId: runId, tenantId: TENANT, workflowId: UNKNOWN_WORKFLOW_ID },
+        'terminal_failure',
+      ),
     );
   });
 });

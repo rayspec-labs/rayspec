@@ -492,13 +492,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolver's own message under `error` (code `workflow_resolve_failed`), and the worker emits one line
   naming the workflow, the tenant and the run id through an injectable sink that defaults to
   `console.warn`. The run's reconciled liveness for such a run is now `terminal` where it was
-  `absent`. If that run ALREADY carries a header from an earlier execution — the reachable case is a
+  `absent`. If that run ALREADY carries a header a WORKFLOW EXECUTION wrote — the reachable case is a
   crash mid-run followed by DBOS crash-recovery re-invoking it against a document that no longer
-  declares the workflow — the existing header is left exactly as it is, because its `attempts` and its
-  node journal are real and this failure attempted nothing; the worker emits a line saying so, and the
-  run keeps reading as `stalled`, the dead-letter classification, rather than being rewritten to
-  `terminal`. `rayspec`'s live-smoke run diagnostics consequently print the workflow-journal line for
-  these runs instead of reporting the run in neither journal.
+  declares the workflow — the existing header is left exactly as it is, whether it is still `running`
+  or already settled at `terminal_failure`, because its `attempts` and its node journal are real and
+  this failure attempted nothing; the worker emits a line naming the status it kept, and a kept
+  `running` header keeps reading as `stalled`, the dead-letter classification, rather than being
+  rewritten to `terminal`. The one header this path does re-settle is one carrying its own mark —
+  `terminal_failure` together with the `workflow_resolve_failed` code, which no other writer sets — so
+  that a re-invocation of the same failing job stays idempotent. `rayspec`'s live-smoke run
+  diagnostics consequently print the workflow-journal line for these runs instead of reporting the run
+  in neither journal.
   **Upgrading.** The first boot on this release changes the deployment's application version, and both
   of DBOS's claim paths are scoped by that column: a startable workflow is selected with
   `application_version IS NULL OR application_version = $3`, and crash recovery reads pending
