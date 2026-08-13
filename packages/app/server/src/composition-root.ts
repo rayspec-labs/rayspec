@@ -1532,10 +1532,16 @@ function staticSecurityHeaders(csp: string, permissionsPolicy: string): Middlewa
  * DB-probing 503). Do NOT wire a DB-readiness monitor onto a static cell. It DOES carry `frontend`, the
  * boot-time readiness of the declared mounts — the assets are this cell's whole reason to exist, so a
  * `200 {status:'ok'}` while they cannot be served is exactly the false-ready signal a deploy tool waits on.
+ *
+ * `opts.bootWarn` is the one-line warning sink (default `console.warn`), injectable so a test can
+ * capture what this boot reported — today, a served page carrying an inline block `config.frontendCsp`
+ * does not permit. EMIT-ONLY: nothing about the assembled app depends on it, and a caller that omits
+ * it (both entrypoints do) boots exactly as before.
  */
 export function assembleStaticServer(
   config: StaticServerConfig,
   spec: { specPath: string; frontend: readonly FrontendSpec[] },
+  opts: { bootWarn?: BootWarnSink } = {},
 ): StaticBootedServer {
   const app = new Hono();
   const specDir = dirname(spec.specPath);
@@ -1546,7 +1552,16 @@ export function assembleStaticServer(
   // readiness of the mounts registered just below (a static profile always declares at least one), so
   // the probe never reports ready while the assets cannot be served. Registered BEFORE the frontend
   // mounts (which decline the reserved `/health` prefix anyway), so a `/` spa catch-all cannot shadow it.
-  registerHealthRoute(app, undefined, frontendMountsReadiness(spec.frontend, specDir));
+  // The same once-per-boot pass also scans the mounts' HTML against the CSP THIS boot emits above and
+  // warns (warn-only) about an inline block that policy does not permit — see `blockedInlineAssetWarning`.
+  registerHealthRoute(
+    app,
+    undefined,
+    frontendMountsReadiness(spec.frontend, specDir, {
+      csp: config.frontendCsp,
+      warn: opts.bootWarn ?? consoleWarn,
+    }),
+  );
   // Mount the declared static frontend(s) — the ONLY request surface. `mountFrontend` (the SAME hardened
   // module the normal path uses) declines the reserved `/v1`,`/health`,`/oidc` prefixes, so an
   // unregistered auth/OIDC/runs path falls through to a uniform 404 — the surface is simply not there.
@@ -2006,9 +2021,16 @@ export async function assembleServer(
   const frontend =
     specParse?.ok && specParse.kind === 'rayspec' ? (specParse.spec.frontend ?? []) : [];
   const frontendSpecDir = config.specPath ? dirname(config.specPath) : undefined;
+  // The same once-per-boot pass also scans those mounts' HTML against the CSP this boot stamps on
+  // mount responses in step 8 and warns (warn-only) about an inline block that policy does not
+  // permit — the SAME signal the static profile emits, because #313 made both shapes serve the
+  // declared mounts under the same headers.
   const frontendReadiness =
     frontendSpecDir !== undefined && frontend.length > 0
-      ? frontendMountsReadiness(frontend, frontendSpecDir)
+      ? frontendMountsReadiness(frontend, frontendSpecDir, {
+          csp: config.frontendCsp,
+          warn: opts.bootWarn ?? consoleWarn,
+        })
       : undefined;
 
   // 7. A generic readiness probe. Registered AFTER createAuthApp so it sits on the same app; it is
