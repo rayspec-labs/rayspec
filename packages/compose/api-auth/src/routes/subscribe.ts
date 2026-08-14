@@ -66,7 +66,7 @@ import { requireAuth, requirePermission, resolveTenant } from '../http/middlewar
 const CURSOR_SEPARATOR = ':';
 
 /** The ONLY shape a cursor's sequence half may take — see `parseEventCursor` for why it is lexical. */
-const DECIMAL_SEQUENCE = /^[0-9]+$/;
+const DECIMAL_SEQUENCE = /^(?:0|[1-9][0-9]*)$/;
 
 /**
  * How long a subscriber waits for a wake before reading anyway — the correctness BACKSTOP and the
@@ -154,11 +154,13 @@ export function sseEventName(topic: string): string {
  * subscriber somewhere it did not ask for and look successful while doing it.
  *
  * THE SEQUENCE IS CHECKED LEXICALLY BEFORE IT IS CONVERTED, which is not pedantry: `Number()` accepts
- * hexadecimal, exponent, fractional, signed and whitespace-padded forms AND the empty string, and
- * every one of those coerces to a perfectly plausible sequence. `<tenant>:0x10` would resume at 16
- * and silently skip fifteen events; `<tenant>:` would coerce to 0 and replay the whole stream. Both
- * are a `200` that reads exactly like a working subscription — the failure this route exists to make
- * impossible — so only `[0-9]+` is a cursor.
+ * hexadecimal, exponent, fractional, signed, whitespace-padded and zero-padded forms AND the empty
+ * string, and every one of those coerces to a perfectly plausible sequence. `<tenant>:0x10` would
+ * resume at 16 and silently skip fifteen events; `<tenant>:` would coerce to 0 and replay the whole
+ * stream. Both are a `200` that reads exactly like a working subscription — the failure this route
+ * exists to make impossible — so only the CANONICAL spelling of a sequence is a cursor: `0`, or a
+ * digit string with no leading zero. That is exactly what `formatEventCursor` writes, since it
+ * interpolates a number, so a client echoing an `id:` back is never affected by the narrower rule.
  */
 export function parseEventCursor(raw: string, tenantId: string): number {
   const at = raw.indexOf(CURSOR_SEPARATOR);
