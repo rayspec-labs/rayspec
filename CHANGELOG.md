@@ -531,10 +531,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dev-boot wrappers — `examples/local-boot/serve.ts` and `deployments/acme-notes/serve.mts` — as the
   boots that assemble the server themselves and never read it. The getting-started guide's two "same
   boot" passages about `rayspec deploy <spec>` and `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` now name
-  two differences that decide what leaves the process and what can still register a table — this
-  trace-export default, and `sealProductStores()`, which `deploy` calls after its boot returns and
-  `rayspec-serve` never calls — rather than counting the differences between the entrypoints, which
-  they never enumerated.
+  two differences that matter for what leaves the process and for what can still register a table —
+  this trace-export default, and `sealProductStores()`, which `deploy` calls after its boot returns
+  and `rayspec-serve` never calls — without claiming to have counted every difference between the two
+  entrypoints (`withBootTimeout` and the `.env` search order differ as well).
   **Two operator-facing sentences are corrected while they are being touched.** The refusal an
   unusable value raises stated `unset ⇒ off`, which is false on the entrypoint this change makes it
   reachable from; it now states the default per entry point. And both `Trace export:` banner lines said

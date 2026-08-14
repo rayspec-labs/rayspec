@@ -463,16 +463,16 @@ file, until `SIGINT` / `SIGTERM`.
 > this way, with no hand-written wrapper — see [the backend
 > profile](#the-backend-profile-direct-agent-boot) below.
 >
-> **They are not interchangeable in every respect.** Two differences decide what
-> leaves this process and what can still register a table, and both sit around
-> that boot rather than in it. `deploy` seals the product-store registrar once its
-> boot returns (`sealProductStores()`), so nothing later in that process can
-> register a product table through the sanctioned door; `rayspec-serve` never calls
-> it, and that door stays open. And `deploy` **defaults the agent trace export
-> off**, while `rayspec-serve` keeps the agent SDK's own default, which is to
-> export to OpenAI. Both entrypoints honour `RAYSPEC_AGENT_TRACING` — `openai` or
-> `off`, a blank value counting as unset — and fail the boot by name on anything
-> else, so the export is a choice you can state on either one.
+> **They are not interchangeable in every respect.** Two of the differences matter
+> for what leaves this process and for what can still register a table, and both
+> sit around that boot rather than in it. `deploy` seals the product-store
+> registrar once its boot returns (`sealProductStores()`), so nothing later in that
+> process can register a product table through the sanctioned door; `rayspec-serve`
+> never calls it, and that door stays open. And `deploy` **defaults the agent
+> trace export off**, while `rayspec-serve` keeps the agent SDK's own default,
+> which is to export to OpenAI. Both entrypoints honour `RAYSPEC_AGENT_TRACING` —
+> `openai` or `off`, a blank value counting as unset — and fail the boot by name on
+> anything else, so the export is a choice you can state on either one.
 
 The repo ships a ready-to-run **product-profile** document — one declarative YAML
 with **zero custom code** — at `examples/acme-notes/acme-notes.product.yaml`. It
