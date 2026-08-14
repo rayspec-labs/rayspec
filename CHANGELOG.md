@@ -524,11 +524,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rayspec-serve` ignoring it. With `off` that boot stops exporting; with an unsupported value it now
   refuses to start rather than booting and exporting. `deploy --check-env` still does not list this
   variable — it reports the variables a document's boot *demands*, and tracing is not demanded.
-  The getting-started guide's two "same boot" claims about `rayspec deploy <spec>` and
-  `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` now name what still differs between the entrypoints: this
+  The documentation of the variable is corrected to match on both halves. `.env.example` no longer
+  presents the block as `rayspec deploy` only or claims that leaving the variable unset keeps traces in
+  the process: it now states the one thing that differs between the two entrypoints, which is what
+  unset means (`off` on `deploy`, the SDK's exporting default on `rayspec-serve`), and names the
+  dev-boot wrappers — `examples/local-boot/serve.ts` and `deployments/acme-notes/serve.mts` — as the
+  boots that assemble the server themselves and never read it. The getting-started guide's two "same
+  boot" passages about `rayspec deploy <spec>` and `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` now name
+  two differences that decide what leaves the process and what can still register a table — this
   trace-export default, and `sealProductStores()`, which `deploy` calls after its boot returns and
-  `rayspec-serve` never calls. The `Trace export: OFF` banner line drops the `on 'rayspec deploy'`
-  qualifier from its remediation hint, which is now true on both entrypoints.
+  `rayspec-serve` never calls — rather than counting the differences between the entrypoints, which
+  they never enumerated.
+  **Two operator-facing sentences are corrected while they are being touched.** The refusal an
+  unusable value raises stated `unset ⇒ off`, which is false on the entrypoint this change makes it
+  reachable from; it now states the default per entry point. And both `Trace export:` banner lines said
+  the export carries prompts. It does not: `@openai/agents-openai` keeps the model input and response in
+  `_`-prefixed span fields and `@openai/agents-core` strips every `_`-prefixed key in `Span.toJSON`
+  before the exporter serializes anything, while function spans carry tool arguments and outputs
+  unprefixed. Both lines now say run metadata plus, once an agent calls tools, its tool arguments and
+  outputs — and both name the remediation as `RAYSPEC_AGENT_TRACING` on `rayspec deploy` and
+  `rayspec-serve` specifically, because the same banner is printed by the two dev-boot wrappers, where
+  that variable is read by nothing.
 
 ### Fixed
 

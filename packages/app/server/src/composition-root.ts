@@ -408,8 +408,9 @@ export interface BootedServer {
   };
   /**
    * The OBSERVED agent trace-export posture this boot runs under — whether agent traces, which carry
-   * prompts and tool arguments, are exported to OpenAI. It is READ OFF THE SDK'S OWN TRACE PROVIDER
-   * (`observedAgentTracing`), not derived from any environment variable, so it reports what will
+   * run metadata and, once an agent calls tools, its tool arguments and outputs, are exported to
+   * OpenAI (the SDK strips the model prompt fields before export). It is READ OFF THE SDK'S OWN TRACE
+   * PROVIDER (`observedAgentTracing`), not derived from any environment variable, so it reports what will
    * actually happen on EVERY entry point — including the ones that do not change the SDK default, and
    * including a boot where the mechanism that was supposed to turn the export off failed to. The boot
    * banner states it in both directions; an embedder that assembles the server itself reads the same

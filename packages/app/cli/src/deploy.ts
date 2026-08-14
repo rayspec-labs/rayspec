@@ -613,11 +613,15 @@ export async function serveDeployment(
   if (allowlistPath !== undefined) process.env.RAYSPEC_UPDATE_ALLOWLIST = allowlistPath;
 
   // The agent trace export is DEFAULTED OFF on this path, and only on this path. `@openai/agents`
-  // exports traces to OpenAI by default and those traces carry prompts and tool arguments; `deploy` is
-  // the strongest available signal that the workload running here is somebody else's, so on it the
-  // export becomes an affirmative choice — RAYSPEC_AGENT_TRACING=openai — instead of a default.
-  // `rayspec-serve` and the local dev wrapper are untouched: a developer tracing their own agent sees
-  // their own prompts, which was never the risk case.
+  // exports traces to OpenAI by default; what leaves on that transport is run metadata and, once an
+  // agent calls tools, its tool arguments and outputs (the SDK strips the model prompt fields before
+  // export). `deploy` is the strongest available signal that the workload running here is somebody
+  // else's, so on it the export becomes an affirmative choice — RAYSPEC_AGENT_TRACING=openai —
+  // instead of a default. What is deploy-only is that DEFAULT, not the variable: `rayspec-serve` reads
+  // the same variable and honours an explicitly stated value (applyServeAgentTracing, issue #383), but
+  // keeps the SDK's default when it is unset, because a developer tracing their own agent is looking
+  // at their own run — which was never the risk case. The dev-boot wrappers (examples/local-boot,
+  // deployments/acme-notes) assemble the server themselves and never read it.
   //
   // FIRST, and through the `@rayspec/server/agent-tracing` SUBPATH rather than the barrel below. The
   // agent SDK builds its global trace provider while its module is being evaluated, and that provider
