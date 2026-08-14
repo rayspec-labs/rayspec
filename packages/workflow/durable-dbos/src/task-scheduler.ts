@@ -83,7 +83,7 @@ import {
   type WorkforceBudgets,
   workforceBudgetsSchema,
 } from '@rayspec/tasks';
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, notInArray, or, type SQL, sql } from 'drizzle-orm';
 
 /** The DBOS queue turn workflows run on (worker-concurrency capped like the run queue). */
 export const WORKFORCE_TURNS_QUEUE = 'workforce-turns';
@@ -197,9 +197,16 @@ const PRIORITY_RANK_SQL = sql`case ${schema.workforceTasks.priority}
  * pass materializing a tenant's whole task partition into process memory. Counts and cascades that
  * would be WRONG when truncated are aggregated in the database or documented as deliberate full
  * scans instead of being capped.
+ *
+ * A bound is only half the invariant. The other half is that the page must ADVANCE, and each scan
+ * says which way it earns that: `#promotePlanned` because every row it examines leaves the set;
+ * the candidate page because the two conditions that would skip a row are excluded in SQL before
+ * the page is taken; the dependency wake and the reaper because they carry a keyset cursor. A
+ * bounded scan whose rows can be skipped in place and is taken from the top every tick is not a
+ * bound, it is a starvation window — which is the one failure this file may not ship.
  */
-const RESERVE_SCAN_LIMIT = 500;
-const SWEEP_SCAN_LIMIT = 500;
+export const RESERVE_SCAN_LIMIT = 500;
+export const SWEEP_SCAN_LIMIT = 500;
 /** How much of a task's own history a turn handler receives as context, newest kept. */
 const CONTEXT_SIGNAL_LIMIT = 200;
 const CONTEXT_MESSAGE_LIMIT = 200;
@@ -232,6 +239,18 @@ export class DbosTaskScheduler {
   #turnWorkflow?: (job: TaskTurnJob) => Promise<void>;
   #passRunning = false;
   #passQueued = false;
+  /**
+   * Wrapping keyset cursors for the two BOUNDED scans whose rows may legitimately stay in the set:
+   * a dependency park whose prerequisites are still pending, and a `working` row whose turn is
+   * still alive. Both are examined, skipped, and still occupy the identical slot of the identical
+   * page next tick — so past one page of them, nothing behind them is ever examined again. Each
+   * scan therefore resumes from the last key it EXAMINED and resets when a short page says the set
+   * is exhausted, which reaches every row within one cycle at the cost of one process-local field
+   * rather than a schema column. A restart resets the cursor to the start of the order: a re-scan,
+   * never a skip.
+   */
+  #dependencyWakeCursor: { key: Date; taskId: string } | null = null;
+  #reapCursor: { key: Date; taskId: string } | null = null;
 
   constructor(deps: TaskSchedulerDeps) {
     this.#deps = deps;
@@ -307,6 +326,12 @@ export class DbosTaskScheduler {
    * exactly one follow-up, because the running pass may have read its state before it committed.
    * This closes the in-process half of the overshoot only; two worker processes still pass
    * independently, and the header says so.
+   *
+   * Under CONTINUOUS kicks the drain loop keeps running, so the scheduled reserve workflow that
+   * entered it stays PENDING for as long as the kicks keep arriving. That is correct rather than a
+   * leak — the work is genuinely being done, one pass at a time, and the alternative (returning and
+   * letting the next tick pick it up) is the overlap this method exists to prevent — but it does
+   * mean a PENDING reserve workflow is not by itself evidence of a stuck pass.
    */
   async #passCoalesced(): Promise<void> {
     // The claim is taken SYNCHRONOUSLY, before the first await: an async body runs to its first
@@ -352,19 +377,6 @@ export class DbosTaskScheduler {
     await this.#promotePlanned(tdb, outcome);
     await this.#wakeDependencySatisfied(tdb);
 
-    // One page of candidates, ordered in the DATABASE by the same key the pass dispatches in
-    // (priority band, then oldest queued) — so the bound cannot let a low-priority row jump ahead
-    // of an urgent one that happened to sit outside the page.
-    const candidates = (await tdb
-      .select(schema.workforceTasks)
-      .where(eq(schema.workforceTasks.status, 'queued'))
-      .orderBy(
-        PRIORITY_RANK_SQL,
-        asc(schema.workforceTasks.queuedAt),
-        asc(schema.workforceTasks.taskId),
-      )
-      .limit(RESERVE_SCAN_LIMIT)) as TaskRecord[];
-    if (candidates.length === 0) return outcome;
     // The concurrency counts are aggregated IN the database: a LIMIT here would understate the
     // caps it feeds, and materializing every working row to count them is the unbounded read.
     const workingGroups = (await tdb
@@ -391,26 +403,49 @@ export class DbosTaskScheduler {
     }
 
     const budgetsCache = new Map<string, { paused: boolean; budgets: WorkforceBudgets }>();
+    const skipped = await this.#undispatchableScopes(tdb, budgetsCache, {
+      workforceCount,
+      departmentCount,
+    });
+    outcome.paused += skipped.pausedTasks;
+    outcome.saturated += skipped.saturatedTasks;
+
+    // One page of candidates, ordered in the DATABASE by the same key the pass dispatches in
+    // (priority band, then oldest queued) — so the bound cannot let a low-priority row jump ahead
+    // of an urgent one that happened to sit outside the page.
+    //
+    // The page is taken over the DISPATCHABLE rows only. A skipped candidate gets no transition, so
+    // it holds the identical slot in the identical page on every subsequent tick: one paused — or
+    // merely at-capacity — workforce with more queued tasks than the page holds would silently stop
+    // dispatch for every other workforce in the tenant, forever. Both of those conditions are
+    // knowable BEFORE the page is taken, so they are excluded in the predicate rather than skipped
+    // in the loop, and the rows they exclude are counted from the same database-side aggregate.
+    const candidates = (await tdb
+      .select(schema.workforceTasks)
+      .where(and(eq(schema.workforceTasks.status, 'queued'), ...skipped.exclusions))
+      .orderBy(
+        PRIORITY_RANK_SQL,
+        asc(schema.workforceTasks.queuedAt),
+        asc(schema.workforceTasks.taskId),
+      )
+      .limit(RESERVE_SCAN_LIMIT)) as TaskRecord[];
+    if (candidates.length === 0) return outcome;
 
     for (const task of candidates) {
       try {
         const wf = task.workforceId;
-        let paused = false;
-        let budgets = EMPTY_BUDGETS;
-        if (wf !== null) {
-          let entry = budgetsCache.get(wf);
-          if (!entry) {
-            const runtime = await ensureWorkforceRuntime(tdb, wf);
-            entry = {
-              paused: runtime.paused,
-              budgets: resolveWorkforceBudgets(runtime.budgets, wf),
-            };
-            budgetsCache.set(wf, entry);
-          }
-          paused = entry.paused;
-          budgets = entry.budgets;
+        // The caps are re-checked per candidate because the pass itself moves them: a workforce
+        // with room at page time saturates as this loop dispatches into it. The cache is already
+        // warm for every workforce that had a queued row when the scopes were resolved; a row that
+        // arrived since then resolves here, so a fresh arrival is never dispatched past a cap.
+        let entry = wf !== null ? budgetsCache.get(wf) : undefined;
+        if (wf !== null && entry === undefined) {
+          const runtime = await ensureWorkforceRuntime(tdb, wf);
+          entry = { paused: runtime.paused, budgets: resolveWorkforceBudgets(runtime.budgets, wf) };
+          budgetsCache.set(wf, entry);
         }
-        if (paused) {
+        const budgets = entry?.budgets ?? EMPTY_BUDGETS;
+        if (entry?.paused === true) {
           outcome.paused++;
           continue; // the pause lives on the workforce row; the task stays visibly queued
         }
@@ -482,6 +517,119 @@ export class DbosTaskScheduler {
   }
 
   /**
+   * The scopes this pass cannot dispatch into, as SQL the candidate page is taken UNDER.
+   *
+   * Two conditions are decided per WORKFORCE (or per department) rather than per task — the pause
+   * flag and a concurrency cap already met — and both are knowable before a single candidate row is
+   * read. Deciding them in the loop instead is what starves the tenant: the skipped rows keep their
+   * place in the ordering, so they refill the same page every tick and nothing behind them is ever
+   * examined. Deciding them here keeps the page full of rows the pass can actually act on.
+   *
+   * The counts come from the same database-side aggregate, so `paused`/`saturated` in the outcome
+   * report every candidate the pass declined — not just the ones that fit in a page.
+   *
+   * Warms `budgetsCache` on the way through: every workforce with a queued task needs its runtime
+   * row read exactly once per pass, whether it is excluded here or dispatched below.
+   */
+  async #undispatchableScopes(
+    tdb: TenantDb,
+    budgetsCache: Map<string, { paused: boolean; budgets: WorkforceBudgets }>,
+    counts: { workforceCount: Map<string, number>; departmentCount: Map<string, number> },
+  ): Promise<{ exclusions: SQL[]; pausedTasks: number; saturatedTasks: number }> {
+    const queuedGroups = (await tdb
+      .select(schema.workforceTasks, {
+        workforceId: schema.workforceTasks.workforceId,
+        department: schema.workforceTasks.department,
+        count: sql<number>`count(*)::int`,
+      })
+      .where(eq(schema.workforceTasks.status, 'queued'))
+      .groupBy(schema.workforceTasks.workforceId, schema.workforceTasks.department)) as Array<{
+      workforceId: string | null;
+      department: string | null;
+      count: number;
+    }>;
+
+    const paused = new Set<string>();
+    const saturated = new Set<string>();
+    /** A workforce whose stored declaration will not parse: every candidate under it would throw. */
+    const unresolvable = new Set<string>();
+    for (const workforceId of new Set(
+      queuedGroups.flatMap((g) => (g.workforceId !== null ? [g.workforceId] : [])),
+    )) {
+      try {
+        const runtime = await ensureWorkforceRuntime(tdb, workforceId);
+        const entry = {
+          paused: runtime.paused,
+          budgets: resolveWorkforceBudgets(runtime.budgets, workforceId),
+        };
+        budgetsCache.set(workforceId, entry);
+        if (entry.paused) {
+          paused.add(workforceId);
+          continue;
+        }
+        const cap = entry.budgets.execution.maxConcurrentWorkers ?? null;
+        if (cap !== null && (counts.workforceCount.get(workforceId) ?? 0) >= cap) {
+          saturated.add(workforceId);
+        }
+      } catch (err) {
+        // A misconfigured workforce must not fill the page with rows that can only throw — it is
+        // excluded loudly and the rest of the tenant keeps dispatching.
+        unresolvable.add(workforceId);
+        this.#logger.error(
+          `[workforce] reserve pass: workforce ${workforceId} is undispatchable: ${String(err)}`,
+        );
+      }
+    }
+
+    const saturatedDepartments: { workforceId: string; department: string }[] = [];
+    let pausedTasks = 0;
+    let saturatedTasks = 0;
+    for (const g of queuedGroups) {
+      const workforceId = g.workforceId;
+      if (workforceId === null) continue; // no runtime row: no pause flag and no caps to meet
+      if (paused.has(workforceId)) {
+        pausedTasks += g.count;
+        continue;
+      }
+      if (saturated.has(workforceId)) {
+        saturatedTasks += g.count;
+        continue;
+      }
+      if (unresolvable.has(workforceId) || g.department === null) continue;
+      const depCap =
+        budgetsCache.get(workforceId)?.budgets.departments?.[g.department]?.maxConcurrentWorkers ??
+        null;
+      if (
+        depCap !== null &&
+        (counts.departmentCount.get(`${workforceId}/${g.department}`) ?? 0) >= depCap
+      ) {
+        saturatedDepartments.push({ workforceId, department: g.department });
+        saturatedTasks += g.count;
+      }
+    }
+
+    const excludedWorkforces = [...paused, ...saturated, ...unresolvable];
+    const exclusions: SQL[] = [];
+    if (excludedWorkforces.length > 0) {
+      // `NOT IN` alone would drop the workforce-less rows too (NULL NOT IN (…) is NULL, not true).
+      exclusions.push(
+        or(
+          isNull(schema.workforceTasks.workforceId),
+          notInArray(schema.workforceTasks.workforceId, excludedWorkforces),
+        ) as SQL,
+      );
+    }
+    for (const { workforceId, department } of saturatedDepartments) {
+      // `IS DISTINCT FROM` so a NULL workforce id or department answers the comparison instead of
+      // making the whole predicate NULL and dropping the row.
+      exclusions.push(
+        sql`(${schema.workforceTasks.workforceId} is distinct from ${workforceId} or ${schema.workforceTasks.department} is distinct from ${department})`,
+      );
+    }
+    return { exclusions, pausedTasks, saturatedTasks };
+  }
+
+  /**
    * Resolve the dispatch id for a candidate, salting PAST dead prior attempts. The base id is
    * deterministic in (task, turn, version) so racing passes dedupe — but an attempt that DIED
    * without moving the row (an unexpected throw inside the claim leaves the workflow ERRORED and
@@ -550,18 +698,35 @@ export class DbosTaskScheduler {
    * Wake blocked(awaiting_dependency) rows whose dependencies have since completed — and DECIDE the
    * ones whose dependencies ended terminal without completing, because nothing else ever revisits
    * this park.
+   *
+   * PAGED FROM A CURSOR, not from the start of the order. `#promotePlanned` may take the first page
+   * every tick because every row it examines LEAVES the set — promoted or parked, it is no longer
+   * `planned`. Here the opposite is normal: a park whose dependencies are still pending is examined,
+   * skipped, and is still the very same row at the very same position next tick, so a page's worth
+   * of long-lived parks hides every newer task behind them permanently. The cursor advances past
+   * what was examined and resets when a short page says the set is exhausted, so every park is
+   * reached within one full cycle of the set.
    */
   async #wakeDependencySatisfied(tdb: TenantDb): Promise<void> {
+    const cursor = this.#dependencyWakeCursor;
     const parked = (await tdb
       .select(schema.workforceTasks)
       .where(
         and(
           eq(schema.workforceTasks.status, 'blocked'),
           eq(schema.workforceTasks.statusReason, 'awaiting_dependency'),
+          cursor === null
+            ? undefined
+            : sql`(${schema.workforceTasks.createdAt}, ${schema.workforceTasks.taskId}) > (${cursor.key.toISOString()}::timestamptz, ${cursor.taskId})`,
         ),
       )
       .orderBy(asc(schema.workforceTasks.createdAt), asc(schema.workforceTasks.taskId))
       .limit(RESERVE_SCAN_LIMIT)) as TaskRecord[];
+    const last = parked[parked.length - 1];
+    this.#dependencyWakeCursor =
+      parked.length < RESERVE_SCAN_LIMIT || last === undefined
+        ? null
+        : { key: last.createdAt, taskId: last.taskId };
     for (const task of parked) {
       try {
         const verdict = await this.#dependencyVerdict(tdb, task);
@@ -664,7 +829,8 @@ export class DbosTaskScheduler {
    * re-queue: `settleTurn` is the only other release and it runs from the turn's final transaction,
    * which this turn never reached. The un-windowed `task`/`root` scopes never roll over, so an
    * unreleased estimate is permanent — enough reaps and the task is denied at a ceiling it has
-   * spent nothing against.
+   * spent nothing against. What it releases is what the CLAIM reserved, in the window the claim
+   * reserved it in (`#reservationOfClaim`), never a fresh derivation from today's declaration.
    */
   async runSweep(): Promise<ApprovalSweepOutcome & { reaped: string[] }> {
     if (!(await this.#deps.tenantExists(this.#deps.tenantId))) {
@@ -673,11 +839,27 @@ export class DbosTaskScheduler {
     const tdb = forTenant(this.#deps.db, this.#deps.tenantId);
     const approvals = await sweepApprovalTimeouts(tdb, this.#now());
     const reaped: string[] = [];
+    // Paged from the reap cursor for the same reason the dependency wake is: a LIVE turn is skipped
+    // and stays `working`, so a page's worth of long-running turns would hide every dead one behind
+    // them from every future sweep.
+    const cursor = this.#reapCursor;
     const working = (await tdb
       .select(schema.workforceTasks)
-      .where(eq(schema.workforceTasks.status, 'working'))
+      .where(
+        and(
+          eq(schema.workforceTasks.status, 'working'),
+          cursor === null
+            ? undefined
+            : sql`(${schema.workforceTasks.startedAt}, ${schema.workforceTasks.taskId}) > (${cursor.key.toISOString()}::timestamptz, ${cursor.taskId})`,
+        ),
+      )
       .orderBy(asc(schema.workforceTasks.startedAt), asc(schema.workforceTasks.taskId))
       .limit(SWEEP_SCAN_LIMIT)) as TaskRecord[];
+    const lastScanned = working[working.length - 1];
+    this.#reapCursor =
+      working.length < SWEEP_SCAN_LIMIT || lastScanned?.startedAt == null
+        ? null
+        : { key: lastScanned.startedAt, taskId: lastScanned.taskId };
     for (const task of working) {
       try {
         const claimRows = (await tdb
@@ -701,6 +883,7 @@ export class DbosTaskScheduler {
         const live =
           status !== null && (status.status === 'PENDING' || status.status === 'ENQUEUED');
         if (live) continue;
+        const reservation = await this.#reservationOfClaim(tdb, task.taskId, turnId);
         await tdb.transaction(async (tx) => {
           // Lock rank (see #claimTurn): runtime row, then the task row, then the ledger rows.
           const budgets =
@@ -718,18 +901,20 @@ export class DbosTaskScheduler {
             actor: 'scheduler',
             queueReason: 'turn_reaped',
           });
-          await releaseTurnReservation(
-            tx,
-            budgets,
-            {
-              taskId: task.taskId,
-              rootTaskId: task.rootTaskId,
-              workforceId: task.workforceId,
-              department: task.department,
-              estimateUsd: budgets.execution.estimateUsdPerTurn,
-            },
-            this.#now(),
-          );
+          if (reservation !== null) {
+            await releaseTurnReservation(
+              tx,
+              budgets,
+              {
+                taskId: task.taskId,
+                rootTaskId: task.rootTaskId,
+                workforceId: task.workforceId,
+                department: task.department,
+                estimateUsd: reservation.estimateUsd,
+              },
+              reservation.reservedAt,
+            );
+          }
         });
         reaped.push(task.taskId);
         this.#logger.warn(
@@ -742,6 +927,50 @@ export class DbosTaskScheduler {
       }
     }
     return { ...approvals, reaped };
+  }
+
+  /**
+   * What the dead claim actually RESERVED, and WHEN — the two facts the release must undo.
+   *
+   * Re-deriving them from today's declaration and today's clock is wrong twice over: an
+   * `estimateUsdPerTurn` edited between the claim and the reap releases the wrong amount (releasing
+   * too much eats the headroom of the turns still running and over-admits past the ceiling), and a
+   * reap that crosses a calendar boundary decrements a window that never held the reservation while
+   * the real one sits in the previous bucket, where nothing will ever release it.
+   *
+   * The claim recorded both facts in the transaction that took the reservation — its
+   * `workforce.budget.reserved` journal entry, keyed by the claim's own turn id — so that entry is
+   * the durable record of the reservation and is what the release reads back. No entry means this
+   * claim reserved nothing (a row driven to `working` outside a dispatch), and releasing nothing is
+   * then exactly right.
+   */
+  async #reservationOfClaim(
+    tdb: TenantDb,
+    taskId: string,
+    turnId: string,
+  ): Promise<{ estimateUsd: number; reservedAt: Date } | null> {
+    const rows = (await tdb
+      .select(schema.runEvents, { data: schema.runEvents.data })
+      .where(
+        and(
+          eq(schema.runEvents.runId, taskId),
+          eq(schema.runEvents.type, 'workforce.budget.reserved'),
+          sql`${schema.runEvents.data}->>'turnId' = ${turnId}`,
+        ),
+      )) as Array<{ data: unknown }>;
+    const data = rows[0]?.data;
+    if (data === undefined || data === null || typeof data !== 'object') return null;
+    const { estimateUsd, reservedAt } = data as { estimateUsd?: unknown; reservedAt?: unknown };
+    const amount = Number(estimateUsd);
+    const at = new Date(String(reservedAt));
+    if (!Number.isFinite(amount) || amount < 0 || Number.isNaN(at.getTime())) {
+      throw new Error(
+        `[workforce] task ${taskId}: the reservation entry for turn ${turnId} carries ` +
+          `estimateUsd=${String(estimateUsd)} reservedAt=${String(reservedAt)} — refusing to ` +
+          'release a guessed amount into a guessed window. Fail-closed.',
+      );
+    }
+    return { estimateUsd: amount, reservedAt: at };
   }
 
   /**
@@ -907,6 +1136,9 @@ export class DbosTaskScheduler {
           turnId: myWorkflowId,
         });
 
+        // ONE instant for the reservation: the window it lands in and the window a later release
+        // works must be the same, so the clock is captured, not read twice.
+        const reservedAt = this.#now();
         const decision = await authorizeTurn(
           tx,
           budgets,
@@ -917,7 +1149,7 @@ export class DbosTaskScheduler {
             department: task.department,
             estimateUsd: budgets.execution.estimateUsdPerTurn,
           },
-          this.#now(),
+          reservedAt,
         );
         if (!decision.allowed) throw new ClaimDenied(decision.denial);
 
@@ -927,7 +1159,11 @@ export class DbosTaskScheduler {
             payload: {
               taskId: task.taskId,
               turnNumber: job.turnNumber,
+              // The claim's own id and clock: the reaper's release reads them back to undo exactly
+              // this reservation, in exactly the window it landed in (`#reservationOfClaim`).
+              turnId: myWorkflowId,
               estimateUsd: budgets.execution.estimateUsdPerTurn,
+              reservedAt: reservedAt.toISOString(),
             },
           },
           {

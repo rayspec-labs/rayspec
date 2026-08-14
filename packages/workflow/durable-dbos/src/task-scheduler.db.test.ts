@@ -37,6 +37,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DbosDurableExecutor, type DbosExecutorDeps } from './executor.js';
 import {
   DbosTaskScheduler,
+  RESERVE_SCAN_LIMIT,
   type TaskTurnContext,
   type TaskTurnHandler,
   taskTurnWorkflowId,
@@ -72,6 +73,12 @@ let executor: DbosDurableExecutor;
 let scheduler: DbosTaskScheduler;
 let appBaseUrl = '';
 let deadWorkflow: () => Promise<void>;
+
+/**
+ * The scheduler's clock, overridable per test. Left `null` (real time) everywhere except the
+ * window-boundary suite, which needs a claim and its reap to fall in different calendar buckets.
+ */
+let clockOverride: Date | null = null;
 
 /** owner -> handler; workers resolve by prefix so fan-out specs need no per-test registration. */
 const handlers = new Map<string, TaskTurnHandler>();
@@ -175,6 +182,7 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
         handlers.get(owner) ?? (owner.startsWith('worker-') ? workerHandler : undefined),
       reserveSchedule: NEVER,
       sweepSchedule: NEVER,
+      now: () => clockOverride ?? new Date(),
     });
     executor.attachPreLaunchHook(() => scheduler.registerScheduledWorkflows());
     executor.attachPreLaunchHook(() => {
@@ -193,6 +201,7 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
 
   beforeEach(async () => {
     handlers.clear();
+    clockOverride = null;
     await db.$client.unsafe(
       'TRUNCATE workforce_tasks, workforce_task_transitions, workforce_task_signals, workforce_delegations, workforce_approvals, workforce_reviews, workforce_messages, workforce_budget_ledger, workforce_runtime, run_events, idempotency_keys CASCADE',
     );
@@ -552,6 +561,232 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
       (journal[0]?.data as { dependencies: { taskId: string; status: string }[] }).dependencies,
     ).toEqual([{ taskId: prerequisite.taskId, status: 'failed' }]);
   });
+
+  /** Create `count` roots on one workforce and drive each to `queued`, pool-parallel. */
+  async function seedQueued(count: number, over: Record<string, unknown>): Promise<string[]> {
+    const ids: string[] = [];
+    const CHUNK = 25;
+    for (let created = 0; created < count; created += CHUNK) {
+      const batch = await Promise.all(
+        Array.from({ length: Math.min(CHUNK, count - created) }, () =>
+          newRoot('worker-bulk', over),
+        ),
+      );
+      await Promise.all(
+        batch.map((task) =>
+          applyTransition(tdb(), {
+            taskId: task.taskId,
+            expectedVersion: task.version,
+            to: 'queued',
+            actor: 'scheduler',
+          }),
+        ),
+      );
+      ids.push(...batch.map((t) => t.taskId));
+    }
+    return ids;
+  }
+
+  it('a paused workforce with a full page of queued tasks does not starve the rest of the tenant', async () => {
+    handlers.set('solo', async () => ({
+      intent: { kind: 'complete', result: { status: 'completed', summary: 'ok', confidence: 1 } },
+    }));
+    await pauseWorkforce(tdb(), { workforceId: 'wf-paused', actor: 'operator' });
+    // A whole page of candidates the pass can never dispatch, all queued BEFORE the live one, so
+    // they own every slot of the deterministic ordering the page is taken in.
+    const starving = await seedQueued(RESERVE_SCAN_LIMIT, { workforceId: 'wf-paused' });
+    expect(starving).toHaveLength(RESERVE_SCAN_LIMIT);
+    const live = await newRoot('solo', { workforceId: 'wf-live' });
+    await applyTransition(tdb(), {
+      taskId: live.taskId,
+      expectedVersion: live.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+
+    // Skipping a paused candidate in the LOOP leaves it in the page forever: the live workforce
+    // sits just outside it and never dispatches again, for as long as the pause lasts.
+    const pass = await scheduler.runReservePass();
+    expect(pass.paused).toBe(RESERVE_SCAN_LIMIT);
+    expect(pass.dispatched.map((d) => d.taskId)).toContain(live.taskId);
+
+    await pumpUntil(async () => (await taskRow(live.taskId)).status === 'completed', 30_000);
+    // The paused workforce still accrued nothing.
+    const parked = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_tasks WHERE task_id IN ('${starving[0]}', '${starving[RESERVE_SCAN_LIMIT - 1]}') AND status = 'queued';`,
+    );
+    expect(parked[0]?.c).toBe(2);
+  }, 120_000);
+
+  it('a page of still-pending dependency parks does not hide a newer satisfiable one', async () => {
+    handlers.set('waiter', async () => ({
+      intent: { kind: 'complete', result: { status: 'completed', summary: 'ok', confidence: 1 } },
+    }));
+    /** A prerequisite parked where nothing will ever complete it on its own. */
+    async function parkedPrerequisite(): Promise<string> {
+      const task = await newRoot('worker-prereq');
+      await applyTransition(tdb(), {
+        taskId: task.taskId,
+        expectedVersion: task.version,
+        to: 'blocked',
+        reason: 'clarification_pending',
+        actor: 'scheduler',
+      });
+      return task.taskId;
+    }
+    const neverCompletes = await parkedPrerequisite();
+    const completesLater = await parkedPrerequisite();
+
+    // A full page of parks whose dependency stays pending: they are examined, skipped, and are
+    // still the very same rows at the very same positions on the next tick.
+    for (let created = 0; created < RESERVE_SCAN_LIMIT; created += 25) {
+      await Promise.all(
+        Array.from({ length: 25 }, () =>
+          newRoot('worker-bulk', { dependencies: [neverCompletes] }),
+        ),
+      );
+    }
+    await scheduler.runReservePass();
+    const parked = await db.$client.unsafe(
+      "SELECT count(*)::int AS c FROM workforce_tasks WHERE status = 'blocked' AND status_reason = 'awaiting_dependency';",
+    );
+    expect(parked[0]?.c).toBe(RESERVE_SCAN_LIMIT);
+
+    // The newer task parks behind all of them, and only then does its dependency complete.
+    const dependent = await newRoot('waiter', { dependencies: [completesLater] });
+    await pumpUntil(
+      async () => (await taskRow(dependent.taskId)).status_reason === 'awaiting_dependency',
+    );
+    const queued = await applyTransition(tdb(), {
+      taskId: completesLater,
+      expectedVersion: (await taskRow(completesLater)).version as number,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    const working = await applyTransition(tdb(), {
+      taskId: completesLater,
+      expectedVersion: queued.version,
+      to: 'working',
+      actor: 'scheduler',
+      turnId: 'wf-task-turn:prereq',
+    });
+    await applyTransition(tdb(), {
+      taskId: completesLater,
+      expectedVersion: working.version,
+      to: 'completed',
+      actor: 'scheduler',
+    });
+
+    // Taken from the top every tick, the scan never reaches past the page of pending parks and
+    // this task waits on a dependency that completed, forever.
+    await pumpUntil(async () => (await taskRow(dependent.taskId)).status === 'completed', 60_000);
+    const wake = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_task_signals WHERE task_id = '${dependent.taskId}' AND kind = 'dependency_completed';`,
+    );
+    expect(wake[0]?.c).toBe(1);
+  }, 180_000);
+
+  it('a reap releases what the CLAIM reserved, into the window it was reserved in', async () => {
+    let releaseTurns: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      releaseTurns = resolve;
+    });
+    handlers.set('slow', async () => {
+      await held;
+      return {
+        intent: { kind: 'complete', result: { status: 'completed', summary: 'ok', confidence: 1 } },
+      };
+    });
+    await ensureWorkforceRuntime(tdb(), 'wf', { execution: { estimateUsdPerTurn: 0.25 } });
+    // Both claims land in the SAME daily workforce window, minutes before it rolls over.
+    clockOverride = new Date('2031-03-01T23:58:00.000Z');
+    const first = await newRoot('slow');
+    const second = await newRoot('slow');
+    await pumpUntil(
+      async () =>
+        (await taskRow(first.taskId)).status === 'working' &&
+        (await taskRow(second.taskId)).status === 'working',
+    );
+    const windowReserved = async (windowStart: string): Promise<number | null> => {
+      const rows = await db.$client.unsafe(
+        `SELECT reserved_usd FROM workforce_budget_ledger WHERE scope_kind = 'workforce' AND scope_id = 'wf' AND window_start = '${windowStart}';`,
+      );
+      return rows.length === 0 ? null : Number(rows[0]?.reserved_usd);
+    };
+    expect(await windowReserved('2031-03-01T00:00:00Z')).toBe(0.5);
+
+    // The declaration is edited and the window rolls over before the reap runs — the two ways a
+    // re-derived release goes wrong.
+    await ensureWorkforceRuntime(tdb(), 'wf', { execution: { estimateUsdPerTurn: 0.9 } });
+    clockOverride = new Date('2031-03-02T00:02:00.000Z');
+    const claim = await db.$client.unsafe(
+      `SELECT turn_id FROM workforce_task_transitions WHERE task_id = '${first.taskId}' AND to_status = 'working';`,
+    );
+    await DBOS.cancelWorkflow(claim[0]?.turn_id as string);
+    const swept = await scheduler.runSweep();
+    expect(swept.reaped).toContain(first.taskId);
+
+    // Releasing today's estimate (0.9) would eat the LIVE turn's headroom down to zero, and
+    // releasing it into today's bucket would decrement a window that never held the reservation
+    // while the real one sits in yesterday's forever.
+    expect(await windowReserved('2031-03-01T00:00:00Z')).toBe(0.25);
+    expect(await windowReserved('2031-03-02T00:00:00Z')).toBeNull();
+
+    releaseTurns();
+    await pumpUntil(async () => (await taskRow(second.taskId)).status === 'completed', 30_000);
+  });
+
+  it('a page of untouchable working rows does not hide a dead turn behind them', async () => {
+    handlers.set('solo', async () => ({
+      intent: { kind: 'complete', result: { status: 'completed', summary: 'ok', confidence: 1 } },
+    }));
+    /** A `working` row the reaper always SKIPS: no claim record, so it is not its row to judge. */
+    async function unjudgeableWorkingRow(): Promise<string> {
+      const task = await newRoot('worker-bulk');
+      const queued = await applyTransition(tdb(), {
+        taskId: task.taskId,
+        expectedVersion: task.version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+      await applyTransition(tdb(), {
+        taskId: task.taskId,
+        expectedVersion: queued.version,
+        to: 'working',
+        actor: 'scheduler',
+      });
+      return task.taskId;
+    }
+    for (let created = 0; created < RESERVE_SCAN_LIMIT; created += 25) {
+      await Promise.all(Array.from({ length: 25 }, () => unjudgeableWorkingRow()));
+    }
+
+    // The dead turn started LAST, so it sits just outside a page taken from the top.
+    const dead = await newRoot('solo');
+    const queued = await applyTransition(tdb(), {
+      taskId: dead.taskId,
+      expectedVersion: dead.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await applyTransition(tdb(), {
+      taskId: dead.taskId,
+      expectedVersion: queued.version,
+      to: 'working',
+      actor: 'scheduler',
+      turnId: `wf-task-turn:${dead.taskId}:1:no-such-workflow`,
+    });
+
+    // Taken from the top every sweep, the scan never reaches it and the row — with its
+    // concurrency slot and its reservation — is held forever.
+    const deadline = Date.now() + 60_000;
+    let reaped = false;
+    while (!reaped && Date.now() < deadline) {
+      reaped = (await scheduler.runSweep()).reaped.includes(dead.taskId);
+    }
+    expect(reaped).toBe(true);
+    expect((await taskRow(dead.taskId)).status).toBe('queued');
+  }, 180_000);
 
   it('reaping a REAL claim gives its budget reservation back — nothing is stranded in the ledger', async () => {
     // The turn that dies mid-flight holds the gate; the fresh dispatch after the reap does not.

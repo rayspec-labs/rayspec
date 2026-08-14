@@ -8,7 +8,7 @@
  * deciders (or a decider racing the sweep) admit exactly one winner.
  */
 import { schema, type TenantDb } from '@rayspec/db';
-import { and, eq, isNotNull, lt } from 'drizzle-orm';
+import { and, asc, eq, isNotNull, lt } from 'drizzle-orm';
 import { z } from 'zod';
 import { afterTaskTerminal, lockRootFirst } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
@@ -117,6 +117,14 @@ export interface ApprovalSweepOutcome {
   readonly escalated: string[];
 }
 
+/**
+ * Per-tick bound on the overdue-approval scan, matching the dispatcher's own scan bounds: a sweep
+ * is a BOUNDED unit of work over an unbounded table. Safe to page here because every row the sweep
+ * touches LEAVES the set — the `status = 'pending'` compare-and-swap resolves it to `timed_out` or
+ * `escalated` — so the oldest-first page always advances and no approval can hide behind a backlog.
+ */
+const APPROVAL_SWEEP_LIMIT = 500;
+
 const SWEEP_TRANSITION_RETRIES = 3;
 
 async function transitionWithRetry(
@@ -146,6 +154,9 @@ async function transitionWithRetry(
  * window (and a terminal `fail` fate — the chain ends at a human, never in a loop), and moves the
  * task to `blocked(approval_pending)` so the escalated decision wakes it. Concurrency-safe: the
  * per-row `status = 'pending'` compare-and-swap makes two sweepers admit one winner per approval.
+ *
+ * BOUNDED per tick (`APPROVAL_SWEEP_LIMIT`), like every other per-tick scan in this engine, and
+ * safely so: a swept approval leaves the `pending` predicate, so the page always advances.
  */
 export async function sweepApprovalTimeouts(
   tdb: TenantDb,
@@ -159,7 +170,11 @@ export async function sweepApprovalTimeouts(
         isNotNull(schema.workforceApprovals.timeoutAt),
         lt(schema.workforceApprovals.timeoutAt, now),
       ),
-    )) as ApprovalRecord[];
+    )
+    // Longest-overdue first, `id` breaking a timestamp tie, so the bounded page is deterministic
+    // and the next tick resumes exactly where this one stopped.
+    .orderBy(asc(schema.workforceApprovals.timeoutAt), asc(schema.workforceApprovals.id))
+    .limit(APPROVAL_SWEEP_LIMIT)) as ApprovalRecord[];
   const outcome: ApprovalSweepOutcome = { failed: [], escalated: [] };
   for (const approval of due) {
     // `escalate` without a declared target cannot happen through the intent path (fail-closed at
