@@ -536,24 +536,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   document profiles (`reserved_document_key`), anywhere in the document.** It is the one key name the
   shape validator cannot report on. The YAML loader builds it as a genuine own property — it *defines*
   the property rather than assigning it, so the prototype setter is bypassed — and the validator then
-  skips that key by name in both readers a spec goes through, the strict-object unrecognized-key walk
-  and the record branch, without raising an issue. The document that reached every rule downstream was
-  therefore not the document the author wrote: the key was simply gone.
-  **What that cost, measured on this grammar.** `api[].project.rename: { __proto__: … }` parsed clean,
-  linted clean and did *nothing* — the column kept its own name on the wire and in the OpenAPI
-  document while the author read the document as a rename. A `__proto__` key at the document root, or
-  in `metadata`, passed the strict unknown-key rejection that refuses every other unknown key. Every
-  record dock behaved the same way: product `metadata`, a store step's `filter`/`values`, a view's
-  `fields`/`params`, `contracts`. And the view-name denylist that already named `__proto__`
-  (`VIEW_RESERVED_NAMES`) is enforced over the shape-parsed object, where the key was already gone —
-  so that member of the denylist could not fire for a document anyone actually wrote. One scan over
-  the raw loaded document closes all of them at once, and it is the only place in the pipeline where
-  the key still exists to be seen. The scan is cycle-guarded, because a YAML alias resolves to the very
-  node its anchor labels and an unguarded walk of such a document would not return.
+  skips that key by name, in both readers a spec goes through — the strict-object unrecognized-key
+  walk and the record branch — without raising an issue.
+  **What that cost, measured on this grammar.** Where the grammar reads the level, the key is dropped
+  and the document that reached every rule downstream was not the document the author wrote:
+  `api[].project.rename: { __proto__: … }` parsed clean, linted clean and did *nothing* — the column
+  kept its own name on the wire and in the OpenAPI document while the author read the document as a
+  rename. A `__proto__` key at the document root, or in `metadata`, passed the strict unknown-key
+  rejection that refuses every other unknown key. Every record dock behaved the same way: product
+  `metadata`, a store step's `filter`/`values`, a view's `fields`/`params`, `contracts`. Inside a
+  FREE-FORM schema slot the behaviour is the opposite and matters just as much: a tool's `parameters`
+  and the body of a `contracts` entry are open `z.unknown()` regions the validator never descends
+  into, so there the key is not dropped — it survives the parse with its value intact and is carried
+  through to what the engine serves (a contract property named `__proto__` reaches
+  `components.schemas` in the emitted OpenAPI document). Unreported in both directions, which is why
+  the refusal belongs at the parse boundary and not in the grammar. The view-name denylist that
+  already named `__proto__` (`VIEW_RESERVED_NAMES`) shows the same split: for the positions it reads
+  from mapping keys — fields, params, filter/match columns — the key was already gone by the time the
+  lint ran, so that member could not fire for a document anyone actually wrote; for a counts *bucket*,
+  which is an array value and which the refusal deliberately leaves alone, it fires on a parsed
+  document today. One scan over the raw loaded document closes the reportable gap at once, and it is
+  the only place in the pipeline where the key is both still present and inspectable. The scan is
+  cycle-guarded, because a YAML alias resolves to the very node its anchor labels and an unguarded
+  walk of such a document would not return.
   **This is a validation behaviour change, and it is deliberate**: a document that used to parse now
   fails, with the error pointed at the offending key. No shipped example or fixture document declares
-  such a key (checked across every tracked `.yaml`/`.yml`), and nothing was exploitable — the key was
-  dropped, never assigned — so what changes is that a document whose author was misled now says so.
+  such a key (checked across every tracked `.yaml`/`.yml`). Two classes of author document are
+  affected, and they are not the same. One was already broken without being told: the key sat on a
+  level the grammar reads, was dropped, and the meaning written under it did nothing — that author now
+  finds out. The other was *working*: the key sat in a free-form schema slot, survived the parse and
+  was served in the emitted API contract. That document parsed before and is refused now; renaming the
+  property is the migration. Loading such a document never reparented an object either way — the YAML
+  loader *defines* the property rather than assigning it, so the `__proto__` setter is never reached.
   **Only `__proto__` is refused.** `constructor` and `prototype` survive the shape parse as ordinary
   keys, so they need no parse-boundary refusal and keep their existing treatment: a store column named
   `constructor` is a legal declaration this platform serves, and a *view field* named `constructor` is
