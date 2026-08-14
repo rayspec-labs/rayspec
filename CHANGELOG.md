@@ -480,6 +480,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the variable without quoting it. The verdict also names the `.env` files
   the CLI's auto-loader searched, which is usually the answer to a disputed "unset".
 
+### Changed
+
+- **The `501` from `POST /v1/triggers/{name}/fire` now names the manual-trigger requirement instead
+  of a durable worker.** It read `Manual trigger firing requires a configured durable worker and a
+  declared manual trigger. No manual-trigger firer is wired on this deployment.`, and the worker half
+  of that sentence cannot be the cause on any deployment able to serve the refusal: a `manual`
+  trigger without `deployment.durableWorker: true` is a lint error at parse/deploy time, and the boot
+  aborts outright when a `cron`/`manual` trigger is registered with no durable worker wired. So the
+  reader most likely to meet it — an operator on an all-`cron` document, such as the shipped
+  `acme-notes-backend`, whose single trigger is `kind: cron` — was pointed at a component that is
+  already there. It now reads: *"This route fires `kind: manual` triggers only — a `cron` trigger
+  fires on its own schedule and is not fireable here. Declare a `kind: manual` trigger in the
+  deployed document; no manual-trigger firer is wired on this deployment."*
+  **No behaviour changed**: same `501`, same `NOT_IMPLEMENTED` code, same guard on the same wiring
+  (the composition root wires the fire seam only when the deployed document declares a `kind: manual`
+  trigger). The refusal stays **deployment-level and never names the requested trigger** — it is
+  raised before the firer's tenant reconciliation and before the `trigger-fire` rate limiter, so
+  echoing the name would answer "does this trigger exist?" for any authenticated caller, which is
+  exactly what the route's uniform `404` (unknown name, non-`manual` kind, foreign tenant) refuses to
+  answer. The trigger reference's `501` bullet now states the same cause; the `404` bullet is
+  unchanged.
+
 ### Fixed
 
 - **A deploy that is refused *after* its product-store DDL applied now names the tables it already
