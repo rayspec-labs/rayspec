@@ -688,7 +688,10 @@ The projection is **read-side only** and **fail-closed**:
   creates a deliberate request/response naming split: with the example above you
   sort with `?order=created_at.asc` and read the same value back as `createdAt`,
   and no query parameter is ever named `companionId`. The generated OpenAPI
-  document states this split on every projected operation.
+  document states this split on every projected operation — including the
+  request-side casing rule, since a body key takes either casing while a query
+  parameter takes the declared name only. A route that opts out with
+  `project: {}` serves the plain declared shape, so its operations state nothing.
 - **Misconfiguration is a `doctor` error, never a runtime surprise.** An unknown
   column in `rename`/`fields`, a rename of a column the projection itself
   removes from the response, two columns mapping to one wire name (including two

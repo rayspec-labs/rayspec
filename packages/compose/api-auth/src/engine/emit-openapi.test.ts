@@ -5,14 +5,20 @@
  *  - a PRODUCT-EMPTY spec emits an EMPTY `paths` object (product-agnostic by construction);
  *  - a {store}/{agent}/{handler}/{stream} route each emits its method+path+params+schema correctly;
  *  - the {store} request body is DERIVED from the StoreSpec (business cols only; injected cols absent);
+ *  - every documented `list` filter param is one the REAL query builder accepts, and every param the
+ *    builder refuses is absent from the document (the doc↔runtime pairing is asserted, not assumed);
  *  - bindRouteParams prepends a deterministic, trusted block — and is a NO-OP with no params.
  */
 
+import { ApiError } from '@rayspec/auth-core';
+import { buildProductTables } from '@rayspec/db/testing';
 import { lintSpec, RaySpec, RESERVED_QUERY_KEYWORDS } from '@rayspec/spec';
+import type { PgTable } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
 import { bindRouteParams } from '../routes/runs.js';
 import { buildDeclaredRoutesOpenApi, type OpenApiDocument } from './emit-openapi.js';
-import { CONTROL_KEYS } from './store-query.js';
+import { buildListQuery, CONTROL_KEYS } from './store-query.js';
+import { NUMERIC_WIRE_RE } from './store-validation.js';
 
 /**
  * Build a validated RaySpec from a plain object by running it through the REAL production grammar
@@ -1020,5 +1026,214 @@ describe('the throttle 429 documents a declared per-route budget without overcla
     expect(description).toContain('Idempotency-Key');
     // …and the declared budget is stated as well, because it is enforced on this route too.
     expect(description).toContain('2 request(s) per 60 second(s)');
+  });
+});
+
+/**
+ * The runtime PgTable for one store of a validated spec — a pure Drizzle table object (no DB, no
+ * network), the same builder `store-query.test.ts` uses.
+ */
+function runtimeTable(spec: RaySpec, storeName: string): PgTable {
+  const built = buildProductTables(spec.stores).get(storeName);
+  if (!built) throw new Error(`expected a runtime table for store '${storeName}'`);
+  return built;
+}
+
+/**
+ * Run the REAL `list` query builder for ONE raw query key/value and report the outcome as a string:
+ * `'ok'` when the builder accepts the parameter, `'<code>: <message>'` when it refuses it. Comparing
+ * strings (rather than asserting "throws") keeps the refusal REASON in the failure output, so a test
+ * that goes red shows which parameter the server actually answers and how.
+ */
+function runtimeFilter(spec: RaySpec, storeName: string, key: string, value: string): string {
+  const store = spec.stores.find((s) => s.name === storeName);
+  if (!store) throw new Error(`no store '${storeName}' in the fixture spec`);
+  const params = new URLSearchParams();
+  params.set(key, value);
+  try {
+    buildListQuery(store, runtimeTable(spec, storeName), params);
+    return 'ok';
+  } catch (e) {
+    if (e instanceof ApiError) return `${e.code}: ${e.message}`;
+    throw e;
+  }
+}
+
+describe('the documented list surface never advertises a filter the runtime refuses', () => {
+  /**
+   * One store that parks a JSONB column in EVERY suffix slot of an eligible column. `a` is a
+   * filterable, comparison-eligible text column; `a__in`, `a__contains` and the four `a__<op>`
+   * names are DECLARED jsonb columns, as are the two injected-`created_by` companion names. `b` is
+   * the unshadowed accept-control column.
+   *
+   * At runtime the FULL query key is resolved first (store-query.ts Precedence 1), so each of those
+   * keys lands on its jsonb column and is refused — a jsonb column is not filterable. The emitter
+   * must therefore not document any of them.
+   */
+  function shadowSpec(): RaySpec {
+    return specFromObject({
+      version: '1.0',
+      metadata: { name: 'suffix-shadow-backend' },
+      stores: [
+        {
+          name: 'shadows',
+          columns: [
+            { name: 'a', type: 'text' },
+            { name: 'b', type: 'integer' },
+            { name: 'a__in', type: 'jsonb' },
+            { name: 'a__contains', type: 'jsonb' },
+            { name: 'a__gt', type: 'jsonb' },
+            { name: 'a__gte', type: 'jsonb' },
+            { name: 'a__lt', type: 'jsonb' },
+            { name: 'a__lte', type: 'jsonb' },
+            { name: 'created_by__in', type: 'jsonb' },
+            { name: 'created_by__contains', type: 'jsonb' },
+          ],
+        },
+      ],
+      api: [
+        {
+          method: 'GET',
+          path: '/shadows',
+          action: { kind: 'store', store: 'shadows', op: 'list' },
+        },
+      ],
+    });
+  }
+
+  /** Every companion name shadowed by a declared jsonb column — all three suffix families. */
+  const SHADOWED = [
+    'a__in',
+    'a__contains',
+    'a__gt',
+    'a__gte',
+    'a__lt',
+    'a__lte',
+    'created_by__in',
+    'created_by__contains',
+  ];
+  /** Parameters the runtime really accepts on the same store — the accept-control. */
+  const ACCEPTED = ['a', 'b', 'created_by', 'b__in', 'b__gt', 'b__gte', 'b__lt', 'b__lte'];
+
+  it('drops every `__in`/`__contains`/comparison companion whose name is a declared jsonb column', () => {
+    const spec = shadowSpec();
+    // (1) Measure the runtime: each shadowed key is a 400, with the reason in the message.
+    for (const key of SHADOWED) {
+      expect(`${key} -> ${runtimeFilter(spec, 'shadows', key, '1')}`).toBe(
+        `${key} -> VALIDATION_ERROR: Column '${key}' is not filterable.`,
+      );
+    }
+    // (2) Accept-control — the fixture is not simply refusing everything.
+    for (const key of ACCEPTED) {
+      expect(`${key} -> ${runtimeFilter(spec, 'shadows', key, '1')}`).toBe(`${key} -> ok`);
+    }
+    // (3) The document must describe exactly that surface.
+    const doc = buildDeclaredRoutesOpenApi(spec);
+    const names = (doc.paths['/shadows'].get.parameters ?? []).map((p) => p.name);
+    for (const key of SHADOWED) expect(names).not.toContain(key);
+    for (const key of ACCEPTED) expect(names).toContain(key);
+    // A dropped companion must not take a legitimate one with it, and the doc stays valid.
+    expect(names).toContain('search');
+    expect(structuralOpenApiProblems(doc)).toEqual([]);
+  });
+
+  it('a NON-jsonb column of the same name still wins as plain equality (the de-dup stays surgical)', () => {
+    // The pre-existing behaviour this fix must not disturb: when `a__in` is a filterable (text)
+    // column, the runtime answers `?a__in=` as plain EQUALITY on it, so the exact-named equality
+    // param is emitted and only `a`'s companion is dropped.
+    const spec = specFromObject({
+      version: '1.0',
+      metadata: { name: 'suffix-equality-backend' },
+      stores: [
+        {
+          name: 'shadows',
+          columns: [
+            { name: 'a', type: 'text' },
+            { name: 'a__in', type: 'text' },
+            { name: 'a__gt', type: 'text' },
+          ],
+        },
+      ],
+      api: [
+        {
+          method: 'GET',
+          path: '/shadows',
+          action: { kind: 'store', store: 'shadows', op: 'list' },
+        },
+      ],
+    });
+    expect(runtimeFilter(spec, 'shadows', 'a__in', 'x')).toBe('ok');
+    expect(runtimeFilter(spec, 'shadows', 'a__gt', 'x')).toBe('ok');
+    const params = buildDeclaredRoutesOpenApi(spec).paths['/shadows'].get.parameters ?? [];
+    for (const name of ['a__in', 'a__gt']) {
+      const hits = params.filter((p) => p.name === name && p.in === 'query');
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.description).toContain('Equality');
+    }
+  });
+});
+
+describe('a numeric column is documented with the runtime wire envelope', () => {
+  function numericSpec(): RaySpec {
+    return specFromObject({
+      version: '1.0',
+      metadata: { name: 'numeric-envelope-backend' },
+      stores: [
+        {
+          name: 'prices',
+          columns: [{ name: 'amount', type: 'numeric', precision: 8, scale: 2 }],
+        },
+      ],
+      api: [
+        { method: 'GET', path: '/prices', action: { kind: 'store', store: 'prices', op: 'list' } },
+        {
+          method: 'POST',
+          path: '/prices',
+          action: { kind: 'store', store: 'prices', op: 'create' },
+        },
+      ],
+    });
+  }
+
+  it('the row schema, the equality filter and the comparison filters all carry NUMERIC_WIRE_RE', () => {
+    const doc = buildDeclaredRoutesOpenApi(numericSpec());
+    const list = doc.paths['/prices'].get;
+    const row = list.responses['200']?.content?.['application/json'].schema as {
+      items: { properties: Record<string, unknown> };
+    };
+    const params = list.parameters ?? [];
+    const body = doc.paths['/prices'].post.requestBody?.content['application/json'].schema as {
+      properties: Record<string, unknown>;
+    };
+    // The create/update body schema already derives its pattern from this regex (the Zod validator
+    // exports it through z.toJSONSchema); pinning all four together is what makes "one envelope"
+    // a checked property of the document rather than a claim in a comment.
+    const expected = { type: 'string', pattern: NUMERIC_WIRE_RE.source };
+    expect(body.properties.amount).toEqual(expected);
+    expect(row.items.properties.amount).toEqual(expected);
+    for (const name of ['amount', 'amount__gt', 'amount__gte', 'amount__lt', 'amount__lte']) {
+      const param = params.find((p) => p.name === name);
+      expect(`${name} -> ${JSON.stringify(param?.schema)}`).toBe(
+        `${name} -> ${JSON.stringify(expected)}`,
+      );
+    }
+  });
+
+  it('the documented filter pattern refuses the digit runs the query builder refuses', () => {
+    const spec = numericSpec();
+    const overlong = '1'.repeat(1001);
+    const longest = '1'.repeat(1000);
+    // Measure the runtime bound, with an accept-control one digit below it.
+    expect(runtimeFilter(spec, 'prices', 'amount', overlong)).toBe(
+      "VALIDATION_ERROR: Filter 'amount' must be a plain decimal string (no exponent).",
+    );
+    expect(runtimeFilter(spec, 'prices', 'amount', longest)).toBe('ok');
+    // The documented pattern must draw the same line (the hand-written `^-?\d+(\.\d+)?$` did not:
+    // it accepted the 1001-digit value the server answers with a 400).
+    const documented = (
+      buildDeclaredRoutesOpenApi(spec).paths['/prices'].get.parameters ?? []
+    ).find((p) => p.name === 'amount')?.schema as { pattern: string };
+    expect(new RegExp(documented.pattern).test(overlong)).toBe(false);
+    expect(new RegExp(documented.pattern).test(longest)).toBe(true);
   });
 });

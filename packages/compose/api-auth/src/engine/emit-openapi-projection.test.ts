@@ -12,12 +12,18 @@
  *    create/update body schemas are byte-identical to the un-projected emission, and the operation
  *    description states the naming split explicitly;
  *  - a store-level projection applies to the store's routes, and a route-level `project: {}`
- *    overrides it wholesale (back to the raw snake shape);
+ *    overrides it wholesale (back to the raw snake shape) AND states no split, because there is none;
+ *  - the split sentence names the request-side casing rule the server actually applies (bodies take
+ *    either casing, query parameters take the declared name only) — both halves measured here;
  *  - a route WITHOUT `project` emits a byte-identical document (accept-control).
  */
+import { ApiError } from '@rayspec/auth-core';
+import { buildProductTables } from '@rayspec/db/testing';
 import { lintSpec, RaySpec } from '@rayspec/spec';
 import { describe, expect, it } from 'vitest';
 import { buildDeclaredRoutesOpenApi } from './emit-openapi.js';
+import { buildListQuery } from './store-query.js';
+import { NUMERIC_WIRE_RE, normalizeBodyCasing } from './store-validation.js';
 
 /** Validate a plain object through the REAL grammar + linter (mirrors emit-openapi.test.ts). */
 function specFromObject(obj: Record<string, unknown>): RaySpec {
@@ -106,7 +112,7 @@ describe('OpenAPI — projected store routes describe the actual wire shape', ()
       minimum: Number.MIN_SAFE_INTEGER,
       maximum: Number.MAX_SAFE_INTEGER,
     });
-    expect(props.numCol).toEqual({ type: 'string', pattern: '^-?\\d+(\\.\\d+)?$' });
+    expect(props.numCol).toEqual({ type: 'string', pattern: NUMERIC_WIRE_RE.source });
     expect(props.dblCol).toEqual({ type: 'number' });
     expect(props.tsCol).toEqual({ type: 'string', format: 'date-time' });
     expect(props.jsonCol).toEqual({});
@@ -193,6 +199,81 @@ describe('OpenAPI — projected store routes describe the actual wire shape', ()
     ).items?.properties;
     expect(Object.keys(overridden ?? {})).toContain('text_col');
     expect(Object.keys(overridden ?? {})).toContain('tenant_id');
+  });
+
+  it('a route-level `project: {}` (the documented opt-out) states NO naming split', () => {
+    // `{}` is not nullish, so an opt-out route used to land on the `project !== undefined` arm and
+    // carried the split sentence onto a route whose wire shape is the plain declared one. The
+    // inherited-projection route on the same store is the accept-control: it DOES state the split.
+    const spec = specFromObject({
+      version: '1.0',
+      metadata: { name: 'opt-out-projection' },
+      stores: [
+        {
+          name: 'things',
+          columns: [{ name: 'text_col', type: 'text' }],
+          project: { casing: 'camel' },
+        },
+      ],
+      api: [
+        { method: 'GET', path: '/things', action: { kind: 'store', store: 'things', op: 'list' } },
+        {
+          method: 'GET',
+          path: '/things-plain',
+          action: { kind: 'store', store: 'things', op: 'list' },
+          project: {},
+        },
+        {
+          method: 'POST',
+          path: '/things-plain',
+          action: { kind: 'store', store: 'things', op: 'create' },
+          project: {},
+        },
+      ],
+    });
+    const doc = buildDeclaredRoutesOpenApi(spec);
+    expect((doc.paths['/things']?.get as { description?: string }).description).toMatch(
+      /declares a response projection/,
+    );
+    for (const method of ['get', 'post'] as const) {
+      const op = doc.paths['/things-plain']?.[method] as object;
+      expect(`${method}: ${JSON.stringify(Object.hasOwn(op, 'description'))}`).toBe(
+        `${method}: false`,
+      );
+    }
+  });
+
+  it('the split sentence states the request-side casing rule the server actually applies', () => {
+    const spec = specWith({ casing: 'camel' });
+    const store = spec.stores[0];
+    const desc =
+      (buildDeclaredRoutesOpenApi(spec).paths['/things']?.get as { description?: string })
+        .description ?? '';
+    // A client generator reading only this document must not conclude that snake_case bodies are
+    // required: the server normalizes a declared snake key to its camelCase twin before the strict
+    // parse, so BOTH casings are accepted on a body — while the query side has no such normalizer.
+    expect(desc).toContain('may use either casing');
+    expect(desc).toContain('declared snake_case name or its camelCase twin');
+    expect(desc).toContain('Query parameters take the declared snake_case name only');
+
+    // Both halves of that sentence, measured against the code that enforces them.
+    expect(normalizeBodyCasing(store, { text_col: 'x' })).toEqual({ textCol: 'x' });
+    expect(normalizeBodyCasing(store, { textCol: 'x' })).toEqual({ textCol: 'x' });
+    expect(() => normalizeBodyCasing(store, { text_col: 'x', textCol: 'y' })).toThrow(ApiError);
+    const table = buildProductTables(spec.stores).get('things');
+    if (!table) throw new Error("expected a runtime table for store 'things'");
+    const filter = (key: string): string => {
+      const params = new URLSearchParams();
+      params.set(key, 'x');
+      try {
+        buildListQuery(store, table, params);
+        return 'ok';
+      } catch (e) {
+        return e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
+      }
+    };
+    expect(filter('text_col')).toBe('ok');
+    expect(filter('textCol')).toBe("VALIDATION_ERROR: Unknown query parameter 'textCol'.");
   });
 
   it("documents columns named after Object.prototype members ('constructor', '__proto__') under their OWN wire names", () => {
