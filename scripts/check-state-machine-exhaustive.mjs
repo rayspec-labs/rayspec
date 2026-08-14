@@ -120,17 +120,25 @@ function splitTopLevelArgs(args) {
 
 // ---- detectors -------------------------------------------------------------------------------
 
-/** Chokepoint-form update: `.update(schema.workforceTasks, { ...SET... })`. */
-const CHOKEPOINT_UPDATE_RE = /\.update\(\s*(?:schema\.)?workforceTasks\s*,/g;
-/** Bare drizzle-form update: `.update(schema.workforceTasks).set({ ... })`. */
-const RAW_BUILDER_UPDATE_RE = /\.update\(\s*(?:schema\.)?workforceTasks\s*\)\s*\.set\s*\(/g;
+/** Chokepoint-form update: `.update(<any-qualifier.>workforceTasks, { ...SET... })`. Any
+ * qualifier is admitted (`schema.`, `s.`, a namespace alias) — binding to the literal `schema.`
+ * would let an import alias walk past the tripwire. A RENAMED table import
+ * (`workforceTasks as t`) is the residual a name regex cannot see; the biome
+ * `noRestrictedImports` override and the tenant chokepoint close that road at the import site. */
+const CHOKEPOINT_UPDATE_RE = /\.update\(\s*(?:[\w$]+\s*\.\s*)?workforceTasks\s*,/g;
+/** Bare drizzle-form update: `.update(workforceTasks).set({ ... })`. */
+const RAW_BUILDER_UPDATE_RE = /\.update\(\s*(?:[\w$]+\s*\.\s*)?workforceTasks\s*\)\s*\.set\s*\(/g;
 /** Any insert on the table (chokepoint or bare builder). */
-const INSERT_RE = /\.insert\(\s*(?:schema\.)?workforceTasks\b/;
-/** A SET object that assigns the status or status_reason column. */
-const STATUS_KEY_RE = /\b(?:status|statusReason)\s*:/;
-/** Raw-SQL writes (checked on comment-stripped source with STRINGS INTACT — SQL lives in strings). */
-const RAW_SQL_UPDATE_RE = /\bupdate\s+(?:[\w".]+\.)?workforce_tasks\b/i;
-const RAW_SQL_INSERT_RE = /\binsert\s+into\s+(?:[\w".]+\.)?workforce_tasks\b/i;
+const INSERT_RE = /\.insert\(\s*(?:[\w$]+\s*\.\s*)?workforceTasks\b/;
+/** A SET object that assigns the status or status_reason column — bare OR quoted key form
+ * (`status:`, `'status':`, `"statusReason":`). Tested against the STRINGS-INTACT capture so the
+ * quoted form is visible. */
+const STATUS_KEY_RE = /['"]?\b(?:status|statusReason)\b['"]?\s*:/;
+/** Raw-SQL writes (checked on comment-stripped source with STRINGS INTACT — SQL lives in
+ * strings). Every identifier part admits optional double quotes (`UPDATE "workforce_tasks"` is
+ * this repo's own migration dialect) and UPDATE admits the ONLY keyword. */
+const RAW_SQL_UPDATE_RE = /\bupdate\s+(?:only\s+)?(?:"?\w+"?\s*\.\s*)*"?workforce_tasks"?/i;
+const RAW_SQL_INSERT_RE = /\binsert\s+into\s+(?:"?\w+"?\s*\.\s*)*"?workforce_tasks"?/i;
 
 /**
  * Detect status-write-monopoly violations in one file's source. Pure (no I/O) so the self-test
@@ -142,13 +150,22 @@ export function detectViolations(rel, src) {
   const codeWithStrings = stripComments(src);
 
   if (rel !== UPDATE_MONOPOLY) {
-    // Chokepoint-form updates: flag when the SET object assigns status / statusReason.
+    // Chokepoint-form updates: flag when the SET object assigns status / statusReason. The CALL
+    // is located on the strings-blanked source (string content cannot fake a call site), but the
+    // SET object is captured from the strings-INTACT source at the same index — the two derive
+    // from the same comment-stripped text with length-preserving blanking, so indexes align, and
+    // a quoted key (`'status':`) stays visible to the key test.
+    const setAssignsStatus = (start) => {
+      const blanked = captureCallArgs(code, start);
+      const intact = captureCallArgs(codeWithStrings, start);
+      const setBlanked = splitTopLevelArgs(`x,${blanked}`)[1] ?? blanked;
+      const setIntact = splitTopLevelArgs(`x,${intact}`)[1] ?? intact;
+      return STATUS_KEY_RE.test(setBlanked) || STATUS_KEY_RE.test(setIntact);
+    };
     let m;
     // biome-ignore lint/suspicious/noAssignInExpressions: standard regex exec loop.
     while ((m = CHOKEPOINT_UPDATE_RE.exec(code)) !== null) {
-      const args = captureCallArgs(code, m.index + m[0].length - 1 + 1);
-      const set = splitTopLevelArgs(`x,${args}`)[1] ?? '';
-      if (STATUS_KEY_RE.test(set)) {
+      if (setAssignsStatus(m.index + m[0].length)) {
         found.push(
           `${rel}: updates workforce_tasks.status/status_reason outside applyTransition() — the ` +
             'transition gate is the ONLY status writer. Route the change through applyTransition.',
@@ -157,8 +174,9 @@ export function detectViolations(rel, src) {
     }
     // biome-ignore lint/suspicious/noAssignInExpressions: standard regex exec loop.
     while ((m = RAW_BUILDER_UPDATE_RE.exec(code)) !== null) {
-      const set = captureCallArgs(code, m.index + m[0].length);
-      if (STATUS_KEY_RE.test(set)) {
+      const setBlanked = captureCallArgs(code, m.index + m[0].length);
+      const setIntact = captureCallArgs(codeWithStrings, m.index + m[0].length);
+      if (STATUS_KEY_RE.test(setBlanked) || STATUS_KEY_RE.test(setIntact)) {
         found.push(
           `${rel}: updates workforce_tasks.status/status_reason via a raw builder outside ` +
             'applyTransition() — the transition gate is the ONLY status writer.',
@@ -271,6 +289,44 @@ function selfTest() {
       rel: foreign,
       src: "await tdb.update(schema.workforceApprovals, { status: 'approved' }).where(w);",
       expect: false,
+    },
+    // Quoted SQL identifiers — the repo's own migration dialect -> FLAG.
+    {
+      rel: foreign,
+      src: 'await db.$client.unsafe(`UPDATE "workforce_tasks" SET status = $1`);',
+      expect: true,
+    },
+    {
+      rel: foreign,
+      src: 'await db.$client.unsafe(`update "public"."workforce_tasks" set status = $1`);',
+      expect: true,
+    },
+    {
+      rel: foreign,
+      src: 'await db.$client.unsafe(`UPDATE ONLY workforce_tasks SET status = $1`);',
+      expect: true,
+    },
+    {
+      rel: foreign,
+      src: 'await db.$client.unsafe(`INSERT INTO "workforce_tasks" (task_id) VALUES ($1)`);',
+      expect: true,
+    },
+    // A namespace-alias qualifier is still the same table -> FLAG.
+    {
+      rel: foreign,
+      src: "await tdb.update(s.workforceTasks, { status: 'queued' }).where(w);",
+      expect: true,
+    },
+    // A QUOTED set key is still the status column -> FLAG.
+    {
+      rel: foreign,
+      src: "await tdb.update(schema.workforceTasks, { 'status': next }).where(w);",
+      expect: true,
+    },
+    {
+      rel: foreign,
+      src: 'await raw.update(schema.workforceTasks).set({ "statusReason": r }).where(w);',
+      expect: true,
     },
   ];
   for (const { rel, src, expect } of cases) {
