@@ -44,6 +44,21 @@ export const workerResultSchema = z.strictObject({
 
 export type WorkerResult = z.output<typeof workerResultSchema>;
 
+/**
+ * WHY a task is being handed up the reporting line — a CLOSED set, journaled and greppable, never
+ * model prose. The free-text `detail` rides beside it as data.
+ */
+export const ESCALATION_REASONS = [
+  'out_of_scope',
+  'insufficient_context',
+  'budget',
+  'capability_missing',
+  'policy_conflict',
+  'risk',
+] as const;
+
+export type EscalationReason = (typeof ESCALATION_REASONS)[number];
+
 /** The one turn-ending intent a handler returns. Strict at every level. */
 export const turnIntentSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('complete'), result: workerResultSchema }),
@@ -67,6 +82,21 @@ export const turnIntentSchema = z.discriminatedUnion('kind', [
     /** Ask the requesting party a typed question; the task parks until a `user_reply` answers it. */
     kind: z.literal('request_clarification'),
     question: z.string().min(1),
+  }),
+  z.strictObject({
+    /**
+     * Hand the task up the reporting line. The caller parks `blocked(escalated)`; a FRESH child
+     * task owned by the superior carries the escalation (their own open task, if any, is
+     * structurally parked on a join and may not be woken — see `afterTaskTerminal`'s reply branch
+     * for the way back). `escalateTo` is RESOLVED BY THE CALLER's trusted layer from the declared
+     * reporting edge — never a model-supplied guess the kernel would have to verify.
+     */
+    kind: z.literal('escalate'),
+    reason: z.enum(ESCALATION_REASONS),
+    detail: z.string().min(1).optional(),
+    escalateTo: z.string().min(1),
+    /** Ledger attribution for the escalation child (the superior's department), when known. */
+    escalateToDepartment: z.string().min(1).nullable().default(null),
   }),
   z.strictObject({ kind: z.literal('yield') }),
   z.strictObject({ kind: z.literal('fail'), message: z.string().min(1) }),
@@ -106,6 +136,13 @@ export type TurnPlan =
   | { readonly kind: 'request_review'; readonly reviewer: string; readonly round: number }
   | { readonly kind: 'review_rounds_exhausted'; readonly reviewer: string }
   | { readonly kind: 'request_clarification'; readonly question: string }
+  | {
+      readonly kind: 'escalate';
+      readonly reason: EscalationReason;
+      readonly detail: string | null;
+      readonly escalateTo: string;
+      readonly escalateToDepartment: string | null;
+    }
   | { readonly kind: 'yield' }
   | { readonly kind: 'fail'; readonly message: string }
   | {
@@ -187,6 +224,28 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
     }
     case 'request_clarification':
       return { kind: 'request_clarification', question: intent.question };
+    case 'escalate': {
+      if (intent.escalateTo === input.taskOwner) {
+        return invalidIntentPlan(
+          'escalate names the escalating task’s own owner — self-escalation resolves ' +
+            'nothing and would loop. Fail-closed.',
+          input.priorToolError,
+        );
+      }
+      // DELIBERATELY not routed through `rejectFanOut`. Escalation is not delegation: the cycle
+      // check would refuse handing UP to an ancestor's owner (the normal case — the reporting
+      // chain usually owns the ancestors), and the depth ceiling would gag exactly the deep worker
+      // whose situation most needs a superior. What bounds escalation instead is the DECLARED
+      // reporting edge the caller resolved (acyclic, rooted — certified at validation) and the
+      // fact that each hop is one fresh child, budget-probed before its row is written.
+      return {
+        kind: 'escalate',
+        reason: intent.reason,
+        detail: intent.detail ?? null,
+        escalateTo: intent.escalateTo,
+        escalateToDepartment: intent.escalateToDepartment,
+      };
+    }
     case 'yield':
       return { kind: 'yield' };
     case 'fail':

@@ -205,11 +205,12 @@ export async function lockRootFirst(tx: TenantDb, task: TaskRecord): Promise<Tas
 }
 
 /**
- * A task just reached a terminal status: settle its opening delegation record and, when its
- * parent is parked on the join, check fan-in. Exported for the cancel cascade, which terminates
- * tasks outside a turn. The parent lock this takes is already held by every caller (they went
- * through `lockRootFirst` before their transition) — re-taking it is free and keeps the fan-in
- * correct on its own terms.
+ * A task just reached a terminal status: settle its opening delegation record and, when its parent
+ * is parked, fan back in — through the JOIN when the parent awaits its children, or through the
+ * ESCALATION REPLY when the parent parked `blocked(escalated)` and this child carried the
+ * escalation. Exported for the cancel cascade, which terminates tasks outside a turn. The parent
+ * lock this takes is already held by every caller (they went through `lockRootFirst` before their
+ * transition) — re-taking it is free and keeps the fan-in correct on its own terms.
  */
 export async function afterTaskTerminal(tx: TenantDb, task: TaskRecord): Promise<void> {
   await tx
@@ -228,6 +229,27 @@ export async function afterTaskTerminal(tx: TenantDb, task: TaskRecord): Promise
     .for('update')) as TaskRecord[];
   const parent = parentRows[0];
   if (!parent) return; // the parent left with its tenant — nothing to fan into
+  if (parent.status === 'blocked' && parent.statusReason === 'escalated') {
+    // The ESCALATION REPLY: this terminal child carried the parent's escalation, and its end —
+    // answered, hand-delegated onward and completed, or cancelled by the superior — is the reply.
+    // The `escalated` signal answers exactly the `blocked(escalated)` park (WAKES, signals.ts);
+    // the payload stays BOUNDED (the parent's next context already carries the child's full
+    // result via `childResults`). Key per escalation child: racing re-executions dedupe on the
+    // receipt first and this UNIQUE second, while a later escalation (new turn, new child id)
+    // re-arms cleanly.
+    const summary =
+      typeof (task.result as { summary?: unknown } | null)?.summary === 'string'
+        ? ((task.result as { summary: string }).summary.slice(0, 500) as string)
+        : null;
+    await deliverSignal(tx, {
+      taskId: parent.taskId,
+      kind: 'escalated',
+      signalKey: `escalated:${task.taskId}`,
+      payload: { escalationTaskId: task.taskId, status: task.status, summary },
+      actor: 'system',
+    });
+    return;
+  }
   if (parent.status !== 'blocked' || parent.statusReason !== 'awaiting_children') return;
   const policyParsed = joinPolicySchema.safeParse(parent.joinPolicy);
   if (!policyParsed.success) return; // no declared join — the parent is blocked on something else
@@ -580,6 +602,55 @@ export async function applyTurnOutcome(
           taskId: task.taskId,
           expectedVersion: task.version,
           to: 'waiting_for_user',
+          ...stamp,
+        });
+        break;
+      }
+      case 'escalate': {
+        // A fresh CHILD task carries the escalation to the superior — their own open task, if any,
+        // is structurally parked on the join that contains THIS task and may not be woken (the
+        // WAKES rule). The caller parks `blocked(escalated)`; the child's terminal fans back as
+        // the `escalated` signal that answers exactly that park (`afterTaskTerminal`).
+        const probe = await probeSpend(
+          tx,
+          input.budgets,
+          {
+            taskId: task.taskId,
+            rootTaskId: task.rootTaskId,
+            workforceId: task.workforceId,
+            department: task.department,
+            estimateUsd: input.budgets.execution.estimateUsdPerTurn,
+          },
+          1,
+        );
+        if (!probe.allowed) {
+          finalTask = await applyBudgetExhausted(tx, task, probe.denial, input.budgets, stamp);
+          break;
+        }
+        const child = await insertChildTask(tx, task, input.turnNumber, 0, {
+          title: `Escalation: ${task.title}`.slice(0, 200),
+          goal:
+            `Escalated (${plan.reason}) from task ${task.taskId}: ` + `${plan.detail ?? task.goal}`,
+          owner: plan.escalateTo,
+          department: plan.escalateToDepartment,
+        });
+        await appendTaskEvents(tx, task.taskId, [
+          {
+            type: 'workforce.escalation.raised',
+            payload: {
+              taskId: task.taskId,
+              escalationTaskId: child.taskId,
+              escalateTo: plan.escalateTo,
+              reason: plan.reason,
+              detail: plan.detail,
+            },
+          },
+        ]);
+        finalTask = await applyTransition(tx, {
+          taskId: task.taskId,
+          expectedVersion: task.version,
+          to: 'blocked',
+          reason: 'escalated',
           ...stamp,
         });
         break;

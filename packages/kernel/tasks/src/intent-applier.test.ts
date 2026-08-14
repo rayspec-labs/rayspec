@@ -248,3 +248,70 @@ describe('clarification planning', () => {
     ).toBe(false);
   });
 });
+
+describe('escalation planning', () => {
+  const escalate = (over: Record<string, unknown> = {}) =>
+    turnIntentSchema.parse({
+      kind: 'escalate',
+      reason: 'capability_missing',
+      escalateTo: 'mgr',
+      ...over,
+    });
+
+  it('escalate passes through with its resolved target and defaults', () => {
+    expect(planTurnOutcome(input({ intent: escalate() }))).toEqual({
+      kind: 'escalate',
+      reason: 'capability_missing',
+      detail: null,
+      escalateTo: 'mgr',
+      escalateToDepartment: null,
+    });
+  });
+
+  it('detail and the target department ride along when given', () => {
+    expect(
+      planTurnOutcome(
+        input({ intent: escalate({ detail: 'needs prod access', escalateToDepartment: 'eng' }) }),
+      ),
+    ).toMatchObject({ detail: 'needs prod access', escalateToDepartment: 'eng' });
+  });
+
+  it('self-escalation is a typed invalid intent (requeue first, fail after a prior offense)', () => {
+    expect(
+      planTurnOutcome(input({ intent: escalate({ escalateTo: 'parent-owner' }) })),
+    ).toMatchObject({ kind: 'invalid_intent', fate: 'requeue' });
+    expect(
+      planTurnOutcome(
+        input({ intent: escalate({ escalateTo: 'parent-owner' }), priorToolError: true }),
+      ),
+    ).toMatchObject({ kind: 'invalid_intent', fate: 'fail' });
+  });
+
+  it('escalating to an ANCESTOR owner is legal — escalation is not delegation', () => {
+    expect(
+      planTurnOutcome(
+        input({
+          intent: escalate({ escalateTo: 'grandparent-owner' }),
+          ancestorOwners: ['grandparent-owner', 'parent-owner'],
+          ancestryDepth: 2,
+          maxDelegationDepth: 2,
+        }),
+      ),
+    ).toMatchObject({ kind: 'escalate', escalateTo: 'grandparent-owner' });
+  });
+
+  it('the reason set is closed and unknown keys are refused', () => {
+    expect(
+      turnIntentSchema.safeParse({ kind: 'escalate', reason: 'because', escalateTo: 'mgr' })
+        .success,
+    ).toBe(false);
+    expect(
+      turnIntentSchema.safeParse({
+        kind: 'escalate',
+        reason: 'risk',
+        escalateTo: 'mgr',
+        override: true,
+      }).success,
+    ).toBe(false);
+  });
+});

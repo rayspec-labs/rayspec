@@ -273,6 +273,113 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(still[0]?.messages).toBe(1);
   });
 
+  it('escalate parks the caller, opens the escalation child, and the child completing wakes it', async () => {
+    const root = await driveToWorking(await newRoot({ owner: 'worker-1' }));
+    const out = await turn(root.taskId, 1, {
+      kind: 'escalate',
+      reason: 'capability_missing',
+      detail: 'needs a production credential',
+      escalateTo: 'mgr',
+      escalateToDepartment: 'eng',
+    });
+    expect(out.task?.status).toBe('blocked');
+    expect(out.task?.statusReason).toBe('escalated');
+
+    const children = (await db.$client.unsafe(
+      `SELECT task_id, owner, department, status, version FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+    )) as unknown as {
+      task_id: string;
+      owner: string;
+      department: string;
+      status: string;
+      version: number;
+    }[];
+    expect(children).toHaveLength(1);
+    const child = children[0] as (typeof children)[number];
+    expect(child.owner).toBe('mgr');
+    expect(child.department).toBe('eng');
+    expect(child.status).toBe('planned');
+    // An escalation is NOT a delegation: no delegation row, no fan-out cap consumed.
+    const delegations = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_delegations WHERE parent_task_id = '${root.taskId}';`,
+    );
+    expect(delegations[0]?.c).toBe(0);
+    const raised = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.escalation.raised';`,
+    );
+    expect(raised[0]?.c).toBe(1);
+
+    // The superior answers: their escalation task completes, and the terminal fans back as the
+    // escalated signal that answers exactly the blocked(escalated) park.
+    const queuedChild = await applyTransition(tdb(), {
+      taskId: child.task_id,
+      expectedVersion: child.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await claim(child.task_id, queuedChild.version, 1);
+    await turn(child.task_id, 1, {
+      kind: 'complete',
+      result: { status: 'completed', summary: 'Granted a scoped credential.', confidence: 1 },
+    });
+
+    const woken = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(woken[0]).toEqual({ status: 'queued', status_reason: null });
+    const signal = (await db.$client.unsafe(
+      `SELECT kind, signal_key, payload FROM workforce_task_signals WHERE task_id = '${root.taskId}';`,
+    )) as unknown as {
+      kind: string;
+      signal_key: string;
+      payload: { summary: string; status: string };
+    }[];
+    expect(signal).toHaveLength(1);
+    expect(signal[0]?.kind).toBe('escalated');
+    expect(signal[0]?.signal_key).toBe(`escalated:${child.task_id}`);
+    expect(signal[0]?.payload.status).toBe('completed');
+    expect(signal[0]?.payload.summary).toBe('Granted a scoped credential.');
+  });
+
+  it('a denied escalation blocks with the typed budget reason and opens no child', async () => {
+    // The escalation child cannot be paid for: the subtree usd ceiling is below one per-turn
+    // estimate (the child draws on the shared root scope — the task's own ceiling deliberately
+    // does not bind a child, which gets its own task scope).
+    const budgets = workforceBudgetsSchema.parse({
+      subtree: { usd: 0.1 },
+      execution: { estimateUsdPerTurn: 1 },
+    });
+    const root = await driveToWorking(await newRoot({ owner: 'worker-1' }));
+    const out = await applyTurnOutcome(tdb(), {
+      taskId: root.taskId,
+      turnId: turnIdFor(root.taskId, 1),
+      turnNumber: 1,
+      intent: { kind: 'escalate', reason: 'budget', escalateTo: 'mgr' },
+      budgets,
+    });
+    expect(out.task?.status).toBe('blocked');
+    expect(out.task?.statusReason).toBe('budget_exhausted');
+    const children = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+    );
+    expect(children[0]?.c).toBe(0);
+  });
+
+  it('re-applying an escalate turn after the wake is a receipt no-op (no duplicate child)', async () => {
+    const root = await driveToWorking(await newRoot({ owner: 'worker-1' }));
+    await turn(root.taskId, 1, { kind: 'escalate', reason: 'risk', escalateTo: 'mgr' });
+    const replay = await turn(root.taskId, 1, {
+      kind: 'escalate',
+      reason: 'risk',
+      escalateTo: 'mgr',
+    });
+    expect(replay.alreadyApplied).toBe(true);
+    const children = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+    );
+    expect(children[0]?.c).toBe(1);
+  });
+
   it('buffered turn messages land as rows AND journal workforce.message.sent without the body', async () => {
     const root = await driveToWorking(await newRoot());
     await applyTurnOutcome(tdb(), {

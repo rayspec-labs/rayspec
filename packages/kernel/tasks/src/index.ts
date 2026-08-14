@@ -92,6 +92,8 @@ export { deterministicChildTaskId, newRootTaskId } from './ids.js';
 export {
   DELEGATION_REJECTION_REASONS,
   type DelegationRejectionReason,
+  ESCALATION_REASONS,
+  type EscalationReason,
   invalidIntentPlan,
   type PlanTurnInput,
   planTurnOutcome,
