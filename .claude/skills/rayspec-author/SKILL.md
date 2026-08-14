@@ -817,10 +817,11 @@ own everything. A **brownfield** setup is the common real deployment, and it inv
   DROP+CREATEs). Treat every schema change as an in-place, reviewed forward delta.
 - **Secrets come from the deployment, not a repo `.env`.** A real deployment sets env via its
   orchestrator / secret manager (secrets are commonly mounted as FILES and exported into the process
-  environment); the `.env` auto-loader is a LOCAL-DEV-ONLY convenience the CLI loads *only if a file
-  exists* — it searches the INVOKING directory's `./.env` first, then the submodule/checkout root's
-  `.env`, per key, never overriding a variable the environment already sets — and both files are absent
-  in a real deployment. Do not assume a `.env` — read/verify the actual injected env.
+  environment); the `.env` auto-loader is a LOCAL-DEV-ONLY convenience that both `rayspec deploy` and
+  `rayspec-serve` run *only if a file exists* — they search the INVOKING directory's `./.env` first,
+  then the RaySpec install root's `.env`, per key, never overriding a variable the environment already
+  sets — and both files are absent in a real deployment. Do not assume a `.env` — read/verify the
+  actual injected env.
 
 **The env mapping (brownfield):**
 

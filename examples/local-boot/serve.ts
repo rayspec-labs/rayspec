@@ -10,8 +10,9 @@
  * This is a thin wrapper over the REAL `@rayspec/server` composition root, PARAMETERIZED by
  * `RAYSPEC_SPEC_PATH` so it can boot ANY declarative spec (stores + CRUD api + agents +
  * tool-handler-backed agents) with NO product knowledge baked in. It:
- *   1. loads repo-root `.env` (the boot secrets + any provider credentials the declared agents need)
- *      — no dotenv dep,
+ *   1. loads a local `.env` (the boot secrets + any provider credentials the declared agents need)
+ *      through the SHIPPED loader — the same two candidates in the same order as `rayspec deploy` and
+ *      `rayspec-serve`: `$PWD/.env` first, then the install-root file, per key,
  *   2. provisions a FRESH dev DATABASE (DROP+CREATE) so the committed migration chain bootstraps it
  *      CLEAN — never the stale hand-provisioned `public`,
  *   3. injects RAYSPEC_SPEC_PATH (the spec .yaml) so `assembleServer` runs the REAL `deploy()`
@@ -60,11 +61,14 @@ import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import type { AllowlistEntry } from '@rayspec/db';
 import {
+  applyServeAgentTracing,
   assembleOptsFromEnv,
   assembleServer,
+  BootConfigError,
   BootTimeoutError,
   bootBanner,
   bootBaseUrl,
+  loadLocalDotenvIfPresent,
   loadServerConfig,
   type PlannedMigration,
   resolveBootTimeoutMs,
@@ -73,53 +77,15 @@ import {
 } from '@rayspec/server';
 import postgres from 'postgres';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = resolve(here, '../..');
-
-/**
- * Minimal `.env` loader (no dotenv dependency — keep the dev harness dep-light). Parses `KEY=VALUE`
- * lines, ignores comments/blank lines, supports a single optional pair of surrounding quotes, and
- * unescapes a literal `\n` (the repo's `.env` stores the PEM on one line). Does NOT override an
- * already-set process.env var (an explicit shell override wins) — so a `RAYSPEC_SPEC_PATH=… pnpm …`
- * invocation's spec path is never clobbered by `.env`.
- */
-function loadEnv(path: string): void {
-  let text: string;
-  try {
-    text = readFileSync(path, 'utf8');
-  } catch {
-    console.warn(`[local-boot] no .env at ${path} — relying on the ambient environment.`);
-    return;
-  }
-  for (const rawLine of text.split('\n')) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    const eq = line.indexOf('=');
-    if (eq < 0) continue;
-    const key = line.slice(0, eq).trim();
-    if (!key || key in process.env) continue;
-    let value = line.slice(eq + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    } else {
-      const hash = value.indexOf(' #');
-      if (hash >= 0) value = value.slice(0, hash).trim();
-    }
-    process.env[key] = value.includes('\\n') ? value.replace(/\\n/g, '\n') : value;
-  }
-}
-
 /** Require an env var or fail closed with an actionable message. */
 function requireEnv(key: string): string {
   const v = process.env[key];
   if (!v) {
     throw new Error(
       `[local-boot] required env var ${key} is not set. The boot secrets (RAYSPEC_API_KEY_PEPPER, ` +
-        'RAYSPEC_JWT_SIGNING_KEY) and DATABASE_URL must be in repo-root .env (gitignored) or the ' +
-        'ambient environment. A provider credential is demanded per declared agent (not here).',
+        'RAYSPEC_JWT_SIGNING_KEY) and DATABASE_URL must be in a local .env — the invoking ' +
+        'directory’s ./.env or the install-root one, both gitignored — or in the ambient ' +
+        'environment. A provider credential is demanded per declared agent (not here).',
     );
   }
   return v;
@@ -372,7 +338,20 @@ async function main(): Promise<void> {
   console.log(
     '[local-boot] booting — provisioning the dev database, connecting, applying migrations…',
   );
-  loadEnv(resolve(REPO_ROOT, '.env'));
+  // The SHIPPED loader (@rayspec/server), not a private copy: this wrapper resolves its local `.env`
+  // through the same two candidates in the same order as `rayspec deploy` and `rayspec-serve` —
+  // `$PWD/.env` first, the install-root file second, per key, never overriding a set variable — and
+  // honours `RAYSPEC_SKIP_DOTENV=1` like both of them. A wrapper-local parser is what let the two
+  // documented entrypoints resolve different files from one checkout (issue #384).
+  loadLocalDotenvIfPresent();
+
+  // Consult RAYSPEC_AGENT_TRACING right after the `.env` load — so a value that file states counts —
+  // and ahead of every boot input below, so no shape of this wrapper can ignore a stated intention
+  // while its banner reports the posture. EXPLICIT-ONLY: unset or blank leaves the agent SDK's own
+  // default (which exports) untouched, `off` disables the export through the SDK's programmatic switch
+  // (the static import above has already built its trace provider, so an environment write alone would
+  // arrive too late), and an unsupported value aborts with the message the documented entrypoints use.
+  await applyServeAgentTracing();
 
   const baseUrl = requireEnv('DATABASE_URL');
   requireEnv('RAYSPEC_API_KEY_PEPPER');
@@ -493,9 +472,10 @@ const isEntrypoint =
   process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isEntrypoint) {
   main().catch((err) => {
-    if (err instanceof BootTimeoutError) {
-      // A boot timeout is an operator-actionable diagnostic (see @rayspec/server boot-timeout) — print
-      // the message only, no stack. Anything else is genuinely unexpected: keep the full stack.
+    if (err instanceof BootTimeoutError || err instanceof BootConfigError) {
+      // A boot timeout and a refused boot configuration are operator-actionable diagnostics (see
+      // @rayspec/server boot-timeout / agent-tracing) — print the message only, no stack. Anything else
+      // is genuinely unexpected: keep the full stack.
       console.error(`[local-boot] ${err.message}`);
     } else {
       console.error('[local-boot] boot failed:', err instanceof Error ? err.stack : err);

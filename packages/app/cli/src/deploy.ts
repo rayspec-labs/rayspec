@@ -620,8 +620,9 @@ export async function serveDeployment(
   // instead of a default. What is deploy-only is that DEFAULT, not the variable: `rayspec-serve` reads
   // the same variable and honours an explicitly stated value (applyServeAgentTracing, issue #383), but
   // keeps the SDK's default when it is unset, because a developer tracing their own agent is looking
-  // at their own run — which was never the risk case. The dev-boot wrappers (examples/local-boot,
-  // deployments/acme-notes) assemble the server themselves and never read it.
+  // at their own run — which was never the risk case. The boot wrappers that assemble the server
+  // themselves (examples/local-boot, deployments/acme-notes) read it on the same explicit-only terms
+  // as `rayspec-serve`; the per-example demo wrappers (examples/<slug>/dev-boot.mjs) read nothing.
   //
   // FIRST, and through the `@rayspec/server/agent-tracing` SUBPATH rather than the barrel below. The
   // agent SDK builds its global trace provider while its module is being evaluated, and that provider
