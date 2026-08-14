@@ -5,9 +5,10 @@
  * submit tools, and the resolver keyed on the task owner means a delegation can never carry a
  * capability along.
  */
+import type { WorkforceEmployeeConfig } from '@rayspec/spec';
 import { describe, expect, it } from 'vitest';
 import { TurnCollector } from './collector.js';
-import { TOOLSETS_BY_ROLE, TURN_ENDING_TOOLS } from './roles.js';
+import { EMPLOYEE_ROLES, TOOLSETS_BY_ROLE, TURN_ENDING_TOOLS } from './roles.js';
 import { emptySnapshot, fixtureConfig, fixtureTask } from './test-support/fixtures.js';
 import { buildRoleToolset } from './toolset.js';
 
@@ -87,6 +88,37 @@ describe('the exact toolset per role', () => {
         'submit_review',
       ].sort(),
     );
+  });
+});
+
+describe('the dispatch chokepoint validates every native tool arguments', () => {
+  it('every tool a role carries sets inputSchema, and it IS the schema the model was shown', () => {
+    // `dispatchTool` guards its Ajv validate-in on `if (tool.inputSchema)`. A tool that declares
+    // only `spec.parameters` is therefore dispatched with its arguments UNVALIDATED — and the
+    // adapters are deliberately permissive, so nothing else would catch them before the handler.
+    for (const role of EMPLOYEE_ROLES) {
+      const employee = {
+        ...(fixtureConfig().employees.get('dev') as WorkforceEmployeeConfig),
+        role,
+      };
+      const task = fixtureTask({ owner: employee.id });
+      const tools = buildRoleToolset({
+        employee,
+        config: fixtureConfig(),
+        task,
+        snapshot: emptySnapshot(task),
+        collector: new TurnCollector({
+          tenantId: task.tenantId,
+          taskId: task.taskId,
+          turnNumber: 1,
+        }),
+      });
+      expect(tools.length, role).toBeGreaterThan(0);
+      for (const tool of tools) {
+        expect(tool.inputSchema, `${role}/${tool.spec.name}`).toBeDefined();
+        expect(tool.inputSchema, `${role}/${tool.spec.name}`).toEqual(tool.spec.parameters);
+      }
+    }
   });
 });
 

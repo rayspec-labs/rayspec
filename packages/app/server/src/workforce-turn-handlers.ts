@@ -32,7 +32,10 @@ import {
   assertNoReservedCollisions,
   buildRoleToolset,
   buildWorkforceSnapshot,
+  MALFORMED_TURN_ENDING,
   matchReviewPolicy,
+  type ToolName,
+  TURN_ENDING_TOOLS,
   TurnCollector,
 } from '@rayspec/workforce-tools';
 
@@ -154,11 +157,30 @@ export function buildWorkforceTurnHandlers(deps: WorkforceTurnHandlerDeps): Reso
       });
 
       const collected = collector.finish();
-      // No valid ending: a malformed attempt hands the RAW value to the engine (its schema refusal
-      // drives the requeue-once-then-fail fate); an ending-free run yields.
+      // WHAT THE ENGINE RECEIVES when no valid ending was collected. Never the model's own
+      // arguments: forwarding those let a `submit_result` whose args failed the toolset's schema be
+      // re-read by the engine as a valid intent of a DIFFERENT kind, with the review-policy match
+      // (which keys on the collected intent, and saw none) passing null — a mandatory review
+      // skipped by sending the wrong arguments to the right tool. A refused ending hands over the
+      // typed sentinel instead, whose kind is outside the engine's closed union and so takes the
+      // declared requeue-once-then-fail fate by construction.
+      //
+      // An ending REFUSED BEFORE the collector ever saw it counts too, and the transcript is the
+      // only record of it: `dispatchTool` rejects arguments failing `inputSchema` without calling
+      // the handler, so nothing is recorded and the run would otherwise look like one that simply
+      // never ended its turn. Asking whether a turn-ending tool was CALLED distinguishes "tried to
+      // end and was refused" from "never tried" — the first takes the fate, the second yields. A
+      // backend reporting no transcript degrades to the yield, which is the safe direction.
+      const attemptedEnding = result.conversation.some((turn) =>
+        turn.parts.some(
+          (part) => part.kind === 'tool_call' && TURN_ENDING_TOOLS.has(part.name as ToolName),
+        ),
+      );
       const intent =
         collected.intent ??
-        (collected.malformed !== null ? collected.malformed.raw : { kind: 'yield' });
+        (collected.malformed !== null || attemptedEnding
+          ? MALFORMED_TURN_ENDING
+          : { kind: 'yield' });
       // A review task's own completion is NEVER policy-reviewed (pendingReview marks a task that
       // exists to decide a review) — review dispatch therefore cannot recurse, and any task's
       // review chain stays exactly one level deep, bounded per round by its own round budget.

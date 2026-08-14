@@ -14,6 +14,7 @@ export {
   type BufferedCreatedChild,
   type BufferedMessage,
   type CollectedTurn,
+  MALFORMED_TURN_ENDING,
   TurnCollector,
 } from './collector.js';
 export {

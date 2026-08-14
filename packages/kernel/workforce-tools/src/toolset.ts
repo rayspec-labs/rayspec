@@ -6,10 +6,21 @@
  * handler throw surfaces through the dispatch chokepoint as a fail-closed typed `tool_error` the
  * model reads — the turn itself is never killed by it.
  *
- * Arguments are validated TWICE by design: the dispatch chokepoint's Ajv pass over `inputSchema`
- * (fail-closed at the edge), then the zod source of truth here (the same schemas the ENGINE
- * re-validates at apply — three layers, one vocabulary). `reviewId` and every other linkage the
+ * ARGUMENTS ARE VALIDATED AT THE CHOKEPOINT FIRST. Every tool built here carries
+ * `inputSchema: spec.parameters` (bound once at the return below, so a new tool cannot be added
+ * without it), which is what makes `dispatchTool`'s Ajv validate-in run at all — it is guarded on
+ * `if (tool.inputSchema)`, and a tool that declares only `spec.parameters` is dispatched with its
+ * arguments UNVALIDATED. The adapters are deliberately permissive, so without this the model's raw
+ * bytes reached a handler unchecked; the zod parse here is then the second, stricter pass, and the
+ * ENGINE re-validates the resulting intent as the third. `reviewId` and every other linkage the
  * model must not choose is injected from the snapshot, never read from arguments.
+ *
+ * WHAT THE ENGINE MAY RECEIVE is a separate rule with the same root: a refused ending hands the
+ * composition a typed SENTINEL (`MALFORMED_TURN_ENDING`), never the model's arguments. Forwarding
+ * the raw value let a `submit_result` whose args failed this module's schema be re-read by the
+ * engine as a perfectly valid intent of a different kind — which is how a mandatory review policy
+ * could be skipped, since policy matching keys on the intent this module COLLECTED and there was
+ * none. See collector.ts.
  */
 import type { NeutralTool } from '@rayspec/core';
 import type { WorkforceConfig, WorkforceEmployeeConfig } from '@rayspec/spec';
@@ -773,7 +784,14 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
   // turn discovering that.
   const withheld: ReadonlySet<ToolName> =
     snapshot.pendingReview !== null ? new Set<ToolName>(['request_review']) : new Set<ToolName>();
-  return TOOLSETS_BY_ROLE[employee.role]
-    .filter((name) => !withheld.has(name))
-    .map((name) => handlers[name]);
+  return (
+    TOOLSETS_BY_ROLE[employee.role]
+      .filter((name) => !withheld.has(name))
+      // BIND THE VALIDATE-IN here rather than on each entry: `dispatchTool` runs its Ajv pass only
+      // when `inputSchema` is present, so a tool that declared just `spec.parameters` was dispatched
+      // with unvalidated arguments. Binding it at the one return means a tool added to the table
+      // above cannot miss it, and the schema the model is shown is by construction the schema its
+      // arguments are checked against.
+      .map((name) => ({ ...handlers[name], inputSchema: handlers[name].spec.parameters }))
+  );
 }

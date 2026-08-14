@@ -1,0 +1,255 @@
+/**
+ * THE FULL TURN CHAIN — scripted backend → the real `dispatchTool` chokepoint → the real toolset
+ * handlers and collector → the real composition → the real engine, against real Postgres.
+ *
+ * This is the only suite that drives `buildWorkforceTurnHandlers` itself, and it exists because the
+ * gap it covers is invisible one layer up OR one layer down. The toolset suites call handlers
+ * directly, so they never exercise the chokepoint's validate-in; the engine suites hand
+ * `applyTurnOutcome` an intent that a composition already chose, so they never ask WHICH intent a
+ * turn's raw tool arguments become. Between those two, model-controlled bytes were reaching the
+ * engine as a trusted turn intent:
+ *
+ *   `submit_result({kind:'complete', result:{…}})` — wrong arguments to the right tool — failed the
+ *   toolset's schema, was recorded as a malformed ending, and the RAW value was forwarded. The
+ *   engine then parsed a perfectly valid `complete` intent out of exactly those bytes, while the
+ *   review-policy match (which keys on the intent the TOOLSET collected, and there was none) passed
+ *   null. A mandatory review policy was skipped, and the task completed.
+ *
+ * Every assertion below reads durable rows.
+ */
+import type { AgentRegistry, AgentRegistryEntry } from '@rayspec/api-auth';
+import type { Backend } from '@rayspec/core';
+import { deriveWorkforceConfig, WorkforceSpec } from '@rayspec/spec';
+import type { TaskRecord } from '@rayspec/tasks';
+import {
+  applyTransition,
+  applyTurnOutcome,
+  createRootTask,
+  ensureWorkforceRuntime,
+  workforceBudgetsSchema,
+} from '@rayspec/tasks';
+import { forTenant, makeTestDb, resetTaskSchema } from '@rayspec/tasks/test-support';
+import { makeScriptedBackend, type TurnScript } from '@rayspec/workforce-tools/testing';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { buildWorkforceTurnHandlers } from './workforce-turn-handlers.js';
+
+const hasDb = Boolean(process.env.DATABASE_URL);
+const requireDb = process.env.CI === 'true' || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
+if (requireDb && !hasDb) {
+  throw new Error(
+    'workforce-turn-validation.db.test: DATABASE_URL is required (CI / RAYSPEC_REQUIRE_DB_TESTS) but absent — refusing to silently skip.',
+  );
+}
+
+const TENANT = '00000000-0000-4000-8000-0000000000d1';
+const NO_BUDGETS = workforceBudgetsSchema.parse({});
+
+/** dev is covered by a review policy demanding review below 0.75 confidence. */
+const DECLARED = WorkforceSpec.parse({
+  id: 'helpdesk',
+  name: 'Helpdesk',
+  orchestrator: 'lead',
+  departments: [
+    { id: 'eng', name: 'Engineering', manager: 'mgr', mission: 'Own it.', members: ['dev'] },
+  ],
+  employees: [
+    { id: 'lead', agent: 'a', title: 'Lead', role: 'orchestrator' },
+    { id: 'mgr', agent: 'a', title: 'M', department: 'eng', reportsTo: 'lead', role: 'manager' },
+    { id: 'dev', agent: 'a', title: 'D', department: 'eng', role: 'worker' },
+    { id: 'qa', agent: 'a', title: 'Q', reportsTo: 'lead', role: 'reviewer' },
+  ],
+  reviewPolicies: [
+    {
+      id: 'eng_quality',
+      appliesTo: { department: 'eng' },
+      reviewer: 'qa',
+      requireWhen: { confidenceBelow: 0.75 },
+      onReject: 'rework',
+      maxRounds: 2,
+    },
+  ],
+});
+
+const config = deriveWorkforceConfig(DECLARED);
+
+describe.skipIf(!hasDb)('the turn chain: dispatch validate-in → composition → engine (db)', () => {
+  let db: ReturnType<typeof makeTestDb>;
+
+  beforeAll(async () => {
+    db = makeTestDb();
+    await resetTaskSchema(db);
+    return async () => {
+      await db.$client.end();
+    };
+  });
+
+  beforeEach(async () => {
+    await db.$client.unsafe(
+      'TRUNCATE workforce_tasks, workforce_task_transitions, workforce_task_signals, workforce_delegations, workforce_approvals, workforce_reviews, workforce_messages, workforce_budget_ledger, workforce_runtime, run_events, runs CASCADE;',
+    );
+    await db.$client.unsafe(
+      `INSERT INTO orgs (id, name) VALUES ('${TENANT}', 'turn-validation-test') ON CONFLICT DO NOTHING;`,
+    );
+    await ensureWorkforceRuntime(forTenant(db, TENANT), 'helpdesk', {});
+  });
+
+  const tdb = () => forTenant(db, TENANT);
+  const turnIdFor = (taskId: string, n: number) => `wf-task-turn:${taskId}:${n}`;
+
+  /** A registry whose single agent runs on the scripted backend the test supplies. */
+  function registryFor(backend: Backend): AgentRegistry {
+    const entry: AgentRegistryEntry = {
+      spec: { name: 'a', instructions: 'Do the work.', model: 'model-x', input: '', tools: [] },
+      backend,
+      tools: [],
+    };
+    return new Map<string, AgentRegistryEntry>([['a', entry]]) as unknown as AgentRegistry;
+  }
+
+  /** Run ONE turn of `task` through the real composition, then apply its outcome to the engine. */
+  async function runTurn(task: TaskRecord, script: TurnScript) {
+    const backend = makeScriptedBackend('openai', () => script);
+    const resolve = buildWorkforceTurnHandlers({
+      db,
+      tenantId: TENANT,
+      config,
+      registry: () => registryFor(backend),
+      backendForEmployee: () => backend,
+    });
+    const handler = resolve(task.owner);
+    if (!handler) throw new Error(`no handler for owner '${task.owner}'`);
+    const outcome = await handler({ task, childResults: null, signals: [], messages: [] });
+    const applied = await applyTurnOutcome(tdb(), {
+      taskId: task.taskId,
+      turnId: turnIdFor(task.taskId, task.turnsUsed + 1),
+      turnNumber: task.turnsUsed + 1,
+      intent: outcome.intent,
+      ...(outcome.messages ? { messages: outcome.messages } : {}),
+      ...(outcome.createdChildren ? { createdChildren: outcome.createdChildren } : {}),
+      ...(outcome.reviewPolicy ? { reviewPolicy: outcome.reviewPolicy } : {}),
+      budgets: NO_BUDGETS,
+    });
+    return { outcome, applied };
+  }
+
+  async function workingTaskFor(owner: string): Promise<TaskRecord> {
+    const root = await createRootTask(tdb(), {
+      workforceId: 'helpdesk',
+      title: 'Ship the slice',
+      goal: 'Do the work.',
+      owner,
+      requestedBy: 'user',
+      department: config.employees.get(owner)?.department ?? null,
+    });
+    const queued = await applyTransition(tdb(), {
+      taskId: root.taskId,
+      expectedVersion: root.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    return applyTransition(tdb(), {
+      taskId: root.taskId,
+      expectedVersion: queued.version,
+      to: 'working',
+      actor: 'scheduler',
+      turnId: turnIdFor(root.taskId, 1),
+    });
+  }
+
+  async function rowOf(taskId: string) {
+    const rows = (await db.$client.unsafe(
+      `SELECT status, status_reason, result FROM workforce_tasks WHERE task_id = '${taskId}';`,
+    )) as unknown as { status: string; status_reason: string | null; result: unknown }[];
+    return rows[0] as { status: string; status_reason: string | null; result: unknown };
+  }
+
+  it('wrong arguments to submit_result NEVER become a completion — the review policy is not skipped', async () => {
+    const task = await workingTaskFor('dev');
+    // The traced chain. These arguments are a valid `complete` INTENT and an invalid
+    // `submit_result` ARGUMENT object — the whole point. The engine used to read the intent out of
+    // them and complete the task, with no policy matched because the toolset collected nothing.
+    const { outcome, applied } = await runTurn(task, [
+      {
+        name: 'submit_result',
+        args: {
+          kind: 'complete',
+          result: { status: 'completed', summary: 'Slipped past review.', confidence: 0.1 },
+        },
+      },
+    ]);
+    // The engine never sees model bytes: the composition forwards the typed sentinel.
+    expect(outcome.intent).toEqual({ kind: 'malformed_turn_ending' });
+    expect(applied.plan?.kind).toBe('invalid_intent');
+    const row = await rowOf(task.taskId);
+    expect(row).toMatchObject({ status: 'queued', status_reason: 'tool_error' });
+    expect(row.result).toBeNull();
+    // Nothing completed, so nothing escaped review — and no review row was opened either.
+    const reviews = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_reviews WHERE task_id = '${task.taskId}';`,
+    );
+    expect(reviews[0]?.c).toBe(0);
+  });
+
+  it('the SAME policy still intercepts a well-formed low-confidence submission', async () => {
+    // The other half of the claim: the policy path is intact, so the test above is about the
+    // bypass and not about a review mechanism that stopped firing.
+    const task = await workingTaskFor('dev');
+    const { outcome, applied } = await runTurn(task, [
+      {
+        name: 'submit_result',
+        args: { status: 'completed', summary: 'Backend slice done.', confidence: 0.4 },
+      },
+    ]);
+    expect(outcome.reviewPolicy).toMatchObject({ reviewer: 'qa', dispatchReviewer: true });
+    expect(applied.plan?.kind).toBe('complete_with_review');
+    expect(await rowOf(task.taskId)).toMatchObject({
+      status: 'waiting_for_review',
+      status_reason: 'review_pending',
+    });
+  });
+
+  it('a high-confidence submission completes normally — the chain is not simply refusing', async () => {
+    const task = await workingTaskFor('dev');
+    const { applied } = await runTurn(task, [
+      {
+        name: 'submit_result',
+        args: { status: 'completed', summary: 'Well above the bar.', confidence: 0.95 },
+      },
+    ]);
+    expect(applied.plan?.kind).toBe('complete');
+    expect(await rowOf(task.taskId)).toMatchObject({ status: 'completed' });
+  });
+
+  it('a forged escalateTo cannot ride in through the tool arguments', async () => {
+    // `escalate.escalateTo` is documented as resolved by the trusted layer from the declared
+    // reporting edge, "never a model-supplied guess". The extra key is refused at the chokepoint,
+    // and the turn takes the fate rather than handing the engine a target the model chose.
+    const task = await workingTaskFor('dev');
+    const { outcome, applied } = await runTurn(task, [
+      { name: 'escalate', args: { reason: 'risk', escalateTo: 'lead' } },
+    ]);
+    expect(outcome.intent).toEqual({ kind: 'malformed_turn_ending' });
+    expect(applied.plan?.kind).toBe('invalid_intent');
+    expect(await rowOf(task.taskId)).toMatchObject({
+      status: 'queued',
+      status_reason: 'tool_error',
+    });
+    // No escalation child was opened to a target the model named.
+    const children = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_tasks WHERE parent_task_id = '${task.taskId}';`,
+    );
+    expect(children[0]?.c).toBe(0);
+    // The well-formed call resolves the target from the declared edge instead.
+    const second = await workingTaskFor('dev');
+    const ok = await runTurn(second, [{ name: 'escalate', args: { reason: 'risk' } }]);
+    expect(ok.applied.plan).toMatchObject({ kind: 'escalate', escalateTo: 'mgr' });
+  });
+
+  it('a run that ends no turn still yields — the fate is for endings that were ATTEMPTED', async () => {
+    const task = await workingTaskFor('dev');
+    const { outcome, applied } = await runTurn(task, [{ name: 'get_task', args: {} }]);
+    expect(outcome.intent).toEqual({ kind: 'yield' });
+    expect(applied.plan?.kind).toBe('yield');
+    expect(await rowOf(task.taskId)).toMatchObject({ status: 'queued' });
+  });
+});

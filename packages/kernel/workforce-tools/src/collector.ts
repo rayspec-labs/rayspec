@@ -18,6 +18,22 @@
 import { deterministicChildTaskId, type TurnIntent } from '@rayspec/tasks';
 import { TurnAlreadyEndedError } from './errors.js';
 
+/**
+ * THE TYPED SENTINEL a refused turn ending hands the engine — never the model's own arguments.
+ *
+ * Its `kind` is deliberately outside `turnIntentSchema`'s closed union, so the engine's own parse
+ * refuses it by construction and drives the declared requeue-once-then-fail fate. Forwarding the
+ * RAW arguments instead was a silent-privilege bug, not merely untidy: a `submit_result` whose
+ * arguments failed this package's schema was recorded malformed and handed to the engine, which
+ * read the very same bytes as a VALID intent of another kind — while the review-policy match, which
+ * keys on the intent this package COLLECTED, saw none and passed null. A mandatory review policy
+ * was skipped by sending the wrong arguments to the right tool.
+ *
+ * The detail stays on the collector for the composition to log; what crosses the boundary is this
+ * constant and nothing else.
+ */
+export const MALFORMED_TURN_ENDING = Object.freeze({ kind: 'malformed_turn_ending' as const });
+
 export interface BufferedMessage {
   readonly recipient: string;
   readonly body: string;

@@ -35,12 +35,22 @@ export function makeScriptedBackend(
     async run(spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
       const calls = await script(spec, ctx);
       let step = 0;
+      // The transcript is part of the neutral result contract, and a consumer may legitimately read
+      // it (the workforce composition asks it whether a turn-ending tool was ATTEMPTED, which is
+      // the only record of a call the chokepoint rejected before the handler). A fixture that
+      // reported an empty conversation while dispatching calls was lying about the run.
+      const parts: { kind: 'tool_call'; toolCallId: string; name: string; args: unknown }[] = [];
+      const results: { kind: 'tool_result'; toolCallId: string; name: string; result: unknown }[] =
+        [];
       for (const call of calls) {
         step += 1;
         if (!ctx.dispatchTool) {
           throw new Error('scripted backend requires ctx.dispatchTool — none was wired.');
         }
-        await ctx.dispatchTool(call.name, call.args, `scripted-${step}`);
+        const toolCallId = `scripted-${step}`;
+        parts.push({ kind: 'tool_call', toolCallId, name: call.name, args: call.args });
+        const result = await ctx.dispatchTool(call.name, call.args, toolCallId);
+        results.push({ kind: 'tool_result', toolCallId, name: call.name, result });
       }
       return {
         runId: ctx.runId,
@@ -51,7 +61,13 @@ export function makeScriptedBackend(
         output: null,
         error: null,
         errorClass: null,
-        conversation: [],
+        conversation:
+          parts.length === 0
+            ? []
+            : [
+                { role: 'assistant' as const, index: 0, parts },
+                { role: 'tool' as const, index: 1, parts: results },
+              ],
         usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
         costUsd: 0,
         stepCount: step,
