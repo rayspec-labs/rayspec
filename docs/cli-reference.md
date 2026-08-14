@@ -658,6 +658,61 @@ Against an existing organization, skip steps 1–2 entirely and set
 
 ---
 
+## `workforce` — operate the durable task engine of a running deployment
+
+```
+rayspec workforce status --workforce <id> [transport flags]
+rayspec workforce tasks [--status <s>] [--owner <o>] [--workforce <id>] [--tree] [transport flags]
+rayspec workforce task <id> [transport flags]
+rayspec workforce approvals list [transport flags]
+rayspec workforce approvals approve <id> [--reason <text>] [transport flags]
+rayspec workforce approvals reject <id> --reason <text> [transport flags]
+rayspec workforce cost [--window 24h|7d] [transport flags]
+rayspec workforce events <task-id> [transport flags]
+rayspec workforce pause [--drain] --workforce <id> [transport flags]
+rayspec workforce resume --workforce <id> [transport flags]
+rayspec workforce halt --reason <text> --workforce <id> [transport flags]
+```
+
+Unlike the spec- and deploy-oriented commands above, every command in this group
+queries or mutates **live tenant state in a running deployment**, over its
+authenticated HTTP API. That needs a transport, and its resolution is
+fail-closed at every step:
+
+- **Deployment resolution**, first match wins: `--url <base>` on the command;
+  then `RAYSPEC_URL` in the environment; then a `deployments/<name>.json` entry
+  under the working directory — selected by `--deployment <name>`, or used
+  implicitly when exactly **one** entry exists. No match, or more than one
+  candidate with no selector, is an error naming the options — never a silent
+  guess at `localhost`. An entry file is a strict `{"url": "…"}` (unknown keys
+  refused); it carries **no credential** — keys come from the flag or the
+  environment, never from a committed file.
+- **Authentication**: an API key from `--api-key` or `RAYSPEC_API_KEY`, sent
+  exactly as the HTTP API expects it. Read commands (`status`, `tasks`, `task`,
+  `approvals list`, `cost`, `events`) need **`store:read`**; every mutating
+  command (`approvals approve`/`reject`, `pause`/`resume`/`halt`, a cancel)
+  needs **`store:write`**, matching the route permissions. A key without the
+  permission gets the route's 403 verbatim — the CLI adds **no local
+  authorization logic of its own**, because two authorization implementations
+  is one too many.
+- **Tenant selection**: the server derives the tenant from the credential. An
+  API key is already bound to its organization, so `--tenant` /
+  `RAYSPEC_TENANT_ID` beside a key is refused as unverifiable rather than
+  silently ignored. A **user token** may span organizations: the CLI resolves
+  the token's active organization (`GET /v1/auth/me`) — no active organization
+  is a `tenant_required` error, and a `--tenant` that differs from the active
+  organization is a `tenant_mismatch` error.
+
+Every reply is one JSON object on stdout (`ok`, `command`, and the payload).
+A route refusal is `ok:false` with the server's error envelope untranslated
+(exit 1); a usage or transport-resolution problem is exit 2. `tasks --tree`
+emits the same rows nested by parent (`children: []` on each node); `events`
+replays the task's journal as parsed JSON events, each carrying `v: 1`. A
+deployment with no durable worker answers `NOT_IMPLEMENTED` (501) for the whole
+group — the task engine dispatches nothing without one, fail-closed.
+
+---
+
 ## `deploy` — boot and serve a declared product
 
 ```

@@ -286,10 +286,22 @@ importers:
       postgres:
         specifier: 3.4.9
         version: 3.4.9
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
     devDependencies:
+      '@rayspec/durable-dbos':
+        specifier: workspace:*
+        version: link:../../workflow/durable-dbos
+      '@rayspec/tasks':
+        specifier: workspace:*
+        version: link:../../kernel/tasks
       '@types/node':
         specifier: 22.12.0
         version: 22.12.0
+      dotenv:
+        specifier: 17.4.2
+        version: 17.4.2
       jose:
         specifier: 6.2.3
         version: 6.2.3
