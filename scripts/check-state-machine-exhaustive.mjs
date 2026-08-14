@@ -25,6 +25,24 @@
  * Parts 1-3 import the BUILT module (packages/kernel/tasks/dist/status.js) — the same artifact the
  * runtime executes — so the gate verifies the shipped table, not a re-parse of its source. Run
  * `pnpm build` first; a missing dist is a fail-closed refusal, never a skip.
+ *
+ * HONEST SCOPE / known ceiling — for the WRITE-MONOPOLY half only (parts 1-3 verify a real object
+ * and have no ceiling). Because the detectors are REGEXES over comment-stripped source (no AST),
+ * they catch the COMMON + previously-seen-regression forms: the chokepoint call, the bare drizzle
+ * builder, an arbitrary qualifier (`schema.`, `s.`, a namespace alias), the unqualified import, a
+ * quoted or multi-line SET key, and raw SQL in a template literal with quoted/unquoted, optionally
+ * schema-qualified identifiers. They do NOT catch every conceivable form:
+ *   - a RENAMED table import (`import { workforceTasks as t }`) — the name regex never sees `t`;
+ *   - a PATCH IN A VARIABLE (`const patch = { status: next }; tdb.update(workforceTasks, patch)`)
+ *     — the SET object is not at the call site to test;
+ *   - a computed key (`{ [col]: next }`) or a spread (`{ ...patch }`);
+ *   - raw SQL ASSEMBLED from interpolated fragments, where no single string contains the statement.
+ * So this half is a loud tripwire for the realistic regressions, NOT a "cannot-escape" guarantee.
+ * The LOAD-BEARING defenses are: (1) the renamed-import road is closed at the IMPORT site by the
+ * Biome `noRestrictedImports` override and the tenant chokepoint; (2) `applyTransition()` is the
+ * only function that can produce a legal transition at all — a foreign write still has to
+ * reimplement the table, the reason rules, the compare-and-swap, the transition log and the
+ * journal; and (3) code review. The gate is defence-in-depth on top of those, not a substitute.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';

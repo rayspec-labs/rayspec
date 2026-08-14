@@ -3,10 +3,11 @@
  * never reaches, driven deterministically by parking one operation on a row lock a third session
  * holds:
  *
- *   - P -> X(working) -> D1: X's completing turn cascades DOWN into D1 and fans IN to P while an
- *     operator cancel of P cascades down into D1. Locked in opposite orders these two wait on each
- *     other and Postgres kills one — the cascade 500s wholesale, or the turn dies and its dispatch
- *     reservation leaks. One documented root-first order makes them QUEUE instead;
+ *   - root -> middle(working) -> leaf: the middle task's completing turn cascades DOWN into the
+ *     leaf and fans IN to the root, while an operator cancel of the root cascades down into the
+ *     same leaf. Locked in opposite orders these two wait on each other and Postgres kills one —
+ *     the cascade 500s wholesale, or the turn dies and its dispatch reservation leaks. One
+ *     documented root-first order makes them QUEUE instead;
  *   - a cancel racing the reserve pass's `planned -> queued` promotion completes (the subtree is
  *     locked before any transition, and a lost compare-and-swap retries) instead of throwing the
  *     whole cascade away.
@@ -18,7 +19,13 @@ import { workforceBudgetsSchema } from './budget.js';
 import { cancelTaskCascade } from './control.js';
 import { createRootTask } from './create-task.js';
 import { deliverSignal } from './signals.js';
-import { forTenant, makeTestDb, resetTaskSchema, seedOrgs, TENANT_A } from './test-support/test-db.js';
+import {
+  forTenant,
+  makeTestDb,
+  resetTaskSchema,
+  seedOrgs,
+  TENANT_A,
+} from './test-support/test-db.js';
 
 const hasDb = Boolean(process.env.DATABASE_URL);
 const requireDb = process.env.CI === 'true' || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -92,35 +99,36 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
   }
 
   /**
-   * Build P -> X -> D1 as the engine does (two fan-out rounds), then leave X `working`: the shape
-   * where one subtree is walked from the top by a cancel and from the middle by a turn.
+   * Build root -> middle -> leaf as the engine does (two fan-out rounds), then leave the middle
+   * task `working`: the shape where one subtree is walked from the top by a cancel and from the
+   * middle by a turn.
    */
-  async function threeDeep(): Promise<{ p: string; x: string; d1: string }> {
-    const root = await createRootTask(tdb(), {
+  async function threeDeep(): Promise<{ root: string; middle: string; leaf: string }> {
+    const rootTask = await createRootTask(tdb(), {
       workforceId: 'wf',
-      title: 'P',
+      title: 'Root',
       goal: 'Drive the cascade.',
       owner: 'coordinator',
       requestedBy: 'user',
     });
-    await driveTo(root.taskId, 'queued');
-    await driveTo(root.taskId, 'working');
-    await turn(root.taskId, 1, {
+    await driveTo(rootTask.taskId, 'queued');
+    await driveTo(rootTask.taskId, 'working');
+    await turn(rootTask.taskId, 1, {
       kind: 'fan_out',
-      children: [{ title: 'X', goal: 'Middle.', owner: 'worker-x' }],
+      children: [{ title: 'Middle', goal: 'Middle work.', owner: 'worker-middle' }],
     });
-    const x = await childOf(root.taskId);
-    await driveTo(x, 'queued');
-    await driveTo(x, 'working');
-    await turn(x, 1, {
+    const middle = await childOf(rootTask.taskId);
+    await driveTo(middle, 'queued');
+    await driveTo(middle, 'working');
+    await turn(middle, 1, {
       kind: 'fan_out',
-      children: [{ title: 'D1', goal: 'Leaf.', owner: 'worker-d' }],
+      children: [{ title: 'Leaf', goal: 'Leaf work.', owner: 'worker-leaf' }],
     });
-    const d1 = await childOf(x);
-    // X back into execution: its join is real, but this suite needs it mid-turn, not parked.
-    await driveTo(x, 'queued');
-    await driveTo(x, 'working');
-    return { p: root.taskId, x, d1 };
+    const leaf = await childOf(middle);
+    // The middle task back into execution: its join is real, but this suite needs it mid-turn.
+    await driveTo(middle, 'queued');
+    await driveTo(middle, 'working');
+    return { root: rootTask.taskId, middle, leaf };
   }
 
   /**
@@ -167,22 +175,22 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
   }
 
   it('a completing turn and an operator cancel of its ancestor QUEUE instead of deadlocking', async () => {
-    const { p, x, d1 } = await threeDeep();
-    // X's turn will end as a cancellation (a cancel absorbed at its own boundary), so it cascades
-    // DOWN into D1 and then fans IN to P — the two directions in one transaction.
+    const { root, middle, leaf } = await threeDeep();
+    // The middle task's turn will end as a cancellation (a cancel absorbed at its own boundary), so
+    // it cascades DOWN into the leaf and then fans IN to the root — both directions, one transaction.
     await deliverSignal(tdb(), {
-      taskId: x,
+      taskId: middle,
       kind: 'cancel',
-      signalKey: `cancel:${x}`,
+      signalKey: `cancel:${middle}`,
       actor: 'user',
     });
 
-    const release = await holdDelegationOf(d1);
-    // T1 parks holding X and D1, one statement short of wanting P.
-    const completingTurn = turn(x, 2, { kind: 'complete', result: RESULT });
+    const release = await holdDelegationOf(leaf);
+    // The turn parks holding the middle task and the leaf, one statement short of wanting the root.
+    const completingTurn = turn(middle, 2, { kind: 'complete', result: RESULT });
     await waitForBlocked(1);
-    // T2 walks the same subtree from the top and wants D1.
-    const operatorCancel = cancelTaskCascade(tdb(), { taskId: p, actor: 'user' });
+    // The cancel walks the same subtree from the top and wants the leaf.
+    const operatorCancel = cancelTaskCascade(tdb(), { taskId: root, actor: 'user' });
     await waitForBlocked(2);
 
     await release();
@@ -191,19 +199,19 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
     await expect(completingTurn).resolves.toBeDefined();
     await expect(operatorCancel).resolves.toBeDefined();
 
-    expect(await statusOf(x)).toBe('cancelled');
-    expect(await statusOf(d1)).toBe('cancelled');
-    expect(await statusOf(p)).toBe('cancelled');
+    expect(await statusOf(middle)).toBe('cancelled');
+    expect(await statusOf(leaf)).toBe('cancelled');
+    expect(await statusOf(root)).toBe('cancelled');
   });
 
   it('a cancel racing the reserve pass completes the cascade instead of throwing it away', async () => {
-    const { p, x, d1 } = await threeDeep();
-    // Park X so the whole subtree is cancellable without a turn in flight.
+    const { root, middle, leaf } = await threeDeep();
+    // Park the middle task so the whole subtree is cancellable without a turn in flight.
     await applyTransition(tdb(), {
-      taskId: x,
+      taskId: middle,
       expectedVersion: (
         (await db.$client.unsafe(
-          `SELECT version FROM workforce_tasks WHERE task_id = '${x}';`,
+          `SELECT version FROM workforce_tasks WHERE task_id = '${middle}';`,
         )) as unknown as { version: number }[]
       )[0]?.version as number,
       to: 'blocked',
@@ -212,20 +220,20 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
     });
     const plannedVersion = (
       (await db.$client.unsafe(
-        `SELECT version FROM workforce_tasks WHERE task_id = '${d1}';`,
+        `SELECT version FROM workforce_tasks WHERE task_id = '${leaf}';`,
       )) as unknown as { version: number }[]
     )[0]?.version as number;
 
-    const release = await holdDelegationOf(x);
-    // The cascade parks after transitioning X, with D1 still ahead of it.
-    const cancel = cancelTaskCascade(tdb(), { taskId: p, actor: 'user' });
+    const release = await holdDelegationOf(middle);
+    // The cascade parks after transitioning the middle task, with the leaf still ahead of it.
+    const cancel = cancelTaskCascade(tdb(), { taskId: root, actor: 'user' });
     await waitForBlocked(1);
 
-    // The reserve pass promotes D1 out from under the cascade's snapshot. Settled or parked — both
-    // are fine; what matters is that it happens BEFORE the cascade reaches D1.
+    // The reserve pass promotes the leaf out from under the cascade's snapshot. Settled or parked —
+    // both are fine; what matters is that it happens BEFORE the cascade reaches it.
     let promotionSettled = false;
     const promotion = applyTransition(tdb(), {
-      taskId: d1,
+      taskId: leaf,
       expectedVersion: plannedVersion,
       to: 'queued',
       actor: 'scheduler',
@@ -241,13 +249,13 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
     }
 
     await release();
-    // Before the subtree was locked root-first, the cascade applied D1's stale version here and the
-    // whole cancel threw TaskVersionConflictError — a 500 that cancelled nothing below X.
+    // Before the subtree was locked root-first, the cascade applied the leaf's stale version here and
+    // the whole cancel threw TaskVersionConflictError — a 500 that cancelled nothing below.
     const outcome = await cancel;
-    expect(outcome.cancelled).toContain(p);
-    expect(outcome.cancelled).toContain(x);
-    expect(outcome.cancelled).toContain(d1);
-    expect(await statusOf(d1)).toBe('cancelled');
+    expect(outcome.cancelled).toContain(root);
+    expect(outcome.cancelled).toContain(middle);
+    expect(outcome.cancelled).toContain(leaf);
+    expect(await statusOf(leaf)).toBe('cancelled');
     await promotion;
   });
 });

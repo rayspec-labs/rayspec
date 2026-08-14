@@ -37,9 +37,18 @@
  * `maxConcurrentWorkers` (per workforce, per department) is enforced by the reserve pass simply
  * NOT DISPATCHING past the cap: a task at a saturated workforce stays `queued` — no transition,
  * no reservation, no journal event — and is picked up when a slot frees. The pass counts `working`
- * rows plus its own dispatches, so the cap holds within a pass; across racing passes the dedup
- * law prevents double dispatch, and the residual is a BOUNDED transient (a dispatched-but-not-yet-
- * claimed task still reads `queued` for one claim latency), never a lost or duplicated turn.
+ * rows plus its own dispatches, so the cap holds WITHIN a pass.
+ *
+ * ACROSS passes it can OVERSHOOT, and the honest statement is not "a bounded transient": a pass
+ * counts `working` rows, and a task it dispatched is not `working` until its claim commits, so two
+ * passes that overlap in that window each see the same count and each admit up to the cap. In one
+ * process the scheduled tick and a route's `kick()` are coalesced (`#passCoalesced`) so they cannot
+ * overlap; ACROSS WORKER PROCESSES nothing in this file can prevent it, and observed concurrency
+ * may reach (overlapping passes) × cap for one claim latency. What the dispatch law does guarantee
+ * unconditionally is that no turn is lost and none is duplicated — the workflow id dedupes, and the
+ * claim's compare-and-swap admits exactly one. Making the cap hard would take a reservation the
+ * DATABASE counts (a claim-time counter row per scope, checked like the budget ledger), not a
+ * tighter read.
  *
  * A paused workforce is skipped wholesale at the pass — its tasks stay visibly `queued`, accruing
  * nothing (the pause lives on the workforce_runtime row, deliberately not a task status).
@@ -220,7 +229,8 @@ export class DbosTaskScheduler {
   readonly #logger: TaskSchedulerLogger;
   #registered = false;
   #turnWorkflow?: (job: TaskTurnJob) => Promise<void>;
-  #kickInFlight = false;
+  #passInFlight: Promise<void> | null = null;
+  #passQueued = false;
 
   constructor(deps: TaskSchedulerDeps) {
     this.#deps = deps;
@@ -242,7 +252,7 @@ export class DbosTaskScheduler {
     });
     const reserveBody = DBOS.registerWorkflow(
       async (_scheduledTime: Date): Promise<void> => {
-        await this.runReservePass();
+        await this.#passCoalesced();
       },
       { name: TASK_RESERVE_WORKFLOW_NAME },
     );
@@ -278,21 +288,41 @@ export class DbosTaskScheduler {
 
   /**
    * Nudge the scheduler after a state change a route just made (a signal, an approval decision, a
-   * resume) — one coalesced pass on the next tick instead of waiting for the cron tick. Best-effort
-   * by design: the scheduled tick is the guarantee, the kick is the latency.
+   * resume) — one coalesced pass instead of waiting for the cron tick. Best-effort by design: the
+   * scheduled tick is the guarantee, the kick is the latency.
    */
   kick(): void {
-    if (this.#kickInFlight) return;
-    this.#kickInFlight = true;
     queueMicrotask(() => {
-      void this.runReservePass()
-        .catch((err) => {
-          this.#logger.warn(`[workforce] kicked reserve pass failed: ${String(err)}`);
-        })
-        .finally(() => {
-          this.#kickInFlight = false;
-        });
+      void this.#passCoalesced().catch((err) => {
+        this.#logger.warn(`[workforce] kicked reserve pass failed: ${String(err)}`);
+      });
     });
+  }
+
+  /**
+   * Run a pass, never CONCURRENTLY with another pass THIS PROCESS started. The cap is counted per
+   * pass (see the header), so a scheduled tick overlapping a route's kick would let each admit up
+   * to it; both go through here instead. A nudge that arrives mid-pass is not dropped — it queues
+   * exactly one follow-up, because the running pass may have read its state before it committed.
+   * This closes the in-process half of the overshoot only; two worker processes still pass
+   * independently, and the header says so.
+   */
+  async #passCoalesced(): Promise<void> {
+    if (this.#passInFlight) {
+      this.#passQueued = true;
+      return;
+    }
+    this.#passInFlight = (async () => {
+      do {
+        this.#passQueued = false;
+        await this.runReservePass();
+      } while (this.#passQueued);
+    })();
+    try {
+      await this.#passInFlight;
+    } finally {
+      this.#passInFlight = null;
+    }
   }
 
   /**
@@ -577,7 +607,6 @@ export class DbosTaskScheduler {
         // good — a decision, not something to keep waiting on.
         blockers.push({ taskId: id, status: 'absent' });
       } else if (dep.status === 'completed') {
-        continue;
       } else if (isTaskStatus(dep.status) && isTerminalStatus(dep.status)) {
         blockers.push({ taskId: id, status: dep.status });
       } else {
@@ -803,6 +832,14 @@ export class DbosTaskScheduler {
   /**
    * The claim transaction (protocol step 1). Returns `claimed` with the working row, or a no-op
    * verdict a recovered/stale/denied execution exits on.
+   *
+   * THE LOCK RANK, established here and followed everywhere: `workforce_runtime` -> `workforce_tasks`
+   * -> `workforce_budget_ledger`. This transaction takes all three in that order —
+   * `ensureWorkforceRuntime`'s upsert locks the runtime row, `applyTransition`'s compare-and-swap
+   * locks the task row, `authorizeTurn`'s upserts lock the ledger rows — so every other path that
+   * touches more than one of them must too, or a claim and a settle could wait on each other. The
+   * ordering WITHIN `workforce_tasks` is the root-first subtree order (@rayspec/tasks
+   * apply-intents.ts); the ordering within the ledger is the canonical scope order (budget.ts).
    */
   async #claimTurn(
     tdb: TenantDb,

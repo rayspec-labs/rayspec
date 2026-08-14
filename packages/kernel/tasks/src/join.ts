@@ -20,7 +20,17 @@ export const joinPolicySchema = z.strictObject({
 
 export type JoinPolicy = z.output<typeof joinPolicySchema>;
 
-/** `all`: the join is satisfied when EVERY child holds a terminal status. */
+/**
+ * `all`: the join is satisfied when EVERY child holds a terminal status.
+ *
+ * NOTE for a future policy: `children` is every child the parent has EVER opened, across fan-out
+ * ROUNDS, not the current round's. `all` is immune — an earlier round's children are terminal by
+ * the time the parent fans out again, so they neither block nor satisfy anything. A counting or
+ * quorum policy (`any`, `n_of_m`) would NOT be: round one's completions would satisfy round two's
+ * quorum before a single new child finished. Such a policy must take the round's children, which
+ * the deterministic child ids already carry (`(tenant, parent, turn, slot)` — the parent's
+ * `turnsUsed` at fan-out IS the round, the same key the join signal is scoped by).
+ */
 export function isJoinSatisfied(policy: JoinPolicy, children: readonly TaskRecord[]): boolean {
   switch (policy.policy) {
     case 'all':
