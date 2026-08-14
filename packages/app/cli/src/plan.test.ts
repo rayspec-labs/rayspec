@@ -19,7 +19,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { runDoctor } from './doctor.js';
 import { resolveGuardComparisonUrl, runPlan } from './plan.js';
 
-/** Repo root, relative to this test file (packages/cli/src → rayspec). */
+/** Repo root, relative to this test file (packages/app/cli/src → rayspec). */
 const REPO_ROOT = resolve(import.meta.dirname, '../../../..');
 /** The neutral reference Product-YAML (read-only fixture): its projection counts must match its real sections. */
 const ACME_YAML = readFileSync(

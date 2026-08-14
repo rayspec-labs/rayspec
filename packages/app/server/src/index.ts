@@ -25,9 +25,14 @@ export type { DriftFinding } from '@rayspec/db';
 // CLI imports the SAME symbols through the `@rayspec/server/agent-tracing` SUBPATH instead: that module
 // pulls in no adapter, so the deploy path can decide the posture — and write the SDK's switch — before
 // it loads this closure and the agent SDK inside it.
+// `applyServeAgentTracing` is here for the same reason `assembleServer` is: a boot wrapper that
+// assembles the server itself has to apply the posture itself, and it has already loaded this closure
+// (and the agent SDK inside it) by the time it can call anything — which is precisely the case that
+// function's programmatic half is written for.
 export {
   type AgentTracingPosture,
   applyDeployAgentTracing,
+  applyServeAgentTracing,
   observedAgentTracing,
   resolveAgentTracing,
 } from './agent-tracing.js';
@@ -132,6 +137,11 @@ export {
   installEnvProxyDispatcher,
   nodeSupportsEnvProxy,
 } from './proxy-dispatcher.js';
+// The local `.env` auto-loader the `rayspec-serve` bin runs at startup (issue #384). Exported so a boot
+// wrapper resolves its configuration through the SAME two-candidate search in the SAME order as the two
+// documented entrypoints instead of carrying a private single-path copy — the construction that let
+// those two drift apart in the first place. A leaf module (node builtins only).
+export { loadLocalDotenvIfPresent } from './read-env.js';
 // The deployer-seam opts builder — shared by the `rayspec-serve` bin (serve.ts) AND the `rayspec deploy`
 // CLI so both boot a backend-profile spec WITH agents directly from ONE builder (the sanctioned
 // registerProductStores registrar + the env-driven agent-backend factory). Exported so the CLI
