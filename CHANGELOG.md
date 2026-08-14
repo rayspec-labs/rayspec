@@ -862,7 +862,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unaffected: a 5-field or 6-field expression reaches the scheduler byte-identically, and unset or
   blank still resolves to the documented `0 3 * * *`. One surface grows: the check runs where the
   rest of the environment is resolved, so a boot that wires no durable worker — an auth-only boot, or
-  a classic `rayspec.yaml` without one — now also refuses an unparseable value it previously ignored.
+  a classic `rayspec.yaml` without one — now also refuses an unparseable value it previously ignored,
+  with one exception: a frontend-only document is outside the check's scope, because both documented
+  entrypoints branch it to the static profile — whose `loadStaticServerConfig` resolves no cleanup
+  knob — before the environment is resolved, so such a boot still serves an unparseable value here,
+  exactly as it still serves a malformed `DATABASE_URL` or a non-numeric `RAYSPEC_GDPR_RETENTION_DAYS`.
 
 - **`rayspec` run from a vendored checkout now honors the invoking project's `./.env`.** The CLI's
   `.env` auto-loader resolved the file relative to its OWN install location — always the RaySpec
