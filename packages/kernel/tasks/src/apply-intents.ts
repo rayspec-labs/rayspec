@@ -16,6 +16,22 @@
  * and strand the parent. A satisfied join writes exactly ONE `child_completed` signal (the
  * signal-key UNIQUE dedupes) and re-queues the parent; the parent's next dispatch receives the
  * full results keyed by child task id, never by completion order.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * THE TASK LOCK ORDER — one order, every path that touches more than one task row.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * Task rows are locked ROOT-FIRST: a task's ancestors before the task, the task before its
+ * descendants, ties inside a level broken by task id. An operation takes the locks on its way UP
+ * (`lockRootFirst`) BEFORE its first transition, and `cancelDescendants` takes the ones on its way
+ * DOWN in the same order. Two operations whose row sets overlap therefore acquire the intersection
+ * in the same sequence and QUEUE instead of deadlocking — an operator cancel holding a parent waits
+ * for the completing child's turn to finish, rather than the two waiting on each other until
+ * Postgres kills one (which turned a cancel into a 500 that did nothing, and a turn into a leaked
+ * reservation). A single-row transition needs no pre-lock: it holds one row and wants nothing else,
+ * so it can never be half of a cycle.
+ *
+ * Rank against the other row types this engine locks: workforce_runtime -> workforce_tasks ->
+ * workforce_budget_ledger (established by the dispatcher's claim transaction).
  */
 import { schema, type TenantDb } from '@rayspec/db';
 import { and, eq, inArray } from 'drizzle-orm';
@@ -81,9 +97,41 @@ async function readTask(tx: TenantDb, taskId: string): Promise<TaskRecord> {
 }
 
 /**
+ * Take the upward half of THE TASK LOCK ORDER (see the module header) for an operation on `task`:
+ * its ancestors root-first, then the task itself, all `FOR UPDATE`, all BEFORE the operation's
+ * first transition. `ancestryPath` is materialized root-first and immutable, so walking it IS the
+ * canonical order. Returns the task re-read UNDER its own lock — the authoritative version a
+ * compare-and-swap can then present without racing anyone.
+ *
+ * Every caller here touches a SECOND task row (the parent it fans into, the root it escalates to,
+ * the descendants it cascades over), which is what makes the order load-bearing.
+ */
+export async function lockRootFirst(tx: TenantDb, task: TaskRecord): Promise<TaskRecord> {
+  const ancestry = Array.isArray(task.ancestryPath) ? (task.ancestryPath as string[]) : [];
+  for (const ancestorId of ancestry) {
+    await tx
+      .select(schema.workforceTasks, { taskId: schema.workforceTasks.taskId })
+      .where(eq(schema.workforceTasks.taskId, ancestorId))
+      .for('update');
+  }
+  const rows = (await tx
+    .select(schema.workforceTasks)
+    .where(eq(schema.workforceTasks.taskId, task.taskId))
+    .for('update')) as TaskRecord[];
+  const locked = rows[0];
+  if (!locked) throw new TaskNotFoundError(task.taskId);
+  if (!isTaskStatus(locked.status)) {
+    throw new TaskRowCorruptError(task.taskId, `status '${locked.status}'`);
+  }
+  return locked;
+}
+
+/**
  * A task just reached a terminal status: settle its opening delegation record and, when its
  * parent is parked on the join, check fan-in. Exported for the cancel cascade, which terminates
- * tasks outside a turn.
+ * tasks outside a turn. The parent lock this takes is already held by every caller (they went
+ * through `lockRootFirst` before their transition) — re-taking it is free and keeps the fan-in
+ * correct on its own terms.
  */
 export async function afterTaskTerminal(tx: TenantDb, task: TaskRecord): Promise<void> {
   await tx
@@ -149,7 +197,10 @@ export async function applyTurnOutcome(
       );
     if (receipt.length > 0) return { alreadyApplied: true, plan: null, task: null };
 
-    const task = await readTask(tx, input.taskId);
+    // Root-first BEFORE the first transition (see the module header): this turn may fan in to its
+    // parent, escalate to its root, or cascade into its descendants, and the cancel cascade walks
+    // the same rows from the top.
+    const task = await lockRootFirst(tx, await readTask(tx, input.taskId));
     if (task.status !== 'working') {
       throw new TurnStateError(input.taskId, `status '${task.status}'`);
     }
@@ -533,7 +584,19 @@ export async function applyBudgetExhausted(
   return blocked;
 }
 
-/** Cancel every non-terminal descendant, root-first; working ones absorb a cancel signal. */
+/**
+ * Cancel every non-terminal descendant, root-first; working ones absorb a cancel signal.
+ *
+ * The whole subtree read is a DELIBERATE full scan — a cascade that saw only a page of its
+ * descendants would leave the rest running under a cancelled ancestor, so this one is bounded by
+ * the subtree's own size, not by a LIMIT.
+ *
+ * Every row this will act on is locked FIRST, in the canonical root-first order (ancestry depth,
+ * then task id — the tiebreaker matters: two cascades over overlapping subtrees must agree on the
+ * order of same-depth siblings). The act-on decision is then made from the LOCKED row, never from
+ * the snapshot: a descendant that ended its turn between the two reads is cancelled rather than
+ * signalled into a task that will never run again.
+ */
 export async function cancelDescendants(
   tx: TenantDb,
   origin: TaskRecord,
@@ -547,16 +610,28 @@ export async function cancelDescendants(
       (t) =>
         t.taskId !== origin.taskId &&
         Array.isArray(t.ancestryPath) &&
-        (t.ancestryPath as string[]).includes(origin.taskId),
+        (t.ancestryPath as string[]).includes(origin.taskId) &&
+        // Terminal is absorbing, so a terminal snapshot is a terminal row — no lock needed.
+        !(isTaskStatus(t.status) && isTerminalStatus(t.status)),
     )
     .sort(
       (a, b) =>
         (Array.isArray(a.ancestryPath) ? a.ancestryPath.length : 0) -
-        (Array.isArray(b.ancestryPath) ? b.ancestryPath.length : 0),
+          (Array.isArray(b.ancestryPath) ? b.ancestryPath.length : 0) ||
+        a.taskId.localeCompare(b.taskId),
     );
+  const locked: TaskRecord[] = [];
+  for (const desc of descendants) {
+    const rows = (await tx
+      .select(schema.workforceTasks)
+      .where(eq(schema.workforceTasks.taskId, desc.taskId))
+      .for('update')) as TaskRecord[];
+    const row = rows[0];
+    if (row) locked.push(row);
+  }
   const cancelled: string[] = [];
   const signalled: string[] = [];
-  for (const desc of descendants) {
+  for (const desc of locked) {
     if (!isTaskStatus(desc.status) || isTerminalStatus(desc.status)) continue;
     if (desc.status === 'working') {
       // Never kill a turn mid-flight: the cancel is absorbed at the turn's own boundary.

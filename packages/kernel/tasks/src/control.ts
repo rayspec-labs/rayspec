@@ -15,9 +15,9 @@
  */
 import { schema, type TenantDb } from '@rayspec/db';
 import { and, eq, isNull } from 'drizzle-orm';
-import { afterTaskTerminal, cancelDescendants } from './apply-intents.js';
+import { afterTaskTerminal, cancelDescendants, lockRootFirst } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
-import { TaskNotFoundError, TaskRowCorruptError } from './errors.js';
+import { TaskNotFoundError, TaskRowCorruptError, TaskVersionConflictError } from './errors.js';
 import { appendWorkforceEvents } from './events.js';
 import { ensureWorkforceRuntime, type WorkforceRuntimeRecord } from './runtime.js';
 import { deliverSignal } from './signals.js';
@@ -30,53 +30,79 @@ export interface CancelCascadeOutcome {
   readonly signalled: string[];
 }
 
+/** A cascade re-reads and retries a bounded number of times rather than 500ing on a lost race. */
+const CASCADE_RETRIES = 3;
+
 export async function cancelTaskCascade(
   tdb: TenantDb,
   input: { readonly taskId: string; readonly actor: string; readonly reason?: string },
 ): Promise<CancelCascadeOutcome> {
-  return tdb.transaction(async (tx) => {
-    const rows = (await tx
-      .select(schema.workforceTasks)
-      .where(eq(schema.workforceTasks.taskId, input.taskId))) as TaskRecord[];
-    const task = rows[0];
-    if (!task) throw new TaskNotFoundError(input.taskId);
-    if (!isTaskStatus(task.status)) {
-      throw new TaskRowCorruptError(input.taskId, `status '${task.status}'`);
-    }
-    if (isTerminalStatus(task.status)) return { cancelled: [], signalled: [] };
+  // A cancel races the reserve pass by construction — the pass rewrites `planned`/`queued` rows
+  // every few seconds — so a lost compare-and-swap re-reads and retries (the `transitionWithRetry`
+  // pattern approvals.ts establishes), on a FRESH transaction because the losing one is spent.
+  // With the whole subtree locked root-first the race is nearly closed already; this is what keeps
+  // the remainder an honest retry instead of a 500 that did nothing.
+  for (let attempt = 1; attempt <= CASCADE_RETRIES; attempt++) {
+    try {
+      return await tdb.transaction(async (tx) => {
+        const rows = (await tx
+          .select(schema.workforceTasks)
+          .where(eq(schema.workforceTasks.taskId, input.taskId))) as TaskRecord[];
+        const snapshot = rows[0];
+        if (!snapshot) throw new TaskNotFoundError(input.taskId);
+        if (!isTaskStatus(snapshot.status)) {
+          throw new TaskRowCorruptError(input.taskId, `status '${snapshot.status}'`);
+        }
+        // Root-first before the first transition (apply-intents.ts's module header): this cascade
+        // and a completing turn inside the same subtree walk the same rows in the same order.
+        const task = await lockRootFirst(tx, snapshot);
+        if (!isTaskStatus(task.status)) {
+          throw new TaskRowCorruptError(input.taskId, `status '${task.status}'`);
+        }
+        if (isTerminalStatus(task.status)) return { cancelled: [], signalled: [] };
 
-    const outcome: { cancelled: string[]; signalled: string[] } = { cancelled: [], signalled: [] };
-    if (task.status === 'working') {
-      // Never kill a turn mid-flight: the target absorbs the cancel at its own boundary (and its
-      // turn's cancellation cascades to the descendants it still owns then). Descendants that are
-      // NOT mid-turn cancel now — schedules are cancelled, in-flight work is not.
-      await deliverSignal(tx, {
-        taskId: task.taskId,
-        kind: 'cancel',
-        signalKey: `cancel:${input.taskId}`,
-        payload: { requestedBy: input.actor, reason: input.reason ?? null },
-        actor: input.actor,
+        const outcome: { cancelled: string[]; signalled: string[] } = {
+          cancelled: [],
+          signalled: [],
+        };
+        if (task.status === 'working') {
+          // Never kill a turn mid-flight: the target absorbs the cancel at its own boundary (and
+          // its turn's cancellation cascades to the descendants it still owns then). Descendants
+          // that are NOT mid-turn cancel now — schedules are cancelled, in-flight work is not.
+          await deliverSignal(tx, {
+            taskId: task.taskId,
+            kind: 'cancel',
+            signalKey: `cancel:${input.taskId}`,
+            payload: { requestedBy: input.actor, reason: input.reason ?? null },
+            actor: input.actor,
+          });
+          outcome.signalled.push(task.taskId);
+          const cascade = await cancelDescendants(tx, task, input.actor);
+          outcome.cancelled.push(...cascade.cancelled);
+          outcome.signalled.push(...cascade.signalled);
+          return outcome;
+        }
+        const done = await applyTransition(tx, {
+          taskId: task.taskId,
+          expectedVersion: task.version,
+          to: 'cancelled',
+          reason: 'cancelled_by_user',
+          actor: input.actor,
+        });
+        outcome.cancelled.push(done.taskId);
+        const cascade = await cancelDescendants(tx, done, input.actor);
+        outcome.cancelled.push(...cascade.cancelled);
+        outcome.signalled.push(...cascade.signalled);
+        await afterTaskTerminal(tx, done);
+        return outcome;
       });
-      outcome.signalled.push(task.taskId);
-      const cascade = await cancelDescendants(tx, task, input.actor);
-      outcome.cancelled.push(...cascade.cancelled);
-      outcome.signalled.push(...cascade.signalled);
-      return outcome;
+    } catch (err) {
+      if (err instanceof TaskVersionConflictError && attempt < CASCADE_RETRIES) continue;
+      throw err;
     }
-    const done = await applyTransition(tx, {
-      taskId: task.taskId,
-      expectedVersion: task.version,
-      to: 'cancelled',
-      reason: 'cancelled_by_user',
-      actor: input.actor,
-    });
-    outcome.cancelled.push(done.taskId);
-    const cascade = await cancelDescendants(tx, done, input.actor);
-    outcome.cancelled.push(...cascade.cancelled);
-    outcome.signalled.push(...cascade.signalled);
-    await afterTaskTerminal(tx, done);
-    return outcome;
-  });
+  }
+  // Unreachable: the loop either returns or rethrows on its final attempt.
+  throw new TaskVersionConflictError(input.taskId, -1, -1);
 }
 
 /** How long a drain politely waits for in-flight turns before refusing (fail-loud, not forever). */
@@ -198,6 +224,11 @@ export interface HaltWorkforceOutcome {
  * Pause with drain, then cancel every non-terminal task ROOT-FIRST (cascades cannot race their
  * parents). Drained first, never killed mid-turn: with the drain complete nothing is `working`, so
  * the cascade transitions parked rows only. The halt event carries the affected count.
+ *
+ * The roots read is a DELIBERATE full scan: a halt that stopped at a page would leave the rest of
+ * the workforce running, which is the one thing a halt may not do. Each root's cancellation runs
+ * through `cancelTaskCascade`, so the halt inherits its root-first locking and its bounded retry —
+ * a version race with the reserve pass no longer aborts a halt midway with nothing journaled.
  */
 export async function haltWorkforce(
   tdb: TenantDb,

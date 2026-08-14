@@ -14,6 +14,7 @@ export {
   applyBudgetExhausted,
   applyTurnOutcome,
   cancelDescendants,
+  lockRootFirst,
   TurnStateError,
 } from './apply-intents.js';
 export { type ApplyTransitionInput, applyTransition, type TaskRecord } from './apply-transition.js';

@@ -7,7 +7,7 @@
 import { schema, type TenantDb } from '@rayspec/db';
 import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
-import { afterTaskTerminal } from './apply-intents.js';
+import { afterTaskTerminal, lockRootFirst } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import type { WorkforceBudgets } from './budget.js';
 
@@ -90,9 +90,15 @@ export async function applyReviewVerdict(
       throw new ReviewTaskStateError(input.reviewId, task?.status ?? 'absent');
     }
     if (input.verdict === 'accept') {
+      // Completing fans in to the parent, so this touches a second task row: root-first first
+      // (apply-intents.ts's module header).
+      const locked = await lockRootFirst(tx, task);
+      if (locked.status !== 'waiting_for_review') {
+        throw new ReviewTaskStateError(input.reviewId, locked.status);
+      }
       const done = await applyTransition(tx, {
-        taskId: task.taskId,
-        expectedVersion: task.version,
+        taskId: locked.taskId,
+        expectedVersion: locked.version,
         to: 'completed',
         actor: input.actor,
       });

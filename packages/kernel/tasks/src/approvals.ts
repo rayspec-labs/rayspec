@@ -10,7 +10,7 @@
 import { schema, type TenantDb } from '@rayspec/db';
 import { and, eq, isNotNull, lt } from 'drizzle-orm';
 import { z } from 'zod';
-import { afterTaskTerminal } from './apply-intents.js';
+import { afterTaskTerminal, lockRootFirst } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import { TaskVersionConflictError } from './errors.js';
 import { appendTaskEvents } from './events.js';
@@ -240,10 +240,13 @@ export async function sweepApprovalTimeouts(
         return;
       }
       await transitionWithRetry(tx, approval.taskId, async (task) => {
-        if (task.status !== 'waiting_for_user') return;
+        // Failing fans in to the parent, so this touches a second task row: root-first first
+        // (apply-intents.ts's module header).
+        const locked = await lockRootFirst(tx, task);
+        if (locked.status !== 'waiting_for_user') return;
         const failed = await applyTransition(tx, {
-          taskId: task.taskId,
-          expectedVersion: task.version,
+          taskId: locked.taskId,
+          expectedVersion: locked.version,
           to: 'failed',
           actor: 'scheduler',
         });
