@@ -6,7 +6,7 @@
  * a local `.env`, an operator running `node packages/cli/dist/index.js plan …` got a silent
  * `shadowApplied:false` (the shadow check skipped) and no read-only-guard comparison target — unless they
  * manually exported both. This loader fixes that by reading a local `.env` at CLI startup,
- * mirroring `@rayspec/server`'s `loadLocalDotenvIfPresent` (packages/server/src/serve.ts).
+ * mirroring `@rayspec/server`'s `loadLocalDotenvIfPresent` (packages/app/server/src/read-env.ts).
  *
  * Mirrored guarantees (identical to the server's loader):
  *   • DEV-ONLY — a real deployment sets env via its orchestrator/secret manager and this file is
