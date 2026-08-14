@@ -962,6 +962,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the checkout root, where the two candidates are one file, it behaves exactly as before.
   (Issue #384.)
 
+- **A `numeric` column holding a `NaN` is refused on read, like a non-finite `double` — and the page
+  carrying it no longer mints a cursor no client can follow.** PostgreSQL's `numeric` accepts `NaN`,
+  which is not a decimal at all. Neither write path produces one — the request body validator and the
+  handler facade both check the same plain-decimal shape — so only a direct SQL write or a
+  hand-written migration can plant one, and until now both read paths handed it straight out: the
+  HTTP read returned `200` with `"amount":"NaN"` under a type documented as *the exact stored value in
+  PostgreSQL's canonical rendering with exactly `scale` fractional digits*, and the handler facade
+  returned the same string to an escape-hatch handler, a `store_read` node and the views interpreter.
+  The follow-on was worse than the value: a keyset page ordered on that column minted an
+  `X-Next-Cursor` carrying `NaN`, and the next request rejected its own cursor with
+  `Filter '<column>' must be a plain decimal string (no exponent).` — a `400` on a filter the client
+  never wrote, with no way to page past the row. Both serializers now refuse such a value with the
+  same `400 VALIDATION_ERROR` shape the `bigint` and `double` read guards use, naming the column and
+  the row id and never the value; a page that refuses mints no cursor, so the feed cannot strand a
+  client mid-scroll. This is the one read guard keyed on the DECLARED column type rather than the
+  value shape, and it has to be: a `numeric` value is a string, exactly like the `text` value beside
+  it, where `NaN` is ordinary data no read may refuse. Nothing legitimate is affected — every
+  rendering PostgreSQL produces for a decimal passes the check, `±Infinity` cannot reach a column that
+  declares a precision and scale (the DB refuses it), and recovering a planted row stays a SQL-level
+  operation, the same price the other two read guards already state.
+
+- **A timestamp filter through the handler facade takes an ISO string, instead of failing as an
+  internal fault.** The facade's contract is plain serializable rows: it hands a handler an ISO
+  string for a timestamp column and accepts one on the write path. A filter did not: the value went
+  straight to the driver, whose timestamp mapper calls `.toISOString()` on it, so a string raised a
+  raw `TypeError` — a 500-shaped fault for what is a handler input mistake, where every other facade
+  input guard produces a `400`. It applied to all three filter forms (an equality value, an `IN`
+  element, and a `gt`/`gte`/`lt`/`lte` bound), so a handler could not express "rows since this
+  timestamp" with the value the same facade had just returned. All three now pass through the write
+  path's own coercion: a parseable string becomes the `Date` the driver wants, and an unparseable one
+  is the existing typed input refusal with its existing generic public message. A `Date` bound is
+  untouched, and no other column type is coerced on a filter — the write range bounds still belong to
+  the write path only.
+
+- **A store column named `__proto__` is serialized instead of silently dropped on the un-projected
+  read path.** Such a column is a legal declaration (the identifier rule admits it, the doctor passes
+  it, the write path stores it), and a route declaring a `project` already serialized it correctly. A
+  route without one did not: the serializer accumulated into a plain object, where
+  `out['__proto__'] = value` is not a property write at all. A string value was silently swallowed —
+  the column simply vanished from the response, with no error anywhere — and a value from a `jsonb`
+  column of that name REPLACED the response object's prototype, so the column vanished *and* every
+  key of the stored value became readable through the response object. Both paths now accumulate into
+  a prototype-free object. Nothing else moves: an ordinary column is an own property either way and
+  serializes to the same bytes in the same order, so the only response this changes is one whose
+  store declares a column named after an `Object.prototype` member — which could not reach the wire
+  at all before.
+
 ### Documentation
 
 - **`rayspec deploy --host <addr>` is documented.** The flag has always been accepted and has always

@@ -274,7 +274,7 @@ export function makeStoreHandler(args: {
   const createSchema = createBodySchema(store);
   const updateSchema = updateBodySchema(store);
   // Resolved once at boot (throws fail-closed on a wire-name collision a code-built spec smuggled
-  // past lint); undefined without a `project`, keeping serializeRow on its byte-identical path.
+  // past lint); undefined without a `project`, keeping serializeRow on its un-projected path.
   const projection = resolveResponseProjection(store, args.project);
 
   return async (c: Context<AppEnv>): Promise<Response> => {

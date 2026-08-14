@@ -297,6 +297,42 @@ describeDb('declared store — the double and numeric column types', () => {
     // A malformed filter value is refused early.
     expect((await listLines(token, 'amount=1e5')).status).toBe(400);
   });
+
+  it('numeric READ guard: a NaN planted by direct SQL is a 400, and no page mints a cursor on it', async () => {
+    testsRan += 1;
+    const { token } = await principal('numeric-read@example.com', 'NumericReadOrg');
+    for (const v of ['1.000000', '2.000000']) {
+      expect((await createLine(token, { amount: v })).status).toBe(201);
+    }
+    const planted = (await (await listLines(token, 'amount=1.000000')).json()) as LineRow[];
+    const id = planted[0]?.id as string;
+    // numeric can hold NaN (and, from PostgreSQL 14, ±Infinity) at the SQL level. The write paths
+    // refuse it — only direct SQL can plant it — and it is not a decimal, so it is not a value the
+    // string wire form of this type can carry.
+    await h.db.execute(
+      drizzleSql`UPDATE ledger_lines SET amount = 'NaN'::numeric WHERE id = ${id}::uuid`,
+    );
+
+    const got = await jsonRequest(h.app, 'GET', `/lines/${id}`, { headers: auth(token) });
+    expect(got.status).toBe(400);
+    expect(got.status).not.toBe(500);
+    const body = await got.text();
+    expect(body).toContain('VALIDATION_ERROR');
+    expect(body).toContain('amount'); // names the column so the row is findable
+    expect(body).not.toContain('"NaN"'); // and never ships the value as the read envelope's decimal
+
+    // The LIST page containing the row refuses too — which is what keeps the FEED followable: the
+    // cursor is minted from the last row of a page that was served, so a page that refuses mints
+    // nothing, and no client is handed an `after=` value the next request would reject as a filter.
+    const page = await listLines(token, 'order=amount.desc&limit=1'); // NaN sorts highest in SQL
+    expect(page.status).toBe(400);
+    expect(page.headers.get('X-Next-Cursor')).toBe(null);
+
+    // The rest of the feed is unaffected: the row is one row, not the whole store.
+    const rest = await listLines(token, 'amount=2.000000');
+    expect(rest.status).toBe(200);
+    expect(((await rest.json()) as LineRow[]).map((r) => r.amount)).toEqual(['2.000000']);
+  });
 });
 
 /**
@@ -306,7 +342,7 @@ describeDb('declared store — the double and numeric column types', () => {
 describe('fractional column acceptance — ran-guard (must not silently skip in CI)', () => {
   it('the double/numeric arms ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (requireDb) {
-      expect(testsRan).toBe(6);
+      expect(testsRan).toBe(7);
     } else {
       expect(requireDb).toBe(false);
     }

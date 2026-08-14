@@ -224,7 +224,15 @@ stores:
     above. A read returns the exact stored value in PostgreSQL's canonical
     rendering with exactly `scale` fractional digits (`7.5` written into a
     `numeric(24, 6)` column reads back `7.500000` — the same value,
-    canonically rendered). Filters and keyset cursors carry the same string
+    canonically rendered) — and refuses anything else: a `numeric` column can
+    also hold `NaN` at the SQL level, which is not a decimal at all, so a value
+    planted there by direct SQL makes the read a `400 VALIDATION_ERROR` naming
+    the column and the row id, exactly as a non-finite `double` does, rather
+    than a response carrying a "decimal" no decimal parser accepts. (No write
+    path produces one — both refuse the string — and PostgreSQL itself refuses
+    `±Infinity` for a column that declares a precision and scale.) The refusal
+    keeps the feed followable, too: a page is refused as a whole, so no keyset
+    cursor is ever minted on such a row. Filters and keyset cursors carry the same string
     form and compare exactly server-side: a filter value beyond the declared
     scale matches nothing rather than matching a rounded neighbour. Both
     fractional types are orderable and usable as keyset pagination columns.
@@ -1370,7 +1378,10 @@ bounded comparison filters (`{ column: { gt: bound } }` and `gte`/`lt`/`lte`, on
 non-nullable, non-jsonb declared columns — read filters only), `orderBy`,
 `limit`/`offset` paging, and a filtered `count`** over the tenant-scoped store
 (still tenant-predicated beneath; no `like`/`OR`
-operators). A read that passes **no** `orderBy` comes back in `id` ascending order —
+operators). A filter on a `timestamp` column takes either a `Date` or the ISO
+string the facade itself hands back for that column — as an equality value, as a
+set-membership element, or as a comparison bound — and an unparseable date string
+is refused as a client error, the same way the write path refuses it. A read that passes **no** `orderBy` comes back in `id` ascending order —
 the same default the `list` op applies — so a handler never receives rows in an
 unspecified physical order. That default is the injected `id`, a random UUID, so it
 is a **stable** order and not a chronological one: order by `created_at` if you want
