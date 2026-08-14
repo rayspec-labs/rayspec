@@ -285,6 +285,17 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
         ),
       );
     }
+    if (employee.role === 'orchestrator' && employee.department !== undefined) {
+      errors.push(
+        specError(
+          'invalid_orchestrator',
+          `orchestrator '${employee.id}' declares a department — the orchestrator sits above ` +
+            'departments, and a membership would install that department manager as the ' +
+            "orchestrator's superior",
+          path(`employees[${ei}].department`),
+        ),
+      );
+    }
   });
 
   // ---- DEPARTMENTS -------------------------------------------------------------------------
@@ -468,6 +479,19 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
           `review policy '${policy.id}' appliesTo names neither a department nor an employee — ` +
             'an unselectable rule can never fire',
           path(`reviewPolicies[${pi}].appliesTo`),
+        ),
+      );
+    }
+    if (
+      policy.requireWhen.confidenceBelow === undefined &&
+      policy.requireWhen.capabilities === undefined
+    ) {
+      errors.push(
+        specError(
+          'schema_violation',
+          `review policy '${policy.id}' requireWhen names neither a confidence threshold nor a ` +
+            'capability — a rule that can never demand review is dead',
+          path(`reviewPolicies[${pi}].requireWhen`),
         ),
       );
     }

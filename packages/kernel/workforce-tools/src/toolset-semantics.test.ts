@@ -6,7 +6,7 @@
  * reporting edge, reviewId injection from the snapshot (never from arguments), buffered creates
  * returning deterministic ids, and read-tool visibility.
  */
-import { deterministicChildTaskId } from '@rayspec/tasks';
+import { deterministicChildTaskId, workerResultSchema } from '@rayspec/tasks';
 import { describe, expect, it } from 'vitest';
 import { TurnCollector } from './collector.js';
 import {
@@ -20,6 +20,7 @@ import {
   parseDelegationTarget,
   resolveDelegationTarget,
 } from './resolve-target.js';
+import { matchReviewPolicy } from './review-policy.js';
 import { emptySnapshot, fixtureConfig, fixtureTask } from './test-support/fixtures.js';
 import { assertNoReservedCollisions, buildRoleToolset } from './toolset.js';
 
@@ -180,6 +181,33 @@ describe('escalation and reviews', () => {
     });
   });
 
+  it('request_review accepts the caller superior when that superior holds a decision role', () => {
+    const { call, collector } = turnFor('dev');
+    call('request_review', { reviewer: 'mgr' });
+    expect(collector.finish().intent).toEqual({
+      kind: 'request_review',
+      reviewer: 'mgr',
+      dispatchReviewer: true,
+    });
+  });
+
+  it('request_review refuses a reviewer outside the caller scope — no org-wide routing', () => {
+    // cmo holds role manager, but manages an UNRELATED department: not a policy reviewer covering
+    // dev and not dev's superior — exactly the destination delegate_task scoping would refuse.
+    const { call, collector } = turnFor('dev');
+    expect(() => call('request_review', { reviewer: 'cmo' })).toThrow(WorkforceToolError);
+    expect(collector.finish().intent).toBeNull();
+  });
+
+  it('request_review never accepts the caller as their own reviewer', () => {
+    const mgr = turnFor('mgr');
+    expect(() => mgr.call('request_review', { reviewer: 'mgr' })).toThrow(WorkforceToolError);
+    expect(mgr.collector.finish().intent).toBeNull();
+    const qa = turnFor('qa');
+    expect(() => qa.call('request_review', { reviewer: 'qa' })).toThrow(WorkforceToolError);
+    expect(qa.collector.finish().intent).toBeNull();
+  });
+
   it('request_approval pulls the declared window for the caller capabilities and names the escalation target', () => {
     const { call, collector } = turnFor('cmo');
     call('request_approval', { question: 'Publish the statement?' });
@@ -267,5 +295,42 @@ describe('reserved-name collision defense', () => {
         },
       ]),
     ).not.toThrow();
+  });
+});
+
+describe('the declared-policy matcher never lets a submitter decide their own work', () => {
+  const selfCovered = {
+    ...fixtureConfig(),
+    reviewPolicies: [
+      {
+        id: 'growth_self',
+        appliesTo: { department: 'growth' },
+        reviewer: 'cmo',
+        requireWhen: { capabilities: ['public_statement'] },
+        onReject: 'rework' as const,
+        maxRounds: 2,
+      },
+    ],
+  };
+  const result = workerResultSchema.parse({
+    status: 'completed',
+    summary: 'Shipped.',
+    confidence: 0.9,
+  });
+
+  it('falls back to the human when the matched reviewer IS the submitter', async () => {
+    const cmo = selfCovered.employees.get('cmo');
+    if (!cmo) throw new Error("fixture employee 'cmo' missing");
+    await expect(
+      matchReviewPolicy(selfCovered, { employee: cmo, taskId: 'task_x', result }),
+    ).resolves.toEqual({ reviewer: 'user', dispatchReviewer: false, maxRounds: 2 });
+  });
+
+  it('still dispatches the declared reviewer for every OTHER covered submitter', async () => {
+    const copy = selfCovered.employees.get('copy');
+    if (!copy) throw new Error("fixture employee 'copy' missing");
+    await expect(
+      matchReviewPolicy(selfCovered, { employee: copy, taskId: 'task_y', result }),
+    ).resolves.toEqual({ reviewer: 'cmo', dispatchReviewer: true, maxRounds: 2 });
   });
 });

@@ -330,7 +330,8 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
         name: 'request_review',
         description:
           'End this turn by sending your work for independent review. The reviewer defaults to ' +
-          'the declared review policy covering you.',
+          'the declared review policy covering you; you may only name a reviewer from those ' +
+          "policies, your own superior, or 'user' — never yourself.",
         parameters: {
           type: 'object',
           properties: { reviewer: { type: 'string', minLength: 1 } },
@@ -339,15 +340,35 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
       },
       handler: (args) => {
         const { reviewer: requested } = parseEnding(requestReviewArgsSchema, args);
-        let reviewer = requested;
-        if (reviewer === undefined) {
-          const rule = config.reviewPolicies.find(
-            (candidate) =>
-              candidate.appliesTo.employee === employee.id ||
-              (candidate.appliesTo.department !== undefined &&
-                candidate.appliesTo.department === employee.department),
+        // The reviewers THIS caller may reach: the declared policies covering them, their own
+        // superior when that superior holds a decision role, and the human — NEVER themselves.
+        // Review dispatch creates a real task, so an org-wide free choice would be a second,
+        // unguarded delegation route around assertManagerMayTarget's scoping.
+        const policyReviewers = config.reviewPolicies
+          .filter(
+            (rule) =>
+              rule.appliesTo.employee === employee.id ||
+              (rule.appliesTo.department !== undefined &&
+                rule.appliesTo.department === employee.department),
+          )
+          .map((rule) => rule.reviewer);
+        const superior = employee.reportsTo;
+        const superiorRole = superior !== null ? config.employees.get(superior)?.role : undefined;
+        const allowed = new Set<string>([
+          'user',
+          ...policyReviewers,
+          ...(superiorRole === 'reviewer' || superiorRole === 'manager'
+            ? [superior as string]
+            : []),
+        ]);
+        allowed.delete(employee.id);
+        const reviewer = requested ?? policyReviewers.find((id) => id !== employee.id) ?? 'user';
+        if (!allowed.has(reviewer)) {
+          throw new WorkforceToolError(
+            `'${reviewer}' is not a reviewer you may request — your reviewers are the declared ` +
+              "policies covering you, your own superior (holding role 'reviewer' or 'manager'), " +
+              "or 'user' for a human decision; never yourself.",
           );
-          reviewer = rule?.reviewer ?? 'user';
         }
         if (reviewer !== 'user') {
           const target = config.employees.get(reviewer);

@@ -663,6 +663,10 @@ export async function applyTurnOutcome(
             .returning({ id: schema.workforceReviews.id });
           const reviewId = (inserted[0] as { id: string }).id;
           let reviewTaskId: string | null = null;
+          // The reviewer child skips the delegation depth ceiling DELIBERATELY (like the
+          // escalation child): review dispatch cannot recurse — a review task's own completion is
+          // never policy-matched, and a requested reviewer is scoped and never the caller — so a
+          // task's review chain sits exactly one level below it, bounded by its own round budget.
           if (dispatchReviewer) {
             const child = await insertChildTask(
               tx,

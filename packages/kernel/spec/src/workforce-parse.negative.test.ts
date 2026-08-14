@@ -274,6 +274,16 @@ describe('workforce semantic lint — references and the orchestrator seat', () 
       'invalid_orchestrator',
     );
   });
+
+  it('rejects an orchestrator declaring a department (the membership would install a superior)', () => {
+    expectRejection(
+      WORKFORCE_BASE.replace(
+        '      title: Lead\n      role: orchestrator\n',
+        '      title: Lead\n      department: engineering\n      role: orchestrator\n',
+      ).replace('members: [dev]', 'members: [dev, lead]'),
+      'invalid_orchestrator',
+    );
+  });
 });
 
 describe('workforce semantic lint — departments and membership', () => {
@@ -478,6 +488,16 @@ describe('workforce semantic lint — review policies', () => {
   it('rejects a review policy whose appliesTo names neither a department nor an employee', () => {
     expectRejection(
       WORKFORCE_BASE.replace('appliesTo: { department: engineering }', 'appliesTo: {}'),
+      'schema_violation',
+    );
+  });
+
+  it('rejects a review policy whose requireWhen names no trigger at all', () => {
+    expectRejection(
+      WORKFORCE_BASE.replace(
+        'requireWhen: { confidenceBelow: 0.75, capabilities: [production_change] }',
+        'requireWhen: {}',
+      ),
       'schema_violation',
     );
   });

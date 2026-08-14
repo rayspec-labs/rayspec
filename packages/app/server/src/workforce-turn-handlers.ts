@@ -159,8 +159,11 @@ export function buildWorkforceTurnHandlers(deps: WorkforceTurnHandlerDeps): Reso
       const intent =
         collected.intent ??
         (collected.malformed !== null ? collected.malformed.raw : { kind: 'yield' });
+      // A review task's own completion is NEVER policy-reviewed (pendingReview marks a task that
+      // exists to decide a review) — review dispatch therefore cannot recurse, and any task's
+      // review chain stays exactly one level deep, bounded per round by its own round budget.
       const reviewPolicy =
-        collected.intent?.kind === 'complete'
+        collected.intent?.kind === 'complete' && snapshot.pendingReview === null
           ? await matchReviewPolicy(deps.config, {
               employee,
               taskId: ctx.task.taskId,

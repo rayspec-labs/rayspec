@@ -37,6 +37,12 @@ export async function matchReviewPolicy(
     { output: input.result, confidence: input.result.confidence },
   );
   if (!decision.required) return null;
+  // A rule may end up covering its own reviewer (a department policy whose reviewer sits inside
+  // that department). Review is independent by definition — a submitter never decides their own
+  // work — so the demand STANDS but the decision falls to the human.
+  if (decision.reviewer === input.employee.id) {
+    return { reviewer: 'user', dispatchReviewer: false, maxRounds: decision.maxRounds };
+  }
   return {
     reviewer: decision.reviewer,
     dispatchReviewer: decision.reviewer !== 'user' && config.employees.has(decision.reviewer),
