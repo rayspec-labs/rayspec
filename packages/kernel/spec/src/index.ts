@@ -26,4 +26,6 @@ export * from './product-parse.js';
 export * from './product-scope.js';
 export * from './product-views.js';
 export * from './product-views-lint.js';
+export * from './workforce-config.js';
 export * from './workforce-grammar.js';
+export * from './workforce-lint.js';

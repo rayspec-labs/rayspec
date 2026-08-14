@@ -883,6 +883,9 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
     devDependencies:
+      '@rayspec/spec':
+        specifier: workspace:*
+        version: link:../spec
       '@types/node':
         specifier: 22.12.0
         version: 22.12.0
