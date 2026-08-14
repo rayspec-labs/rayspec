@@ -839,6 +839,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **The getting-started backend-profile walkthrough now points at `rayspec deploy --check-env`
+  before the first boot, so a reader can ask for the environment its document demands instead of
+  discovering it one refused boot at a time.** The section walks the reader into a boot whose
+  requirements it never lists up front: the surrounding text explains that a missing credential
+  fails the boot fast, and that refusal is clear on its own, but a document raising more than one
+  demand answers them one at a time, and each of those attempts opens the database and applies the
+  committed migration chain before it refuses. `--check-env` was already documented in the CLI
+  reference and answers the same question without any of that; the walkthrough simply never
+  mentioned it. The added sentence names the `deploy` spelling — the `rayspec-serve` entrypoint the
+  section's own code block uses parses no flags, so `rayspec-serve --check-env` boots as if the flag
+  were absent — and bridges to it through the equivalence the page already states, that
+  `rayspec deploy <spec>` and `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` are the same boot. It is
+  scoped to what the check reports (the variables the document's boot will require, why, and whether
+  each is set) and does not present a passing verdict as a boot that will succeed: the check
+  validates no value and opens no database, so it answers `ok` for a document whose boot still
+  refuses on a non-UUID tenant id or a TypeScript handler module, and it links the CLI reference for
+  what it deliberately does not check. Documentation only — no command, flag or behaviour changed.
+
 - **The default Content-Security-Policy a served frontend carries is now documented where someone
   deploying a built site meets it — and the shipped example stops violating it.** The baseline is
   `default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'`, which names no
