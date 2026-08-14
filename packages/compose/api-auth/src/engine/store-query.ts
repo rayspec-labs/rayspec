@@ -57,6 +57,7 @@ import {
 } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import { snakeToCamel } from './injected-columns-view.js';
+import { NUMERIC_WIRE_RE } from './store-validation.js';
 
 /** Case-insensitive RFC-4122 uuid shape (mirrors store-routes/store-validation; kept local). */
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -289,7 +290,10 @@ function coerceValue(type: ColumnType, name: string, raw: string): unknown {
       // here, deliberately: a comparison does not apply the column's typmod, so a filter value
       // beyond the declared scale is simply an exact value no stored row equals (an honest empty
       // result), never a rounded match. This is also what a keyset cursor binds on page 2+.
-      if (!/^-?\d{1,1000}(\.\d{1,1000})?$/.test(raw)) {
+      // The shape check is `NUMERIC_WIRE_RE` itself (store-validation.ts) rather than a copy of it,
+      // so this gate, the body validator, and the `pattern` the OpenAPI emitter publishes are one
+      // envelope by construction — the emitted document cannot drift from what this line accepts.
+      if (!NUMERIC_WIRE_RE.test(raw)) {
         validationError(`Filter '${name}' must be a plain decimal string (no exponent).`);
       }
       return raw;

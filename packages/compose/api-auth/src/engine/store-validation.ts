@@ -39,8 +39,15 @@ const MIN_SAFE_BIG = BigInt(Number.MIN_SAFE_INTEGER);
  * a form that needs interpretation cannot be proven exact). The 1..1000 digit-run bounds cover the
  * whole Postgres numeric range (precision <= 1000) and keep an adversarial string away from any
  * unbounded scan. Serializes into the exported OpenAPI body schema as a `pattern`.
+ *
+ * EXPORTED as the ONE numeric wire envelope this engine has: the create/update body validator below
+ * enforces it, `store-query.ts` tests every numeric filter/cursor value against it, and
+ * `emit-openapi.ts` emits `.source` verbatim as the `pattern` of the row schema and of the
+ * numeric filter params. One object, so the documented envelope and the enforced one cannot diverge
+ * (they used to: the emitter carried a hand-written `^-?\d+(\.\d+)?$`, which documented digit runs
+ * the server refuses).
  */
-const NUMERIC_WIRE_RE = /^-?\d{1,1000}(\.\d{1,1000})?$/;
+export const NUMERIC_WIRE_RE = /^-?\d{1,1000}(\.\d{1,1000})?$/;
 
 /**
  * Does a NUMERIC_WIRE_RE-shaped decimal string FIT the declared numeric(precision, scale) without

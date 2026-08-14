@@ -550,6 +550,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The generated OpenAPI document stops describing a `list` filter the server refuses, and its
+  `numeric` pattern is now the envelope the server enforces.** Three corrections to what
+  `GET /v1/openapi.json` publishes for declared `{store}` routes. Each is a document-accuracy fix —
+  no route behaviour changed, and the runtime was fail-closed throughout — but the document is a
+  product artifact a client generates code from, so a parameter it advertises has to be one the
+  server answers.
+  **Suffix companions were de-duplicated against the wrong set.** The emitter adds a `<col>__in`, a
+  `<col>__contains` and the four `<col>__gt`/`__gte`/`__lt`/`__lte` companions per eligible column,
+  and dropped a companion whose name collides with a declared **filterable** column. A `jsonb` column
+  is not filterable and was therefore missing from that set — while the query builder resolves the
+  FULL query key first, against **every** declared column. A store declaring an eligible column `foo`
+  next to a `jsonb` column literally named `foo__gt` published a `foo__gt` parameter that
+  `?foo__gt=` answers with `400 VALIDATION_ERROR: Column 'foo__gt' is not filterable.` The
+  de-duplication now keys on every declared column name plus the injected `created_by` — exactly the
+  set the query builder resolves first — and it covers all three suffix families and each of the four
+  comparison operators on its own. Nothing else moved: a non-`jsonb` column of the same name still
+  wins as plain equality, and a shadowed operator still costs its eligible sibling only that one
+  bound.
+  **The `numeric` pattern was a hand-written copy of the runtime's, and a looser one.** The row
+  schema and the numeric filter parameters carried `^-?\d+(\.\d+)?$` while the value gate is
+  `^-?\d{1,1000}(\.\d{1,1000})?$`, so the document admitted digit runs the server answers with a 400.
+  All three emitted patterns — row schema, filter parameters, and the create/update body schema that
+  already derived from it — are now the one exported regex, which the body validator and the filter
+  and cursor coercion also test against, so the published envelope and the enforced one cannot
+  diverge. Not covered by this: the per-column `numeric(precision, scale)` fit the create/update
+  validator additionally applies is a refinement with no JSON-Schema form, so the exported body
+  schema still admits a value the column's typmod refuses.
+  **A `project: {}` route stated a naming split it does not have, and the split sentence understated
+  the request surface.** `project: {}` is the documented per-route opt-out from a store-level
+  projection, and `{}` is not nullish — so an opted-out operation, whose schemas are byte-identical
+  to an un-projected one, still carried the sentence describing a request/response naming split. The
+  sentence is now emitted only for a non-empty projection. Where it is emitted it also states the
+  request-side casing rule, which it previously left out: a create/update body key may be written as
+  the declared snake_case name **or** its camelCase twin (both variants of one column in one body are
+  refused as ambiguous), while a query parameter takes the declared name only. Reading only the
+  generated document, a client author would have concluded that snake_case bodies are required —
+  stricter than what the server accepts.
 - **`examples/agent-pack-deployment` can be deployed now, and its pack manifest stops claiming the
   loader compiles TypeScript.** The example's whole product surface — a `notes` store, a `lookup_note`
   tool and the `note_summarizer` agent that references it — ships as a `defineExtension` pack authored
