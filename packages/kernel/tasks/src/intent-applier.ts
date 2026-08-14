@@ -24,7 +24,7 @@
  */
 import { z } from 'zod';
 import { type DelegationChildSpec, delegationChildSpecSchema } from './create-task.js';
-import { type JoinPolicy, joinPolicySchema } from './join.js';
+import { fanOutJoinPolicySchema, type JoinPolicy } from './join.js';
 
 /** The closed structured-result contract. A result that fails this never completes a task. */
 export const workerResultSchema = z.strictObject({
@@ -65,7 +65,7 @@ export const turnIntentSchema = z.discriminatedUnion('kind', [
   z.strictObject({
     kind: z.literal('fan_out'),
     children: z.array(delegationChildSpecSchema).min(1),
-    joinPolicy: joinPolicySchema.prefault({ policy: 'all' }),
+    joinPolicy: fanOutJoinPolicySchema.prefault({ policy: 'all' }),
   }),
   z.strictObject({
     kind: z.literal('request_approval'),

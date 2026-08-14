@@ -5,7 +5,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { TaskRecord } from './apply-transition.js';
-import { isJoinSatisfied, joinPolicySchema, mergeChildResults } from './join.js';
+import {
+  fanOutJoinPolicySchema,
+  isJoinSatisfied,
+  joinPolicySchema,
+  mergeChildResults,
+} from './join.js';
 
 function fakeChild(taskId: string, status: string, summary: string): TaskRecord {
   return {
@@ -48,6 +53,25 @@ describe('joinPolicySchema', () => {
     expect(joinPolicySchema.safeParse({ policy: 'any' }).success).toBe(false);
     expect(joinPolicySchema.safeParse({ policy: 'all', count: 2 }).success).toBe(false);
     expect(joinPolicySchema.safeParse('all').success).toBe(false);
+  });
+
+  it('carries the escalation binding on the column, but never on a fan-out intent', () => {
+    expect(
+      joinPolicySchema.safeParse({ policy: 'escalation', escalationTaskId: 'task_e' }).success,
+    ).toBe(true);
+    expect(
+      fanOutJoinPolicySchema.safeParse({ policy: 'escalation', escalationTaskId: 'task_e' })
+        .success,
+    ).toBe(false);
+  });
+});
+
+describe('isJoinSatisfied (escalation)', () => {
+  it('only the bound child terminal counts — a terminal sibling never satisfies it', () => {
+    const bound = { policy: 'escalation', escalationTaskId: 'c-esc' } as const;
+    expect(isJoinSatisfied(bound, [fakeChild('c-sibling', 'completed', 'x')])).toBe(false);
+    expect(isJoinSatisfied(bound, [fakeChild('c-esc', 'working', 'y')])).toBe(false);
+    expect(isJoinSatisfied(bound, [fakeChild('c-esc', 'completed', 'y')])).toBe(true);
   });
 });
 

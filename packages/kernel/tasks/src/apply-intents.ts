@@ -818,6 +818,14 @@ export async function applyTurnOutcome(
             owner: plan.escalateTo,
             department: plan.escalateToDepartment,
           });
+          // BIND the park to its child: only THIS child's terminal answers `blocked(escalated)` —
+          // a detached buffered-create child (this turn's or an earlier turn's) finishing while
+          // the caller waits must not release the park (afterTaskTerminal checks the binding).
+          await tx
+            .update(schema.workforceTasks, {
+              joinPolicy: { policy: 'escalation', escalationTaskId: child.taskId },
+            })
+            .where(eq(schema.workforceTasks.taskId, task.taskId));
           await appendTaskEvents(tx, task.taskId, [
             {
               type: 'workforce.escalation.raised',

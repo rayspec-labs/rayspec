@@ -714,6 +714,84 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(signal[0]?.payload.summary).toBe('Granted a scoped credential.');
   });
 
+  it('a sibling terminal never releases an escalation park — only the bound escalation child does', async () => {
+    const root = await driveToWorking(await newRoot({ owner: 'worker-1' }));
+    // ONE turn: buffer a detached self-owned child, then escalate — the caller now waits on the
+    // superior while the detached child runs on.
+    const out = await applyTurnOutcome(tdb(), {
+      taskId: root.taskId,
+      turnId: turnIdFor(root.taskId, 1),
+      turnNumber: 1,
+      intent: {
+        kind: 'escalate',
+        reason: 'risk',
+        escalateTo: 'mgr',
+        escalateToDepartment: 'eng',
+      },
+      createdChildren: [{ title: 'Detached', goal: 'Runs on regardless.', owner: 'worker-1' }],
+      budgets: NO_BUDGETS,
+    });
+    expect(out.task?.status).toBe('blocked');
+    expect(out.task?.statusReason).toBe('escalated');
+
+    const children = (await db.$client.unsafe(
+      `SELECT task_id, owner, version FROM workforce_tasks WHERE parent_task_id = '${root.taskId}' ORDER BY owner;`,
+    )) as unknown as { task_id: string; owner: string; version: number }[];
+    expect(children.map((c) => c.owner)).toEqual(['mgr', 'worker-1']);
+    const escalation = children[0] as (typeof children)[number];
+    const detached = children[1] as (typeof children)[number];
+    // The park is BOUND to the escalation child on the caller's row.
+    const bound = await db.$client.unsafe(
+      `SELECT join_policy FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(bound[0]?.join_policy).toEqual({
+      policy: 'escalation',
+      escalationTaskId: escalation.task_id,
+    });
+
+    // The DETACHED sibling completes first — the park must hold and no signal may land.
+    const queuedDetached = await applyTransition(tdb(), {
+      taskId: detached.task_id,
+      expectedVersion: detached.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await claim(detached.task_id, queuedDetached.version, 1);
+    await turn(detached.task_id, 1, {
+      kind: 'complete',
+      result: { status: 'completed', summary: 'Side quest done.', confidence: 1 },
+    });
+    const held = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(held[0]).toEqual({ status: 'blocked', status_reason: 'escalated' });
+    const noSignals = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_task_signals WHERE task_id = '${root.taskId}';`,
+    );
+    expect(noSignals[0]?.c).toBe(0);
+
+    // The BOUND escalation child completes — exactly that terminal is the reply.
+    const queuedEscalation = await applyTransition(tdb(), {
+      taskId: escalation.task_id,
+      expectedVersion: escalation.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await claim(escalation.task_id, queuedEscalation.version, 1);
+    await turn(escalation.task_id, 1, {
+      kind: 'complete',
+      result: { status: 'completed', summary: 'Handled.', confidence: 1 },
+    });
+    const woken = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(woken[0]).toEqual({ status: 'queued', status_reason: null });
+    const signals = (await db.$client.unsafe(
+      `SELECT signal_key FROM workforce_task_signals WHERE task_id = '${root.taskId}';`,
+    )) as unknown as { signal_key: string }[];
+    expect(signals.map((s) => s.signal_key)).toEqual([`escalated:${escalation.task_id}`]);
+  });
+
   it('a denied escalation blocks with the typed budget reason and opens no child', async () => {
     // The escalation child cannot be paid for: the subtree usd ceiling is below one per-turn
     // estimate (the child draws on the shared root scope — the task's own ceiling deliberately

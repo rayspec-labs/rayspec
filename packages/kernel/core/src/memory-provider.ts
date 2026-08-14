@@ -7,8 +7,8 @@
  *
  * The default recalls NOTHING, and says so instead of pretending: `search` returns an empty list
  * and `remember` retains nothing. Both facts are the contract — a deployment has no memory until a
- * real reference implementation replaces this one, and code that consumes the seam must behave
- * correctly on an always-empty recall (which is exactly what this default proves in every test).
+ * real provider replaces this one, and code that consumes the seam must behave correctly on an
+ * always-empty recall (which is exactly what this default proves in every test).
  */
 
 export interface MemoryQuery {
@@ -40,7 +40,7 @@ export interface WorkforceMemoryProvider {
 /**
  * The explicit empty-recall default. Returns no hits and retains nothing — loudly, by contract,
  * not as a stub that grew load-bearing: consumers must render an empty recall section correctly,
- * and this default is what keeps that path tested. A real reference implementation replaces it.
+ * and this default is what keeps that path tested. A real provider replaces it.
  */
 export class EmptyRecallMemoryProvider implements WorkforceMemoryProvider {
   readonly id = 'empty-recall';

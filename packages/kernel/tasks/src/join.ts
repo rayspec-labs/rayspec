@@ -1,9 +1,10 @@
 /**
  * Fan-in — the parent's declared join policy and the DETERMINISTIC merge of child results.
  *
- * `joinPolicy` is a strict object whose `policy` is a closed enum with ONE member today (`all`).
- * The object shape (not a bare string) is deliberate: a later policy is an enum addition, never a
- * schema change, and a policy that needs parameters adds optional keys beside it.
+ * `joinPolicy` is a strict object whose `policy` is a closed enum — `all` (the one join a fan-out
+ * may declare) and `escalation` (the engine-written binding naming the child that carries a park's
+ * escalation). The object shape (not a bare string) is deliberate: a later policy is an enum
+ * addition, never a schema change, and a policy that needs parameters adds optional keys beside it.
  *
  * The merge rule protects replay: results are keyed by CHILD TASK ID and serialized with sorted
  * keys at every level, so NOTHING downstream can observe which child finished first — the merged
@@ -14,8 +15,22 @@ import { z } from 'zod';
 import type { TaskRecord } from './apply-transition.js';
 import { isTaskStatus, isTerminalStatus } from './status.js';
 
-export const joinPolicySchema = z.strictObject({
+/** The join a FAN-OUT intent may declare — the model-reachable half stays 'all'-only. */
+export const fanOutJoinPolicySchema = z.strictObject({
   policy: z.enum(['all']),
+});
+
+/**
+ * What the COLUMN may carry — the fan-out joins plus the ESCALATION BINDING the escalate executor
+ * writes: `escalation` records which child task carries the caller's escalation, so the
+ * `blocked(escalated)` park is answered by exactly that child's terminal and by nothing else (a
+ * detached buffered-create child finishing while the caller waits delivers no wake). The binding is
+ * inert once the park resolves; the next fan-out or escalation overwrites it.
+ */
+export const joinPolicySchema = z.strictObject({
+  policy: z.enum(['all', 'escalation']),
+  /** `escalation` only: the one child whose terminal answers the park. */
+  escalationTaskId: z.string().min(1).optional(),
 });
 
 export type JoinPolicy = z.output<typeof joinPolicySchema>;
@@ -37,6 +52,15 @@ export function isJoinSatisfied(policy: JoinPolicy, children: readonly TaskRecor
       return (
         children.length > 0 &&
         children.every((c) => isTaskStatus(c.status) && isTerminalStatus(c.status))
+      );
+    case 'escalation':
+      // Never consulted through the awaiting_children branch (an escalated park is answered by
+      // the reply fan-in, not by a join) — honest anyway: only the bound child's terminal counts.
+      return children.some(
+        (c) =>
+          c.taskId === policy.escalationTaskId &&
+          isTaskStatus(c.status) &&
+          isTerminalStatus(c.status),
       );
   }
 }

@@ -155,8 +155,18 @@ export async function afterTaskTerminal(tx: TenantDb, task: TaskRecord): Promise
   const parent = parentRows[0];
   if (!parent) return; // the parent left with its tenant — nothing to fan into
   if (parent.status === 'blocked' && parent.statusReason === 'escalated') {
-    // The ESCALATION REPLY: this terminal child carried the parent's escalation, and its end —
-    // answered, hand-delegated onward and completed, or cancelled by the superior — is the reply.
+    // The ESCALATION REPLY: the park is BOUND to the one child the escalate turn recorded on the
+    // caller's row, and only THAT child's terminal is the reply — a detached buffered-create
+    // child finishing while the caller waits delivers nothing, and the park holds until the
+    // superior answers. Fail-closed: no binding wakes nobody.
+    const binding = joinPolicySchema.safeParse(parent.joinPolicy);
+    if (
+      !binding.success ||
+      binding.data.policy !== 'escalation' ||
+      binding.data.escalationTaskId !== task.taskId
+    ) {
+      return;
+    }
     // The `escalated` signal answers exactly the `blocked(escalated)` park (WAKES, signals.ts);
     // the payload stays BOUNDED (the parent's next context already carries the child's full
     // result via `childResults`). Key per escalation child: racing re-executions dedupe on the
