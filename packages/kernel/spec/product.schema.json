@@ -1235,7 +1235,8 @@
             "type": "string",
             "enum": [
               "empty_200",
-              "not_ready_409"
+              "not_ready_409",
+              "not_found_404"
             ]
           },
           "conditional_read": {

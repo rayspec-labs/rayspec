@@ -16,8 +16,10 @@
  *
  * The pack ENTRY (this file) authors against `@rayspec/platform` (where `defineExtension` + the
  * fragment types live). The pack HANDLER under `handlers/` imports ONLY `@rayspec/handler-sdk`. This
- * dir is in no tsconfig (an `examples/` fixture, excluded from turbo/CI build) — the manifest is
- * loaded at TEST/deploy time (the loader's importer transforms the `.ts`).
+ * dir is in no tsconfig (an `examples/` fixture, excluded from turbo/CI build). Nothing transforms
+ * this file on the way into a deploy: `loadExtensions` loads compiled JavaScript only, so the
+ * example's `build.mjs` compiles the pack to `dist/` and a deployment points at that directory. A
+ * TEST loads this source through the loader's explicit `typeStrippingImporter` seam instead.
  */
 import { defineExtension } from '@rayspec/platform';
 

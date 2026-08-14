@@ -46,14 +46,18 @@ export function registerTriggerRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): 
       const name = c.req.param('name');
       if (!name) throw new ApiError('NOT_FOUND', 'Not found.');
 
-      // FAIL-CLOSED: a firer must be wired (like async runs need a durable worker). Never a silent
-      // no-op that would 202 without firing anything. Absent ⇒ this deployment declares no manual
-      // trigger / wires no durable worker.
+      // FAIL-CLOSED: a firer must be wired. Never a silent no-op that would 202 without firing
+      // anything. The absence is a DEPLOYMENT fact, not a fact about `name` — the composition root
+      // wires this seam only when the deployed spec declares a `kind:'manual'` trigger — so the
+      // refusal names the deployment-level cause and NEVER echoes the requested name: it is raised
+      // before the firer's tenant reconciliation and before the rate limiter below, so naming the
+      // trigger would make it a per-name existence oracle the uniform 404 deliberately is not.
       if (!deps.manualTriggerFirer) {
         throw new ApiError(
           'NOT_IMPLEMENTED',
-          'Manual trigger firing requires a configured durable worker and a declared manual trigger. ' +
-            'No manual-trigger firer is wired on this deployment.',
+          'This route fires `kind: manual` triggers only — a `cron` trigger fires on its own ' +
+            'schedule and is not fireable here. Declare a `kind: manual` trigger in the deployed ' +
+            'document; no manual-trigger firer is wired on this deployment.',
         );
       }
 

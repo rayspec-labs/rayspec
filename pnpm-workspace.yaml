@@ -15,13 +15,15 @@ packages:
   # The synthetic stream/blob extension pack is its OWN @spike/* package (mirroring how a REAL
   # pack — e.g. an extension pack — ships in its own repo with @rayspec/platform as a dependency). It is
   # a workspace member SO pnpm links @rayspec/platform into its node_modules (the pack ENTRY imports
-  # `defineExtension` from @rayspec/platform at runtime); it ships NO build/typecheck/test scripts +
-  # is named @spike/* so the `--filter='!@spike/*'` CI excludes it (a pure loaded-at-deploy fixture).
+  # `defineExtension` from @rayspec/platform at runtime); it declares NO build/typecheck/test SCRIPTS +
+  # is named @spike/* so the `--filter='!@spike/*'` CI excludes it. It is not build-free, though: the
+  # deploy runtime loads compiled JavaScript only, so the example ships its own build.mjs.
   - "examples/stream-backend/packs/*"
   # The synthetic agent-pack (a pack contributing an `agents` fragment) is the
   # same kind of @spike/* workspace-member fixture as the stream pack: a member ONLY so pnpm links
-  # @rayspec/platform into its node_modules (the pack ENTRY imports `defineExtension`); NO build/
-  # typecheck/test, excluded from CI by `--filter='!@spike/*'`; loaded at deploy/test time.
+  # @rayspec/platform into its node_modules (the pack ENTRY imports `defineExtension`); no build/
+  # typecheck/test SCRIPTS, excluded from CI by `--filter='!@spike/*'`, and built for deploy by the
+  # example's own build.mjs.
   - "examples/agent-pack-deployment/packs/*"
 
 onlyBuiltDependencies:

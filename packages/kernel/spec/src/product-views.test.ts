@@ -694,6 +694,40 @@ describe('pagination + absent-state laws', () => {
       expect(errs.some((e) => e.path === 'views[0].read.absent')).toBe(true);
     }
   });
+
+  it('ACCEPTS a bare not_found_404 single view but REJECTS it WITH read.absent', () => {
+    const bare = lintErrors({
+      source: { kind: 'store', ref: 'things_store' },
+      absent_state: 'not_found_404',
+      read: { mode: 'single', shape: { fields: {} } },
+    });
+    expect(bare).toEqual([]);
+
+    const both = lintErrors({
+      source: { kind: 'store', ref: 'things_store' },
+      absent_state: 'not_found_404',
+      read: { mode: 'single', shape: { fields: {} }, absent: { fields: {} } },
+    });
+    expect(both.some((e) => e.path === 'views[0].read.absent')).toBe(true);
+  });
+
+  it('REJECTS not_found_404 on list/collect reads', () => {
+    for (const mode of ['list', 'collect'] as const) {
+      const errs = lintErrors({
+        source: { kind: 'store', ref: 'things_store' },
+        absent_state: 'not_found_404',
+        read: {
+          mode,
+          shape:
+            mode === 'list' ? { fields: { items: FIELD_INSTANCES.page_items } } : { fields: {} },
+        },
+        ...(mode === 'list'
+          ? { pagination: { limit_param: 'limit', offset_param: 'offset', max_limit: 10 } }
+          : {}),
+      });
+      expect(errs.some((e) => e.path === 'views[0].absent_state')).toBe(true);
+    }
+  });
 });
 
 describe('group / counts / sub-read laws', () => {

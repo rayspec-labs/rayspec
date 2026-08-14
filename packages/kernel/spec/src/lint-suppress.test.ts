@@ -8,9 +8,9 @@
  * rejected at parse).
  *
  * The application half (`applyLintSuppressions`): a suppression filters ONLY advisories produced by
- * the node it sits on (an agent, a store, a route) — never the same code fired by another node —
- * moving each matched advisory into a `suppressed` list carrying the finding's code + the recorded
- * justification. An acknowledgement whose code does not fire on its node becomes its own advisory
+ * the node it sits on (an agent, a store, a route, a trigger, a handler) — never the same code fired
+ * by another node — moving each matched advisory into a `suppressed` list carrying the finding's
+ * code + the recorded justification. An acknowledgement whose code does not fire on its node becomes its own advisory
  * (`stale_suppression`, pointing at the suppression entry), so acknowledgements cannot rot silently.
  *
  * Fail-the-fix: the parse rejections are RED if the grammar accepts a reason-less or error-code
@@ -259,6 +259,119 @@ api:
     const applied = applyLintSuppressions(value, raw);
     expect(applied.warnings).toEqual([]);
     expect(applied.suppressed.map((s) => s.code)).toEqual(['stream_playback_media_token']);
+  });
+
+  it('works on a TRIGGER node (cron_tenant_required acknowledged on the cron trigger)', () => {
+    const value = parseOk(`
+version: '1.0'
+metadata:
+  name: trigger-suppress
+deployment:
+  durableWorker: true
+agents:
+  - id: summarizer
+    name: summarizer
+    backend: openai
+    model: gpt-4o-mini
+    instructions: >
+      Summarize the previous day.
+triggers:
+  - name: nightly-summary
+    kind: cron
+    schedule: '0 3 * * *'
+    action: { kind: agent, agent: summarizer }
+    lintSuppress:
+      - code: cron_tenant_required
+        because: the deployment's compose file pins RAYSPEC_CRON_TENANT_ID to the operations org
+`);
+    const raw = lintSpecWarnings(value);
+    expect(raw.map((w) => w.code)).toEqual(['cron_tenant_required']);
+    const applied = applyLintSuppressions(value, raw);
+    expect(applied.warnings).toEqual([]);
+    expect(applied.suppressed.map((s) => s.code)).toEqual(['cron_tenant_required']);
+    expect(applied.suppressed[0]?.path).toBe('triggers[0].kind');
+  });
+
+  it('works on a HANDLER node (typescript_handler_module acknowledged on the .ts handler)', () => {
+    const value = parseOk(`
+version: '1.0'
+metadata:
+  name: handler-suppress
+handlers:
+  - id: export_rows
+    module: handlers/export-rows.ts
+    export: exportRows
+    kind: route
+    lintSuppress:
+      - code: typescript_handler_module
+        because: the deployment's build step transpiles handlers/ and rewrites the module paths
+api:
+  - method: GET
+    path: /export
+    action: { kind: handler, handler: export_rows }
+`);
+    const raw = lintSpecWarnings(value);
+    expect(raw.map((w) => w.code)).toEqual(['typescript_handler_module']);
+    const applied = applyLintSuppressions(value, raw);
+    expect(applied.warnings).toEqual([]);
+    expect(applied.suppressed.map((s) => s.code)).toEqual(['typescript_handler_module']);
+    expect(applied.suppressed[0]?.path).toBe('handlers[0].module');
+  });
+
+  it('a stale acknowledgement on a TRIGGER node names the trigger (label wiring)', () => {
+    // The trigger was re-declared as a webhook, which has no fire path and so never demands the
+    // cron tenant — the acknowledgement has outlived its finding.
+    const value = parseOk(`
+version: '1.0'
+metadata:
+  name: trigger-stale
+handlers:
+  - { id: ingest, module: dist/ingest.js, export: ingest, kind: trigger }
+triggers:
+  - name: inbound-hook
+    kind: webhook
+    action: { kind: handler, handler: ingest }
+    lintSuppress:
+      - code: cron_tenant_required
+        because: reviewed while this was still a cron trigger
+`);
+    const raw = lintSpecWarnings(value);
+    expect(raw).toEqual([]);
+    const applied = applyLintSuppressions(value, raw);
+    expect(applied.suppressed).toEqual([]);
+    expect(applied.warnings).toHaveLength(1);
+    expect(applied.warnings[0]?.code).toBe('stale_suppression');
+    expect(applied.warnings[0]?.path).toBe('triggers[0].lintSuppress[0]');
+    expect(applied.warnings[0]?.message).toContain("trigger 'inbound-hook'");
+  });
+
+  it('a stale acknowledgement on a HANDLER node names the handler (label wiring)', () => {
+    // The module was compiled to `.js`, so the build-step advisory no longer fires on it.
+    const value = parseOk(`
+version: '1.0'
+metadata:
+  name: handler-stale
+handlers:
+  - id: export_rows
+    module: dist/export-rows.js
+    export: exportRows
+    kind: route
+    lintSuppress:
+      - code: typescript_handler_module
+        because: reviewed while the module still pointed at the TypeScript source
+api:
+  - method: GET
+    path: /export
+    action: { kind: handler, handler: export_rows }
+`);
+    const raw = lintSpecWarnings(value);
+    expect(raw).toEqual([]);
+    const applied = applyLintSuppressions(value, raw);
+    expect(applied.suppressed).toEqual([]);
+    expect(applied.warnings).toHaveLength(1);
+    expect(applied.warnings[0]?.code).toBe('stale_suppression');
+    expect(applied.warnings[0]?.path).toBe('handlers[0].lintSuppress[0]');
+    expect(applied.warnings[0]?.message).toContain("handler 'export_rows'");
   });
 
   it('is a pure passthrough for a suppression-free document (same warnings, same order, nothing suppressed)', () => {

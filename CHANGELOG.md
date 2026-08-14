@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`lintSuppress` now docks on a `triggers[]` and a `handlers[]` node too.** The key arrived (see
+  below) on agents, stores and api routes; on a trigger or a handler it was not ignored but a hard
+  parse error (`unknown_field`) that broke the document — which put the two advisories an author is
+  most likely to have reviewed out of reach: `cron_tenant_required`, reported on a `cron`/`manual`
+  trigger, and `typescript_handler_module`, reported on a handler whose `module` is TypeScript
+  source. Both node kinds now take the same `[{ code, because }]` list under the same fail-closed
+  rules (the code vocabulary contains no error codes, and an empty or whitespace-only `because` is
+  rejected at parse), with the same node scope — a suppression filters only advisories whose path
+  lies under its own node — and the same `stale_suppression` rot detector, which names the trigger
+  by its `name` and the handler by its `id`.
+  An acknowledgement **records a reviewed decision and quiets `doctor`; it changes no enforcement.**
+  `doctor` moves the finding from `warnings` to `suppressed` with the justification and the finding's
+  path. Nothing else consults the list: `rayspec plan` reports the raw advisory pass, so an
+  acknowledged finding is still listed in its `specWarnings`; a document declaring a cron or manual
+  trigger still aborts the boot when `RAYSPEC_CRON_TENANT_ID` is unset; and the deploy loader still
+  loads compiled JavaScript only, so a `.ts` module still needs its build step. The plan reference
+  and the `PlanResult` field doc now state that divergence rather than claiming the two commands
+  report the same entries.
+  The field is optional with no default, so a document that declares no suppression parses
+  byte-identically. The exported JSON-Schema artifacts `spec.schema.json` and
+  `version-1.0.schema.json` carry the key on both new nodes; `product.schema.json` is byte-unchanged
+  (the product profile declares neither section).
+- **`absent_state: not_found_404` — a view can now answer an unknown reference with a 404.** The
+  member decides what a `single` read serves when it matches no row:
+  `404 { error: 'not_found', detail }` alongside the existing `empty_200` (the declared `read.absent`
+  DTO at `200`) and `not_ready_409`. Neither existing member has ever produced a 404, and until now
+  there was no way to say that a reference does not exist at all.
+  **Which member is correct is decided by when the backing row appears, not by the view** — the read
+  sees zero rows either way. `not_found_404` fits a read model whose row exists from the moment the
+  reference is valid: a catalog or reference store materialized before any workflow runs, or a store
+  written at acceptance. It is wrong for a store that a workflow step writes, because there an absent
+  row is a job that has not finished, and a 404 would tell a polling client that its reference does
+  not exist. The reference page and the views-runtime README now state that precondition next to the
+  vocabulary, and lint rejects the declarations that cannot mean anything: `not_found_404` together
+  with a `read.absent` shape (a fixed error body leaves nothing to project) and `not_found_404` on a
+  `list`/`collect` read.
+  The `detail` on the 404 is a **constant string** and carries nothing derived from the request. What
+  makes that hold is where the body is built: a view returns its response from the interpreter and
+  the route layer serializes it verbatim, so it does not pass the auth-core error chokepoint that
+  strips `details` from a 404 — there is no later stage that could remove an echoed path or filter
+  value, so none is put in. The status choice leaks nothing either way: the read is tenant-bound, so
+  a foreign row and an absent row both yield zero rows and take the same arm under every member.
+  **Nothing else changed.** This is a vocabulary addition, not a migration: no shipped example or
+  fixture document was touched, all 24 `absent_state` declarations in the shipped example and fixture
+  documents still read `empty_200` or `not_ready_409`, and both existing members behave exactly as
+  before — the interpreter and the OpenAPI emitter each gained one arm keyed on the new member and
+  left the others untouched.
 - **A boot warning when a served page carries an inline `<style>` / `<script>` / `style=` / `on*=`
   that the active Content-Security-Policy does not permit.** The default policy for a served frontend
   is `default-src 'self'` with no `'unsafe-inline'`, and a page that violates it fails in a way
@@ -433,8 +480,165 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the variable without quoting it. The verdict also names the `.env` files
   the CLI's auto-loader searched, which is usually the answer to a disputed "unset".
 
+### Changed
+
+- **The `501` from `POST /v1/triggers/{name}/fire` now names the manual-trigger requirement instead
+  of a durable worker.** It read `Manual trigger firing requires a configured durable worker and a
+  declared manual trigger. No manual-trigger firer is wired on this deployment.`, and the worker half
+  of that sentence is never the but-for cause: the composition root wires the fire seam exactly when
+  the deployed document declares a `kind: manual` trigger, so setting `deployment.durableWorker: true`
+  alone never clears the refusal. Nor can a document declare a manual trigger *without* the worker —
+  that is a lint error at parse/deploy time, with the boot abort as its runtime backstop — so the
+  reader most likely to meet the refusal, an operator on an all-`cron` document such as the shipped
+  `acme-notes-backend`, whose single trigger is `kind: cron`, was pointed at a component that is
+  already there. It now reads: *"This route fires `kind: manual` triggers only — a `cron` trigger
+  fires on its own schedule and is not fireable here. Declare a `kind: manual` trigger in the
+  deployed document; no manual-trigger firer is wired on this deployment."*
+  **No behaviour changed**: same `501`, same `NOT_IMPLEMENTED` code, same guard on the same wiring
+  (the composition root wires the fire seam only when the deployed document declares a `kind: manual`
+  trigger). The refusal stays **deployment-level and never names the requested trigger** — it is
+  raised before the firer's tenant reconciliation and before the `trigger-fire` rate limiter, so
+  echoing the name would answer "does this trigger exist?" for any authenticated caller, which is
+  exactly what the route's uniform `404` (unknown name, non-`manual` kind, foreign tenant) refuses to
+  answer. The trigger reference's `501` bullet now states the same cause; the `404` bullet is
+  unchanged.
+
+- **`rayspec-serve` now honours an explicitly set `RAYSPEC_AGENT_TRACING`, and refuses a value it
+  cannot act on.** The variable had exactly one reader, reached only from `rayspec deploy`, so on
+  `rayspec-serve` an operator could set `RAYSPEC_AGENT_TRACING=off`, watch the boot banner state
+  `Trace export: EXPORTING TO OPENAI`, and have the agent SDK go on exporting — and a typo such as
+  `RAYSPEC_AGENT_TRACING=NoNsEnSe` was ignored there, while the same value fail-closes by name on
+  `deploy`. What that transport carries is run metadata and, once an agent calls tools, the tool
+  arguments and tool outputs (the SDK strips the model prompt fields before export).
+  **Unset — including blank — is unchanged**, and deliberately so: `rayspec-serve` keeps the agent
+  SDK's own default, which is to export, and `rayspec deploy` keeps its default of `off`. The new
+  reader is explicit-only for that reason: it hands off to `resolveAgentTracing` — the same refusal,
+  in the same words — only once a value is actually stated, so that function's collapse of unset into
+  `off` is never reached from `rayspec-serve`, and the deploy path behaves as before. What changes on
+  `rayspec-serve` is only what an explicit value now does: `off` disables the export (through the
+  SDK's programmatic `setTracingDisabled`, because that entrypoint's static imports have already
+  built the trace provider, so writing the SDK's environment switch alone would arrive too late),
+  `openai` is a no-op, and anything else aborts the boot with the same message `deploy` raises, from
+  the same line — not a second, entrypoint-specific wording — before the config load and before any
+  port is bound.
+  **Who is affected:** a deployment that exports `RAYSPEC_AGENT_TRACING` process-wide and relies on
+  `rayspec-serve` ignoring it. With `off` that boot stops exporting; with an unsupported value it now
+  refuses to start rather than booting and exporting. `deploy --check-env` still does not list this
+  variable — it reports the variables a document's boot *demands*, and tracing is not demanded.
+  The documentation of the variable is corrected to match on both halves. `.env.example` no longer
+  presents the block as `rayspec deploy` only or claims that leaving the variable unset keeps traces in
+  the process: it now states the one thing that differs between the two entrypoints in how they treat
+  the variable, which is what unset means (`off` on `deploy`, the SDK's exporting default on
+  `rayspec-serve`), and names the dev-boot wrappers — `examples/local-boot/serve.ts` and
+  `deployments/acme-notes/serve.mts` — as the boots that assemble the server themselves and never read
+  it. The getting-started guide's two "same boot" passages about `rayspec deploy <spec>` and
+  `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` now name two differences that matter for what leaves the
+  process and for what can still register a table — this trace-export default, and
+  `sealProductStores()`, which `deploy` calls after its boot returns and `rayspec-serve` never calls —
+  without claiming to have counted every difference between the two entrypoints (`withBootTimeout` and
+  the `.env` search order differ as well).
+  **The operator-facing messages are corrected while they are being touched.** The refusal an
+  unusable value raises stated `unset ⇒ off`, which is false on the entrypoint this change makes it
+  reachable from; it now states the default per entry point. And both `Trace export:` banner lines said
+  the export carries prompts. It does not: `@openai/agents-openai` keeps the model input and response in
+  `_`-prefixed span fields and `@openai/agents-core` strips every `_`-prefixed key in `Span.toJSON`
+  before the exporter serializes anything, while function spans carry tool arguments and outputs
+  unprefixed. Both lines now say run metadata plus, once an agent calls tools, its tool arguments and
+  outputs — and both name the remediation as `RAYSPEC_AGENT_TRACING` on `rayspec deploy` and
+  `rayspec-serve` specifically, because the same banner is printed by the two dev-boot wrappers, where
+  that variable is read by nothing.
+
 ### Fixed
 
+- **`examples/agent-pack-deployment` can be deployed now, and its pack manifest stops claiming the
+  loader compiles TypeScript.** The example's whole product surface — a `notes` store, a `lookup_note`
+  tool and the `note_summarizer` agent that references it — ships as a `defineExtension` pack authored
+  in TypeScript, and the example carried no build step of any kind. The deploy runtime loads compiled
+  JavaScript only (`assertCompiledJavaScriptModule` refuses a `.ts` path before importing it), so
+  `rayspec deploy examples/agent-pack-deployment/rayspec.yaml` aborted at the pack entry — while
+  `packs/agent-pack/package.json` described the pack as "loaded at deploy/test time by loadExtensions
+  (the importer transforms the .ts)". The example now ships `build.mjs` and
+  `packs/agent-pack/tsconfig.build.json`, the same thin-`tsc`-wrapper pair `examples/stream-backend`
+  ships: `node examples/agent-pack-deployment/build.mjs` transpiles the pack's `index.ts` and
+  `handlers/*.ts` to ESM under `packs/agent-pack/dist/` and marks that output `{"type":"module"}`. The
+  built pack lands under the pack directory so the entry still resolves `@rayspec/platform` through the
+  pack's own `node_modules`, which is the first stop on Node's upward walk from the built file. A new
+  `examples/agent-pack-deployment/README.md` gives the build command and the one line a deployment
+  changes — `module: ./packs/agent-pack/dist` — and says plainly that the build clears the
+  compiled-JavaScript boundary and nothing else: the document still needs the boot environment
+  `rayspec deploy --check-env` reports, and that report is derived from a document declaring no agents
+  of its own, so it does not name the credential the pack's agent needs.
+  **The committed `rayspec.yaml` still points at the pack SOURCE, by design.** That is the form the
+  example's tests load, through the loader's explicit `typeStrippingImporter` seam, and repointing it
+  at `dist/` would also drop the pack's handler root from `gate:handler-imports` and
+  `gate:extension-capability`, which add `<packDir>/handlers` only when it exists on disk — in a clean
+  clone `dist/handlers` does not.
+  **The parenthetical was false on the test path too, not just on deploy**, so it is deleted rather
+  than narrowed: no importer transforms anything. `typeStrippingImporter` is the production importer
+  minus the compiled-JavaScript assertion — a bare dynamic `import()` of the module's own file URL — so
+  whether an un-built `.ts` executes is the RUNTIME's business and never the loader's: the test
+  runner's transform under `pnpm test`, Node's own type stripping on the versions that do it by
+  default, and `Unknown file extension ".ts"` on a Node that does not. (That is why the production
+  boundary is an explicit extension check rather than a reliance on `import()` failing, as
+  `assertCompiledJavaScriptModule`'s own docblock says.) That
+  sentence shipped byte-identically in `examples/stream-backend/packs/stream-pack/package.json`, and
+  with the neighbouring "no build/typecheck/test" framing it made nine claims across seven files —
+  both pack manifests, both pack entries, the agent pack's handler, the two `examples/*` comments in
+  `pnpm-workspace.yaml` and two paragraphs of the stream-backend README, which called its pack "a pure
+  loaded-at-deploy fixture" while the example shipped a `build.mjs`, and told a reader that its
+  source-pointing spec "works in this repository because the dev/test importer strips types on the way
+  in" — the same misattribution, plus a compiled-JavaScript boundary wrongly localized to out-of-repo
+  deployments. All nine now say what is true:
+  neither pack declares a build/typecheck/test *script* and turbo runs none, each example carries
+  its own `build.mjs` because the deploy runtime loads compiled JavaScript only, and the seam is named
+  as the opt-in it is.
+  `packages/app/server/src/deployable-backend-handlers.test.ts` gains the third arm of the battery it
+  already ran for `acme-notes-backend` and `stream-backend`: the production importer refuses the agent
+  pack's `.ts` source, runs the documented build, and then resolves the built `dist/` — entry, handler
+  and the pack-contributed `agents` fragment. That test is a `@rayspec/server` test and runs in CI; the
+  example itself is a `@spike/*` fixture and is not built, typechecked or tested there. (Issue #364.)
+- **A port that is already in use now refuses the boot in one actionable line instead of crashing with
+  a raw Node stack.** `serve()` returns while the bind is still *pending* — immediately after the call
+  the listener's `listening` is `false` and its `address()` is `null` — so neither entrypoint had
+  anything to catch: the boot reported itself served and the `EADDRINUSE` arrived afterwards as an
+  unhandled `'error'` event, printing Node's `throw er; // Unhandled 'error' event` report and a
+  `node:net` stack. On `rayspec deploy` that landed *after* the boot had connected to the database and
+  applied migrations, so a successful-looking preamble was followed by an unhandled exception. The raw
+  stack did name the address numerically, but nothing else: not the variable to change, not the host
+  knob, and no remedy.
+  Both shipped entrypoints now refuse instead — the `rayspec-serve` bin and `rayspec deploy`, on their
+  normal **and** their static-profile (frontend-only) boot paths, four listeners in all. Each attaches
+  an `'error'` listener the moment `serve()` returns, and on `EADDRINUSE` prints one line naming the
+  address (`Boot aborted — 127.0.0.1:8191 is already in use. …`), the command that finds the process
+  holding it (`lsof -nP -iTCP:<port> -sTCP:LISTEN`) and the knob that entrypoint's operator turns —
+  `PORT=<n>` for `rayspec-serve`, `--port <n>` or `PORT=<n>` for `rayspec deploy` (its `--port` writes
+  `PORT`), with `RAYSPEC_HOST` / `--host` named for moving the address — then exits 1. It opens
+  `Boot aborted — `, the same opening as the existing invalid-`PORT` refusal
+  (`Boot aborted — PORT='abc' is not a valid TCP port (1–65535).`).
+  **Only `EADDRINUSE` changes.** Every other listen error — `EACCES` on a privileged port, a
+  `getaddrinfo` failure on an unresolvable `RAYSPEC_HOST`, anything else — is re-emitted by that
+  listener after it removes itself, so it reaches exactly the handling it reached before: Node's
+  unhandled-`'error'` report, with its frames, and exit 1. The address in the refusal is built from the
+  host and port the entrypoint already resolved, never from the error object, because a listen error
+  carries `address`/`port` for some codes only. (Issue #365.)
+- **`Ctrl-C` now stops the example dev-boot servers.** `examples/contract-intake/dev-boot.mjs`,
+  `examples/support-intake-chat/dev-boot.mjs` and `examples/support-ticket-triage/dev-boot.mjs` kept
+  running after `SIGINT` and after `SIGTERM` — still answering `/health` 200 — so a developer who
+  pressed `Ctrl-C` was left with a live server still holding its database pool and its durable worker.
+  Each wrapper now owns its shutdown: it captures the `serve()` return value and, on `SIGINT`/`SIGTERM`,
+  closes the HTTP server, awaits `server.close()` (which drains the durable worker, then ends the
+  database pool) and exits `0` — the same wiring `packages/app/server/src/serve.ts` gives the shipped
+  `rayspec-serve` entrypoint, which is why that entrypoint is not affected.
+  **Nothing in a dependency changed.** The wrappers registered no signal handler of their own, and the
+  `SIGINT`/`SIGTERM` handlers their dependencies install each act only when no *other* listener is
+  registered — `@openai/agents-core`'s tracing provider exits only when `process.listeners(sig).length`
+  is not greater than 1, and `signal-exit` re-raises the signal only when that count equals its own
+  listener count — so with both loaded neither one ended the process. An owning handler is what
+  terminates it now, whatever the dependencies decide. `SIGHUP` is deliberately left unlistened:
+  `signal-exit` registers for it and `@openai/agents-core` does not, so `signal-exit` is its sole
+  listener there and re-raises it — that path is unchanged. The two example READMEs that gave a boot
+  command with no stop instruction (`contract-intake`, `support-intake-chat`) now name `Ctrl-C`, and the
+  authoring skill's dev-boot pattern teaches the handler. (Issue #360.)
 - **A deploy that is refused *after* its product-store DDL applied now names the tables it already
   committed, instead of reading as if nothing had happened.** Each migration is applied in its own
   transaction, so it is committed the moment it returns; every refusal raised after the migrate step
@@ -640,8 +844,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   point `--version` uses: `rayspec --help`, `rayspec <command> --help`, and
   `rayspec <group> <sub> --help` each exit `0` and print to stdout, with `rayspec dev --help`
   answering for all three `dev` commands and `rayspec dev db --help` for that one alone.
-  `rayspec deploy --help` now shows deploy's five flags (`--dry-run`, `--port`, `--host`,
-  `--apply-migration`, `--allowlist`) without the rest of the manual around them.
+  `rayspec deploy --help` now shows deploy's six flags (`--dry-run`, `--check-env`, `--port`,
+  `--host`, `--apply-migration`, `--allowlist`) without the rest of the manual around them.
 
   **This is the one documented exception to "every subcommand emits exactly one JSON object on
   stdout"**: the help text is plain text, and every place that carried that promise — the CLI
@@ -703,7 +907,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unaffected: a 5-field or 6-field expression reaches the scheduler byte-identically, and unset or
   blank still resolves to the documented `0 3 * * *`. One surface grows: the check runs where the
   rest of the environment is resolved, so a boot that wires no durable worker — an auth-only boot, or
-  a classic `rayspec.yaml` without one — now also refuses an unparseable value it previously ignored.
+  a classic `rayspec.yaml` without one — now also refuses an unparseable value it previously ignored,
+  with one exception: a frontend-only document is outside the check's scope, because both documented
+  entrypoints branch it to the static profile — whose `loadStaticServerConfig` resolves no cleanup
+  knob — before the environment is resolved, so such a boot still serves an unparseable value here,
+  exactly as it still serves a malformed `DATABASE_URL` or a non-numeric `RAYSPEC_GDPR_RETENTION_DAYS`.
 
 - **`rayspec` run from a vendored checkout now honors the invoking project's `./.env`.** The CLI's
   `.env` auto-loader resolved the file relative to its OWN install location — always the RaySpec
@@ -725,7 +933,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value is unchanged, and under `RAYSPEC_SKIP_DOTENV=1` the suffix is omitted because nothing was
   searched.
 
+- **A subscription cursor with a zero-padded sequence is refused rather than coerced.**
+  `GET /v1/subscribe?since=<tenant_id>:007` answered `200` and resumed from 7, skipping the seven
+  events below it, and `:00` replayed the stream from the floor — while the route's own `400` body,
+  the spec reference and this changelog already described a padded sequence as refused. The
+  sequence half must now be the canonical spelling the stream itself writes: `0`, or digits with no
+  leading zero. No cursor this platform issues is affected: the SSE `id:` is built by interpolating
+  a number, so it never carries a leading zero, and a client echoing an `id:` back (as
+  `Last-Event-ID` or `?since=`) resumes exactly as before — `:0`, the replay-from-floor cursor,
+  included. (Issue #385.)
+
 ### Documentation
+
+- **`rayspec deploy --host <addr>` is documented.** The flag has always been accepted and has always
+  been printed by `rayspec deploy --help`, but the CLI reference's deploy section described the
+  other five flags and not this one — both synopsis forms that carry `[--port <n>]` omitted it, and
+  so did the `Flags:` summary, leaving `--host` in the whole document exactly once, inside the
+  quoted `deploy --help` transcript. So an operator reading the deploy section learned neither the
+  flag nor the loopback bind default from it; both were reachable by running the help text, or from
+  the `RAYSPEC_HOST` entry in `.env.example`, the environment surface this reference points readers
+  at. The section now names `--host <addr>` in both synopsis forms and in the summary, and carries a
+  bullet for it: it writes `RAYSPEC_HOST`, overriding an ambient value, exactly as `--port`
+  overrides `PORT`; unset, blank or whitespace-only binds loopback, so a deployment is not reachable
+  off-box until an operator names another interface; the boot banner reports the address actually
+  bound rather than a fixed loopback string; `--dry-run` and `--check-env` bind nothing, so each
+  accepts and ignores it — where both refuse `--apply-migration` / `--allowlist`; and it moves the
+  listen address only, leaving the OIDC issuer at its `http://127.0.0.1:<port>/oidc` default, so a
+  deployment bound to `0.0.0.0` keeps emitting loopback OIDC URLs until `OIDC_ISSUER` names the
+  address its clients reach it on. A `@rayspec/cli` test now reads deploy's option set out of the
+  argument parser that declares it and fails when a flag the command accepts is missing from either
+  of those two places; the per-flag bullets are not covered, because `--port` and `--allowlist`
+  carry none. Nothing about the command changed — the flag, its loopback default and the help text
+  are exactly as they were.
+
+- **The getting-started backend-profile walkthrough now points at `rayspec deploy --check-env`
+  before the first boot, so a reader can ask for the environment its document demands instead of
+  discovering it one refused boot at a time.** The section walks the reader into a boot whose
+  requirements it never lists up front: the surrounding text explains that a missing credential
+  fails the boot fast, and that refusal is clear on its own, but a document raising more than one
+  demand answers them one at a time — and not every one of those attempts is cheap: the demand a
+  declared `cron` / `manual` trigger raises is reached only after the boot has opened the database
+  and applied the committed migration chain, while a missing backend credential and the three
+  config-load secrets refuse before the database is opened at all. `--check-env` was already
+  documented in the CLI reference and answers the whole set in one shot without booting; the
+  walkthrough simply never mentioned it. The added sentence names the `deploy` spelling — the
+  `rayspec-serve` entrypoint the section's own code block uses parses no flags, so
+  `rayspec-serve --check-env` boots as if the flag were absent — and bridges to it through the
+  equivalence the page already states, that `rayspec deploy <spec>` and
+  `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` are the same boot. It is scoped to what the check reports
+  (the variables the document's boot will require, why, and whether each is set) and does not
+  present a passing verdict as a boot that will succeed: the check validates no value and opens no
+  database, so it answers `ok` for a document whose boot still refuses on a non-UUID tenant id or
+  a TypeScript handler module, and it links the CLI reference for what it deliberately does not
+  check. Documentation only — no command, flag or behaviour changed.
 
 - **The default Content-Security-Policy a served frontend carries is now documented where someone
   deploying a built site meets it — and the shipped example stops violating it.** The baseline is
@@ -746,6 +1006,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   helper as an inline script — the one shipped asset the platform's own default policy would have
   blocked; it now lives in `web/dist/app.js` and the page references it. No behaviour changed: the
   policy, the two environment variables and the served headers are exactly as they were.
+
+- **Three example READMEs stop telling the reader to "register/switch to the tenant", which no
+  deployment has ever allowed.** A deployment cannot create its own tenant — the boot fail-closes on
+  a `RAYSPEC_PRODUCT_TENANT_ID` that names no live org — a `POST /v1/auth/register` carrying an
+  `orgName` creates a *different*, server-generated org (without one it creates no org at all, and
+  the product calls then answer `404`), and `POST /v1/orgs/{id}/switch` answers a bare `404`
+  (`Not found.`) to an account that is no member of the target, so following the sentence left the
+  reader serving their own tenant rather than the one the demo seeds: reads there answer `200` over
+  no data (`GET /tickets` → `{"tickets":[]}`) and a turn is refused `403` with the reason named
+  (`cross_tenant`). The three files needed two different corrections, because the situations
+  differ. In `examples/support-intake-chat/README.md` the dev-boot seeds the org
+  `00000000-0000-4000-8000-000000000043` and no user, and its four `support_catalog` rows are seeded
+  under that tenant alone; the README now walks the shipped path instead — `rayspec tenant ensure`
+  against the demo's own `play_support_chat` database mints an owner invite for that exact org, and
+  `POST /v1/invites/accept` redeems it into an account whose `201` already carries an org-scoped
+  token, so no login and no switch follow. It also states why the `DATABASE_URL` override is
+  load-bearing (the dev-boot ignores `.env`'s value, the CLI does not), why the invite file has to be
+  deleted, and what a re-run does instead of minting a second token — `already_owned` once the org is
+  claimed, `pending` while an invite is outstanding, and `--reissue-owner-invite` for a token lost
+  before redemption. In `examples/invoice-intake/README.md` and
+  `examples/expense-claim/README.md` there is no seeded org: the recipe already asks for an existing
+  org uuid, so those two now say where one comes from — a `POST /v1/auth/register` carrying an
+  `orgName` returns the new org's id as `activeOrgId` and a token already scoped to it, which is the
+  value `RAYSPEC_PRODUCT_TENANT_ID` wants, and it has to exist *before* the boot because the boot
+  fail-closes on an id that names no live org. **No behaviour changed** — the correction is in the
+  three READMEs, and the platform paths they now describe are the ones that already shipped.
+
+- **`examples/contract-intake/README.md` now says how to reach the tenant its dev-boot seeds.** The
+  wrapper seeds the org `00000000-0000-4000-8000-000000000042` and no principal — a booted demo has
+  one org, zero users and zero memberships — so a reader who followed the README could call none of
+  the product: `PUT /files/{file_id}`, `POST /files/{file_id}/submit` and `GET /contracts` all
+  answer `401`, and the file carried no auth step of any kind. Registering does not reach that org
+  either: a `POST /v1/auth/register` carrying an `orgName` creates a different one and
+  `POST /v1/orgs/{the seeded id}/switch` answers `404` to a non-member, whose own empty tenant then
+  serves `200` on the reads and on an upload but is refused `403` at the submit, with the reason
+  named (`cross_tenant`). The README now walks the shipped path instead — `rayspec tenant ensure`
+  against the demo's own `play_contract` database mints an owner invite for that exact org, and
+  `POST /v1/invites/accept` redeems it into an account whose `201` already carries an org-scoped
+  token, so no login and no switch follow. It states why the `DATABASE_URL` override is load-bearing
+  (the dev-boot ignores `.env`'s value, the CLI does not), why `RAYSPEC_API_KEY_PEPPER` has to be the
+  value the demo booted with (the invite token is hashed under it, and under a different one it is
+  refused at accept), why the invite file has to be deleted, and what a re-run does instead of
+  minting a second token — `already_owned` once the org is claimed, `pending` while an invite is
+  outstanding, and `--reissue-owner-invite` for a token lost before redemption. It also names this
+  example's own upload pair, `PUT /files/{file_id}` → `POST /files/{file_id}/submit`: neither route
+  appeared anywhere under `examples/contract-intake/` — the capability mounts them, so the authored
+  document does not declare them, and they were written down in the `@rayspec/file-runtime` README,
+  the authoring skill and the invoice-intake example, but nowhere in this example's own docs.
+  **No behaviour changed** — the correction is in the README, and the platform paths it now
+  describes are the ones that already shipped.
 
 ### Security
 

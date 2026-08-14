@@ -1179,7 +1179,16 @@ agents:
   whose code no longer fires on the node becomes its own advisory
   (`stale_suppression`, pointing at the entry), so acknowledgements cannot rot
   silently. The same key, with the same shape and semantics, is available on a
-  [store](#stores) and on a [route](#api).
+  [store](#stores), a [route](#api), a [trigger](#triggers) and a
+  [handler](#handlers).
+
+  An acknowledgement records a reviewed decision and quiets `doctor` — it
+  relaxes no enforcement. Only `doctor` applies suppressions: `plan` reports the
+  raw advisory list, so an acknowledged finding still appears in its
+  `specWarnings`, and every requirement an advisory describes stands unchanged
+  (acknowledging `cron_tenant_required` leaves `RAYSPEC_CRON_TENANT_ID` required
+  at boot, and acknowledging `typescript_handler_module` leaves the deploy loader
+  accepting compiled JavaScript only).
 
 There is no `input` field: the task input is a runtime value supplied per
 request, not part of the spec.
@@ -1240,6 +1249,14 @@ triggers:
     `outputSchema` output as one store row with the same exactly-once,
     deploy-validated semantics described for the [`agent` route action](#api) above.
   - **`handler`** — fire a declared trigger-handler. Field: `handler`.
+- `lintSuppress` — optional list of acknowledged advisories scoped to **this
+  trigger**; same shape and semantics as [`lintSuppress` on an agent](#agents): a
+  `code` naming an advisory (never an error) and a **required, non-empty**
+  `because` recording why the finding does not apply here. This is the node the
+  `cron_tenant_required` advisory is reported on. Acknowledging it records that
+  the tenant is provided and quiets `doctor`; it does not make the variable
+  optional — an unset `RAYSPEC_CRON_TENANT_ID` still refuses the boot, and `plan`
+  still reports the raw advisory.
 
 Firing a scheduled trigger requires a durable worker (see `deployment`); the run
 surface refuses an off-request fire when no worker is configured.
@@ -1305,9 +1322,11 @@ The error cases:
   `trigger-fire` rate bucket: **30 fires per 60 seconds per tenant+name**. An
   over-quota call dispatches nothing; the retry advice rides in the body as
   `error.details.retryAfterMs` — this `429` carries no `Retry-After` header.
-- **`501`** — no manual-trigger firer is wired on this deployment (the spec
-  declares no `manual` trigger, or no durable worker is configured). Fail-closed:
-  never a silent no-op `202`.
+- **`501`** — the deployed document declares no `kind: manual` trigger, so no
+  manual-trigger firer is wired on this deployment. The refusal is
+  deployment-level and never names the requested trigger — a deployment with at
+  least one manual trigger answers the `404` above for a `cron` name instead.
+  Fail-closed: never a silent no-op `202`.
 
 ## `handlers`
 
@@ -1335,6 +1354,14 @@ handlers:
   product stores, so its route is gated on `store:read` instead of the default
   `store:write` (see the authorization consequence below). Absent or `false` leaves
   the default gate unchanged.
+- `lintSuppress` — optional list of acknowledged advisories scoped to **this
+  handler**; same shape and semantics as [`lintSuppress` on an agent](#agents): a
+  `code` naming an advisory (never an error) and a **required, non-empty**
+  `because` recording why the finding does not apply here. This is the node the
+  `typescript_handler_module` advisory — the one a `.ts` `module` raises — is
+  reported on. Acknowledging it records the reviewed decision (a build step
+  compiles the module before deploy, say) and quiets `doctor`; the deploy loader
+  still loads compiled JavaScript only, and `plan` still reports the raw advisory.
 
 A `handler`-kind route is also the escape hatch for reads the declarative `store`
 `list` op does not cover — an **offset**-paged read or a filtered **`count`**. (The
@@ -2360,7 +2387,39 @@ views:
   requires bounded `pagination` (`limit_param` + `offset_param` + `max_limit`) and
   a `page_items` envelope.
 - `pagination` — required for a `list` read; otherwise optional.
-- `absent_state` — optional: `empty_200` or `not_ready_409`.
+- `absent_state` — optional in the grammar: `empty_200`, `not_ready_409`, or
+  `not_found_404`. On a `single` read it decides what the view answers when the
+  read matches no row. **Neither `empty_200` nor `not_ready_409` ever produces a
+  404**: `empty_200` serves the declared `read.absent` DTO with status `200`, and
+  `not_ready_409` serves `409 { error: 'not_ready', detail }`. `not_found_404`
+  serves `404 { error: 'not_found', detail }` — the `detail` is a fixed string and
+  never echoes the request.
+
+  Which one is correct is decided by **when the backing row appears**, not by the
+  view — the read sees zero rows either way. Choose `not_found_404` for a read
+  model whose row exists from the moment the reference is valid: a catalog or
+  reference store materialized before any workflow runs, or a store written at
+  acceptance. Do **not** choose it for a store that a workflow step writes: there
+  an absent row means the job has not finished yet, and a 404 would tell a polling
+  client that its reference does not exist. Declare `empty_200` (with a
+  `read.absent` shape) or `not_ready_409` for that case.
+
+  On a `list` or `collect` read the field decides nothing at runtime — the absent
+  answer is served from the `single` branch of the interpreter alone, so
+  `empty_200` is accepted there but inert (several of the shipped example
+  documents declare it on their list view). On a view with **no** `read` — a
+  `capability`-sourced view, whose behavior is the capability's own handler — it
+  is declared knowledge for the generated contract: the OpenAPI emitter documents
+  the `409` (`not_ready_409`) or `404` (`not_found_404`) the view names, which is
+  where the `409` on the playback-token route of
+  [`examples/acme-notes`](../examples/acme-notes/acme-notes.product.yaml) comes
+  from.
+
+  Lint keys its laws on the read mode. On a `single` read the field is
+  **required**: `empty_200` demands a `read.absent` shape, and `not_ready_409` or
+  `not_found_404` forbid one (a fixed error body leaves nothing to project). On a
+  `list`/`collect` read `not_ready_409` and `not_found_404` are rejected — a read
+  with no matches is an empty page, not an un-ready or a nonexistent one.
 - `conditional_read` — optional (e.g. strong ETag + `If-None-Match` on `GET`).
 
 ## `deployment_overrides`

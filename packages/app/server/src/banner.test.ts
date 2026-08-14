@@ -129,20 +129,32 @@ describe('bootBanner — the resolved daily-cleanup crontab', () => {
 
 /**
  * The observed agent trace-export posture, stated in BOTH directions — that is the whole point of the
- * line: nobody loses tracing silently, and nobody exports prompts and tool arguments to a third party
- * silently. The posture handed in here is the one `assembleServer` reads off the SDK's own global trace
- * provider (`observedAgentTracing`); what this file pins is that the banner renders each value as the
- * operator-visible sentence, and never the other one. That the OBSERVATION itself is truthful on the
+ * line: nobody loses tracing silently, and nobody exports tool arguments and tool outputs to a third
+ * party silently. The posture handed in here is the one `assembleServer` reads off the SDK's own global
+ * trace provider (`observedAgentTracing`); what this file pins is that the banner renders each value as
+ * the operator-visible sentence, and never the other one. That the OBSERVATION itself is truthful on the
  * deploy path is measured against the real SDK in
  * `packages/app/cli/src/deploy-agent-tracing.sdk.test.ts` — it cannot be measured under vitest, whose
  * `NODE_ENV=test` the SDK treats as tracing-disabled regardless of anything this repository does.
+ *
+ * BOTH ARMS PIN BOTH HALVES of their sentence — what the transport carries, and the remediation that
+ * moves it — so neither half can rot silently while the other stays green. What the transport carries
+ * is measured in the installed SDK: the model input/response sit in `_`-prefixed span fields that
+ * `@openai/agents-core` strips in `Span.toJSON`, while function spans carry tool arguments and outputs
+ * unprefixed. The banner therefore must NOT claim prompts leave: the OFF arm's `not.toContain('prompt')`
+ * and the EXPORTING arm's `toContain('strips the model prompt fields')` are what hold it to that.
  */
 describe('bootBanner — the observed agent trace-export posture', () => {
-  it('states OFF, and names the variable, when nothing exports', () => {
+  it('states OFF, names the variable, and names what does not leave', () => {
     const agentTracing: AgentTracingPosture = 'off';
     const banner = bootBanner(booted({ agentTracing }), BASE);
     expect(banner).toContain('Trace export:          OFF');
-    expect(banner).toContain('RAYSPEC_AGENT_TRACING');
+    expect(banner).toContain('tool arguments and outputs');
+    // The remediation half, scoped to the two entry points that actually read the variable — this
+    // banner is also printed by two dev-boot wrappers that never consult it.
+    expect(banner).toContain("RAYSPEC_AGENT_TRACING=openai on 'rayspec deploy' / 'rayspec-serve'");
+    // …and it does not promise that turning the export on would send prompts: the SDK strips them.
+    expect(banner).not.toContain('prompt');
     expect(banner).not.toContain('EXPORTING TO OPENAI');
   });
 
@@ -152,8 +164,9 @@ describe('bootBanner — the observed agent trace-export posture', () => {
     const agentTracing: AgentTracingPosture = 'openai';
     const banner = bootBanner(booted({ agentTracing }), BASE);
     expect(banner).toContain('Trace export:          EXPORTING TO OPENAI');
-    expect(banner).toContain('prompts and tool arguments');
-    expect(banner).toContain('RAYSPEC_AGENT_TRACING');
+    expect(banner).toContain('tool arguments and outputs');
+    expect(banner).toContain('strips the model prompt fields');
+    expect(banner).toContain("RAYSPEC_AGENT_TRACING=off on 'rayspec deploy' / 'rayspec-serve'");
     expect(banner).not.toContain('Trace export:          OFF');
   });
 });

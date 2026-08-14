@@ -25,7 +25,9 @@ import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { DeployError } from '@rayspec/api-auth';
 import type { FrontendSpec } from '@rayspec/spec';
+import { applyServeAgentTracing } from './agent-tracing.js';
 import { bootBanner, bootBaseUrl, staticBootBanner } from './banner.js';
+import { attachBindRefusal } from './bind-refusal.js';
 import { BootTimeoutError, resolveBootTimeoutMs, withBootTimeout } from './boot-timeout.js';
 import {
   assembleServer,
@@ -85,6 +87,17 @@ function detectStaticBoot(): { specPath: string; frontend: readonly FrontendSpec
 async function main(): Promise<void> {
   loadLocalDotenvIfPresent();
 
+  // Consult RAYSPEC_AGENT_TRACING, and refuse a value this boot cannot act on. Here, ahead of BOTH
+  // branches below and of the secret-requiring config load, so no shape of this entrypoint can ignore
+  // a stated intention — the same position `rayspec deploy` gives its own posture, ahead of its
+  // branches. EXPLICIT-ONLY: unset or blank is left exactly as it was, because this entrypoint's
+  // default is the agent SDK's own and only the operator moves it (agent-tracing.ts). Selecting `off`
+  // therefore has to drive the SDK's programmatic switch and not just its environment one: the static
+  // imports at the head of this file reach `@openai/agents`, whose global trace provider snapshots
+  // that variable while the module evaluates, long before this line runs. A refusal is a
+  // BootConfigError, which the catch at the foot of this file clean-prints.
+  await applyServeAgentTracing();
+
   // Static-profile detection BEFORE the secret-requiring config load: a frontend-only spec boots with
   // NO database/JWT/pepper and mounts NO auth surface (see assembleStaticServer). It branches AWAY from
   // the whole DB/auth composition, so it must run before loadServerConfig (which fail-closes on the
@@ -102,6 +115,14 @@ async function main(): Promise<void> {
         console.log(staticBootBanner(staticServer, bootBaseUrl(info.address, info.port)));
       },
     );
+    // `serve()` returns with the bind still PENDING, so a taken port arrives as an `'error'` event
+    // rather than as a throw — hence a listener, which answers a collision with one line and
+    // re-emits any other listen error untouched (bind-refusal.ts).
+    attachBindRefusal(httpServer, {
+      host: staticConfig.host,
+      port: staticConfig.port,
+      prefix: '[rayspec-serve]',
+    });
     const shutdown = (signal: string) => {
       console.log(`\n[rayspec-serve] ${signal} received — shutting down…`);
       httpServer.close(async () => {
@@ -136,6 +157,13 @@ async function main(): Promise<void> {
       console.log(bootBanner(server, bootBaseUrl(info.address, info.port)));
     },
   );
+  // The same bind refusal the static branch above attaches: a taken port refuses the boot instead of
+  // landing as an unhandled listen `'error'` after the migrations have already been applied.
+  attachBindRefusal(httpServer, {
+    host: config.host,
+    port: config.port,
+    prefix: '[rayspec-serve]',
+  });
 
   // Graceful shutdown: stop accepting connections, end the DB pool, exit. Wired to SIGINT/SIGTERM.
   const shutdown = (signal: string) => {

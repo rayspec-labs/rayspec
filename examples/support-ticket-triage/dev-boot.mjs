@@ -110,8 +110,27 @@ const config = loadServerConfig();
 const server = await assembleServer(config, {
   registerProductTables: registerProductStores,
 });
-serve({ fetch: server.app.fetch, hostname: config.host, port: config.port }, (info) => {
-  console.log(
-    `[dev-boot] UP — ${bootBaseUrl(info.address, info.port)} (deployMode=${server.deployMode})`,
-  );
-});
+const httpServer = serve(
+  { fetch: server.app.fetch, hostname: config.host, port: config.port },
+  (info) => {
+    console.log(
+      `[dev-boot] UP — ${bootBaseUrl(info.address, info.port)} (deployMode=${server.deployMode})`,
+    );
+  },
+);
+
+// Graceful shutdown: stop accepting connections, drain the durable worker + end the DB pool, exit —
+// the same wiring `packages/app/server/src/serve.ts` gives the shipped entrypoint. This wrapper needs
+// its OWN handler: the two SIGINT/SIGTERM handlers its dependencies install (@openai/agents-core's
+// tracing provider and signal-exit) each act only when no OTHER listener is registered, so with both
+// loaded neither one ends the process. NOT SIGHUP — signal-exit is its only listener there, so that
+// signal already stops this process; leaving it unlistened keeps it that way.
+const shutdown = (signal) => {
+  console.log(`\n[dev-boot] ${signal} received — shutting down…`);
+  httpServer.close(async () => {
+    await server.close();
+    process.exit(0);
+  });
+};
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
