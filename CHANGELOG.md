@@ -224,12 +224,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a file that is not there still gets a `404` rather than `200 text/html` from a `<name>.<ext>.html`
   sibling — while a dotted directory on the way (`/guide/1.2/notes`) still resolves its page, since
   only the last segment decides. **It is opt-in
-  (default `false`), so no existing deployment changes behaviour** — and **one** behaviour changes for
-  a site that opts in: where **both** `<path>.html` and `<path>/index.html` exist for the same path,
+  (default `false`), so no existing deployment changes behaviour** — and **two** behaviours change for
+  a site that opts in. Where **both** `<path>.html` and `<path>/index.html` exist for the same path,
   the `.html` file now wins where the directory index served before (`.html` is tried first, the order
-  the hosts above use). A trailing-slash request (`/docs/`) is unaffected and still resolves the
-  directory index. The option is echoed in the `deploy --dry-run` verdict for **both** the static and
-  the backend profile, so the preview names the resolution boot will use.
+  the hosts above use). And on a mount that ships a root `404.html`, `/404` is an extensionless path
+  like any other, so it now serves that page with `200` where the miss branch answered the same bytes
+  with `404` — the same parity with those hosts, all of which serve `/404` as a page, and the reason
+  the status is not "fixed" back to `404`. A trailing-slash request (`/docs/`) is unaffected and still
+  resolves the directory index. The option is echoed in the `deploy --dry-run` verdict for **both** the
+  static and the backend profile, so the preview names the resolution boot will use, and the static
+  profile's boot banner marks a mount that sets it.
 
 - **Speech synthesis reaches a backend-profile handler as the optional `init.tts` capability, behind a
   new `TTS_PROVIDER` contract — the egress half of the audio pipeline.** The platform shipped a real
@@ -1058,9 +1062,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'`, which names no
   `style-src` and no `script-src`, so an inline `<style>` or `<script>` in a served page is blocked.
   The policy is right and is unchanged; what was missing is that meeting it required a browser. No
-  server-side signal exists: the response is a `200` carrying the exact bytes, so `curl`, the deploy
-  output and the logs all look correct and only the rendered page differs — the first encounter reads
-  as "the deployment lost my CSS", with nothing connecting it to the policy. The `frontend` grammar
+  *request* shows it: the response is a `200` carrying the exact bytes, so `curl`, the deploy
+  output and the request logs all look correct and only the rendered page differs — the first encounter
+  reads as "the deployment lost my CSS", with nothing connecting it to the policy. (The server-side
+  signal for it is the boot warning listed under Added above.) The `frontend` grammar
   reference, the getting-started static-serving walkthrough, the concepts page and the CLI reference
   now state the default value in full, that CSS and JS belong in files the page references rather than
   in inline code (a same-origin file is what the default allows), and that `RAYSPEC_FRONTEND_CSP`

@@ -202,7 +202,13 @@ export function staticBootBanner(server: StaticBootedServer, base: string): stri
   lines.push('');
   lines.push('  Served static frontend mounts:');
   for (const m of server.frontendMounts) {
-    lines.push(`    ${m.route.padEnd(12)} → ${m.dir}${m.spa ? '   (SPA fallback)' : ''}`);
+    // BOTH declared mount options, so this line and the `deploy --dry-run` verdict (which echoes each
+    // mount whole) agree on what is worth naming: `cleanUrls` decides how every extensionless path
+    // under the mount resolves, which is not something an operator should have to read the spec for.
+    const options = [m.spa ? '(SPA fallback)' : '', m.cleanUrls ? '(clean URLs)' : '']
+      .filter(Boolean)
+      .join(' ');
+    lines.push(`    ${m.route.padEnd(12)} → ${m.dir}${options === '' ? '' : `   ${options}`}`);
   }
   lines.push(RULE);
   lines.push('');

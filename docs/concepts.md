@@ -175,9 +175,14 @@ geolocation=()`. A deployer can override either — the value given replaces tha
 verbatim rather than adding to it.
 
 That baseline names no `style-src` and no `script-src`, so an inline `<style>` or
-`<script>` in a served page is blocked — and nothing on the server side reports it: the
-response is a `200` carrying the exact bytes, and only the rendered page differs. Ship
-CSS and JS as files the page references, or opt into a weaker policy explicitly. See
+`<script>` in a served page is blocked — as are a `style="…"` attribute and an `on*=`
+handler, which fall back to the same `default-src`. No request reports it: the
+response is a `200` carrying the exact bytes, and only the rendered page differs. The
+signal arrives at **boot** instead: both forms above scan the served HTML against the
+policy they will emit and warn once, naming the files — warn-only (it can never fail a
+boot) and bounded, so it is a pointer rather than a report. Ship
+CSS and JS as files the page references, or opt into a weaker policy explicitly — one
+that permits the shape also silences the warning. See
 [getting-started → serving a static frontend](./getting-started.md#serving-a-static-frontend-spa)
 and [→ a frontend-only (static) deployment](./getting-started.md#a-frontend-only-static-deployment).
 

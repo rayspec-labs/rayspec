@@ -812,6 +812,46 @@ describe('mountFrontend — cleanUrls (extensionless resolution, opt-in)', () =>
     expect(body).not.toContain(BOTH_INDEX_SENTINEL);
   });
 
+  it('cleanUrls:true — /404 on a mount shipping a root 404.html serves that page with 200 (the second flip)', async () => {
+    // The SECOND visible change for a site that opts in, alongside the both-forms flip above:
+    // `404.html` is a `<name>.html` like any other, so `/404` becomes an extensionless path that
+    // resolves to it — the same bytes the miss branch served with status 404 now come back 200. That
+    // is parity with the hosts this option mirrors (Netlify / Vercel / GitHub Pages all serve
+    // `/404` as a page), so it is the documented behaviour, not a defect; this arm is what stops it
+    // changing unnoticed. The `cleanUrls:false` control below is what makes it a CHANGE and not just
+    // a fact about the fixture.
+    const on = buildApp([cleanMount], fixtureRoot);
+    const onRes = await on.request('/404');
+    expect(onRes.status).toBe(200);
+    expect(onRes.headers.get('content-type')).toMatch(/text\/html/);
+    expect(await onRes.text()).toContain(CLEAN_404_SENTINEL);
+
+    const off = buildApp([offMount], fixtureRoot);
+    const offRes = await off.request('/404');
+    expect(offRes.status).toBe(404);
+    expect(await offRes.text()).toContain(CLEAN_404_SENTINEL); // the SAME bytes, the other status
+  });
+
+  it('cleanUrls:true — a percent-encoded `/` the guard decodes but `serveStatic` does not is a MISS, never an escape', async () => {
+    // The mount guard decodes with `decodeURIComponent`, `serveStatic` with `decodeURI`, and the two
+    // differ on the reserved set. `/docs%2Fgetting-started` is the case: the guard sees
+    // `/docs/getting-started` and clears `docs/getting-started.html`, while the rewrite hands
+    // `serveStatic` `docs%2Fgetting-started.html`, a name no file has — so the request MISSES rather
+    // than serving the page. Pinned because the direction of the divergence is what makes it safe:
+    // the guard decodes a strict superset, so a path it would refuse can never reach the rewrite,
+    // and the rewrite's less-decoded string cannot name anything outside the served directory.
+    const app = buildApp([cleanMount], fixtureRoot);
+    const res = await app.request('/docs%2Fgetting-started');
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain(CLEAN_PAGE_SENTINEL);
+
+    // ACCEPT CONTROL: the same page, spelled plainly, still serves — the 404 above is the encoding,
+    // not a broken fixture.
+    const plain = await app.request('/docs/getting-started');
+    expect(plain.status).toBe(200);
+    expect(await plain.text()).toContain(CLEAN_PAGE_SENTINEL);
+  });
+
   it('cleanUrls:true — a TRAILING-SLASH request still resolves the directory index, never <path>.html', async () => {
     const app = buildApp([cleanMount], fixtureRoot);
     const res = await app.request('/both/');

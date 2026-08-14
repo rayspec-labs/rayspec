@@ -1010,7 +1010,8 @@ export function mountFrontend<E extends Env>(
     }
 
     // The byte server. For a non-root route, strip the route prefix so `join(baseDir, subPath)`
-    // targets the served directory (serveStatic hands the rewrite the FULL decoded request path).
+    // targets the served directory (serveStatic hands the rewrite the WHOLE request path, route
+    // prefix included — `decodeURI`-decoded; see the DECODING note under the clean-URL server below).
     const fileServer =
       route === '/'
         ? serveStatic({ root: baseDir })
@@ -1023,9 +1024,19 @@ export function mountFrontend<E extends Env>(
           });
 
     // CLEAN URLS: the same byte server pointed at `<path>.html`. `serveStatic` hands the rewrite the
-    // FULL decoded request path, so the rewrite strips the route prefix exactly as `fileServer`'s does
-    // and appends the extension. Only invoked once `resolveCleanUrlTarget` has proven that file exists
-    // and is safe to serve, so this server never resolves a path the guards have not cleared.
+    // WHOLE request path (route prefix included), so the rewrite strips that prefix exactly as
+    // `fileServer`'s does and appends the extension. Only invoked once `resolveCleanUrlTarget` has
+    // proven that file exists and is safe to serve.
+    //
+    // DECODING: the two sides do not decode alike. The guard above decodes with `decodeURIComponent`
+    // (`decodeOnce`), `serveStatic` with `decodeURI`, which leaves the reserved set (`/ ? # : @ & = +
+    // $ ,`) encoded — so the two agree on every path EXCEPT one carrying a percent-encoded reserved
+    // character. There (`/a%2Fb`) the guard clears `a/b.html` while the rewrite resolves
+    // `a%2Fb.html`, a path the guard never inspected: it misses, because no file carries that name.
+    // It cannot do worse than miss, and the reason is the DIRECTION of the divergence — the guard
+    // decodes a strict superset, so every path the guard would refuse (`/%2e%2e%2fsecret` →
+    // `/../secret`) is refused before this server is reached, and the rewrite's less-decoded string
+    // cannot spell a traversal the guard did not already see.
     const cleanUrlServer = cleanUrls
       ? serveStatic({
           root: baseDir,

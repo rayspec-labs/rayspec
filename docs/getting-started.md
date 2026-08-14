@@ -729,11 +729,19 @@ rules, and what static serving does **not** do in v1. A ready-to-run example liv
 `default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'` — the
 same default a static profile emits (below), on this boot shape too. It names no
 `style-src` and no `script-src`, so an inline `<style>` or `<script>` in a served page
-is **blocked**. Nothing on the server side reports that: the response is a `200` with
+is **blocked** — and so are a `style="…"` attribute and an `on*=` handler, which fall
+back to the same `default-src`. No *request* reports that: the response is a `200` with
 the exact bytes, so `curl` and the deploy output look right, and only the rendered page
-differs — the inline CSS is not applied and the inline script never runs. Reference
+differs — the inline CSS is not applied and the inline script never runs. The **boot**
+does report it: the same pass that computes what `/health` says about the mounts scans
+their HTML against the policy this boot will actually emit, and warns once, naming the
+files. It is a warning and never a refusal — the boot proceeds either way — and it is
+bounded: at most 200 HTML files per boot, the first 1 MiB of any one file, the first 5
+offending files named, and the warning says so whenever a bound truncated it. Reference
 built `.css`/`.js` files by `href`/`src` instead (same-origin, which the default
-allows), or set `RAYSPEC_FRONTEND_CSP` to replace the baseline.
+allows), or set `RAYSPEC_FRONTEND_CSP` to replace the baseline — an override that
+permits the shape a page ships also silences the warning, because the scan judges the
+page against the policy in force rather than the default.
 
 ### A frontend-only (static) deployment
 
