@@ -485,11 +485,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The `501` from `POST /v1/triggers/{name}/fire` now names the manual-trigger requirement instead
   of a durable worker.** It read `Manual trigger firing requires a configured durable worker and a
   declared manual trigger. No manual-trigger firer is wired on this deployment.`, and the worker half
-  of that sentence cannot be the cause on any deployment able to serve the refusal: a `manual`
-  trigger without `deployment.durableWorker: true` is a lint error at parse/deploy time, and the boot
-  aborts outright when a `cron`/`manual` trigger is registered with no durable worker wired. So the
-  reader most likely to meet it — an operator on an all-`cron` document, such as the shipped
-  `acme-notes-backend`, whose single trigger is `kind: cron` — was pointed at a component that is
+  of that sentence is never the but-for cause: the composition root wires the fire seam exactly when
+  the deployed document declares a `kind: manual` trigger, so setting `deployment.durableWorker: true`
+  alone never clears the refusal. Nor can a document declare a manual trigger *without* the worker —
+  that is a lint error at parse/deploy time, with the boot abort as its runtime backstop — so the
+  reader most likely to meet the refusal, an operator on an all-`cron` document such as the shipped
+  `acme-notes-backend`, whose single trigger is `kind: cron`, was pointed at a component that is
   already there. It now reads: *"This route fires `kind: manual` triggers only — a `cron` trigger
   fires on its own schedule and is not fireable here. Declare a `kind: manual` trigger in the
   deployed document; no manual-trigger firer is wired on this deployment."*
