@@ -63,6 +63,8 @@ export {
   childTaskSpecSchema,
   createRootTask,
   createRootTaskInputSchema,
+  type DelegationChildSpec,
+  delegationChildSpecSchema,
   insertChildTask,
   MAX_TASK_DEPENDENCIES,
   TASK_PRIORITIES,

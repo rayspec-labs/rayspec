@@ -93,6 +93,19 @@ export const childTaskSpecSchema = z.strictObject({
 
 export type ChildTaskSpec = z.input<typeof childTaskSpecSchema>;
 
+/**
+ * A fan-out child PLUS the original delegation target the caller resolved (`employee:<id>`,
+ * `department:<id>`, `team:<id>`). The task row never carries it — `owner` is the resolution — but
+ * the delegation record does: `delegated_to` keeps what was ADDRESSED while `resolved_owner` keeps
+ * who answers for it, so an audit can tell "sent to the department" from "sent to its manager by
+ * name". Absent (a caller that resolved nothing) the delegation record falls back to the owner.
+ */
+export const delegationChildSpecSchema = childTaskSpecSchema.extend({
+  delegatedTo: z.string().min(1).optional(),
+});
+
+export type DelegationChildSpec = z.input<typeof delegationChildSpecSchema>;
+
 async function insertTaskRow(
   tx: TenantDb,
   row: Readonly<Record<string, unknown>> & { taskId: string },

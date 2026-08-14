@@ -178,6 +178,81 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(stillFour[0]?.c).toBe(4);
   });
 
+  it('a fan-out child carries the ORIGINAL delegation target on the record, never on the task row', async () => {
+    const root = await driveToWorking(await newRoot());
+    const out = await turn(root.taskId, 1, {
+      kind: 'fan_out',
+      children: [
+        { title: 'Dept work', goal: 'G', owner: 'mgr-eng', delegatedTo: 'department:engineering' },
+        { title: 'Direct work', goal: 'G', owner: 'worker-1' },
+      ],
+    });
+    expect(out.task?.statusReason).toBe('awaiting_children');
+    const rows = (await db.$client.unsafe(
+      `SELECT delegated_to, resolved_owner FROM workforce_delegations WHERE parent_task_id = '${root.taskId}' ORDER BY resolved_owner;`,
+    )) as unknown as { delegated_to: string; resolved_owner: string }[];
+    expect(rows).toEqual([
+      { delegated_to: 'department:engineering', resolved_owner: 'mgr-eng' },
+      { delegated_to: 'worker-1', resolved_owner: 'worker-1' },
+    ]);
+    // The task row's owner IS the resolution — the target string never lands there.
+    const owners = await db.$client.unsafe(
+      `SELECT owner FROM workforce_tasks WHERE parent_task_id = '${root.taskId}' ORDER BY owner;`,
+    );
+    expect(owners.map((r) => r.owner)).toEqual(['mgr-eng', 'worker-1']);
+  });
+
+  it('a rejected fan-out records the ORIGINAL target on the rejected delegation rows too', async () => {
+    const root = await driveToWorking(await newRoot());
+    const out = await applyTurnOutcome(tdb(), {
+      taskId: root.taskId,
+      turnId: turnIdFor(root.taskId, 1),
+      turnNumber: 1,
+      intent: {
+        kind: 'fan_out',
+        children: [
+          { title: 'One too many', goal: 'G', owner: 'worker-1', delegatedTo: 'team:release' },
+          { title: 'Two too many', goal: 'G', owner: 'worker-2' },
+        ],
+      },
+      budgets: workforceBudgetsSchema.parse({ delegation: { maxPerTask: 1 } }),
+    });
+    expect(out.plan?.kind).toBe('delegation_rejected');
+    const rows = (await db.$client.unsafe(
+      `SELECT delegated_to, resolved_owner, status FROM workforce_delegations WHERE parent_task_id = '${root.taskId}' ORDER BY resolved_owner;`,
+    )) as unknown as { delegated_to: string; resolved_owner: string; status: string }[];
+    expect(rows).toEqual([
+      { delegated_to: 'team:release', resolved_owner: 'worker-1', status: 'rejected' },
+      { delegated_to: 'worker-2', resolved_owner: 'worker-2', status: 'rejected' },
+    ]);
+  });
+
+  it('buffered turn messages land as rows AND journal workforce.message.sent without the body', async () => {
+    const root = await driveToWorking(await newRoot());
+    await applyTurnOutcome(tdb(), {
+      taskId: root.taskId,
+      turnId: turnIdFor(root.taskId, 1),
+      turnNumber: 1,
+      intent: { kind: 'complete', result: RESULT },
+      messages: [{ recipient: 'user', body: 'shipping the summary now' }],
+      budgets: NO_BUDGETS,
+    });
+    const rows = await db.$client.unsafe(
+      `SELECT sender, recipient, body FROM workforce_messages WHERE task_id = '${root.taskId}';`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.sender).toBe('coordinator');
+    const events = (await db.$client.unsafe(
+      `SELECT data FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.message.sent';`,
+    )) as unknown as {
+      data: { sender: string; recipient: string; bodyLength: number; body?: string };
+    }[];
+    expect(events).toHaveLength(1);
+    expect(events[0]?.data.recipient).toBe('user');
+    expect(events[0]?.data.bodyLength).toBe('shipping the summary now'.length);
+    expect(events[0]?.data.body).toBeUndefined();
+  });
+
   it('the join wakes the parent exactly once, even when the last two children finish concurrently', async () => {
     const root = await driveToWorking(await newRoot());
     await turn(root.taskId, 1, {

@@ -460,7 +460,10 @@ export async function applyTurnOutcome(
         await tx
           .update(schema.workforceTasks, { joinPolicy: plan.joinPolicy })
           .where(eq(schema.workforceTasks.taskId, task.taskId));
-        for (const [index, spec] of plan.children.entries()) {
+        for (const [index, specWithTarget] of plan.children.entries()) {
+          // The ORIGINAL target rides the delegation record only — the task row's `owner` IS the
+          // resolution, so the target is stripped before the child insert.
+          const { delegatedTo, ...spec } = specWithTarget;
           const child = await insertChildTask(tx, task, input.turnNumber, index, spec);
           const depth = Array.isArray(child.ancestryPath) ? child.ancestryPath.length : 0;
           await tx
@@ -469,7 +472,7 @@ export async function applyTurnOutcome(
               parentTaskId: task.taskId,
               childTaskId: child.taskId,
               delegatedBy: task.owner,
-              delegatedTo: child.owner,
+              delegatedTo: delegatedTo ?? child.owner,
               resolvedOwner: child.owner,
               goal: child.goal,
               expectedOutput: 'worker_result',
@@ -484,7 +487,8 @@ export async function applyTurnOutcome(
                 parentTaskId: task.taskId,
                 childTaskId: child.taskId,
                 delegatedBy: task.owner,
-                delegatedTo: child.owner,
+                delegatedTo: delegatedTo ?? child.owner,
+                resolvedOwner: child.owner,
                 depth,
                 goal: child.goal,
               },
@@ -612,7 +616,7 @@ export async function applyTurnOutcome(
                 parentTaskId: task.taskId,
                 childTaskId,
                 delegatedBy: task.owner,
-                delegatedTo: spec.owner,
+                delegatedTo: spec.delegatedTo ?? spec.owner,
                 resolvedOwner: spec.owner,
                 goal: spec.goal,
                 expectedOutput: 'worker_result',
@@ -628,7 +632,8 @@ export async function applyTurnOutcome(
                   parentTaskId: task.taskId,
                   childTaskId,
                   delegatedBy: task.owner,
-                  delegatedTo: spec.owner,
+                  delegatedTo: spec.delegatedTo ?? spec.owner,
+                  resolvedOwner: spec.owner,
                   reason: plan.reason,
                   detail: plan.detail,
                 },
@@ -653,6 +658,19 @@ export async function applyTurnOutcome(
           recipient: message.recipient,
           body: message.body,
         });
+        // The journal carries WHO wrote to WHOM and HOW MUCH — never the body: a message is
+        // untrusted data addressed to a later turn's context, not operator UX.
+        await appendTaskEvents(tx, task.taskId, [
+          {
+            type: 'workforce.message.sent',
+            payload: {
+              taskId: task.taskId,
+              sender: task.owner,
+              recipient: message.recipient,
+              bodyLength: message.body.length,
+            },
+          },
+        ]);
       }
     }
 

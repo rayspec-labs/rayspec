@@ -53,6 +53,10 @@ export const WORKFORCE_EVENT_TYPES = [
   'workforce.control.paused',
   'workforce.control.resumed',
   'workforce.control.halted',
+  /** A task-scoped message row landed (payload carries WHO and HOW MUCH, never the body). */
+  'workforce.message.sent',
+  /** A turn escalated its task up the reporting line (the caller parks; a fresh task carries it). */
+  'workforce.escalation.raised',
 ] as const;
 
 export type WorkforceEventType = (typeof WORKFORCE_EVENT_TYPES)[number];

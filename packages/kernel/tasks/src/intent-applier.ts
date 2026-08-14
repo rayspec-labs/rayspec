@@ -23,7 +23,7 @@
  *     typed `tool_error` reason and FAILS on the second consecutive offense.
  */
 import { z } from 'zod';
-import { type ChildTaskSpec, childTaskSpecSchema } from './create-task.js';
+import { type DelegationChildSpec, delegationChildSpecSchema } from './create-task.js';
 import { type JoinPolicy, joinPolicySchema } from './join.js';
 
 /** The closed structured-result contract. A result that fails this never completes a task. */
@@ -49,7 +49,7 @@ export const turnIntentSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('complete'), result: workerResultSchema }),
   z.strictObject({
     kind: z.literal('fan_out'),
-    children: z.array(childTaskSpecSchema).min(1),
+    children: z.array(delegationChildSpecSchema).min(1),
     joinPolicy: joinPolicySchema.prefault({ policy: 'all' }),
   }),
   z.strictObject({
@@ -86,7 +86,7 @@ export type TurnPlan =
   | { readonly kind: 'complete'; readonly result: WorkerResult }
   | {
       readonly kind: 'fan_out';
-      readonly children: readonly ReturnType<typeof childTaskSpecSchema.parse>[];
+      readonly children: readonly ReturnType<typeof delegationChildSpecSchema.parse>[];
       readonly joinPolicy: JoinPolicy;
     }
   | {
@@ -186,7 +186,10 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
   }
 }
 
-function rejectFanOut(input: PlanTurnInput, children: readonly ChildTaskSpec[]): TurnPlan | null {
+function rejectFanOut(
+  input: PlanTurnInput,
+  children: readonly DelegationChildSpec[],
+): TurnPlan | null {
   if (input.maxDelegationDepth !== null && input.ancestryDepth + 1 > input.maxDelegationDepth) {
     return {
       kind: 'delegation_rejected',
@@ -207,7 +210,7 @@ function rejectFanOut(input: PlanTurnInput, children: readonly ChildTaskSpec[]):
     };
   }
   for (const child of children) {
-    const owner = childTaskSpecSchema.parse(child).owner;
+    const owner = delegationChildSpecSchema.parse(child).owner;
     if (owner === input.taskOwner) {
       return {
         kind: 'delegation_rejected',
