@@ -4,8 +4,15 @@
  * When a result is submitted, the policy decides whether independent review is REQUIRED before the
  * task may complete — and the decision OVERRIDES whatever the submitting turn asked for. Policy is
  * runtime code over declared rules, never prompt text: a model can neither name its reviewer nor
- * talk its way past a matching rule. Applying the decision (parking the task, dispatching the
+ * talk its way past a rule that MATCHES. Applying the decision (parking the task, dispatching the
  * reviewer, counting rounds) stays with the engine.
+ *
+ * Whether a rule matches is a different question from whether it can be argued with, and the two
+ * `requireWhen` triggers differ there. A `capabilities` rule is matched against the deployed
+ * document and holds unconditionally. A `confidenceBelow` rule is matched against
+ * `ReviewedResult.confidence` — which the SUBMITTER wrote — so a result claiming high confidence
+ * simply does not trip it. That is a heuristic over self-report, useful and not a control; see
+ * `packages/kernel/workforce-tools/src/review-policy.ts` for the full statement of the limitation.
  *
  * The default evaluates the DECLARED rules and is itself the runtime matcher the engine binds —
  * one implementation, not a default and a twin.

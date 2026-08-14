@@ -20,11 +20,27 @@
  * gate-coverage regression copies exactly one script file into a throwaway repo root.
  *
  * HONEST SCOPE / known ceiling: a regex tripwire over trusted-author first-party code, not an AST.
- * It cannot see an import laundered THROUGH an allowed workspace package (those packages carry
- * their own gates), it flags `import type` of a banned engine function name deliberately (nothing
- * needs those types; distinguishing them is not worth the parser), and an opaque dynamic specifier
- * is flagged rather than resolved. The load-bearing defenses behind it are the package manifests
- * (no forbidden dependency is declared), review, and the engine's own claim/receipt checks.
+ * It flags `import type` of a banned engine function name deliberately (nothing needs those types;
+ * distinguishing them is not worth the parser), and an opaque dynamic specifier is flagged rather
+ * than resolved.
+ *
+ * THE EVASIONS IT DOES NOT CATCH, each verified against this detector rather than assumed:
+ *
+ *   1. NAMESPACE IMPORT. `import * as tasks from '@rayspec/tasks'` names an ALLOWED specifier and
+ *      no banned identifier, so `tasks.applyTurnOutcome(...)` passes. Catching it means resolving
+ *      member expressions, i.e. an AST.
+ *   2. STATIC DYNAMIC IMPORT of an allowed package. `(await import('@rayspec/tasks')).applyTransition`
+ *      is the same hole one syntax over; only a NON-static specifier is flagged, and only because
+ *      an unresolvable one cannot be judged at all.
+ *   3. LAUNDERING THROUGH AN ALLOWED PACKAGE. `@rayspec/core`, `@rayspec/db`, `@rayspec/spec` and
+ *      `@rayspec/tasks` are importable, so a write path RE-EXPORTED by any of them arrives under an
+ *      allowed name. `@rayspec/db` is the widest of these — it is the transaction handle's own home
+ *      — and nothing here would see it.
+ *
+ * What actually holds in those three cases is not this gate: it is the package manifests (no
+ * forbidden dependency is declared), the allowed packages' own gates and exports, review, and the
+ * engine's claim/receipt checks — which refuse a turn applied over foreign state whatever imported
+ * the function. This gate's job is to make the OBVIOUS route loud, and it should be read as that.
  */
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, posix, relative } from 'node:path';
@@ -62,6 +78,11 @@ const FORBIDDEN_IMPORT_PREFIXES = [
  */
 const FORBIDDEN_TASKS_IMPORTS = new Set([
   'afterTaskTerminal',
+  // The journal's two writers. A toolset that appended events would be writing the record of work
+  // it did not do — and `appendTaskEvents` allocates its seq by UPDATEing the task row, so it is a
+  // task-row write and a lock acquisition outside the turn's own transaction as well.
+  'appendTaskEvents',
+  'appendWorkforceEvents',
   'applyBudgetExhausted',
   'applyReviewVerdict',
   'applyReviewVerdictInTx',
@@ -338,6 +359,12 @@ function selfTest() {
       expect: true,
     },
     { rel: at('a.ts'), src: "import { cancelTaskCascade } from '@rayspec/tasks';", expect: true },
+    { rel: at('a.ts'), src: "import { appendTaskEvents } from '@rayspec/tasks';", expect: true },
+    {
+      rel: at('a.ts'),
+      src: "import { appendWorkforceEvents } from '@rayspec/tasks';",
+      expect: true,
+    },
     // FIRE: opaque loaders + non-static dynamic specifiers + root-escaping relative imports.
     {
       rel: at('a.ts'),
