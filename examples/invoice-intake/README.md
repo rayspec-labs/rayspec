@@ -79,9 +79,17 @@ RAYSPEC_JWT_SIGNING_KEY="…" RAYSPEC_API_KEY_PEPPER="…" \
 pnpm --filter @rayspec/server serve
 ```
 
-Then register/switch to the tenant, seed `vendor_gl_catalog` rows (including the `unmatched`
-suspense fallback), `PUT /files/{file_id}` an invoice document, `POST /files/{file_id}/submit`, and
-read `GET /invoices/{invoice_ref}` + `GET /invoices`.
+`RAYSPEC_PRODUCT_TENANT_ID` has to name an org that ALREADY exists — the boot fail-closes on an id
+that names no live org — so this deployment cannot create its own tenant, and registering once it is
+up only makes a different org (`POST /v1/orgs/{the deployment's id}/switch` then answers `404`, since
+that account is no member). Get the id first, from an auth-only boot (the command above with no
+`RAYSPEC_SPEC_PATH`): `POST /v1/auth/register` with an `orgName` creates the org as part of the
+registration and returns its id as `activeOrgId`, and the token in that same response is already
+scoped to it, so there is nothing to switch to — the [getting-started walkthrough](../../docs/getting-started.md)
+covers that call; in production provision the org with `rayspec tenant ensure` instead. With that
+token, seed `vendor_gl_catalog` rows (including the `unmatched` suspense fallback),
+`PUT /files/{file_id}` an invoice document, `POST /files/{file_id}/submit`, and read
+`GET /invoices/{invoice_ref}` + `GET /invoices`.
 
 > **LOCAL / trusted posture / NOT internet-facing** — the separate hardening layer (per-tenant
 > sandbox, RLS, KMS-DEK, DPoP) is the gate before any external exposure. Never put this behind a

@@ -859,6 +859,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   blocked; it now lives in `web/dist/app.js` and the page references it. No behaviour changed: the
   policy, the two environment variables and the served headers are exactly as they were.
 
+- **Three example READMEs stop telling the reader to "register/switch to the tenant", which no
+  deployment has ever allowed.** A product deployment binds every principal to
+  `RAYSPEC_PRODUCT_TENANT_ID`, and `POST /v1/orgs/{id}/switch` answers `404` to an account that is no
+  member of that org — while `POST /v1/auth/register` always creates a *different* org, so following
+  the sentence left the reader outside the tenant the demo serves with nothing saying why. The three
+  files needed two different corrections, because the situations differ. In
+  `examples/support-intake-chat/README.md` the dev-boot seeds the org
+  `00000000-0000-4000-8000-000000000043` and no user, and its four `support_catalog` rows are seeded
+  under that tenant alone; the README now walks the shipped path instead — `rayspec tenant ensure`
+  against the demo's own `play_support_chat` database mints an owner invite for that exact org, and
+  `POST /v1/invites/accept` redeems it into an account whose `201` already carries an org-scoped
+  token, so no login and no switch follow. It also states why the `DATABASE_URL` override is
+  load-bearing (the dev-boot ignores `.env`'s value, the CLI does not) and why the invite file has to
+  be deleted and cannot be reused. In `examples/invoice-intake/README.md` and
+  `examples/expense-claim/README.md` there is no seeded org: the recipe already asks for an existing
+  org uuid, so those two now say where one comes from — a `POST /v1/auth/register` carrying an
+  `orgName` returns the new org's id as `activeOrgId` and a token already scoped to it, which is the
+  value `RAYSPEC_PRODUCT_TENANT_ID` wants, and it has to exist *before* the boot because the boot
+  fail-closes on an id that names no live org. **No behaviour changed** — the correction is in the
+  three READMEs, and the platform paths they now describe are the ones that already shipped.
+
 ### Security
 
 - **The transitive `nanoid` copy behind the test runner is raised from 3.3.17 to 3.3.18**
