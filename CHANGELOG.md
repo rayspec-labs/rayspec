@@ -861,12 +861,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Three example READMEs stop telling the reader to "register/switch to the tenant", which no
   deployment has ever allowed.** A deployment cannot create its own tenant — the boot fail-closes on
-  a `RAYSPEC_PRODUCT_TENANT_ID` that names no live org — `POST /v1/auth/register` always creates a
-  *different*, server-generated org, and `POST /v1/orgs/{id}/switch` answers `404` to an account that
-  is no member of the target, so following the sentence left the reader serving their own empty
-  tenant rather than the one the demo seeds, with nothing saying why. The three files needed two
-  different corrections, because the situations differ. In
-  `examples/support-intake-chat/README.md` the dev-boot seeds the org
+  a `RAYSPEC_PRODUCT_TENANT_ID` that names no live org — a `POST /v1/auth/register` carrying an
+  `orgName` creates a *different*, server-generated org (without one it creates no org at all, and
+  the product calls then answer `404`), and `POST /v1/orgs/{id}/switch` answers a bare `404`
+  (`Not found.`) to an account that is no member of the target, so following the sentence left the
+  reader serving their own tenant rather than the one the demo seeds: reads there answer `200` over
+  no data (`GET /tickets` → `{"tickets":[]}`) and a turn is refused `403` with the reason named
+  (`cross_tenant`). The three files needed two different corrections, because the situations
+  differ. In `examples/support-intake-chat/README.md` the dev-boot seeds the org
   `00000000-0000-4000-8000-000000000043` and no user, and its four `support_catalog` rows are seeded
   under that tenant alone; the README now walks the shipped path instead — `rayspec tenant ensure`
   against the demo's own `play_support_chat` database mints an owner invite for that exact org, and

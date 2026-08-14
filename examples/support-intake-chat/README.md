@@ -78,12 +78,14 @@ Stop it with `Ctrl-C`: the wrapper closes the HTTP server, drains the durable wo
 pool, then exits.
 
 The dev-boot seeds the ORG `00000000-0000-4000-8000-000000000043` and no user, so you cannot register
-your way into it: `POST /v1/auth/register` creates a DIFFERENT org (its `activeOrgId` is that new id),
-and `POST /v1/orgs/00000000-0000-4000-8000-000000000043/switch` answers `404` because the caller is no
-member of it. That caller is served their OWN, empty tenant: `PUT /conversations/{id}` and
-`GET /tickets` answer `200` (`{"tickets":[]}`), but `POST /conversations/{id}/turns` is refused
-`403 conversation_event_rejected` — the turn dispatcher is bound to the deployment's tenant, so a
-foreign turn is rejected fail-closed (`cross_tenant`), with no workflow started and no reply. The
+your way into it: a `POST /v1/auth/register` carrying an `orgName` creates a DIFFERENT org (its
+`activeOrgId` is that new id), and `POST /v1/orgs/00000000-0000-4000-8000-000000000043/switch` answers
+`404` because the caller is no member of it. That caller is served their OWN, empty tenant:
+`PUT /conversations/{id}` and `GET /tickets` answer `200` (`{"tickets":[]}`), but
+`POST /conversations/{id}/turns` is refused `403 conversation_event_rejected` — the turn dispatcher is
+bound to the deployment's tenant, so a foreign turn is rejected fail-closed (`cross_tenant`), with no
+workflow started and no reply. Registering WITHOUT an `orgName` gets you less far still: no org is
+created at all (`activeOrgId` comes back `null`) and all three of those calls answer `404`. The
 four `support_catalog` rows are seeded under the seeded tenant alone, so none of the demo's data is
 reachable that way either. Mint an owner invite for the seeded org instead:
 
