@@ -34,8 +34,10 @@ import {
   deliverSignal,
   ensureWorkforceRuntime,
   haltWorkforce,
+  isReservedWorkforceSegment,
   isTaskStatus,
   pauseWorkforce,
+  RESERVED_WORKFORCE_SEGMENTS,
   ReviewAlreadyDecidedError,
   ReviewNotFoundError,
   ReviewTaskStateError,
@@ -83,19 +85,16 @@ const APPROVAL_STATUSES = ['pending', 'approved', 'rejected', 'timed_out', 'esca
 const HTTP_DRAIN_TIMEOUT_MS = 25_000;
 
 /**
- * Path segments this surface spends on its own collections, so they cannot also be workforce ids:
- * `/v1/workforce/tasks/:id` and `/v1/workforce/:workforceId/status` are both four segments, and a
- * workforce called `tasks` would collide with the task route on every request. The `:workforceId`
- * routes are registered FIRST (so `/v1/workforce/tasks/status` resolves as a workforce, not as a
- * task whose id is `status`) and refuse a reserved id here — one clear 400 naming the set, instead
- * of a route silently answering for the wrong resource.
+ * The reserved segments come from the engine (`@rayspec/tasks`), which also refuses them where a
+ * workforce id is MINTED: `/v1/workforce/tasks/:id` and `/v1/workforce/:workforceId/status` are
+ * both four segments, and a workforce called `tasks` would collide with the task route on every
+ * request. The `:workforceId` routes are registered FIRST (so `/v1/workforce/tasks/status` resolves
+ * as a workforce, not as a task whose id is `status`) and refuse a reserved id here — one clear 400
+ * naming the set, instead of a route silently answering for the wrong resource.
  */
-const RESERVED_WORKFORCE_SEGMENTS = ['tasks', 'approvals', 'reviews', 'cost'] as const;
-
 function workforceIdParam(c: Context<AppEnv>): string {
   const workforceId = c.req.param('workforceId') ?? '';
-  const reserved = RESERVED_WORKFORCE_SEGMENTS as readonly string[];
-  if (workforceId.length === 0 || reserved.includes(workforceId)) {
+  if (workforceId.length === 0 || isReservedWorkforceSegment(workforceId)) {
     throw new ApiError(
       'VALIDATION_ERROR',
       'That workforce id is a reserved path segment on this surface.',

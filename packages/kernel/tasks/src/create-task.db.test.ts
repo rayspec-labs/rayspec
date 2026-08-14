@@ -16,6 +16,7 @@ import {
   createRootTaskInputSchema,
 } from './create-task.js';
 import { TaskDependenciesInvalidError } from './errors.js';
+import { RESERVED_WORKFORCE_SEGMENTS } from './runtime.js';
 import {
   forTenant,
   makeTestDb,
@@ -112,6 +113,34 @@ describe.skipIf(!hasDb)('task creation dependencies (db)', () => {
       dependencies: tooMany,
     });
     expect(parsed.success).toBe(false);
+  });
+
+  it('refuses a workforce id that is a reserved path segment — an unreachable workforce is not created', async () => {
+    for (const reserved of RESERVED_WORKFORCE_SEGMENTS) {
+      const parsed = createRootTaskInputSchema.safeParse({
+        workforceId: reserved,
+        title: 'Shadowed',
+        goal: 'g',
+        owner: 'coordinator',
+        requestedBy: 'user',
+      });
+      expect(parsed.success, `workforce id '${reserved}' is refused`).toBe(false);
+    }
+    // The routes refuse these on the `:workforceId` path, so a workforce that carried one could
+    // never be paused, resumed, halted or read — it has to be refused where it is MINTED.
+    await expect(
+      createRootTask(tdb(), {
+        workforceId: 'tasks',
+        title: 'Shadowed',
+        goal: 'Never reachable.',
+        owner: 'coordinator',
+        requestedBy: 'user',
+      }),
+    ).rejects.toThrow();
+    const rows = await db.$client.unsafe(
+      "SELECT count(*)::int AS c FROM workforce_tasks WHERE title = 'Shadowed';",
+    );
+    expect(rows[0]?.c).toBe(0);
   });
 
   it('accepts a resolvable list and parks nothing at creation', async () => {

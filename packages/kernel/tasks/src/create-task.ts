@@ -19,6 +19,7 @@ import type { TaskRecord } from './apply-transition.js';
 import { TaskDependenciesInvalidError } from './errors.js';
 import { appendTaskEvents } from './events.js';
 import { deterministicChildTaskId, newRootTaskId } from './ids.js';
+import { isReservedWorkforceSegment, RESERVED_WORKFORCE_SEGMENTS } from './runtime.js';
 
 export const TASK_PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const;
 
@@ -43,9 +44,27 @@ const dependenciesSchema = z
   .default([])
   .transform((ids) => [...new Set(ids)]);
 
+/**
+ * The workforce a task is minted into. A RESERVED path segment is refused here, not only at the
+ * routes: a workforce created as `tasks` collides with the task collection on every control and
+ * read route, so it can never be paused, resumed, halted or queried — a row that is born
+ * unreachable, which is a creation-time refusal and not an operator's problem to discover later.
+ */
+const workforceIdSchema = z
+  .string()
+  .min(1)
+  .nullable()
+  .default(null)
+  .refine((id) => id === null || !isReservedWorkforceSegment(id), {
+    message:
+      `a workforce id may not be one of ${RESERVED_WORKFORCE_SEGMENTS.join(', ')} — those path ` +
+      "segments belong to the workforce surface's own collections, and a workforce carrying one " +
+      'would be unreachable for control and reads. Fail-closed.',
+  });
+
 /** Strict creation surface for a ROOT task (no parent; the task anchors its own subtree). */
 export const createRootTaskInputSchema = z.strictObject({
-  workforceId: z.string().min(1).nullable().default(null),
+  workforceId: workforceIdSchema,
   title: z.string().min(1).max(200),
   goal: z.string().min(1),
   description: z.string().min(1).nullable().default(null),

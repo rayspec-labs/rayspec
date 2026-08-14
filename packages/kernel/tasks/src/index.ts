@@ -117,6 +117,8 @@ export {
 } from './reviews.js';
 export {
   ensureWorkforceRuntime,
+  isReservedWorkforceSegment,
+  RESERVED_WORKFORCE_SEGMENTS,
   readWorkforceRuntime,
   type WorkforceRuntimeRecord,
 } from './runtime.js';

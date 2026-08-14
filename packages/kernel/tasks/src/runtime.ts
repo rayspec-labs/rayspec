@@ -11,6 +11,20 @@ import { WorkforceUnknownError } from './errors.js';
 
 export type WorkforceRuntimeRecord = typeof schema.workforceRuntime.$inferSelect;
 
+/**
+ * Workforce ids the HTTP surface spends on its own collections, so a workforce may not carry one:
+ * `/v1/workforce/tasks/:id` and `/v1/workforce/:workforceId/status` are the same shape, and a
+ * workforce called `tasks` would answer for the wrong resource. The routes refuse these on the
+ * `:workforceId` path — but a refusal at the READ side only produces a workforce that exists and is
+ * permanently un-pausable and un-queryable, so the set lives HERE, beside the runtime row, and
+ * binds at the one place a workforce id is minted (create-task.ts) as well as at the edge.
+ */
+export const RESERVED_WORKFORCE_SEGMENTS = ['tasks', 'approvals', 'reviews', 'cost'] as const;
+
+export function isReservedWorkforceSegment(workforceId: string): boolean {
+  return (RESERVED_WORKFORCE_SEGMENTS as readonly string[]).includes(workforceId);
+}
+
 /** Read the runtime row; a workforce nobody initialized is a typed refusal. */
 export async function readWorkforceRuntime(
   tdb: TenantDb,
