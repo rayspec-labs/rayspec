@@ -64,6 +64,7 @@ import {
   isTerminalStatus,
   type MergedChildResult,
   mergeChildResults,
+  releaseTurnReservation,
   resolveWorkforceBudgets,
   sweepApprovalTimeouts,
   type TaskRecord,
@@ -505,6 +506,12 @@ export class DbosTaskScheduler {
    * effect-free and the receipt guards double application, so a fresh dispatch of the same turn is
    * safe). A LIVE turn is never touched, however long it runs — nothing is killed mid-flight.
    * Deterministic seam for tests.
+   *
+   * A reap also RELEASES the dead claim's budget reservation, in the same transaction as the
+   * re-queue: `settleTurn` is the only other release and it runs from the turn's final transaction,
+   * which this turn never reached. The un-windowed `task`/`root` scopes never roll over, so an
+   * unreleased estimate is permanent — enough reaps and the task is denied at a ceiling it has
+   * spent nothing against.
    */
   async runSweep(): Promise<ApprovalSweepOutcome & { reaped: string[] }> {
     if (!(await this.#deps.tenantExists(this.#deps.tenantId))) {
@@ -534,13 +541,35 @@ export class DbosTaskScheduler {
         const live =
           status !== null && (status.status === 'PENDING' || status.status === 'ENQUEUED');
         if (live) continue;
-        await applyTransition(tdb, {
-          taskId: task.taskId,
-          expectedVersion: task.version,
-          to: 'queued',
-          reason: 'tool_error',
-          actor: 'scheduler',
-          queueReason: 'turn_reaped',
+        await tdb.transaction(async (tx) => {
+          // Lock rank (see #claimTurn): runtime row, then the task row, then the ledger rows.
+          const budgets =
+            task.workforceId !== null
+              ? resolveWorkforceBudgets(
+                  (await ensureWorkforceRuntime(tx, task.workforceId)).budgets,
+                  task.workforceId,
+                )
+              : EMPTY_BUDGETS;
+          await applyTransition(tx, {
+            taskId: task.taskId,
+            expectedVersion: task.version,
+            to: 'queued',
+            reason: 'tool_error',
+            actor: 'scheduler',
+            queueReason: 'turn_reaped',
+          });
+          await releaseTurnReservation(
+            tx,
+            budgets,
+            {
+              taskId: task.taskId,
+              rootTaskId: task.rootTaskId,
+              workforceId: task.workforceId,
+              department: task.department,
+              estimateUsd: budgets.execution.estimateUsdPerTurn,
+            },
+            this.#now(),
+          );
         });
         reaped.push(task.taskId);
         this.#logger.warn(

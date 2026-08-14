@@ -34,6 +34,7 @@ export {
   EPOCH_WINDOW_START,
   LedgerCostPolicy,
   ledgerScopesFor,
+  releaseTurnReservation,
   resolveWorkforceBudgets,
   settleTurn,
   type WorkforceBudgets,

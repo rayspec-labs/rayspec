@@ -26,6 +26,9 @@
  * aborted, the overrun lands in `settled_usd`, and the NEXT authorize sees consumed > ceiling and
  * denies — counted exactly once, never silently truncated.
  *
+ * `releaseTurnReservation` is the settle-less counterpart for a turn that never reaches its final
+ * transaction at all (the sweep's reaper): the reservation goes back, nothing is settled.
+ *
  * Windows are calendar buckets (UTC hour/day/week) keyed by `window_start`; the un-windowed scopes
  * (task, root) use the epoch sentinel so the UNIQUE scope key stays total.
  */
@@ -270,7 +273,16 @@ class DenialRollback extends Error {
   }
 }
 
-/** Bound wait for a contended ledger row, so a wedged holder surfaces instead of hanging dispatch. */
+/**
+ * Bound wait for a contended ledger row, so a wedged holder surfaces instead of hanging dispatch.
+ *
+ * The seam sets it with `set_config('lock_timeout', …, is_local := true)`. When `authorizeTurn`
+ * runs NESTED (the dispatcher's claim transaction calls it, so the "transaction" is a SAVEPOINT),
+ * a RELEASED savepoint keeps the setting: the bound stays in force for the remainder of the
+ * enclosing claim. That is deliberate, not a leak — the claim's remaining statements touch the rows
+ * this bound already covers, and a claim that hangs on a lock is exactly what the bound exists to
+ * surface. A DENIED authorize rolls its savepoint back and the setting goes with it.
+ */
 const AUTHORIZE_LOCK_TIMEOUT_MS = 5_000;
 
 /**
@@ -350,6 +362,13 @@ class ProbeRollback extends Error {
  * mutates the ledger — the caller decides what the verdict means (a denied fan-out blocks the
  * parent with the typed reason; it never opens the children). Callable mid-transaction: the
  * savepoint nests inside the caller's transaction.
+ *
+ * The verdict is ADVISORY, and deliberately so: the rollback that undoes the probe's writes also
+ * releases the row locks it took, so between this verdict and whatever the caller does with it a
+ * concurrent authorize may consume the headroom the probe just saw. An `allowed` probe is "the
+ * ceilings had room a moment ago", never a reservation — the enforcement that cannot be raced is
+ * `authorizeTurn`, which locks, checks and reserves in one transaction. A fan-out reads the probe
+ * as a fail-closed pre-check on opening N children whose OWN dispatches each authorize for real.
  */
 export async function probeSpend(
   tdb: TenantDb,
@@ -432,6 +451,44 @@ export async function settleTurn(
       .update(schema.workforceBudgetLedger, {
         reservedUsd: sql`greatest(${schema.workforceBudgetLedger.reservedUsd} - ${String(settled.estimateUsd)}, 0)`,
         settledUsd: sql`${schema.workforceBudgetLedger.settledUsd} + ${String(settled.actualUsd)}`,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.workforceBudgetLedger.scopeKind, scope.scopeKind),
+          eq(schema.workforceBudgetLedger.scopeId, scope.scopeId),
+          eq(schema.workforceBudgetLedger.windowStart, scope.windowStart),
+        ),
+      );
+  }
+}
+
+/**
+ * Give ONE dispatched turn's reservation back without settling anything — for a turn that never
+ * reaches its final transaction. `settleTurn` is the only other release, and it runs from
+ * `applyTurnOutcome`; a turn whose workflow died never gets there, so without this the estimate the
+ * claim reserved would sit in the ledger forever. The `task` and `root` scopes are keyed on the
+ * epoch sentinel and never roll over, so a stranded estimate is permanent: enough reaps and the
+ * task is denied at a ceiling it has spent nothing against.
+ *
+ * Walks the same canonical scope order under the same lock discipline (the caller holds the task
+ * row first), floors at zero, and leaves `settled_turns` alone — a DISPATCHED turn is a spent turn,
+ * exactly as `authorizeTurn` counts it, and the reaped turn did occupy a dispatch slot. Same
+ * WINDOW-BOUNDARY honesty as `settleTurn`: scopes come from the release-time clock, so a release
+ * that crosses a boundary works the CURRENT bucket while the reservation sits in the old one — a
+ * phantom reservation in a past bucket can never deny a future turn.
+ */
+export async function releaseTurnReservation(
+  tx: TenantDb,
+  budgets: WorkforceBudgets,
+  proposed: ProposedExecution,
+  now: Date = new Date(),
+): Promise<void> {
+  for (const scope of ledgerScopesFor(proposed, budgets, now)) {
+    await lockLedgerRow(tx, scope);
+    await tx
+      .update(schema.workforceBudgetLedger, {
+        reservedUsd: sql`greatest(${schema.workforceBudgetLedger.reservedUsd} - ${String(proposed.estimateUsd)}, 0)`,
         updatedAt: sql`now()`,
       })
       .where(

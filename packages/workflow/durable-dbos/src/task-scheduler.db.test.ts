@@ -114,6 +114,14 @@ async function taskRow(taskId: string): Promise<Record<string, unknown>> {
   return rows[0] as Record<string, unknown>;
 }
 
+/** What the task's OWN ledger scope currently holds reserved (0 when it has no row yet). */
+async function reservedUsd(taskId: string): Promise<number> {
+  const rows = await db.$client.unsafe(
+    `SELECT reserved_usd FROM workforce_budget_ledger WHERE scope_kind = 'task' AND scope_id = '${taskId}';`,
+  );
+  return Number(rows[0]?.reserved_usd ?? 0);
+}
+
 /** Pump reserve passes until the predicate holds (the deterministic stand-in for the cron tick). */
 async function pumpUntil(predicate: () => Promise<boolean>, ms = 20_000): Promise<void> {
   const deadline = Date.now() + ms;
@@ -514,5 +522,53 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
     expect(reQueued[0]?.c).toBe(1);
     // The reclaimed slot is real: the next passes dispatch a fresh turn and the task completes.
     await pumpUntil(async () => (await taskRow(root.taskId)).status === 'completed');
+  });
+
+  it('reaping a REAL claim gives its budget reservation back — nothing is stranded in the ledger', async () => {
+    // The turn that dies mid-flight holds the gate; the fresh dispatch after the reap does not.
+    let releaseDeadTurn: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      releaseDeadTurn = resolve;
+    });
+    let dispatches = 0;
+    handlers.set('solo', async () => {
+      if (++dispatches === 1) await held;
+      return {
+        intent: { kind: 'complete', result: { status: 'completed', summary: 'ok', confidence: 1 } },
+      };
+    });
+    await ensureWorkforceRuntime(tdb(), 'wf', { execution: { estimateUsdPerTurn: 0.25 } });
+    const root = await newRoot('solo');
+    await pumpUntil(async () => (await taskRow(root.taskId)).status === 'working');
+
+    // The claim reserved for real, over the canonical scope set.
+    expect(await reservedUsd(root.taskId)).toBe(0.25);
+    const claim = await db.$client.unsafe(
+      `SELECT turn_id FROM workforce_task_transitions WHERE task_id = '${root.taskId}' AND to_status = 'working';`,
+    );
+    const turnId = claim[0]?.turn_id as string;
+
+    // Kill the claimed workflow: the engine now reports it terminal, which is what the reaper acts
+    // on — the turn's final transaction (the only other release) never runs.
+    await DBOS.cancelWorkflow(turnId);
+    const swept = await scheduler.runSweep();
+    expect(swept.reaped).toContain(root.taskId);
+    expect((await taskRow(root.taskId)).status).toBe('queued');
+    // Before the reap released it, every reap stranded one estimate in a scope that never rolls
+    // over — enough of them and the task is denied at a ceiling it has spent nothing against.
+    expect(await reservedUsd(root.taskId)).toBe(0);
+    const rootScope = await db.$client.unsafe(
+      `SELECT reserved_usd FROM workforce_budget_ledger WHERE scope_kind = 'root' AND scope_id = '${root.taskId}';`,
+    );
+    expect(Number(rootScope[0]?.reserved_usd)).toBe(0);
+    // A dispatched turn stays a spent turn: the reap gives back money, never a turn count.
+    const turns = await db.$client.unsafe(
+      `SELECT settled_turns FROM workforce_budget_ledger WHERE scope_kind = 'task' AND scope_id = '${root.taskId}';`,
+    );
+    expect(turns[0]?.settled_turns).toBe(1);
+
+    releaseDeadTurn();
+    await pumpUntil(async () => (await taskRow(root.taskId)).status === 'completed');
+    expect(await reservedUsd(root.taskId)).toBe(0);
   });
 });
