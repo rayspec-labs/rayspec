@@ -48,6 +48,23 @@ export class TaskRowCorruptError extends Error {
   }
 }
 
+/**
+ * A declared dependency can never be satisfied — it names no task under this tenant, or it names
+ * the task being created. Refused at creation rather than parked forever with nobody to wake it.
+ */
+export class TaskDependenciesInvalidError extends Error {
+  readonly dependencies: readonly string[];
+  constructor(detail: string, dependencies: readonly string[]) {
+    super(
+      `task dependencies cannot be satisfied (${detail}) — a dependency names a task that must ` +
+        'reach `completed`, so an unresolvable one is a creation-time refusal, never a silent ' +
+        'wait. Fail-closed.',
+    );
+    this.name = 'TaskDependenciesInvalidError';
+    this.dependencies = dependencies;
+  }
+}
+
 /** The stored budgets declaration fails the strict schema — refuse to enforce a guess. */
 export class WorkforceBudgetsInvalidError extends Error {
   readonly workforceId: string;

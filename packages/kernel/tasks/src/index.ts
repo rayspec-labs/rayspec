@@ -55,14 +55,17 @@ export {
 export {
   type ChildTaskSpec,
   type CreateRootTaskInput,
+  assertDependenciesResolvable,
   childTaskSpecSchema,
   createRootTask,
   createRootTaskInputSchema,
   insertChildTask,
+  MAX_TASK_DEPENDENCIES,
   TASK_PRIORITIES,
   type TaskPriority,
 } from './create-task.js';
 export {
+  TaskDependenciesInvalidError,
   TaskNotFoundError,
   TaskRowCorruptError,
   TaskVersionConflictError,

@@ -54,6 +54,8 @@ export function isTerminalStatus(status: TaskStatus): status is TerminalStatus {
 export const STATUS_REASONS = [
   'awaiting_children',
   'awaiting_dependency',
+  /** A declared dependency ended terminal without completing — the wait can never be satisfied. */
+  'dependency_failed',
   'escalated',
   'budget_exhausted',
   'deadline_exceeded',
@@ -77,7 +79,8 @@ type TransitionRow = Readonly<Record<TaskStatus, boolean>>;
  *
  *   planned → queued        dependencies met and dispatchable
  *   planned → blocked       unmet dependencies (`awaiting_dependency`)
- *   planned → failed        creation-time validation failure
+ *   planned → failed        creation-time validation failure; a decided dependency
+ *                           (`dependency_failed`)
  *   planned → cancelled     cancelled before ever dispatching
  *   queued  → working       scheduler dispatch — THE one door into execution
  *   queued  → blocked       dispatch-boundary denial (`budget_exhausted`, `deadline_exceeded`)
@@ -92,7 +95,7 @@ type TransitionRow = Readonly<Record<TaskStatus, boolean>>;
  *   working → cancelled     a cancel signal absorbed at the turn boundary
  *   blocked → queued        any wake signal
  *   blocked → waiting_for_user     escalation to a human (incl. block-and-escalate exhaustion)
- *   blocked → failed        an enforced fate (e.g. quarantine retry budget spent)
+ *   blocked → failed        an enforced fate (quarantine retry budget spent; `dependency_failed`)
  *   blocked → cancelled     cancel cascade
  *   waiting_for_review → queued    reviewer rejected and the policy says rework
  *   waiting_for_review → blocked   the review round itself hit a ceiling
@@ -217,6 +220,7 @@ export const ALLOWED_TRANSITIONS: Readonly<Record<TaskStatus, TransitionRow>> = 
 export const REASON_RULES: Readonly<Record<StatusReason, readonly TaskStatus[]>> = Object.freeze({
   awaiting_children: ['blocked'],
   awaiting_dependency: ['blocked'],
+  dependency_failed: ['failed'],
   escalated: ['blocked'],
   budget_exhausted: ['blocked'],
   deadline_exceeded: ['blocked'],

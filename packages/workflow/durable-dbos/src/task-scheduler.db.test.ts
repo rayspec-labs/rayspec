@@ -524,6 +524,34 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
     await pumpUntil(async () => (await taskRow(root.taskId)).status === 'completed');
   });
 
+  it('a dependency that FAILS decides the dependent: failed with the typed reason, not parked forever', async () => {
+    handlers.set('doomed', async () => ({
+      intent: { kind: 'fail', message: 'the prerequisite could not be produced' },
+    }));
+    handlers.set('waiter', async () => ({
+      intent: { kind: 'complete', result: { status: 'completed', summary: 'ok', confidence: 1 } },
+    }));
+    const prerequisite = await newRoot('doomed');
+    const dependent = await newRoot('waiter', { dependencies: [prerequisite.taskId] });
+
+    // The dependent parks on the dependency while the prerequisite runs…
+    await pumpUntil(async () => (await taskRow(dependent.taskId)).status === 'blocked');
+    expect((await taskRow(dependent.taskId)).status_reason).toBe('awaiting_dependency');
+    await pumpUntil(async () => (await taskRow(prerequisite.taskId)).status === 'failed');
+
+    // …and once the prerequisite's outcome is DECIDED, so is the dependent's. Nothing else ever
+    // revisits this park, so waiting on a failed dependency is waiting forever.
+    await pumpUntil(async () => (await taskRow(dependent.taskId)).status === 'failed');
+    const row = await taskRow(dependent.taskId);
+    expect(row.status_reason).toBe('dependency_failed');
+    const journal = await db.$client.unsafe(
+      `SELECT data FROM run_events WHERE run_id = '${dependent.taskId}' AND type = 'workforce.task.dependency_failed';`,
+    );
+    expect(journal).toHaveLength(1);
+    expect((journal[0]?.data as { dependencies: { taskId: string; status: string }[] }).dependencies)
+      .toEqual([{ taskId: prerequisite.taskId, status: 'failed' }]);
+  });
+
   it('reaping a REAL claim gives its budget reservation back — nothing is stranded in the ledger', async () => {
     // The turn that dies mid-flight holds the gate; the fresh dispatch after the reap does not.
     let releaseDeadTurn: () => void = () => {};

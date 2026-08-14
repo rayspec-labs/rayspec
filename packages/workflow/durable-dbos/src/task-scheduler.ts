@@ -176,6 +176,15 @@ const PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, normal: 2, l
 
 const EMPTY_BUDGETS = workforceBudgetsSchema.parse({});
 
+/**
+ * Where a task's declared dependencies stand. `decided` means at least one can never complete —
+ * the dependent gets a typed failure rather than an unanswerable park.
+ */
+type DependencyVerdict =
+  | { readonly kind: 'satisfied' }
+  | { readonly kind: 'pending' }
+  | { readonly kind: 'decided'; readonly blockers: { taskId: string; status: string }[] };
+
 /** Thrown inside the claim transaction to roll a denied authorization back; never escapes. */
 class ClaimDenied extends Error {
   readonly denial: { scopeKind: string; scopeId: string; ceiling: unknown; consumed: number };
@@ -440,9 +449,12 @@ export class DbosTaskScheduler {
       .where(eq(schema.workforceTasks.status, 'planned'))) as TaskRecord[];
     for (const task of planned) {
       try {
-        const deps = Array.isArray(task.dependencies) ? (task.dependencies as string[]) : [];
-        const satisfied = await this.#dependenciesCompleted(tdb, deps);
-        if (satisfied) {
+        const verdict = await this.#dependencyVerdict(tdb, task);
+        if (verdict.kind === 'decided') {
+          await this.#failOnDecidedDependency(tdb, task, verdict.blockers);
+          continue;
+        }
+        if (verdict.kind === 'satisfied') {
           await applyTransition(tdb, {
             taskId: task.taskId,
             expectedVersion: task.version,
@@ -467,7 +479,11 @@ export class DbosTaskScheduler {
     }
   }
 
-  /** Wake blocked(awaiting_dependency) rows whose dependencies have since completed. */
+  /**
+   * Wake blocked(awaiting_dependency) rows whose dependencies have since completed — and DECIDE the
+   * ones whose dependencies ended terminal without completing, because nothing else ever revisits
+   * this park.
+   */
   async #wakeDependencySatisfied(tdb: TenantDb): Promise<void> {
     const parked = (await tdb
       .select(schema.workforceTasks)
@@ -478,23 +494,92 @@ export class DbosTaskScheduler {
         ),
       )) as TaskRecord[];
     for (const task of parked) {
-      const deps = Array.isArray(task.dependencies) ? (task.dependencies as string[]) : [];
-      if (!(await this.#dependenciesCompleted(tdb, deps))) continue;
-      await deliverSignal(tdb, {
-        taskId: task.taskId,
-        kind: 'dependency_completed',
-        signalKey: `deps:${task.taskId}`,
-        actor: 'scheduler',
-      });
+      try {
+        const verdict = await this.#dependencyVerdict(tdb, task);
+        if (verdict.kind === 'decided') {
+          await this.#failOnDecidedDependency(tdb, task, verdict.blockers);
+          continue;
+        }
+        if (verdict.kind !== 'satisfied') continue;
+        await deliverSignal(tdb, {
+          taskId: task.taskId,
+          kind: 'dependency_completed',
+          signalKey: `deps:${task.taskId}`,
+          actor: 'scheduler',
+        });
+      } catch (err) {
+        if (!(err instanceof TaskVersionConflictError)) {
+          this.#logger.error(`[workforce] dependency wake ${task.taskId} errored: ${String(err)}`);
+        }
+      }
     }
   }
 
-  async #dependenciesCompleted(tdb: TenantDb, deps: readonly string[]): Promise<boolean> {
-    if (deps.length === 0) return true;
+  /**
+   * Resolve a task's declared dependencies. `decided` is the outcome the park had no answer for: a
+   * dependency that is TERMINAL but not `completed` (or that no longer exists) can never satisfy
+   * the wait, so it is a decision, not a delay. Membership is checked per unique id against the
+   * rows found, never by counting them — a list carrying the same id twice used to be permanently
+   * unsatisfiable under a `rows.length === deps.length` comparison.
+   */
+  async #dependencyVerdict(tdb: TenantDb, task: TaskRecord): Promise<DependencyVerdict> {
+    const declared = Array.isArray(task.dependencies) ? (task.dependencies as string[]) : [];
+    const deps = [...new Set(declared)];
+    if (deps.length === 0) return { kind: 'satisfied' };
     const rows = (await tdb
       .select(schema.workforceTasks)
-      .where(inArray(schema.workforceTasks.taskId, [...deps]))) as TaskRecord[];
-    return rows.length === deps.length && rows.every((r) => r.status === 'completed');
+      .where(inArray(schema.workforceTasks.taskId, deps))) as TaskRecord[];
+    const byId = new Map(rows.map((r) => [r.taskId, r]));
+    const blockers: { taskId: string; status: string }[] = [];
+    let waiting = false;
+    for (const id of deps) {
+      const dep = byId.get(id);
+      if (!dep) {
+        // Creation refuses an unknown id, so a missing row here means the dependency is gone for
+        // good — a decision, not something to keep waiting on.
+        blockers.push({ taskId: id, status: 'absent' });
+      } else if (dep.status === 'completed') {
+        continue;
+      } else if (isTaskStatus(dep.status) && isTerminalStatus(dep.status)) {
+        blockers.push({ taskId: id, status: dep.status });
+      } else {
+        waiting = true;
+      }
+    }
+    if (blockers.length > 0) return { kind: 'decided', blockers };
+    return waiting ? { kind: 'pending' } : { kind: 'satisfied' };
+  }
+
+  /**
+   * A dependency's outcome is decided and it is not `completed`: fail the dependent with the typed
+   * reason and journal what decided it. The alternative is the defect this replaces — a task in
+   * `blocked(awaiting_dependency)` with nobody left who could ever wake it.
+   */
+  async #failOnDecidedDependency(
+    tdb: TenantDb,
+    task: TaskRecord,
+    blockers: readonly { taskId: string; status: string }[],
+  ): Promise<void> {
+    await tdb.transaction(async (tx) => {
+      await appendTaskEvents(tx, task.taskId, [
+        {
+          type: 'workforce.task.dependency_failed',
+          payload: { taskId: task.taskId, dependencies: blockers },
+        },
+      ]);
+      await applyTransition(tx, {
+        taskId: task.taskId,
+        expectedVersion: task.version,
+        to: 'failed',
+        reason: 'dependency_failed',
+        actor: 'scheduler',
+      });
+    });
+    this.#logger.warn(
+      `[workforce] task ${task.taskId} failed: dependency ${blockers
+        .map((b) => `${b.taskId} (${b.status})`)
+        .join(', ')} ended without completing.`,
+    );
   }
 
   /**

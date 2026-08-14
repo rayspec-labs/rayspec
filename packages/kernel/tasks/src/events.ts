@@ -37,6 +37,7 @@ export const WORKFORCE_EVENT_TYPES = [
   'workforce.task.completed',
   'workforce.task.failed',
   'workforce.task.cancelled',
+  'workforce.task.dependency_failed',
   'workforce.approval.requested',
   'workforce.approval.decided',
   'workforce.approval.timed_out',

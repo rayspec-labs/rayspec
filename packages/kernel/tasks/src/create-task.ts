@@ -13,14 +13,35 @@
  */
 
 import { schema, type TenantDb } from '@rayspec/db';
+import { inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import type { TaskRecord } from './apply-transition.js';
+import { TaskDependenciesInvalidError } from './errors.js';
 import { appendTaskEvents } from './events.js';
 import { deterministicChildTaskId, newRootTaskId } from './ids.js';
 
 export const TASK_PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const;
 
 export type TaskPriority = (typeof TASK_PRIORITIES)[number];
+
+/**
+ * How many prerequisites one task may declare. A bound, not a policy: the scheduler resolves the
+ * whole list on every pass, so an unbounded one is an unbounded read.
+ */
+export const MAX_TASK_DEPENDENCIES = 100;
+
+/**
+ * Declared prerequisites: task ids that must reach `completed` before this task leaves `planned`.
+ * DEDUPED at parse — a repeated id is one prerequisite, and the scheduler's old count-based
+ * satisfaction check (`rows.length === deps.length`) could never be met by `["A", "A"]`, so the
+ * task waited on a completed dependency forever. Existence and self-reference are checked against
+ * the rows at creation (`assertDependenciesResolvable`), which a schema cannot do.
+ */
+const dependenciesSchema = z
+  .array(z.string().min(1).max(200))
+  .max(MAX_TASK_DEPENDENCIES)
+  .default([])
+  .transform((ids) => [...new Set(ids)]);
 
 /** Strict creation surface for a ROOT task (no parent; the task anchors its own subtree). */
 export const createRootTaskInputSchema = z.strictObject({
@@ -32,7 +53,7 @@ export const createRootTaskInputSchema = z.strictObject({
   requestedBy: z.string().min(1),
   department: z.string().min(1).nullable().default(null),
   priority: z.enum(TASK_PRIORITIES).default('normal'),
-  dependencies: z.array(z.string().min(1)).default([]),
+  dependencies: dependenciesSchema,
   deadlineAt: z.date().nullable().default(null),
 });
 
@@ -83,6 +104,34 @@ async function insertTaskRow(
   return task;
 }
 
+/**
+ * The rule every task-creation surface applies to a declared dependency list: each id must name a
+ * task that EXISTS under this tenant and is not the task being created. Nothing else ever revisits
+ * a `blocked(awaiting_dependency)` park with an answer, so an id nobody can complete is a task
+ * parked forever — refused here instead. Runs inside the creating transaction, against the rows.
+ */
+export async function assertDependenciesResolvable(
+  tx: TenantDb,
+  taskId: string,
+  dependencies: readonly string[],
+): Promise<void> {
+  if (dependencies.length === 0) return;
+  if (dependencies.includes(taskId)) {
+    throw new TaskDependenciesInvalidError(`task '${taskId}' depends on itself`, dependencies);
+  }
+  const rows = await tx
+    .select(schema.workforceTasks, { taskId: schema.workforceTasks.taskId })
+    .where(inArray(schema.workforceTasks.taskId, [...dependencies]));
+  const present = new Set(rows.map((r) => (r as { taskId: string }).taskId));
+  const unknown = dependencies.filter((id) => !present.has(id));
+  if (unknown.length > 0) {
+    throw new TaskDependenciesInvalidError(
+      `no task under this tenant matches ${unknown.map((id) => `'${id}'`).join(', ')}`,
+      dependencies,
+    );
+  }
+}
+
 /** Create a root task in `planned` and journal its creation. */
 export async function createRootTask(
   tdb: TenantDb,
@@ -90,8 +139,9 @@ export async function createRootTask(
 ): Promise<TaskRecord> {
   const parsed = createRootTaskInputSchema.parse(input);
   const taskId = newRootTaskId();
-  return tdb.transaction(async (tx) =>
-    insertTaskRow(tx, {
+  return tdb.transaction(async (tx) => {
+    await assertDependenciesResolvable(tx, taskId, parsed.dependencies);
+    return insertTaskRow(tx, {
       taskId,
       workforceId: parsed.workforceId,
       parentTaskId: null,
@@ -106,8 +156,8 @@ export async function createRootTask(
       priority: parsed.priority,
       dependencies: parsed.dependencies,
       deadlineAt: parsed.deadlineAt,
-    }),
-  );
+    });
+  });
 }
 
 /**
