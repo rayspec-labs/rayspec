@@ -14,6 +14,9 @@
  *     the run's `enqueued` header — tenant-stamped, carrying the resolved backend/agent/model —
  *     BEFORE the executor enqueue (the stub probes the table AT enqueue time), so the runId the fire
  *     surface hands back resolves immediately, exactly like the async-run 202's id.
+ *  2b. BOTH ARMS OF THE SHARED PATH: the write sits in the shared `#fire`, keyed on nothing about how
+ *     the fire arrived — so a SCHEDULED cron tick (`fireScheduled`, the body the registered DBOS
+ *     scheduled-workflow runs) writes the same header as an on-demand fire.
  *  3. NO runId WHERE THERE IS NO RUN: a handler-action fire reports `{ fired: true }` with NO runId
  *     key and writes NO header; a deduped no-op reports `{ fired: false }` with NO runId key and
  *     enqueues nothing new (accept controls — today's shapes stay byte-identical).
@@ -130,6 +133,14 @@ function manualAgentDescriptor(name: string, agentId = 'digest-agent'): TriggerD
   return { name, kind: 'manual', action: { kind: 'agent', agentId } };
 }
 
+/**
+ * A CRON→agent descriptor — the SCHEDULED arm. `fireScheduled` runs the body DBOS's schedule loop
+ * runs (`#fire(..., { fromSchedule: true })`), which is the same shared path a manual fire takes.
+ */
+function cronAgentDescriptor(name: string, agentId = 'digest-agent'): TriggerDescriptor {
+  return { name, kind: 'cron', schedule: '0 3 * * *', action: { kind: 'agent', agentId } };
+}
+
 /** A MANUAL→handler descriptor — dispatches in-process; there is never a run to follow. */
 function manualHandlerDescriptor(name: string): TriggerDescriptor {
   return {
@@ -169,7 +180,11 @@ async function headerRow(
 /** Build a scheduler over the stub; `withResolver` toggles the pre-enqueue-header seam. */
 function makeScheduler(withResolver: boolean): DbosCronScheduler {
   return new DbosCronScheduler(
-    [manualAgentDescriptor('manual-agent'), manualHandlerDescriptor('manual-digest')],
+    [
+      manualAgentDescriptor('manual-agent'),
+      manualHandlerDescriptor('manual-digest'),
+      cronAgentDescriptor('cron-agent'),
+    ],
     {
       db,
       tenantId: TENANT,
@@ -220,7 +235,7 @@ function makeSchedulerOver(
 }
 
 describe.skipIf(!hasDb)(
-  'the manual fire surfaces the enqueued runId + writes the header first',
+  'the fire surface hands back the enqueued runId + writes the header first (manual AND scheduled)',
   () => {
     beforeAll(async () => {
       const url = process.env.DATABASE_URL as string;
@@ -259,6 +274,33 @@ describe.skipIf(!hasDb)(
       expect(stub.enqueued[0]?.headerRowsAtEnqueue).toBe(1);
 
       // The header carries the resolved identity, the `enqueued` status, and the firing tenant.
+      const rows = await headerRow(runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual({
+        tenant_id: TENANT,
+        backend: 'openai',
+        agent_name: 'digest',
+        model: 'gpt-4o-mini',
+        status: 'enqueued',
+      });
+    });
+
+    it('SCHEDULED cron fire: the same shared path writes the header too (not a manual-fire-only write)', async () => {
+      const scheduler = makeScheduler(true);
+      const instant = new Date('2026-06-24T03:00:00.000Z');
+      const runId = cronRunId('cron-agent', instant);
+
+      // `fireScheduled` IS the body the registered DBOS scheduled-workflow runs — the header write
+      // sits in the shared `#fire`, below the reserve and above the enqueue, with nothing keyed on
+      // how the fire arrived. So a scheduled tick's run id resolves as `enqueued` from the first
+      // instant, exactly like a manual fire's and an async run's, instead of 404ing until the run's
+      // own header commits (and forever, for a run that ends by throwing).
+      expect(await scheduler.fireScheduled('cron-agent', instant)).toBe(true);
+
+      expect(stub.enqueued).toHaveLength(1);
+      expect(stub.enqueued[0]?.job.runId).toBe(runId);
+      // Committed BEFORE the enqueue on this arm as well.
+      expect(stub.enqueued[0]?.headerRowsAtEnqueue).toBe(1);
       const rows = await headerRow(runId);
       expect(rows).toHaveLength(1);
       expect(rows[0]).toEqual({

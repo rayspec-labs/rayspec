@@ -54,16 +54,25 @@ export const FAKE_TTS_BOOT_WARNING =
   '    provider is contacted.\n' +
   '    This is a DEV/CI posture — NOT a production configuration. If this is prod, fix the env.\n';
 
-/** The neutral per-call adapter request (the text plus whatever options the caller expressed). */
+/**
+ * The neutral per-call adapter request (the text plus whatever options the caller expressed).
+ *
+ * EXPRESSED, not truthy: the test is `!== undefined` on every option, so a value the caller named is
+ * forwarded even when it is falsy, and only an option left out (or explicitly `undefined`, which the
+ * optional-property type makes the same thing) is omitted. Dropping a blank `voice` here would hand
+ * the adapter an ABSENT voice, which it resolves to its default — the silent fallback the closed
+ * voice list exists to prevent; a blank `format` would be substituted by the adapter's default
+ * container the same way (`speed: 0` has the same shape, and is clamped rather than dropped).
+ */
 function synthesizeRequest(
   text: string,
   opts: TtsSynthesizeOptions | undefined,
 ): TtsSynthesizeRequest {
   return {
     text,
-    ...(opts?.voice ? { voice: opts.voice } : {}),
+    ...(opts?.voice !== undefined ? { voice: opts.voice } : {}),
     ...(opts?.speed !== undefined ? { speed: opts.speed } : {}),
-    ...(opts?.format ? { format: opts.format } : {}),
+    ...(opts?.format !== undefined ? { format: opts.format } : {}),
   };
 }
 

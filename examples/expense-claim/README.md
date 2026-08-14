@@ -46,9 +46,14 @@ Get the id first, from an auth-only boot (`pnpm --filter @rayspec/server serve` 
 registration and returns its id as `activeOrgId`, and the token in that same response is already
 scoped to it, so there is nothing to switch to — the
 [getting-started walkthrough](../../docs/getting-started.md) covers that call; in production
-provision the org with `rayspec tenant ensure` instead. With that token, seed a few
-`expense_policies` rows, `POST /records/{record_id}/submit` a claim, and read
-`GET /claims/{claim_ref}` + `GET /claims`.
+provision the org with `rayspec tenant ensure` instead. That token is short-lived — the register
+response's `expiresIn` says how many seconds it is good for, `480` unless
+`RAYSPEC_ACCESS_TOKEN_TTL_SECONDS` says otherwise — and the product boot happens in between, so a
+slow one leaves you holding an expired token and the calls answer `401`. Log in again for a fresh
+one: `POST /v1/auth/login` with the same email and password returns a new `accessToken`, and because
+that account is a member of exactly one org, login resolves it and the new token is scoped to the
+same tenant. With that token, seed a few `expense_policies` rows,
+`POST /records/{record_id}/submit` a claim, and read `GET /claims/{claim_ref}` + `GET /claims`.
 
 ### Live extraction (real LLM) — the GENERIC (non-transcript) branch
 

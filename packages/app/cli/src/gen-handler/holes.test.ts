@@ -10,6 +10,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ColumnType as SpecColumnType } from '@rayspec/spec';
 import { describe, expect, it } from 'vitest';
 import type { HandlerHoles } from './holes.js';
 import {
@@ -209,6 +210,77 @@ describe('validateHoles — fail-closed on malformed hole-sets', () => {
       ),
     ).toThrow(/bigint/);
   });
+
+  it('every grammar `ColumnType` is either accepted or refused WITH THE REASON it cannot be rendered', () => {
+    // The renderer serves a SUBSET of the grammar's column vocabulary (`emitCoerceColumn` has one
+    // coercion arm per type it can serve, and none for the fractional pair). A hole-set naming a type
+    // outside the subset must be refused — that part already holds — but the refusal has to say WHY,
+    // otherwise a valid store column reads back as a typo. Every type is taken from the grammar enum
+    // itself, so this stays honest when the vocabulary grows again.
+    const accepted: string[] = [];
+    const explained: string[] = [];
+    const bareRefusal: string[] = [];
+    for (const type of SpecColumnType.options) {
+      try {
+        validateHoles(
+          persist({ columns: [{ col: 'x', jsonType: type, required: true, nullable: false }] }),
+        );
+        accepted.push(type);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        (/has no coercion arm for it/.test(message) ? explained : bareRefusal).push(type);
+      }
+    }
+    // Accept control: the loop really did run a hole-set through the validator, not throw on setup.
+    expect(accepted).toContain('text');
+    // THE PROPERTY: no grammar column type is refused as if it were an unknown word.
+    expect(bareRefusal).toEqual([]);
+    // Instrument check: the "explained" bucket is reachable, and the two fractional types are the
+    // ones the renderer cannot serve today.
+    expect(explained).toContain('double');
+    expect(explained).toContain('numeric');
+    // A type the GRAMMAR does not carry either keeps the plain unknown-type refusal — the reason
+    // clause must not fire for a genuine typo.
+    expect(() =>
+      validateHoles(
+        persist({ columns: [{ col: 'x', jsonType: 'float', required: true, nullable: false }] }),
+      ),
+    ).not.toThrow(/coercion arm/);
+  });
+
+  it('the fractional refusal scopes itself to the COERCED path — a `fixedValues` constant still renders', () => {
+    // The refusal above is about the arm `emitCoerceColumn` would need for an UNTRUSTED arg. It is not
+    // a statement about the column: `fixedValues` writes author CONSTANTS by column NAME, carries no
+    // `jsonType`, and is never routed through `assertColumnHole` — so a rendered handler does stamp a
+    // fractional column when the value is the author's, not the model's. The refusal text must say
+    // which path it closes, or it reads as "this column is unwritable here", which is false.
+    let message = '';
+    try {
+      validateHoles(
+        persist({
+          columns: [{ col: 'fx_rate', jsonType: 'double', required: true, nullable: false }],
+        }),
+      );
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    }
+    // Instrument check: the refusal fired at all and is the fractional one (not some earlier rejection).
+    expect(message).toMatch(/has no coercion arm for it/);
+    // THE PROPERTY: the way out is named for the coerced path only, and the constant path is named too.
+    expect(message).toMatch(/coerces that column from an untrusted arg/i);
+    expect(message).toMatch(/fixedValues/);
+
+    // The measurement the wording rests on: the SAME column, stamped as an author constant, is accepted
+    // and reaches the write. If this ever stops holding, the sentence above (and the skill's) is stale.
+    const holes = persist({ fixedValues: { fx_rate: 1.2345, amount_due: '7.500000' } });
+    expect(() => validateHoles(holes)).not.toThrow();
+    const src = renderHandler(holes as unknown as HandlerHoles, 'ts');
+    expect(src).toContain(
+      'Object.assign(coerced.row, { fx_rate: 1.2345, amount_due: "7.500000" });',
+    );
+    expect(src).toContain('await init.db.update(STORE, { id }, coerced.row)');
+  });
+
   it('rejects enumValues on a non-text column', () => {
     expect(() =>
       validateHoles(

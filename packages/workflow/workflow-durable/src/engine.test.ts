@@ -386,6 +386,44 @@ describe('DurableWorkflowEngine', () => {
     expect(calls).toBe(1); // the node ran EXACTLY once across both executes (single-flight dedup)
   });
 
+  it('DEDUP IS BLIND TO WHETHER ANYTHING RAN: a settled header with an EMPTY node journal short-circuits', async () => {
+    let calls = 0;
+    registry.register('test.op', () => {
+      calls += 1;
+      return completed();
+    });
+    const wf = workflow([step({ id: 'a', capability: 'test', operation: 'op' })]);
+    const runId = await anyRunId();
+    // The exact shape the DBOS executor's resolve-failure path commits before it rethrows: the header
+    // settled at `terminal_failure` with `attempts: 0`, its own `workflow_resolve_failed` code, and NO
+    // node rows — nothing was ever executed under this run id.
+    await store.ensureRun({
+      workflowRunId: runId,
+      workflowId: wf.id,
+      idempotencyKey: wf.idempotency_key,
+      triggerEvent: wf.trigger.event,
+      inputEvent: event(),
+    });
+    await store.finalizeRun(runId, {
+      status: 'terminal_failure',
+      resumable: false,
+      attempts: 0,
+      error: { code: 'workflow_resolve_failed', message: 'unknown workflow', retryable: false },
+    });
+
+    const view = await engine().execute({ workflow: wf, event: event() });
+
+    // The short-circuit keys on the header's STATUS alone, never on whether the run has a journal:
+    // execute returns the settled run and runs nothing. Documented as a hazard (not a dedup bug) on
+    // `#journalResolveFailure` in the DBOS executor — its caller ignores this return value, so a
+    // recovery re-invocation that reaches here completes its step successfully having executed
+    // nothing. Kept as-is deliberately: re-running a run someone else settled is the worse failure.
+    expect(view.run.workflowRunId).toBe(runId);
+    expect(view.run.status).toBe('terminal_failure');
+    expect(view.nodes).toEqual([]);
+    expect(calls).toBe(0);
+  });
+
   it('RESUME: a crashed run (status running, node a completed) resumes at b WITHOUT re-running a', async () => {
     let aCalls = 0;
     let bCalls = 0;
