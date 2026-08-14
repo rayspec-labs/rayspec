@@ -150,8 +150,8 @@ export function sseEventName(topic: string): string {
  * Parse a client-supplied cursor against the request's SERVER-DERIVED tenant.
  *
  * Refuses, rather than coerces, on every failure: a malformed cursor, a cursor carrying another
- * tenant's tag, and a sequence that is not decimal digits. Coercing any of these would resume the
- * subscriber somewhere it did not ask for and look successful while doing it.
+ * tenant's tag, and a sequence that is not the canonical decimal spelling. Coercing any of these
+ * would resume the subscriber somewhere it did not ask for and look successful while doing it.
  *
  * THE SEQUENCE IS CHECKED LEXICALLY BEFORE IT IS CONVERTED, which is not pedantry: `Number()` accepts
  * hexadecimal, exponent, fractional, signed, whitespace-padded and zero-padded forms AND the empty
