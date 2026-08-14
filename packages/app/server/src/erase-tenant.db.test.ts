@@ -334,6 +334,17 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
       // event stream is asserted on real rows.
       tenant_events: 2,
       tenant_event_streams: 1,
+      // the task-engine tables — not seeded here, so the erase reports them at 0 (they are still
+      // covered by tenant erasure, derived from CORE_TENANT_SCOPED_TABLES like the rest).
+      workforce_tasks: 0,
+      workforce_task_transitions: 0,
+      workforce_task_signals: 0,
+      workforce_delegations: 0,
+      workforce_approvals: 0,
+      workforce_reviews: 0,
+      workforce_messages: 0,
+      workforce_budget_ledger: 0,
+      workforce_runtime: 0,
     };
   }
 

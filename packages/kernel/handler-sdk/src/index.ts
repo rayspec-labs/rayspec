@@ -374,11 +374,11 @@ export interface HandlerInit {
    * plain result out), preserving the external-exposure isolate seam. NOT tenant-partitioned (it
    * transcribes the bytes it is handed — see `SttCapability`).
    *
-   * POPULATED ON `handler`-KIND ROUTE INITS + TOOL INITS. A `stream`-kind route init carries only its
-   * byte-moving surface (the raw request plus the REQUIRED `blob`) and a TRIGGER init carries only
-   * `{ tenantId, db, triggerName }` at runtime — neither builder injects this capability, the same
-   * boundary `fsSource` already has — so a trigger or stream handler that needs transcription does its
-   * work through a `handler`-kind route or a tool.
+   * POPULATED ON `handler`-KIND ROUTE INITS + TOOL INITS + TRIGGER INITS (the durable trigger path
+   * carries the same configured read/media seams the request path does — `fsSource`/`stt`/`tts`,
+   * spread-absent when unconfigured). A `stream`-kind route init carries only its byte-moving
+   * surface (the raw request plus the REQUIRED `blob`) — its builder injects none of these, so a
+   * stream handler that needs transcription does its work through a `handler`-kind route or a tool.
    */
   readonly stt?: SttCapability;
   /**
@@ -391,11 +391,11 @@ export interface HandlerInit {
    * string + a plain options record in, a plain result out), preserving the external-exposure isolate
    * seam. NOT tenant-partitioned (it speaks the text it is handed — see `TtsCapability`).
    *
-   * POPULATED ON `handler`-KIND ROUTE INITS + TOOL INITS. A `stream`-kind route init carries only its
-   * byte-moving surface (the raw request plus the REQUIRED `blob`) and a TRIGGER init carries only
-   * `{ tenantId, db, triggerName }` at runtime — neither builder injects this capability, the same
-   * boundary `fsSource`/`stt` already have — so a trigger or stream handler that needs speech does its
-   * work through a `handler`-kind route or a tool.
+   * POPULATED ON `handler`-KIND ROUTE INITS + TOOL INITS + TRIGGER INITS (the durable trigger path
+   * carries the same configured read/media seams the request path does — `fsSource`/`stt`/`tts`,
+   * spread-absent when unconfigured). A `stream`-kind route init carries only its byte-moving
+   * surface (the raw request plus the REQUIRED `blob`) — its builder injects none of these, so a
+   * stream handler that needs speech does its work through a `handler`-kind route or a tool.
    */
   readonly tts?: TtsCapability;
   /**
@@ -406,11 +406,12 @@ export interface HandlerInit {
    * deployment (mirrors `blob`/`fsSource`/`stt`/`tts`). There is NO provider and NO credential to
    * configure: the backend is the database the boot already required.
    *
-   * POPULATED ON `handler`-KIND ROUTE INITS + TOOL INITS. A `stream`-kind route init carries only its
-   * byte-moving surface (the raw request plus the REQUIRED `blob`) and a TRIGGER init carries only
-   * `{ tenantId, db, triggerName }` at runtime — neither builder injects this capability, the same
-   * boundary `fsSource`/`stt`/`tts` already have — so work that must emit does it through a
-   * `handler`-kind route or a tool.
+   * POPULATED ON `handler`-KIND ROUTE INITS + TOOL INITS. A `stream`-kind route init carries only
+   * its byte-moving surface (the raw request plus the REQUIRED `blob`), and a TRIGGER init —
+   * although it now carries the read/media seams (`fsSource`/`stt`/`tts`) — deliberately does NOT
+   * carry `emit`: an event announces a change other requests can read, and the trigger path's
+   * transaction/visibility contract for that announcement is its own design decision, so work that
+   * must emit does it through a `handler`-kind route or a tool.
    *
    * UNLIKE the `stt`/`tts` handles (one deployment-static provider read once at registration), this
    * one is TENANT-BOUND and built PER REQUEST from the run's server-derived tenant, exactly like
