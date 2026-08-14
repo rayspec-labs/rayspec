@@ -509,7 +509,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Trace export: EXPORTING TO OPENAI`, and have the agent SDK go on exporting — and a typo such as
   `RAYSPEC_AGENT_TRACING=NoNsEnSe` was ignored there, while the same value fail-closes by name on
   `deploy`. What that transport carries is run metadata and, once an agent calls tools, the tool
-  arguments and tool outputs (the SDK strips the prompt fields before export).
+  arguments and tool outputs (the SDK strips the model prompt fields before export).
   **Unset — including blank — is unchanged**, and deliberately so: `rayspec-serve` keeps the agent
   SDK's own default, which is to export, and `rayspec deploy` keeps its default of `off`. The new
   reader is explicit-only for that reason: it hands off to `resolveAgentTracing` — the same refusal,
@@ -526,16 +526,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variable — it reports the variables a document's boot *demands*, and tracing is not demanded.
   The documentation of the variable is corrected to match on both halves. `.env.example` no longer
   presents the block as `rayspec deploy` only or claims that leaving the variable unset keeps traces in
-  the process: it now states the one thing that differs between the two entrypoints, which is what
-  unset means (`off` on `deploy`, the SDK's exporting default on `rayspec-serve`), and names the
-  dev-boot wrappers — `examples/local-boot/serve.ts` and `deployments/acme-notes/serve.mts` — as the
-  boots that assemble the server themselves and never read it. The getting-started guide's two "same
-  boot" passages about `rayspec deploy <spec>` and `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` now name
-  two differences that matter for what leaves the process and for what can still register a table —
-  this trace-export default, and `sealProductStores()`, which `deploy` calls after its boot returns
-  and `rayspec-serve` never calls — without claiming to have counted every difference between the two
-  entrypoints (`withBootTimeout` and the `.env` search order differ as well).
-  **Two operator-facing sentences are corrected while they are being touched.** The refusal an
+  the process: it now states the one thing that differs between the two entrypoints in how they treat
+  the variable, which is what unset means (`off` on `deploy`, the SDK's exporting default on
+  `rayspec-serve`), and names the dev-boot wrappers — `examples/local-boot/serve.ts` and
+  `deployments/acme-notes/serve.mts` — as the boots that assemble the server themselves and never read
+  it. The getting-started guide's two "same boot" passages about `rayspec deploy <spec>` and
+  `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` now name two differences that matter for what leaves the
+  process and for what can still register a table — this trace-export default, and
+  `sealProductStores()`, which `deploy` calls after its boot returns and `rayspec-serve` never calls —
+  without claiming to have counted every difference between the two entrypoints (`withBootTimeout` and
+  the `.env` search order differ as well).
+  **The operator-facing messages are corrected while they are being touched.** The refusal an
   unusable value raises stated `unset ⇒ off`, which is false on the entrypoint this change makes it
   reachable from; it now states the default per entry point. And both `Trace export:` banner lines said
   the export carries prompts. It does not: `@openai/agents-openai` keeps the model input and response in
