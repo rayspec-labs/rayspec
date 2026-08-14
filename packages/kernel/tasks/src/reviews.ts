@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { afterTaskTerminal, lockRootFirst } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import type { WorkforceBudgets } from './budget.js';
+import { appendTaskEvents } from './events.js';
 
 export type ReviewRecord = typeof schema.workforceReviews.$inferSelect;
 
@@ -89,7 +90,32 @@ export async function applyReviewVerdict(
     if (task?.status !== 'waiting_for_review') {
       throw new ReviewTaskStateError(input.reviewId, task?.status ?? 'absent');
     }
-    if (input.verdict === 'accept') {
+    const maxRounds = budgets.execution.maxReviewRounds ?? null;
+    const outcome =
+      input.verdict === 'accept'
+        ? 'completed'
+        : maxRounds !== null && review.round >= maxRounds
+          ? 'rounds_exhausted'
+          : 'rework';
+    // The verdict is an AUDIT fact: who decided what, in which round, and what the engine did about
+    // it. The generic transition alone says the task moved, never that a reviewer moved it.
+    await appendTaskEvents(tx, task.taskId, [
+      {
+        type: 'workforce.review.decided',
+        payload: {
+          reviewId: review.id,
+          taskId: task.taskId,
+          reviewer: review.reviewer,
+          round: review.round,
+          verdict: input.verdict,
+          decidedBy: input.actor,
+          reasons: input.reasons,
+          requiredChanges: input.requiredChanges,
+          outcome,
+        },
+      },
+    ]);
+    if (outcome === 'completed') {
       // Completing fans in to the parent, so this touches a second task row: root-first first
       // (apply-intents.ts's module header).
       const locked = await lockRootFirst(tx, task);
@@ -105,8 +131,7 @@ export async function applyReviewVerdict(
       await afterTaskTerminal(tx, done);
       return done;
     }
-    const maxRounds = budgets.execution.maxReviewRounds ?? null;
-    if (maxRounds !== null && review.round >= maxRounds) {
+    if (outcome === 'rounds_exhausted') {
       // The round budget is spent — a human decides instead of another rework loop.
       return applyTransition(tx, {
         taskId: task.taskId,

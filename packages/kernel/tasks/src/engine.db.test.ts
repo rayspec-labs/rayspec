@@ -4,7 +4,7 @@
  * restart story's kernel: re-applying a committed turn changes nothing and duplicates nothing.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { applyTurnOutcome } from './apply-intents.js';
+import { applyTurnOutcome, DELEGATION_STATUSES } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import { ApprovalAlreadyDecidedError, decideApproval, sweepApprovalTimeouts } from './approvals.js';
 import { workforceBudgetsSchema } from './budget.js';
@@ -136,6 +136,16 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       `SELECT count(*)::int AS c FROM workforce_delegations WHERE parent_task_id = '${root.taskId}' AND status = 'accepted';`,
     );
     expect(delegations[0]?.c).toBe(4);
+    // Each hand-off is journaled: a delegation surface that leaves only a generic transition
+    // behind is not auditable.
+    const accepted = (await db.$client.unsafe(
+      `SELECT data FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.delegation.accepted' ORDER BY seq::numeric;`,
+    )) as unknown as { data: { childTaskId: string; delegatedTo: string; depth: number } }[];
+    expect(accepted).toHaveLength(4);
+    expect(accepted.map((e) => e.data.childTaskId).sort()).toEqual(
+      children.map((c) => c.task_id as string).sort(),
+    );
+    for (const e of accepted) expect(e.data.depth).toBe(1);
 
     const replay = await turn(root.taskId, 1, intent);
     expect(replay.alreadyApplied).toBe(true);
@@ -311,6 +321,91 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       actor: 'reviewer-1',
     });
     expect(exhausted.status).toBe('waiting_for_user');
+
+    // The whole review lifecycle is journaled — this surface is audit-first, and a verdict that
+    // leaves only a generic transition behind cannot answer "who decided what, and when".
+    const reviewEvents = (await db.$client.unsafe(
+      `SELECT type, data FROM run_events WHERE run_id = '${root.taskId}' AND type LIKE 'workforce.review.%' ORDER BY seq::numeric;`,
+    )) as unknown as {
+      type: string;
+      data: { round: number; verdict?: string; decidedBy?: string; outcome?: string };
+    }[];
+    expect(reviewEvents.map((e) => e.type)).toEqual([
+      'workforce.review.requested',
+      'workforce.review.decided',
+      'workforce.review.requested',
+      'workforce.review.decided',
+    ]);
+    expect(reviewEvents[1]?.data).toMatchObject({
+      round: 1,
+      verdict: 'reject',
+      decidedBy: 'reviewer-1',
+      outcome: 'rework',
+    });
+    expect(reviewEvents[3]?.data).toMatchObject({ round: 2, outcome: 'rounds_exhausted' });
+  });
+
+  it('every delegation status written is a member of the closed vocabulary', async () => {
+    const budgets = workforceBudgetsSchema.parse({ delegation: { maxDepth: 1 } });
+    const root = await driveToWorking(await newRoot());
+    // Accepted (fan-out) …
+    await turn(root.taskId, 1, {
+      kind: 'fan_out',
+      children: [1, 2].map((i) => ({ title: `S${i}`, goal: `G${i}`, owner: `worker-${i}` })),
+    });
+    const children = (await db.$client.unsafe(
+      `SELECT task_id, version FROM workforce_tasks WHERE parent_task_id = '${root.taskId}' ORDER BY task_id;`,
+    )) as unknown as { task_id: string; version: number }[];
+    // … completed (a child finishing settles its opening record) …
+    const first = children[0] as { task_id: string; version: number };
+    const q = await applyTransition(tdb(), {
+      taskId: first.task_id,
+      expectedVersion: first.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await applyTransition(tdb(), {
+      taskId: first.task_id,
+      expectedVersion: q.version,
+      to: 'working',
+      actor: 'scheduler',
+    });
+    await turn(first.task_id, 1, { kind: 'complete', result: RESULT });
+    // … rejected (a hand-off refused at planning) …
+    const second = children[1] as { task_id: string; version: number };
+    const q2 = await applyTransition(tdb(), {
+      taskId: second.task_id,
+      expectedVersion: second.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await applyTransition(tdb(), {
+      taskId: second.task_id,
+      expectedVersion: q2.version,
+      to: 'working',
+      actor: 'scheduler',
+    });
+    await applyTurnOutcome(tdb(), {
+      taskId: second.task_id,
+      turnId: `wf-task-turn:${second.task_id}:1`,
+      turnNumber: 1,
+      intent: { kind: 'fan_out', children: [{ title: 'GC', goal: 'G', owner: 'worker-9' }] },
+      budgets,
+    });
+    // … and cancelled (the cascade).
+    await cancelTaskCascade(tdb(), { taskId: root.taskId, actor: 'user' });
+
+    const written = (await db.$client.unsafe(
+      'SELECT DISTINCT status FROM workforce_delegations ORDER BY status;',
+    )) as unknown as { status: string }[];
+    expect(written.length).toBeGreaterThan(1);
+    for (const row of written) {
+      expect(DELEGATION_STATUSES as readonly string[]).toContain(row.status);
+    }
+    const rejectedEvents = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM run_events WHERE run_id = '${second.task_id}' AND type = 'workforce.delegation.rejected';`,
+    );
+    expect(rejectedEvents[0]?.c).toBe(1);
   });
 
   it('delegation rejections record typed rows and follow the one-retry fate', async () => {

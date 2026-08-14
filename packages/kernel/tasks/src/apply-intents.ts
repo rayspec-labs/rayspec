@@ -35,6 +35,7 @@
  */
 import { schema, type TenantDb } from '@rayspec/db';
 import { and, eq, inArray } from 'drizzle-orm';
+import { z } from 'zod';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import { probeSpend, settleTurn, type WorkforceBudgets } from './budget.js';
 import { insertChildTask } from './create-task.js';
@@ -50,6 +51,38 @@ import {
 import { isJoinSatisfied, joinPolicySchema } from './join.js';
 import { absorbPendingWakes, consumePendingCancels, deliverSignal } from './signals.js';
 import { isTaskStatus, isTerminalStatus } from './status.js';
+
+/**
+ * The CLOSED delegation lifecycle — ONE vocabulary for `workforce_delegations.status`, which the
+ * column carried in two halves with nothing narrowing it. A hand-off is OPENED (`accepted`) or
+ * refused at planning (`rejected`); an accepted one SETTLES to the child's terminal status when the
+ * child ends. Additive and CHECK-free, like every other closed vocabulary here: the column stays
+ * `text`, the narrowing lives in code, and a new member is a code change with no migration.
+ */
+export const DELEGATION_STATUSES = [
+  'accepted',
+  'rejected',
+  'completed',
+  'failed',
+  'cancelled',
+] as const;
+
+export type DelegationStatus = (typeof DELEGATION_STATUSES)[number];
+
+export const delegationStatusSchema = z.enum(DELEGATION_STATUSES);
+
+/**
+ * Narrow a terminating task's status to the settlement half of the vocabulary. The three terminal
+ * statuses are members by construction; anything else reaching a settlement is a corrupted row, not
+ * a value to write through.
+ */
+function settlementStatus(task: TaskRecord): DelegationStatus {
+  const parsed = delegationStatusSchema.safeParse(task.status);
+  if (!parsed.success) {
+    throw new TaskRowCorruptError(task.taskId, `status '${task.status}' cannot settle a delegation`);
+  }
+  return parsed.data;
+}
 
 /** The turn's final application refuses a task in a state it cannot explain. */
 export class TurnStateError extends Error {
@@ -135,7 +168,10 @@ export async function lockRootFirst(tx: TenantDb, task: TaskRecord): Promise<Tas
  */
 export async function afterTaskTerminal(tx: TenantDb, task: TaskRecord): Promise<void> {
   await tx
-    .update(schema.workforceDelegations, { status: task.status, completedAt: new Date() })
+    .update(schema.workforceDelegations, {
+      status: settlementStatus(task),
+      completedAt: new Date(),
+    })
     .where(eq(schema.workforceDelegations.childTaskId, task.taskId));
   if (task.parentTaskId === null) return;
 
@@ -321,6 +357,7 @@ export async function applyTurnOutcome(
           .where(eq(schema.workforceTasks.taskId, task.taskId));
         for (const [index, spec] of plan.children.entries()) {
           const child = await insertChildTask(tx, task, input.turnNumber, index, spec);
+          const depth = Array.isArray(child.ancestryPath) ? child.ancestryPath.length : 0;
           await tx
             .insert(schema.workforceDelegations, {
               workforceId: task.workforceId,
@@ -331,10 +368,23 @@ export async function applyTurnOutcome(
               resolvedOwner: child.owner,
               goal: child.goal,
               expectedOutput: 'worker_result',
-              depth: Array.isArray(child.ancestryPath) ? child.ancestryPath.length : 0,
-              status: 'accepted',
+              depth,
+              status: 'accepted' satisfies DelegationStatus,
             })
             .onConflictDoNothing();
+          await appendTaskEvents(tx, task.taskId, [
+            {
+              type: 'workforce.delegation.accepted',
+              payload: {
+                parentTaskId: task.taskId,
+                childTaskId: child.taskId,
+                delegatedBy: task.owner,
+                delegatedTo: child.owner,
+                depth,
+                goal: child.goal,
+              },
+            },
+          ]);
         }
         finalTask = await applyTransition(tx, {
           taskId: task.taskId,
@@ -382,11 +432,24 @@ export async function applyTurnOutcome(
         break;
       }
       case 'request_review': {
-        await tx.insert(schema.workforceReviews, {
-          taskId: task.taskId,
-          reviewer: plan.reviewer,
-          round: plan.round,
-        });
+        const inserted = await tx
+          .insert(schema.workforceReviews, {
+            taskId: task.taskId,
+            reviewer: plan.reviewer,
+            round: plan.round,
+          })
+          .returning({ id: schema.workforceReviews.id });
+        await appendTaskEvents(tx, task.taskId, [
+          {
+            type: 'workforce.review.requested',
+            payload: {
+              reviewId: (inserted[0] as { id: string }).id,
+              taskId: task.taskId,
+              reviewer: plan.reviewer,
+              round: plan.round,
+            },
+          },
+        ]);
         finalTask = await applyTransition(tx, {
           taskId: task.taskId,
           expectedVersion: task.version,
@@ -432,26 +495,40 @@ export async function applyTurnOutcome(
         const intent = parsedIntent.success ? parsedIntent.data : null;
         if (intent?.kind === 'fan_out') {
           for (const [index, spec] of intent.children.entries()) {
+            const childTaskId = deterministicChildTaskId(
+              tx.tenantId,
+              task.taskId,
+              input.turnNumber,
+              index,
+            );
             await tx
               .insert(schema.workforceDelegations, {
                 workforceId: task.workforceId,
                 parentTaskId: task.taskId,
-                childTaskId: deterministicChildTaskId(
-                  tx.tenantId,
-                  task.taskId,
-                  input.turnNumber,
-                  index,
-                ),
+                childTaskId,
                 delegatedBy: task.owner,
                 delegatedTo: spec.owner,
                 resolvedOwner: spec.owner,
                 goal: spec.goal,
                 expectedOutput: 'worker_result',
                 depth: (Array.isArray(task.ancestryPath) ? task.ancestryPath.length : 0) + 1,
-                status: 'rejected',
+                status: 'rejected' satisfies DelegationStatus,
                 rejectionReason: plan.reason,
               })
               .onConflictDoNothing();
+            await appendTaskEvents(tx, task.taskId, [
+              {
+                type: 'workforce.delegation.rejected',
+                payload: {
+                  parentTaskId: task.taskId,
+                  childTaskId,
+                  delegatedBy: task.owner,
+                  delegatedTo: spec.owner,
+                  reason: plan.reason,
+                  detail: plan.detail,
+                },
+              },
+            ]);
           }
         }
         finalTask = await applyToolErrorFate(tx, task, plan.fate, stamp);
@@ -653,7 +730,10 @@ export async function cancelDescendants(
       actor,
     });
     await tx
-      .update(schema.workforceDelegations, { status: 'cancelled', completedAt: new Date() })
+      .update(schema.workforceDelegations, {
+        status: 'cancelled' satisfies DelegationStatus,
+        completedAt: new Date(),
+      })
       .where(eq(schema.workforceDelegations.childTaskId, done.taskId));
     cancelled.push(desc.taskId);
   }

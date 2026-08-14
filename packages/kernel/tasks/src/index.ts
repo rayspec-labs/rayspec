@@ -14,6 +14,9 @@ export {
   applyBudgetExhausted,
   applyTurnOutcome,
   cancelDescendants,
+  DELEGATION_STATUSES,
+  type DelegationStatus,
+  delegationStatusSchema,
   lockRootFirst,
   TurnStateError,
 } from './apply-intents.js';
