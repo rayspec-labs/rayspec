@@ -80,9 +80,12 @@ pool, then exits.
 The dev-boot seeds the ORG `00000000-0000-4000-8000-000000000043` and no user, so you cannot register
 your way into it: `POST /v1/auth/register` creates a DIFFERENT org (its `activeOrgId` is that new id),
 and `POST /v1/orgs/00000000-0000-4000-8000-000000000043/switch` answers `404` because the caller is no
-member of it. The four `support_catalog` rows are seeded under the seeded tenant alone, so a
-self-registered caller's turns would be grounded in an empty catalog, and nothing in the responses
-says why. Mint an owner invite for the seeded org instead:
+member of it. That caller is served their OWN, empty tenant: `PUT /conversations/{id}` and
+`GET /tickets` answer `200` (`{"tickets":[]}`), but `POST /conversations/{id}/turns` is refused
+`403 conversation_event_rejected` — the turn dispatcher is bound to the deployment's tenant, so a
+foreign turn is rejected fail-closed (`cross_tenant`), with no workflow started and no reply. The
+four `support_catalog` rows are seeded under the seeded tenant alone, so none of the demo's data is
+reachable that way either. Mint an owner invite for the seeded org instead:
 
 ```bash
 DATABASE_URL="postgres://rayspec:rayspec@localhost:5433/play_support_chat" \
@@ -108,8 +111,12 @@ curl -s -X POST http://127.0.0.1:8794/v1/invites/accept -H 'content-type: applic
 ```
 
 The `201` hands back an access token already scoped to the seeded org — no login and no switch follow.
-Then delete `./owner-invite.txt`: until it is redeemed it is a tenant-takeover credential, and the file
-is never overwritten, so a second run needs a fresh `--owner-invite-out` path.
+Then delete `./owner-invite.txt`: until it is redeemed it is a tenant-takeover credential. Re-running
+the command mints nothing once the org is claimed — it reports `already_owned` — and reports
+`pending` (writing no file at all) while an invite is still outstanding, so if you lose the token
+before redeeming it, add `--reissue-owner-invite`, which revokes the outstanding invite and mints a
+replacement; give that run a path that does not exist yet, because a minting run refuses an existing
+`--owner-invite-out` rather than overwriting it.
 
 With that token, `PUT /conversations/{id}`, `POST /conversations/{id}/turns`
 (optionally `Accept: text/event-stream`), and read `GET /tickets/{conversation_id}` + `GET /tickets`.
