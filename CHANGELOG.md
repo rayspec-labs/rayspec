@@ -1094,7 +1094,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Neither gap was hiding a live failure:** the launcher suite is green on this tree and the three
   example directories carry no forbidden token — what changes is that a regression in either place is
   now loud instead of silent. The stale ci.yml comment pointing at a `pnpm gate:workspace` script
-  (removed from this repository, along with the `gate:tracker-hygiene` it named) is deleted rather
+  (never defined in this repository, nor the `gate:tracker-hygiene` it named) is deleted rather
   than renamed, and the deterministic-subset count, wrong in both places it appeared, is corrected and
   now carries the derivation and the command that recounts it. Repository infrastructure only: no
   published package, API or runtime behavior changes.
