@@ -19,7 +19,7 @@
  * The translation is FAITHFUL to the closed vocabulary only — the contract lint already rejected
  * anything outside it, so an unknown key here is a bug, not an input.
  */
-import type { ContractsSpec, ProductViewSpec, ViewParamSpec } from '@rayspec/spec';
+import type { ContractsSpec, ProductViewSpec, ViewAbsentState, ViewParamSpec } from '@rayspec/spec';
 import { viewPathParams } from '@rayspec/spec';
 
 export interface ViewsOpenApiDocument {
@@ -44,6 +44,22 @@ interface ViewsOpenApiOperation {
   responses: Record<string, Record<string, unknown>>;
 }
 
+/**
+ * The EXTRA status each `ViewAbsentState` member can produce beyond the always-present `200`
+ * (`null` ⇒ the member answers on the 200 the set already carries).
+ *
+ * The twin of `interpret.ts`'s `ABSENT_RESPONSE`, and enforced the same way:
+ * `satisfies Record<ViewAbsentState, string | null>` makes `pnpm typecheck` (`tsc -p tsconfig.json
+ * --noEmit`, which includes this file) reject the map the moment `ViewAbsentState` grows a member it
+ * does not answer. So a future member cannot be documented as a plain 200 by omission — the emitter
+ * and the runtime have to gain it together, which is what keeps documented ⊆ producible honest.
+ */
+const ABSENT_STATUS = {
+  empty_200: null,
+  not_ready_409: '409',
+  not_found_404: '404',
+} satisfies Record<ViewAbsentState, string | null>;
+
 /** A stable operationId from the view id (view ids are unique — lint-enforced). */
 function operationId(view: ProductViewSpec): string {
   return `view_${view.id}`;
@@ -66,8 +82,9 @@ function operationId(view: ProductViewSpec): string {
 export function producibleViewResponseStatuses(view: ProductViewSpec): ReadonlySet<string> {
   const out = new Set<string>(['200']);
   if (Object.keys(view.params ?? {}).length > 0) out.add('400');
-  if (view.absent_state === 'not_ready_409') out.add('409');
-  if (view.absent_state === 'not_found_404') out.add('404');
+  // An UNDECLARED `absent_state` is the `empty_200` posture (the grammar leaves the field optional).
+  const absentStatus = ABSENT_STATUS[view.absent_state ?? 'empty_200'];
+  if (absentStatus !== null) out.add(absentStatus);
   if (view.conditional_read === 'etag') out.add('304');
   return out;
 }
