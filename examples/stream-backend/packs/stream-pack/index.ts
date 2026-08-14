@@ -15,8 +15,10 @@
  * types live). The pack HANDLER modules under `handlers/` import ONLY `@rayspec/handler-sdk` (the
  * type-only capability contract; the now-manifest-derived `gate:handler-imports` +
  * `gate:extension-capability` scan THIS pack's `handlers/` root). NOTE: this dir is in no tsconfig (an
- * `examples/` fixture, excluded from turbo/CI build) — the manifest is loaded at TEST/deploy time (the
- * loader's importer transforms the .ts); it is the synthetic forcing-function, not a workspace package.
+ * `examples/` fixture, excluded from turbo/CI build). Nothing transforms this file on the way into a
+ * deploy: `loadExtensions` loads compiled JavaScript only, so the example's `build.mjs` compiles the
+ * pack to `dist/` and a deployment points at that directory. A TEST loads this source through the
+ * loader's explicit `typeStrippingImporter` seam instead.
  */
 import { defineExtension } from '@rayspec/platform';
 
