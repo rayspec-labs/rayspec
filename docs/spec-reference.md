@@ -1237,6 +1237,12 @@ triggers:
     kind: cron
     schedule: '0 3 * * *'
     action: { kind: agent, agent: summarizer }
+  - name: rebuild-index
+    kind: manual
+    action: { kind: handler, handler: rebuild_index_handler }
+  - name: summarize-now
+    kind: manual
+    action: { kind: agent, agent: summarizer }
 ```
 
 - `name` — required, non-empty.
@@ -1281,7 +1287,7 @@ durable reserve→dispatch machinery a cron fire uses, so a double fire within o
 firing-instant bucket dedups to one dispatch. The answer is `202` with:
 
 ```json
-{ "name": "nightly-summary", "fired": true }
+{ "name": "rebuild-index", "fired": true }
 ```
 
 `fired: true` means **this call** won the exactly-once reserve and dispatched.
@@ -1290,7 +1296,7 @@ that dispatch enqueued:
 
 ```json
 {
-  "name": "nightly-summary",
+  "name": "summarize-now",
   "fired": true,
   "runId": "…",
   "events": "/v1/runs/{id}/events"
@@ -1342,6 +1348,10 @@ handlers:
     module: handlers/persist-note.ts
     export: persistNote
     kind: tool
+  - id: rebuild_index_handler
+    module: handlers/rebuild-index.ts
+    export: rebuildIndex
+    kind: trigger
 ```
 
 - `id` — required logical id referenced from `tooling`, `api`, or `triggers`.
