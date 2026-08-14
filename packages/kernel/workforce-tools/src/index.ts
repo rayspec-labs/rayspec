@@ -10,4 +10,42 @@
  * an employee's agent and applies the collected intent lives with the composition root, on the
  * other side of the gate.
  */
-export { EMPLOYEE_ROLES, TOOLSETS_BY_ROLE, type ToolName, TURN_ENDING_TOOLS } from './roles.js';
+export {
+  type BufferedCreatedChild,
+  type BufferedMessage,
+  type CollectedTurn,
+  TurnCollector,
+} from './collector.js';
+export {
+  DelegationTargetInvalidError,
+  EscalationTargetMissingError,
+  ManagerTargetForbiddenError,
+  ReservedToolNameError,
+  TaskNotVisibleError,
+  TurnAlreadyEndedError,
+  WorkforceToolError,
+} from './errors.js';
+export {
+  assertManagerMayTarget,
+  type DelegationTarget,
+  parseDelegationTarget,
+  type ResolvedTarget,
+  resolveDelegationTarget,
+} from './resolve-target.js';
+export { type MatchedReviewPolicy, matchReviewPolicy } from './review-policy.js';
+export {
+  EMPLOYEE_ROLES,
+  type EmployeeRole,
+  TOOLSETS_BY_ROLE,
+  type ToolName,
+  TURN_ENDING_TOOLS,
+} from './roles.js';
+export {
+  buildWorkforceSnapshot,
+  SNAPSHOT_DEPARTMENT_LIMIT,
+  SNAPSHOT_SUBTREE_LIMIT,
+  type TaskSummary,
+  type WorkforceReadSnapshot,
+  type WorkforceStateView,
+} from './snapshot.js';
+export { assertNoReservedCollisions, buildRoleToolset, type RoleToolsetInput } from './toolset.js';

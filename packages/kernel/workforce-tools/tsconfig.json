@@ -5,11 +5,19 @@
     "outDir": "./dist"
   },
   "references": [
-    { "path": "../core" },
-    { "path": "../db" },
-    { "path": "../spec" },
-    { "path": "../tasks" }
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../db"
+    },
+    {
+      "path": "../spec"
+    },
+    {
+      "path": "../tasks"
+    }
   ],
   "include": ["src/**/*.ts"],
-  "exclude": ["dist", "node_modules", "**/*.test.ts"]
+  "exclude": ["dist", "node_modules", "**/*.test.ts", "src/test-support/**"]
 }
