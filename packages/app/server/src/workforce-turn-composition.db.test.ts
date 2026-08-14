@@ -237,10 +237,12 @@ describe.skipIf(!hasDb)('the toolset → engine seam (db)', () => {
         tasks: [{ target: 'employee:qa', title: 'Ask', goal: 'Ask qa.' }],
       });
     });
-    // `qa` is a member of the team mgr leads, so this one is ALLOWED — the bounded grant the lint
-    // now certifies (a manager lead, not among their own members, no orchestrator inside).
-    expect(thrown).toBeNull();
-    expect(outcome.plan?.kind).toBe('fan_out');
+    // `qa` is a member of the team mgr LEADS, but this task is not that team's work — the
+    // delegation chain records no `team:` target — so the grant does not exist here and the
+    // refusal is the same one another department gets. Teams are cross-functional; an unscoped
+    // led-team grant was unbounded cross-department delegation from any task at all.
+    expect(thrown).toBeInstanceOf(ManagerTargetForbiddenError);
+    expect(outcome.plan?.kind).toBe('invalid_intent');
 
     const other = await workingChildOf('mgr');
     const refused = await runTurn(other, (invoke) => {
