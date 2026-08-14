@@ -482,6 +482,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A port that is already in use now refuses the boot in one actionable line instead of crashing with
+  a raw Node stack.** `serve()` returns while the bind is still *pending* — immediately after the call
+  the listener's `listening` is `false` and its `address()` is `null` — so neither entrypoint had
+  anything to catch: the boot reported itself served and the `EADDRINUSE` arrived afterwards as an
+  unhandled `'error'` event, printing Node's `throw er; // Unhandled 'error' event` report and a
+  `node:net` stack. On `rayspec deploy` that landed *after* the boot had connected to the database and
+  applied migrations, so a successful-looking preamble was followed by an unhandled exception. The raw
+  stack did name the address numerically, but nothing else: not the variable to change, not the host
+  knob, and no remedy.
+  Both shipped entrypoints now refuse instead — the `rayspec-serve` bin and `rayspec deploy`, on their
+  normal **and** their static-profile (frontend-only) boot paths, four listeners in all. Each attaches
+  an `'error'` listener the moment `serve()` returns, and on `EADDRINUSE` prints one line naming the
+  address (`Boot aborted — 127.0.0.1:8191 is already in use. …`), the command that finds the process
+  holding it (`lsof -nP -iTCP:<port> -sTCP:LISTEN`) and the knob that entrypoint's operator turns —
+  `PORT=<n>` for `rayspec-serve`, `--port <n>` or `PORT=<n>` for `rayspec deploy` (its `--port` writes
+  `PORT`), with `RAYSPEC_HOST` / `--host` named for moving the address — then exits 1. Same shape as
+  every other boot refusal in this product.
+  **Only `EADDRINUSE` changes.** Every other listen error — `EACCES` on a privileged port, a
+  `getaddrinfo` failure on an unresolvable `RAYSPEC_HOST`, anything else — is re-emitted by that
+  listener after it removes itself, so it reaches exactly the handling it reached before: Node's
+  unhandled-`'error'` report, with its frames, and exit 1. The address in the refusal is built from the
+  host and port the entrypoint already resolved, never from the error object, because a listen error
+  carries `address`/`port` for some codes only. (Issue #365.)
 - **A deploy that is refused *after* its product-store DDL applied now names the tables it already
   committed, instead of reading as if nothing had happened.** Each migration is applied in its own
   transaction, so it is committed the moment it returns; every refusal raised after the migrate step

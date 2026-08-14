@@ -32,6 +32,17 @@ export {
   resolveAgentTracing,
 } from './agent-tracing.js';
 export { bootBanner, bootBaseUrl, staticBootBanner } from './banner.js';
+// The port-collision boot refusal — shared by the `rayspec-serve` bin (serve.ts) and the `rayspec
+// deploy` CLI so a taken port refuses the boot in the same actionable one-line form on both, instead
+// of surfacing as an unhandled listen `'error'`. A leaf module (it imports nothing), and its message
+// builder is pure, so the wording is pinned by a unit test that binds no port.
+export {
+  attachBindRefusal,
+  type BindErrorEmitter,
+  type BindRefusalOpts,
+  type BindRefusalPrefix,
+  bindRefusalMessage,
+} from './bind-refusal.js';
 // The boot's ENVIRONMENT DEMANDS — the single source of truth the boot refusals are composed from and
 // the read-only `rayspec deploy --check-env` report is enumerated from. Re-exported here for embedders,
 // but the CLI imports `checkBootEnv` through the `@rayspec/server/boot-env` SUBPATH instead: that module

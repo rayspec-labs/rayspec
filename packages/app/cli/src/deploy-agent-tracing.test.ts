@@ -59,8 +59,15 @@ vi.mock('@rayspec/server', async (importOriginal) => {
   };
 });
 vi.mock('@hono/node-server', () => ({
-  // A fake listener: nothing binds a port, and the banner callback is never invoked.
-  serve: () => ({ close: (done?: () => void) => done?.() }),
+  // A fake listener: nothing binds a port, and the banner callback is never invoked. It still carries
+  // the `'error'`-event surface, because the REAL `attachBindRefusal` (this file spreads the actual
+  // module above) registers a listener on it — one that never fires, since nothing here binds.
+  serve: () => ({
+    close: (done?: () => void) => done?.(),
+    on: () => {},
+    removeListener: () => {},
+    emit: () => false,
+  }),
 }));
 // Only the SEAL is stubbed — `assembleOptsFromEnv` (the real one) still resolves the sanctioned
 // registrar from this module, and sealing the chokepoint for real would shut it for the whole worker.
