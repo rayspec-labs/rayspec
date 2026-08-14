@@ -404,6 +404,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are unchanged. The route also enters the spec reference next to `triggers` — method, permission,
   the `202` bodies, the `fired:false` ambiguity, the error cases, and the `trigger-fire` rate
   bucket (30 fires per 60 seconds per tenant+trigger).
+  **The header write is not route-only, and that is a behaviour change beyond this route.** It sits
+  in the scheduler's one shared fire path, below the firing reserve and above the enqueue, keyed on
+  nothing about how the fire arrived — so a **scheduled** `cron` trigger's agent action writes it
+  too, on every scheduled tick that actually dispatches (a deduped no-op, a tenant-absent skip and a
+  beyond-look-back catch-up replay all return before it, as they always did). A cron-fired run id
+  therefore now resolves on `GET /v1/runs/{id}` as `enqueued` from the instant it is enqueued, where
+  it previously `404`ed until the run's own header committed and stayed `404` for a run that ended
+  by throwing. So a bounded or thrown cron run now leaves a non-terminal `enqueued` row in `runs`
+  rather than no row at all — read such a run's outcome by testing the header for TERMINALITY
+  (`isTerminalRunStatus`), the same way an API-enqueued run has always had to be read. The
+  documentation that stated the old behaviour outright is corrected with it: the
+  `RAYSPEC_AGENT_RUN_MAX_MS` note in `.env.example`, and the 1.7.0 entry that first described it.
+  The write stays advisory on both arms: it is
+  driven by the run-header identity resolver the deployment injects — the one boot path that
+  constructs the cron scheduler always supplies one, resolved off the same agent registry the
+  executor resolves runs from — a write failure is logged and never costs the fire its dispatch, and
+  a resolver that cannot name the `agentId` logs the skip and writes nothing. Both arms are pinned in
+  `packages/workflow/durable-dbos/src/cron-scheduler-run-header.db.test.ts`, the scheduled one
+  through `fireScheduled` — the same body the registered DBOS scheduled-workflow runs.
 - **Bounded comparison filters on both read surfaces, and a cursor on every `list` page.** Every
   read was equality-only, so "give me everything after X" — the natural read for an event log, an
   activity feed, or an incremental sync — could not be written at all. The declared `list` op now
@@ -792,6 +811,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default only writes the queue row when the running version is the newest one registered, which
   per-document versions make the *un*common case — a second deployment's `workerConcurrency` would
   have looked accepted and silently not applied.
+  **What the fence does not cover: the queue row itself.** The fencing above is about *claiming* —
+  which worker may dequeue which job. Queue *configuration* is not fenced, and this release does not
+  change that. The queue names are process-independent constants (`workflow-runs`, `agent-runs`) and
+  DBOS's `queues` table is keyed on the name alone — it carries no application-version column, and
+  `always_update` upserts `ON CONFLICT (name) DO UPDATE`. So where two deployments share one
+  `DATABASE_URL`, and therefore one DBOS system database, they share one queue row per name: the most
+  recently booted deployment's `workerConcurrency` is the one in effect, for both. Setting different
+  values per deployment is not expressible against a shared system database; give each deployment its
+  own if their concurrency must differ. Verified against the pinned SDK (4.21.6) rather than inferred.
   **What an operator observes.** The `Application version` DBOS prints as it initializes — and the
   `applicationVersion` field the public `GET /recovery-scope` readiness probe reports — is now a
   `doc-…` value rather than a platform hash. The probe's fail-closed contract is unchanged: both
@@ -1766,7 +1794,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enqueued through the API keeps the `enqueued` header that path writes before handing the job over,
   so reading its outcome has to test the header for TERMINALITY, which is what `isTerminalRunStatus`
   is for — while a cron trigger's agent action enqueues without writing a header, so a bounded run of
-  that kind leaves no `runs` row at all. Be precise about what the ceiling does: it stops run-core
+  that kind leaves no `runs` row at all. *(SUPERSEDED — that second clause describes this release
+  only. The trigger fire path now writes the same pre-enqueue `enqueued` header, so a bounded cron-
+  or manual-fired run leaves that non-terminal row behind and is read for TERMINALITY exactly like an
+  API-enqueued one; see the `POST /v1/triggers/{name}/fire` entry above.)*
+  Be precise about what the ceiling does: it stops run-core
   waiting, it does **not** cancel the model call — there is no cancellation path, so the provider
   request continues until it settles by itself. What it does give you is the caller and the worker
   slot back, and a run-core that refuses what the abandoned call reaches for afterwards: an event it
