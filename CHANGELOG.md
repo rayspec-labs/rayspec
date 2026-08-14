@@ -1049,9 +1049,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this variable at all". Five boots assemble the server themselves. The three the list omitted are the
   per-example demo wrappers — `examples/contract-intake/dev-boot.mjs`,
   `examples/support-intake-chat/dev-boot.mjs` and `examples/support-ticket-triage/dev-boot.mjs` — and
-  they are the worse case: they read no trace-export setting **and** print no boot banner, so a demo
-  run exports to OpenAI with nothing said either way, while the READMEs that invite you to run them
-  drive live model calls. An operator reading a two-item list concludes the boots it omits honour the
+  they are the worse case: they read no trace-export setting **and** print no boot banner. Two of the
+  three call a model — `contract-intake` and `support-intake-chat` declare an extractor, default to
+  the live extraction path, and abort by name without `OPENAI_API_KEY` — so on those a demo run keeps
+  the agent SDK's exporting default with nothing said either way. `support-ticket-triage` declares no
+  extractor and demands no model credential, so it makes no model call and has nothing to export; it
+  belongs on the list because it reads the variable no more than the other two do, not because it
+  exports. An operator reading a two-item list concludes the boots it omits honour the
   variable. The entry no longer enumerates the ones that do not read it against a list that can rot:
   the two wrappers that print the banner now read the variable (above), and the demo wrappers are
   named as a shape — `examples/<slug>/dev-boot.mjs` — with what they do state plainly, along with the
@@ -1065,12 +1069,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   equivalence unqualified. It links to the corrected passage, so a reader gets there; the clause is
   now on the sentence itself, and on this changelog's own restatement of it.
   Separately, the two-candidate `.env` search was documented as ending at the "checkout root". It ends
-  at the **install root**: the loader resolves it from its own module location, which is a checkout
-  only when you run from one and is the consumer's `node_modules/rayspec` when RaySpec is a
-  dependency — the layout the term was most misleading for. `install root` is also what the shipped
-  refusal suffix and this changelog's normative sentences already used, so the reference, the
+  at the **install root**: the loader resolves it four segments above its own module, which is a
+  checkout root only when you run from one. Installed from the registry those four segments land
+  outside the package — the consuming project's own root under npm's flat layout, where it is usually
+  the same file as `$PWD/.env` and the two candidates dedupe to one read, and a directory inside
+  `node_modules/.pnpm/` under pnpm's. In neither layout is it the unscoped `node_modules/rayspec`
+  launcher package, which ships a bin and no loader. `install root` is what this changelog's own
+  normative sentences for issue #384 already used, so the reference, the
   environment example, the server package README, the authoring skill and the two loaders' own
   comments now all say it, and each names how that root is resolved rather than assuming a layout.
+  The missing-required-variable refusal keeps listing the resolved paths themselves, which is the one
+  place an operator reads the actual directory off a real run.
   The authoring skill additionally still attributed the two-candidate search to the CLI alone; both
   documented entrypoints have run it since issue #384. Two stale module paths in the CLI loader's
   comments (`packages/cli/{src,dist}`, which has never existed at that spelling) are corrected in the

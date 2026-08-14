@@ -23,11 +23,16 @@ import { fileURLToPath } from 'node:url';
  *   1. `$PWD/.env` — the INVOKING project's file. In the vendored/submodule layout the brownfield
  *      docs recommend (`rayspec-serve` run from a product repo against `vendor/rayspec/…`), this is
  *      where the config actually lives.
- *   2. the INSTALL-ROOT `.env`, resolved relative to THIS module's own location
- *      (`packages/app/server/{src,dist}` → the root of the RaySpec installation, which in a published
- *      package layout is the consumer's `node_modules/rayspec` and not anyone's checkout) — the only
- *      path this loader used to search, and identical to `$PWD/.env` when the entrypoint is run from
- *      that root.
+ *   2. the INSTALL-ROOT `.env`, resolved relative to THIS module's own location — the directory FOUR
+ *      segments above it (`packages/app/server/{src,dist}` → the RaySpec checkout root when the
+ *      entrypoint runs from a checkout). Installed from the registry those four segments land OUTSIDE
+ *      this package: from `node_modules/@rayspec/server/dist` they reach the consuming project's own
+ *      root under npm's flat layout, and from
+ *      `node_modules/.pnpm/@rayspec+server@<version>/node_modules/@rayspec/server/dist` they reach
+ *      `node_modules/.pnpm/@rayspec+server@<version>/` under pnpm's. Never the unscoped
+ *      `node_modules/rayspec` launcher package, which ships a bin and no loader. It is the only path
+ *      this loader used to search, and identical to `$PWD/.env` when the entrypoint is run from
+ *      whichever directory that resolves to.
  */
 function dotenvCandidatePaths(): readonly string[] {
   // packages/app/server/{src,dist} -> install root.

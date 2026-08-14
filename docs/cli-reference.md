@@ -925,9 +925,11 @@ deployment sets its configuration through its orchestrator or secret manager.
 - Ahead of that resolution it loads a local `.env` **if one exists** — a
   local-development convenience; a real deployment has none. It searches `$PWD/.env`, the
   directory `rayspec-serve` was started in, **first** and the RaySpec **install root's**
-  `.env` **second** — the install root being wherever RaySpec itself is installed, resolved
-  from the loader's own module location (your checkout when you run from one, the
-  consumer's `node_modules/rayspec` when RaySpec is a dependency) — deduplicated to one
+  `.env` **second** — the install root being the directory four segments above the loader's
+  own module: your checkout root when you run from a checkout, and from a registry install
+  the consuming project's own root under npm's flat layout or a directory inside
+  `node_modules/.pnpm/` under pnpm's, never the unscoped `node_modules/rayspec` launcher
+  package, which ships a bin and no loader — deduplicated to one
   read when they are the same file. Neither file
   overrides a variable the environment already sets, and the second never overwrites a key
   the first supplied, so the precedence per key is: environment > `$PWD/.env` >
