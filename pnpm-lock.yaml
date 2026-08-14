@@ -987,6 +987,15 @@ importers:
       '@rayspec/platform':
         specifier: workspace:*
         version: link:../../kernel/platform
+      '@rayspec/spec':
+        specifier: workspace:*
+        version: link:../../kernel/spec
+      '@rayspec/tasks':
+        specifier: workspace:*
+        version: link:../../kernel/tasks
+      '@rayspec/workforce-tools':
+        specifier: workspace:*
+        version: link:../../kernel/workforce-tools
       dotenv:
         specifier: 17.4.2
         version: 17.4.2
