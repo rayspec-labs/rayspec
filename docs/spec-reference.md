@@ -1625,6 +1625,11 @@ es.addEventListener('note.created', (e) => render(JSON.parse(e.data)))
 - The event's timestamp is **not on the wire**. It is transaction-start time and is
   not monotone with `seq`, so shipping it would only invite clients to sort by it. A
   handler that wants a timestamp puts one in its payload.
+- The stream opens with a **`retry:` field** — the reconnect delay, one second (the
+  field is in milliseconds). It is not a frame either and dispatches no event. It is
+  there because the close that ends most of these streams is the server's own lifetime
+  cap, so how long you wait before coming back is the server's call rather than a
+  per-client default, and those defaults differ. `EventSource` applies it for you.
 - Between frames you may see a block that is an `id:` line and nothing else — the
   **resume checkpoint**. It is not a frame and dispatches no event; it exists so that
   a subscriber which has not been handed a data frame yet is still holding a cursor
@@ -1654,12 +1659,25 @@ environments. Four refusals, each a `400` rather than a plausible-looking stream
 receives no truncation signal, however old the stream's floor is — it never had the
 history it is missing.
 
+**An empty `Last-Event-ID` is no cursor, not a bad one.** An `EventSource`'s
+last-event-ID string starts *empty*, so a header that is present with no value says
+exactly what an omitted header says: nothing to resume from. It is read as absent — a
+`?since=` sent alongside it still applies, and with neither you start at the tail. A
+header that does carry a value outranks `?since=`, and is checked against the four
+refusals above like any other cursor — "no value" is the empty string exactly, so a
+header holding only characters HTTP does not count as whitespace (a non-breaking space,
+say) is a value, and a `400`.
+
 ### `topics`
 
 **Omitting `topics` means every topic.** An explicitly empty `?topics=` is a `400`,
 not a subscription that quietly delivers nothing: an empty filter can only ever match
 nothing, which is indistinguishable from a working stream on a quiet workspace. A
 filter does not slow your resume down — the cursor advances past the events it skips.
+
+**At most 64 topics per subscription.** A longer filter is a `400`. The bound is on the
+filter, not on your topics: omit `topics` to receive every one of them and select
+client-side.
 
 ### Delivery, and what bounds it
 
