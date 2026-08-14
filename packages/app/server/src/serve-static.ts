@@ -129,6 +129,38 @@ function decodeOnce(pathname: string): string {
 }
 
 /**
+ * Decode a request path the way the file server will. `@hono/node-server`'s `serve-static` resolves
+ * `tryDecode(path, decodeURI)`, and `decodeURI` leaves the reserved set (`/ ? # : @ & = + $ ,`)
+ * encoded — so for a path carrying a percent-encoded reserved character this returns a DIFFERENT
+ * string than `decodeOnce`: the name actually resolved on disk.
+ *
+ * The malformed-escape fallback is MIRRORED, not approximated, and that is load-bearing. When
+ * `decodeURI` throws, `serve-static` does NOT fall back to the raw string — it retries each
+ * percent-escape RUN on its own and keeps the ones that decode:
+ *
+ *     str.replace(/(?:%[0-9A-Fa-f]{2})+/g, (m) => { try { return decodeURI(m) } catch { return m } })
+ *
+ * A raw-string fallback here would make this function agree with `decodeOnce` (which also throws and
+ * also falls back) on exactly the inputs where the file server resolves a THIRD, different name —
+ * `/docs%252Fgetting-started.html%` reads `docs%2Fgetting-started.html%` while both decoders return
+ * the wire string untouched. The caller's divergence check would then see two equal strings and skip
+ * the guard on the one name that needed it. Keep this in step with the dependency.
+ */
+function decodeAsServed(pathname: string): string {
+  try {
+    return decodeURI(pathname);
+  } catch {
+    return pathname.replace(/(?:%[0-9A-Fa-f]{2})+/g, (match) => {
+      try {
+        return decodeURI(match);
+      } catch {
+        return match;
+      }
+    });
+  }
+}
+
+/**
  * Is `path` (the FULL decoded request path) under a platform-reserved namespace (`/v1`, `/health`,
  * `/oidc`)? Such a path must NEVER be answered by a static mount — decline it so a registered platform
  * route wins and an unregistered one gets the uniform 404 (never a file / SPA shell). Uses the SAME set
@@ -1038,16 +1070,19 @@ export function mountFrontend<E extends Env>(
     //     a `..` segment in the string the guard already saw and refused on its dotfile rule
     //     (`/%2e%2e%2fsecret` → `/../secret`; the encoded-traversal arms in serve-static.test.ts pin
     //     that both plainly and with an escaped separator);
-    //   - but it is NOT confined to a miss. A miss is only what happens when nothing on disk carries
-    //     the less-decoded name — which is every build whose output has no `%` in a file name. When
-    //     such a file DOES exist it is served, and `isSafeStaticPath`'s dotfile, containment and
-    //     symlink-escape checks never ran on that name: they ran on the decoded one. So a `%`-named
-    //     symlink pointing out of the served directory is served (200 + its bytes), while the same
-    //     symlink under a plainly-spelled name is refused 404.
-    // The divergence belongs to the module, not to this option: `fileServer` above resolves the same
-    // less-decoded string, and a `cleanUrls:false` mount answers `/a%2Fb.html` the same way. Closing
-    // it means guarding the string `serveStatic` will resolve in addition to the one the guard
-    // inspects — a behaviour change, not made here.
+    //   - and it used NOT to be confined to a miss. A miss is only what happens when nothing on disk
+    //     carries the less-decoded name — which is every build whose output has no `%` in a file
+    //     name. When such a file DID exist it was served, and `isSafeStaticPath`'s dotfile,
+    //     containment and symlink-escape checks had never run on that name: they ran on the decoded
+    //     one. A `%`-named symlink pointing out of the served directory came back 200 with its bytes
+    //     while the same symlink under a plainly-spelled name was refused 404.
+    //     THAT IS CLOSED: the handler above guards the served name too whenever the two decodings
+    //     differ (and, here, the `<name>.html` this rewrite would form from it), so the refusal no
+    //     longer depends on how the name is spelled. Both spellings are pinned in
+    //     serve-static.test.ts, the plain one as the accept control.
+    // The divergence itself belongs to the module, not to this option: `fileServer` above resolves
+    // the same less-decoded string, and a `cleanUrls:false` mount answers `/a%2Fb.html` the same way
+    // — which is why the guard covers both and not just the rewrite.
     const cleanUrlServer = cleanUrls
       ? serveStatic({
           root: baseDir,
@@ -1075,6 +1110,25 @@ export function mountFrontend<E extends Env>(
       // Fail-closed guard BEFORE serving — a refused path skips the file/SPA server entirely and
       // falls through to the platform's uniform 404 (never the SPA shell).
       if (!isSafeStaticPath(baseDir, realBaseDir, subPath)) return next();
+      // …and the guard must inspect the name that will actually be READ, not only the one decoded
+      // here. The two decoders diverge on a percent-encoded reserved character: this handler decodes
+      // with `decodeURIComponent`, the file server with `decodeURI`. For `/docs%2Fgetting-started`
+      // the check above clears `docs/getting-started` while the file server resolves the literal
+      // `docs%2Fgetting-started` — a different name, whose dotfile, containment and symlink-escape
+      // checks never ran. A build carrying such a file (a symlink out of the served directory under
+      // that name) was therefore served 200 with bytes from outside the mount, while the identical
+      // symlink under a plainly-spelled name was refused. So when the two decodings differ, the
+      // served name is guarded too — and, for a `cleanUrls` mount, the `<name>.html` candidate the
+      // rewrite would resolve from it. Identical strings for every path without such an escape, so
+      // this is a no-op on any ordinary build.
+      const servedFullPath = decodeAsServed(c.req.path);
+      const servedSubPath = route === '/' ? servedFullPath : servedFullPath.slice(route.length);
+      if (servedSubPath !== subPath) {
+        if (!isSafeStaticPath(baseDir, realBaseDir, servedSubPath)) return next();
+        if (cleanUrls && !isSafeStaticPath(baseDir, realBaseDir, `${servedSubPath}.html`)) {
+          return next();
+        }
+      }
       // RFC-7233: an UNSATISFIABLE Range (start at/after EOF, or reversed) gets a proper 416 rather than
       // serveStatic's malformed 0-byte 206 (closed beyond EOF) or ERR_OUT_OF_RANGE → 500 (open beyond
       // EOF). Runs AFTER the fail-closed guard (a refused path already 404'd) and ONLY when a Range
@@ -1129,9 +1183,20 @@ export function mountFrontend<E extends Env>(
       }
       // Serve the file; on a hit serveStatic returns the Response. On a miss it returns undefined —
       // then the SPA fallback (if any) gets a turn; if THAT misses too, fall through to the 404.
-      const fileRes = await fileServer(c, noop);
+      //
+      // An APPENDED name needs the guard too, for the same reason the served name does: `serveStatic`
+      // resolves a directory to `<dir>/index.html` itself, and the SPA fallback names `/index.html`
+      // outright — neither string ever reached `isSafeStaticPath`, which saw only what was requested.
+      // A `sub/index.html` symlink pointing out of the served directory was therefore served 200 with
+      // its bytes for `GET /sub`, needing no exotic filename at all. `serveNotFoundPage` below already
+      // guards the name IT appends; these two now match it, so all three appended names are covered.
+      const dirIndexSubPath = `${servedSubPath.replace(/\/+$/, '')}/index.html`;
+      const dirIndexSafe =
+        statSyncSafe(join(baseDir, servedSubPath))?.isDirectory() !== true ||
+        isSafeStaticPath(baseDir, realBaseDir, dirIndexSubPath);
+      const fileRes = dirIndexSafe ? await fileServer(c, noop) : undefined;
       if (fileRes) return stamped(fileRes);
-      if (spaServer) {
+      if (spaServer && isSafeStaticPath(baseDir, realBaseDir, '/index.html')) {
         const spaRes = await spaServer(c, noop);
         if (spaRes) return stamped(spaRes);
       }
