@@ -515,14 +515,22 @@ describe('docs/cli-reference.md — the --version example does not go stale', ()
  * and nothing regenerates either, so a flag added to the parser reaches `--help` (which is assembled
  * from the command's own block) while the document stays silent. `--host` shipped that way. The
  * option set is IMPORTED from the one place the grammar is declared, `DEPLOY_ARG_OPTIONS`
- * (`deploy.ts`), which `parseDeployArgs` hands to `parseArgs` unchanged; every name it yields is then
- * re-proved against the live parser, with an invented flag as the accept control, so a declaration
- * that had drifted away from the parser could not quietly shrink the arms below.
+ * (`deploy.ts`).
  *
- * Reading the declaration rather than the file's source text is what makes these arms independent of
- * how `deploy.ts` is written. They previously recovered the names with a regular expression over that
- * source, so a comment written next to an option — or a key placed before `type` — dropped a flag
- * from the set and turned a formatting choice in the parser into a failure of a documentation check.
+ * Two opposite drifts can put a flag outside these arms, and each needs its own guard. A name in the
+ * set that the parser does NOT take is caught by re-proving every name against the live parser, with
+ * an invented flag as the accept control. A flag the parser DOES take that the set never yields is
+ * invisible to that loop — it is the one that would quietly shrink the coverage — so the pass-through
+ * the set relies on is asserted directly: `parseDeployArgs`'s `parseArgs` call must hand
+ * `DEPLOY_ARG_OPTIONS` over by name, with nothing merged into it. That plus `strict: true` is what
+ * makes the declared set the set deploy accepts.
+ *
+ * The NAMES come from the declaration rather than from the file's source text, which is what makes
+ * these arms independent of how `deploy.ts` is written. They previously recovered the names with a
+ * regular expression over that source, so a comment written next to an option — or a key placed
+ * before `type` — dropped a flag from the set and turned a formatting choice in the parser into a
+ * failure of a documentation check. The pass-through assertion still reads that source, but only for
+ * the one token that hands the declaration to `parseArgs`; it never looks at the option entries.
  *
  * What these arms pin is each flag's PRESENCE in the synopsis and in the summary. The per-flag bullets
  * are deliberately not covered: `--port` and `--allowlist` carry none, so demanding a bullet per flag
@@ -530,6 +538,8 @@ describe('docs/cli-reference.md — the --version example does not go stale', ()
  */
 describe("docs/cli-reference.md — deploy's documented flags do not go stale", () => {
   const declaredFlags = Object.keys(DEPLOY_ARG_OPTIONS).map((name) => `--${name}`);
+  const deploySrc = readFileSync(new URL('./deploy.ts', import.meta.url), 'utf8');
+  const parseArgsCall = /parseArgs\(\{[\s\S]*?\n\s*\}\);/.exec(deploySrc)?.[0] ?? '';
 
   const doc = readFileSync(new URL('../../../../docs/cli-reference.md', import.meta.url), 'utf8');
   const heading = doc.indexOf('## `deploy` — boot and serve a declared product');
@@ -541,7 +551,18 @@ describe("docs/cli-reference.md — deploy's documented flags do not go stale", 
   // longer `--host…` spelling that happens to start with it.
   const names = (text: string, flag: string): boolean => new RegExp(`${flag}(?![\\w-])`).test(text);
 
-  it('the option set is read from the parser, and every name it yields is a flag deploy accepts', () => {
+  it('the parser takes the declaration WHOLE — nothing is merged into it at the call', () => {
+    expect(parseArgsCall, "parseDeployArgs's parseArgs call was not found in deploy.ts").not.toBe(
+      '',
+    );
+    // The names below are the declaration's keys, so they are the flags deploy accepts only while
+    // the parser is handed that declaration and nothing else. An option merged in here — `{
+    // ...DEPLOY_ARG_OPTIONS, extra: … }` — would be a flag the parser takes that the set never
+    // yields, and the per-name loop below cannot see it: the arms would simply check one flag less.
+    expect(parseArgsCall).toMatch(/options:\s*DEPLOY_ARG_OPTIONS\s*[,}]/);
+  });
+
+  it('every name the declared set yields is a flag deploy accepts', () => {
     expect(declaredFlags.length).toBeGreaterThan(0);
     // The parser is strict, so acceptance is the proof a name is a real flag. A flag either takes a
     // value or does not; try both spellings before concluding it is rejected.

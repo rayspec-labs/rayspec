@@ -611,13 +611,24 @@ export async function runAgent(
   // function has already given up on. The refusal is the dispatcher's own neutral `tool_error`
   // shape, so an adapter marshals it back to the model exactly like any other refused call.
   //
-  // ENTRY is the whole test, and deliberately so. `abandoned` is read synchronously on the way in
-  // and nothing re-reads it later, so a call that entered BEFORE the flag was set still runs its
-  // handler to completion afterwards — under `sequentialTools` possibly much later, since it waits
-  // its turn in the queue below. That is the same contract as the unqueued path (there too every
-  // call of a batch is admitted at entry and does its async work afterwards); the queue only widens
-  // the gap between the admission and the effect, it does not create a class of dispatch that could
-  // not already be admitted-then-abandoned.
+  // ENTRY is the whole test THIS gate applies, and deliberately so. `abandoned` is read
+  // synchronously on the way in and this wrapper never re-reads it, so it does not stop a call it
+  // has already admitted — under `sequentialTools` possibly much later, since the call waits its
+  // turn in the queue below. That is the same contract as the unqueued path (there too every call
+  // of a batch is admitted at entry and does its async work afterwards); the queue only widens the
+  // gap between the admission and the effect, it does not create a class of dispatch that could not
+  // already be admitted-then-abandoned.
+  //
+  // Admitted is not immune, though: only the REFUSAL DECISION is entry-time. Both seams handed to
+  // the dispatcher above consult `abandoned` when they are REACHED — `wrappedOnEvent` drops the
+  // event, `journal` throws `RunAbandonedError` — so the flag still governs what an admitted call
+  // may WRITE. On a live call that validates, nothing between the entry and the handler throws (the
+  // `tool_called` emission is dropped, not refused), so the handler runs to completion and it is the
+  // journal step AFTER it that is refused: the effect really happened and goes unjournaled, and the
+  // dispatch rejects with `RunAbandonedError` rather than returning the neutral `tool_error` a late
+  // ARRIVAL gets. `run-core-bound.db.test.ts` pins that shape. On a REPLAY of an idempotent tool the
+  // guarded `journal.lookupToolCache` is consulted before the handler, so there the refusal lands
+  // first and no effect fires at all.
   //
   // `spec.sequentialTools` — the platform-level honor: a per-run FIFO width-1 queue AT THE ENTRY.
   // The dispatcher's own Semaphore caps how many HANDLERS run at once, but its acquire sits BEHIND

@@ -397,8 +397,9 @@ describe('OpenAI adapter: sequentialTools maps to BOTH SDK settings — and ONLY
     // observable content for a model whose defaults are non-empty: `gpt-4.1-mini` above gets `{}`
     // from the SDK, whereas a gpt-5 model gets reasoning/verbosity defaults that a bare
     // `{ parallelToolCalls: false }` would silently drop — a second behaviour change riding along
-    // with the flag. Pinned against the SDK's own accessor rather than a copied literal, so an SDK
-    // bump that moves these defaults reds here instead of changing what a flagged run sends.
+    // with the flag. Both sides read the SDK's own accessor, so what this pins is the REPRODUCTION:
+    // a construction that stopped spreading the defaults reds here. It does NOT pin the values — an
+    // SDK bump that MOVES these defaults moves both sides together and is not caught here.
     const defaults = getDefaultModelSettings('gpt-5');
     expect(Object.keys(defaults).length).toBeGreaterThan(0); // the arm is not vacuous
 
