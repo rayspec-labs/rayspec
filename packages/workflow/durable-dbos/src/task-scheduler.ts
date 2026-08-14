@@ -135,6 +135,19 @@ export interface TaskTurnHandlerOutcome {
     readonly dispatchReviewer: boolean;
     readonly maxRounds: number;
   };
+  /**
+   * Children the turn BUFFERED for creation (the non-turn-ending create tools) — applied
+   * atomically with the ending intent; validated strictly by the engine.
+   */
+  readonly createdChildren?: readonly {
+    readonly title: string;
+    readonly goal: string;
+    readonly description?: string | null;
+    readonly owner: string;
+    readonly department?: string | null;
+    readonly priority?: 'low' | 'normal' | 'high' | 'urgent';
+    readonly delegatedTo?: string;
+  }[];
   /** The turn's actual cost, settled against the dispatch reservation. */
   readonly actualUsd?: number;
 }
@@ -1059,6 +1072,9 @@ export class DbosTaskScheduler {
             intent: outcome.intent,
             messages: outcome.messages,
             ...(outcome.reviewPolicy !== undefined ? { reviewPolicy: outcome.reviewPolicy } : {}),
+            ...(outcome.createdChildren !== undefined
+              ? { createdChildren: outcome.createdChildren }
+              : {}),
             budgets,
             actualUsd: outcome.actualUsd ?? 0,
           });

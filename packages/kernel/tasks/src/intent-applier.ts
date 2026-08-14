@@ -120,6 +120,17 @@ export const turnIntentSchema = z.discriminatedUnion('kind', [
     /** Ledger attribution for the escalation child (the superior's department), when known. */
     escalateToDepartment: z.string().min(1).nullable().default(null),
   }),
+  z.strictObject({
+    /**
+     * Cancel one task the caller owns or roots — the target must sit in the caller's own subtree
+     * (checked against the immutable ancestry, planner + executor both). Cascades to the target's
+     * descendants; the caller re-queues and keeps working. Not an operator kill switch.
+     */
+    kind: z.literal('cancel_task'),
+    taskId: z.string().min(1),
+    /** Journaled free text riding the turn record — never a status reason. */
+    detail: z.string().min(1).optional(),
+  }),
   z.strictObject({ kind: z.literal('yield') }),
   z.strictObject({ kind: z.literal('fail'), message: z.string().min(1) }),
 ]);
@@ -195,6 +206,11 @@ export type TurnPlan =
       readonly escalateTo: string;
       readonly escalateToDepartment: string | null;
     }
+  | {
+      readonly kind: 'cancel_task';
+      readonly targetTaskId: string;
+      readonly detail: string | null;
+    }
   | { readonly kind: 'yield' }
   | { readonly kind: 'fail'; readonly message: string }
   | {
@@ -235,6 +251,19 @@ export interface PlanTurnInput {
     readonly dispatchReviewer: boolean;
     readonly maxRounds: number;
   } | null;
+  /**
+   * Children the turn BUFFERED for creation (the non-turn-ending create tools) — validated by the
+   * executor, applied atomically with the turn whatever its ending intent. They occupy the depth
+   * tier a fan-out child would, and the ones that are HAND-OFFS (owner differs from the task's
+   * own) count against the per-task fan-out cap exactly as delegation rows do; self-owned planning
+   * children are not hand-offs and do not.
+   */
+  readonly createdChildren: readonly ReturnType<typeof delegationChildSpecSchema.parse>[];
+  /**
+   * Pre-read facts about a `cancel_task` intent's target (null for every other intent). Read from
+   * the immutable ancestry, so no lock is needed for the membership fact.
+   */
+  readonly cancelTarget: { readonly exists: boolean; readonly inCallerSubtree: boolean } | null;
   readonly intent: TurnIntent;
 }
 
@@ -249,6 +278,8 @@ export function invalidIntentPlan(detail: string, priorToolError: boolean): Turn
 
 export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
   if (input.pendingCancel) return { kind: 'cancelled' };
+  const bufferedRejection = rejectBufferedCreates(input);
+  if (bufferedRejection) return bufferedRejection;
   const intent = input.intent;
   switch (intent.kind) {
     case 'complete': {
@@ -339,11 +370,62 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
         escalateToDepartment: intent.escalateToDepartment,
       };
     }
+    case 'cancel_task': {
+      if (input.cancelTarget === null) {
+        // Defensive: the executor always pre-reads the target for this intent kind.
+        return invalidIntentPlan(
+          'cancel_task arrived without its pre-read target facts. Fail-closed.',
+          input.priorToolError,
+        );
+      }
+      if (!input.cancelTarget.exists || !input.cancelTarget.inCallerSubtree) {
+        return invalidIntentPlan(
+          `cancel_task target '${intent.taskId}' does not exist in this task's own subtree — a ` +
+            'turn may cancel only work it owns or roots. Fail-closed.',
+          input.priorToolError,
+        );
+      }
+      return { kind: 'cancel_task', targetTaskId: intent.taskId, detail: intent.detail ?? null };
+    }
     case 'yield':
       return { kind: 'yield' };
     case 'fail':
       return { kind: 'fail', message: intent.message };
   }
+}
+
+/**
+ * The ceilings buffered creates answer to: the DEPTH tier they would occupy (they are children,
+ * exactly as a fan-out's) and — for the HAND-OFFS among them (owner differs from the task's own) —
+ * the per-task fan-out cap, counted with the existing delegation rows. Self- and cycle-hand-off
+ * rules deliberately do NOT apply: a self-owned planning child is the create tool's whole point,
+ * and none of these children carries execution away from the caller's declared structure (the
+ * trusted layer resolved each owner before buffering).
+ */
+function rejectBufferedCreates(input: PlanTurnInput): TurnPlan | null {
+  if (input.createdChildren.length === 0) return null;
+  if (input.maxDelegationDepth !== null && input.ancestryDepth + 1 > input.maxDelegationDepth) {
+    return {
+      kind: 'delegation_rejected',
+      reason: 'depth_exceeded',
+      detail: `created-child depth ${input.ancestryDepth + 1} exceeds maxDelegationDepth ${input.maxDelegationDepth}`,
+      fate: toolErrorFate(input.priorToolError),
+    };
+  }
+  const handOffs = input.createdChildren.filter((child) => child.owner !== input.taskOwner).length;
+  if (
+    input.maxDelegationsPerTask !== null &&
+    handOffs > 0 &&
+    input.existingDelegationCount + handOffs > input.maxDelegationsPerTask
+  ) {
+    return {
+      kind: 'delegation_rejected',
+      reason: 'fanout_exceeded',
+      detail: `${input.existingDelegationCount} existing + ${handOffs} created hand-offs exceeds maxDelegationsPerTask ${input.maxDelegationsPerTask}`,
+      fate: toolErrorFate(input.priorToolError),
+    };
+  }
+  return null;
 }
 
 function rejectFanOut(
@@ -358,14 +440,18 @@ function rejectFanOut(
       fate: toolErrorFate(input.priorToolError),
     };
   }
+  // Buffered created hand-offs land in the SAME turn — they occupy cap slots beside these.
+  const bufferedHandOffs = input.createdChildren.filter(
+    (child) => child.owner !== input.taskOwner,
+  ).length;
   if (
     input.maxDelegationsPerTask !== null &&
-    input.existingDelegationCount + children.length > input.maxDelegationsPerTask
+    input.existingDelegationCount + bufferedHandOffs + children.length > input.maxDelegationsPerTask
   ) {
     return {
       kind: 'delegation_rejected',
       reason: 'fanout_exceeded',
-      detail: `${input.existingDelegationCount} existing + ${children.length} requested exceeds maxDelegationsPerTask ${input.maxDelegationsPerTask}`,
+      detail: `${input.existingDelegationCount} existing + ${bufferedHandOffs} created + ${children.length} requested exceeds maxDelegationsPerTask ${input.maxDelegationsPerTask}`,
       fate: toolErrorFate(input.priorToolError),
     };
   }

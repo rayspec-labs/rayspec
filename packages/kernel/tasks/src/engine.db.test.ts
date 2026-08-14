@@ -273,6 +273,147 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(still[0]?.messages).toBe(1);
   });
 
+  it('buffered creates land with the turn; delegation rows only for hand-offs; replay is a no-op', async () => {
+    const root = await driveToWorking(await newRoot());
+    const applyIt = () =>
+      applyTurnOutcome(tdb(), {
+        taskId: root.taskId,
+        turnId: turnIdFor(root.taskId, 1),
+        turnNumber: 1,
+        intent: { kind: 'yield' },
+        createdChildren: [
+          { title: 'Backlog item', goal: 'Own follow-up planning.', owner: 'coordinator' },
+          {
+            title: 'Handed off',
+            goal: 'A member does this.',
+            owner: 'worker-1',
+            delegatedTo: 'department:eng',
+          },
+        ],
+        budgets: NO_BUDGETS,
+      });
+    const out = await applyIt();
+    expect(out.task?.status).toBe('queued'); // the caller keeps working — creates never park it
+    const children = (await db.$client.unsafe(
+      `SELECT owner FROM workforce_tasks WHERE parent_task_id = '${root.taskId}' ORDER BY owner;`,
+    )) as unknown as { owner: string }[];
+    expect(children.map((c) => c.owner)).toEqual(['coordinator', 'worker-1']);
+    const delegations = (await db.$client.unsafe(
+      `SELECT delegated_to, resolved_owner FROM workforce_delegations WHERE parent_task_id = '${root.taskId}';`,
+    )) as unknown as { delegated_to: string; resolved_owner: string }[];
+    expect(delegations).toEqual([{ delegated_to: 'department:eng', resolved_owner: 'worker-1' }]);
+
+    const replay = await applyIt();
+    expect(replay.alreadyApplied).toBe(true);
+    const still = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+    );
+    expect(still[0]?.c).toBe(2);
+  });
+
+  it('buffered creates and a same-turn fan-out share the child-id space without collision', async () => {
+    const root = await driveToWorking(await newRoot());
+    const out = await applyTurnOutcome(tdb(), {
+      taskId: root.taskId,
+      turnId: turnIdFor(root.taskId, 1),
+      turnNumber: 1,
+      intent: {
+        kind: 'fan_out',
+        children: [
+          { title: 'F1', goal: 'G', owner: 'worker-1' },
+          { title: 'F2', goal: 'G', owner: 'worker-2' },
+        ],
+      },
+      createdChildren: [{ title: 'Planned', goal: 'G', owner: 'coordinator' }],
+      budgets: NO_BUDGETS,
+    });
+    expect(out.task?.statusReason).toBe('awaiting_children');
+    const children = await db.$client.unsafe(
+      `SELECT count(*)::int AS c, count(DISTINCT task_id)::int AS ids FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+    );
+    expect(children[0]).toEqual({ c: 3, ids: 3 });
+  });
+
+  it('buffered creates the budget cannot pay for park the task and create nothing', async () => {
+    const root = await driveToWorking(await newRoot());
+    const out = await applyTurnOutcome(tdb(), {
+      taskId: root.taskId,
+      turnId: turnIdFor(root.taskId, 1),
+      turnNumber: 1,
+      intent: { kind: 'yield' },
+      createdChildren: [{ title: 'C', goal: 'G', owner: 'worker-1' }],
+      budgets: workforceBudgetsSchema.parse({
+        subtree: { usd: 0.1 },
+        execution: { estimateUsdPerTurn: 1 },
+      }),
+    });
+    expect(out.task?.status).toBe('blocked');
+    expect(out.task?.statusReason).toBe('budget_exhausted');
+    const children = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+    );
+    expect(children[0]?.c).toBe(0);
+  });
+
+  it('cancel_task cancels a subtree the caller roots and the caller keeps orchestrating', async () => {
+    const root = await driveToWorking(await newRoot());
+    await turn(root.taskId, 1, { kind: 'yield' });
+    // Turn 2 buffers a hand-off child, then turn 3 cancels it.
+    await claim(root.taskId, await currentVersion(root.taskId), 2);
+    await applyTurnOutcome(tdb(), {
+      taskId: root.taskId,
+      turnId: turnIdFor(root.taskId, 2),
+      turnNumber: 2,
+      intent: { kind: 'yield' },
+      createdChildren: [{ title: 'Doomed', goal: 'G', owner: 'worker-1' }],
+      budgets: NO_BUDGETS,
+    });
+    const child = (await db.$client.unsafe(
+      `SELECT task_id FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+    )) as unknown as { task_id: string }[];
+    const childId = (child[0] as { task_id: string }).task_id;
+
+    await claim(root.taskId, await currentVersion(root.taskId), 3);
+    const out = await applyTurnOutcome(tdb(), {
+      taskId: root.taskId,
+      turnId: turnIdFor(root.taskId, 3),
+      turnNumber: 3,
+      intent: { kind: 'cancel_task', taskId: childId, detail: 'superseded' },
+      budgets: NO_BUDGETS,
+    });
+    expect(out.plan?.kind).toBe('cancel_task');
+    expect(out.task?.status).toBe('queued'); // the caller continues
+    const rows = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${childId}';`,
+    );
+    expect(rows[0]).toEqual({ status: 'cancelled', status_reason: 'cancelled_by_user' });
+    // The hand-off's delegation record settles with its child.
+    const settled = await db.$client.unsafe(
+      `SELECT status FROM workforce_delegations WHERE child_task_id = '${childId}';`,
+    );
+    expect(settled[0]?.status).toBe('cancelled');
+  });
+
+  it('cancel_task on a task outside the caller subtree is a tool error touching nothing', async () => {
+    const rootA = await driveToWorking(await newRoot());
+    const foreign = await newRoot({ owner: 'other' });
+    const out = await turn(rootA.taskId, 1, { kind: 'cancel_task', taskId: foreign.taskId });
+    expect(out.plan?.kind).toBe('invalid_intent');
+    expect(out.task?.status).toBe('queued');
+    expect(out.task?.statusReason).toBe('tool_error');
+    const untouched = await db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${foreign.taskId}';`,
+    );
+    expect(untouched[0]?.status).toBe('planned');
+  });
+
+  async function currentVersion(taskId: string): Promise<number> {
+    const rows = (await db.$client.unsafe(
+      `SELECT version FROM workforce_tasks WHERE task_id = '${taskId}';`,
+    )) as unknown as { version: number }[];
+    return (rows[0] as { version: number }).version;
+  }
+
   const QA_POLICY = { reviewer: 'qa', dispatchReviewer: true, maxRounds: 2 };
 
   /** Drive a task's next turn to a policy-intercepted completion. */

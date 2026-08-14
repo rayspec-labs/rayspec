@@ -5,6 +5,7 @@
  * fates, and the strictness of the intent/result schemas at every level.
  */
 import { describe, expect, it } from 'vitest';
+import { delegationChildSpecSchema } from './create-task.js';
 import {
   invalidIntentPlan,
   type PlanTurnInput,
@@ -32,6 +33,8 @@ function input(over: Partial<PlanTurnInput> = {}): PlanTurnInput {
     priorToolError: false,
     pendingCancel: false,
     matchedReviewPolicy: null,
+    createdChildren: [],
+    cancelTarget: null,
     intent: turnIntentSchema.parse({ kind: 'complete', result: RESULT }),
     ...over,
   };
@@ -418,5 +421,126 @@ describe('review dispatch and reviewer verdicts', () => {
         force: true,
       }).success,
     ).toBe(false);
+  });
+});
+
+describe('buffered created children', () => {
+  const created = (owner: string) =>
+    delegationChildSpecSchema.parse({ title: 'T', goal: 'G', owner });
+
+  it('an empty buffer changes nothing', () => {
+    expect(planTurnOutcome(input({ createdChildren: [] })).kind).toBe('complete');
+  });
+
+  it('buffered creates answer to the depth ceiling like any child', () => {
+    expect(
+      planTurnOutcome(
+        input({
+          createdChildren: [created('parent-owner')],
+          ancestryDepth: 2,
+          maxDelegationDepth: 2,
+        }),
+      ),
+    ).toMatchObject({ kind: 'delegation_rejected', reason: 'depth_exceeded', fate: 'requeue' });
+    expect(
+      planTurnOutcome(
+        input({
+          createdChildren: [created('parent-owner')],
+          ancestryDepth: 2,
+          maxDelegationDepth: 2,
+          priorToolError: true,
+        }),
+      ),
+    ).toMatchObject({ kind: 'delegation_rejected', fate: 'fail' });
+  });
+
+  it('only HAND-OFFS count against the fan-out cap; self-owned planning children do not', () => {
+    // Two self-owned + one hand-off against a cap of 1: the hand-off fits, the plan proceeds.
+    expect(
+      planTurnOutcome(
+        input({
+          createdChildren: [created('parent-owner'), created('parent-owner'), created('w1')],
+          maxDelegationsPerTask: 1,
+        }),
+      ).kind,
+    ).toBe('complete');
+    // Two hand-offs against a cap of 1: rejected.
+    expect(
+      planTurnOutcome(
+        input({
+          createdChildren: [created('w1'), created('w2')],
+          maxDelegationsPerTask: 1,
+        }),
+      ),
+    ).toMatchObject({ kind: 'delegation_rejected', reason: 'fanout_exceeded' });
+  });
+
+  it('buffered hand-offs and a same-turn fan-out share ONE cap', () => {
+    expect(
+      planTurnOutcome(
+        fanOut(['w2'], { createdChildren: [created('w1')], maxDelegationsPerTask: 1 }),
+      ),
+    ).toMatchObject({ kind: 'delegation_rejected', reason: 'fanout_exceeded' });
+    expect(
+      planTurnOutcome(
+        fanOut(['w2'], { createdChildren: [created('w1')], maxDelegationsPerTask: 2 }),
+      ).kind,
+    ).toBe('fan_out');
+  });
+
+  it('a pending cancel still overrides a turn with buffered creates', () => {
+    expect(
+      planTurnOutcome(input({ createdChildren: [created('w1')], pendingCancel: true })),
+    ).toEqual({ kind: 'cancelled' });
+  });
+});
+
+describe('cancel_task planning', () => {
+  const cancel = turnIntentSchema.parse({ kind: 'cancel_task', taskId: 'task_target' });
+
+  it('a target in the caller subtree plans the cancellation with its detail', () => {
+    expect(
+      planTurnOutcome(
+        input({
+          intent: turnIntentSchema.parse({
+            kind: 'cancel_task',
+            taskId: 'task_target',
+            detail: 'superseded by the merged approach',
+          }),
+          cancelTarget: { exists: true, inCallerSubtree: true },
+        }),
+      ),
+    ).toEqual({
+      kind: 'cancel_task',
+      targetTaskId: 'task_target',
+      detail: 'superseded by the merged approach',
+    });
+  });
+
+  it('detail is optional and lands as null', () => {
+    expect(
+      planTurnOutcome(
+        input({ intent: cancel, cancelTarget: { exists: true, inCallerSubtree: true } }),
+      ),
+    ).toEqual({ kind: 'cancel_task', targetTaskId: 'task_target', detail: null });
+  });
+
+  it('an unknown target or one outside the caller subtree is a typed invalid intent', () => {
+    expect(
+      planTurnOutcome(
+        input({ intent: cancel, cancelTarget: { exists: false, inCallerSubtree: false } }),
+      ),
+    ).toMatchObject({ kind: 'invalid_intent', fate: 'requeue' });
+    expect(
+      planTurnOutcome(
+        input({ intent: cancel, cancelTarget: { exists: true, inCallerSubtree: false } }),
+      ),
+    ).toMatchObject({ kind: 'invalid_intent' });
+  });
+
+  it('missing pre-read facts refuse defensively', () => {
+    expect(planTurnOutcome(input({ intent: cancel, cancelTarget: null }))).toMatchObject({
+      kind: 'invalid_intent',
+    });
   });
 });
