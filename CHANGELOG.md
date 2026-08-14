@@ -505,6 +505,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`Ctrl-C` now stops the example dev-boot servers.** `examples/contract-intake/dev-boot.mjs`,
+  `examples/support-intake-chat/dev-boot.mjs` and `examples/support-ticket-triage/dev-boot.mjs` kept
+  running after `SIGINT` and after `SIGTERM` — still answering `/health` 200 — so a developer who
+  pressed `Ctrl-C` was left with a live server still holding its database pool and its durable worker.
+  Each wrapper now owns its shutdown: it captures the `serve()` return value and, on `SIGINT`/`SIGTERM`,
+  closes the HTTP server, awaits `server.close()` (which drains the durable worker, then ends the
+  database pool) and exits `0` — the same wiring `packages/app/server/src/serve.ts` gives the shipped
+  `rayspec-serve` entrypoint, which is why that entrypoint is not affected.
+  **Nothing in a dependency changed.** The wrappers registered no signal handler of their own, and the
+  `SIGINT`/`SIGTERM` handlers their dependencies install each act only when no *other* listener is
+  registered — `@openai/agents-core`'s tracing provider exits only when `process.listeners(sig).length`
+  is not greater than 1, and `signal-exit` re-raises the signal only when that count equals its own
+  listener count — so with both loaded neither one ended the process. An owning handler is what
+  terminates it now, whatever the dependencies decide. `SIGHUP` is deliberately left unlistened:
+  `signal-exit` registers for it and `@openai/agents-core` does not, so `signal-exit` is its sole
+  listener there and re-raises it — that path is unchanged. The two example READMEs that gave a boot
+  command with no stop instruction (`contract-intake`, `support-intake-chat`) now name `Ctrl-C`, and the
+  authoring skill's dev-boot pattern teaches the handler. (Issue #360.)
 - **A deploy that is refused *after* its product-store DDL applied now names the tables it already
   committed, instead of reading as if nothing had happened.** Each migration is applied in its own
   transaction, so it is committed the moment it returns; every refusal raised after the migrate step
