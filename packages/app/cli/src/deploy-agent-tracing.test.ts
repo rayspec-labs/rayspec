@@ -7,8 +7,8 @@
  * belongs to someone other than the operator, so on THAT path the export becomes an affirmative
  * choice — `RAYSPEC_AGENT_TRACING=openai`. What is deploy-only is that DEFAULT, not the variable:
  * `rayspec-serve` honours an explicitly stated value and keeps the SDK default only when it is unset
- * (`applyServeAgentTracing`, issue #383), while the dev-boot wrappers (examples/local-boot,
- * deployments/acme-notes) assemble the server themselves and never read it.
+ * (`applyServeAgentTracing`, issue #383), and so do the boot wrappers that assemble the server
+ * themselves (examples/local-boot, deployments/acme-notes).
  *
  * WHAT THIS FILE PINS, and what it deliberately does not. The decisive question — does the SDK still
  * export? — is answered against the real SDK, in a child process at `NODE_ENV=production`, by

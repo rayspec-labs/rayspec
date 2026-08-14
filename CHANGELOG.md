@@ -608,9 +608,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   presents the block as `rayspec deploy` only or claims that leaving the variable unset keeps traces in
   the process: it now states the one thing that differs between the two entrypoints in how they treat
   the variable, which is what unset means (`off` on `deploy`, the SDK's exporting default on
-  `rayspec-serve`), and names the dev-boot wrappers — `examples/local-boot/serve.ts` and
-  `deployments/acme-notes/serve.mts` — as the boots that assemble the server themselves and never read
-  it. The getting-started guide's two "same boot" passages about `rayspec deploy <spec>` and
+  `rayspec-serve`), and names the boots that assemble the server themselves and read no trace-export
+  setting at all. (Both halves of that list moved again later in this release — see "the boot wrappers
+  that assemble the server themselves now honour `RAYSPEC_AGENT_TRACING` too" below.)
+  The getting-started guide's two "same boot" passages about `rayspec deploy <spec>` and
   `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` now name two differences that matter for what leaves the
   process and for what can still register a table — this trace-export default, and
   `sealProductStores()`, which `deploy` calls after its boot returns and `rayspec-serve` never calls —
@@ -623,12 +624,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_`-prefixed span fields and `@openai/agents-core` strips every `_`-prefixed key in `Span.toJSON`
   before the exporter serializes anything, while function spans carry tool arguments and outputs
   unprefixed. Both lines now say run metadata plus, once an agent calls tools, its tool arguments and
-  outputs — and both name the remediation as `RAYSPEC_AGENT_TRACING` on `rayspec deploy` and
-  `rayspec-serve` specifically, because the same banner is printed by the two dev-boot wrappers, where
-  that variable is read by nothing.
+  outputs — and both name the remediation as `RAYSPEC_AGENT_TRACING`. (That hint was scoped to
+  `rayspec deploy` and `rayspec-serve` at the time, because the banner's other two call sites read
+  nothing; it is unqualified now that they do — see below.)
 
 ### Fixed
 
+- **The boot wrappers that assemble the server themselves now honour `RAYSPEC_AGENT_TRACING` too, and
+  load their local `.env` through the shipped loader.** `examples/local-boot/serve.ts` and
+  `deployments/acme-notes/serve.mts` call `assembleServer` directly, so neither reached the
+  `rayspec-serve` entrypoint's `main()`: an operator who set `RAYSPEC_AGENT_TRACING=off` on either one
+  still got the agent SDK's exporting default — run metadata and, once an agent calls tools, its tool
+  arguments and outputs leaving for OpenAI — and an unsupported value that fail-closes by name on both
+  documented entrypoints was ignored there. Both wrappers printed the resolved posture on their boot
+  banner throughout, so the export was visible; it was simply not a decision the operator could make.
+  Each now applies the same explicit-only reader the `rayspec-serve` entrypoint uses, before its first
+  boot input is read: `off` disables the export through the SDK's programmatic switch (both import the
+  composition root statically, so the trace provider has snapshotted the SDK's own switch long before
+  either boots and an environment write alone would arrive too late), `openai` is a no-op, unset and
+  blank still change nothing, and anything else aborts with the message the documented entrypoints
+  raise — printed as a message, not a stack, on both.
+  `examples/local-boot/serve.ts` also carried its own single-path `.env` reader: a private parser
+  resolving exactly one file, the install-root one, relative to its own module location. That is the
+  construction issue #384 was about, one level down — it ignored `RAYSPEC_SKIP_DOTENV=1`, never looked
+  at the invoking directory, and parsed values by rules of its own. It now calls the shipped
+  `loadLocalDotenvIfPresent`, so it resolves configuration exactly as `rayspec deploy` and
+  `rayspec-serve` do: `$PWD/.env` first, the install-root file second, per key, opt-out included.
+  `deployments/acme-notes/serve.mts` reads no `.env` at all and still does not — it is a deployment
+  entrypoint whose environment comes from the deployment.
+  **The banner's remediation hint drops its entry-point qualifier**, because all four boots that print
+  it now read the variable; a source-discovering test requires every `bootBanner` call site to apply a
+  posture, so a fifth boot that printed the banner without reading the variable fails rather than
+  making that sentence false. **And the two `.env` loaders gain the parity test they never had:** the
+  CLI's copy and the server's are behaviourally identical and joined only by a comment in each pointing
+  at the other, which is exactly how they came apart the first time. One suite now runs both shipped
+  modules over the same two-root layout on disk and requires identical resolved values — order,
+  per-key precedence, the opt-out, quote-stripping and the `\n` unescape — so a change to one that is
+  not made to the other stops being green. (Issues #383, #384.)
 - **`rayspec gen-handler` now says WHY it cannot coerce a `double` or `numeric` column from a tool
   arg, instead of refusing the type as if it did not exist.** The holes contract carries its own
   column-type set — the types the deterministic renderer has a coercion arm for — and that set is
@@ -1068,13 +1100,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`rayspec` run from a vendored checkout now honors the invoking project's `./.env`.** The CLI's
   `.env` auto-loader resolved the file relative to its OWN install location — always the RaySpec
-  checkout root, never the caller's project — so in the vendored/submodule layout the brownfield
+  install root, never the caller's project — so in the vendored/submodule layout the brownfield
   docs recommend, a product repo's `./.env` was silently ignored and the boot failed closed claiming
   a variable is missing even though the file set it. The loader now searches `$PWD/.env` first and
   the install-root `.env` second, with the same parser and the same per-key no-override rule, so the
   effective precedence is: real environment > `$PWD/.env` > install-root `.env` — an earlier source
   always wins per key, a later one only fills what is still unset. `RAYSPEC_SKIP_DOTENV=1` keeps
-  skipping the auto-load entirely, now covering both candidates; a run from the RaySpec checkout
+  skipping the auto-load entirely, now covering both candidates; a run from the RaySpec install
   root, where the two candidates are the same file, behaves exactly as before.
 
 - **A missing-required-variable boot refusal now names the `.env` paths that were searched.**
@@ -1099,7 +1131,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`rayspec-serve` now honours the invoking project's `./.env` too — the other half of the `.env`
   defect this release closed for the `rayspec` CLI.** The CLI gained a two-candidate search;
   `rayspec-serve` kept resolving a single path relative to its OWN install location — always the
-  RaySpec checkout root — so one checkout could hand the two documented entrypoints different
+  RaySpec install root — so one checkout could hand the two documented entrypoints different
   configuration. With a `./.env` in the invoking project and another at the install root naming, say,
   a different `DATABASE_URL`, `rayspec deploy <spec>` opened the first and
   `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` the second, with nothing said either way. Both entrypoints
@@ -1112,7 +1144,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The boot's refusals are unchanged too — `rayspec-serve` names no searched paths, where
   `rayspec deploy` lists them. The one thing a deployment could notice: a `rayspec-serve` started
   from a directory that happens to contain a `.env` now reads that file, project file first. Started
-  from the checkout root, where the two candidates are one file, it behaves exactly as before.
+  from the install root, where the two candidates are one file, it behaves exactly as before.
   (Issue #384.)
 
 - **A `numeric` column holding a `NaN` is refused on read, like a non-finite `double` — and a page
@@ -1183,10 +1215,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A test now reads both documents off disk and compares the names they list to the injected set minus
   `id`, so adding an injected column turns it red until both documents name it. The chain closes end to
   end: the set the test compares against is this package's copy of the injected columns, which is
-  itself pinned by an existing equality assertion against the generated list. The extractor *throws*
-  when its marker sentence is gone, so rewriting the sentence out of reach fails loudly instead of
-  silently finding nothing and passing. No prose changed and no behaviour changed — what is new is
-  that the next injected column reds a test instead of aging two documents.
+  itself pinned by an existing equality assertion against the generated list. The extractor requires
+  *exactly one* marker sentence per document and **throws** otherwise, so rewriting the sentence out
+  of reach — or duplicating it — fails loudly instead of silently finding nothing and passing. No
+  prose changed and no behaviour changed — what is new is that the next injected column reds a test
+  instead of aging two documents.
+
+- **The list of boots that ignore `RAYSPEC_AGENT_TRACING` was wrong in the direction that matters.**
+  `.env.example` named two wrappers as the ones that "assemble the server themselves and never read
+  this variable at all". Five boots assemble the server themselves. The three the list omitted are the
+  per-example demo wrappers — `examples/contract-intake/dev-boot.mjs`,
+  `examples/support-intake-chat/dev-boot.mjs` and `examples/support-ticket-triage/dev-boot.mjs` — and
+  they are the worse case: they read no trace-export setting **and** print no boot banner. Two of the
+  three call a model — `contract-intake` and `support-intake-chat` declare an extractor, default to
+  the live extraction path, and abort by name without `OPENAI_API_KEY` — so on those a demo run keeps
+  the agent SDK's exporting default with nothing said either way. `support-ticket-triage` declares no
+  extractor and demands no model credential, so it makes no model call and has nothing to export; it
+  belongs on the list because it reads the variable no more than the other two do, not because it
+  exports. An operator reading a two-item list concludes the boots it omits honour the
+  variable. The entry no longer enumerates the ones that do not read it against a list that can rot:
+  the two wrappers that print the banner now read the variable (above), and the demo wrappers are
+  named as a shape — `examples/<slug>/dev-boot.mjs` — with what they do state plainly, along with the
+  agent SDK's own switch as the way to stop that export in their environment.
+
+- **A third "same boot" sentence is qualified, and the `.env` search's install root stops being
+  called a checkout root.** The equivalence between `rayspec deploy <spec>` and
+  `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` was corrected in the getting-started guide earlier this
+  release — `deploy` seals the product-store registrar after its boot returns and defaults the agent
+  trace export off, `rayspec-serve` does neither — while the CLI reference stated the same
+  equivalence unqualified. It links to the corrected passage, so a reader gets there; the clause is
+  now on the sentence itself, and on this changelog's own restatement of it.
+  Separately, the two-candidate `.env` search was documented as ending at the "checkout root". It ends
+  at the **install root**: the loader resolves it four segments above its own module, which is a
+  checkout root only when you run from one. Installed from the registry those four segments land
+  outside the package — the consuming project's own root under npm's flat layout, where it is usually
+  the same file as `$PWD/.env` and the two candidates dedupe to one read, and a directory inside
+  `node_modules/.pnpm/` under pnpm's. In neither layout is it the unscoped `node_modules/rayspec`
+  launcher package, which ships a bin and no loader. `install root` is what this changelog's own
+  normative sentences for issue #384 already used, so the reference, the
+  environment example, the server package README, the authoring skill and the two loaders' own
+  comments now all say it, and each names how that root is resolved rather than assuming a layout.
+  The missing-required-variable refusal keeps listing the resolved paths themselves, which is the one
+  place an operator reads the actual directory off a real run.
+  The authoring skill additionally still attributed the two-candidate search to the CLI alone; both
+  documented entrypoints have run it since issue #384. Two stale module paths in the CLI loader's
+  comments (`packages/cli/{src,dist}`, which has never existed at that spelling) are corrected in the
+  same pass.
 
 - **The column-type vocabulary is swept: `double` and `numeric` now appear everywhere the closed set
   is enumerated.** The reference page was updated when the two fractional types landed; the two
@@ -1257,7 +1331,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rayspec-serve` entrypoint the section's own code block uses parses no flags, so
   `rayspec-serve --check-env` boots as if the flag were absent — and bridges to it through the
   equivalence the page already states, that `rayspec deploy <spec>` and
-  `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` are the same boot. It is scoped to what the check reports
+  `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` are the same boot up to the differences that page names
+  (product-store sealing and the agent trace-export default), neither of which changes what a
+  document's boot demands. It is scoped to what the check reports
   (the variables the document's boot will require, why, and whether each is set) and does not
   present a passing verdict as a boot that will succeed: the check validates no value and opens no
   database, so it answers `ok` for a document whose boot still refuses on a non-UUID tenant id or
