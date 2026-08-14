@@ -436,7 +436,13 @@ export interface HandlerInit {
  *    into another tenant — the closure has no path to one.
  *  - FAIL-CLOSED WHEN UNWIRED: the capability is ABSENT on a deployment that did not enable the bus —
  *    a handler that needs it fail-closes loudly on `undefined` (mirrors `blob`/`enqueue`), never a
- *    silent no-op that drops events on the floor.
+ *    silent no-op that drops events on the floor. It is ABSENT for one further reason a tool author
+ *    must know: the tools of an ENQUEUED run (`async: true`, or a trigger whose action is
+ *    `kind: 'agent'`) never carry it, however the bus is configured. Such a run executes inside ONE
+ *    transaction on the durable worker, and an emit allocated there would hold the tenant's sequence
+ *    lock until the whole run committed — so the deployment does not thread the bus into the worker's
+ *    tool inits at all. Work that must emit belongs in a `{handler}` route or in a tool of an
+ *    in-request agent run.
  *  - FAIL-CLOSED ON A MALFORMED CALL: a call whose first argument is not a non-empty string, or whose
  *    payload cannot be JSON-serialized, is refused with a clear error naming the expected
  *    `emit(topic, payload)` shape. A handler ships as an `.mjs` module, where the type below does not
