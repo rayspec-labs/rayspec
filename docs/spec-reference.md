@@ -37,6 +37,16 @@ document against the matching set of sections. Both profiles are strict: every
 object level rejects an unknown or misspelled key rather than ignoring it, so a
 typo fails validation instead of silently doing nothing.
 
+One key name is refused outright, anywhere in either profile: a mapping key
+written literally as `__proto__`. It is the one key the shape validator cannot
+report on — it drops that key by name before any rule can see it — so a document
+declaring it used to validate, deploy and document itself as if the key were not
+there at all: a `rename` written under it renamed nothing, a view field written
+under it vanished from the response. Such a document now fails validation with
+`reserved_document_key`, pointed at the key. This is about a **key**. A `__proto__`
+*value* is untouched: a store column named `__proto__` stays a legal declaration
+and is served under its own name.
+
 The rest of this document is in two halves — the backend profile first (the
 concrete starting point), then the product profile.
 

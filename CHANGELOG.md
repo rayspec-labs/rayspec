@@ -532,6 +532,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A mapping key written literally as `__proto__` is now refused at the parse boundary of both
+  document profiles (`reserved_document_key`), anywhere in the document.** It is the one key name the
+  shape validator cannot report on. The YAML loader builds it as a genuine own property — it *defines*
+  the property rather than assigning it, so the prototype setter is bypassed — and the validator then
+  skips that key by name in both readers a spec goes through, the strict-object unrecognized-key walk
+  and the record branch, without raising an issue. The document that reached every rule downstream was
+  therefore not the document the author wrote: the key was simply gone.
+  **What that cost, measured on this grammar.** `api[].project.rename: { __proto__: … }` parsed clean,
+  linted clean and did *nothing* — the column kept its own name on the wire and in the OpenAPI
+  document while the author read the document as a rename. A `__proto__` key at the document root, or
+  in `metadata`, passed the strict unknown-key rejection that refuses every other unknown key. Every
+  record dock behaved the same way: product `metadata`, a store step's `filter`/`values`, a view's
+  `fields`/`params`, `contracts`. And the view-name denylist that already named `__proto__`
+  (`VIEW_RESERVED_NAMES`) is enforced over the shape-parsed object, where the key was already gone —
+  so that member of the denylist could not fire for a document anyone actually wrote. One scan over
+  the raw loaded document closes all of them at once, and it is the only place in the pipeline where
+  the key still exists to be seen. The scan is cycle-guarded, because a YAML alias resolves to the very
+  node its anchor labels and an unguarded walk of such a document would not return.
+  **This is a validation behaviour change, and it is deliberate**: a document that used to parse now
+  fails, with the error pointed at the offending key. No shipped example or fixture document declares
+  such a key (checked across every tracked `.yaml`/`.yml`), and nothing was exploitable — the key was
+  dropped, never assigned — so what changes is that a document whose author was misled now says so.
+  **Only `__proto__` is refused.** `constructor` and `prototype` survive the shape parse as ordinary
+  keys, so they need no parse-boundary refusal and keep their existing treatment: a store column named
+  `constructor` is a legal declaration this platform serves, and a *view field* named `constructor` is
+  still rejected by the view lint on a parsed document. And the refusal is about a **key**: a
+  `__proto__` *value* is untouched, so a store column named `__proto__` stays legal and is served
+  under its own name.
+
 - **The `501` from `POST /v1/triggers/{name}/fire` now names the manual-trigger requirement instead
   of a durable worker.** It read `Manual trigger firing requires a configured durable worker and a
   declared manual trigger. No manual-trigger firer is wired on this deployment.`, and the worker half
@@ -1143,6 +1172,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   serialized, because `__proto__` alone is a setter rather than a plain key.
 
 ### Documentation
+
+- **The two prose lists of which columns `omitInjected` drops can no longer age quietly.** The
+  `ResponseProjection` doc comment in the grammar and the `project` section of the spec reference each
+  spell out, by name, the seven server-injected columns a projection removes and the spared `id`. Both
+  are correct today — checked against the generated injected-column list — but both were written by
+  hand, while the code that enforces the rule *derives* the set from that generated list. A ninth
+  injected column would change what the platform does and leave both documents quietly describing the
+  old set, with nothing to notice.
+  A test now reads both documents off disk and compares the names they list to the injected set minus
+  `id`, so adding an injected column turns it red until both documents name it. The chain closes end to
+  end: the set the test compares against is this package's copy of the injected columns, which is
+  itself pinned by an existing equality assertion against the generated list. The extractor *throws*
+  when its marker sentence is gone, so rewriting the sentence out of reach fails loudly instead of
+  silently finding nothing and passing. No prose changed and no behaviour changed — what is new is
+  that the next injected column reds a test instead of aging two documents.
 
 - **The column-type vocabulary is swept: `double` and `numeric` now appear everywhere the closed set
   is enumerated.** The reference page was updated when the two fractional types landed; the two

@@ -459,6 +459,14 @@ export type ViewConditionalRead = z.infer<typeof ViewConditionalRead>;
  * DTO field / param names that can never be declared (prototype-pollution guards). `SafeIdentifier`
  * admits a leading underscore, so `__proto__` would otherwise pass — lint rejects these everywhere a
  * name is declared (fields, params, match keys, buckets).
+ *
+ * WHERE EACH MEMBER ACTUALLY FIRES. This lint runs over the SHAPE-PARSED document, and `__proto__`
+ * never reaches it from a parsed one: the shape validator drops that key by name, so the parse
+ * boundary refuses the document instead (`reserved_document_key`, document-keys.ts) and this member
+ * is the defence in depth behind it — still reachable, but only for a view built in code, which is
+ * how `product-views.test.ts` exercises the whole set. `constructor` and `prototype` survive the
+ * shape parse as ordinary keys, so for those two this lint is the only thing that refuses them and
+ * it fires on a parsed document.
  */
 export const VIEW_RESERVED_NAMES: ReadonlySet<string> = new Set([
   '__proto__',

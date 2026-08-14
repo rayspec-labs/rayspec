@@ -8,17 +8,24 @@
  *   2. VERSION CHECK FIRST   — before the full strict Zod parse, read `version` off the loaded
  *                             object. A missing/unsupported version -> one clean
  *                             `unsupported_version` SpecError, NOT a wall of strict-shape errors.
- *   3. STRICT ZOD PARSE      — `RaySpec.safeParse`. EVERY Zod issue maps to a SpecError with
+ *   3. RESERVED DOCUMENT KEY — `scanReservedDocumentKeys` over the RAW loaded object: a mapping key
+ *                             named `__proto__` is the one key the shape validator cannot see (it
+ *                             skips it by name), so it is refused HERE or nowhere. Short-circuits
+ *                             like the version check: the document the shape parse would read is
+ *                             not the document the author wrote, so its issues would be reported
+ *                             against a different document.
+ *   4. STRICT ZOD PARSE      — `RaySpec.safeParse`. EVERY Zod issue maps to a SpecError with
  *                             a JSON path; an `unrecognized_keys` issue -> `unknown_field` (one per
  *                             offending key), everything else -> `schema_violation`. Returns the
  *                             FULL issue list.
- *   4. SEMANTIC LINT         — `lintSpec` (cross-refs, dups, capability, embedded schemas). Only
+ *   5. SEMANTIC LINT         — `lintSpec` (cross-refs, dups, capability, embedded schemas). Only
  *                             run when the shape parse SUCCEEDS (lint needs a typed spec).
  *
  * Any non-empty error list -> `{ ok:false, errors }` (the value is NEVER returned partially).
  */
 import { parse as parseYaml } from 'yaml';
 import type { z } from 'zod';
+import { scanReservedDocumentKeys } from './document-keys.js';
 import { type Result, type SpecError, specError } from './errors.js';
 import { RaySpec, SPEC_VERSION } from './grammar.js';
 import { lintSpec } from './lint.js';
@@ -117,14 +124,20 @@ export function parseSpec(rawYamlText: string): Result<RaySpec, SpecError> {
     };
   }
 
-  // ---- 3. STRICT ZOD PARSE (full issue list) --------------------------------------------
+  // ---- 3. RESERVED DOCUMENT KEY (raw scan; short-circuit on any hit) --------------------
+  const reservedKeyErrors = scanReservedDocumentKeys(loaded);
+  if (reservedKeyErrors.length > 0) {
+    return { ok: false, errors: reservedKeyErrors };
+  }
+
+  // ---- 4. STRICT ZOD PARSE (full issue list) --------------------------------------------
   const parsed = RaySpec.safeParse(loaded);
   if (!parsed.success) {
     const errors = parsed.error.issues.flatMap(issueToSpecErrors);
     return { ok: false, errors };
   }
 
-  // ---- 4. SEMANTIC LINT -----------------------------------------------------------------
+  // ---- 5. SEMANTIC LINT -----------------------------------------------------------------
   const lintErrors = lintSpec(parsed.data);
   if (lintErrors.length > 0) {
     return { ok: false, errors: lintErrors };
