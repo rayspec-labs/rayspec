@@ -16,8 +16,13 @@ import { describe, expect, it } from 'vitest';
 import { resolveResponseProjection } from './store-projection.js';
 import { serializeRow } from './store-validation.js';
 
-/** Parse + lint a spec whose store carries proto-named columns; throws on any doctor error. */
-function protoSpec(): RaySpec {
+/**
+ * Parse + lint a spec whose store carries proto-named columns; throws on any doctor error.
+ * `protoColumnType` types the `__proto__` column: `text` (a string value) or `jsonb` (an OBJECT
+ * value — the shape that turns a plain-`{}` accumulator's `out['__proto__'] = value` from a silent
+ * no-op into a real prototype mutation).
+ */
+function protoSpec(protoColumnType: 'text' | 'jsonb' = 'text'): RaySpec {
   const spec = RaySpec.parse({
     version: '1.0',
     metadata: { name: 'proto-named-columns' },
@@ -27,7 +32,7 @@ function protoSpec(): RaySpec {
         columns: [
           { name: 'wire_name', type: 'text' },
           { name: 'constructor', type: 'text' },
-          { name: '__proto__', type: 'text' },
+          { name: '__proto__', type: protoColumnType },
         ],
       },
     ],
@@ -102,6 +107,41 @@ describe('response projection — columns named after Object.prototype members',
     );
     expect(JSON.stringify(camelOut)).toBe(
       '{"id":"u-1","wireName":"ada","constructor":"brunel","_Proto__":"shelley"}',
+    );
+  });
+
+  it('serializes them on the UN-PROJECTED path too — a route with no `project` (author snake names)', () => {
+    const spec = protoSpec();
+    const store = spec.stores[0]!;
+    // A route that declares no `project` resolves to `undefined`: that is the argument the
+    // un-projected path is entered with, so this is the shape every project-less route returns.
+    const none = resolveResponseProjection(store, undefined);
+    expect(none).toBeUndefined();
+    const out = serializeRow(store, ROW, none);
+    // Same pin as the projected arm above, under the AUTHOR's snake names: a column named
+    // `__proto__` is an ordinary column and must reach the wire, not be swallowed by the
+    // accumulator's setter.
+    expect(JSON.stringify(out)).toBe(
+      '{"id":"u-1","wire_name":"ada","constructor":"brunel","__proto__":"shelley"}',
+    );
+    expect(Object.hasOwn(out, '__proto__')).toBe(true);
+    expect(Object.hasOwn(out, 'constructor')).toBe(true);
+  });
+
+  it('an OBJECT value under a `__proto__` column is a property, never the response prototype', () => {
+    const spec = protoSpec('jsonb');
+    const store = spec.stores[0]!;
+    const value = { tampered: true };
+    const row = { id: 'u-2', wireName: 'ada', constructor: 'brunel', _Proto__: value };
+    const out = serializeRow(store, row, resolveResponseProjection(store, undefined));
+    // The jsonb case is the sharp one: `out['__proto__'] = <object>` on an accumulator that still
+    // has Object.prototype REPLACES the response object's prototype — the column disappears from
+    // the response AND every key of the stored value becomes readable through the response.
+    expect(Object.getPrototypeOf(out)).not.toBe(value);
+    expect((out as { tampered?: unknown }).tampered).toBeUndefined();
+    expect(Object.hasOwn(out, '__proto__')).toBe(true);
+    expect(JSON.stringify(out)).toBe(
+      '{"id":"u-2","wire_name":"ada","constructor":"brunel","__proto__":{"tampered":true}}',
     );
   });
 });

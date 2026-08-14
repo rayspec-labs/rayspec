@@ -123,8 +123,19 @@ const MIN_SAFE_BIG = BigInt(Number.MIN_SAFE_INTEGER);
  * The refusal is keyed on the VALUE SHAPE, not a per-column type table, so a BigInt from any source
  * is caught. The detailed text (column + bound) stays on the internal `message`; the client sees only
  * the generic `publicMessage`, following this file's convention.
+ *
+ * THE NUMERIC ARM is the one that needs the COLUMN (`col`, the runtime PgColumn its caller already
+ * holds) rather than the value shape: a numeric column is string-mode, so its value is a string —
+ * exactly like the text column beside it, where "NaN" is ordinary data no read may refuse. What it
+ * refuses is a numeric column value that is not a decimal at all: PostgreSQL's numeric holds NaN
+ * (±Infinity is the DB's own refusal — a column with a declared precision/scale, the only numeric
+ * this platform emits, raises 22003 on one), and `coerceForColumn` refuses the string on the way IN
+ * against this very regex, so only a route around the write chokepoints can produce one. Handing it
+ * out unrefused means a handler, a `store_read` node or the views interpreter receives a "decimal"
+ * no decimal parser accepts, under a type whose entire promise is exactness. `col` is undefined only
+ * for a row key the table does not declare (no such key exists today), and such a key passes through.
  */
-function serializeValue(value: unknown, name: string): unknown {
+function serializeValue(value: unknown, name: string, col: PgColumn | undefined): unknown {
   if (typeof value === 'bigint') {
     if (value > MAX_SAFE_BIG || value < MIN_SAFE_BIG) {
       throw new StoreInputError(
@@ -146,6 +157,16 @@ function serializeValue(value: unknown, name: string): unknown {
         'represent — refused rather than silently nulled (fail-closed).',
       'A stored value cannot be represented by this API.',
     );
+  }
+  if (col !== undefined && isNumericColumn(col) && typeof value === 'string') {
+    if (!NUMERIC_WIRE_RE.test(value)) {
+      throw new StoreInputError(
+        `HandlerDb: column '${name}' holds a value that is not a plain decimal (a numeric column ` +
+          'can hold NaN at the SQL level; the exact-decimal form this type promises cannot) — ' +
+          'refused rather than passed off as a decimal (fail-closed).',
+        'A stored value cannot be represented by this API.',
+      );
+    }
   }
   return value instanceof Date ? value.toISOString() : value;
 }
@@ -249,7 +270,8 @@ function assertValidValue(col: PgColumn, where: string, name: string, value: unk
   //
   // WHICH CALLER CHECKS THE RANGE: the write mapper does — it runs `coerceForColumn` on every value
   // right after this guard, and that is where the ±(2^53−1) bound is enforced. `filterPredicate` does
-  // NOT: it calls this guard and goes straight to `eq`/`inArray`, so a filter VALUE reaches the driver
+  // NOT: it calls this guard and goes to `eq`/`inArray` through `coerceFilterValue`, which is the
+  // timestamp string→Date SHAPE fix and nothing else, so a filter VALUE reaches the driver
   // unbounded. That is deliberate and safe in the direction that matters — a filter only ever narrows
   // a read, so an out-of-range one selects no row rather than storing something no read could return —
   // but it does mean the bound is a WRITE bound, not a facade-wide one. Do not restate it as the
@@ -297,6 +319,27 @@ const OPERATOR_FNS: ReadonlyMap<string, typeof gt> = new Map([
  * EQUALITY filter keys, e.g. a read-by-id).
  */
 const INJECTED_SNAKE: ReadonlySet<string> = new Set(INJECTED_COLUMN_NAMES);
+
+/**
+ * Coerce a FILTER value for its column, for the one column type whose driver mapper cannot take the
+ * value's wire form: drizzle's timestamp column maps a bound with `value.toISOString()`, and a String
+ * has no such method — so an ISO STRING reached the driver as a raw `TypeError`, i.e. a 500-shaped
+ * internal fault for what is a handler INPUT mistake, where every other facade input guard produces a
+ * StoreInputError (a 400). An ISO string is not an exotic bound either: it is exactly what the facade
+ * HANDS BACK for a timestamp column (`serializeValue` emits ISO strings) and exactly what the write
+ * path already takes (SF-2, `coerceForColumn`) — so a read-modify-write handler produces one by
+ * following the plain-serializable-row contract. This routes such a bound through THAT SAME SF-2 arm:
+ * a parseable string becomes the Date the mapper wants, and an unparseable one is refused by the same
+ * guard, with the same message and the same generic public text.
+ *
+ * DELIBERATELY NARROW — a timestamp column with a string value, nothing else. Every other value and
+ * column type is returned untouched, so the filter path still applies no WRITE range bound (see the
+ * note on `assertValidValue`'s BigInt arm, which states that split and the reason for it).
+ */
+function coerceFilterValue(col: PgColumn, name: string, value: unknown): unknown {
+  if (!isTimestampColumn(col) || typeof value !== 'string') return value;
+  return coerceForColumn(col, name, value, 'filter');
+}
 
 /** True for a PLAIN, non-array, non-Date object (prototype exactly Object.prototype or null). */
 function isPlainNonArrayObject(value: unknown): value is Record<string, unknown> {
@@ -357,7 +400,7 @@ function operatorPredicate(col: PgColumn, name: string, obj: Record<string, unkn
     // rejected, and on this (non-jsonb) column any plain object/array bound is rejected too.
     assertValidValue(col, 'filter', name, bound);
     const fn = OPERATOR_FNS.get(key);
-    if (fn) preds.push(fn(col, bound) as SQL);
+    if (fn) preds.push(fn(col, coerceFilterValue(col, name, bound)) as SQL);
   }
   return preds.length === 1 ? (preds[0] as SQL) : (and(...preds) as SQL);
 }
@@ -383,6 +426,11 @@ function operatorPredicate(col: PgColumn, name: string, obj: Record<string, unkn
  * the flag: an object value there remains the SF-1 reject it always was — a range write/delete is a
  * deliberate later decision, not a side effect of a read feature.
  *
+ * TIMESTAMP BOUNDS: all three forms — the equality value, each `inArray` element, and each operator
+ * bound — pass through `coerceFilterValue`, so an ISO STRING on a timestamp column becomes the Date
+ * drizzle's mapper needs and an unparseable one is a StoreInputError, matching the write path (SF-2)
+ * instead of leaking the mapper's `TypeError`. Nothing else about a filter value is coerced.
+ *
  * Each key is resolved fail-closed to a real column (#4); injected columns (e.g. `id`) ARE valid filter
  * keys (a read-by-id is legitimate). The tenant predicate is AND-combined by TenantDb BENEATH this, so a
  * filter can NEVER drop the tenant scope.
@@ -400,7 +448,10 @@ function filterPredicate(
     // still SF-1-guarded. A jsonb column keeps eq (the array IS the value — do not break jsonb equality).
     if (Array.isArray(value) && !isJsonbColumn(col)) {
       for (const element of value) assertValidValue(col, 'filter', name, element);
-      return inArray(col, value as unknown[]);
+      return inArray(
+        col,
+        (value as unknown[]).map((element) => coerceFilterValue(col, name, element)),
+      );
     }
     // Read-shaping: a PLAIN OBJECT on a NON-jsonb column → the comparison-operator form (or its
     // fail-closed reject) — READ filters only. A jsonb column keeps eq (the object IS the value).
@@ -408,7 +459,7 @@ function filterPredicate(
       return operatorPredicate(col, name, value);
     }
     assertValidValue(col, 'filter', name, value);
-    return eq(col, value);
+    return eq(col, coerceFilterValue(col, name, value));
   });
   return preds.length === 1 ? preds[0] : and(...preds);
 }
@@ -786,7 +837,7 @@ function serializeRow(table: PgTable, row: Record<string, unknown>): StoreRow {
   const out: StoreRow = {};
   for (const [key, value] of Object.entries(row)) {
     const snake = camelToSnake.get(key) ?? key;
-    out[snake] = serializeValue(value, snake);
+    out[snake] = serializeValue(value, snake, cols[key]);
   }
   return out;
 }

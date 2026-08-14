@@ -271,6 +271,32 @@ describe('OpenAiTtsAdapter — HTTP + transport error mapping (content-free)', (
     });
   });
 
+  it('maps a JSON 2xx that carries NO content-type header to malformed_provider_output', async () => {
+    // A `Response` built from bytes sets no content-type, so the header guard cannot see this one —
+    // the body itself has to. No audio container the port speaks starts with `{` or `[`.
+    const { fetchImpl } = fetchReturning(
+      new TextEncoder().encode(`\n  ${JSON.stringify({ error: 'nope' })}`),
+      200,
+    );
+    const adapter = new OpenAiTtsAdapter({ apiKey: SECRET_KEY, env: {}, fetchImpl });
+    await expect(adapter.synthesize({ text: 'hallo' })).rejects.toMatchObject({
+      code: 'malformed_provider_output',
+    });
+  });
+
+  it('ACCEPT CONTROL: a 2xx carrying audio bytes and NO content-type header still succeeds', async () => {
+    for (const bytes of [
+      AUDIO, // mp3 frame sync
+      new TextEncoder().encode('RIFF....WAVE'),
+      new TextEncoder().encode('OggS....'),
+    ]) {
+      const { fetchImpl } = fetchReturning(bytes, 200);
+      const adapter = new OpenAiTtsAdapter({ apiKey: SECRET_KEY, env: {}, fetchImpl });
+      const result = await adapter.synthesize({ text: 'hallo' });
+      expect([...result.bytes]).toEqual([...bytes]);
+    }
+  });
+
   it('maps an EMPTY 2xx body to malformed_provider_output (never a silent zero-byte success)', async () => {
     const { fetchImpl } = fetchReturning(new Uint8Array([]), 200);
     const adapter = new OpenAiTtsAdapter({ apiKey: SECRET_KEY, env: {}, fetchImpl });

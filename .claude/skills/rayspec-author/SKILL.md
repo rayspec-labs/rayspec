@@ -53,8 +53,9 @@ the request, and cannot write its result back into a row. It.2 is exactly that l
 Every branch is built on this. An It.0 PRD is DONE after step 6; It.1 adds an agent, It.2 adds the loop.
 
 1. **Model the data.** Each "thing we store" → a `stores[]` entry (one table); each field → a `columns[]`
-   entry with a `ColumnType` (`text | uuid | timestamp | integer | bigint | boolean | jsonb`); "optional" →
-   `nullable: true`; "no duplicates" → `unique: true`; a parent/child link → a `foreignKeys[]` entry.
+   entry with a `ColumnType` (`text | uuid | timestamp | integer | bigint | boolean | jsonb | double |
+   numeric`); "optional" → `nullable: true`; "no duplicates" → `unique: true`; a parent/child link → a
+   `foreignKeys[]` entry.
    **NEVER declare the injected columns** (`tenant_id`, `id`, `created_at`, `deleted_at`,
    `retention_days`, `region`, `created_by` — all server-managed). Optional refinements (see the
    `stores[]` grammar reference): a text-column value whitelist (`enum: [...]`), opt-in tombstone-on-
@@ -104,8 +105,17 @@ with a declarative approximation; recommend it as a future iteration or the prod
 - Beyond the loop: multi-store atomic `db.transaction(fn)` writes; concurrency-race hardening (23505
   re-read / human-edit preservation / stale-reconcile); grounding/validation over a closed evidence
   set; vector/embedding/fuzzy/range lookups (the templates scaffold **AND-equality filters only** — the
-  facade's bounded `{ gt/gte/lt/lte }` comparisons are not scaffolded); typed scalar arrays
-  / floats at the DB layer (map to `jsonb`, never a typed scalar array).
+  facade's bounded `{ gt/gte/lt/lte }` comparisons are not scaffolded); typed scalar arrays at the DB
+  layer (they map to `jsonb`, never a typed scalar array). Fractional numbers ARE declarable — `double`
+  and `numeric` are column types — but the `gen-handler` renderer has no coercion arm for either on the
+  WRITE side, so a rendered handler cannot PERSIST one from a model arg (`validateHoles` refuses a
+  `double`/`numeric` `columns[]` entry). Reading is not restricted the same way: `filterCols` carries
+  column names only, is checked for snake case and never against the column vocabulary, and the lookup
+  template passes a model-supplied `number` straight into the read filter — so a model-chosen
+  fractional value CAN reach a `double`/`numeric` column as a lookup filter.
+  An author CONSTANT into such a column DOES render, via `fixedValues`, provided the
+  literal matches the column's wire envelope — a finite number for `double`, a fitting decimal string
+  for `numeric` (see the holes contract below).
 
 ## What you must NEVER touch
 
@@ -872,10 +882,13 @@ frontend: []              # optional — static frontend mounts served alongside
 - name: <safe_identifier>           # /^[a-z_][a-z0-9_]*$/, 1..63 chars (snake_case; no metacharacters).
   columns:                          # REQUIRED, >= 1 — BUSINESS columns only.
     - name: <safe_identifier>
-      type: <ColumnType>            # one of: text | uuid | timestamp | integer | bigint | boolean | jsonb
+      type: <ColumnType>            # one of: text | uuid | timestamp | integer | bigint | boolean |
+                                    #   jsonb | double | numeric
       nullable: <bool>              # optional, default false
       unique: <bool>                # optional, default false
       enum: [<value>, ...]          # optional — a value whitelist. TEXT COLUMNS ONLY; >= 1 DISTINCT member.
+      precision: <int>              # REQUIRED on a `numeric` column, REJECTED on every other type:
+      scale: <int>                  #   total digits (1..1000) and fractional digits (0..precision).
   foreignKeys:                      # optional, default [] — child→parent (product→product) FKs.
     - column: <safe_identifier>          #   a DECLARED business column on THIS store
       references: <safe_identifier>      #   another DECLARED store's name
@@ -900,6 +913,25 @@ ONLY for product→product references.
   against a table-identity whitelist registry — a non-member value, including a non-string scalar, is
   refused; the failure names the store and column only, never the offending value). The earlier residual —
   the facade being un-enforced — is CLOSED.
+
+**`double` / `numeric` — the fractional pair (pick by whether a wrong last digit is a defect).**
+- **`double`** is PostgreSQL `double precision` (`float8`) — IEEE-754 binary64, exactly what a JSON
+  number is, so it round-trips as a **JSON number** on bodies, filters and cursors with no re-rounding
+  in either direction. Float64 semantics are the honest contract (`0.1 + 0.2` is
+  `0.30000000000000004`). `NaN`/`Infinity` are refused fail-closed everywhere a value enters or leaves.
+  Use it for scores, confidences, coordinates, ratings — **never for money**.
+- **`numeric`** is the exact decimal `numeric(precision, scale)` and **REQUIRES both parameters** on the
+  column (a `numeric` without them, or a `precision`/`scale` on any other type, is a lint error). It
+  crosses the wire as a **STRING in both directions** — a JSON **number** on a numeric column is refused
+  with **400 VALIDATION_ERROR**, because every JSON parser routes a numeric literal through float64
+  before a validator can see it. A written value must FIT the declared shape (at most `scale` fractional
+  digits as written and at most `precision − scale` integer digits) or it is refused rather than
+  rounded; a read returns PostgreSQL's canonical rendering with exactly `scale` fractional digits (`7.5`
+  into a `numeric(24, 6)` column reads back `"7.500000"`). Use it for money and anything else that must
+  be exact.
+- Both are orderable, filterable and usable as keyset-pagination columns. Changing an existing column's
+  `precision`/`scale` is a **destructive** type change — blocked until a reviewed allowlist entry covers
+  the exact `ALTER` statement.
 
 **`softDelete: true` — opt-in soft delete (tombstone).** DEFAULT is a **HARD physical delete** (the
 `deleted_at` column is injected but unused). With `softDelete: true`:
@@ -1131,18 +1163,26 @@ Notes that matter:
   Do not reach for `spa: true` to fix broken extensionless links — it answers EVERY unmatched path with
   the root document, so a genuinely broken link comes back `200`. `cleanUrls` keeps `404` terminal (for
   `spa: false`). A mount may set both: the order is exact file → `<path>.html` → `<path>/index.html` →
-  the SPA fallback → `404.html`/404. ONE behaviour changes when you opt in — a site shipping BOTH
+  the SPA fallback → `404.html`/404. TWO behaviours change when you opt in — (1) a site shipping BOTH
   `<path>.html` and `<path>/index.html` starts serving `<path>.html` where the directory index served
-  before; a trailing-slash request (`/docs/`) still resolves the directory index. EXTENSIONLESS is the
-  exact domain: a TYPED path (last segment carries a `.`, e.g. `/app.js`, `/data.json`) is never
-  rewritten, so a missing asset stays a `404` instead of being answered from a `<name>.<ext>.html`
-  sibling; only the last segment decides, so `/guide/1.2/notes` still resolves.
+  before; (2) on a mount shipping a root `404.html`, `/404` is extensionless like any other path, so it
+  serves that page with 200 — on an `spa: false` mount that flips the status (the miss branch answered
+  those bytes with 404), on an `spa: true` one it flips the document (the fallback runs before the
+  `404.html` branch, so the shell already answered 200). Host parity either way — Netlify / Vercel /
+  GitHub Pages all serve `/404` as a page. A trailing-slash request (`/docs/`) still resolves the directory
+  index. EXTENSIONLESS is the exact domain: a TYPED path (last segment carries a `.`, e.g. `/app.js`,
+  `/data.json`) is never rewritten, so a missing asset stays a `404` instead of being answered from a
+  `<name>.<ext>.html` sibling; only the last segment decides, so `/guide/1.2/notes` still resolves.
 - Mount responses carry `Content-Security-Policy: default-src 'self'; frame-ancestors 'none';
   object-src 'none'; base-uri 'self'` plus a `Permissions-Policy` (both boot shapes — a static profile
   app-wide, a full backend on its mount responses; `RAYSPEC_FRONTEND_CSP` / `RAYSPEC_PERMISSIONS_POLICY`
   replace either verbatim). No `style-src`/`script-src` ⇒ an inline `<style>`/`<script>` in a served page
-  is **BLOCKED**, and SILENTLY: the response is a 200 with the exact bytes, only the rendered page
-  differs. Author the assets with CSS and JS in FILES referenced by `href`/`src`, never inline.
+  is **BLOCKED** — and so are a `style="…"` attribute and an `on*=` handler, which fall back to the same
+  `default-src`. No REQUEST shows it: the response is a 200 with the exact bytes, only the rendered page
+  differs. The BOOT does: it scans the served HTML against the policy in force and warns once, naming the
+  files — warn-only (it never fails a boot), bounded (200 HTML files per boot, the first 1 MiB of one
+  file, 5 files named), a heuristic text scan rather than a parser, and silenced by an override that
+  permits the shape. Author the assets with CSS and JS in FILES referenced by `href`/`src`, never inline.
 - **Not in v1:** SSR, template rendering, an asset build/bundle pipeline, cache/CDN headers, and the
   product profile — `frontend` is backend-profile only. (Range and HEAD ARE honored: a byte-`Range` GET
   returns **`206`** partial content and a `HEAD` returns **`200`**; an **UNSATISFIABLE** range — a start
@@ -1225,6 +1265,11 @@ out-of-It.2 signal (see the list at the end of this contract), not a key to add.
     { "col": "<snake_col>", "jsonType": "text", "required": true, "nullable": false,
       "enumValues": ["ok", "review", "violation"] }   // optional closed set (text columns only)
     // jsonType ∈ text | uuid | timestamp | integer | bigint | boolean | jsonb
+    //   — NARROWER than the spec's `ColumnType` ON PURPOSE: the renderer emits one coercion arm per
+    //   type it can serve and has none for `double`/`numeric`, so a `columns[]` entry naming either is
+    //   refused with that reason. This bounds the COERCED (model-arg) path only — `fixedValues` below
+    //   stamps by column NAME and carries no `jsonType`, so an author CONSTANT into a fractional column
+    //   renders. Only a MODEL-chosen fractional value needs a hand-written handler.
   ],
   "fixedValues": { "status": "coded" },  // OPTIONAL author CONSTANTS server-stamped ON TOP of the
                                          //   coerced args (a model can never override them); keys are
@@ -1326,10 +1371,13 @@ What the lookup renderer GUARANTEES:
 Multi-store atomic `db.transaction(fn)` writes · concurrency-race hardening (23505 re-read / edited-row
 preservation / stale-reconcile) · grounding/validation over a closed evidence set · blob/stream/media
 (a document-UPLOAD pipeline IS authorable as a product-profile document — see the reference below) ·
-durable-enqueue / off-request jobs / triggers / cron · typed scalar arrays / floats at the DB layer
-(→ `jsonb`) · vector/embedding/fuzzy/range lookups (the templates scaffold AND-equality filters only —
-the facade's bounded `{ gt/gte/lt/lte }` comparisons are not scaffolded). A PRD needing any
-of these is out of It.2 scope — say so and STOP.
+durable-enqueue / off-request jobs / triggers / cron · typed scalar arrays at the DB layer (→ `jsonb`) ·
+PERSISTING a **MODEL-CHOSEN `double`/`numeric`** value (the column itself is declarable; an author
+CONSTANT into one renders via `fixedValues`, and a model-chosen fractional value can still be a lookup
+FILTER — what has no renderer arm is coercing an untrusted arg on the write side; see the `jsonType`
+note in the holes contract) · vector/embedding/fuzzy/range lookups (the templates
+scaffold AND-equality filters only — the facade's bounded `{ gt/gte/lt/lte }` comparisons are not
+scaffolded). A PRD needing any of these is out of It.2 scope — say so and STOP.
 
 ---
 
@@ -1844,8 +1892,12 @@ declaring `input_normalize` without it fails closed at deploy. A `record_input` 
 ```yaml
 - name: <safe-ident>                       # the store (table) name.
   description: <string>                     # OPTIONAL.
-  columns:                                  # >= 1 BUSINESS column — the backend column vocabulary:
-    - { name: <safe-ident>, type: text | uuid | timestamp | integer | bigint | boolean | jsonb, nullable?: bool, unique?: bool }
+  columns:                                  # >= 1 BUSINESS column — the SAME StoreColumn shape as the
+                                            #   backend `stores[]` above, so `precision`+`scale` are
+                                            #   REQUIRED on a `numeric` column and REJECTED on every
+                                            #   other type here too.
+    - { name: <safe-ident>, type: text | uuid | timestamp | integer | bigint | boolean | jsonb | double | numeric,
+        nullable?: bool, unique?: bool, precision?: int, scale?: int }
   key: [<column>]                           # REQUIRED — EXACTLY ONE column: the UPSERT conflict/idempotency key
                                             #   (derives `unique: true`; every store_write UPSERTs on it — single-flight).
                                             #   The key column MUST be a declared NON-nullable column

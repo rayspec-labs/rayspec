@@ -268,8 +268,10 @@ export function toDbValues(
  *  - injected columns → their snake_case name (id, tenant_id, created_at, deleted_at,
  *    retention_days, region);
  *  - Date → ISO string; BigInt → a JSON number, or a 400 when it cannot be one; a non-finite
- *    number (a NaN/Infinity float8 planted by SQL) → a 400, never a silent JSON null; everything
- *    else passes through (a numeric column's exact decimal string included, verbatim).
+ *    number (a NaN/Infinity float8 planted by SQL) → a 400, never a silent JSON null; a `numeric`
+ *    column value that is not a plain decimal (the NaN a numeric column can hold at the SQL level)
+ *    → a 400; everything else passes through (a numeric column's exact decimal string included,
+ *    verbatim).
  * Tenant_id IS returned (it is the row's data; it is the caller's OWN tenant — resolveTenant already
  * matched it, so there is no cross-tenant leak: a row only reaches here if the tenant predicate
  * admitted it).
@@ -287,15 +289,40 @@ export function toDbValues(
  * it is a SQL-level operation. That is the deliberate price of never returning a wrong number, which
  * is why the message names the column and the row id rather than the value.
  *
+ * THE NUMERIC ARM IS THE ONE GUARD KEYED ON THE DECLARED COLUMN TYPE, and it has to be: a `numeric`
+ * column is string-mode, so its value's SHAPE is a string — indistinguishable from the `text` column
+ * next to it, where "NaN" is ordinary data nobody may refuse. What it refuses is a numeric column
+ * value the declared wire form does not cover: PostgreSQL's numeric holds NaN, which is not a
+ * decimal (±Infinity is the DB's own refusal — a column with a declared precision/scale, the only
+ * numeric this platform emits, raises 22003 on one), and BOTH write chokepoints already refuse the
+ * string against this very regex — so only a route around them (direct SQL, a hand-written
+ * migration) can produce such a row. Returning it 200 was not a silent substitution — the string is
+ * the true stored value — but it is outside the documented read envelope (a decimal string with
+ * exactly `scale` fractional digits), and a keyset page minted on such a row hands the client an
+ * `after=` cursor whose value the next request rejects as a filter, i.e. a feed no client can page
+ * past. Refusing at the serializer bounds the guard to exactly what the serializer sees. Where the
+ * column IS served that is the whole harm: the list handler serializes a page BEFORE minting its
+ * pagination headers (store-routes.ts), so the refusal takes the page and no cursor is minted on
+ * the row. Where the column is NOT served it reaches nothing — the projection omission below runs
+ * BEFORE these guards, so a projected-out value is never inspected, the page is served, and
+ * `parseOrder` (store-query.ts) validates `order` against `store.columns` and never against the
+ * projection, so a page ordered on the dropped column still mints the cursor the next request
+ * refuses as a filter. Both arms are pinned in store-fractional.db.test.ts.
+ *
  * PROJECTION (`projection` — the resolved `snake → wire name` map from `resolveResponseProjection`,
  * threaded by the route that declared a `project`): each column's value is emitted under its WIRE
  * name, a column absent from the map is OMITTED (skipped BEFORE the range guards — nothing reaches
  * the wire, so there is nothing to refuse; the guard messages keep naming the column by its author
- * snake name either way). `undefined` (no `project` declared) keeps the historical path
- * byte-identically. DELIBERATE BOUNDARY the projection closes: the un-projected path passes an
- * UNKNOWN row key through raw (the `?? key` arm below — unreachable today, every row key is a
- * declared or injected column); a projected route serializes EXACTLY the resolved column set, so
- * an unknown key can never ride a projected response.
+ * snake name either way). `undefined` (no `project` declared) keeps the historical path: the
+ * author's snake_case names, the same values, the same key order — the one response it does not
+ * reproduce byte-for-byte is a store declaring a column named exactly `__proto__`, which the
+ * accumulator below now emits on this path too instead of swallowing it. It is the only such name:
+ * on a plain `{}` every other `Object.prototype` member (`constructor`, `toString`, …) already
+ * assigned as an own property and already reached the wire; `__proto__` alone is a setter. DELIBERATE
+ * BOUNDARY the projection closes: the un-projected path passes an UNKNOWN row key through raw (the
+ * `?? key` arm below — unreachable today, every row key is a declared or injected column); a
+ * projected route serializes EXACTLY the resolved column set, so an unknown key can never ride a
+ * projected response.
  */
 export function serializeRow(
   store: StoreSpec,
@@ -308,14 +335,31 @@ export function serializeRow(
   for (const [snake, camel] of Object.entries(INJECTED_COLUMN_TS_NAMES)) {
     camelToSnake.set(camel, snake);
   }
-  // Prototype-free accumulator on the PROJECTED path only: wire names are author-chosen (a name
-  // like `__proto__` must land as a plain own-property, never a prototype mutation). The
-  // un-projected path keeps its plain `{}` untouched (the byte-identity accept-control).
-  const out: Record<string, unknown> = projection === undefined ? {} : Object.create(null);
+  // The DECLARED `numeric` columns, by the camelCase key the driver hands back — the numeric read
+  // guard below cannot key on the value shape (see the header): a numeric value is a string, and so
+  // is a text value. No injected column is numeric, so this set is exactly the declared ones.
+  const numericCamelKeys = new Set<string>();
+  for (const col of store.columns) {
+    if (col.type === 'numeric') numericCamelKeys.add(snakeToCamel(col.name));
+  }
+  // Prototype-free accumulator on BOTH paths: every key this loop writes is author-chosen (a
+  // projected wire name, or — un-projected — the column's own declared name), and `__proto__` is a
+  // SafeIdentifier-legal, doctor-clean column name. On an accumulator that still carries
+  // Object.prototype, `out['__proto__'] = value` is not a property write at all: a string value is
+  // silently swallowed (the column disappears from the response) and an OBJECT value — a jsonb
+  // column of that name — REPLACES the response object's prototype, so the column disappears AND
+  // every key of the stored value becomes readable through the response object. Neither path may
+  // do that, so neither uses `{}`. Nothing else moves: an ordinary key is an own property either
+  // way, `JSON.stringify` emits the same bytes in the same insertion order, and the only response
+  // this changes is one whose store declares a column named exactly `__proto__` — the one name a
+  // plain `{}` swallows, because assigning it hits the prototype setter instead of creating an own
+  // property. Every other `Object.prototype` member reached the wire on both paths before this
+  // change. Both paths are pinned in store-projection.test.ts.
+  const out: Record<string, unknown> = Object.create(null);
   for (const [key, value] of Object.entries(row)) {
     const snake = camelToSnake.get(key) ?? key;
-    // The wire name this column serializes under: its snake name (no projection — historical
-    // behaviour, byte-identical), or the projection's resolved name; absent ⇒ omitted.
+    // The wire name this column serializes under: its snake name (no projection — the historical
+    // author-named shape), or the projection's resolved name; absent ⇒ omitted.
     const wireName = projection === undefined ? snake : projection.get(snake);
     if (wireName === undefined) continue;
     if (typeof value === 'bigint') {
@@ -339,6 +383,17 @@ export function serializeRow(
         'VALIDATION_ERROR',
         `Column '${snake}' holds a non-finite value (NaN/Infinity) JSON cannot represent — ` +
           `row id ${String(row.id)}.`,
+      );
+    }
+    // The numeric READ guard (the declared-type-keyed one — see the header): the wire form of a
+    // numeric column is a plain decimal string, the SAME shape both write chokepoints enforce with
+    // this regex. A NaN planted by SQL is not one, and a page carrying it would also mint a keyset
+    // cursor the next request refuses as a filter value. Refuse the read instead.
+    if (numericCamelKeys.has(key) && typeof value === 'string' && !NUMERIC_WIRE_RE.test(value)) {
+      throw new ApiError(
+        'VALIDATION_ERROR',
+        `Column '${snake}' holds a value that is not a plain decimal (a numeric column can hold ` +
+          `NaN at the SQL level; the wire form of this type cannot) — row id ${String(row.id)}.`,
       );
     }
     out[wireName] = value instanceof Date ? value.toISOString() : value;

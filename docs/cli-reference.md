@@ -127,14 +127,28 @@ it dispatches on the `product:` discriminant.
 - **Output:**
 
   ```json
-  { "ok": true, "errors": [] }
+  { "ok": true, "errors": [], "warnings": [] }
+  ```
+
+  `warnings` is part of every envelope, empty or not. It carries the non-fatal
+  advisories the linter raised — each a `code`, a `message` and a `path` — and
+  never affects `ok` or the exit code.
+
+  A fourth key, `suppressed`, is present **only** when a node's `lintSuppress`
+  acknowledged an advisory: the finding moves out of `warnings` into it, carrying
+  the finding's `code`, the acknowledgement's `because` verbatim, and the
+  finding's `path`. It does not affect `ok` either, and a document that
+  acknowledges nothing gets no `suppressed` key at all:
+
+  ```json
+  { "ok": true, "errors": [], "warnings": [], "suppressed": [{ "code": "cron_tenant_required", "because": "…", "path": "triggers[0].kind" }] }
   ```
 
   On failure, each entry carries a closed `code`, a `message`, and an optional
   `path`:
 
   ```json
-  { "ok": false, "errors": [{ "code": "unknown_field", "message": "…", "path": "stores[0].colums" }] }
+  { "ok": false, "errors": [{ "code": "unknown_field", "message": "…", "path": "stores[0].colums" }], "warnings": [] }
   ```
 
 - **Exit:** `0` if valid, `1` otherwise.

@@ -124,6 +124,27 @@ describe('static boot — the banner agrees with what /health answers', () => {
     expect(banner).toContain('503 when a mount cannot be served');
     expect(banner).not.toMatch(/liveness/i);
   });
+
+  it('the mount list names BOTH declared mount options — `spa` and `cleanUrls`', () => {
+    // The banner is one of the two operator-visible echoes of a mount's declared options; the other
+    // is the `deploy --dry-run` verdict, which echoes each mount WHOLE (route, dir, spa, cleanUrls).
+    // Printing only one of the two options here left the two surfaces disagreeing about which options
+    // are worth naming — and `cleanUrls` changes how every extensionless path resolves.
+    const server = assembleStaticServer(loadStaticServerConfig({}), {
+      specPath: join(root, 'rayspec.yaml'),
+      frontend: [
+        { route: '/', dir: 'web/dist', spa: true, cleanUrls: true },
+        { route: '/plain', dir: 'web/dist', spa: false, cleanUrls: false },
+      ],
+    });
+    const banner = staticBootBanner(server, 'http://localhost:8080');
+    expect(banner).toContain('(SPA fallback)');
+    expect(banner).toContain('(clean URLs)');
+    // A mount that declares neither option carries neither marker.
+    const plainLine = banner.split('\n').find((l) => l.includes('/plain'));
+    expect(plainLine).toBeDefined();
+    expect(plainLine).not.toContain('(');
+  });
 });
 
 describe('static boot — the auth surface is NOT mounted (load-bearing security assertion)', () => {

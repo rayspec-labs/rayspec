@@ -167,6 +167,39 @@ describe.skipIf(!hasDb)('makeHandlerDb — double/numeric envelopes over the rea
     await expect(hdb.select('measurements')).rejects.toThrow(StoreInputError);
   });
 
+  it('READ guard: a NaN planted into a NUMERIC column by direct SQL is REFUSED too', async () => {
+    testsRan += 1;
+    const hdb = handlerDb();
+    const row = await hdb.insert('measurements', { confidence: 0.5, amount: '1' });
+    // NaN is the one non-decimal a DECLARED numeric column can hold: `precision`/`scale` are
+    // required on the type, and PostgreSQL refuses ±Infinity for a column that has them (22003,
+    // "A field with precision 24, scale 6 cannot hold an infinite value") — pinned below. The write
+    // paths refuse the string 'NaN' as well, so only direct SQL can put one here. The read refuses
+    // rather than hand a handler (or the views interpreter, or a `store_read` node) a value under
+    // a type whose whole promise is an exact decimal.
+    await db.$client.unsafe(
+      `UPDATE ${SCHEMA}.measurements SET amount = 'NaN'::numeric WHERE id = $1`,
+      [row.id as string],
+    );
+    await expect(hdb.select('measurements', { id: row.id as string })).rejects.toThrow(
+      StoreInputError,
+    );
+    // Why the loop above is one value and not three: the DB itself closes the other two.
+    await expect(
+      db.$client.unsafe(
+        `UPDATE ${SCHEMA}.measurements SET amount = 'Infinity'::numeric WHERE id = $1`,
+        [row.id as string],
+      ),
+    ).rejects.toThrow(/numeric field overflow/);
+
+    // ACCEPT CONTROL: the same read on an unplanted row returns the exact decimal untouched — so
+    // the refusal above is the guard firing on that value, not a read that refuses everything.
+    await db.$client.unsafe(`DELETE FROM ${SCHEMA}.measurements WHERE id = $1`, [row.id as string]);
+    const clean = await hdb.insert('measurements', { confidence: 0.5, amount: EXACT_DECIMAL });
+    const read = await hdb.select('measurements', { id: clean.id as string });
+    expect(read.map((r) => r.amount)).toEqual([EXACT_DECIMAL]);
+  });
+
   it('orders both types NUMERICALLY through the facade select (the sortability seam)', async () => {
     testsRan += 1;
     const hdb = handlerDb();
@@ -191,7 +224,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — double/numeric envelopes over the rea
 describe('fractional facade acceptance — ran-guard (must not silently skip in CI)', () => {
   it('the double/numeric facade arms ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (requireDb) {
-      expect(testsRan).toBe(5);
+      expect(testsRan).toBe(6);
     } else {
       expect(requireDb).toBe(false);
     }

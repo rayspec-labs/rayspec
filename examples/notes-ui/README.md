@@ -90,7 +90,11 @@ static handler is hardened against dotfiles, path traversal, and symlink-escape,
 Every response the mount serves carries `Content-Security-Policy: default-src 'self'; frame-ancestors
 'none'; object-src 'none'; base-uri 'self'` and `Permissions-Policy: camera=(), microphone=(),
 geolocation=()`. The CSP names no `style-src` or `script-src`, so an inline `<style>` or `<script>` in
-a served page is blocked — which is why this example's script is a file. Nothing on the server reports
-that: the response is a `200` carrying the exact bytes, and only the rendered page differs.
-`RAYSPEC_FRONTEND_CSP` overrides the baseline verbatim. See the
+a served page is blocked — as are a `style="…"` attribute and an `on*=` handler, which fall back to the
+same `default-src`. That is why this example's script is a file. No request reports
+it: the response is a `200` carrying the exact bytes, and only the rendered page differs. The boot does:
+it scans the served HTML against the policy in force and warns once, naming the files — warn-only and
+bounded, so a clean boot here is what you should see.
+`RAYSPEC_FRONTEND_CSP` overrides the baseline verbatim, and an override permitting the shape silences
+the warning with it. See the
 [`frontend` reference](../../docs/spec-reference.md#frontend).

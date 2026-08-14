@@ -24,12 +24,22 @@
  * (`gate:handler-imports`, `gate:extension-capability`) are TRIPWIRES, not a sandbox. No rendered
  * comment, doc, or skill line may imply a generated handler is sandboxed.
  */
+import { ColumnType as SpecColumnType } from '@rayspec/spec';
 
 /**
- * The closed `ColumnType` set the platform supports (mirrors `@rayspec/spec` `grammar.ts:93` — kept
- * as a local literal so the renderer takes NO `@rayspec/spec` dep beyond what the CLI already has;
- * `validateHoles` rejects any other type). Arrays/floats map to `jsonb` upstream, never a typed
- * scalar array — the renderer never sees them.
+ * The `ColumnType` set the DETERMINISTIC RENDERER can serve — a DELIBERATE SUBSET of the store column
+ * vocabulary `@rayspec/spec` declares (`ColumnType` in its grammar), NOT a mirror of it. The subset is
+ * what `emitCoerceColumn` in `templates.ts` has a coercion arm for, and it is compiler-enforced in one
+ * direction: that switch has no `default` and is annotated `: string`, so adding a member HERE without
+ * writing its arm THERE fails `tsc` with TS2366 (`Function lacks ending return statement`). A type the
+ * grammar has and this set does not is therefore one the renderer genuinely cannot emit a coercion for
+ * — `validateHoles` refuses such a `columns[]` entry and says so rather than emitting a handler that
+ * never writes the column. This bounds the COERCED path only: `fixedValues` stamps author constants by
+ * column NAME, carries no `jsonType`, and is checked here against the injected-column denylist and the
+ * fkRevalidate/clampValues overlap rules — never against this set — so a rendered handler can still
+ * write a fractional column when the value is the author's. Kept as a local literal (rather than
+ * re-exported from the grammar) so the renderer's own contract reads in one place; the GAP against the
+ * grammar is derived just below, never re-listed.
  */
 export type ColumnType = 'text' | 'uuid' | 'timestamp' | 'integer' | 'bigint' | 'boolean' | 'jsonb';
 
@@ -42,6 +52,16 @@ const COLUMN_TYPES: ReadonlySet<string> = new Set<ColumnType>([
   'boolean',
   'jsonb',
 ]);
+
+/**
+ * The store column types the grammar accepts and the renderer has NO arm for — DERIVED by subtracting
+ * the set above from the grammar's own enum, so it cannot drift: a type added to the grammar lands
+ * here on its own, and one that gains a renderer arm leaves on its own. It exists only to make the
+ * refusal below name the reason; nothing branches on it.
+ */
+const UNRENDERABLE_COLUMN_TYPES: ReadonlySet<string> = new Set(
+  SpecColumnType.options.filter((t) => !COLUMN_TYPES.has(t)),
+);
 
 /**
  * One persistable / projected business column. `col` is the snake_case DECLARED column name (the wire
@@ -398,9 +418,19 @@ function assertColumnHole(c: unknown, what: string): asserts c is ColumnHole {
     );
   }
   if (typeof o.jsonType !== 'string' || !COLUMN_TYPES.has(o.jsonType)) {
+    // The accepted list is read off `COLUMN_TYPES` rather than spelled out again, so the message can
+    // never quote a vocabulary the renderer has outgrown. A type the GRAMMAR carries gets the reason
+    // appended: it is a valid column to declare, just not one this renderer can coerce an untrusted
+    // arg into, and an author who reads "must be one of …" alone would hunt for a typo that isn't there.
+    const accepted = [...COLUMN_TYPES].join('|');
+    const reason =
+      typeof o.jsonType === 'string' && UNRENDERABLE_COLUMN_TYPES.has(o.jsonType)
+        ? ` — '${o.jsonType}' is a valid store column type, but the deterministic renderer ` +
+          'has no coercion arm for it, so a handler that coerces that column from an untrusted arg ' +
+          'must be hand-written (a server-stamped `fixedValues` constant into that column still renders)'
+        : '';
     throw new HolesError(
-      `${what}.jsonType must be one of text|uuid|timestamp|integer|bigint|boolean|jsonb, got ` +
-        JSON.stringify(o.jsonType),
+      `${what}.jsonType must be one of ${accepted}, got ${JSON.stringify(o.jsonType)}${reason}`,
     );
   }
   if (typeof o.required !== 'boolean') throw new HolesError(`${what}.required must be a boolean`);
