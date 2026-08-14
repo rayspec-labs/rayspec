@@ -1512,8 +1512,10 @@ today:
   are a PCM tone and `contentType` is an honest `audio/wav` whatever container was
   requested. The refusals match the wired provider; the container does not — a
   handler (or a test) that pins `contentType` to the requested `format` passes
-  against `openai` and fails against `fake`. The boot **warns** loudly (warn-only —
-  it never blocks a dev boot).
+  against `openai` and fails against `fake` — for `mp3` and `opus`. A requested
+  `wav` is the one case the two agree on, so a suite that exercises only `wav`
+  never catches the pin. The boot **warns** loudly (warn-only — it never blocks a
+  dev boot).
 
 Unlike `transcribe`, `synthesize` **rejects** rather than returning a status union
 (the happy path is the audio itself). A failure is a `TtsAdapterError` carrying a
@@ -1531,9 +1533,11 @@ that passes in CI cannot first fail in production:
   mid-sentence and looks successful.
 - **voice membership is closed.** An unknown voice is refused rather than silently
   falling back to a default the caller did not ask for — a blank string is an
-  unknown voice, not an absent one, so only an omitted `voice` resolves to the
-  adapter's default. `speed`, by contrast, is **clamped** into the supported range
-  rather than refused.
+  unknown voice, not an absent one, and is refused the same way. The adapter's
+  default is reached by omitting `voice`, and by an explicit `null`: only an
+  untyped caller can send one, and it is read as absent rather than raised as a
+  type error. `speed`, by contrast, is **clamped** into the supported range rather
+  than refused.
 
 #### `init.emit` — append to the tenant's event stream
 

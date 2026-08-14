@@ -57,10 +57,12 @@ export const FAKE_TTS_BOOT_WARNING =
 /**
  * The neutral per-call adapter request (the text plus whatever options the caller expressed).
  *
- * EXPRESSED, not truthy: an option the caller named is forwarded even when its value is falsy, and
- * only an option the caller left out is omitted. Dropping a blank `voice` here would hand the adapter
- * an ABSENT voice, which it resolves to its default — the silent fallback the closed voice list
- * exists to prevent (`speed: 0` has the same shape, and is clamped rather than dropped).
+ * EXPRESSED, not truthy: the test is `!== undefined` on every option, so a value the caller named is
+ * forwarded even when it is falsy, and only an option left out (or explicitly `undefined`, which the
+ * optional-property type makes the same thing) is omitted. Dropping a blank `voice` here would hand
+ * the adapter an ABSENT voice, which it resolves to its default — the silent fallback the closed
+ * voice list exists to prevent; a blank `format` would be substituted by the adapter's default
+ * container the same way (`speed: 0` has the same shape, and is clamped rather than dropped).
  */
 function synthesizeRequest(
   text: string,
@@ -70,7 +72,7 @@ function synthesizeRequest(
     text,
     ...(opts?.voice !== undefined ? { voice: opts.voice } : {}),
     ...(opts?.speed !== undefined ? { speed: opts.speed } : {}),
-    ...(opts?.format ? { format: opts.format } : {}),
+    ...(opts?.format !== undefined ? { format: opts.format } : {}),
   };
 }
 

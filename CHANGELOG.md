@@ -264,11 +264,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caught). Two limits are enforced before any provider call, so a rejected request is never billed:
   the 4096-character text cap is **fail-closed** (an over-long text is refused, never truncated into
   a recording that stops mid-sentence), and an unknown voice is refused rather than silently falling
-  back to a default — a blank string is an unknown voice, not an absent one, so only an omitted
-  `voice` resolves to the adapter's default — while `speed` is clamped into the supported range. The
-  offline provider enforces exactly those same limits — it is handed the live adapter's own policy —
-  so a request that passes in CI cannot first fail in production. Deployments that set no provider
-  boot and serve exactly as before.
+  back to a default — a blank string is an unknown voice, not an absent one, and is refused the same
+  way; the default is reached by omitting `voice`, and by an explicit `null`, which only an untyped
+  caller can send and which is read as absent — while `speed` is clamped into the supported range.
+  The capability forwards every option the caller **expressed** rather than every option that is
+  truthy, so a blank `format` reaches the same membership check a blank `voice` does instead of being
+  dropped and resolved to the adapter's default container. The offline provider enforces exactly
+  those same limits — it is handed the live adapter's own policy — so a request that passes in CI
+  cannot first fail in production. Deployments that set no provider boot and serve exactly as before.
 
 - **Transcription reaches a backend-profile handler as the optional `init.stt` capability, behind the
   existing `STT_PROVIDER` contract.** The platform shipped a real speech-to-text stack — the neutral
@@ -1135,10 +1138,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   find the seam was to read the adapter source. The speech section now carries both, commented out
   beside `TTS_PROVIDER`, as what they are: optional test/dev seams for pointing a suite or a dev
   boot at a local stub, with the trailing slash stripped either way and unset meaning the real host.
-  The `OPENAI_BASE_URL` note also states what it is *not* — the Codex agent backend deliberately
-  omits that variable (with `OPENAI_API_KEY`, `CODEX_API_KEY` and `CODEX_BASE_URL`) from the
-  subprocess environment it builds, so setting it never redirects Codex. **No behaviour changed** —
-  both variables were already read exactly this way.
+  The `OPENAI_BASE_URL` note also states its blast radius, which is wider than speech: the vendored
+  `openai` client defaults its base URL to that variable and the OpenAI agent backend constructs the
+  client without passing one, so a boot that points the variable at a local stub sends that backend's
+  model calls to the stub as well. The Codex agent backend is the exception — it deliberately omits
+  the variable (with `OPENAI_API_KEY`, `CODEX_API_KEY` and `CODEX_BASE_URL`) from the subprocess
+  environment it builds. **No behaviour changed** — both variables were already read exactly this way.
 
 ### Security
 

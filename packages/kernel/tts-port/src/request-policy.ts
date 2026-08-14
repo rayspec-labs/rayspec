@@ -68,8 +68,10 @@ export function contentTypeForTtsFormat(format: TtsAudioFormat): string {
  *      applies is the ADAPTER's knowledge, expressed in the `maxTextLength` it states; this guard
  *      measures that number in code units and does not claim to restate the provider's own limit.
  *   3. `voice`, when named, must be a MEMBER of the adapter's list — never a silent fallback. A
- *      named-but-BLANK voice is a named one: it is trimmed, fails membership, and is REFUSED. Only
- *      an ABSENT `voice` resolves to `defaultVoice`.
+ *      named-but-BLANK voice is a named one: it is trimmed, fails membership, and is REFUSED.
+ *      `defaultVoice` is reached by an ABSENT `voice` and by a `null` one — `null` is the single
+ *      named value that still resolves to the default, it is reachable only from an untyped caller,
+ *      and it is read as absent on purpose (see the comment at the check).
  *   4. `format`, when named, must be one the port speaks.
  *   5. `speed`, when named, must be finite, and is then CLAMPED into [minSpeed, maxSpeed] — a rate
  *      outside the range is a clamp, not a refusal (the documented contract for this field).
@@ -97,7 +99,9 @@ export function normalizeTtsRequest(
   // ABSENT (or `null` from an untyped caller) ⇒ the policy default. NAMED ⇒ the caller's value,
   // trimmed and then membership-checked below — a BLANK one included. Treating `''`/`'   '` as
   // absent would resolve a voice the caller DID pass into a default it did not ask for, which is
-  // exactly the silent fallback rule 3 rules out.
+  // exactly the silent fallback rule 3 rules out. `null` is the deliberate exception: `== null`
+  // rather than `=== undefined` keeps an untyped caller's `null` out of `.trim()`, which would
+  // raise a raw TypeError instead of a structured TtsAdapterError.
   const voice = request.voice == null ? policy.defaultVoice : request.voice.trim();
   if (!policy.voices.includes(voice)) {
     throw new TtsAdapterError(

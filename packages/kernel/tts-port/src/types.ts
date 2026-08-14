@@ -12,7 +12,9 @@ export interface TtsSynthesizeRequest {
   text: string;
   /** The provider voice id. The adapter validates MEMBERSHIP against its own closed list — an unknown
    *  voice is refused rather than quietly falling back to a default the caller did not ask for. That
-   *  includes a BLANK one: only an ABSENT `voice` resolves to the adapter's default. */
+   *  includes a BLANK one: `''` and `'   '` are named voices and are refused. The adapter's default
+   *  is reached by an ABSENT `voice` — and by a `null` one, which only an untyped caller can send and
+   *  which is read as absent (`request-policy.test.ts` pins both). */
   voice?: string;
   /** Speaking rate; CLAMPED into the provider's supported range (out-of-range is not an error). */
   speed?: number;

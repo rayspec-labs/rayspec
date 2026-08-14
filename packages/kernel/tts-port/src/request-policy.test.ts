@@ -118,6 +118,16 @@ describe('normalizeTtsRequest — closed voice membership', () => {
     expect(normalizeTtsRequest({ text: 'hallo', voice: '  beta  ' }, POLICY).voice).toBe('beta');
   });
 
+  it('reads a `null` voice as absent — the ONE named value that still reaches the default', () => {
+    // Only an untyped caller can send it (`voice?: string`). Reading it as absent is deliberate:
+    // an `=== undefined` test would drop it into `.trim()` and raise a raw TypeError instead of a
+    // structured TtsAdapterError. It is the exception to "a named voice is membership-checked",
+    // which is why the docstrings that state that rule name it.
+    expect(normalizeTtsRequest({ text: 'hallo', voice: null as never }, POLICY).voice).toBe(
+      POLICY.defaultVoice,
+    );
+  });
+
   it('REFUSES a NAMED but blank voice rather than quietly substituting the default', () => {
     for (const voice of ['', ' ', '\t\n']) {
       let caught: unknown;
