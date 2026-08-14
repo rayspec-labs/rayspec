@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.8.0] - 2026-08-15
 
 ### Added
 
@@ -1537,8 +1537,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   distinct packages.
 - **The transitive `nanoid` copy behind `oidc-provider` is raised from 5.1.15 to 5.1.16**
   (GHSA-28wg-ghj8-5hjv / CVE-2026-67214: the `nanoid/non-secure` generators can loop indefinitely
-  when given a negative size). The vulnerable module is not reachable here — `oidc-provider` only
-  imports the secure `nanoid` entry point, with a fixed generator size — but the fix is a patch
+  when given a negative size). The vulnerable module is not reachable here — `oidc-provider` imports
+  the secure `nanoid` entry point and never `nanoid/non-secure`, in either of the two helpers that
+  use it, so the affected generators are out of reach regardless of the size passed. (Only one of
+  those two helpers passes a fixed size: `helpers/nanoid.js` builds a 43-character generator, while
+  `helpers/user_codes.js` derives its length from the user-code mask.) But the fix is a patch
   release inside `oidc-provider`'s declared range, so the copy is pinned forward via a scoped
   `pnpm.overrides` entry (`nanoid@5`) rather than carried as a scanner exception. The dependency
   SBOM (`docs/dependency-sbom.json`) is regenerated to match. The separate `nanoid` 3.x copy
@@ -1559,6 +1562,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanner matches fails the dependency-audit lane. The direct dependency is untouched at 2.0.10, the
   dependency SBOM (`docs/dependency-sbom.json`) is regenerated to match, and the graph still
   resolves to 485 distinct packages.
+
+### Upgrade notes
+
+Everything below is documented in place above; this is the checklist. Nothing here applies to a
+deployment that only authors specs and deploys them — the items are for embedders, for operators of
+an existing database, and for authors of documents that were silently doing nothing.
+
+- **Two exported types gained REQUIRED members, so an out-of-repository implementation stops
+  typechecking until it grows them.** `ServerConfig` (`@rayspec/server`) gains three:
+  `frontendCsp: string`, `permissionsPolicy: string` and `authRateMultiplier: number`. A deployment
+  that builds its config with `loadServerConfig` needs no change — it fills all three from the
+  environment; only code that constructs the object literally is affected. `FrontendSpec`
+  (`@rayspec/spec`) gains `cleanUrls: boolean` in its OUTPUT type, so a literal built outside this
+  repository needs the key; parsing a document is unaffected, because the field carries a default.
+- **A document with a mapping key written literally as `__proto__` no longer parses.** It used to,
+  and then quietly did nothing with whatever sat under that key — a `rename` renamed nothing, a view
+  field vanished from the response. It is now a named `reserved_document_key` error at the parse
+  boundary of both profiles. If a document relied on that key surviving into a free-form slot (a
+  tool's `parameters`, the body of a `contracts` entry), rename it before upgrading.
+- **`RAYSPEC_AUTH_RATE_MULTIPLIER` now has a ceiling** and refuses a value above it by name, the way
+  its sibling knobs already did. A deployment that set an implausibly large multiplier must lower it
+  or the boot stops.
+- **A static mount refuses a served file whose on-disk name carries a percent escape** when the two
+  decoders disagree about it, and refuses a directory index or SPA shell that resolves outside the
+  served directory. Both were served before; neither shape is produced by an ordinary build.
 
 ## [1.7.0] - 2026-08-05
 
@@ -4415,6 +4443,16 @@ stands up the running backend from that single file.
   untrusted, multi-tenant, public-internet hosting is a separate layer and is
   deliberately not part of the core — see [`SECURITY.md`](./SECURITY.md).
 
+[1.8.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.8.0
+[1.7.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.7.0
+[1.6.2]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.6.2
+[1.6.1]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.6.1
+[1.6.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.6.0
+[1.5.1]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.5.1
+[1.5.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.5.0
+[1.4.1]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.4.1
+[1.4.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.4.0
+[1.3.3]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.3.3
 [1.3.2]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.3.2
 [1.3.1]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.3.1
 [1.3.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.3.0
