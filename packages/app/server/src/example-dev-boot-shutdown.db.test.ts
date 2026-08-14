@@ -17,8 +17,8 @@
  *       wiring only; the behaviour behind that wiring is what arm (a) runs.
  *
  * `SIGHUP` is deliberately NOT wired: `signal-exit` registers for it and `@openai/agents-core` does not,
- * so signal-exit is its sole listener and re-raises it — the one signal these wrappers already die on.
- * Leaving it unlistened keeps that path as it is; arm (b) asserts the absence.
+ * so signal-exit is its sole listener and re-raises it, which is why that signal already ends these
+ * wrappers. Leaving it unlistened keeps that path as it is; arm (b) asserts the absence.
  *
  * Arm (a) skips without DATABASE_URL; the ran-guard at the bottom hard-fails if a REQUIRED run skipped it.
  */

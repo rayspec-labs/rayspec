@@ -496,8 +496,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is not greater than 1, and `signal-exit` re-raises the signal only when that count equals its own
   listener count — so with both loaded neither one ended the process. An owning handler is what
   terminates it now, whatever the dependencies decide. `SIGHUP` is deliberately left unlistened:
-  `signal-exit` registers for it and `@openai/agents-core` does not, so it is the one signal that
-  already ended these processes, and that path is unchanged. The two example READMEs that gave a boot
+  `signal-exit` registers for it and `@openai/agents-core` does not, so `signal-exit` is its sole
+  listener there and re-raises it — that path is unchanged. The two example READMEs that gave a boot
   command with no stop instruction (`contract-intake`, `support-intake-chat`) now name `Ctrl-C`, and the
   authoring skill's dev-boot pattern teaches the handler. (Issue #360.)
 - **A deploy that is refused *after* its product-store DDL applied now names the tables it already
