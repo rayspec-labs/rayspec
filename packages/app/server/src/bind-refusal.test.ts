@@ -88,6 +88,10 @@ function eaddrinuse(address: string, port: number): NodeJS.ErrnoException {
  * The spies are recorded into LOCALS rather than asserted through the spy objects: `mockRestore()`
  * drops a spy's call record, so an `expect(spy).not.toHaveBeenCalled()` after the restore would pass
  * whatever happened — a false green on exactly the arm that must NOT print or exit.
+ *
+ * `errorEmits` counts the `('error', err)` calls the emitter SAW, this driver's own included. It is
+ * the only reading that separates the re-emit arm from a remove-then-re-throw: both leave no listener
+ * and the same error propagating out of `emit`, and only the re-emit puts a second call on the count.
  */
 function drive(
   opts: Parameters<typeof bindRefusalMessage>[0],
@@ -98,6 +102,7 @@ function drive(
   readonly exits: number;
   readonly listenersLeft: number;
   readonly rethrown: unknown;
+  readonly errorEmits: number;
 } {
   const emitter = new EventEmitter();
   const written: string[] = [];
@@ -110,7 +115,9 @@ function drive(
     exitCode = code;
     exits += 1;
   }) as never);
+  const emitSpy = vi.spyOn(emitter, 'emit');
   let rethrown: unknown;
+  let errorEmits = 0;
   try {
     attachBindRefusal(emitter, opts);
     expect(emitter.listenerCount('error')).toBe(1);
@@ -120,10 +127,20 @@ function drive(
       rethrown = e;
     }
   } finally {
+    // Read the record BEFORE the restore drops it, for the same reason as the two spies above.
+    errorEmits = emitSpy.mock.calls.filter((c) => c[0] === 'error' && c[1] === err).length;
+    emitSpy.mockRestore();
     errSpy.mockRestore();
     exitSpy.mockRestore();
   }
-  return { written, exitCode, exits, listenersLeft: emitter.listenerCount('error'), rethrown };
+  return {
+    written,
+    exitCode,
+    exits,
+    listenersLeft: emitter.listenerCount('error'),
+    rethrown,
+    errorEmits,
+  };
 }
 
 describe('attachBindRefusal — EADDRINUSE refuses the boot', () => {
@@ -135,6 +152,8 @@ describe('attachBindRefusal — EADDRINUSE refuses the boot', () => {
     expect(r.written).toEqual([`[rayspec-serve] ${SERVE_REFUSAL}`]);
     expect(r.exitCode).toBe(1);
     expect(r.rethrown).toBeUndefined();
+    // Only this driver's own emit: the refusing arm hands the error on to nobody.
+    expect(r.errorEmits).toBe(1);
   });
 
   it('builds the address from the RESOLVED host/port, never from the error object', () => {
@@ -158,10 +177,12 @@ describe('attachBindRefusal — every other listen error keeps its current behav
       syscall: 'listen',
     });
     const r = drive({ host: '127.0.0.1', port: 80, prefix: '[rayspec-serve]' }, eacces);
-    // The re-emit finds NO listener left, and an EventEmitter with no `'error'` listener throws the
-    // error itself — the same default handling that runs when nothing was ever attached. That throw
-    // propagating out of `emit` IS the assertion: it could not happen had the listener swallowed the
-    // error, and a re-throw arm would surface at the listener rather than through a listener-less emit.
+    // Two readings, because the error propagating out of `drive` proves only that the listener did not
+    // SWALLOW it: a remove-then-re-throw would propagate the same error and leave the same zero
+    // listeners. The second `('error', eacces)` call on the emitter is what says re-EMIT — and with no
+    // listener left, an EventEmitter answers an `'error'` by throwing it, which is the default handling
+    // that runs when nothing was ever attached. A re-throw arm leaves the count at 1 and REDs here.
+    expect(r.errorEmits).toBe(2);
     expect(r.rethrown).toBe(eacces);
     expect(r.listenersLeft).toBe(0);
     expect(r.written).toEqual([]);
@@ -171,7 +192,9 @@ describe('attachBindRefusal — every other listen error keeps its current behav
   it('leaves an error with no code alone too (the arm is keyed on EADDRINUSE, not on absence)', () => {
     const bare = new Error('something the listener never planned for');
     const r = drive({ host: '127.0.0.1', port: 8191, prefix: '[rayspec deploy]' }, bare);
+    expect(r.errorEmits).toBe(2);
     expect(r.rethrown).toBe(bare);
+    expect(r.listenersLeft).toBe(0);
     expect(r.written).toEqual([]);
     expect(r.exits).toBe(0);
   });
