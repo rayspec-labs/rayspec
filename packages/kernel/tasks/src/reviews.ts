@@ -22,6 +22,7 @@ import { applyTransition, type TaskRecord } from './apply-transition.js';
 import type { WorkforceBudgets } from './budget.js';
 import { TaskNotFoundError } from './errors.js';
 import { appendTaskEvents } from './events.js';
+import { joinPolicySchema } from './join.js';
 import { afterTaskTerminal, lockRootFirst } from './task-locks.js';
 
 export type ReviewRecord = typeof schema.workforceReviews.$inferSelect;
@@ -54,6 +55,20 @@ export class ReviewTaskStateError extends Error {
     this.name = 'ReviewTaskStateError';
     this.reviewId = reviewId;
   }
+}
+
+/**
+ * The effective round ceiling for a reviewed task: the tighter of the DECLARED policy's `maxRounds`
+ * (carried on the review park's binding, written when the park was opened) and the execution-wide
+ * ceiling. Either may be absent; absent on both sides means unbounded rounds, which is what an
+ * undeclared ceiling has always meant.
+ */
+function tighterRoundCeiling(task: TaskRecord, executionMax: number | null): number | null {
+  const binding = joinPolicySchema.safeParse(task.joinPolicy);
+  const policyMax =
+    binding.success && binding.data.policy === 'review' ? (binding.data.maxRounds ?? null) : null;
+  if (policyMax === null) return executionMax;
+  return executionMax === null ? policyMax : Math.min(policyMax, executionMax);
 }
 
 export const reviewVerdictSchema = z.strictObject({
@@ -124,7 +139,12 @@ export async function applyReviewVerdictInTx(
   const review = updated[0];
   if (!review) throw new ReviewAlreadyDecidedError(input.reviewId);
 
-  const maxRounds = budgets.execution.maxReviewRounds ?? null;
+  // THE TIGHTER OF THE TWO ceilings, exactly as the planner computed it when the park was opened:
+  // the DECLARED policy's own `maxRounds` (recorded on the park's binding — a policy lives in a
+  // document this module is deliberately roster-free about, so the binding is the only way it
+  // arrives here) and the execution-wide ceiling. Reading only the budgets' half made a policy
+  // `maxRounds: 1` with no execution ceiling yield `rework` forever on the verdict path.
+  const maxRounds = tighterRoundCeiling(task, budgets.execution.maxReviewRounds ?? null);
   const outcome =
     input.verdict === 'accept'
       ? 'completed'

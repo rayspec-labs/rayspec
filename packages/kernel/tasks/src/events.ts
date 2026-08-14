@@ -43,6 +43,12 @@ export const WORKFORCE_EVENT_TYPES = [
   'workforce.approval.timed_out',
   'workforce.review.requested',
   'workforce.review.decided',
+  /**
+   * A dispatched review task ended terminal without a verdict (cancelled, or failed on the
+   * tool-error fate) — the reviewed task is released to a human rather than left in a park whose
+   * only exit is gone. The review row stays pending and undecided; no verdict is fabricated.
+   */
+  'workforce.review.abandoned',
   'workforce.delegation.accepted',
   'workforce.delegation.rejected',
   'workforce.budget.reserved',

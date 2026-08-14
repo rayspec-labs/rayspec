@@ -31,21 +31,32 @@ export const fanOutJoinPolicySchema = z.strictObject({
 });
 
 /**
- * What the COLUMN may carry — the FAN-OUT BINDING (`all`, naming the children that fan-out opened)
- * plus the ESCALATION BINDING the escalate executor writes (`escalation`, naming the one child that
- * carries the caller's escalation, so `blocked(escalated)` is answered by exactly that child's
- * terminal and by nothing else).
+ * What the COLUMN may carry — one binding per park the engine can leave a task sitting in:
+ *
+ *   - `all`         the FAN-OUT binding, naming the children that fan-out opened;
+ *   - `escalation`  the one child that carries the caller's escalation, so `blocked(escalated)` is
+ *                   answered by exactly that child's terminal and by nothing else;
+ *   - `review`      the pending review a `waiting_for_review` park waits on: which review row, the
+ *                   dispatched review task (when there is one), and the ROUND CEILING the matched
+ *                   policy declared — the verdict path's only way to know a ceiling that lives in a
+ *                   document the kernel deliberately cannot read.
  *
  * `childTaskIds` is OPTIONAL for one reason only: a parent parked by a fan-out written before the
  * ids were recorded carries `{policy:'all'}` alone, and must keep the behaviour it parked under
  * rather than strand on a binding it never had. Every fan-out this engine writes names its children.
  */
 export const joinPolicySchema = z.strictObject({
-  policy: z.enum(['all', 'escalation']),
+  policy: z.enum(['all', 'escalation', 'review']),
   /** `all` only: the children THAT fan-out opened — the round the join waits on. */
   childTaskIds: z.array(z.string().min(1)).optional(),
   /** `escalation` only: the one child whose terminal answers the park. */
   escalationTaskId: z.string().min(1).optional(),
+  /** `review` only: the pending review row this park waits on. */
+  reviewId: z.string().min(1).optional(),
+  /** `review` only: the dispatched review task, or null when a human decides the review. */
+  reviewTaskId: z.string().min(1).nullable().optional(),
+  /** `review` only: the matched policy's own round ceiling; absent when no policy declared one. */
+  maxRounds: z.number().int().positive().optional(),
 });
 
 export type JoinPolicy = z.output<typeof joinPolicySchema>;
@@ -79,6 +90,15 @@ export function isJoinSatisfied(policy: JoinPolicy, children: readonly TaskRecor
       // Never consulted through the awaiting_children branch (an escalated park is answered by
       // the reply fan-in, not by a join) — honest anyway: only the bound child's terminal counts.
       return children.some((c) => c.taskId === policy.escalationTaskId && terminal(c));
+    case 'review':
+      // Also never consulted through that branch (a review park is answered by the verdict route,
+      // or released by `afterTaskTerminal` when the review task ends without one). Same rule: only
+      // the bound review task counts, and a review nobody was dispatched for has no child answer.
+      return (
+        policy.reviewTaskId !== undefined &&
+        policy.reviewTaskId !== null &&
+        children.some((c) => c.taskId === policy.reviewTaskId && terminal(c))
+      );
   }
 }
 

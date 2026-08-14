@@ -691,6 +691,162 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(stored[0]?.summary).toBe('Done.');
   });
 
+  it('the DECLARED policy’s round ceiling reaches the verdict — the tighter of the two decides', async () => {
+    // The policy allows ONE round; no execution-wide ceiling is declared. A reject on round 1 has
+    // therefore spent the budget: a human decides, instead of a rework round that can only park.
+    const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+    await applyTurnOutcome(tdb(), {
+      taskId: root.taskId,
+      turnId: turnIdFor(root.taskId, 1),
+      turnNumber: 1,
+      intent: { kind: 'complete', result: { ...RESULT, confidence: 0.6 } },
+      reviewPolicy: { reviewer: 'qa', dispatchReviewer: true, maxRounds: 1 },
+      budgets: NO_BUDGETS,
+    });
+    const review = (await db.$client.unsafe(
+      `SELECT id FROM workforce_reviews WHERE task_id = '${root.taskId}' AND round = 1;`,
+    )) as unknown as { id: string }[];
+    const decided = await applyReviewVerdict(tdb(), NO_BUDGETS, {
+      reviewId: (review[0] as { id: string }).id,
+      verdict: 'reject',
+      reasons: ['not yet'],
+      requiredChanges: ['fix it'],
+      actor: 'qa',
+    });
+    expect(decided.status).toBe('waiting_for_user');
+    const outcome = (await db.$client.unsafe(
+      `SELECT data->>'outcome' AS outcome FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.review.decided';`,
+    )) as unknown as { outcome: string }[];
+    expect(outcome[0]?.outcome).toBe('rounds_exhausted');
+  });
+
+  it('the EXECUTION ceiling still wins when it is the tighter one', async () => {
+    const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+    const tightBudgets = workforceBudgetsSchema.parse({ execution: { maxReviewRounds: 1 } });
+    await applyTurnOutcome(tdb(), {
+      taskId: root.taskId,
+      turnId: turnIdFor(root.taskId, 1),
+      turnNumber: 1,
+      intent: { kind: 'complete', result: { ...RESULT, confidence: 0.6 } },
+      reviewPolicy: { reviewer: 'qa', dispatchReviewer: true, maxRounds: 5 },
+      budgets: tightBudgets,
+    });
+    const review = (await db.$client.unsafe(
+      `SELECT id FROM workforce_reviews WHERE task_id = '${root.taskId}' AND round = 1;`,
+    )) as unknown as { id: string }[];
+    const decided = await applyReviewVerdict(tdb(), tightBudgets, {
+      reviewId: (review[0] as { id: string }).id,
+      verdict: 'reject',
+      reasons: ['no'],
+      requiredChanges: [],
+      actor: 'qa',
+    });
+    expect(decided.status).toBe('waiting_for_user');
+  });
+
+  it('a review child may not COMPLETE — its only ending is the verdict it was dispatched to give', async () => {
+    const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+    await completeUnderPolicy(root.taskId, 1);
+    const reviewer = await reviewerChildOf(root.taskId);
+    await driveChildToWorking(reviewer.task_id);
+    // `submit_result` from a review task used to complete it normally, and the reviewed task then
+    // sat in `waiting_for_review` forever: no signal kind matches that park, no sweep covers it,
+    // and nothing journaled the miss.
+    const out = await applyTurnOutcome(tdb(), {
+      taskId: reviewer.task_id,
+      turnId: turnIdFor(reviewer.task_id, 1),
+      turnNumber: 1,
+      intent: { kind: 'complete', result: RESULT },
+      budgets: NO_BUDGETS,
+    });
+    expect(out.plan?.kind).toBe('invalid_intent');
+    expect(out.task).toMatchObject({ status: 'queued', statusReason: 'tool_error' });
+    // The reviewed task is still parked on its review, and the review is still decidable.
+    const parked = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(parked[0]).toMatchObject({
+      status: 'waiting_for_review',
+      status_reason: 'review_pending',
+    });
+  });
+
+  it('a review child may not commission a review of its own — the chain is one level deep', async () => {
+    const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+    await completeUnderPolicy(root.taskId, 1);
+    const reviewer = await reviewerChildOf(root.taskId);
+    await driveChildToWorking(reviewer.task_id);
+    // `reviewRoundsUsed` restarts at zero on every task, so an unbounded review chain needed only
+    // a reviewer that keeps asking for review — with no declared budget, nothing stopped it.
+    const out = await applyTurnOutcome(tdb(), {
+      taskId: reviewer.task_id,
+      turnId: turnIdFor(reviewer.task_id, 1),
+      turnNumber: 1,
+      intent: { kind: 'request_review', reviewer: 'qa2', dispatchReviewer: true },
+      budgets: NO_BUDGETS,
+    });
+    expect(out.plan?.kind).toBe('invalid_intent');
+    const grandchildren = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_tasks WHERE parent_task_id = '${reviewer.task_id}';`,
+    );
+    expect(grandchildren[0]?.c).toBe(0);
+  });
+
+  it('a review child that ends terminal without a verdict releases the reviewed task to a human', async () => {
+    const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+    await completeUnderPolicy(root.taskId, 1);
+    const reviewer = await reviewerChildOf(root.taskId);
+    // A cancel is terminal and carries no verdict. The reviewed task's park has lost its only
+    // exit — the verdict route refuses any task outside `waiting_for_review`, so waiting on is
+    // waiting forever. A human decides instead.
+    await cancelTaskCascade(tdb(), { taskId: reviewer.task_id, actor: 'user' });
+    const released = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(released[0]).toMatchObject({ status: 'waiting_for_user', status_reason: null });
+    const abandoned = (await db.$client.unsafe(
+      `SELECT data->>'reviewTaskId' AS review_task_id FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.review.abandoned';`,
+    )) as unknown as { review_task_id: string }[];
+    expect(abandoned).toHaveLength(1);
+    expect(abandoned[0]?.review_task_id).toBe(reviewer.task_id);
+    // The stored result survived — a human sees the work the reviewer never judged.
+    const stored = await db.$client.unsafe(
+      `SELECT result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(stored[0]?.summary).toBe('Done.');
+  });
+
+  it('a verdict from a reviewer who is not the review task’s own owner is a tool error', async () => {
+    const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+    await completeUnderPolicy(root.taskId, 1);
+    const reviewer = await reviewerChildOf(root.taskId);
+    // The review row names 'qa'. A DIFFERENT task under the same parent — a fan-out sibling, say —
+    // must not be able to decide it just because the row belongs to its parent.
+    await db.$client.unsafe(
+      `UPDATE workforce_tasks SET owner = 'impostor' WHERE task_id = '${reviewer.task_id}';`,
+    );
+    const review = (await db.$client.unsafe(
+      `SELECT id FROM workforce_reviews WHERE task_id = '${root.taskId}' AND round = 1;`,
+    )) as unknown as { id: string }[];
+    await driveChildToWorking(reviewer.task_id);
+    const out = await applyTurnOutcome(tdb(), {
+      taskId: reviewer.task_id,
+      turnId: turnIdFor(reviewer.task_id, 1),
+      turnNumber: 1,
+      intent: {
+        kind: 'submit_review',
+        reviewId: (review[0] as { id: string }).id,
+        verdict: 'accept',
+      },
+      budgets: NO_BUDGETS,
+    });
+    expect(out.task).toMatchObject({ status: 'queued', statusReason: 'tool_error' });
+    const undecided = await db.$client.unsafe(
+      `SELECT verdict FROM workforce_reviews WHERE id = '${(review[0] as { id: string }).id}';`,
+    );
+    expect(undecided[0]?.verdict).toBeNull();
+  });
+
   it('a reviewer verdict that lost its race completes the reviewer task as superseded', async () => {
     const root = await driveToWorking(await newRoot({ owner: 'dev' }));
     await completeUnderPolicy(root.taskId, 1);

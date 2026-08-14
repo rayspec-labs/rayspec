@@ -185,6 +185,13 @@ export type TurnPlan =
       readonly reviewer: string;
       readonly dispatchReviewer: boolean;
       readonly round: number;
+      /**
+       * The EFFECTIVE round ceiling this interception was planned against — the tighter of the
+       * matched rule's own `maxRounds` and the execution-wide one. Recorded on the review park's
+       * binding so the verdict path enforces the same ceiling the planner used, rather than the
+       * budgets' half of it.
+       */
+      readonly maxRounds: number;
     }
   | {
       readonly kind: 'review_rounds_exhausted';
@@ -265,6 +272,12 @@ export interface PlanTurnInput {
    * the immutable ancestry, so no lock is needed for the membership fact.
    */
   readonly cancelTarget: { readonly exists: boolean; readonly inCallerSubtree: boolean } | null;
+  /**
+   * THE REVIEW ASSIGNMENT this task carries, read from the parent's park binding: this task was
+   * dispatched to decide that review, and `submit_review` is the only ending that discharges it.
+   * Null for every other task.
+   */
+  readonly reviewAssignment: { readonly reviewId: string } | null;
   readonly intent: TurnIntent;
 }
 
@@ -282,6 +295,8 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
   const bufferedRejection = rejectBufferedCreates(input);
   if (bufferedRejection) return bufferedRejection;
   const intent = input.intent;
+  const reviewChildRejection = rejectReviewChildEnding(input);
+  if (reviewChildRejection) return reviewChildRejection;
   switch (intent.kind) {
     case 'complete': {
       const policy = input.matchedReviewPolicy;
@@ -306,6 +321,7 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
         reviewer: policy.reviewer,
         dispatchReviewer: policy.dispatchReviewer,
         round: input.reviewRoundsUsed + 1,
+        maxRounds: effectiveMax,
       };
     }
     case 'fan_out': {
@@ -393,6 +409,39 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
     case 'fail':
       return { kind: 'fail', message: intent.message };
   }
+}
+
+/**
+ * THE REVIEW CHILD'S LEGAL ENDINGS — the reason a review park always has an exit, and the reason a
+ * review chain is exactly one level deep.
+ *
+ * A task dispatched to decide a review exists for that one purpose, so two endings are refused:
+ *
+ *   - `complete`: the review task would finish normally and the REVIEWED task would sit in
+ *     `waiting_for_review` forever — no signal kind matches that park, no timeout sweep covers it,
+ *     and the verdict route refuses any task outside it, so nothing could ever decide the review
+ *     again. Making the mistake a typed tool error is what keeps that unreachable state unreachable.
+ *   - `request_review`: `reviewRoundsUsed` restarts at zero on every task and the reviewer role
+ *     carries `request_review`, so a reviewer that keeps asking for review is an unbounded chain
+ *     whenever no execution ceiling is declared. A review decides; it does not commission.
+ *
+ * Together these bound a RECIPROCAL pair of declared policies too (A reviews B, B reviews A): a
+ * review task cannot complete, so its completion is never policy-matched, and it cannot ask for a
+ * review of its own — the pair costs at most one review each way and cannot recurse.
+ *
+ * The assignment is read from the PARENT's park binding without a lock. A racing verdict that moves
+ * the parent out of the park can make it stale by the time this turn commits, and the refusal it
+ * produces is then a tool error the turn retries — fail-closed in the safe direction.
+ */
+function rejectReviewChildEnding(input: PlanTurnInput): TurnPlan | null {
+  if (input.reviewAssignment === null) return null;
+  if (input.intent.kind !== 'complete' && input.intent.kind !== 'request_review') return null;
+  return invalidIntentPlan(
+    `this task was dispatched to decide review '${input.reviewAssignment.reviewId}' — ` +
+      `'${input.intent.kind}' is not an ending it may take. Answer with submit_review ` +
+      '(accept or reject). Fail-closed.',
+    input.priorToolError,
+  );
 }
 
 /**

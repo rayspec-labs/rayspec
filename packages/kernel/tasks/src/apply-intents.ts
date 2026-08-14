@@ -48,6 +48,7 @@ import { delegationChildSpecSchema, insertChildTask } from './create-task.js';
 import { TaskNotFoundError, TaskRowCorruptError, TaskVersionConflictError } from './errors.js';
 import { appendTaskEvents } from './events.js';
 import { deterministicChildTaskId } from './ids.js';
+import { joinPolicySchema } from './join.js';
 import {
   invalidIntentPlan,
   planTurnOutcome,
@@ -223,6 +224,28 @@ async function assertClaimOwnership(tx: TenantDb, input: ApplyTurnInput): Promis
   }
 }
 
+/**
+ * Is this task the REVIEW CHILD its parent's park is bound to? Read from the parent's binding —
+ * the same row the park lives on, so the fact cannot disagree with the park it describes. A plain
+ * read: the parent is parked and moves only by a verdict, and a racing verdict only ever makes the
+ * answer stale in the fail-closed direction (see `rejectReviewChildEnding`).
+ */
+async function readReviewAssignment(
+  tx: TenantDb,
+  task: TaskRecord,
+): Promise<{ reviewId: string } | null> {
+  if (task.parentTaskId === null) return null;
+  const rows = (await tx
+    .select(schema.workforceTasks)
+    .where(eq(schema.workforceTasks.taskId, task.parentTaskId))) as TaskRecord[];
+  const parent = rows[0];
+  if (!parent || parent.status !== 'waiting_for_review') return null;
+  const binding = joinPolicySchema.safeParse(parent.joinPolicy);
+  if (!binding.success || binding.data.policy !== 'review') return null;
+  if (binding.data.reviewTaskId !== task.taskId || binding.data.reviewId === undefined) return null;
+  return { reviewId: binding.data.reviewId };
+}
+
 /** Owners along the ancestry — the cycle-rejection input, read from rows, never from promises. */
 async function ancestorOwners(tx: TenantDb, task: TaskRecord): Promise<string[]> {
   const ids = Array.isArray(task.ancestryPath) ? (task.ancestryPath as string[]) : [];
@@ -314,6 +337,7 @@ export async function applyTurnOutcome(
     }
 
     const planInput = {
+      reviewAssignment: await readReviewAssignment(tx, snapshot),
       taskOwner: snapshot.owner,
       ancestryDepth: Array.isArray(snapshot.ancestryPath) ? snapshot.ancestryPath.length : 0,
       ancestorOwners: await ancestorOwners(tx, snapshot),
@@ -606,6 +630,13 @@ export async function applyTurnOutcome(
               round: plan.round,
             })
             .returning({ id: schema.workforceReviews.id });
+          // A model-initiated review answers to the EXECUTION ceiling alone — no declared policy
+          // stands behind it, so the binding carries none and the verdict path uses the budgets'.
+          await bindReviewPark(tx, task.taskId, {
+            reviewId: (inserted[0] as { id: string }).id,
+            reviewTaskId: null,
+            maxRounds: null,
+          });
           await appendTaskEvents(tx, task.taskId, [
             {
               type: 'workforce.review.requested',
@@ -670,10 +701,10 @@ export async function applyTurnOutcome(
             .returning({ id: schema.workforceReviews.id });
           const reviewId = (inserted[0] as { id: string }).id;
           let reviewTaskId: string | null = null;
-          // The reviewer child skips the delegation depth ceiling DELIBERATELY (like the
-          // escalation child): review dispatch cannot recurse — a review task's own completion is
-          // never policy-matched, and a requested reviewer is scoped and never the caller — so a
-          // task's review chain sits exactly one level below it, bounded by its own round budget.
+          // The reviewer child skips the delegation depth ceiling DELIBERATELY (like the escalation
+          // child): review dispatch cannot recurse, and that is now enforced rather than argued —
+          // a task bound as a review child may take NEITHER `complete` NOR `request_review`
+          // (`rejectReviewChildEnding`), so a task's review chain sits exactly one level below it.
           if (dispatchReviewer) {
             const child = await insertChildTask(
               tx,
@@ -690,6 +721,14 @@ export async function applyTurnOutcome(
             );
             reviewTaskId = child.taskId;
           }
+          // BIND the park: which review answers it, which task was dispatched to decide it, and the
+          // DECLARED policy's own round ceiling. The verdict path takes the tighter of that and the
+          // execution ceiling — it is the only way a document the kernel cannot read reaches it.
+          await bindReviewPark(tx, task.taskId, {
+            reviewId,
+            reviewTaskId,
+            maxRounds: plan.kind === 'complete_with_review' ? plan.maxRounds : null,
+          });
           await appendTaskEvents(tx, task.taskId, [
             {
               type: 'workforce.review.requested',
@@ -734,15 +773,23 @@ export async function applyTurnOutcome(
         case 'submit_review': {
           // A reviewer turn's verdict on the task UNDER REVIEW — this task's PARENT. The trusted
           // layer resolved `reviewId` from the pending review row; the kernel still re-checks the
-          // linkage fail-closed: a review that does not belong to the parent is a tool error, one
-          // requeue then failed, exactly like any other malformed turn ending.
+          // linkage fail-closed, on BOTH ends: the review must belong to the parent, AND its named
+          // reviewer must be this task's own owner. Without the second check any task under the
+          // reviewed parent — a fan-out sibling, a buffered child — could decide a review addressed
+          // to someone else. Either mismatch is a tool error, one requeue then failed, exactly like
+          // any other malformed turn ending.
           const reviewRows = (await tx
             .select(schema.workforceReviews)
             .where(
               eq(schema.workforceReviews.id, plan.reviewId),
             )) as (typeof schema.workforceReviews.$inferSelect)[];
           const review = reviewRows[0];
-          if (!review || task.parentTaskId === null || review.taskId !== task.parentTaskId) {
+          if (
+            !review ||
+            task.parentTaskId === null ||
+            review.taskId !== task.parentTaskId ||
+            review.reviewer !== task.owner
+          ) {
             finalTask = await applyToolErrorFate(
               tx,
               task,
@@ -1043,6 +1090,30 @@ export async function applyTurnOutcome(
     ]);
     return { alreadyApplied: false, plan, task: finalTask };
   });
+}
+
+/**
+ * BIND a `waiting_for_review` park to the review it waits on, on the same row the park lives on
+ * (`joinPolicy`, the park-binding column — see join.ts). Three facts nothing else can supply later:
+ * WHICH review answers the park, WHICH task was dispatched to decide it (null when a human does),
+ * and the DECLARED policy's round ceiling — a ceiling that lives in a document the kernel is
+ * deliberately roster-free about, and which the verdict path would otherwise never see.
+ */
+async function bindReviewPark(
+  tx: TenantDb,
+  taskId: string,
+  binding: { reviewId: string; reviewTaskId: string | null; maxRounds: number | null },
+): Promise<void> {
+  await tx
+    .update(schema.workforceTasks, {
+      joinPolicy: {
+        policy: 'review',
+        reviewId: binding.reviewId,
+        reviewTaskId: binding.reviewTaskId,
+        ...(binding.maxRounds !== null ? { maxRounds: binding.maxRounds } : {}),
+      },
+    })
+    .where(eq(schema.workforceTasks.taskId, taskId));
 }
 
 type Stamp = { actor: string; turnId: string; turnNumber: number };

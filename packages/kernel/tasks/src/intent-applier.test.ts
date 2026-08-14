@@ -35,6 +35,7 @@ function input(over: Partial<PlanTurnInput> = {}): PlanTurnInput {
     matchedReviewPolicy: null,
     createdChildren: [],
     cancelTarget: null,
+    reviewAssignment: null,
     intent: turnIntentSchema.parse({ kind: 'complete', result: RESULT }),
     ...over,
   };
@@ -330,6 +331,19 @@ describe('policy-intercepted completion', () => {
       reviewer: 'qa',
       dispatchReviewer: true,
       round: 1,
+      maxRounds: 2,
+    });
+  });
+
+  it('the plan carries the EFFECTIVE ceiling so the verdict path enforces the same one', () => {
+    // The rule's 2 against an execution-wide 1: the plan records 1, and the review park's binding
+    // carries it to the verdict — which previously saw only the budgets' half of the rule.
+    expect(
+      planTurnOutcome(input({ matchedReviewPolicy: policy, maxReviewRounds: 1 })),
+    ).toMatchObject({ kind: 'complete_with_review', maxRounds: 1 });
+    // No execution ceiling at all: the rule's own number is the whole ceiling.
+    expect(planTurnOutcome(input({ matchedReviewPolicy: policy }))).toMatchObject({
+      maxRounds: 2,
     });
   });
 
@@ -368,6 +382,55 @@ describe('policy-intercepted completion', () => {
         input({ matchedReviewPolicy: { reviewer: 'user', dispatchReviewer: false, maxRounds: 1 } }),
       ),
     ).toMatchObject({ kind: 'complete_with_review', reviewer: 'user', dispatchReviewer: false });
+  });
+});
+
+describe('a review child’s legal endings', () => {
+  const assigned = { reviewAssignment: { reviewId: 'rev_1' } };
+
+  it('refuses `complete` — the reviewed task would park on a verdict that can never arrive', () => {
+    const plan = planTurnOutcome(input(assigned));
+    expect(plan).toMatchObject({ kind: 'invalid_intent', fate: 'requeue' });
+    expect((plan as { detail: string }).detail).toContain('rev_1');
+  });
+
+  it('refuses `request_review` — a review decides, it does not commission another', () => {
+    expect(
+      planTurnOutcome(
+        input({
+          ...assigned,
+          intent: turnIntentSchema.parse({ kind: 'request_review', reviewer: 'qa2' }),
+        }),
+      ),
+    ).toMatchObject({ kind: 'invalid_intent' });
+  });
+
+  it('takes the terminal fate on a second consecutive offense, like any malformed ending', () => {
+    expect(planTurnOutcome(input({ ...assigned, priorToolError: true }))).toMatchObject({
+      kind: 'invalid_intent',
+      fate: 'fail',
+    });
+  });
+
+  it('leaves every other ending alone — a reviewer may still escalate, yield or be cancelled', () => {
+    expect(planTurnOutcome(input({ ...assigned, intent: { kind: 'yield' } }))).toEqual({
+      kind: 'yield',
+    });
+    expect(
+      planTurnOutcome(
+        input({
+          ...assigned,
+          intent: turnIntentSchema.parse({
+            kind: 'submit_review',
+            reviewId: 'rev_1',
+            verdict: 'accept',
+          }),
+        }),
+      ),
+    ).toMatchObject({ kind: 'submit_review', verdict: 'accept' });
+    expect(planTurnOutcome(input({ ...assigned, pendingCancel: true }))).toEqual({
+      kind: 'cancelled',
+    });
   });
 });
 

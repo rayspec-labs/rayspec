@@ -10,8 +10,9 @@
 import { schema, type TenantDb } from '@rayspec/db';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
-import type { TaskRecord } from './apply-transition.js';
+import { applyTransition, type TaskRecord } from './apply-transition.js';
 import { TaskNotFoundError, TaskRowCorruptError } from './errors.js';
+import { appendTaskEvents } from './events.js';
 import { isJoinSatisfied, joinPolicySchema } from './join.js';
 import { deliverSignal } from './signals.js';
 import { isTaskStatus, isTerminalStatus } from './status.js';
@@ -130,11 +131,16 @@ export async function lockDescendants(tx: TenantDb, origin: TaskRecord): Promise
 
 /**
  * A task just reached a terminal status: settle its opening delegation record and, when its parent
- * is parked, fan back in — through the JOIN when the parent awaits its children, or through the
+ * is parked, fan back in — through the JOIN when the parent awaits its children, through the
  * ESCALATION REPLY when the parent parked `blocked(escalated)` and this child carried the
- * escalation. Exported for the cancel cascade, which terminates tasks outside a turn. The parent
- * lock this takes is already held by every caller (they went through `lockRootFirst` before their
- * transition) — re-taking it is free and keeps the fan-in correct on its own terms.
+ * escalation, or through the ABANDONED REVIEW when the parent parked `waiting_for_review` and this
+ * child was the reviewer that never returned a verdict. Exported for the cancel cascade, which
+ * terminates tasks outside a turn. The parent lock this takes is already held by every caller (they
+ * went through `lockRootFirst` before their transition) — re-taking it is free and keeps the fan-in
+ * correct on its own terms.
+ *
+ * Every branch is keyed on the parent's PARK BINDING (`joinPolicy`), never on the park's status
+ * alone: a task under a parked parent is not automatically the task that park is waiting for.
  */
 export async function afterTaskTerminal(tx: TenantDb, task: TaskRecord): Promise<void> {
   await tx
@@ -185,6 +191,10 @@ export async function afterTaskTerminal(tx: TenantDb, task: TaskRecord): Promise
     });
     return;
   }
+  if (parent.status === 'waiting_for_review') {
+    await releaseAbandonedReview(tx, parent, task);
+    return;
+  }
   if (parent.status !== 'blocked' || parent.statusReason !== 'awaiting_children') return;
   const policyParsed = joinPolicySchema.safeParse(parent.joinPolicy);
   if (!policyParsed.success) return; // no declared join — the parent is blocked on something else
@@ -202,6 +212,67 @@ export async function afterTaskTerminal(tx: TenantDb, task: TaskRecord): Promise
     kind: 'child_completed',
     signalKey: `join:${parent.taskId}:${parent.turnsUsed}`,
     payload: { childCount: children.length },
+    actor: 'system',
+  });
+}
+
+/**
+ * THE ABANDONED REVIEW — the backstop that keeps `waiting_for_review` from being a park with no
+ * exit.
+ *
+ * A review park is answered by its VERDICT, which is why `waiting_for_review` appears in no wake
+ * set: no signal kind matches it and no timeout sweep covers it. That is sound only while the
+ * dispatched reviewer can still deliver one. It cannot once its task is terminal — and a review
+ * task reaches a terminal status by routes no tool error can prevent: an operator cancel, a cancel
+ * cascade from an ancestor, or the second consecutive tool error that fails it outright.
+ *
+ * When the terminating task IS the bound review task and the review is still undecided, the
+ * reviewed task is released to `waiting_for_user` — the same place a spent round budget leaves it,
+ * and for the same reason: no mechanism can decide this any more, so a human does. The stored
+ * result stays on the row, so the human sees the work the reviewer never judged. The review row is
+ * left pending and undecided on purpose: fabricating a verdict nobody gave would be worse than
+ * recording that none arrived, and the journal entry names the task that was supposed to give it.
+ */
+async function releaseAbandonedReview(
+  tx: TenantDb,
+  parent: TaskRecord,
+  task: TaskRecord,
+): Promise<void> {
+  const binding = joinPolicySchema.safeParse(parent.joinPolicy);
+  if (
+    !binding.success ||
+    binding.data.policy !== 'review' ||
+    binding.data.reviewTaskId !== task.taskId ||
+    binding.data.reviewId === undefined
+  ) {
+    // Not the bound reviewer — a sibling ending under a reviewed parent answers nothing.
+    return;
+  }
+  const reviewRows = (await tx
+    .select(schema.workforceReviews)
+    .where(eq(schema.workforceReviews.id, binding.data.reviewId))) as (typeof schema.workforceReviews.$inferSelect)[];
+  const review = reviewRows[0];
+  // A decided review is the normal path: the verdict already moved the reviewed task, and this
+  // terminal is just the reviewer's own turn ending afterwards.
+  if (!review || review.verdict !== null) return;
+  await appendTaskEvents(tx, parent.taskId, [
+    {
+      type: 'workforce.review.abandoned',
+      payload: {
+        taskId: parent.taskId,
+        reviewId: review.id,
+        reviewTaskId: task.taskId,
+        reviewer: review.reviewer,
+        round: review.round,
+        reviewTaskStatus: task.status,
+        outcome: 'waiting_for_user',
+      },
+    },
+  ]);
+  await applyTransition(tx, {
+    taskId: parent.taskId,
+    expectedVersion: parent.version,
+    to: 'waiting_for_user',
     actor: 'system',
   });
 }
