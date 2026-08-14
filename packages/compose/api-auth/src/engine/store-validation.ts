@@ -308,8 +308,10 @@ export function toDbValues(
  * the wire, so there is nothing to refuse; the guard messages keep naming the column by its author
  * snake name either way). `undefined` (no `project` declared) keeps the historical path: the
  * author's snake_case names, the same values, the same key order — the one response it does not
- * reproduce byte-for-byte is a store declaring a column named after an Object.prototype member,
- * which the accumulator below now emits on this path too instead of swallowing it. DELIBERATE
+ * reproduce byte-for-byte is a store declaring a column named exactly `__proto__`, which the
+ * accumulator below now emits on this path too instead of swallowing it. It is the only such name:
+ * on a plain `{}` every other `Object.prototype` member (`constructor`, `toString`, …) already
+ * assigned as an own property and already reached the wire; `__proto__` alone is a setter. DELIBERATE
  * BOUNDARY the projection closes: the un-projected path passes an UNKNOWN row key through raw (the
  * `?? key` arm below — unreachable today, every row key is a declared or injected column); a
  * projected route serializes EXACTLY the resolved column set, so an unknown key can never ride a
@@ -342,8 +344,10 @@ export function serializeRow(
   // every key of the stored value becomes readable through the response object. Neither path may
   // do that, so neither uses `{}`. Nothing else moves: an ordinary key is an own property either
   // way, `JSON.stringify` emits the same bytes in the same insertion order, and the only response
-  // this changes is one whose store declares a column named after an Object.prototype member —
-  // which could not reach the wire at all before. Both paths are pinned in store-projection.test.ts.
+  // this changes is one whose store declares a column named exactly `__proto__` — the one name a
+  // plain `{}` swallows, because assigning it hits the prototype setter instead of creating an own
+  // property. Every other `Object.prototype` member reached the wire on both paths before this
+  // change. Both paths are pinned in store-projection.test.ts.
   const out: Record<string, unknown> = Object.create(null);
   for (const [key, value] of Object.entries(row)) {
     const snake = camelToSnake.get(key) ?? key;

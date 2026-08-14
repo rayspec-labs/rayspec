@@ -30,8 +30,8 @@ import { INJECTED_COLUMN_TS_NAMES, snakeToCamel } from './injected-columns-view.
  * absent from the map is omitted from responses). Returns `undefined` for an absent projection —
  * the callers keep their historical un-projected path (never an identity map, so "no `project` key
  * ⇒ the author's own column names" is structural, not incidental; the one un-projected response
- * byte that has moved since is a column named after an Object.prototype member, which `serializeRow`
- * now emits on both paths).
+ * byte that has moved since is a column named exactly `__proto__` — the single name a plain `{}`
+ * accumulator swallowed — which `serializeRow` now emits on both paths).
  */
 export function resolveResponseProjection(
   store: StoreSpec,

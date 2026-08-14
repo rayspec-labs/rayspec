@@ -1015,8 +1015,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key of the stored value became readable through the response object. Both paths now accumulate into
   a prototype-free object. Nothing else moves: an ordinary column is an own property either way and
   serializes to the same bytes in the same order, so the only response this changes is one whose
-  store declares a column named after an `Object.prototype` member — which could not reach the wire
-  at all before.
+  store declares a column named exactly `__proto__` — which could not reach the wire at all before.
+  It is the only name with that property: on a plain `{}` every other `Object.prototype` member
+  (`constructor`, `toString`, and the rest) already assigned as an own property and already
+  serialized, because `__proto__` alone is a setter rather than a plain key.
 
 ### Documentation
 
