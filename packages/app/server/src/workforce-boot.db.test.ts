@@ -12,6 +12,7 @@ import {
   assertWorkforceSpecCompatible,
   ensureDeclaredWorkforceRuntime,
   parseDelegatedTo,
+  releaseDepartedWorkforceDeclarations,
   WorkforceSpecChangeError,
 } from './workforce-boot.js';
 
@@ -112,7 +113,7 @@ describe.skipIf(!hasDb)('workforce boot wiring (db)', () => {
     await expect(assertWorkforceSpecCompatible(tdb(), withoutDev)).rejects.toThrow(task.taskId);
   });
 
-  describe('the workforce ID is a declaration too — a rename is a removal', () => {
+  describe('a declaration is a fact on the row — the marker, and what it does and does not gate', () => {
     async function liveTask(workforceId: string) {
       return createRootTask(tdb(), {
         workforceId,
@@ -124,22 +125,67 @@ describe.skipIf(!hasDb)('workforce boot wiring (db)', () => {
       });
     }
 
-    it('a document declaring NO workforce is UNGATED — the case the schema cannot decide', async () => {
+    /** What a prior boot of a declaring document leaves behind: the stamped runtime row. */
+    async function priorDeclaringBoot(workforce = DECLARED): Promise<void> {
+      await ensureDeclaredWorkforceRuntime(tdb(), workforce);
+    }
+
+    async function markerOf(workforceId: string): Promise<string | null> {
+      const rows = (await db.$client.unsafe(
+        `SELECT budgets->>'declaredAt' AS declared_at FROM workforce_runtime WHERE workforce_id = '${workforceId}';`,
+      )) as unknown as { declared_at: string | null }[];
+      return rows[0]?.declared_at ?? null;
+    }
+
+    it('a declaring boot stamps the marker; the ceilings it stores still parse', async () => {
+      await priorDeclaringBoot();
+      expect(await markerOf('helpdesk')).not.toBeNull();
+      // The marker rides the SAME strict payload the engine parses at every dispatch, so the
+      // load-bearing assertion is that adding it did not make that payload unreadable.
+      const rows = (await db.$client.unsafe(
+        `SELECT budgets FROM workforce_runtime WHERE workforce_id = 'helpdesk';`,
+      )) as unknown as { budgets: unknown }[];
+      const budgets = resolveWorkforceBudgets(rows[0]?.budgets, 'helpdesk');
+      expect(budgets.workforce?.usd).toBe(40);
+      expect(budgets.execution.maxTaskWallClockMs).toBe(2_700_000);
+    });
+
+    it('refuses a redeploy that DROPS the workforce section while live work runs under it', async () => {
+      await priorDeclaringBoot();
+      const task = await liveTask('helpdesk');
+      // The maximal removal. The marker is what makes it decidable: this id was declared by a
+      // document, so live work under it is stranded rather than merely engine-owned.
+      const refusal = assertWorkforceSpecCompatible(tdb(), undefined);
+      await expect(refusal).rejects.toBeInstanceOf(WorkforceSpecChangeError);
+      await expect(refusal).rejects.toMatchObject({ taskIds: [task.taskId] });
+      await expect(assertWorkforceSpecCompatible(tdb(), undefined)).rejects.toThrow(
+        "workforce 'helpdesk'",
+      );
+      await expect(assertWorkforceSpecCompatible(tdb(), undefined)).rejects.toThrow(task.taskId);
+    });
+
+    it('the ENGINE-ONLY posture stays ungated — an unstamped id is nobody’s declaration', async () => {
+      // No declaring boot ever ran: `workforce_id` here is the task engine's own scoping, set by
+      // whoever created the task, and `/v1/workforce` serves exactly this deployment. Without a
+      // marker there is no declaration to have been removed, so the boot proceeds.
       await liveTask('helpdesk');
-      // This is the maximal removal and it deploys. Not an oversight: a task row's `workforce_id`
-      // is set by whoever created the task, so live work under an id is exactly as consistent with
-      // an engine-only deployment (a shipped posture — `/v1/workforce` serves it) as with a
-      // workforce that was just deleted, and nothing on any row says a DOCUMENT ever declared it.
-      // Refusing on the shared evidence would abort every engine-only boot. Pinned so the gap is a
-      // recorded decision rather than a silent pass; closing it needs a stored prior declaration.
+      expect(await markerOf('helpdesk')).toBeNull();
       await expect(assertWorkforceSpecCompatible(tdb(), undefined)).resolves.toBeUndefined();
+      // And it stays ungated for a document that declares a DIFFERENT workforce, too: unmarked
+      // live work is not this document's to strand.
+      const other = WorkforceSpec.parse({
+        ...JSON.parse(JSON.stringify(DECLARED)),
+        id: 'helpdesk_v2',
+      });
+      await expect(assertWorkforceSpecCompatible(tdb(), other)).resolves.toBeUndefined();
     });
 
     it('refuses a redeploy that RENAMES the workforce id out from under live work', async () => {
+      await priorDeclaringBoot();
       const task = await liveTask('helpdesk');
-      // Every gate query filtered on the NEW id, so a rename matched zero rows and passed
-      // trivially — while the live tasks kept dispatching under the old id, against a runtime row
-      // nothing would ever refresh again.
+      // A rename is a removal of the old id. Every gate query used to filter on the NEW id, so it
+      // matched zero rows and passed trivially while the live tasks kept dispatching under the old
+      // one, against a runtime row nothing would refresh again.
       const renamed = WorkforceSpec.parse({
         ...JSON.parse(JSON.stringify(DECLARED)),
         id: 'helpdesk_v2',
@@ -152,16 +198,26 @@ describe.skipIf(!hasDb)('workforce boot wiring (db)', () => {
       );
     });
 
-    it('terminal work under a departed workforce id never refuses', async () => {
+    it('a marked workforce with only TERMINAL work deploys, and the stale marker is released', async () => {
+      await priorDeclaringBoot();
       const done = await liveTask('helpdesk');
       await db.$client.unsafe(
         `UPDATE workforce_tasks SET status = 'completed' WHERE task_id = '${done.taskId}';`,
       );
-      const renamed = WorkforceSpec.parse({
-        ...JSON.parse(JSON.stringify(DECLARED)),
-        id: 'helpdesk_v2',
-      });
-      await expect(assertWorkforceSpecCompatible(tdb(), renamed)).resolves.toBeUndefined();
+      await expect(assertWorkforceSpecCompatible(tdb(), undefined)).resolves.toBeUndefined();
+      // Nothing live depended on the declaration, so the retirement is clean and the marker goes:
+      // leaving it would make a LATER engine-only boot refuse over tasks created after the
+      // workforce was legitimately retired.
+      await releaseDepartedWorkforceDeclarations(tdb(), undefined);
+      expect(await markerOf('helpdesk')).toBeNull();
+      await liveTask('helpdesk');
+      await expect(assertWorkforceSpecCompatible(tdb(), undefined)).resolves.toBeUndefined();
+    });
+
+    it('a still-declared workforce keeps its marker when the release runs', async () => {
+      await priorDeclaringBoot();
+      await releaseDepartedWorkforceDeclarations(tdb(), DECLARED);
+      expect(await markerOf('helpdesk')).not.toBeNull();
     });
 
     it('a bare platform task carries no workforce id and is never a workforce declaration', async () => {
@@ -171,11 +227,7 @@ describe.skipIf(!hasDb)('workforce boot wiring (db)', () => {
         owner: 'user',
         requestedBy: 'user',
       });
-      const renamed = WorkforceSpec.parse({
-        ...JSON.parse(JSON.stringify(DECLARED)),
-        id: 'helpdesk_v2',
-      });
-      await expect(assertWorkforceSpecCompatible(tdb(), renamed)).resolves.toBeUndefined();
+      await expect(assertWorkforceSpecCompatible(tdb(), undefined)).resolves.toBeUndefined();
     });
   });
 

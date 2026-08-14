@@ -156,7 +156,11 @@ import { buildSttCapability, FAKE_STT_BOOT_WARNING } from './stt-capability.js';
 // would be a runtime cycle. The shape of the secret pair belongs with the code that consumes it.
 import type { TenantProvisionSecrets } from './tenant-provision.js';
 import { buildTtsCapability, FAKE_TTS_BOOT_WARNING } from './tts-capability.js';
-import { assertWorkforceSpecCompatible, ensureDeclaredWorkforceRuntime } from './workforce-boot.js';
+import {
+  assertWorkforceSpecCompatible,
+  ensureDeclaredWorkforceRuntime,
+  releaseDepartedWorkforceDeclarations,
+} from './workforce-boot.js';
 import { buildWorkforceTurnHandlers } from './workforce-turn-handlers.js';
 
 /** The default local port (overridable via PORT). Local DX only — not a reserved well-known port. */
@@ -2903,24 +2907,30 @@ async function deployDeclaredSpec(
   // ── The WORKFORCE REDEPLOY GATE + tenant precondition (BEFORE deploy(): a refusal precedes any
   //    DDL or mount). The platform migration chain already applied above, so the workforce tables
   //    exist even on a first boot; an empty database passes trivially (pure additions always
-  //    deploy). A document declaring NO workforce is deliberately not gated — see
-  //    workforce-boot.ts's header for why that case is undecidable on the current schema.
-  if (effectiveSpec.workforce !== undefined) {
-    if (!config.cronTenantId) {
-      throw new BootConfigError(
-        'Boot aborted — the spec declares a workforce but RAYSPEC_CRON_TENANT_ID is unset. A ' +
-          'workforce runs under the deployment task tenant (the same single-deployment posture ' +
-          'cron fires use); set the variable to the org id durable tasks run under. Fail-closed.',
-      );
-    }
+  //    deploy).
+  //
+  //    The gate runs whether or not THIS document declares a workforce, because a document that
+  //    declares none is the MAXIMAL removal — the case a declaration-keyed gate cannot ask about at
+  //    all. What makes it decidable is the declaration marker a previous declaring boot left on the
+  //    runtime row (workforce-boot.ts's header): an id no document ever declared is unmarked, so an
+  //    engine-only deployment passes by construction. A clean retirement then releases the marker,
+  //    which is why the release runs here too and only after the gate has agreed the retirement is
+  //    clean.
+  if (effectiveSpec.workforce !== undefined && !config.cronTenantId) {
+    throw new BootConfigError(
+      'Boot aborted — the spec declares a workforce but RAYSPEC_CRON_TENANT_ID is unset. A ' +
+        'workforce runs under the deployment task tenant (the same single-deployment posture ' +
+        'cron fires use); set the variable to the org id durable tasks run under. Fail-closed.',
+    );
+  }
+  if (config.cronTenantId) {
     // The gate scopes by tenant, so the tenant SHAPE is asked first — otherwise a malformed id
     // surfaces as `forTenant`'s raw chokepoint throw here instead of the typed boot abort the
     // scheduler wiring below already produces for it. Same check, same message, taken earlier.
     await assertCronTenantBootable(db, config.cronTenantId);
-    await assertWorkforceSpecCompatible(
-      forTenant(db, config.cronTenantId),
-      effectiveSpec.workforce,
-    );
+    const workforceGateDb = forTenant(db, config.cronTenantId);
+    await assertWorkforceSpecCompatible(workforceGateDb, effectiveSpec.workforce);
+    await releaseDepartedWorkforceDeclarations(workforceGateDb, effectiveSpec.workforce);
   }
 
   // ── deploy() + the post-deploy boot GATES, under one committed-DDL catch ────────────────

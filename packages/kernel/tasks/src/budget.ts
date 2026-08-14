@@ -56,8 +56,27 @@ const turnsCeilingSchema = z.number().int().positive();
 /**
  * The declared ceiling configuration persisted on `workforce_runtime.budgets`. STRICT at every
  * nesting level — an unknown key is a refusal, not a silently ignored wish.
+ *
+ * The strictness is why `declaredAt` below is DECLARED here rather than written past this schema:
+ * the runtime row's payload is re-parsed on every dispatch, so a loose key stamped onto it would
+ * not be ignored — it would make the row unreadable and stop the workforce.
  */
 const rawWorkforceBudgetsSchema = z.strictObject({
+  /**
+   * NOT A CEILING — the DECLARATION MARKER, and the only member here that is not one.
+   *
+   * An ISO instant stamped by the boot that deployed a document declaring this workforce id, and
+   * by nothing else. The engine ignores it; it exists so the REDEPLOY GATE can tell a workforce a
+   * document once declared from a workforce id that only ever labelled engine-owned tasks. Those
+   * two are otherwise indistinguishable on every row — same tasks, same runtime row (the scheduler
+   * creates one on first dispatch), same delegations — and telling them apart is what makes
+   * "the document no longer declares this workforce" a decidable question instead of a guess that
+   * would abort every engine-only deployment. See workforce-boot.ts for the full mechanism.
+   *
+   * It lives on this object because the runtime row has exactly one jsonb column, and recording it
+   * needed no DDL. Nothing may READ it as a budget: it is carried, never enforced.
+   */
+  declaredAt: z.string().min(1).optional(),
   /** Whole-workforce ceilings, enforced per calendar window (UTC). */
   workforce: z
     .strictObject({

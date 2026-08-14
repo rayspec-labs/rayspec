@@ -6,40 +6,47 @@
  * (the engine reads ceilings from that row at every dispatch). Org structure itself is never
  * persisted — it derives fresh from the deployed document at every boot.
  *
- * There is no stored prior declaration, so removals are detected from LIVE EVIDENCE — the only
- * thing a redeploy can actually strand: a non-terminal task under a workforce id the document no
- * longer declares, a non-terminal task whose owner or department it no longer declares, or a live
- * delegation whose original target names a departed employee/department/team. `deploy --dry-run`
- * has no database and cannot run this check; its output says so.
- *
- * THE GATE READS THE DATABASE FIRST AND THE DOCUMENT SECOND. A gate keyed on the declared id can
- * only ever ask "is THIS id's live work still declared?", so RENAMING `workforce.id` pointed every
- * query at an id no row carried: it matched zero rows and passed trivially while the live tasks
- * kept dispatching under the old id, against a runtime row nothing would refresh again. Live
- * workforce ids are therefore enumerated from the task rows and each is checked against what the
- * document declares.
+ * Removals are detected from LIVE EVIDENCE — the only thing a redeploy can actually strand: a
+ * non-terminal task under a declared workforce id the document no longer carries, a non-terminal
+ * task whose owner or department it no longer declares, or a live delegation whose original target
+ * names a departed employee/department/team. `deploy --dry-run` has no database and cannot run this
+ * check; its output says so.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * WHAT THIS GATE CANNOT SEE: A DOCUMENT THAT DROPS `workforce:` ENTIRELY.
+ * THE DECLARATION MARKER — how "this workforce was removed" became a decidable question.
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * That is the maximal removal, and it is NOT checked here — not as an oversight, but because the
- * database cannot distinguish the two situations it would have to tell apart:
+ * The two hardest removals are the maximal ones: deleting the whole `workforce:` section, and
+ * RENAMING `workforce.id` (which is a removal of the old id wearing a new name). A gate keyed only
+ * on the declared id cannot see either — with the section gone there is no id to ask on behalf of,
+ * and a rename points every query at an id no row carries, matching nothing and passing trivially
+ * while the live tasks keep dispatching under the old id against a runtime row nothing refreshes.
  *
- *   - a deployment that DECLARED a workforce and just removed it (live work is stranded: with no
- *     declaration, no turn-handler resolver is wired and every dispatched owner fails typed), and
- *   - a deployment that NEVER declared one and runs the task engine directly (`workforce_tasks`
- *     rows carry a `workforce_id` for budget and control scoping whoever created them — the
- *     `/v1/workforce` surface exists precisely for this, and it is a shipped, supported posture).
+ * Reading the task rows instead is not enough on its own, because `workforce_tasks.workforce_id` is
+ * set by WHOEVER CREATED THE TASK. Live work under an id is exactly as consistent with:
  *
- * Both leave IDENTICAL evidence: non-terminal tasks with a workforce id, a runtime row (the
- * scheduler creates one on first dispatch), delegation rows, a journal. Nothing on any row records
- * that a DOCUMENT once declared the id. Refusing on the shared evidence would abort every
- * engine-only deployment, so the gate declines to guess.
+ *   - a deployment that DECLARED a workforce and just removed it (the work is stranded: with no
+ *     declaration no turn-handler resolver is wired, and every dispatched owner fails typed), as with
+ *   - a deployment that NEVER declared one and drives the task engine directly (`/v1/workforce`
+ *     exists precisely for this, and it is a shipped, supported posture).
  *
- * Closing it needs the one thing the module header above says does not exist — a stored prior
- * declaration — which is a deliberate design decision (what to record, where, and how a first boot
- * after the change behaves), not a fix-up. Until then this case is UNGATED and named as such here,
- * rather than implied to be covered by the rename check next to it.
+ * Both leave identical evidence on every row — same tasks, same runtime row (the scheduler creates
+ * one on first dispatch), same delegations, same journal. So the boot RECORDS the fact that only it
+ * knows: `ensureDeclaredWorkforceRuntime` stamps `budgets.declaredAt` on the runtime row of a
+ * workforce THE DOCUMENT DECLARES, and nothing else ever writes it. The gate then refuses exactly
+ * when a MARKED id is no longer declared and still carries live non-terminal tasks. A workforce id
+ * that no document ever declared is never marked, so the engine-only posture is untouched by
+ * construction rather than by exemption.
+ *
+ * A clean retirement RELEASES the marker (`releaseDepartedWorkforceDeclarations`, run after the gate
+ * passes): once a document has stopped declaring an id and nothing live depends on it, the fact is
+ * no longer true, and leaving it would make a LATER engine-only boot refuse over tasks created after
+ * the workforce was legitimately retired.
+ *
+ * ONE TRANSITIONAL WINDOW, stated rather than glossed: a workforce declared by a boot that ran
+ * BEFORE this marker existed carries none, so a deletion or rename between that boot and the next
+ * declaring boot is not caught. The first boot that still declares the workforce stamps it, and the
+ * removal is caught from then on. On this branch that window is theoretical — nothing has shipped —
+ * but it is real for any database whose rows predate the marker.
  */
 import { schema, type TenantDb } from '@rayspec/db';
 import { deriveWorkforceBudgets, type WorkforceSpec } from '@rayspec/spec';
@@ -106,6 +113,7 @@ export async function assertWorkforceSpecCompatible(
   // EVERY live non-terminal task that belongs to SOME workforce — no id filter, because the id
   // itself is one of the declarations under test. A bare platform task carries a NULL workforce id
   // and is not a workforce declaration; SQL NULL semantics exclude it from the predicate.
+  const declaredIds = await markedWorkforceIds(tdb);
   const tasks = (await tdb
     .select(schema.workforceTasks, {
       taskId: schema.workforceTasks.taskId,
@@ -125,17 +133,17 @@ export async function assertWorkforceSpecCompatible(
     department: string | null;
   }>;
 
-  // 1. Live work under a workforce id this document declares DIFFERENTLY — the id was renamed. Its
-  //    employees/departments are not checked individually: the whole workforce is gone under that
-  //    name, and naming every member of it would bury the fact that matters. Only reachable when a
-  //    workforce IS declared; see the header for why a document declaring none cannot ask this.
+  // 1. Live work under a MARKED workforce id this document no longer declares — the section was
+  //    deleted, or the id renamed. Its employees/departments are not checked individually: the
+  //    whole workforce is gone, and naming every member of it would bury the fact that matters.
+  //    An UNMARKED id is nobody's declaration (see the header) and is passed over here.
   const ownTasks: typeof tasks = [];
   for (const task of tasks) {
-    if (declaredId !== null && task.workforceId !== declaredId) {
+    if (task.workforceId === declaredId) {
+      ownTasks.push(task);
+    } else if (declaredIds.has(task.workforceId)) {
       missing.add(`workforce '${task.workforceId}'`);
       strandedTaskIds.add(task.taskId);
-    } else if (task.workforceId === declaredId) {
-      ownTasks.push(task);
     }
   }
 
@@ -192,17 +200,80 @@ export async function assertWorkforceSpecCompatible(
 }
 
 /**
+ * The workforce ids whose runtime row carries a DECLARATION MARKER — the ids some document declared,
+ * as opposed to ids that only ever labelled engine-owned tasks. The gate's whole ability to call a
+ * removal a removal rests on this set; see the module header.
+ */
+async function markedWorkforceIds(tdb: TenantDb): Promise<Set<string>> {
+  const rows = (await tdb
+    .select(schema.workforceRuntime, {
+      workforceId: schema.workforceRuntime.workforceId,
+      budgets: schema.workforceRuntime.budgets,
+    })
+    .all()) as Array<{ workforceId: string; budgets: unknown }>;
+  const marked = new Set<string>();
+  for (const row of rows) {
+    if (declarationMarkerOf(row.budgets) !== null) marked.add(row.workforceId);
+  }
+  return marked;
+}
+
+/** Read the marker off a stored budgets payload without imposing the engine's strict parse. */
+function declarationMarkerOf(budgets: unknown): string | null {
+  if (budgets === null || typeof budgets !== 'object') return null;
+  const value = (budgets as { declaredAt?: unknown }).declaredAt;
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
  * Persist the DECLARED budgets onto the runtime row — the third `ensureWorkforceRuntime` argument
  * is exactly this boot hook. Idempotent (upsert on the UNIQUE (tenant, workforce) key), so every
  * reboot refreshes the declared ceilings and the very next dispatch reads them.
+ *
+ * This is ALSO the only writer of the DECLARATION MARKER (`budgets.declaredAt`): reaching here means
+ * a deployed document declared this workforce id, which is exactly the fact the redeploy gate cannot
+ * otherwise learn. The stamp is refreshed every boot, so its value reads as "the last boot that
+ * declared this workforce".
  */
 export async function ensureDeclaredWorkforceRuntime(
   tdb: TenantDb,
   workforce: WorkforceSpec,
 ): Promise<void> {
-  await ensureWorkforceRuntime(
-    tdb,
-    workforce.id,
-    deriveWorkforceBudgets(workforce) as Readonly<Record<string, unknown>>,
-  );
+  await ensureWorkforceRuntime(tdb, workforce.id, {
+    ...(deriveWorkforceBudgets(workforce) as Readonly<Record<string, unknown>>),
+    declaredAt: new Date().toISOString(),
+  });
+}
+
+/**
+ * RELEASE the declaration marker of every workforce this document no longer declares — run AFTER
+ * the gate has passed, so it only ever runs on a retirement the gate found clean (nothing live
+ * references the departed id).
+ *
+ * Clearing rather than leaving it is deliberate: the marker asserts "a document declares this id",
+ * and once one has stopped and the retirement is clean, that is simply no longer true. A marker left
+ * behind would make a LATER engine-only boot refuse over tasks created under that id long after the
+ * workforce was legitimately retired — a refusal naming a declaration nobody would recognise.
+ *
+ * The budgets stay untouched: they are a fact about ceilings, and the runtime row still serves the
+ * `/v1/workforce` control surface for whatever work continues under that id.
+ */
+export async function releaseDepartedWorkforceDeclarations(
+  tdb: TenantDb,
+  workforce: WorkforceSpec | undefined,
+): Promise<void> {
+  const rows = (await tdb
+    .select(schema.workforceRuntime, {
+      workforceId: schema.workforceRuntime.workforceId,
+      budgets: schema.workforceRuntime.budgets,
+    })
+    .all()) as Array<{ workforceId: string; budgets: unknown }>;
+  for (const row of rows) {
+    if (row.workforceId === workforce?.id) continue;
+    if (declarationMarkerOf(row.budgets) === null) continue;
+    const { declaredAt: _released, ...rest } = row.budgets as Record<string, unknown>;
+    await tdb
+      .update(schema.workforceRuntime, { budgets: rest })
+      .where(eq(schema.workforceRuntime.workforceId, row.workforceId));
+  }
 }
