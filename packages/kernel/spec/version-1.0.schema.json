@@ -199,7 +199,8 @@
                         "typescript_handler_module",
                         "stream_playback_media_token",
                         "agent_untrusted_field_precedence",
-                        "cron_tenant_required"
+                        "cron_tenant_required",
+                        "workforce_capability_unheld"
                       ]
                     },
                     "because": {
@@ -416,7 +417,8 @@
                         "typescript_handler_module",
                         "stream_playback_media_token",
                         "agent_untrusted_field_precedence",
-                        "cron_tenant_required"
+                        "cron_tenant_required",
+                        "workforce_capability_unheld"
                       ]
                     },
                     "because": {
@@ -527,7 +529,8 @@
                         "typescript_handler_module",
                         "stream_playback_media_token",
                         "agent_untrusted_field_precedence",
-                        "cron_tenant_required"
+                        "cron_tenant_required",
+                        "workforce_capability_unheld"
                       ]
                     },
                     "because": {
@@ -697,7 +700,8 @@
                         "typescript_handler_module",
                         "stream_playback_media_token",
                         "agent_untrusted_field_precedence",
-                        "cron_tenant_required"
+                        "cron_tenant_required",
+                        "workforce_capability_unheld"
                       ]
                     },
                     "because": {
@@ -764,7 +768,8 @@
                         "typescript_handler_module",
                         "stream_playback_media_token",
                         "agent_untrusted_field_precedence",
-                        "cron_tenant_required"
+                        "cron_tenant_required",
+                        "workforce_capability_unheld"
                       ]
                     },
                     "because": {
@@ -877,6 +882,437 @@
             ],
             "additionalProperties": false
           }
+        },
+        "workforce": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 63,
+              "pattern": "^[a-z_][a-z0-9_]*$"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "orchestrator": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 63,
+              "pattern": "^[a-z_][a-z0-9_]*$"
+            },
+            "budgets": {
+              "type": "object",
+              "properties": {
+                "workforce": {
+                  "type": "object",
+                  "properties": {
+                    "usd": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "window": {
+                      "type": "string",
+                      "enum": [
+                        "hourly",
+                        "daily",
+                        "weekly"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "usd"
+                  ],
+                  "additionalProperties": false
+                },
+                "task": {
+                  "type": "object",
+                  "properties": {
+                    "usd": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "turns": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "usd",
+                    "turns"
+                  ],
+                  "additionalProperties": false
+                },
+                "delegation": {
+                  "type": "object",
+                  "properties": {
+                    "maxDepth": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "maxPerTask": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            },
+            "execution": {
+              "type": "object",
+              "properties": {
+                "maxConcurrentWorkers": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "maxTaskWallClock": {
+                  "type": "string",
+                  "pattern": "^([1-9]\\d{0,8})(s|m|h|d)$"
+                },
+                "maxReviewRounds": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "onBudgetExhausted": {
+                  "type": "string",
+                  "enum": [
+                    "block",
+                    "block_and_escalate"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "departments": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 63,
+                    "pattern": "^[a-z_][a-z0-9_]*$"
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "manager": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 63,
+                    "pattern": "^[a-z_][a-z0-9_]*$"
+                  },
+                  "mission": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "members": {
+                    "default": [],
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 63,
+                      "pattern": "^[a-z_][a-z0-9_]*$"
+                    }
+                  },
+                  "budgets": {
+                    "type": "object",
+                    "properties": {
+                      "usd": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      },
+                      "turns": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "window": {
+                        "type": "string",
+                        "enum": [
+                          "hourly",
+                          "daily",
+                          "weekly"
+                        ]
+                      },
+                      "maxConcurrentWorkers": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "manager",
+                  "mission"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "employees": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 63,
+                    "pattern": "^[a-z_][a-z0-9_]*$"
+                  },
+                  "agent": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "department": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 63,
+                    "pattern": "^[a-z_][a-z0-9_]*$"
+                  },
+                  "reportsTo": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 63,
+                    "pattern": "^[a-z_][a-z0-9_]*$"
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "orchestrator",
+                      "manager",
+                      "worker",
+                      "reviewer"
+                    ]
+                  },
+                  "capabilities": {
+                    "default": [],
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "agent",
+                  "title",
+                  "role"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "teams": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 63,
+                    "pattern": "^[a-z_][a-z0-9_]*$"
+                  },
+                  "lead": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 63,
+                    "pattern": "^[a-z_][a-z0-9_]*$"
+                  },
+                  "members": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 63,
+                      "pattern": "^[a-z_][a-z0-9_]*$"
+                    }
+                  },
+                  "maxSize": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "id",
+                  "lead",
+                  "members",
+                  "maxSize"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "reviewPolicies": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 63,
+                    "pattern": "^[a-z_][a-z0-9_]*$"
+                  },
+                  "appliesTo": {
+                    "type": "object",
+                    "properties": {
+                      "department": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z_][a-z0-9_]*$"
+                      },
+                      "employee": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z_][a-z0-9_]*$"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "reviewer": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 63,
+                    "pattern": "^[a-z_][a-z0-9_]*$"
+                  },
+                  "requireWhen": {
+                    "type": "object",
+                    "properties": {
+                      "confidenceBelow": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "maximum": 1
+                      },
+                      "capabilities": {
+                        "minItems": 1,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "onReject": {
+                    "type": "string",
+                    "const": "rework"
+                  },
+                  "maxRounds": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "id",
+                  "appliesTo",
+                  "reviewer",
+                  "requireWhen",
+                  "onReject",
+                  "maxRounds"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "approvals": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 63,
+                    "pattern": "^[a-z_][a-z0-9_]*$"
+                  },
+                  "requireWhen": {
+                    "type": "object",
+                    "properties": {
+                      "capabilities": {
+                        "minItems": 1,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    },
+                    "required": [
+                      "capabilities"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "approver": {
+                    "type": "string",
+                    "const": "user"
+                  },
+                  "timeout": {
+                    "type": "string",
+                    "pattern": "^([1-9]\\d{0,8})(s|m|h|d)$"
+                  },
+                  "onTimeout": {
+                    "type": "string",
+                    "enum": [
+                      "fail",
+                      "escalate"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "requireWhen",
+                  "approver",
+                  "timeout",
+                  "onTimeout"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "orchestrator",
+            "employees"
+          ],
+          "additionalProperties": false
+        },
+        "managed": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
         }
       },
       "required": [

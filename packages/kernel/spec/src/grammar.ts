@@ -37,6 +37,8 @@ import {
   ToolSpec as NeutralToolSpec,
 } from '@rayspec/core';
 import { z } from 'zod';
+import { MAX_IDENTIFIER_LENGTH, SafeIdentifier } from './identifier.js';
+import { WorkforceSpec } from './workforce-grammar.js';
 import { SuppressibleWarningCode } from './errors.js';
 
 /** The supported spec major.minor. Parsed FIRST (two-phase) so an unknown major fails cleanly. */
@@ -207,48 +209,15 @@ export const ColumnType = z.enum([
 ]);
 export type ColumnType = z.infer<typeof ColumnType>;
 
-/**
- * A SAFE SQL/TS IDENTIFIER for a store name / column name / FK column-or-reference (TEN-1).
- * Store/column names are interpolated VERBATIM into generated SQL (`CREATE TABLE "<name>"`)
- * AND generated TS (`export const <camel> = pgTable('<name>', …)`) — so an unconstrained
- * `z.string()` is an INJECTION seam (a name like `m" ); DROP …` lands in executable DDL, and the
- * destructive scan is a closed blocklist that can never catch every form). Fail-closed at the
- * SOURCE: a safe identifier is `[a-z_][a-z0-9_]*`, length 1..63 (the Postgres identifier limit),
- * lowercase only (Postgres folds unquoted idents to lowercase; we keep snake_case author names and
- * camelCase them for TS). `parseSpec` rejects a metacharacter/over-long name as `schema_violation`.
- * The generators re-assert the SAME shape (defense-in-depth for a code-built spec bypassing parse).
- */
-export const SAFE_IDENTIFIER_RE = /^[a-z_][a-z0-9_]*$/;
-export const MAX_IDENTIFIER_LENGTH = 63;
-export const SafeIdentifier = z
-  .string()
-  .min(1)
-  .max(
-    MAX_IDENTIFIER_LENGTH,
-    `identifier must be <= ${MAX_IDENTIFIER_LENGTH} chars (Postgres limit)`,
-  )
-  .regex(
-    SAFE_IDENTIFIER_RE,
-    'identifier must match /^[a-z_][a-z0-9_]*$/ (lowercase letters/digits/underscore, no metacharacters)',
-  );
-
-/**
- * Re-assert the safe-identifier shape OUTSIDE Zod (the generators call this on a spec that may have
- * been built in code, bypassing parseSpec). THROWS — never returns a malformed identifier into
- * generated SQL/TS. Single source of the rule shared by the grammar refine above + both generators.
- */
-export function assertSafeIdentifier(value: string, what: string): void {
-  if (
-    value.length === 0 ||
-    value.length > MAX_IDENTIFIER_LENGTH ||
-    !SAFE_IDENTIFIER_RE.test(value)
-  ) {
-    throw new Error(
-      `unsafe identifier for ${what}: ${JSON.stringify(value)} — must match ` +
-        `/^[a-z_][a-z0-9_]*$/ and be <= ${MAX_IDENTIFIER_LENGTH} chars (injection guard, TEN-1)`,
-    );
-  }
-}
+// The safe-identifier rule moved to identifier.ts (a leaf module) so the workforce grammar can
+// share it without a circular import back into this document root; re-exported here so the
+// package surface is unchanged.
+export {
+  assertSafeIdentifier,
+  MAX_IDENTIFIER_LENGTH,
+  SAFE_IDENTIFIER_RE,
+  SafeIdentifier,
+} from './identifier.js';
 
 /** One business column on a store. `nullable`/`unique` default false (the conservative shape). */
 export const StoreColumn = z
@@ -817,6 +786,20 @@ export const RaySpec = z
      * `metadata`) stays valid (frontend is omittable).
      */
     frontend: z.array(FrontendSpec).optional(),
+    /**
+     * OPTIONAL, EXPERIMENTAL declared workforce (workforce-grammar.ts). `.optional()` (NEVER
+     * `.default()`) so a document that omits it parses byte-identically. The PARSER additionally
+     * rejects a document that declares it unless the caller opted in
+     * (`experimental_section_disabled`, parse.ts) — fail-closed for any entry point that has not
+     * decided.
+     */
+    workforce: WorkforceSpec.optional(),
+    /**
+     * OPTIONAL RESERVED section. Accepted as a mapping and round-tripped verbatim; NEVER
+     * interpreted by this engine (a deployment-manager keeps its platform-side configuration here
+     * so one document serves both). `plan` notes its presence in one neutral line.
+     */
+    managed: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
 export type RaySpec = z.infer<typeof RaySpec>;

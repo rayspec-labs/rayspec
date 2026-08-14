@@ -58,11 +58,24 @@ function issueToSpecErrors(issue: z.core.$ZodIssue): SpecError[] {
   return [specError('schema_violation', issue.message, base)];
 }
 
+/** The caller-decided options `parseSpec` accepts. */
+export interface ParseSpecOptions {
+  /**
+   * Opt-in for the EXPERIMENTAL `workforce:` section. Absent/false ⇒ a document declaring it is
+   * rejected with `experimental_section_disabled` — fail-closed for every entry point that has not
+   * decided (the safe default a forgotten call site inherits).
+   */
+  readonly experimentalWorkforce?: boolean;
+}
+
 /**
  * Parse + validate a raw RaySpec YAML spec. Returns the typed spec on success, or the FULL
  * aggregated list of fail-closed violations.
  */
-export function parseSpec(rawYamlText: string): Result<RaySpec, SpecError> {
+export function parseSpec(
+  rawYamlText: string,
+  options: ParseSpecOptions = {},
+): Result<RaySpec, SpecError> {
   // ---- 1. YAML SAFE-LOAD ----------------------------------------------------------------
   let loaded: unknown;
   try {
@@ -114,6 +127,25 @@ export function parseSpec(rawYamlText: string): Result<RaySpec, SpecError> {
     return {
       ok: false,
       errors: [specError('unsupported_version', message, 'version')],
+    };
+  }
+
+  // ---- 2b. EXPERIMENTAL-SECTION GATE ----------------------------------------------------
+  // Before the strict shape parse (two-phase discipline: ONE clean refusal, not a wall of shape
+  // errors from a section the caller never enabled). The gate keys on the RAW document — a
+  // `workforce:` key of ANY shape is the author's declared intent to use the section.
+  if ('workforce' in doc && options.experimentalWorkforce !== true) {
+    return {
+      ok: false,
+      errors: [
+        specError(
+          'experimental_section_disabled',
+          "the 'workforce' section is EXPERIMENTAL and this entry point did not opt in — set " +
+            'RAYSPEC_EXPERIMENTAL_WORKFORCE=1 in the environment of doctor/plan/deploy/serve to ' +
+            'enable it (its grammar and behavior may change without notice)',
+          'workforce',
+        ),
+      ],
     };
   }
 

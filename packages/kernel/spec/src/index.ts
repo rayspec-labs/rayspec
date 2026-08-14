@@ -13,6 +13,7 @@
 export * from './brace-params.js';
 export * from './detect.js';
 export * from './errors.js';
+export * from './experimental.js';
 export * from './export.js';
 export * from './grammar.js';
 export * from './lint.js';
@@ -25,3 +26,4 @@ export * from './product-parse.js';
 export * from './product-scope.js';
 export * from './product-views.js';
 export * from './product-views-lint.js';
+export * from './workforce-grammar.js';
