@@ -1172,7 +1172,10 @@ agents:
   handlers, events, and journal steps included. Declare it for tools with
   ordered side effects (a write that must land before a finish, a spawn that
   must land before a sweep); the default keeps concurrent dispatch, which
-  suits read-only tools. A backend that could honor neither level is rejected
+  suits read-only tools. The provider-side half applies only when the agent
+  declares tools: with an empty `tools` list there is no call to order, so
+  `openai` sends neither setting and the request is the one a tool-free agent
+  always sent. A backend that could honor neither level is rejected
   at validation time (`capability_violation`) rather than silently ignoring
   the declaration; every current backend honors it.
 - `lintSuppress` — optional list of acknowledged advisories, scoped to **this

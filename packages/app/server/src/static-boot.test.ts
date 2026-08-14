@@ -32,7 +32,7 @@ const INDEX_SENTINEL = 'INDEX-HTML-SENTINEL-static-boot';
 const ASSET_SENTINEL = 'ASSET-JS-SENTINEL-static-boot';
 
 let root = ''; // the temp root; the spec "lives" at root/rayspec.yaml, assets under root/web/dist
-const SPA_MOUNT: FrontendSpec = { route: '/', dir: 'web/dist', spa: true };
+const SPA_MOUNT: FrontendSpec = { route: '/', dir: 'web/dist', spa: true, cleanUrls: false };
 
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), 'rayspec-static-boot-'));
@@ -229,7 +229,7 @@ describe('static boot — a custom 404.html page carries the security-header cha
     const config: StaticServerConfig = loadStaticServerConfig({});
     const { app } = assembleStaticServer(config, {
       specPath: join(customRoot, 'rayspec.yaml'),
-      frontend: [{ route: '/', dir: 'web/dist', spa: false }],
+      frontend: [{ route: '/', dir: 'web/dist', spa: false, cleanUrls: false }],
     });
     const res = await app.request('/no/such/deep/link');
     expect(res.status).toBe(404);

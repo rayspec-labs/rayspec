@@ -33,7 +33,7 @@
  * into `rayspec doctor` / the read-only floor.
  */
 
-import { parseArgs } from 'node:util';
+import { type ParseArgsConfig, parseArgs } from 'node:util';
 import type { ProductYamlRollout } from '@rayspec/product-yaml';
 // TYPE-ONLY (erased at runtime): the shape of the boot-environment report `--check-env` emits. The
 // FUNCTION that produces it is imported dynamically, on that flag's path alone, so a `deploy` without
@@ -188,6 +188,26 @@ export type DeployOutcome =
   | { readonly kind: 'served' };
 
 /**
+ * `deploy`'s option set — the ONE declaration of which flags the command takes, hoisted out of the
+ * `parseArgs` call below so it is readable as a VALUE. `parseDeployArgs` is its only runtime
+ * consumer and passes it through unchanged, so the grammar is exactly what it always was.
+ *
+ * It is exported because the flag set is checked against the prose in `docs/cli-reference.md`, and
+ * nothing else in the repository enumerated it: that check used to recover the names with a regular
+ * expression over this file's own source text, which made a documentation test depend on how this
+ * literal happens to be formatted — a comment added next to an option, or a key written before
+ * `type`, was enough to make it miss a flag. Importing the declaration removes that coupling.
+ */
+export const DEPLOY_ARG_OPTIONS = {
+  'dry-run': { type: 'boolean' },
+  'check-env': { type: 'boolean' },
+  port: { type: 'string' },
+  host: { type: 'string' },
+  'apply-migration': { type: 'string' },
+  allowlist: { type: 'string' },
+} as const satisfies NonNullable<ParseArgsConfig['options']>;
+
+/**
  * Parse `deploy`'s args: exactly one positional spec path, plus `--dry-run` / `--check-env`, an optional
  * `--port` and `--host` (the listen interface — LOOPBACK unless explicitly set), and the
  * reviewed-forward-migration flags `--apply-migration <delta.sql>` (+ its optional
@@ -207,14 +227,7 @@ export function parseDeployArgs(args: readonly string[]): {
       args: [...args],
       allowPositionals: true,
       strict: true,
-      options: {
-        'dry-run': { type: 'boolean' },
-        'check-env': { type: 'boolean' },
-        port: { type: 'string' },
-        host: { type: 'string' },
-        'apply-migration': { type: 'string' },
-        allowlist: { type: 'string' },
-      },
+      options: DEPLOY_ARG_OPTIONS,
     });
     return {
       positionals,

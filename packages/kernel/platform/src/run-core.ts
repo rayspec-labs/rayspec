@@ -605,11 +605,19 @@ export async function runAgent(
           markRunTainted: () => markRunTainted(opts.taintDb ?? tdb, runId),
         })
       : undefined;
-  // The tool path the RunContext carries. A dispatch that arrives once the run has been ABANDONED is
-  // refused CLOSED — the handler is not run, no journal step is written and no taint marker is
-  // committed — because the call making it belongs to a run this function has already given up on.
-  // The refusal is the dispatcher's own neutral `tool_error` shape, so an adapter marshals it back to
-  // the model exactly like any other refused call.
+  // The tool path the RunContext carries. A dispatch is refused CLOSED — the handler is not run, no
+  // journal step is written and no taint marker is committed — when the run is already ABANDONED at
+  // the moment the CALL ENTERS this wrapper, because the call making it belongs to a run this
+  // function has already given up on. The refusal is the dispatcher's own neutral `tool_error`
+  // shape, so an adapter marshals it back to the model exactly like any other refused call.
+  //
+  // ENTRY is the whole test, and deliberately so. `abandoned` is read synchronously on the way in
+  // and nothing re-reads it later, so a call that entered BEFORE the flag was set still runs its
+  // handler to completion afterwards — under `sequentialTools` possibly much later, since it waits
+  // its turn in the queue below. That is the same contract as the unqueued path (there too every
+  // call of a batch is admitted at entry and does its async work afterwards); the queue only widens
+  // the gap between the admission and the effect, it does not create a class of dispatch that could
+  // not already be admitted-then-abandoned.
   //
   // `spec.sequentialTools` — the platform-level honor: a per-run FIFO width-1 queue AT THE ENTRY.
   // The dispatcher's own Semaphore caps how many HANDLERS run at once, but its acquire sits BEHIND

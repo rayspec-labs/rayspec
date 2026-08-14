@@ -28,6 +28,7 @@ import type {
   StepReport,
 } from '@rayspec/core';
 import { makeDispatchTool } from '@rayspec/platform';
+import { getDefaultModelSettings } from '@openai/agents';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ---- mock @openai/agents: real Agent/tool/setDefaultOpenAIKey, controllable run() -------------
@@ -370,10 +371,60 @@ describe('OpenAI adapter: sequentialTools maps to BOTH SDK settings — and ONLY
     // Provider side: the constructed Agent disables parallel tool calls at the source.
     const agent = runSpy.mock.calls[0]?.[0] as { modelSettings?: Record<string, unknown> };
     expect(agent.modelSettings?.parallelToolCalls).toBe(false);
+    // ...and NOTHING else moves: the whole object is compared, so a second setting quietly added
+    // here would red. `gpt-4.1-mini` is a model the SDK gives NO implicit defaults, so for it the
+    // reproduction below is the empty spread and this is the exact expected object — the arm that
+    // gives the reproduction teeth is the gpt-5 one further down.
+    expect(agent.modelSettings).toEqual({
+      ...getDefaultModelSettings(baseSpec.model),
+      parallelToolCalls: false,
+    });
     // SDK-loop side: a received batch executes strictly in emission-index order.
     const options = runSpy.mock.calls[0]?.[2] as Record<string, unknown>;
     expect(Object.keys(options).sort()).toEqual(['maxTurns', 'stream', 'toolExecution']);
     expect(options.toolExecution).toEqual({ maxFunctionToolConcurrency: 1 });
+  });
+
+  it('on a model the SDK gives implicit defaults, the flag keeps them — parallel_tool_calls is the ONE delta', async () => {
+    const calls: unknown[] = [];
+    const tool = recordingTool(calls);
+    const journal = new FakeJournal();
+    runSpy.mockImplementation(fakeRunImpl());
+    const adapter = new OpenAIAdapter({ apiKey: 'sk-test' });
+
+    // Handing the Agent an EXPLICIT modelSettings suppresses the SDK's implicit per-model defaults
+    // wholesale, so the adapter reproduces them and layers its one setting on top. That only has
+    // observable content for a model whose defaults are non-empty: `gpt-4.1-mini` above gets `{}`
+    // from the SDK, whereas a gpt-5 model gets reasoning/verbosity defaults that a bare
+    // `{ parallelToolCalls: false }` would silently drop — a second behaviour change riding along
+    // with the flag. Pinned against the SDK's own accessor rather than a copied literal, so an SDK
+    // bump that moves these defaults reds here instead of changing what a flagged run sends.
+    const defaults = getDefaultModelSettings('gpt-5');
+    expect(Object.keys(defaults).length).toBeGreaterThan(0); // the arm is not vacuous
+
+    await adapter.run(
+      { ...baseSpec, model: 'gpt-5', sequentialTools: true, tools: [tool.spec] },
+      makeCtx(journal, [tool]),
+    );
+
+    const agent = runSpy.mock.calls[0]?.[0] as { modelSettings?: Record<string, unknown> };
+    expect(agent.modelSettings).toEqual({ ...defaults, parallelToolCalls: false });
+  });
+
+  it('with sequentialTools but NO tools BOTH settings are ABSENT — a tool-free run has no call to order', async () => {
+    const journal = new FakeJournal();
+    runSpy.mockImplementation(fakeRunImpl());
+    const adapter = new OpenAIAdapter({ apiKey: 'sk-test' });
+
+    await adapter.run({ ...baseSpec, sequentialTools: true, tools: [] }, makeCtx(journal, []));
+
+    // The flag is honored against the tool list, not on its own: with no tools there is no batch to
+    // serialize, so neither half is emitted and the request stays the one a tool-free run always
+    // sent. Same two assertions the flag-off arm below makes — the KEY must be absent, not false.
+    const agent = runSpy.mock.calls[0]?.[0] as { modelSettings: Record<string, unknown> };
+    expect(Object.hasOwn(agent.modelSettings, 'parallelToolCalls')).toBe(false);
+    const options = runSpy.mock.calls[0]?.[2] as Record<string, unknown>;
+    expect(Object.keys(options).sort()).toEqual(['maxTurns', 'stream']);
   });
 
   it('without the flag BOTH settings are ABSENT (not false, not null) — today’s wire shape byte-identical', async () => {

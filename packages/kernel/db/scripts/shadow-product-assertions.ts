@@ -71,9 +71,12 @@ function seedValues(store: StoreSpec, parentId: string | undefined): Record<stri
       case 'numeric':
         // A string-mode numeric column binds a decimal STRING. Zero is the only value valid for
         // EVERY legal (precision, scale) — precision - scale may be 0 (abs < 1 only) and scale may
-        // be 0 (integers only) — rendered at the declared scale so the seed matches the column
-        // shape it was declared with.
-        row[col.name] = (0).toFixed(col.scale ?? 0);
+        // be 0 (integers only). It is bound UNRENDERED: Postgres stores the identical value for
+        // every legal (precision, scale) whether the literal carries the fractional zeros or not,
+        // so rendering buys nothing — and rendering it through `toFixed` capped the seedable scale
+        // at 100 (the grammar admits up to 1000), which made a legal `numeric(200, 150)` spec throw
+        // a RangeError out of the seed builder instead of being asserted.
+        row[col.name] = '0';
         break;
     }
   }
