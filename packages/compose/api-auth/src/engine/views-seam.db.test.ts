@@ -576,7 +576,14 @@ describe.skipIf(!hasDb)('declared views through the REAL platform chain, DB-back
   });
 
   it('DENY-BY-DEFAULT: unauthenticated requests to EVERY declared view are 401', async () => {
-    for (const path of ['/sessions', '/sessions/s-c/mic/transcript', '/sessions/s-c/notes']) {
+    // All FOUR declared views on this app: the golden fixture's three, plus the `not_found_404`
+    // probe declaration mounted beside them. A view added to either declaration belongs here.
+    for (const path of [
+      '/sessions',
+      '/sessions/s-c/mic/transcript',
+      '/sessions/s-c/notes',
+      '/probe-404/s-c/transcript',
+    ]) {
       const res = await get(path);
       expect(res.status, `expected 401 for unauthenticated ${path}`).toBe(401);
     }

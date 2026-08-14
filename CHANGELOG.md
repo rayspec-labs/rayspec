@@ -51,11 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strips `details` from a 404 — there is no later stage that could remove an echoed path or filter
   value, so none is put in. The status choice leaks nothing either way: the read is tenant-bound, so
   a foreign row and an absent row both yield zero rows and take the same arm under every member.
-  **Nothing else changed.** This is a vocabulary addition, not a migration: no shipped example or
-  fixture document was touched, all 24 `absent_state` declarations in the shipped example and fixture
-  documents still read `empty_200` or `not_ready_409`, and both existing members behave exactly as
-  before — the interpreter and the OpenAPI emitter each gained one arm keyed on the new member and
-  left the others untouched.
+  **Nothing a view answers changed.** This is a vocabulary addition, not a migration: no shipped
+  example or fixture document was touched, all 24 `absent_state` declarations in the shipped example
+  and fixture documents still read `empty_200` or `not_ready_409`, and both existing members behave
+  exactly as before. The dispatch around them did change, so a 1.7.0→1.8.0 diff shows all three arms
+  as new text rather than one arm added: the interpreter and the OpenAPI emitter no longer test
+  `absent_state` with an `if`-chain ending in an `empty_200` fall-through — each looks the member up
+  in one map annotated `satisfies Record<ViewAbsentState, …>`. That annotation is what makes a fourth
+  member a build failure instead of a silent 200: both files are non-test modules under `src/`, which
+  the package tsconfig includes while excluding `**/*.test.ts`, and the package's `typecheck` script
+  is `tsc -p tsconfig.json --noEmit`.
 - **A boot warning when a served page carries an inline `<style>` / `<script>` / `style=` / `on*=`
   that the active Content-Security-Policy does not permit.** The default policy for a served frontend
   is `default-src 'self'` with no `'unsafe-inline'`, and a page that violates it fails in a way
