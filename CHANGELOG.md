@@ -943,6 +943,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Last-Event-ID` or `?since=`) resumes exactly as before — `:0`, the replay-from-floor cursor,
   included. (Issue #385.)
 
+- **`rayspec-serve` now honours the invoking project's `./.env` too — the other half of the `.env`
+  defect this release closed for the `rayspec` CLI.** The CLI gained a two-candidate search;
+  `rayspec-serve` kept resolving a single path relative to its OWN install location — always the
+  RaySpec checkout root — so one checkout could hand the two documented entrypoints different
+  configuration. With a `./.env` in the invoking project and another at the install root naming, say,
+  a different `DATABASE_URL`, `rayspec deploy <spec>` opened the first and
+  `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` the second, with nothing said either way. Both entrypoints
+  now search `$PWD/.env` first and the install-root `.env` second, deduplicated to a single read when
+  they are the same file, through the same parser and the same per-key no-override rule — so the
+  effective precedence is: real environment > `$PWD/.env` > install-root `.env`. Everything else
+  about the loader is unchanged: `RAYSPEC_SKIP_DOTENV=1` still skips it entirely, now covering both
+  candidates; an already-set variable still wins over both files; a literal `\n` is still unescaped,
+  which is what makes the single-line PEM form work; and a file that does not exist is still silent.
+  The boot's refusals are unchanged too — `rayspec-serve` names no searched paths, where
+  `rayspec deploy` lists them. The one thing a deployment could notice: a `rayspec-serve` started
+  from a directory that happens to contain a `.env` now reads that file, project file first. Started
+  from the checkout root, where the two candidates are one file, it behaves exactly as before.
+  (Issue #384.)
+
 ### Documentation
 
 - **`rayspec deploy --host <addr>` is documented.** The flag has always been accepted and has always

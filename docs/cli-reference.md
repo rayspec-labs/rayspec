@@ -922,6 +922,15 @@ deployment sets its configuration through its orchestrator or secret manager.
   trim leaves untouched is silent. The stripped trailing newline of a key file created with
   a `>` redirect is the expected, harmless case; the signal matters when a secret that
   carried edge whitespace suddenly stops being accepted.
+- Ahead of that resolution it loads a local `.env` **if one exists** — a
+  local-development convenience; a real deployment has none. It searches `$PWD/.env`, the
+  directory `rayspec-serve` was started in, **first** and the RaySpec checkout root's
+  `.env` **second**, deduplicated to one read when they are the same file. Neither file
+  overrides a variable the environment already sets, and the second never overwrites a key
+  the first supplied, so the precedence per key is: environment > `$PWD/.env` >
+  checkout-root `.env`. `RAYSPEC_SKIP_DOTENV=1` skips both. `rayspec deploy` searches the
+  same two paths in the same order, so the two entrypoints resolve the same configuration
+  out of the same checkout.
 - On boot it **applies the committed platform migration chain** to the target
   database (idempotent — it bootstraps a clean database and no-ops on an up-to-date
   one), then materializes a spec's declared stores on a clean database or mounts them
