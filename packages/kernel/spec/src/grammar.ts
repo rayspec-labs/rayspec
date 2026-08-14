@@ -126,7 +126,7 @@ export const DeploymentSpec = z
 export type DeploymentSpec = z.infer<typeof DeploymentSpec>;
 
 // ---------------------------------------------------------------------------------------
-// lintSuppress — node-scoped advisory acknowledgements (shared by stores[]/agents[]/api[])
+// lintSuppress — node-scoped advisory acknowledgements (shared by stores[]/agents[]/api[]/triggers[]/handlers[])
 // ---------------------------------------------------------------------------------------
 
 /**
@@ -143,11 +143,20 @@ export type DeploymentSpec = z.infer<typeof DeploymentSpec>;
  *                a suppression without a reason is rejected at parse, fail-closed — the whole value
  *                of the entry is the audit trail it leaves.
  *
- * SCOPE is the node the list sits on (an agent, a store, a route), never global: a suppression
- * filters only advisories that node itself produced (`applyLintSuppressions`, lint.ts), and one
- * whose code does not fire there becomes the `stale_suppression` advisory rather than rotting
- * silently. `doctor` moves each acknowledged finding from `warnings` into a `suppressed` array
- * (code + justification) — visible in review, quiet in the loop, never affecting `ok`.
+ * SCOPE is the node the list sits on (an agent, a store, a route, a trigger, a handler), never
+ * global: a suppression filters only advisories that node itself produced (`applyLintSuppressions`,
+ * lint.ts), and one whose code does not fire there becomes the `stale_suppression` advisory rather
+ * than rotting silently. `doctor` moves each acknowledged finding from `warnings` into a
+ * `suppressed` array (code + justification) — visible in review, quiet in the loop, never
+ * affecting `ok`.
+ *
+ * An entry records a REVIEWED DECISION and quiets `doctor`; it relaxes NO enforcement. The reach is
+ * exactly `applyLintSuppressions`, whose single caller is `doctor` (packages/app/cli/src/doctor.ts):
+ * `rayspec plan` reports the raw `lintSpecWarnings`, so an acknowledged advisory still appears in
+ * its `specWarnings`, and every mechanism an advisory describes runs unchanged — acknowledging
+ * `cron_tenant_required` does not make `RAYSPEC_CRON_TENANT_ID` optional at boot (an unset variable
+ * still refuses it) and acknowledging `typescript_handler_module` does not make the deploy loader
+ * accept TypeScript (it still loads compiled JavaScript only).
  */
 export const LintSuppression = z
   .object({
@@ -397,6 +406,12 @@ export const HandlerSpec = z
      * `store:read` instead of the default `store:write`, so a read-scoped credential can reach it.
      */
     readonly: z.boolean().optional(),
+    /** Optional advisory acknowledgements scoped to THIS handler (see `LintSuppression`) — the node
+     *  `typescript_handler_module` fires on. This schema doubles as the extension-pack handler
+     *  fragment schema (`loadExtensions`, packages/kernel/platform), so a pack fragment may carry the
+     *  key too; nothing reads it there, because the advisory pass runs over the document `doctor`
+     *  and `plan` parse from disk and packs merge later, at boot, in the composition root. */
+    lintSuppress: LintSuppressList,
   })
   .strict();
 export type HandlerSpec = z.infer<typeof HandlerSpec>;
@@ -653,6 +668,9 @@ export const TriggerSpec = z
      *  (bounded look-back). Valid ONLY for `kind:'cron'` (lint-enforced). Default: no catch-up. */
     catchUp: z.boolean().optional(),
     action: TriggerAction,
+    /** Optional advisory acknowledgements scoped to THIS trigger (see `LintSuppression`) — the node
+     *  `cron_tenant_required` fires on. */
+    lintSuppress: LintSuppressList,
   })
   .strict();
 export type TriggerSpec = z.infer<typeof TriggerSpec>;

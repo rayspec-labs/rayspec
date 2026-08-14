@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`lintSuppress` now docks on a `triggers[]` and a `handlers[]` node too.** The key arrived (see
+  below) on agents, stores and api routes; on a trigger or a handler it was not ignored but a hard
+  parse error (`unknown_field`) that broke the document — which put the two advisories an author is
+  most likely to have reviewed out of reach: `cron_tenant_required`, reported on a `cron`/`manual`
+  trigger, and `typescript_handler_module`, reported on a handler whose `module` is TypeScript
+  source. Both node kinds now take the same `[{ code, because }]` list under the same fail-closed
+  rules (the code vocabulary contains no error codes, and an empty or whitespace-only `because` is
+  rejected at parse), with the same node scope — a suppression filters only advisories whose path
+  lies under its own node — and the same `stale_suppression` rot detector, which names the trigger
+  by its `name` and the handler by its `id`.
+  An acknowledgement **records a reviewed decision and quiets `doctor`; it changes no enforcement.**
+  `doctor` moves the finding from `warnings` to `suppressed` with the justification and the finding's
+  path. Nothing else consults the list: `rayspec plan` reports the raw advisory pass, so an
+  acknowledged finding is still listed in its `specWarnings`; a document declaring a cron or manual
+  trigger still aborts the boot when `RAYSPEC_CRON_TENANT_ID` is unset; and the deploy loader still
+  loads compiled JavaScript only, so a `.ts` module still needs its build step. The plan reference
+  and the `PlanResult` field doc now state that divergence rather than claiming the two commands
+  report the same entries.
+  The field is optional with no default, so a document that declares no suppression parses
+  byte-identically. The exported JSON-Schema artifacts `spec.schema.json` and
+  `version-1.0.schema.json` carry the key on both new nodes; `product.schema.json` is byte-unchanged
+  (the product profile declares neither section).
 - **`absent_state: not_found_404` — a view can now answer an unknown reference with a 404.** The
   member decides what a `single` read serves when it matches no row:
   `404 { error: 'not_found', detail }` alongside the existing `empty_200` (the declared `read.absent`
@@ -30,9 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value, so none is put in. The status choice leaks nothing either way: the read is tenant-bound, so
   a foreign row and an absent row both yield zero rows and take the same arm under every member.
   **Nothing else changed.** This is a vocabulary addition, not a migration: no shipped example or
-  fixture document was touched, all 24 `absent_state` declarations in the tree still read `empty_200`
-  or `not_ready_409`, and both existing members behave exactly as before — the interpreter and the
-  OpenAPI emitter each gained one arm keyed on the new member and left the others untouched.
+  fixture document was touched, all 24 `absent_state` declarations in the shipped example and fixture
+  documents still read `empty_200` or `not_ready_409`, and both existing members behave exactly as
+  before — the interpreter and the OpenAPI emitter each gained one arm keyed on the new member and
+  left the others untouched.
 - **A boot warning when a served page carries an inline `<style>` / `<script>` / `style=` / `on*=`
   that the active Content-Security-Policy does not permit.** The default policy for a served frontend
   is `default-src 'self'` with no `'unsafe-inline'`, and a page that violates it fails in a way

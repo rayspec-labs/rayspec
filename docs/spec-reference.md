@@ -1176,7 +1176,16 @@ agents:
   whose code no longer fires on the node becomes its own advisory
   (`stale_suppression`, pointing at the entry), so acknowledgements cannot rot
   silently. The same key, with the same shape and semantics, is available on a
-  [store](#stores) and on a [route](#api).
+  [store](#stores), a [route](#api), a [trigger](#triggers) and a
+  [handler](#handlers).
+
+  An acknowledgement records a reviewed decision and quiets `doctor` — it
+  relaxes no enforcement. Only `doctor` applies suppressions: `plan` reports the
+  raw advisory list, so an acknowledged finding still appears in its
+  `specWarnings`, and every requirement an advisory describes stands unchanged
+  (acknowledging `cron_tenant_required` leaves `RAYSPEC_CRON_TENANT_ID` required
+  at boot, and acknowledging `typescript_handler_module` leaves the deploy loader
+  accepting compiled JavaScript only).
 
 There is no `input` field: the task input is a runtime value supplied per
 request, not part of the spec.
@@ -1237,6 +1246,14 @@ triggers:
     `outputSchema` output as one store row with the same exactly-once,
     deploy-validated semantics described for the [`agent` route action](#api) above.
   - **`handler`** — fire a declared trigger-handler. Field: `handler`.
+- `lintSuppress` — optional list of acknowledged advisories scoped to **this
+  trigger**; same shape and semantics as [`lintSuppress` on an agent](#agents): a
+  `code` naming an advisory (never an error) and a **required, non-empty**
+  `because` recording why the finding does not apply here. This is the node the
+  `cron_tenant_required` advisory is reported on. Acknowledging it records that
+  the tenant is provided and quiets `doctor`; it does not make the variable
+  optional — an unset `RAYSPEC_CRON_TENANT_ID` still refuses the boot, and `plan`
+  still reports the raw advisory.
 
 Firing a scheduled trigger requires a durable worker (see `deployment`); the run
 surface refuses an off-request fire when no worker is configured.
@@ -1332,6 +1349,14 @@ handlers:
   product stores, so its route is gated on `store:read` instead of the default
   `store:write` (see the authorization consequence below). Absent or `false` leaves
   the default gate unchanged.
+- `lintSuppress` — optional list of acknowledged advisories scoped to **this
+  handler**; same shape and semantics as [`lintSuppress` on an agent](#agents): a
+  `code` naming an advisory (never an error) and a **required, non-empty**
+  `because` recording why the finding does not apply here. This is the node the
+  `typescript_handler_module` advisory — the one a `.ts` `module` raises — is
+  reported on. Acknowledging it records the reviewed decision (a build step
+  compiles the module before deploy, say) and quiets `doctor`; the deploy loader
+  still loads compiled JavaScript only, and `plan` still reports the raw advisory.
 
 A `handler`-kind route is also the escape hatch for reads the declarative `store`
 `list` op does not cover — an **offset**-paged read or a filtered **`count`**. (The
