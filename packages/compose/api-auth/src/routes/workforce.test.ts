@@ -433,6 +433,43 @@ describe('/v1/workforce (the task-engine surface)', () => {
     expect(unknown.status).toBe(404);
   });
 
+  it("a fixed collection segment is reserved, and it does not shadow a workforce id or a task id", async () => {
+    const a = await principal('wf-reserved@example.test', 'Org WF Reserved');
+    const task = await seedRoot(a.orgId, 'Not shadowed');
+    const auth = { authorization: `Bearer ${a.token}` };
+
+    // `/v1/workforce/tasks/status` matches BOTH the workforce status route and the task-get route.
+    // The status route is registered first and names the collision, instead of quietly answering
+    // as a task lookup for a task called 'status'.
+    const collision = await jsonRequest(h.app, 'GET', '/v1/workforce/tasks/status', {
+      headers: auth,
+    });
+    expect(collision.status).toBe(400);
+    expect((await collision.json()).error?.details?.reserved).toEqual([
+      'tasks',
+      'approvals',
+      'reviews',
+      'cost',
+    ]);
+    // The same refusal on the mutations, so a reserved id is never half-addressable.
+    const paused = await jsonRequest(h.app, 'POST', '/v1/workforce/cost/pause', {
+      body: {},
+      headers: auth,
+    });
+    expect(paused.status).toBe(400);
+
+    // …and both real routes still resolve.
+    const real = await jsonRequest(h.app, 'GET', `/v1/workforce/${task.taskId}/status`, {
+      headers: auth,
+    });
+    expect(real.status).toBe(404); // a task id is not a workforce id — uniform, not a crash
+    const byId = await jsonRequest(h.app, 'GET', `/v1/workforce/tasks/${task.taskId}`, {
+      headers: auth,
+    });
+    expect(byId.status).toBe(200);
+    expect((await byId.json()).taskId).toBe(task.taskId);
+  });
+
   it('the cost view rolls the ledger up per scope and refuses a malformed window', async () => {
     const a = await principal('wf-cost@example.test', 'Org WF Cost');
     const bad = await jsonRequest(h.app, 'GET', '/v1/workforce/cost?window=fortnight', {

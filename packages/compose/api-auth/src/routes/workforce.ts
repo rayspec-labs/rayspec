@@ -82,6 +82,29 @@ const APPROVAL_STATUSES = ['pending', 'approved', 'rejected', 'timed_out', 'esca
 /** The drain window an HTTP pause may hold the request for; past it → 504 (the pause holds). */
 const HTTP_DRAIN_TIMEOUT_MS = 25_000;
 
+/**
+ * Path segments this surface spends on its own collections, so they cannot also be workforce ids:
+ * `/v1/workforce/tasks/:id` and `/v1/workforce/:workforceId/status` are both four segments, and a
+ * workforce called `tasks` would collide with the task route on every request. The `:workforceId`
+ * routes are registered FIRST (so `/v1/workforce/tasks/status` resolves as a workforce, not as a
+ * task whose id is `status`) and refuse a reserved id here — one clear 400 naming the set, instead
+ * of a route silently answering for the wrong resource.
+ */
+const RESERVED_WORKFORCE_SEGMENTS = ['tasks', 'approvals', 'reviews', 'cost'] as const;
+
+function workforceIdParam(c: Context<AppEnv>): string {
+  const workforceId = c.req.param('workforceId') ?? '';
+  const reserved = RESERVED_WORKFORCE_SEGMENTS as readonly string[];
+  if (workforceId.length === 0 || reserved.includes(workforceId)) {
+    throw new ApiError(
+      'VALIDATION_ERROR',
+      'That workforce id is a reserved path segment on this surface.',
+      { reserved: RESERVED_WORKFORCE_SEGMENTS },
+    );
+  }
+  return workforceId;
+}
+
 const signalRequestSchema = z.strictObject({
   kind: signalKindSchema,
   payload: z.record(z.string(), z.unknown()).optional(),
@@ -209,6 +232,84 @@ function decodeCursor(raw: string): { id: string } {
 
 export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
   // ── reads ─────────────────────────────────────────────────────────────────────────────────────
+
+  // GET /v1/workforce/:workforceId/status — control state, task counts, queue depth, headroom.
+  // Registered BEFORE the task routes so a workforce id is never shadowed by a fixed segment.
+  app.get(
+    '/v1/workforce/:workforceId/status',
+    requireAuth(),
+    resolveTenant(deps),
+    requirePermission(deps, 'store:read'),
+    async (c) => {
+      requireWorkforce(deps);
+      const tdb = tenantHandle(deps, c.get('tenantId'));
+      const workforceId = workforceIdParam(c);
+      try {
+        const runtime = await readWorkforceRuntime(tdb, workforceId);
+        const budgets = resolveWorkforceBudgets(runtime.budgets, workforceId);
+        // Aggregated IN the database — the view must not materialize the tenant's task
+        // partition into process memory to count nine statuses.
+        const grouped = (await tdb
+          .select(schema.workforceTasks, {
+            status: schema.workforceTasks.status,
+            count: sql<number>`count(*)::int`,
+            oldestQueuedAt: sql<Date | null>`min(${schema.workforceTasks.queuedAt})`,
+          })
+          .where(eq(schema.workforceTasks.workforceId, workforceId))
+          .groupBy(schema.workforceTasks.status)) as Array<{
+          status: string;
+          count: number;
+          oldestQueuedAt: Date | null;
+        }>;
+        const byStatus: Record<string, number> = {};
+        for (const g of grouped) byStatus[g.status] = g.count;
+        const oldestQueuedAt = grouped.find((g) => g.status === 'queued')?.oldestQueuedAt ?? null;
+        // Headroom on the CURRENT workforce window, from the ledger row that enforces it.
+        const ceiling = budgets.workforce?.usd ?? null;
+        let consumedUsd = 0;
+        if (ceiling !== null) {
+          const windowStart = windowStartFor(budgets.workforce?.window ?? 'daily', new Date());
+          const ledger = (await tdb
+            .select(schema.workforceBudgetLedger)
+            .where(
+              and(
+                eq(schema.workforceBudgetLedger.scopeKind, 'workforce'),
+                eq(schema.workforceBudgetLedger.scopeId, workforceId),
+                eq(schema.workforceBudgetLedger.windowStart, windowStart),
+              ),
+            )) as Array<typeof schema.workforceBudgetLedger.$inferSelect>;
+          consumedUsd = ledger.reduce(
+            (sum, r) => sum + Number(r.settledUsd) + Number(r.reservedUsd),
+            0,
+          );
+        }
+        return c.json(
+          {
+            workforceId,
+            paused: runtime.paused,
+            pausedAt: runtime.pausedAt,
+            pausedBy: runtime.pausedBy,
+            haltReason: runtime.haltReason,
+            tasks: byStatus,
+            queueDepth: byStatus.queued ?? 0,
+            oldestQueuedAt,
+            budget:
+              ceiling !== null
+                ? {
+                    ceilingUsd: ceiling,
+                    consumedUsd,
+                    headroomUsd: Math.max(ceiling - consumedUsd, 0),
+                  }
+                : null,
+          },
+          200,
+        );
+      } catch (err) {
+        mapEngineError(err);
+      }
+    },
+  );
+
 
   // GET /v1/workforce/tasks?status=&owner=&workforceId=&cursor=&limit= — keyset-paginated list.
   app.get(
@@ -354,82 +455,6 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
         resolveLastEventId(c),
         serializeWorkforceEventData,
       );
-    },
-  );
-
-  // GET /v1/workforce/:workforceId/status — control state, task counts, queue depth, headroom.
-  app.get(
-    '/v1/workforce/:workforceId/status',
-    requireAuth(),
-    resolveTenant(deps),
-    requirePermission(deps, 'store:read'),
-    async (c) => {
-      requireWorkforce(deps);
-      const tdb = tenantHandle(deps, c.get('tenantId'));
-      const workforceId = c.req.param('workforceId');
-      try {
-        const runtime = await readWorkforceRuntime(tdb, workforceId);
-        const budgets = resolveWorkforceBudgets(runtime.budgets, workforceId);
-        // Aggregated IN the database — the view must not materialize the tenant's task
-        // partition into process memory to count nine statuses.
-        const grouped = (await tdb
-          .select(schema.workforceTasks, {
-            status: schema.workforceTasks.status,
-            count: sql<number>`count(*)::int`,
-            oldestQueuedAt: sql<Date | null>`min(${schema.workforceTasks.queuedAt})`,
-          })
-          .where(eq(schema.workforceTasks.workforceId, workforceId))
-          .groupBy(schema.workforceTasks.status)) as Array<{
-          status: string;
-          count: number;
-          oldestQueuedAt: Date | null;
-        }>;
-        const byStatus: Record<string, number> = {};
-        for (const g of grouped) byStatus[g.status] = g.count;
-        const oldestQueuedAt = grouped.find((g) => g.status === 'queued')?.oldestQueuedAt ?? null;
-        // Headroom on the CURRENT workforce window, from the ledger row that enforces it.
-        const ceiling = budgets.workforce?.usd ?? null;
-        let consumedUsd = 0;
-        if (ceiling !== null) {
-          const windowStart = windowStartFor(budgets.workforce?.window ?? 'daily', new Date());
-          const ledger = (await tdb
-            .select(schema.workforceBudgetLedger)
-            .where(
-              and(
-                eq(schema.workforceBudgetLedger.scopeKind, 'workforce'),
-                eq(schema.workforceBudgetLedger.scopeId, workforceId),
-                eq(schema.workforceBudgetLedger.windowStart, windowStart),
-              ),
-            )) as Array<typeof schema.workforceBudgetLedger.$inferSelect>;
-          consumedUsd = ledger.reduce(
-            (sum, r) => sum + Number(r.settledUsd) + Number(r.reservedUsd),
-            0,
-          );
-        }
-        return c.json(
-          {
-            workforceId,
-            paused: runtime.paused,
-            pausedAt: runtime.pausedAt,
-            pausedBy: runtime.pausedBy,
-            haltReason: runtime.haltReason,
-            tasks: byStatus,
-            queueDepth: byStatus.queued ?? 0,
-            oldestQueuedAt,
-            budget:
-              ceiling !== null
-                ? {
-                    ceilingUsd: ceiling,
-                    consumedUsd,
-                    headroomUsd: Math.max(ceiling - consumedUsd, 0),
-                  }
-                : null,
-          },
-          200,
-        );
-      } catch (err) {
-        mapEngineError(err);
-      }
     },
   );
 
@@ -597,7 +622,7 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       const body = pauseRequestSchema.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
       try {
         const runtime = await pauseWorkforce(tdb, {
-          workforceId: c.req.param('workforceId'),
+          workforceId: workforceIdParam(c),
           actor: actorFrom(c),
           drain: body.drain,
           drainTimeoutMs: HTTP_DRAIN_TIMEOUT_MS,
@@ -620,7 +645,7 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       const tdb = tenantHandle(deps, c.get('tenantId'));
       try {
         const runtime = await resumeWorkforce(tdb, {
-          workforceId: c.req.param('workforceId'),
+          workforceId: workforceIdParam(c),
           actor: actorFrom(c),
         });
         workforce.kick();
@@ -643,7 +668,7 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       const body = haltRequestSchema.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
       try {
         const outcome = await haltWorkforce(tdb, {
-          workforceId: c.req.param('workforceId'),
+          workforceId: workforceIdParam(c),
           actor: actorFrom(c),
           reason: body.reason,
           drainTimeoutMs: HTTP_DRAIN_TIMEOUT_MS,
