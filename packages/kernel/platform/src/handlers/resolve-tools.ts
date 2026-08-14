@@ -157,8 +157,10 @@ function buildNeutralTool(
  *                      provider); absent on a deploy with no `TTS_PROVIDER` configured.
  * @param eventBus      OPTIONAL composition-root `TenantEventBus` — when the deployment enabled the
  *                      bus, each tool init carries `init.emit`, built PER RUN from the run's
- *                      tenant-bound `TenantDb` (the immediate form — a tool has no outer transaction);
- *                      absent on a deploy that did not enable it.
+ *                      tenant-bound `TenantDb` (the immediate form, which allocates the sequence
+ *                      number AT THE CALL — so the handle this factory is invoked with must not be an
+ *                      open transaction, or the tenant's counter lock is held until that transaction
+ *                      commits); absent on a deploy that did not enable it.
  */
 export function buildToolFactory(
   spec: RaySpec,

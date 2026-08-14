@@ -224,10 +224,25 @@ stores:
     above. A read returns the exact stored value in PostgreSQL's canonical
     rendering with exactly `scale` fractional digits (`7.5` written into a
     `numeric(24, 6)` column reads back `7.500000` — the same value,
-    canonically rendered). Filters and keyset cursors carry the same string
-    form and compare exactly server-side: a filter value beyond the declared
-    scale matches nothing rather than matching a rounded neighbour. Both
-    fractional types are orderable and usable as keyset pagination columns.
+    canonically rendered) — and refuses anything else: a `numeric` column can
+    also hold `NaN` at the SQL level, which is not a decimal at all, so a value
+    planted there by direct SQL makes the read a `400 VALIDATION_ERROR` naming
+    the column and the row id, exactly as a non-finite `double` does, rather
+    than a response carrying a "decimal" no decimal parser accepts. (No write
+    path produces one — both refuse the string — and PostgreSQL itself refuses
+    `±Infinity` for a column that declares a precision and scale.) The refusal
+    keeps the feed followable wherever the column is served: a page is
+    serialized before its pagination headers are minted, so the refusal takes
+    the whole page and no keyset cursor is minted on that row. A `project`
+    that drops the column is outside that reach — the serializer skips a
+    column the projection omits before the read guards run, and `order` is
+    validated against the store's columns, never against the projection, so a
+    page ordered on the dropped column is still served and still mints a
+    cursor the next request refuses as a filter value. Filters and keyset
+    cursors carry the same string form and compare exactly server-side: a
+    filter value beyond the declared scale matches nothing rather than
+    matching a rounded neighbour. Both fractional types are orderable and
+    usable as keyset pagination columns.
 
     **Changing a numeric column's `precision`/`scale`** is a real schema
     change: the diff emits a single `ALTER … SET DATA TYPE numeric(<p>, <s>)`,
@@ -705,8 +720,13 @@ The projection is **read-side only** and **fail-closed**:
 - **Keyset pagination is projection-immune.** The `X-Next-Cursor` is minted from
   the stored row, so paging keeps working when the response renames `id` away or
   a `fields` allowlist drops it entirely.
-- **Purely additive.** No `project` key ⇒ byte-identical responses, documents,
-  and write behaviour.
+- **Additive, with one exception.** No `project` key ⇒ the same responses,
+  documents, and write behaviour as before the key existed. The exception is a
+  store that declares a column named `__proto__` — a legal, `doctor`-clean
+  column name: the un-projected serializer now emits it like any other column,
+  where the plain object it used to accumulate into swallowed a string value
+  outright and, for a `jsonb` value, took the stored object as the response's
+  prototype.
 
 ### The `created_by` actor stamp
 
@@ -1383,7 +1403,10 @@ bounded comparison filters (`{ column: { gt: bound } }` and `gte`/`lt`/`lte`, on
 non-nullable, non-jsonb declared columns — read filters only), `orderBy`,
 `limit`/`offset` paging, and a filtered `count`** over the tenant-scoped store
 (still tenant-predicated beneath; no `like`/`OR`
-operators). A read that passes **no** `orderBy` comes back in `id` ascending order —
+operators). A filter on a `timestamp` column takes either a `Date` or the ISO
+string the facade itself hands back for that column — as an equality value, as a
+set-membership element, or as a comparison bound — and an unparseable date string
+is refused as a client error, the same way the write path refuses it. A read that passes **no** `orderBy` comes back in `id` ascending order —
 the same default the `list` op applies — so a handler never receives rows in an
 unspecified physical order. That default is the injected `id`, a random UUID, so it
 is a **stable** order and not a chronological one: order by `created_at` if you want
@@ -1428,7 +1451,7 @@ everywhere:
 | `init.enqueue` | Enqueue a durable, off-request agent run. | `handler`-kind routes | a configured durable worker |
 | `init.stt` | Transcribe audio bytes (speech-to-text). | `handler`-kind routes and tools | `STT_PROVIDER` |
 | `init.tts` | Synthesize audio from text (text-to-speech). | `handler`-kind routes and tools | `TTS_PROVIDER` |
-| `init.emit` | Append a durable, per-tenant-sequenced event to the tenant's stream. | `handler`-kind routes and tools | `deployment.eventBus.enabled` (a product deployment has it structurally, with nothing to declare) |
+| `init.emit` | Append a durable, per-tenant-sequenced event to the tenant's stream. | `handler`-kind routes and the tools of an **in-request** agent run (never those of an enqueued one — see below) | `deployment.eventBus.enabled` (a product deployment has it structurally, with nothing to declare) |
 
 Two boundaries the table implies are worth spelling out.
 
@@ -1552,9 +1575,15 @@ export const createNote = async (init) => {
 live UI reads back, instead of every product growing its own polled events table. It
 is present only when the deployment enabled the bus
 ([`deployment.eventBus`](#deployment)), and it reaches **`handler`-kind routes and
-tools** only: a `stream`-kind route init and a trigger init do not carry it (the same
-boundary the rest of this table draws), so work that must emit belongs in a
-`handler`-kind route or a tool the trigger drives.
+the tools of an in-request agent run** only: a `stream`-kind route init and a trigger
+init do not carry it (the same boundary the rest of this table draws), and neither
+does the init of a tool an **enqueued** run drives — `async: true`, or any trigger
+whose action is `kind: agent`, since a trigger fires its agent through the same
+durable worker. The worker runs a whole run inside one transaction, and allocating a
+sequence number there would hold the tenant's stream lock until that run committed,
+so the capability is left off rather than made to behave differently off-request. So
+work that must emit belongs in a `handler`-kind route, or in a tool of an agent run
+the request itself drives.
 
 The **tenant is engine-bound**: the capability has no tenant parameter, so a handler
 cannot emit into another tenant — there is nowhere to name one. That is the same
@@ -1572,11 +1601,20 @@ What a subscriber may rely on:
 - **The sequence is gap-free.** A rolled-back request returns its number and the next
   emit reuses it, which is what makes a hole in a stream a real signal that retention
   removed something, rather than noise.
-- **On a route handler the events are atomic with the handler's own writes.** They are
-  written as the last statement before the route transaction commits, so a reader
-  never sees an event announcing a change it cannot yet read — and a handler that
-  throws leaves neither its rows nor its events. A tool has no outer transaction by
-  design, so there each emit is its own statement, durable as it returns.
+- **On a route handler the events are atomic with the handler's own writes — inside
+  the transaction the engine opens around it.** That transaction is the boundary of
+  the promise: the buffered events are flushed as its last statement, so a reader
+  never sees an event announcing a change it cannot yet read, and a handler that
+  throws leaves neither its rows nor its events. Every `handler`-kind route this
+  document can declare runs inside it — and that is the only declarable kind whose
+  init carries `emit` at all. The one posture that does not — the engine opens no
+  transaction and the handler commits its own short ones instead — belongs to a
+  route a mounted capability contributes in code, and has no key in this grammar;
+  such a handler still gets ordered, durable events, but it committed its own
+  writes before the flush, so the two are not atomic. A tool's `emit` is the
+  immediate form instead: the run surface that carries it builds a tool's
+  capabilities from a plain, non-transactional handle, so there each emit is its own
+  statement, durable as it returns.
 
 Two refusals, both fail-closed with a named error (`500 INTERNAL`) rather than a
 silent no-op:
@@ -1812,7 +1850,8 @@ deployment:
   sequence is gap-free (a rolled-back request returns its number and the next
   emit reuses it), which is what makes a hole in a stream a real signal that
   retention removed something, rather than noise. On a route handler the events
-  commit with the handler's own writes, so a reader never sees an event
+  commit inside the transaction the engine opens around the handler, together
+  with the writes the handler made in it, so a reader never sees an event
   announcing a change it cannot yet read.
 
 ## `frontend`

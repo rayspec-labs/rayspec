@@ -44,6 +44,9 @@ export interface BufferedTenantEmit {
 export interface TenantEventBus {
   /** Build the BUFFERED emit for a handler running inside the engine's route transaction. */
   buffered(tdb: TenantDb): BufferedTenantEmit;
-  /** Build the IMMEDIATE emit for a handler with no outer transaction (a tool). */
+  /**
+   * Build the IMMEDIATE emit — it allocates the sequence number at the call, so the handle passed
+   * here must NOT be an open transaction (the counter lock would be held until that commits).
+   */
   immediate(tdb: TenantDb): EmitEvent;
 }

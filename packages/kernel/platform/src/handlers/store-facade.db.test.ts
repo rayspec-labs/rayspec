@@ -166,6 +166,20 @@ const usageStore: StoreSpec = {
   foreignKeys: [],
 };
 
+// TIMESTAMP-FILTER fixture — a NON-NULLABLE timestamp business column, so the column is eligible for
+// the comparison-operator filter form too (an operator on a NULLABLE column is refused outright, so
+// `meetings.scheduled_at` can only exercise the equality form). The facade hands a handler its
+// timestamps back as ISO STRINGS (`serializeRow`) and takes an ISO string on the write path (SF-2),
+// so an ISO string is the form a filter on this column naturally carries.
+const slotsStore: StoreSpec = {
+  name: 'slots',
+  columns: [
+    { name: 'label', type: 'text', nullable: false, unique: false },
+    { name: 'starts_at', type: 'timestamp', nullable: false, unique: false },
+  ],
+  foreignKeys: [],
+};
+
 /** Every PRODUCT store this suite creates in the isolated schema, paired with its business columns. */
 const productStores = [
   meetingsStore,
@@ -177,6 +191,7 @@ const productStores = [
   docsStore,
   ticketsStore,
   usageStore,
+  slotsStore,
 ];
 
 /**
@@ -276,6 +291,14 @@ function buildFacadeSchemaSql(): string {
         bytes_total bigint NOT NULL,
         ${after}
       );
+      -- TIMESTAMP-FILTER fixture: a NON-nullable timestamp business column, so both the equality and
+      -- the comparison-operator filter forms are reachable on it.
+      CREATE TABLE slots (
+        ${before},
+        label text NOT NULL,
+        starts_at timestamptz NOT NULL,
+        ${after}
+      );
       INSERT INTO orgs (id, name) VALUES ('${TENANT_A}', 'A'), ('${TENANT_B}', 'B');
     `;
 }
@@ -354,6 +377,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
       docsStore,
       ticketsStore,
       usageStore,
+      slotsStore,
     ]);
     unregister = registerScopedTables([...productTables.values()]);
   });
@@ -365,7 +389,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
 
   beforeEach(async () => {
     await db.$client.unsafe(
-      `SET search_path TO ${SCHEMA}; TRUNCATE meetings, tags, gizmos, pairs, scoped, notes, docs, tickets, usage_totals CASCADE;`,
+      `SET search_path TO ${SCHEMA}; TRUNCATE meetings, tags, gizmos, pairs, scoped, notes, docs, tickets, usage_totals, slots CASCADE;`,
     );
   });
 
@@ -784,6 +808,69 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     );
     // The DETAILED text stays available server-side (log / throw-site), never sent to the client.
     expect((err as StoreInputError).message).toMatch(/not a valid date/);
+  });
+
+  it('SF-2 on the READ FILTER: an ISO-string timestamp bound SELECTS, in every filter form', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    const first = '2026-07-01T10:00:00.000Z';
+    const second = '2026-07-02T10:00:00.000Z';
+    await aDb.insert('slots', { label: 'first', starts_at: first });
+    await aDb.insert('slots', { label: 'second', starts_at: second });
+    const labels = (rows: Array<Record<string, unknown>>) => rows.map((r) => r.label).sort();
+
+    // EQUALITY: the value the facade just handed back on the write (`serializeRow` emits ISO
+    // strings), fed straight back in as a filter — the plain-serializable-row round trip.
+    expect(labels(await aDb.select('slots', { starts_at: first }))).toEqual(['first']);
+    // COMPARISON OPERATORS: the same string as a bound, both ends of a range.
+    expect(labels(await aDb.select('slots', { starts_at: { gte: first, lt: second } }))).toEqual([
+      'first',
+    ]);
+    expect(labels(await aDb.select('slots', { starts_at: { gt: first } }))).toEqual(['second']);
+    // SET MEMBERSHIP: the same string as an `IN (…)` element.
+    expect(labels(await aDb.select('slots', { starts_at: [first, second] }))).toEqual([
+      'first',
+      'second',
+    ]);
+    // `count` takes the same filter through the same predicate builder.
+    expect(await aDb.count('slots', { starts_at: { gte: first } })).toBe(2);
+    // A real Date bound keeps working unchanged (it never needed coercing).
+    expect(labels(await aDb.select('slots', { starts_at: new Date(second) }))).toEqual(['second']);
+  });
+
+  it('SF-2 on the READ FILTER: an INVALID date string is a StoreInputError (a 400), never a raw driver TypeError', async () => {
+    testsRan += 1;
+    const aDb = makeHandlerDb(forTenant(db, TENANT_A), productTables);
+    // Every filter form reaches the same guard, and each is an INPUT error — the api layer maps a
+    // StoreInputError to 400, where a raw TypeError out of drizzle's column mapper is an internal 500.
+    const forms: Array<Record<string, unknown>> = [
+      { starts_at: 'not-a-date' },
+      { starts_at: { gte: 'not-a-date' } },
+      { starts_at: ['not-a-date'] },
+    ];
+    const caught: unknown[] = [];
+    for (const filter of forms) {
+      try {
+        await aDb.select('slots', filter);
+        caught.push(new Error(`expected a rejection for ${JSON.stringify(filter)}`));
+      } catch (e) {
+        caught.push(e);
+      }
+    }
+    // Collected first, asserted once: the class of ALL THREE forms is visible in one failure, so a
+    // form that regresses to the driver's TypeError names itself instead of hiding behind the first.
+    expect(caught.map((e) => (e as Error).constructor.name)).toEqual([
+      'StoreInputError',
+      'StoreInputError',
+      'StoreInputError',
+    ]);
+    for (const err of caught) {
+      expect((err as StoreInputError).message).toMatch(/not a valid date/);
+      // NO-LEAK, the same rule the write path holds: no column name, no offending value, no prefix.
+      expect((err as StoreInputError).publicMessage).not.toMatch(
+        /HandlerDb|starts_at|not-a-date|timestamp|slots/i,
+      );
+    }
   });
 
   it('TenantDb backstop: update with tenantId in the SET does NOT move the row', async () => {

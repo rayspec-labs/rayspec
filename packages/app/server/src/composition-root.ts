@@ -2905,6 +2905,35 @@ async function deployDeclaredSpec(
               // stream route) so a declared tool the OFF-REQUEST worker runs gets the SAME tenant-bound
               // `init.blob` the sync run surface gives it — built from the run's server-derived tenant.
               ...(blobFactory ? { blobFactory } : {}),
+              // The three REMAINING handle-shaped capabilities the sync run surface threads
+              // (api-auth's `withDeclaredAgents`), on the SAME terms and for the SAME reason.
+              // `resolve-tools.ts` SPREADS each handle onto the tool init, so a capability this
+              // registry never received is an ABSENT key — and a declared tool that reads it throws
+              // off-request while the identical tool works in-request. None of the three touches the
+              // run's transaction: `fsSourceFactory()` reads the deployment's jailed source root and
+              // `sttCapability`/`ttsCapability` are provider handles that take no database at all.
+              // Every one is spread-when-wired, so a deployment that configured none builds a
+              // byte-identical registry to before.
+              ...(fsSourceFactory ? { fsSourceFactory } : {}),
+              ...(sttCapability ? { sttCapability } : {}),
+              ...(ttsCapability ? { ttsCapability } : {}),
+              // `eventBus` is DELIBERATELY NOT threaded here, and it is the one capability that
+              // cannot cross this seam on these terms. The durable worker runs the WHOLE run inside
+              // one `tdb.transaction(...)` and builds the run's tools from that TRANSACTIONAL handle
+              // (@rayspec/durable-dbos `executor.ts`, the `runAgent` step), while the sync run surface
+              // builds them from a plain `forTenant(...)` handle (api-auth `routes/runs.ts`). The bus
+              // gives a tool the IMMEDIATE form, which allocates the sequence number at the call —
+              // so built from the worker's handle it would take the tenant's `tenant_event_streams`
+              // counter-row lock INSIDE the run's transaction, and Postgres holds that lock until
+              // COMMIT: for the rest of the run, across the model call, with every other emit of that
+              // tenant (ordinary in-request route flushes included) waiting behind it, unbounded —
+              // exactly the hazard the buffered/immediate split exists to prevent (api-auth
+              // `engine/event-bus.ts`). The same wrapping would also roll a tool's emitted events back
+              // with a run that later throws, while the identical in-request tool's survive. Giving an
+              // off-request tool a sound `init.emit` needs a handle that is NOT the run's transaction,
+              // which is a change to the tool-factory seam itself, not a wiring choice available here.
+              // `durable-worker-capability-parity.db.test.ts` arm (d) measures the counter row while a
+              // run is parked and fails if this seam is opened.
             });
           }
           // Inject the tenant-bound blob backend into the engine (the `stream` route arm
