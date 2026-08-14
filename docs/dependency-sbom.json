@@ -4,7 +4,7 @@
   "reproduce": "pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs",
   "scope_note": "The package SET is derived from pnpm-lock.yaml (host-independent). Each licence is read verbatim from the installed package.json after a --frozen-lockfile install. Rows with installed:false are optional, platform-gated packages this host does not install; their licence was not read from disk and is recorded as null with an absent_reason, never dropped. 'provenance' below records WHERE the licences were read — it does not describe the scope of this inventory.",
   "lockfile": "pnpm-lock.yaml",
-  "lockfile_sha256": "bb0413934aeaa9963b27e392f3f97bc530c8a688ed9279592dfa2dfff064e23a",
+  "lockfile_sha256": "f39234e2079ccea5afd35e21cc2f6397c63ee9d83a24714d249cdde4d8628822",
   "provenance": {
     "host": "darwin-arm64",
     "node": "v22.12.0"
@@ -2286,6 +2286,7 @@
         "packages/kernel/stt-port",
         "packages/kernel/tasks",
         "packages/kernel/tts-port",
+        "packages/kernel/workforce-tools",
         "packages/workflow/nodes/agent-runtime",
         "packages/workflow/nodes/grounding-runtime",
         "packages/workflow/nodes/views-runtime",
@@ -2725,6 +2726,7 @@
         "packages/kernel/db",
         "packages/kernel/platform",
         "packages/kernel/tasks",
+        "packages/kernel/workforce-tools",
         "packages/test/parity",
         "packages/workflow/durable-dbos",
         "packages/workflow/workflow-durable"
@@ -2754,6 +2756,7 @@
         "packages/kernel/db",
         "packages/kernel/platform",
         "packages/kernel/tasks",
+        "packages/kernel/workforce-tools",
         "packages/workflow/durable-dbos",
         "packages/workflow/workflow-durable"
       ]
@@ -4305,6 +4308,7 @@
         "packages/kernel/stt-port",
         "packages/kernel/tasks",
         "packages/kernel/tts-port",
+        "packages/kernel/workforce-tools",
         "packages/test/parity",
         "packages/workflow/durable-dbos",
         "packages/workflow/foundation",
@@ -4393,6 +4397,7 @@
         "packages/kernel/stt-port",
         "packages/kernel/tasks",
         "packages/kernel/tts-port",
+        "packages/kernel/workforce-tools",
         "packages/test/parity",
         "packages/workflow/durable-dbos",
         "packages/workflow/foundation",
@@ -4479,7 +4484,8 @@
         "packages/kernel/auth-core",
         "packages/kernel/core",
         "packages/kernel/spec",
-        "packages/kernel/tasks"
+        "packages/kernel/tasks",
+        "packages/kernel/workforce-tools"
       ]
     },
     {

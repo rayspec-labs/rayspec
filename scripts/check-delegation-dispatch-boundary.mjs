@@ -345,6 +345,7 @@ function selfTest() {
       expect: true,
     },
     { rel: at('a.ts'), src: 'const name = pick(); const m = await import(name);', expect: true },
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the fixture IS forbidden source text.
     { rel: at('a.ts'), src: 'const m = await import(`@rayspec/${pkg}`);', expect: true },
     {
       rel: at('a.ts'),
