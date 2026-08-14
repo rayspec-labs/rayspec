@@ -687,8 +687,8 @@ export async function serveDeployment(
         },
       );
       // `serve()` returns with the bind still PENDING, so a taken port arrives as an `'error'` event
-      // rather than as a throw the catch below could see — refuse it in the same one-line form as
-      // every other boot failure. Any other listen error is re-emitted untouched (bind-refusal.ts).
+      // rather than as a throw the catch below could see — hence a listener, which answers a
+      // collision with one line and re-emits any other listen error untouched (bind-refusal.ts).
       attachBindRefusal(httpStatic, {
         host: staticConfig.host,
         port: staticConfig.port,

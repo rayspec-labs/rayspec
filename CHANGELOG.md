@@ -498,7 +498,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holding it (`lsof -nP -iTCP:<port> -sTCP:LISTEN`) and the knob that entrypoint's operator turns —
   `PORT=<n>` for `rayspec-serve`, `--port <n>` or `PORT=<n>` for `rayspec deploy` (its `--port` writes
   `PORT`), with `RAYSPEC_HOST` / `--host` named for moving the address — then exits 1. It opens
-  `Boot aborted — `, the way this product's config refusals do.
+  `Boot aborted — `, the same opening as the existing invalid-`PORT` refusal
+  (`Boot aborted — PORT='abc' is not a valid TCP port (1–65535).`).
   **Only `EADDRINUSE` changes.** Every other listen error — `EACCES` on a privileged port, a
   `getaddrinfo` failure on an unresolvable `RAYSPEC_HOST`, anything else — is re-emitted by that
   listener after it removes itself, so it reaches exactly the handling it reached before: Node's
