@@ -170,6 +170,12 @@ const httpServer = serve(
 // tracing provider and signal-exit) each act only when no OTHER listener is registered, so with both
 // loaded neither one ends the process. NOT SIGHUP — signal-exit is its only listener there, so that
 // signal already stops this process; leaving it unlistened keeps it that way.
+// TWO BOUNDS this handler does NOT remove. (1) The exit sits inside close()'s callback, which Node
+// runs only once every open connection has ended: the port refuses new connections the moment the
+// signal lands, but a request still in flight holds the exit until it finishes. (2) This registration
+// happens after the boot, so a signal DURING the boot is unhandled here — before the dependencies
+// above install theirs it kills the process outright, and from then until serve() returns it does
+// nothing at all. serve.ts carries both bounds, from the same wiring.
 const shutdown = (signal) => {
   console.log(`\n[dev-boot] ${signal} received — shutting down…`);
   httpServer.close(async () => {

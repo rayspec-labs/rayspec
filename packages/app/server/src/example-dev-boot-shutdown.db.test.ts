@@ -13,8 +13,18 @@
  *       so with both loaded each defers to the other. This arm covers ONE of the three wrappers: it is
  *       the only one whose boot needs no model-provider key (the other two default to live executor
  *       modes and abort without `OPENAI_API_KEY`).
- *   (b) SOURCE arm — pins the shape in all THREE wrappers by reading them. It asserts registration and
- *       wiring only; the behaviour behind that wiring is what arm (a) runs.
+ *   (b) SOURCE arm — pins the shape in EVERY wrapper it finds by reading them; the set is read off the
+ *       filesystem (`discoverWrappers`), so a wrapper added later is held from the day it lands. It
+ *       asserts registration and wiring only; the behaviour behind that wiring is what arm (a) runs.
+ *
+ * TWO BOUNDS NEITHER ARM COVERS — properties of the wiring, not gaps in the arms:
+ *   - The exit sits inside `httpServer.close()`'s callback, and Node runs that callback only once every
+ *     open connection has ended. Arm (a) signals an IDLE server. With a request still in flight the
+ *     wrapper stops accepting immediately but stays alive until that request finishes.
+ *   - The handler is registered after `serve()` returns, so a signal during the boot is not the
+ *     wrapper's to answer: before the dependencies named above install theirs it kills the process,
+ *     and after that — until `serve()` returns — it does nothing at all and the boot completes.
+ *   `packages/app/server/src/serve.ts` carries both, from the same wiring.
  *
  * `SIGHUP` is deliberately NOT wired: `signal-exit` registers for it and `@openai/agents-core` does not,
  * so signal-exit is its sole listener and re-raises it, which is why that signal already ends these
@@ -23,7 +33,7 @@
  * Arm (a) skips without DATABASE_URL; the ran-guard at the bottom hard-fails if a REQUIRED run skipped it.
  */
 import { type ChildProcess, spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,15 +44,23 @@ const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
 const EXAMPLES = resolve(here, '../../../../examples');
 
-/** Every dev-boot wrapper under examples/ — arm (b) holds all three to the same shape. */
-const WRAPPERS = [
-  'contract-intake/dev-boot.mjs',
-  'support-intake-chat/dev-boot.mjs',
-  'support-ticket-triage/dev-boot.mjs',
-] as const;
+/**
+ * Every dev-boot wrapper under examples/ — READ OFF THE FILESYSTEM, never typed out, so a wrapper
+ * added later is held by arm (b) the moment it lands instead of escaping a list nobody updated.
+ * The floor assertion in arm (b) is what keeps a glob that found nothing from passing vacuously.
+ */
+function discoverWrappers(): string[] {
+  return readdirSync(EXAMPLES, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => `${entry.name}/dev-boot.mjs`)
+    .filter((rel) => existsSync(resolve(EXAMPLES, rel)))
+    .sort();
+}
+const WRAPPERS = discoverWrappers();
 
 /** The wrapper arm (a) boots: the only one whose boot demands no model-provider key. */
-const BOOTABLE_WRAPPER = resolve(EXAMPLES, 'support-ticket-triage/dev-boot.mjs');
+const BOOTABLE_REL = 'support-ticket-triage/dev-boot.mjs';
+const BOOTABLE_WRAPPER = resolve(EXAMPLES, BOOTABLE_REL);
 
 const SUITE_DB = `rayspec_devboot_shutdown_${process.pid}`;
 /** How long the wrapper gets to be gone after the signal. The shutdown itself is milliseconds. */
@@ -207,6 +225,14 @@ describe.skipIf(!baseUrl)('examples/*/dev-boot.mjs — a signal stops the wrappe
 });
 
 describe('examples/*/dev-boot.mjs — every wrapper registers the same owning handler', () => {
+  // The floor under the discovery above: an EMPTY or truncated glob would collect zero `it`s below and
+  // this file would still read GREEN while pinning nothing. Three wrappers exist today; the boot arm's
+  // own wrapper must be among them, or arm (a) is signalling a path arm (b) never reads.
+  it('discovers every examples/<slug>/dev-boot.mjs on disk', () => {
+    expect(WRAPPERS.length).toBeGreaterThanOrEqual(3);
+    expect(WRAPPERS).toContain(BOOTABLE_REL);
+  });
+
   for (const wrapper of WRAPPERS) {
     it(`${wrapper} closes the http server, awaits server.close() and exits 0`, () => {
       const src = readFileSync(resolve(EXAMPLES, wrapper), 'utf8');

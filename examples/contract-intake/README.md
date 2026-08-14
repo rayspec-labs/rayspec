@@ -108,5 +108,7 @@ With that token, `PUT /files/{file_id}` a contract (text or a text-layer PDF —
 `GET /contracts/{contract_ref}` + `GET /contracts`. The `contract_ref` IS the `file_id` you uploaded
 under: the `store_write` takes it from the file event.
 
-Stop it with `Ctrl-C`: the wrapper closes the HTTP server, drains the durable worker and ends the DB
-pool, then exits.
+Stop it with `Ctrl-C` once it is up: the wrapper closes the HTTP server, drains the durable worker and
+ends the DB pool, then exits. Two things it does not cover: a request still in flight when you press it
+holds the exit until that request finishes (the port refuses new connections immediately), and a
+`Ctrl-C` during the boot itself arrives before the wrapper has registered its handler.

@@ -1718,7 +1718,10 @@ deterministic REPLY Backend, so the wrapper is
 **Interactive per-product dev-boot (the play-DB pattern).** The example is
 `examples/support-ticket-triage/dev-boot.mjs` — a thin per-product script that auto-creates a
 throwaway play DB (NEVER the main dev DB), pulls only the two secrets from `.env`, registers the
-product tables via the local store registrar (`registerScopedTables`), and boots `assembleServer`. That
+product tables via the SANCTIONED registrar `registerProductStores` (from `@rayspec/db/composition` —
+it validates every table's tenant predicate before registering the set; the raw `registerScopedTables`
+lives in `@rayspec/db/testing`, which the lint rules refuse in shipped source), and boots
+`assembleServer`. That
 example product declares NO file/audio capability, so its script sets NO blob env — **a FILE product's
 dev-boot must additionally set `RAYSPEC_BLOB_ROOT=<a writable dir>`** (e.g. a throwaway `.dev-blobs/`
 dir; without it the boot fail-closes with the actionable `RAYSPEC_BLOB_ROOT` demand). An agent-bearing
@@ -1745,7 +1748,11 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 Without that handler the wrapper survives BOTH signals and keeps serving: the SIGINT/SIGTERM handlers
 `@openai/agents-core`'s tracing provider and `signal-exit` install each act only when no OTHER listener
 is registered, so with both loaded neither ends the process. Do NOT add `SIGHUP` — `signal-exit` is its
-only listener there, which is why that one signal already stops such a wrapper.
+only listener there, which is why that one signal already stops such a wrapper. Two bounds to state
+rather than overclaim: `close()`'s callback runs only once every open connection has ended, so a request
+still in flight holds the exit until it finishes; and the registration above happens after the boot, so
+a signal during the boot is unhandled (it kills the process before the dependencies install theirs, and
+does nothing between that point and `serve()` returning).
 
 **Live extraction (real LLM) via the generic entrypoint** — works for an AUDIO product (the pilot customer, the
 transcript branch) AND — since the file-ingest work — for a NON-audio product: an agent that declares NO
