@@ -384,7 +384,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   getting-started docs gain a "Testing against a live boot" section naming the buckets and their
   windows, so suite authors can also stagger registrations knowingly instead.
 - **A spec node can acknowledge a `doctor` advisory with `lintSuppress` — with a mandatory recorded
-  justification.** An agent, a store, or an api route may carry
+  justification.** An agent, a store, an api route, a trigger or a handler may carry
   `lintSuppress: [{ code, because }]`. `code` names one of the advisory (warning) codes only — the
   field's closed vocabulary contains no error codes, so suppressing an error is not expressible —
   and `because` is required and non-empty (whitespace-only rejected): a suppression without a
@@ -986,7 +986,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalid or absent credential still gets the uniform `401`.
 - **A refreshed access token carries `mship_role` again, resolved from live membership at refresh
   time.** `POST /v1/auth/refresh` re-minted the JWT without the role claim, so after the first
-  refresh (8 minutes in, at the default `ACCESS_TOKEN_TTL_SECONDS = 480`) every claim-trusted
+  refresh (8 minutes in, at the default `RAYSPEC_ACCESS_TOKEN_TTL_SECONDS = 480`) every claim-trusted
   permission (`store:read`, `agent:run`, `agent:read`, `org:read`, `apikey:read`) answered
   `403 missing_permission`, while every sensitive permission (`store:write`, `apikey:mint`,
   `apikey:revoke`, the org-management ops) kept working through its live-membership recheck — an

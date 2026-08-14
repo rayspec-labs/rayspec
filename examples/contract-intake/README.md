@@ -52,6 +52,8 @@ Interactive dev-boot (a throwaway play DB; a FILE product also needs `RAYSPEC_BL
 node examples/contract-intake/dev-boot.mjs   # auto-creates play_contract, serves on :8793
 ```
 
+This runs in the foreground — give the steps below a second shell.
+
 The dev-boot seeds the ORG `00000000-0000-4000-8000-000000000042` and no user, so nothing is callable
 yet — `PUT /files/{file_id}`, `POST /files/{file_id}/submit` and `GET /contracts` all answer `401` —
 and you cannot register your way into it: a `POST /v1/auth/register` carrying an `orgName` creates a
@@ -70,6 +72,11 @@ DATABASE_URL="postgres://rayspec:rayspec@localhost:5433/play_contract" \
   rayspec tenant ensure --org-id 00000000-0000-4000-8000-000000000042 \
     --name 'Contract Co' --owner-email you@local --owner-invite-out ./owner-invite.txt
 ```
+
+Run that from the repo root. The CLI looks for a `.env` in exactly two places — `$PWD` and the
+directory its own install sits in — and searches nowhere above either, so a globally installed
+`rayspec` run from any other directory finds no `RAYSPEC_API_KEY_PEPPER` and refuses with
+`SECRETS_MISSING` before it touches the database.
 
 `DATABASE_URL` is doing real work there. `tenant ensure` applies the committed migration chain to —
 and creates the org in — whatever database it names, and the dev-boot serves the throwaway

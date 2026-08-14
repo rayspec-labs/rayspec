@@ -74,8 +74,8 @@ seeds the catalog):
 node examples/support-intake-chat/dev-boot.mjs        # serves on :8794, live mode
 ```
 
-Stop it with `Ctrl-C`: the wrapper closes the HTTP server, drains the durable worker and ends the DB
-pool, then exits.
+This runs in the foreground — give the steps below a second shell. Stop it with `Ctrl-C`: the
+wrapper closes the HTTP server, drains the durable worker and ends the DB pool, then exits.
 
 The dev-boot seeds the ORG `00000000-0000-4000-8000-000000000043` and no user, so you cannot register
 your way into it: a `POST /v1/auth/register` carrying an `orgName` creates a DIFFERENT org (its
@@ -94,6 +94,11 @@ DATABASE_URL="postgres://rayspec:rayspec@localhost:5433/play_support_chat" \
   rayspec tenant ensure --org-id 00000000-0000-4000-8000-000000000043 \
     --name 'Support Chat Co' --owner-email you@local --owner-invite-out ./owner-invite.txt
 ```
+
+Run that from the repo root. The CLI looks for a `.env` in exactly two places — `$PWD` and the
+directory its own install sits in — and searches nowhere above either, so a globally installed
+`rayspec` run from any other directory finds no `RAYSPEC_API_KEY_PEPPER` and refuses with
+`SECRETS_MISSING` before it touches the database.
 
 `DATABASE_URL` is doing real work there. `tenant ensure` provisions — and applies the migration chain
 to — whatever database it names, and the dev-boot serves the throwaway `play_support_chat` while
