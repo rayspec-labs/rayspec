@@ -1133,8 +1133,10 @@ Notes that matter:
   the SPA fallback → `404.html`/404. TWO behaviours change when you opt in — (1) a site shipping BOTH
   `<path>.html` and `<path>/index.html` starts serving `<path>.html` where the directory index served
   before; (2) on a mount shipping a root `404.html`, `/404` is extensionless like any other path, so it
-  serves that page with 200 where the miss branch answered 404 (host parity — Netlify / Vercel / GitHub
-  Pages all serve `/404` as a page). A trailing-slash request (`/docs/`) still resolves the directory
+  serves that page with 200 — on an `spa: false` mount that flips the status (the miss branch answered
+  those bytes with 404), on an `spa: true` one it flips the document (the fallback runs before the
+  `404.html` branch, so the shell already answered 200). Host parity either way — Netlify / Vercel /
+  GitHub Pages all serve `/404` as a page. A trailing-slash request (`/docs/`) still resolves the directory
   index. EXTENSIONLESS is the exact domain: a TYPED path (last segment carries a `.`, e.g. `/app.js`,
   `/data.json`) is never rewritten, so a missing asset stays a `404` instead of being answered from a
   `<name>.<ext>.html` sibling; only the last segment decides, so `/guide/1.2/notes` still resolves.

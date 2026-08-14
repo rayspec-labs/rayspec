@@ -1032,11 +1032,22 @@ export function mountFrontend<E extends Env>(
     // (`decodeOnce`), `serveStatic` with `decodeURI`, which leaves the reserved set (`/ ? # : @ & = +
     // $ ,`) encoded — so the two agree on every path EXCEPT one carrying a percent-encoded reserved
     // character. There (`/a%2Fb`) the guard clears `a/b.html` while the rewrite resolves
-    // `a%2Fb.html`, a path the guard never inspected: it misses, because no file carries that name.
-    // It cannot do worse than miss, and the reason is the DIRECTION of the divergence — the guard
-    // decodes a strict superset, so every path the guard would refuse (`/%2e%2e%2fsecret` →
-    // `/../secret`) is refused before this server is reached, and the rewrite's less-decoded string
-    // cannot spell a traversal the guard did not already see.
+    // `a%2Fb.html`, A NAME THE GUARD NEVER INSPECTED. What that does and does not cost, measured:
+    //   - it can never be a TRAVERSAL: `decodeURI` never turns an escape into a `/`, and `%2e`
+    //     decodes to `.` under both decoders, so a `..` segment in the string this server resolves is
+    //     a `..` segment in the string the guard already saw and refused on its dotfile rule
+    //     (`/%2e%2e%2fsecret` → `/../secret`; the encoded-traversal arms in serve-static.test.ts pin
+    //     that both plainly and with an escaped separator);
+    //   - but it is NOT confined to a miss. A miss is only what happens when nothing on disk carries
+    //     the less-decoded name — which is every build whose output has no `%` in a file name. When
+    //     such a file DOES exist it is served, and `isSafeStaticPath`'s dotfile, containment and
+    //     symlink-escape checks never ran on that name: they ran on the decoded one. So a `%`-named
+    //     symlink pointing out of the served directory is served (200 + its bytes), while the same
+    //     symlink under a plainly-spelled name is refused 404.
+    // The divergence belongs to the module, not to this option: `fileServer` above resolves the same
+    // less-decoded string, and a `cleanUrls:false` mount answers `/a%2Fb.html` the same way. Closing
+    // it means guarding the string `serveStatic` will resolve in addition to the one the guard
+    // inspects — a behaviour change, not made here.
     const cleanUrlServer = cleanUrls
       ? serveStatic({
           root: baseDir,

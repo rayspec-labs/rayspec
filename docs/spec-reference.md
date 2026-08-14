@@ -1859,9 +1859,13 @@ frontend:
   `<path>.html` and `<path>/index.html` for the same path serves `<path>.html`, where it
   serves `<path>/index.html` today — `.html` is tried first. And on a mount that ships a
   root `404.html`, `/404` becomes an extensionless path like any other and serves that
-  page with `200`, where the miss branch answered the same bytes with `404`; that is
-  parity with the hosts this option mirrors, which all serve `/404` as a page. A request
-  with a trailing slash (`/docs/`) is unaffected and still resolves the directory index.
+  page with `200`. What that changes depends on `spa`, because the fallback comes first in
+  the order above: on an `spa: false` mount the miss branch answered the same bytes with
+  `404`, so the status flips; on an `spa: true` mount the fallback already answered `/404`
+  with `200`, so the status is unchanged and the document flips from the shell to the
+  page. Either way it is parity with the hosts this option mirrors, which all serve `/404`
+  as a page. A request with a trailing slash (`/docs/`) is unaffected and still resolves
+  the directory index.
   The fail-closed guard below applies to the `.html` candidate exactly as it does to any
   other served path: a dotfile, a traversal, or a symlink escaping the directory is
   refused, never followed.

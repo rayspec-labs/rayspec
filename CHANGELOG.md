@@ -228,10 +228,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a site that opts in. Where **both** `<path>.html` and `<path>/index.html` exist for the same path,
   the `.html` file now wins where the directory index served before (`.html` is tried first, the order
   the hosts above use). And on a mount that ships a root `404.html`, `/404` is an extensionless path
-  like any other, so it now serves that page with `200` where the miss branch answered the same bytes
-  with `404` — the same parity with those hosts, all of which serve `/404` as a page, and the reason
-  the status is not "fixed" back to `404`. A trailing-slash request (`/docs/`) is unaffected and still
-  resolves the directory index. The option is echoed in the `deploy --dry-run` verdict for **both** the
+  like any other, so it now serves that page with `200`. What that displaces depends on `spa`, since
+  the SPA fallback precedes the `404.html` branch: on an `spa: false` mount the miss branch answered
+  the same bytes with `404`, so the status flips, while on an `spa: true` mount the shell already
+  answered `/404` with `200`, so the document flips and the status does not. Either way it is the same
+  parity with those hosts, all of which serve `/404` as a page, and the reason the status is not
+  "fixed" back to `404`. A trailing-slash request (`/docs/`) is unaffected and still resolves the
+  directory index. The option is echoed in the `deploy --dry-run` verdict for **both** the
   static and the backend profile, so the preview names the resolution boot will use, and the static
   profile's boot banner marks a mount that sets it.
 
