@@ -13,15 +13,15 @@
  * yield), and hand it to the real `applyTurnOutcome`. The assertions are on durable rows.
  */
 import { deriveWorkforceConfig, WorkforceSpec } from '@rayspec/spec';
+import type { TaskRecord } from '@rayspec/tasks';
 import {
   applyTransition,
   applyTurnOutcome,
   createRootTask,
   ensureWorkforceRuntime,
   insertChildTask,
+  workforceBudgetsSchema,
 } from '@rayspec/tasks';
-import type { TaskRecord } from '@rayspec/tasks';
-import { workforceBudgetsSchema } from '@rayspec/tasks';
 import { forTenant, makeTestDb, resetTaskSchema } from '@rayspec/tasks/test-support';
 import {
   buildRoleToolset,

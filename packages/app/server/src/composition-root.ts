@@ -2900,28 +2900,35 @@ async function deployDeclaredSpec(
     query: queryFn, // the SAME thunk used for the pre-flight drift classification above.
   };
 
-  // ── deploy() + the post-deploy boot GATES, under one committed-DDL catch ────────────────
-  // From here through the cron gates below, a refusal is raised on a schema that may ALREADY carry
-  // this boot's product DDL (applyMigration commits each migration in its own transaction, so a
-  // refusal after the migrate step leaves it standing — there is no rollback, and none is wanted:
-  // recovery in RaySpec is a reviewed FORWARD migration). The catch appends that fact to the caught
   // ── The WORKFORCE REDEPLOY GATE + tenant precondition (BEFORE deploy(): a refusal precedes any
   //    DDL or mount). The platform migration chain already applied above, so the workforce tables
-  //    exist even on a first boot; an empty database passes trivially (pure additions always deploy).
-  if (effectiveSpec.workforce !== undefined) {
-    if (!config.cronTenantId) {
-      throw new BootConfigError(
-        'Boot aborted — the spec declares a workforce but RAYSPEC_CRON_TENANT_ID is unset. A ' +
-          'workforce runs under the deployment task tenant (the same single-deployment posture ' +
-          'cron fires use); set the variable to the org id durable tasks run under. Fail-closed.',
-      );
-    }
+  //    exist even on a first boot; an empty database passes trivially (pure additions always
+  //    deploy). The gate runs whether or not THIS document declares a workforce: a document that
+  //    declares none is the maximal removal, and a renamed id is a removal too — both used to slip
+  //    past a gate that only ran for a declared section (see workforce-boot.ts's header).
+  if (effectiveSpec.workforce !== undefined && !config.cronTenantId) {
+    throw new BootConfigError(
+      'Boot aborted — the spec declares a workforce but RAYSPEC_CRON_TENANT_ID is unset. A ' +
+        'workforce runs under the deployment task tenant (the same single-deployment posture ' +
+        'cron fires use); set the variable to the org id durable tasks run under. Fail-closed.',
+    );
+  }
+  if (config.cronTenantId) {
+    // The gate scopes by tenant, so the tenant SHAPE is asked first — otherwise a malformed id
+    // surfaces as `forTenant`'s raw chokepoint throw here instead of the typed boot abort the
+    // scheduler wiring below already produces for it. Same check, same message, taken earlier.
+    await assertCronTenantBootable(db, config.cronTenantId);
     await assertWorkforceSpecCompatible(
       forTenant(db, config.cronTenantId),
       effectiveSpec.workforce,
     );
   }
 
+  // ── deploy() + the post-deploy boot GATES, under one committed-DDL catch ────────────────
+  // From here through the cron gates below, a refusal is raised on a schema that may ALREADY carry
+  // this boot's product DDL (applyMigration commits each migration in its own transaction, so a
+  // refusal after the migrate step leaves it standing — there is no rollback, and none is wanted:
+  // recovery in RaySpec is a reviewed FORWARD migration). The catch appends that fact to the caught
   // error IN PLACE and rethrows the SAME object, so the class every printer switches on survives.
   // `result` and the two scheduler seams are declared out here because they outlive the try.
   let result: DeployResult<ReturnType<typeof createAuthApp>>;
