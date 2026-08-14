@@ -7,7 +7,7 @@
   ],
   "license": "FSL-1.1-ALv2",
   "type": "module",
-  "description": "The RaySpec CLI — a READ-ONLY diagnostic floor (`rayspec doctor` static parseSpec, `rayspec plan` read-only deploy front-half, `rayspec gen-handler`; never mutates a real/target DB, never prints secrets) PLUS a clearly-separated LOCAL-DEV, MUTATING `dev` group (`dev gen-secrets` writes the 3 platform boot secrets to a .env idempotently without ever echoing a value, `dev db` creates the dev DB if absent, `dev bootstrap-tenant` creates the first tenant+owner via the shipped auth API). The diagnostic floor wraps already-shipped functions and adds NO new platform mechanism.",
+  "description": "The RaySpec CLI \u2014 a READ-ONLY diagnostic floor (`rayspec doctor` static parseSpec, `rayspec plan` read-only deploy front-half, `rayspec gen-handler`; never mutates a real/target DB, never prints secrets) PLUS a clearly-separated LOCAL-DEV, MUTATING `dev` group (`dev gen-secrets` writes the 3 platform boot secrets to a .env idempotently without ever echoing a value, `dev db` creates the dev DB if absent, `dev bootstrap-tenant` creates the first tenant+owner via the shipped auth API). The diagnostic floor wraps already-shipped functions and adds NO new platform mechanism.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -35,10 +35,14 @@
     "@rayspec/server": "workspace:*",
     "@rayspec/spec": "workspace:*",
     "@rayspec/views-runtime": "workspace:*",
-    "postgres": "3.4.9"
+    "postgres": "3.4.9",
+    "zod": "4.4.3"
   },
   "devDependencies": {
+    "@rayspec/durable-dbos": "workspace:*",
+    "@rayspec/tasks": "workspace:*",
     "@types/node": "22.12.0",
+    "dotenv": "17.4.2",
     "jose": "6.2.3",
     "tsx": "4.22.4",
     "typescript": "5.9.3",

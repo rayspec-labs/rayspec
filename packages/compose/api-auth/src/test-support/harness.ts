@@ -242,13 +242,128 @@ function buildFullSchemaSql(SCHEMA: string): string {
     CONSTRAINT tenant_events_tenant_id_seq_pk PRIMARY KEY (tenant_id, seq)
   );
   CREATE INDEX tenant_events_at_idx ON tenant_events (at);
+
+  -- the task engine's nine tables (mirrors migration 0012) — the workforce route suites read and
+  -- write these through the TenantDb chokepoint.
+  CREATE TABLE workforce_tasks (
+    task_id text PRIMARY KEY,
+    tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    workforce_id text, parent_task_id text, root_task_id text NOT NULL,
+    ancestry_path jsonb NOT NULL DEFAULT '[]'::jsonb,
+    title text NOT NULL, goal text NOT NULL, description text,
+    owner text NOT NULL, requested_by text NOT NULL, department text,
+    status text NOT NULL, status_reason text, priority text NOT NULL DEFAULT 'normal',
+    dependencies jsonb NOT NULL DEFAULT '[]'::jsonb, join_policy jsonb,
+    artifacts jsonb NOT NULL DEFAULT '[]'::jsonb, result jsonb, confidence numeric,
+    cost_usd numeric NOT NULL DEFAULT '0', token_usage jsonb NOT NULL DEFAULT '{}'::jsonb,
+    turns_used integer NOT NULL DEFAULT 0, last_event_seq integer NOT NULL DEFAULT 0,
+    deadline_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(),
+    queued_at timestamptz, started_at timestamptz, completed_at timestamptz,
+    version integer NOT NULL DEFAULT 1
+  );
+  CREATE INDEX workforce_tasks_tenant_status_priority_queued_idx
+    ON workforce_tasks (tenant_id, status, priority, queued_at);
+  CREATE INDEX workforce_tasks_tenant_root_idx ON workforce_tasks (tenant_id, root_task_id);
+  CREATE INDEX workforce_tasks_tenant_parent_idx ON workforce_tasks (tenant_id, parent_task_id);
+
+  CREATE TABLE workforce_task_transitions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    task_id text NOT NULL, from_status text NOT NULL, to_status text NOT NULL,
+    status_reason text, actor text NOT NULL, turn_id text, turn_number integer,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX workforce_transitions_tenant_task_created_idx
+    ON workforce_task_transitions (tenant_id, task_id, created_at);
+  CREATE UNIQUE INDEX workforce_transitions_turn_receipt_idx
+    ON workforce_task_transitions (tenant_id, task_id, turn_number) WHERE turn_number IS NOT NULL;
+
+  CREATE TABLE workforce_task_signals (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    task_id text NOT NULL, kind text NOT NULL, signal_key text NOT NULL,
+    payload jsonb NOT NULL DEFAULT '{}'::jsonb, consumed_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE UNIQUE INDEX workforce_signals_tenant_task_key_idx
+    ON workforce_task_signals (tenant_id, task_id, signal_key);
+
+  CREATE TABLE workforce_delegations (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    workforce_id text, parent_task_id text NOT NULL, child_task_id text NOT NULL,
+    delegated_by text NOT NULL, delegated_to text NOT NULL, resolved_owner text NOT NULL,
+    goal text NOT NULL, expected_output text NOT NULL, depth integer NOT NULL,
+    status text NOT NULL, rejection_reason text,
+    created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
+  );
+  CREATE INDEX workforce_delegations_tenant_parent_idx
+    ON workforce_delegations (tenant_id, parent_task_id);
+  CREATE UNIQUE INDEX workforce_delegations_tenant_child_idx
+    ON workforce_delegations (tenant_id, child_task_id);
+
+  CREATE TABLE workforce_approvals (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    task_id text NOT NULL, question text NOT NULL,
+    options jsonb NOT NULL DEFAULT '[]'::jsonb, approver text NOT NULL,
+    status text NOT NULL, decision text, decided_by text, reason text,
+    timeout_at timestamptz, on_timeout text NOT NULL, escalate_to text,
+    created_at timestamptz NOT NULL DEFAULT now(), decided_at timestamptz
+  );
+  CREATE INDEX workforce_approvals_tenant_status_idx ON workforce_approvals (tenant_id, status);
+  CREATE INDEX workforce_approvals_tenant_timeout_idx ON workforce_approvals (tenant_id, timeout_at);
+
+  CREATE TABLE workforce_reviews (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    task_id text NOT NULL, reviewer text NOT NULL, round integer NOT NULL,
+    verdict text, reasons jsonb NOT NULL DEFAULT '[]'::jsonb,
+    required_changes jsonb NOT NULL DEFAULT '[]'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(), decided_at timestamptz
+  );
+  CREATE INDEX workforce_reviews_tenant_task_idx ON workforce_reviews (tenant_id, task_id, round);
+
+  CREATE TABLE workforce_messages (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    task_id text NOT NULL, sender text NOT NULL, recipient text NOT NULL, body text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX workforce_messages_tenant_task_created_idx
+    ON workforce_messages (tenant_id, task_id, created_at);
+
+  CREATE TABLE workforce_budget_ledger (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    scope_kind text NOT NULL, scope_id text NOT NULL, window_start timestamptz NOT NULL,
+    reserved_usd numeric NOT NULL DEFAULT '0', settled_usd numeric NOT NULL DEFAULT '0',
+    settled_turns integer NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE UNIQUE INDEX workforce_ledger_scope_idx
+    ON workforce_budget_ledger (tenant_id, scope_kind, scope_id, window_start);
+
+  CREATE TABLE workforce_runtime (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    workforce_id text NOT NULL, paused boolean NOT NULL DEFAULT false,
+    paused_at timestamptz, paused_by text, halt_reason text, halted_at timestamptz,
+    budgets jsonb NOT NULL DEFAULT '{}'::jsonb, last_event_seq integer NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE UNIQUE INDEX workforce_runtime_tenant_workforce_idx
+    ON workforce_runtime (tenant_id, workforce_id);
 `;
 }
 
 const ALL_TABLES =
   'orgs, users, memberships, sessions, api_keys, auth_audit, oidc_models, ' +
   'idempotency_keys, invites, journal_steps, conversation_items, runs, run_events, ' +
-  'tenant_events, tenant_event_streams';
+  'tenant_events, tenant_event_streams, ' +
+  'workforce_tasks, workforce_task_transitions, workforce_task_signals, workforce_delegations, ' +
+  'workforce_approvals, workforce_reviews, workforce_messages, workforce_budget_ledger, ' +
+  'workforce_runtime';
 
 /**
  * Build the harness: isolated schema, real signing key, wired app. `withOidc` mounts the provider;
@@ -408,6 +523,12 @@ export async function createHarness(
      */
     manualTriggerFirer?: AppDeps['manualTriggerFirer'];
     /**
+     * the OPTIONAL task-engine seam wired into `deps.workforce` (the `/v1/workforce/*` routes'
+     * injected dependency). A workforce-route suite injects a stub whose `kick()` records the
+     * nudge; omit ⇒ the whole surface fail-closes 501 (the unwired posture a test can also exercise).
+     */
+    workforce?: AppDeps['workforce'];
+    /**
      * trusted-proxy CIDRs wired into `deps.trustedProxies` (the rate-limiter client-identity
      * resolution). Default UNSET ⇒ no forwarding header is trusted (the socket peer is the identity).
      * A served-app suite behind loopback opts in (e.g. `['127.0.0.0/8', '::1/128']`) so an
@@ -556,6 +677,7 @@ export async function createHarness(
     engine,
     ...(opts.sessionReprocessor ? { sessionReprocessor: opts.sessionReprocessor } : {}),
     ...(opts.manualTriggerFirer ? { manualTriggerFirer: opts.manualTriggerFirer } : {}),
+    ...(opts.workforce ? { workforce: opts.workforce } : {}),
     ...(opts.trustedProxies !== undefined ? { trustedProxies: opts.trustedProxies } : {}),
     ...(opts.maxJsonBodyBytes !== undefined ? { maxJsonBodyBytes: opts.maxJsonBodyBytes } : {}),
   };

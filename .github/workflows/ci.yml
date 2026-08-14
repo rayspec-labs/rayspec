@@ -10,7 +10,7 @@ name: CI
 #
 #   lane2-db             — ephemeral Postgres service. install → build → the DB gates
 #                          (migrations / shadow-dryrun / migrate-clean) → the DB test subset
-#                          (the 9 Postgres-backed packages: 8 platform + the local-boot example) with
+#                          (the 10 Postgres-backed packages: 9 platform + the local-boot example) with
 #                          RAYSPEC_REQUIRE_DB_TESTS=true so a DB suite can NEVER silently self-skip.
 #                          --concurrency=1 keeps the two real-DBOS packages off each other on one
 #                          Postgres. REQUIRED merge check.
@@ -25,7 +25,7 @@ name: CI
 #
 # The test split is by TURBO --filter, not self-skip: GitHub sets CI=true, which arms the
 # un-skippable DB ran-guards (they hard-FAIL, they do not skip, when DATABASE_URL is absent). So the
-# 9 Postgres-backed packages MUST be excluded from lane 1 at the filter level — they run only in
+# 10 Postgres-backed packages MUST be excluded from lane 1 at the filter level — they run only in
 # lane 2 (with a DB). lane1 ∪ lane2 == every @rayspec/* package, with no package in both.
 #
 # Intentionally NOT run in CI:
@@ -158,6 +158,12 @@ jobs:
       - name: Spec-schema drift gate
         run: pnpm gate:spec-schema
 
+      # The task-engine transition table must stay exhaustive (all 81 cells explicit, terminal rows
+      # all-false, `queued` the only door into `working`, every status reason ruled), and
+      # applyTransition() must remain the only status writer. Verifies the BUILT table — needs the Build.
+      - name: State-machine exhaustiveness gate
+        run: pnpm gate:state-machine
+
       # The composed product stack must be self-sufficient with any customer product ABSENT — no
       # rayspec source statically imports a product path; the deploy kit builds from THIS repo only.
       - name: No-pack regression gate
@@ -275,7 +281,7 @@ jobs:
 
       # ── Deterministic test subset — the 20 non-DB, non-parity packages ────────────────────────────
       # Split by turbo --filter (NOT self-skip): under CI=true the DB ran-guards HARD-FAIL when
-      # DATABASE_URL is absent, so the 9 Postgres-backed packages are excluded here and run only in
+      # DATABASE_URL is absent, so the 10 Postgres-backed packages are excluded here and run only in
       # lane 2. @rayspec/parity is excluded because it ran as the gate step above. No DATABASE_URL is
       # set → this lane touches no Postgres. @spike/* is auto-excluded (the base filter is @rayspec/*).
       - name: Test (deterministic subset)
@@ -288,6 +294,7 @@ jobs:
             --filter='!@rayspec/api-auth' \
             --filter='!@rayspec/db' \
             --filter='!@rayspec/platform' \
+            --filter='!@rayspec/tasks' \
             --filter='!@rayspec/durable-dbos' \
             --filter='!@rayspec/workflow-durable' \
             --filter='!@rayspec/local-boot' \
@@ -376,7 +383,7 @@ jobs:
       - name: Migration from-clean-DB gate
         run: pnpm gate:migrate-clean
 
-      # ── DB test subset — the 9 Postgres-backed packages (8 platform + the local-boot example) ─────
+      # ── DB test subset — the 10 Postgres-backed packages (9 platform + the local-boot example) ────
       # --concurrency=1: @rayspec/durable-dbos + @rayspec/server both boot a REAL DBOS engine; run
       # concurrently against one Postgres they deadlock / race on CREATE/DROP DATABASE. The two
       # real-engine packages must not overlap on a single database.
@@ -391,6 +398,7 @@ jobs:
             --filter='@rayspec/api-auth' \
             --filter='@rayspec/db' \
             --filter='@rayspec/platform' \
+            --filter='@rayspec/tasks' \
             --filter='@rayspec/durable-dbos' \
             --filter='@rayspec/workflow-durable' \
             --filter='@rayspec/local-boot'

@@ -123,7 +123,10 @@ stores:
   `api_keys`, `auth_audit`, `conversation_items`, `idempotency_keys`, `invites`,
   `journal_steps`, `memberships`, `oidc_models`, `orgs`, `run_events`, `runs`,
   `sessions`, `tenant_event_streams`, `tenant_events`, `users`,
-  `workflow_artifacts`, `workflow_node_states`, `workflow_runs`.
+  `workflow_artifacts`, `workflow_node_states`, `workflow_runs`,
+  `workforce_approvals`, `workforce_budget_ledger`, `workforce_delegations`,
+  `workforce_messages`, `workforce_reviews`, `workforce_runtime`,
+  `workforce_task_signals`, `workforce_task_transitions`, `workforce_tasks`.
 
   Several are names a product would plausibly reach for on its own — `sessions`
   for a chat application, `invites`, `runs`. The match is exact, so a

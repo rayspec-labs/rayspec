@@ -56,6 +56,7 @@ import { runOpenapi } from './openapi.js';
 import { runPlan } from './plan.js';
 import { loadLocalDotenvIfPresent } from './read-env.js';
 import { runTenant, TenantCliError } from './tenant.js';
+import { runWorkforce, WorkforceCliError } from './workforce.js';
 
 /**
  * The usage text, split ONE BLOCK PER COMMAND under the section headings the general usage prints.
@@ -202,6 +203,41 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 to a 1-hour lifetime (--invite-ttl-seconds overrides, clamped to
                                 5min-30d). --reissue-owner-invite revokes the outstanding invite and
                                 mints a replacement (for a lost token). Emits ONE JSON object.`,
+      },
+    ],
+  },
+  {
+    heading: 'OPERATE A DEPLOYMENT (the `workforce` group — live tenant state over the HTTP API):',
+    commands: [
+      {
+        name: 'workforce',
+        block: `  rayspec workforce <status|tasks|task|approvals|cost|events|pause|resume|halt> [flags]
+                                The operator console for the durable task engine, speaking to a
+                                RUNNING deployment over its authenticated HTTP API. Shared flags on
+                                every subcommand: --url <base> (else RAYSPEC_URL, else a single
+                                unambiguous deployments/<name>.json or --deployment <name> — never a
+                                localhost guess), --api-key <key> (else RAYSPEC_API_KEY; sent as the
+                                Bearer the API expects — the CLI adds NO authorization of its own, a
+                                permission gap is the route's own 403 verbatim), and --tenant <org-id>
+                                (an API key is already org-bound and refuses the flag; a user token
+                                resolves its active org, answering tenant_required/tenant_mismatch).
+                                Subcommands:
+                                  status --workforce <id>       control state, counts, queue depth,
+                                                                current-window budget headroom
+                                  tasks [--status] [--owner] [--workforce <id>] [--tree]
+                                                                list tasks; --tree nests by parent
+                                  task <id>                     one task
+                                  approvals list                the pending inbox
+                                  approvals approve <id> [--reason <text>]
+                                  approvals reject <id> --reason <text>
+                                  cost [--window 24h|7d]        per-scope settled/reserved roll-up
+                                  events <task-id>              the task's journal replay
+                                  pause [--drain] --workforce <id>
+                                  resume --workforce <id>
+                                  halt --reason <text> --workforce <id>
+                                Reads need a store:read credential; mutations need store:write. Every
+                                reply is ONE JSON object; a route refusal is ok:false carrying the
+                                server's error envelope untranslated.`,
       },
     ],
   },
@@ -393,7 +429,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   const rest = args.slice(1);
   if (command === undefined) {
     throw new CliError(
-      'missing command (expected `init`, `doctor`, `plan`, `openapi`, `gen-handler`, `deploy`, `tenant`, or `dev`)',
+      'missing command (expected `init`, `doctor`, `plan`, `openapi`, `gen-handler`, `deploy`, `tenant`, `workforce`, or `dev`)',
     );
   }
   // `--version`/`-v` is the one TOP-LEVEL flag, answered BEFORE the leading-dash check below —
@@ -422,7 +458,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   }
   if (command.startsWith('-')) {
     throw new CliError(
-      `expected a subcommand (\`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, \`tenant\`, or \`dev\`), got ${command}`,
+      `expected a subcommand (\`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, \`tenant\`, \`workforce\`, or \`dev\`), got ${command}`,
     );
   }
 
@@ -501,6 +537,22 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
         result = await runTenant(rest);
       } catch (e) {
         if (e instanceof TenantCliError) throw new CliError(e.message);
+        throw e;
+      }
+      await emit(result);
+      return result.ok ? 0 : 1;
+    }
+    case 'workforce': {
+      // OPERATE-A-DEPLOYMENT: the `workforce` group queries/mutates LIVE tenant state in a RUNNING
+      // deployment over its authenticated HTTP API (transport resolution + credential + tenant rules
+      // in workforce/transport.ts — fail-closed, never a localhost guess, no local authorization).
+      // A usage/configuration problem is a WorkforceCliError; re-throw as a CliError so the top
+      // level maps it to exit 2 (a route refusal is returned ok:false with the server's envelope).
+      let result: Awaited<ReturnType<typeof runWorkforce>>;
+      try {
+        result = await runWorkforce(rest);
+      } catch (e) {
+        if (e instanceof WorkforceCliError) throw new CliError(e.message);
         throw e;
       }
       await emit(result);

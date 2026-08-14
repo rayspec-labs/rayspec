@@ -384,20 +384,39 @@ export async function invokeStreamRouteHandler(
 }
 
 /**
+ * The optional read/media capabilities a trigger init may carry — the SAME composition-root-built
+ * seams the route/tool builders inject, so the durable trigger path is no longer the one init shape
+ * that cannot read a file or transcribe an input. Spread-absent like every other capability slot:
+ * an unconfigured capability is a MISSING key (`'stt' in init === false`), never an
+ * undefined-valued one, and a handler that needs it fail-closes loudly.
+ */
+export interface TriggerHandlerCapabilities {
+  readonly fsSourceFactory?: FsSourceFactory;
+  readonly stt?: SttCapability;
+  readonly tts?: TtsCapability;
+}
+
+/**
  * Invoke a declared TRIGGER handler inside a tenant transaction (the contract the durable worker
  * uses; not fired synchronously today). `triggerName` is the declared trigger's name (DATA).
+ * `capabilities` is the composition root's closure over its wired seams — absent slots stay
+ * absent, exactly as `buildRouteHandlerInit` spreads them.
  */
 export async function invokeTriggerHandler(
   fn: TriggerHandler,
   tdb: TenantDb,
   productTables: ReadonlyMap<string, PgTable>,
   triggerName: string,
+  capabilities?: TriggerHandlerCapabilities,
 ): Promise<void> {
   await tdb.transaction(async (txTdb) => {
     const init: TriggerHandlerInit = {
       tenantId: txTdb.tenantId,
       db: makeHandlerDb(txTdb, productTables),
       triggerName,
+      ...(capabilities?.fsSourceFactory ? { fsSource: capabilities.fsSourceFactory() } : {}),
+      ...(capabilities?.stt ? { stt: capabilities.stt } : {}),
+      ...(capabilities?.tts ? { tts: capabilities.tts } : {}),
     };
     await getHandlerRuntime().invokeTrigger(fn, init);
   });

@@ -1,6 +1,7 @@
 export * from './abort.js';
 export * from './backend.js';
 export * from './bounded-body.js';
+export * from './cost-policy.js';
 export * from './error-class.js';
 export * from './hash.js';
 export * from './neutral.js';

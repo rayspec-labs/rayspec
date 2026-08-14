@@ -1,0 +1,229 @@
+/**
+ * The turn-intent PLANNER — the pure decision core of intent application.
+ *
+ * A turn handler returns exactly ONE turn-ending intent (a strict discriminated union — unknown
+ * kinds and unknown keys are refused at the edge, and a `complete` carries a result that must
+ * validate against the closed structured-result contract). This module turns (task snapshot,
+ * intent, ceilings, pending-cancel) into a typed PLAN and nothing else: no I/O, no clock, no
+ * database — which is why the build enforces 100% branch coverage HERE. An untested branch in this
+ * module is a corrupted task graph; keeping it pure is what makes that bar honest in every lane.
+ *
+ * The safety rules the planner owns:
+ *   - a pending `cancel` signal OVERRIDES the turn's own intent (the turn ran to its natural end —
+ *     nothing is killed mid-flight — but its outcome is the cancellation);
+ *   - fan-out acceptance checks: depth against the declared ceiling (on the materialized ancestry,
+ *     never on promises), the per-task fan-out cap (counted on the delegation table), unconditional
+ *     self-hand-off rejection, and cycle rejection when a child's owner already appears among the
+ *     ancestor owners — each a CLOSED rejection reason, no override flag anywhere;
+ *   - an approval with `onTimeout: 'escalate'` must NAME its escalation target — there is no
+ *     implicit "next approver up" to guess at;
+ *   - review rounds are a ceiling: a request past `maxReviewRounds` parks for a human instead of
+ *     looping;
+ *   - a malformed intent (or malformed result) never completes a task: it re-queues once with the
+ *     typed `tool_error` reason and FAILS on the second consecutive offense.
+ */
+import { z } from 'zod';
+import { type ChildTaskSpec, childTaskSpecSchema } from './create-task.js';
+import { type JoinPolicy, joinPolicySchema } from './join.js';
+
+/** The closed structured-result contract. A result that fails this never completes a task. */
+export const workerResultSchema = z.strictObject({
+  status: z.enum(['completed', 'partial', 'failed', 'needs_clarification']),
+  summary: z.string().min(1),
+  findings: z.array(z.string()).default([]),
+  recommendations: z.array(z.string()).default([]),
+  artifacts: z
+    .array(
+      z.strictObject({ kind: z.string().min(1), id: z.string().min(1), title: z.string().min(1) }),
+    )
+    .default([]),
+  confidence: z.number().min(0).max(1),
+  needsFollowUp: z.boolean().default(false),
+  suggestedFollowUp: z.string().min(1).optional(),
+});
+
+export type WorkerResult = z.output<typeof workerResultSchema>;
+
+/** The one turn-ending intent a handler returns. Strict at every level. */
+export const turnIntentSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('complete'), result: workerResultSchema }),
+  z.strictObject({
+    kind: z.literal('fan_out'),
+    children: z.array(childTaskSpecSchema).min(1),
+    joinPolicy: joinPolicySchema.prefault({ policy: 'all' }),
+  }),
+  z.strictObject({
+    kind: z.literal('request_approval'),
+    question: z.string().min(1),
+    options: z.array(z.string().min(1)).default([]),
+    approver: z.string().min(1).default('user'),
+    /** The enforced fate window: a hung approval is swept, never left waiting silently. */
+    timeoutMs: z.number().int().positive(),
+    onTimeout: z.enum(['fail', 'escalate']).default('fail'),
+    escalateTo: z.string().min(1).optional(),
+  }),
+  z.strictObject({ kind: z.literal('request_review'), reviewer: z.string().min(1) }),
+  z.strictObject({ kind: z.literal('yield') }),
+  z.strictObject({ kind: z.literal('fail'), message: z.string().min(1) }),
+]);
+
+export type TurnIntent = z.output<typeof turnIntentSchema>;
+
+export const DELEGATION_REJECTION_REASONS = [
+  'depth_exceeded',
+  'fanout_exceeded',
+  'self_delegation',
+  'delegation_cycle',
+] as const;
+
+export type DelegationRejectionReason = (typeof DELEGATION_REJECTION_REASONS)[number];
+
+/** What a malformed/rejected turn outcome does to the task: one retry, then failure. */
+export type ToolErrorFate = 'requeue' | 'fail';
+
+export type TurnPlan =
+  | { readonly kind: 'cancelled' }
+  | { readonly kind: 'complete'; readonly result: WorkerResult }
+  | {
+      readonly kind: 'fan_out';
+      readonly children: readonly ReturnType<typeof childTaskSpecSchema.parse>[];
+      readonly joinPolicy: JoinPolicy;
+    }
+  | {
+      readonly kind: 'request_approval';
+      readonly question: string;
+      readonly options: readonly string[];
+      readonly approver: string;
+      readonly timeoutMs: number;
+      readonly onTimeout: 'fail' | 'escalate';
+      readonly escalateTo: string | null;
+    }
+  | { readonly kind: 'request_review'; readonly reviewer: string; readonly round: number }
+  | { readonly kind: 'review_rounds_exhausted'; readonly reviewer: string }
+  | { readonly kind: 'yield' }
+  | { readonly kind: 'fail'; readonly message: string }
+  | {
+      readonly kind: 'delegation_rejected';
+      readonly reason: DelegationRejectionReason;
+      readonly detail: string;
+      readonly fate: ToolErrorFate;
+    }
+  | { readonly kind: 'invalid_intent'; readonly detail: string; readonly fate: ToolErrorFate };
+
+export interface PlanTurnInput {
+  /** The owner of the task whose turn ended (self-hand-off rejection input). */
+  readonly taskOwner: string;
+  /** Materialized ancestry depth (ancestryPath.length) — the depth-ceiling input. */
+  readonly ancestryDepth: number;
+  /** The OWNERS along the ancestry — the cycle-rejection input. */
+  readonly ancestorOwners: readonly string[];
+  /** Delegations this task has already opened (counted on the table, not on promises). */
+  readonly existingDelegationCount: number;
+  /** Declared ceilings (absent = unlimited). */
+  readonly maxDelegationDepth: number | null;
+  readonly maxDelegationsPerTask: number | null;
+  readonly maxReviewRounds: number | null;
+  /** Review rounds this task has already consumed. */
+  readonly reviewRoundsUsed: number;
+  /** True when the immediately preceding turn already ended in `tool_error` re-queue. */
+  readonly priorToolError: boolean;
+  /** True when a pending `cancel` signal was consumed at this turn's boundary. */
+  readonly pendingCancel: boolean;
+  readonly intent: TurnIntent;
+}
+
+function toolErrorFate(priorToolError: boolean): ToolErrorFate {
+  return priorToolError ? 'fail' : 'requeue';
+}
+
+/** The plan for a turn whose intent (or result) failed validation at the edge. */
+export function invalidIntentPlan(detail: string, priorToolError: boolean): TurnPlan {
+  return { kind: 'invalid_intent', detail, fate: toolErrorFate(priorToolError) };
+}
+
+export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
+  if (input.pendingCancel) return { kind: 'cancelled' };
+  const intent = input.intent;
+  switch (intent.kind) {
+    case 'complete':
+      return { kind: 'complete', result: intent.result };
+    case 'fan_out': {
+      const rejection = rejectFanOut(input, intent.children);
+      if (rejection) return rejection;
+      return { kind: 'fan_out', children: intent.children, joinPolicy: intent.joinPolicy };
+    }
+    case 'request_approval': {
+      if (intent.onTimeout === 'escalate' && intent.escalateTo === undefined) {
+        return invalidIntentPlan(
+          "request_approval with onTimeout 'escalate' must name escalateTo — there is no implicit escalation target. Fail-closed.",
+          input.priorToolError,
+        );
+      }
+      return {
+        kind: 'request_approval',
+        question: intent.question,
+        options: intent.options,
+        approver: intent.approver,
+        timeoutMs: intent.timeoutMs,
+        onTimeout: intent.onTimeout,
+        escalateTo: intent.escalateTo ?? null,
+      };
+    }
+    case 'request_review': {
+      if (input.maxReviewRounds !== null && input.reviewRoundsUsed >= input.maxReviewRounds) {
+        return { kind: 'review_rounds_exhausted', reviewer: intent.reviewer };
+      }
+      return {
+        kind: 'request_review',
+        reviewer: intent.reviewer,
+        round: input.reviewRoundsUsed + 1,
+      };
+    }
+    case 'yield':
+      return { kind: 'yield' };
+    case 'fail':
+      return { kind: 'fail', message: intent.message };
+  }
+}
+
+function rejectFanOut(input: PlanTurnInput, children: readonly ChildTaskSpec[]): TurnPlan | null {
+  if (input.maxDelegationDepth !== null && input.ancestryDepth + 1 > input.maxDelegationDepth) {
+    return {
+      kind: 'delegation_rejected',
+      reason: 'depth_exceeded',
+      detail: `child depth ${input.ancestryDepth + 1} exceeds maxDelegationDepth ${input.maxDelegationDepth}`,
+      fate: toolErrorFate(input.priorToolError),
+    };
+  }
+  if (
+    input.maxDelegationsPerTask !== null &&
+    input.existingDelegationCount + children.length > input.maxDelegationsPerTask
+  ) {
+    return {
+      kind: 'delegation_rejected',
+      reason: 'fanout_exceeded',
+      detail: `${input.existingDelegationCount} existing + ${children.length} requested exceeds maxDelegationsPerTask ${input.maxDelegationsPerTask}`,
+      fate: toolErrorFate(input.priorToolError),
+    };
+  }
+  for (const child of children) {
+    const owner = childTaskSpecSchema.parse(child).owner;
+    if (owner === input.taskOwner) {
+      return {
+        kind: 'delegation_rejected',
+        reason: 'self_delegation',
+        detail: `child owner '${owner}' is the delegating task's own owner`,
+        fate: toolErrorFate(input.priorToolError),
+      };
+    }
+    if (input.ancestorOwners.includes(owner)) {
+      return {
+        kind: 'delegation_rejected',
+        reason: 'delegation_cycle',
+        detail: `child owner '${owner}' already owns an ancestor task`,
+        fate: toolErrorFate(input.priorToolError),
+      };
+    }
+  }
+  return null;
+}

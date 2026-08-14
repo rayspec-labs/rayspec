@@ -24,14 +24,15 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@hono/node-server": "2.0.10",
+    "@hono/zod-openapi": "1.4.0",
     "@rayspec/auth-core": "workspace:*",
     "@rayspec/core": "workspace:*",
     "@rayspec/db": "workspace:*",
     "@rayspec/platform": "workspace:*",
     "@rayspec/product-yaml": "workspace:*",
     "@rayspec/spec": "workspace:*",
-    "@hono/node-server": "2.0.10",
-    "@hono/zod-openapi": "1.4.0",
+    "@rayspec/tasks": "workspace:*",
     "drizzle-orm": "0.45.2",
     "hono": "4.12.27",
     "jose": "6.2.3",

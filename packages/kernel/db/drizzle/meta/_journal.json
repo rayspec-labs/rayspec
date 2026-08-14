@@ -85,6 +85,13 @@
       "when": 1786571056897,
       "tag": "0011_tenant_event_bus",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1786661701293,
+      "tag": "0012_workforce_task_engine",
+      "breakpoints": true
     }
   ]
 }

@@ -4,15 +4,15 @@
   "reproduce": "pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs",
   "scope_note": "The package SET is derived from pnpm-lock.yaml (host-independent). Each licence is read verbatim from the installed package.json after a --frozen-lockfile install. Rows with installed:false are optional, platform-gated packages this host does not install; their licence was not read from disk and is recorded as null with an absent_reason, never dropped. 'provenance' below records WHERE the licences were read — it does not describe the scope of this inventory.",
   "lockfile": "pnpm-lock.yaml",
-  "lockfile_sha256": "294219e7d89280577ddc10db0720b364e7c06e03d7fe265bf6858c54f4a07d95",
+  "lockfile_sha256": "bb0413934aeaa9963b27e392f3f97bc530c8a688ed9279592dfa2dfff064e23a",
   "provenance": {
     "host": "darwin-arm64",
     "node": "v22.12.0"
   },
   "counts": {
-    "lockfile_distinct": 485,
-    "installed_here": 374,
-    "license_read_from_manifest": 374,
+    "lockfile_distinct": 503,
+    "installed_here": 392,
+    "license_read_from_manifest": 392,
     "license_not_read": 111
   },
   "classification": {
@@ -21,9 +21,9 @@
     "custom_or_proprietary": "^\\s*(?:SEE LICENSE IN|UNLICENSED)"
   },
   "license_groups": {
-    "MIT": 267,
+    "MIT": 282,
     "Apache-2.0": 57,
-    "BSD-3-Clause": 17,
+    "BSD-3-Clause": 20,
     "ISC": 16,
     "BlueOak-1.0.0": 5,
     "BSD-2-Clause": 2,
@@ -501,8 +501,43 @@
       "installed": true
     },
     {
+      "name": "@babel/helper-string-parser",
+      "version": "7.29.7",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "@babel/helper-validator-identifier",
+      "version": "7.29.7",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "@babel/parser",
+      "version": "7.29.8",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
       "name": "@babel/runtime",
       "version": "7.29.7",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "@babel/types",
+      "version": "7.29.8",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "@bcoe/v8-coverage",
+      "version": "1.0.2",
       "license": "MIT",
       "license_file_present": true,
       "installed": true
@@ -1366,8 +1401,22 @@
       "installed": true
     },
     {
+      "name": "@jridgewell/resolve-uri",
+      "version": "3.1.2",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
       "name": "@jridgewell/sourcemap-codec",
       "version": "1.5.5",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "@jridgewell/trace-mapping",
+      "version": "0.3.31",
       "license": "MIT",
       "license_file_present": true,
       "installed": true
@@ -2235,6 +2284,7 @@
         "packages/kernel/auth-core",
         "packages/kernel/spec",
         "packages/kernel/stt-port",
+        "packages/kernel/tasks",
         "packages/kernel/tts-port",
         "packages/workflow/nodes/agent-runtime",
         "packages/workflow/nodes/grounding-runtime",
@@ -2291,6 +2341,14 @@
       "license": "MIT",
       "license_file_present": true,
       "installed": true
+    },
+    {
+      "name": "@vitest/coverage-v8",
+      "version": "4.1.9",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true,
+      "direct_dependents": ["packages/kernel/tasks"]
     },
     {
       "name": "@vitest/expect",
@@ -2395,6 +2453,13 @@
     {
       "name": "assertion-error",
       "version": "2.0.1",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "ast-v8-to-istanbul",
+      "version": "1.0.5",
       "license": "MIT",
       "license_file_present": true,
       "installed": true
@@ -2655,9 +2720,11 @@
         "packages/adapters/deepgram",
         "packages/adapters/openai",
         "packages/adapters/openai-tts",
+        "packages/app/cli",
         "packages/app/server",
         "packages/kernel/db",
         "packages/kernel/platform",
+        "packages/kernel/tasks",
         "packages/test/parity",
         "packages/workflow/durable-dbos",
         "packages/workflow/workflow-durable"
@@ -2686,6 +2753,7 @@
         "packages/compose/product-yaml",
         "packages/kernel/db",
         "packages/kernel/platform",
+        "packages/kernel/tasks",
         "packages/workflow/durable-dbos",
         "packages/workflow/workflow-durable"
       ]
@@ -3009,6 +3077,13 @@
       "installed": true
     },
     {
+      "name": "has-flag",
+      "version": "4.0.0",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
       "name": "has-symbols",
       "version": "1.1.0",
       "license": "MIT",
@@ -3041,6 +3116,13 @@
       "name": "hosted-git-info",
       "version": "9.0.3",
       "license": "ISC",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "html-escaper",
+      "version": "2.0.2",
+      "license": "MIT",
       "license_file_present": true,
       "installed": true
     },
@@ -3136,6 +3218,27 @@
       "installed": true
     },
     {
+      "name": "istanbul-lib-coverage",
+      "version": "3.2.2",
+      "license": "BSD-3-Clause",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "istanbul-lib-report",
+      "version": "3.0.1",
+      "license": "BSD-3-Clause",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "istanbul-reports",
+      "version": "3.2.0",
+      "license": "BSD-3-Clause",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
       "name": "jiti",
       "version": "2.7.0",
       "license": "MIT",
@@ -3154,6 +3257,13 @@
         "packages/compose/api-auth",
         "packages/kernel/auth-core"
       ]
+    },
+    {
+      "name": "js-tokens",
+      "version": "10.0.0",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
     },
     {
       "name": "jsesc",
@@ -3380,6 +3490,20 @@
     {
       "name": "magic-string",
       "version": "0.30.21",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "magicast",
+      "version": "0.5.4",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "make-dir",
+      "version": "4.0.0",
       "license": "MIT",
       "license_file_present": true,
       "installed": true
@@ -4040,6 +4164,13 @@
       "installed": true
     },
     {
+      "name": "supports-color",
+      "version": "7.2.0",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
       "name": "tinybench",
       "version": "2.9.0",
       "license": "MIT",
@@ -4172,6 +4303,7 @@
         "packages/kernel/platform",
         "packages/kernel/spec",
         "packages/kernel/stt-port",
+        "packages/kernel/tasks",
         "packages/kernel/tts-port",
         "packages/test/parity",
         "packages/workflow/durable-dbos",
@@ -4259,6 +4391,7 @@
         "packages/kernel/platform",
         "packages/kernel/spec",
         "packages/kernel/stt-port",
+        "packages/kernel/tasks",
         "packages/kernel/tts-port",
         "packages/test/parity",
         "packages/workflow/durable-dbos",
@@ -4341,10 +4474,12 @@
         "packages/adapters/codex",
         "packages/adapters/openai",
         "packages/adapters/pi",
+        "packages/app/cli",
         "packages/compose/api-auth",
         "packages/kernel/auth-core",
         "packages/kernel/core",
-        "packages/kernel/spec"
+        "packages/kernel/spec",
+        "packages/kernel/tasks"
       ]
     },
     {

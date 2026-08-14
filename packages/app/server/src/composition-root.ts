@@ -83,9 +83,11 @@ import {
   crontabParseError,
   DbosCronScheduler,
   DbosDurableExecutor,
+  DbosTaskScheduler,
   DEFAULT_CLEANUP_SCHEDULE,
   DEFAULT_WORKER_CONCURRENCY,
   type ResolvedRun,
+  type ResolveTurnHandler,
   SystemCleanupScheduler,
 } from '@rayspec/durable-dbos';
 import {
@@ -1853,6 +1855,14 @@ export async function assembleServer(
      */
     moduleImporter?: ModuleImporter;
     /**
+     * Resolve a task OWNER to its turn handler for the task dispatcher. A composition/test seam,
+     * exactly the `moduleImporter` posture: it is NOT reachable from `assembleOptsFromEnv`, so a
+     * production entrypoint can never inject turn handlers through the environment — the embedder
+     * that composes them passes them here. Absent ⇒ no owner resolves, and a dispatched task fails
+     * typed (`no turn handler is registered`) rather than silently idling.
+     */
+    workforceTurnHandlers?: ResolveTurnHandler;
+    /**
      * The UPDATE flow: reviewed forward DELTA migration(s) to apply to an EXISTING
      * (the backend-profile RaySpec) schema, each carrying its own reviewed destructive-statement
      * allowlist (empty for a purely-additive delta). When present, the materialize/mount/
@@ -2073,6 +2083,7 @@ export async function assembleServer(
       registerProductTables: opts.registerProductTables,
       ...(opts.updateMigrations ? { updateMigrations: opts.updateMigrations } : {}),
       ...(opts.moduleImporter ? { moduleImporter: opts.moduleImporter } : {}),
+      ...(opts.workforceTurnHandlers ? { workforceTurnHandlers: opts.workforceTurnHandlers } : {}),
       ...(opts.bootWarn ? { bootWarn: opts.bootWarn } : {}),
     });
     app = deployed.app;
@@ -2346,6 +2357,8 @@ async function deployDeclaredSpec(
     /** DEV/TEST ONLY — the pack module importer (defaults to the guarded compiled-JavaScript-only
      * importer; production never sets it). See the `assembleServer` opts docstring. */
     moduleImporter?: ModuleImporter;
+    /** The task dispatcher's owner→handler resolution seam. See the `assembleServer` opts docstring. */
+    workforceTurnHandlers?: ResolveTurnHandler;
     /**
      * The boot's one-line WARNING sink, defaulting to `console.warn` — the same shape (and the same
      * reason) as `loadServerConfig`'s: it exists so a test can capture what the boot reported. EMIT-ONLY;
@@ -2716,6 +2729,15 @@ async function deployDeclaredSpec(
   // spec declares manual triggers (else the fire route fail-closes 501 — the unwired posture).
   const hasManualTriggers = effectiveSpec.triggers.some((t) => t.kind === 'manual');
   let wiredCronScheduler: DbosCronScheduler | undefined;
+
+  // ── The TASK-ENGINE dispatcher seam (late-bound, like the manual firer) ────────────────────────
+  // The task scheduler is wired AFTER deploy() (it rides the same pre-launch window the cron
+  // scheduler uses), but createAuthApp is built INSIDE deploy() — so the app's injected seam reads
+  // this late-bound ref at request time. The seam is injected ONLY when the preconditions are
+  // already known here: a durable worker (nothing dispatches without one) and the deployment task
+  // tenant (the same single-deployment posture as cron fires — RAYSPEC_CRON_TENANT_ID names the org
+  // durable tasks run under). Without both, the /v1/workforce surface fail-closes 501 wholesale.
+  let wiredTaskScheduler: DbosTaskScheduler | undefined;
   const manualTriggerFirer: ManualTriggerFirer | undefined = hasManualTriggers
     ? {
         async fireManual({ tenantId: reqTenant, name }) {
@@ -2904,6 +2926,13 @@ async function deployDeclaredSpec(
               // stream route) so a declared tool the OFF-REQUEST worker runs gets the SAME tenant-bound
               // `init.blob` the sync run surface gives it — built from the run's server-derived tenant.
               ...(blobFactory ? { blobFactory } : {}),
+              // Close the durable-path capability gap: the OFF-REQUEST worker's tool inits carry the
+              // SAME read/media seams the request path injects (fsSource/stt/tts, spread-absent when
+              // unconfigured) — an off-request tool that cannot read a file or transcribe an input
+              // was a request-path/durable-path divergence, not a posture.
+              ...(fsSourceFactory ? { fsSourceFactory } : {}),
+              ...(sttCapability ? { sttCapability } : {}),
+              ...(ttsCapability ? { ttsCapability } : {}),
             });
           }
           // Inject the tenant-bound blob backend into the engine (the `stream` route arm
@@ -2944,6 +2973,11 @@ async function deployDeclaredSpec(
             // Inject the manual-trigger fire seam (when the spec declares manual triggers) so
             // POST /v1/triggers/:name/fire drives it; it reads the late-bound scheduler at request time.
             ...(manualTriggerFirer ? { manualTriggerFirer } : {}),
+            // Inject the task-engine seam when its preconditions hold (a durable worker + the
+            // deployment task tenant); the kick reads the late-bound scheduler at request time.
+            ...(durableExecutorInstance && config.cronTenantId
+              ? { workforce: { kick: () => wiredTaskScheduler?.kick() } }
+              : {}),
           }) as App;
         },
       },
@@ -3029,7 +3063,16 @@ async function deployDeclaredSpec(
         tenantId: cronTenantId,
         executor: durableExecutorInstance,
         productTables,
-        invokeTriggerHandler,
+        // Close the durable-path capability gap for TRIGGER handlers too: the composition root
+        // closes over its wired read/media seams so a fired handler's init carries the SAME
+        // fsSource/stt/tts the request path injects — spread-absent when unconfigured, exactly the
+        // route-builder idiom.
+        invokeTriggerHandler: (fn, tdb, tables, name) =>
+          invokeTriggerHandler(fn, tdb, tables, name, {
+            ...(fsSourceFactory ? { fsSourceFactory } : {}),
+            ...(sttCapability ? { stt: sttCapability } : {}),
+            ...(ttsCapability ? { tts: ttsCapability } : {}),
+          }),
         // The per-firing existence probe. Bound to the WORKER pool (the pool the fire itself dispatches
         // off) so the check never borrows an HTTP connection, and re-evaluated on every call — that is
         // what makes an org created mid-life start firing without a restart. The tenant is the one the
@@ -3121,12 +3164,41 @@ async function deployDeclaredSpec(
     bootWarn(eventBusUnsweptBootNotice(eventBusRetentionHours));
   }
 
+  // ── Wire the TASK-ENGINE dispatcher (BEFORE launch) ─────────────────────────────────────────
+  // The turn dispatcher + its reserve/sweep ticks ride the SAME pre-launch window the cron and
+  // cleanup schedulers use. Preconditions mirror the injected app seam above: a durable worker (a
+  // task with nothing to dispatch it is a stranded row) and the deployment task tenant
+  // (RAYSPEC_CRON_TENANT_ID — the single-deployment posture every off-request fire already runs
+  // under). Without both this stays unwired and the /v1/workforce surface answers its 501s.
+  let startTaskSchedulerQueue: (() => Promise<void>) | undefined;
+  if (durableExecutorInstance && workerDbHandle && config.cronTenantId) {
+    const taskTenantId = config.cronTenantId;
+    // The tenant SHAPE is boot-checkable (a malformed id never becomes valid by waiting); whether
+    // the org EXISTS stays a per-pass question through the same probe the cron scheduler uses.
+    await assertCronTenantBootable(db, taskTenantId);
+    const taskScheduler = new DbosTaskScheduler({
+      db: workerDbHandle,
+      tenantId: taskTenantId,
+      tenantExists: (passTenantId: string) => tenantOrgExists(workerDbHandle as Db, passTenantId),
+      // The owner→handler resolution seam (opts-only, like moduleImporter — no env path). Absent ⇒
+      // every dispatched owner fails typed rather than idling.
+      resolveTurnHandler: opts.workforceTurnHandlers ?? (() => undefined),
+    });
+    durableExecutorInstance.attachPreLaunchHook(() => taskScheduler.registerScheduledWorkflows());
+    wiredTaskScheduler = taskScheduler;
+    // The turn queue is DB-backed and registers only on a LAUNCHED engine — deferred past start().
+    startTaskSchedulerQueue = () => taskScheduler.registerQueue();
+  }
+
   // Fix F: NOW that deploy() → buildApp has bound `workerAgentRegistry`, START the durable engine
   // (DBOS.launch() begins crash-recovery + queue dispatch). A recovered/enqueued job that reaches
   // `resolveRun` will find the registry bound (no spurious terminal failure). enqueue was unreachable
   // before this (the run surface serves only after assembleServer returns), so nothing raced. The cron
   // scheduler's pre-launch hook (attached above) registers its scheduled-workflows inside this start().
   if (pendingExecutorStart) await pendingExecutorStart();
+  // Register the task-turn queue AFTER launch (registerQueue requires a launched engine — the same
+  // ordering the run queue keeps inside executor.start()).
+  if (startTaskSchedulerQueue) await startTaskSchedulerQueue();
 
   // ── wire the on-demand tenant DATA-ERASURE control seam ──────────────────────────────────────
   // Threads the deployed product tables + stores (for FK-safe ordering), the wired blob backend (built
