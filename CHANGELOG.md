@@ -752,8 +752,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   point `--version` uses: `rayspec --help`, `rayspec <command> --help`, and
   `rayspec <group> <sub> --help` each exit `0` and print to stdout, with `rayspec dev --help`
   answering for all three `dev` commands and `rayspec dev db --help` for that one alone.
-  `rayspec deploy --help` now shows deploy's five flags (`--dry-run`, `--port`, `--host`,
-  `--apply-migration`, `--allowlist`) without the rest of the manual around them.
+  `rayspec deploy --help` now shows deploy's six flags (`--dry-run`, `--check-env`, `--port`,
+  `--host`, `--apply-migration`, `--allowlist`) without the rest of the manual around them.
 
   **This is the one documented exception to "every subcommand emits exactly one JSON object on
   stdout"**: the help text is plain text, and every place that carried that promise — the CLI
@@ -838,6 +838,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   searched.
 
 ### Documentation
+
+- **`rayspec deploy --host <addr>` is documented.** The flag has always been accepted and has always
+  been printed by `rayspec deploy --help`, but the CLI reference's deploy section described the
+  other five flags and not this one — both synopsis forms that carry `[--port <n>]` omitted it, and
+  so did the `Flags:` summary, leaving `--host` in the whole document exactly once, inside the
+  quoted `deploy --help` transcript. So an operator reading the deploy section learned neither the
+  flag nor the loopback bind default from it; both were reachable by running the help text, or from
+  the `RAYSPEC_HOST` entry in `.env.example`, the environment surface this reference points readers
+  at. The section now names `--host <addr>` in both synopsis forms and in the summary, and carries a
+  bullet for it: it writes `RAYSPEC_HOST`, overriding an ambient value, exactly as `--port`
+  overrides `PORT`; unset, blank or whitespace-only binds loopback, so a deployment is not reachable
+  off-box until an operator names another interface; the boot banner reports the address actually
+  bound rather than a fixed loopback string; `--dry-run` and `--check-env` bind nothing, so each
+  accepts and ignores it — where both refuse `--apply-migration` / `--allowlist`; and it moves the
+  listen address only, leaving the OIDC issuer at its `http://127.0.0.1:<port>/oidc` default, so a
+  deployment bound to `0.0.0.0` keeps emitting loopback OIDC URLs until `OIDC_ISSUER` names the
+  address its clients reach it on. A `@rayspec/cli` test now reads deploy's option set out of the
+  argument parser that declares it and fails when a flag the command accepts is missing from either
+  of those two places; the per-flag bullets are not covered, because `--port` and `--allowlist`
+  carry none. Nothing about the command changed — the flag, its loopback default and the help text
+  are exactly as they were.
 
 - **The getting-started backend-profile walkthrough now points at `rayspec deploy --check-env`
   before the first boot, so a reader can ask for the environment its document demands instead of

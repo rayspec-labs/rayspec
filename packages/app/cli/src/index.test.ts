@@ -19,6 +19,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parseDeployArgs } from './deploy.js';
 import { main, run } from './index.js';
 
 const VALID_SPEC = `
@@ -298,10 +299,17 @@ describe('run — `--help`/`-h` at every level', () => {
     });
   }
 
-  it('`deploy --help` is SCOPED to deploy: its five flags, not the general manual', async () => {
+  it('`deploy --help` is SCOPED to deploy: its own flags, not the general manual', async () => {
     await run(['deploy', '--help']);
     const out = outChunks.join('');
-    for (const flag of ['--dry-run', '--port', '--host', '--apply-migration', '--allowlist']) {
+    for (const flag of [
+      '--dry-run',
+      '--check-env',
+      '--port',
+      '--host',
+      '--apply-migration',
+      '--allowlist',
+    ]) {
       expect(out, `deploy's help must name ${flag}`).toContain(flag);
     }
     // The whole manual would carry these; deploy's own block does not.
@@ -497,5 +505,91 @@ describe('docs/cli-reference.md — the --version example does not go stale', ()
     const shown = /\{\s*"ok":\s*true,\s*"version":\s*"([^"]+)"\s*\}/.exec(doc);
     expect(shown, 'the --version example was not found in docs/cli-reference.md').not.toBeNull();
     expect((shown as RegExpExecArray)[1]).toBe(manifest.version);
+  });
+});
+
+/**
+ * `deploy`'s DOCUMENTED flags, checked against the flags it actually takes.
+ *
+ * The reference describes deploy's flags as prose — a synopsis block and a `Flags:` summary sentence —
+ * and nothing regenerates either, so a flag added to the parser reaches `--help` (which is assembled
+ * from the command's own block) while the document stays silent. `--host` shipped that way. The
+ * option set is read from the one place the grammar is declared, the `parseArgs` options literal in
+ * `parseDeployArgs` (`deploy.ts`) — the same way `deploy.test.ts`'s structural guards read that file —
+ * and every name it yields is then re-proved against the live parser, with an invented flag as the
+ * accept control, so an extraction that drifted cannot quietly shrink the arms below.
+ *
+ * What these arms pin is each flag's PRESENCE in the synopsis and in the summary. The per-flag bullets
+ * are deliberately not covered: `--port` and `--allowlist` carry none, so demanding a bullet per flag
+ * would fail on the document as written.
+ */
+describe("docs/cli-reference.md — deploy's documented flags do not go stale", () => {
+  const deploySrc = readFileSync(new URL('./deploy.ts', import.meta.url), 'utf8');
+  const parseArgsCall = /parseArgs\(\{[\s\S]*?\n\s*\}\);/.exec(deploySrc)?.[0] ?? '';
+  const declaredFlags = [
+    ...parseArgsCall.matchAll(/'?([a-z][a-z0-9-]*)'?:\s*\{\s*type:\s*'(?:boolean|string)'/g),
+  ].map((m) => `--${m[1]}`);
+
+  const doc = readFileSync(new URL('../../../../docs/cli-reference.md', import.meta.url), 'utf8');
+  const heading = doc.indexOf('## `deploy` — boot and serve a declared product');
+  const section = heading < 0 ? '' : doc.slice(heading, doc.indexOf('\n## ', heading + 1));
+  const synopsis = /```\n([\s\S]*?)\n```/.exec(section)?.[1] ?? '';
+  const flagsSummary = /\n- \*\*Flags:\*\*([\s\S]*?)\n- \*\*/.exec(section)?.[1] ?? '';
+
+  // A flag counts as named only where the WHOLE token appears — `--host` must not be satisfied by a
+  // longer `--host…` spelling that happens to start with it.
+  const names = (text: string, flag: string): boolean => new RegExp(`${flag}(?![\\w-])`).test(text);
+
+  it('the option set is read from the parser, and every name it yields is a flag deploy accepts', () => {
+    expect(parseArgsCall, "parseDeployArgs's parseArgs call was not found in deploy.ts").not.toBe(
+      '',
+    );
+    // Every `type:` entry in that call produced a name: a partial extraction would leave the arms
+    // below checking fewer flags than deploy takes, which is the exact drift they exist to catch.
+    expect(declaredFlags.length).toBe((parseArgsCall.match(/type:\s*'/g) ?? []).length);
+    expect(declaredFlags.length).toBeGreaterThan(0);
+    // The parser is strict, so acceptance is the proof a name is a real flag. A flag either takes a
+    // value or does not; try both spellings before concluding it is rejected.
+    const accepts = (flag: string): boolean =>
+      [[flag], [flag, 'v']].some((argv) => {
+        try {
+          parseDeployArgs(argv);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    for (const flag of declaredFlags) expect(accepts(flag), `${flag} must parse`).toBe(true);
+    // The accept control: without it, a parser that accepted anything would pass every arm above.
+    expect(accepts('--frobnicate')).toBe(false);
+  });
+
+  it('`deploy --help` names every flag the parser accepts', async () => {
+    expect(await main(['deploy', '--help'])).toBe(0);
+    const out = outChunks.join('');
+    for (const flag of declaredFlags) {
+      expect(names(out, flag), `deploy's help must name ${flag}`).toBe(true);
+    }
+  });
+
+  it("the reference's deploy synopsis names every flag the parser accepts", () => {
+    expect(synopsis, 'the deploy synopsis block was not found in docs/cli-reference.md').not.toBe(
+      '',
+    );
+    for (const flag of declaredFlags) {
+      expect(names(synopsis, flag), `the deploy synopsis must name ${flag}`).toBe(true);
+    }
+  });
+
+  it("the reference's deploy `Flags:` summary names every flag the parser accepts", () => {
+    expect(
+      flagsSummary,
+      'the deploy `Flags:` summary was not found in docs/cli-reference.md',
+    ).not.toBe('');
+    for (const flag of declaredFlags) {
+      expect(names(flagsSummary, flag), `the deploy \`Flags:\` summary must name ${flag}`).toBe(
+        true,
+      );
+    }
   });
 });

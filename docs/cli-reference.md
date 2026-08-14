@@ -664,8 +664,9 @@ Against an existing organization, skip steps 1–2 entirely and set
 ## `deploy` — boot and serve a declared product
 
 ```
-rayspec deploy <spec.yaml> [--port <n>]
-rayspec deploy <spec.yaml> --apply-migration <delta.sql> [--allowlist <file.json>] [--port <n>]
+rayspec deploy <spec.yaml> [--port <n>] [--host <addr>]
+rayspec deploy <spec.yaml> --apply-migration <delta.sql> [--allowlist <file.json>]
+               [--port <n>] [--host <addr>]
 rayspec deploy --dry-run <spec.yaml>
 rayspec deploy --check-env <spec.yaml>
 ```
@@ -814,6 +815,17 @@ change is applied by the explicit `--apply-migration` flag below.
   frontend-only spec (the static profile below touches no database either), and a bare
   `--allowlist` without `--apply-migration` is refused (it would be silently ignored).
   Both file paths are jailed exactly like the spec path.
+- **`--host <addr>`** sets the interface the serve path binds, by writing `RAYSPEC_HOST` —
+  a value passed here overrides an ambient one, exactly as `--port` overrides `PORT`.
+  Unset, blank or whitespace-only means **loopback** (`127.0.0.1`), so a deployment is
+  **not reachable off-box** until an operator names another interface (`--host 0.0.0.0`
+  binds all of them); the boot banner reports the address actually bound rather than a
+  fixed loopback string. It is a **serve-path** flag: `--dry-run` and `--check-env` answer
+  without binding anything, so a `--host` passed alongside either is accepted and ignored —
+  unlike `--apply-migration` / `--allowlist`, which those two modes refuse outright. It
+  moves the **listen address only**. The OIDC issuer still defaults to
+  `http://127.0.0.1:<port>/oidc`, so a deployment bound to `0.0.0.0` keeps emitting
+  loopback OIDC URLs until `OIDC_ISSUER` names the address its clients reach it on.
 - **Postgres:** required for the serve path (it applies the committed **platform**
   migration chain and materializes/mounts stores). `--dry-run` touches no database,
   and neither does a frontend-only spec — see the static-profile bullet below.
@@ -830,9 +842,10 @@ change is applied by the explicit `--apply-migration` flag below.
   instead of a compose verdict — the same detection the boot branches on, so the check
   and the boot cannot disagree. See
   [getting-started → a frontend-only (static) deployment](./getting-started.md#a-frontend-only-static-deployment).
-- **Flags:** `--port <n>` overrides `PORT` (serve path); `--dry-run` selects the
-  one-shot compose check; `--check-env` selects the one-shot boot-environment check;
-  `--apply-migration <delta.sql>` applies a reviewed forward
+- **Flags:** `--port <n>` overrides `PORT` (serve path); `--host <addr>` overrides
+  `RAYSPEC_HOST` and moves the bind off the loopback default (serve path); `--dry-run`
+  selects the one-shot compose check; `--check-env` selects the one-shot
+  boot-environment check; `--apply-migration <delta.sql>` applies a reviewed forward
   migration; `--allowlist <file.json>` (requires `--apply-migration`) covers reviewed
   destructive statements in that delta.
 - **Exit:** the serve path stays up until a signal; a fail-closed boot error (a
