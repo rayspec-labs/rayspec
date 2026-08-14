@@ -5,9 +5,11 @@
  * their CURRENT shape inside a dedicated schema, so these suites are deterministic and isolated
  * from the db/platform/api-auth suites when turbo runs them against the same local Postgres.
  *
- * NOTE: this file is excluded from the package build (test support, not shipped code). The
- * canonical schema is packages/kernel/db/src/schema.ts; this DDL mirrors migration 0012 plus the
- * orgs root and run_events (the journal stream the engine appends to).
+ * NOTE: exported via the `@rayspec/tasks/test-support` subpath (never the main barrel) so the
+ * db-backed suites of the layers ABOVE the engine — the boot wiring included — can drive exactly
+ * the rows the engine writes. The canonical schema is packages/kernel/db/src/schema.ts; this DDL
+ * mirrors migration 0012 plus the orgs root and run_events (the journal stream the engine appends
+ * to).
  */
 import { randomUUID } from 'node:crypto';
 import { forTenant } from '@rayspec/db';

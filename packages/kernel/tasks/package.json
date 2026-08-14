@@ -11,6 +11,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./test-support": {
+      "types": "./dist/test-support/test-db.d.ts",
+      "default": "./dist/test-support/test-db.js"
     }
   },
   "main": "./dist/index.js",

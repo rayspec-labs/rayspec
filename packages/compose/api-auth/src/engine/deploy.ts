@@ -108,6 +108,7 @@ import {
   detectSpecKind,
   type RaySpec,
   parseProductSpec,
+  type ParseSpecOptions,
   parseSpec,
   type SpecError,
 } from '@rayspec/spec';
@@ -252,6 +253,11 @@ export interface DeployConfig {
   /** The raw `rayspec.yaml` text — validated (parseSpec) by step 1; a `!ok` aborts. */
   readonly specSource: string;
   /**
+   * The caller's parse opt-ins for step 1 (experimental sections). Absent ⇒ the fail-closed
+   * default parse — a caller that has not decided rejects an experimental section.
+   */
+  readonly specParse?: ParseSpecOptions;
+  /**
    * The reviewed migrations to apply (the deployer reviews the generated SQL + commits it; here
    * it passes the migration(s) it intends to apply, each gated by step 3). For a first
    * materialization this is the generator's additive output; a forward-fix passes its own migration.
@@ -311,7 +317,7 @@ export async function deploy<App = unknown>(config: DeployConfig): Promise<Deplo
     }
     spec = product.engineSpec;
   } else {
-    const parsed = parseSpec(specSource);
+    const parsed = parseSpec(specSource, config.specParse ?? {});
     if (!parsed.ok) {
       throw new DeployError(
         'validate',
