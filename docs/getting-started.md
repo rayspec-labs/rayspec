@@ -615,6 +615,14 @@ RAYSPEC_SPEC_PATH=<your-backend-spec>.yaml $RAYSPEC_SERVE
 A missing or misconfigured credential fails the boot fast, naming the backend and
 the agent(s) that select it — never deep inside a request.
 
+Because `rayspec deploy <spec>` and the `rayspec-serve` invocation above are the
+same boot, you can ask that boot what it will demand instead of attempting it:
+`rayspec deploy --check-env <your-backend-spec>.yaml` is a one-shot check that
+reports the variables this document's boot will require, why each is required,
+and whether it is currently set — it opens no database and binds no port, and the
+[CLI reference](./cli-reference.md#deploy--boot-and-serve-a-declared-product)
+lists what it deliberately does not check.
+
 `examples/lead-qualifier/` is the runnable worked example: a backend-profile spec
 whose declared agent runs **off-request** on the durable worker and records its
 verdict by calling a persist tool. Its README walks the full register → org → POST
