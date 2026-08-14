@@ -12,10 +12,16 @@
  *   node scripts/check-spec-schema.mjs            # CHECK (exit 1 on drift)
  *   node scripts/check-spec-schema.mjs --write    # REGENERATE the committed artifact
  *
- * SCOPE (honest): this gate ONLY checks FRESHNESS (artifact == exporter). The exporter's
- * Ajv2020-enforceability / round-trip contract is already proven by `packages/kernel/spec/src/export.test.ts`
- * — NOT duplicated here. DB-free + secret-free (pure schema derivation). It imports the BUILT exporter
- * from `packages/kernel/spec/dist`, so it runs AFTER `pnpm build` in the CI chain (a clear error if unbuilt).
+ * SCOPE (honest): this gate checks FRESHNESS (artifact == exporter) AND the per-node CLOSED-SHAPE
+ * invariant — every object node that declares `properties`, at EVERY nesting level of every derived
+ * schema, must carry `additionalProperties:false` (a grammar level that lost its `.strict()` turns
+ * the gate red at its exact JSON Pointer; deliberate record maps declare no properties and stay
+ * legal). The walk itself (`findOpenObjectNodes`) lives in the exporter module and is unit-tested in
+ * `packages/kernel/spec/src/export.test.ts`; the gate SELF-TESTS it on two known fixtures before
+ * trusting any scan. The exporter's Ajv2020-enforceability / round-trip contract is already proven
+ * by the same test file — NOT duplicated here. DB-free + secret-free (pure schema derivation). It
+ * imports the BUILT exporter from `packages/kernel/spec/dist`, so it runs AFTER `pnpm build` in the
+ * CI chain (a clear error if unbuilt).
  *
  * NOTE: this is the MINIMAL schema-emit + drift-gate. Generated handler TYPES
  * are deliberately OUT OF SCOPE here.
@@ -85,14 +91,66 @@ async function loadExporters() {
       process.exit(1);
     }
   }
+  if (typeof mod.findOpenObjectNodes !== 'function') {
+    console.error(
+      'spec-schema gate FAILED: @rayspec/spec/dist does not export `findOpenObjectNodes` ' +
+        '(the per-node closed-shape walk). Did the export surface change?',
+    );
+    process.exit(1);
+  }
   return mod;
+}
+
+/**
+ * SELF-TEST the closed-shape walk on two known fixtures BEFORE trusting any scan: an object that
+ * lost its `.strict()` must be flagged at its exact pointer, and a closed shape with a deliberate
+ * record map must scan clean. A detector that cannot find the planted defect proves nothing about
+ * the real artifacts. Exit 2 on a self-test failure (distinct from a real violation's exit 1).
+ */
+function selfTestClosedShapeWalk(findOpenObjectNodes) {
+  const openFixture = {
+    type: 'object',
+    properties: { outer: { type: 'object', properties: { x: { type: 'string' } } } },
+    additionalProperties: false,
+  };
+  const closedFixture = {
+    type: 'object',
+    properties: {
+      map: { type: 'object', propertyNames: { type: 'string' }, additionalProperties: {} },
+    },
+    additionalProperties: false,
+  };
+  const flagged = findOpenObjectNodes(openFixture);
+  const clean = findOpenObjectNodes(closedFixture);
+  if (flagged.length !== 1 || flagged[0] !== '/properties/outer' || clean.length !== 0) {
+    console.error(
+      'spec-schema gate SELF-TEST FAILED: findOpenObjectNodes did not flag the planted open node ' +
+        `(got ${JSON.stringify(flagged)}) or wrongly flagged the closed fixture ` +
+        `(got ${JSON.stringify(clean)}). Refusing to scan with a broken detector.`,
+    );
+    process.exit(2);
+  }
 }
 
 const write = process.argv.includes('--write');
 const mod = await loadExporters();
+selfTestClosedShapeWalk(mod.findOpenObjectNodes);
 
 for (const { path, exportName } of ARTIFACTS) {
-  const fresh = serializeSchema(mod[exportName]());
+  const derived = mod[exportName]();
+  const fresh = serializeSchema(derived);
+
+  // The CLOSED-SHAPE invariant binds on --write too: an open node must never be committable.
+  const openNodes = mod.findOpenObjectNodes(derived);
+  if (openNodes.length > 0) {
+    console.error(
+      `spec-schema gate FAILED: ${exportName} emits ${openNodes.length} OPEN object node(s) — an ` +
+        'object level declares properties without `additionalProperties:false` (a grammar object ' +
+        'lost its `.strict()`; unknown keys would be silently accepted there). Fail-closed. At:\n' +
+        openNodes.map((pointer) => `    ${pointer}`).join('\n'),
+    );
+    process.exit(1);
+  }
 
   if (write) {
     writeFileSync(path, fresh);
@@ -122,6 +180,7 @@ for (const { path, exportName } of ARTIFACTS) {
   }
 
   console.log(
-    `spec-schema gate PASSED: ${path} is fresh (${fresh.length} bytes, byte-identical to ${exportName}).`,
+    `spec-schema gate PASSED: ${path} is fresh (${fresh.length} bytes, byte-identical to ${exportName}) ` +
+      'and every object node that declares properties is closed.',
   );
 }

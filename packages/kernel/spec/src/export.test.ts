@@ -13,7 +13,12 @@
 import type { Ajv2020 as Ajv2020Class } from 'ajv/dist/2020.js';
 import * as Ajv2020Module from 'ajv/dist/2020.js';
 import { describe, expect, it } from 'vitest';
-import { exportJsonSchema, exportUnifiedJsonSchema } from './export.js';
+import {
+  exportJsonSchema,
+  exportProductJsonSchema,
+  exportUnifiedJsonSchema,
+  findOpenObjectNodes,
+} from './export.js';
 
 type AjvInstance = Ajv2020Class;
 const Ajv2020Ctor = ((Ajv2020Module as { default?: unknown }).default ?? Ajv2020Module) as new (
@@ -289,5 +294,78 @@ describe('exportUnifiedJsonSchema — Ajv2020 compile + oneOf round-trip contrac
     expect(productArm(MINIMAL_BACKEND)).toBe(false);
     expect(productArm(MINIMAL_PRODUCT)).toBe(true);
     expect(backendArm(MINIMAL_PRODUCT)).toBe(false);
+  });
+});
+
+describe('findOpenObjectNodes — the per-node closed-shape walk', () => {
+  it('reports NO open nodes across all three exported artifacts (every strict level is closed)', () => {
+    expect(findOpenObjectNodes(exportJsonSchema())).toEqual([]);
+    expect(findOpenObjectNodes(exportProductJsonSchema())).toEqual([]);
+    expect(findOpenObjectNodes(exportUnifiedJsonSchema())).toEqual([]);
+  });
+
+  it('flags an object that declares properties without additionalProperties:false, at its exact pointer', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        outer: {
+          type: 'object',
+          properties: { inner: { type: 'string' } }, // lost its .strict() — the regression under test
+        },
+      },
+      additionalProperties: false,
+    };
+    expect(findOpenObjectNodes(schema)).toEqual(['/properties/outer']);
+  });
+
+  it('flags a loose object (object-valued additionalProperties BESIDE declared properties)', () => {
+    const schema = {
+      type: 'object',
+      properties: { a: { type: 'string' } },
+      additionalProperties: {},
+    };
+    expect(findOpenObjectNodes(schema)).toEqual(['/']);
+  });
+
+  it('does NOT flag a record map (no declared properties — deliberate openness)', () => {
+    const schema = {
+      type: 'object',
+      propertyNames: { type: 'string' },
+      additionalProperties: {},
+    };
+    expect(findOpenObjectNodes(schema)).toEqual([]);
+  });
+
+  it('walks keyword positions only — a property NAMED properties cannot fake a schema node', () => {
+    const schema = {
+      type: 'object',
+      // The property map contains a field literally named `properties`; its VALUE is a schema and is
+      // walked as one, but the MAP itself must never be treated as an open schema node.
+      properties: {
+        properties: { type: 'object', properties: { x: { type: 'string' } } },
+      },
+      additionalProperties: false,
+    };
+    expect(findOpenObjectNodes(schema)).toEqual(['/properties/properties']);
+  });
+
+  it('descends through oneOf arms, array items and $defs', () => {
+    const schema = {
+      oneOf: [
+        { type: 'object', properties: { a: { type: 'string' } } },
+        {
+          type: 'array',
+          items: { type: 'object', properties: { b: { type: 'string' } } },
+        },
+      ],
+      $defs: {
+        leaf: {
+          type: 'object',
+          properties: { c: { type: 'string' } },
+          additionalProperties: false,
+        },
+      },
+    };
+    expect(findOpenObjectNodes(schema)).toEqual(['/oneOf/0', '/oneOf/1/items']);
   });
 });
