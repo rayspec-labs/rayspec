@@ -3,7 +3,7 @@
  *
  * `rayspec plan`'s OPTIONAL shadow-apply only runs when `SHADOW_DATABASE_URL` is set, and the read-only
  * same-DB guard can only fire when it has a `DATABASE_URL` to compare against. Without auto-loading
- * a local `.env`, an operator running `node packages/cli/dist/index.js plan …` got a silent
+ * a local `.env`, an operator running `node packages/app/cli/dist/index.js plan …` got a silent
  * `shadowApplied:false` (the shadow check skipped) and no read-only-guard comparison target — unless they
  * manually exported both. This loader fixes that by reading a local `.env` at CLI startup,
  * mirroring `@rayspec/server`'s `loadLocalDotenvIfPresent` (packages/app/server/src/read-env.ts).
@@ -28,18 +28,20 @@ import { fileURLToPath } from 'node:url';
 
 /**
  * The `.env` locations the loader searches, in PRECEDENCE order (deduplicated when they coincide —
- * the common run-from-the-checkout-root case):
+ * the common run-from-the-install-root case):
  *   1. `$PWD/.env` — the INVOKING project's file. In the vendored/submodule layout the brownfield
  *      docs recommend (the CLI run from `vendor/rayspec/…` inside a product repo), this is where the
  *      config actually lives.
  *   2. the INSTALL-ROOT `.env`, resolved relative to THIS module's own location
- *      (`packages/cli/{src,dist}` → the RaySpec checkout root) — the same source-relative resolution
- *      the server's loader uses, and identical to `$PWD/.env` when the CLI is run from its own checkout.
+ *      (`packages/app/cli/{src,dist}` → the root of the RaySpec installation, which in a published
+ *      package layout is the consumer's `node_modules/rayspec` and not anyone's checkout) — the same
+ *      source-relative resolution the server's loader uses, and identical to `$PWD/.env` when the CLI
+ *      is run from that root.
  * Exported so the missing-required-variable refusal can NAME the searched paths (paths only — never
  * file contents).
  */
 export function dotenvCandidatePaths(): readonly string[] {
-  // packages/cli/{src,dist} -> repo root.
+  // packages/app/cli/{src,dist} -> install root.
   const here = dirname(fileURLToPath(import.meta.url));
   return [
     ...new Set([resolve(process.cwd(), '.env'), resolve(here, '..', '..', '..', '..', '.env')]),

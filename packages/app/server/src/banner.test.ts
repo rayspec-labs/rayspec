@@ -150,9 +150,11 @@ describe('bootBanner — the observed agent trace-export posture', () => {
     const banner = bootBanner(booted({ agentTracing }), BASE);
     expect(banner).toContain('Trace export:          OFF');
     expect(banner).toContain('tool arguments and outputs');
-    // The remediation half, scoped to the two entry points that actually read the variable — this
-    // banner is also printed by two dev-boot wrappers that never consult it.
-    expect(banner).toContain("RAYSPEC_AGENT_TRACING=openai on 'rayspec deploy' / 'rayspec-serve'");
+    // The remediation half, unqualified because every boot that prints this banner applies a posture
+    // — the property wrapper-agent-tracing.test.ts discovers the call sites to hold.
+    expect(banner).toContain(
+      'RAYSPEC_AGENT_TRACING=openai — every boot that prints this banner reads it',
+    );
     // …and it does not promise that turning the export on would send prompts: the SDK strips them.
     expect(banner).not.toContain('prompt');
     expect(banner).not.toContain('EXPORTING TO OPENAI');
@@ -166,7 +168,9 @@ describe('bootBanner — the observed agent trace-export posture', () => {
     expect(banner).toContain('Trace export:          EXPORTING TO OPENAI');
     expect(banner).toContain('tool arguments and outputs');
     expect(banner).toContain('strips the model prompt fields');
-    expect(banner).toContain("RAYSPEC_AGENT_TRACING=off on 'rayspec deploy' / 'rayspec-serve'");
+    expect(banner).toContain(
+      'RAYSPEC_AGENT_TRACING=off — every boot that prints this banner reads it',
+    );
     expect(banner).not.toContain('Trace export:          OFF');
   });
 });

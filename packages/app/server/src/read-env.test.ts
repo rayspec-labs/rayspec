@@ -40,7 +40,7 @@ const CONFIG_REFUSAL = 'required env var(s) missing';
 
 /**
  * Every key that can carry the boot past the secret gate, PRESENT and BLANK. Present is what disarms
- * them: the loader's no-override rule is `key in process.env`, so a checkout-root `.env` — the
+ * them: the loader's no-override rule is `key in process.env`, so the `.env` beside this checkout — the
  * install-root candidate these arms resolve for real — can supply none of them. Blank is what makes the
  * boot stop: `loadServerConfig` counts a blank secret as missing.
  *

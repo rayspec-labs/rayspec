@@ -19,16 +19,18 @@ import { fileURLToPath } from 'node:url';
 
 /**
  * The `.env` locations the loader searches, in PRECEDENCE order (deduplicated when they coincide —
- * the common run-from-the-checkout-root case):
+ * the common run-from-the-install-root case):
  *   1. `$PWD/.env` — the INVOKING project's file. In the vendored/submodule layout the brownfield
  *      docs recommend (`rayspec-serve` run from a product repo against `vendor/rayspec/…`), this is
  *      where the config actually lives.
  *   2. the INSTALL-ROOT `.env`, resolved relative to THIS module's own location
- *      (`packages/app/server/{src,dist}` → the RaySpec checkout root) — the only path this loader used
- *      to search, and identical to `$PWD/.env` when the entrypoint is run from its own checkout.
+ *      (`packages/app/server/{src,dist}` → the root of the RaySpec installation, which in a published
+ *      package layout is the consumer's `node_modules/rayspec` and not anyone's checkout) — the only
+ *      path this loader used to search, and identical to `$PWD/.env` when the entrypoint is run from
+ *      that root.
  */
 function dotenvCandidatePaths(): readonly string[] {
-  // packages/app/server/{src,dist} -> repo root.
+  // packages/app/server/{src,dist} -> install root.
   const here = dirname(fileURLToPath(import.meta.url));
   return [
     ...new Set([resolve(process.cwd(), '.env'), resolve(here, '..', '..', '..', '..', '.env')]),
