@@ -1,10 +1,24 @@
 /**
- * WORKFORCE INTENT PARITY — identical scripted tool-call sequences through the REAL turn collector
- * produce BYTE-IDENTICAL TurnIntents, buffered effects, deterministic child ids and typed
- * tool-error payloads, whichever backend the employee's agent declares. The intent a turn hands the
- * engine is a pure function of (role, config, snapshot, arguments) — never of the backend — and
- * this suite pins that: every scenario runs once per backend binding and its full observable shape
- * (each call's return value or thrown error, then the collected turn) is compared as JSON bytes.
+ * WORKFORCE INTENT PARITY — an INJECTION-LEVEL tripwire on the intent layer's backend-neutrality,
+ * and a byte-exact transcript pin on the intents themselves.
+ *
+ * Scripted tool-call sequences run through the REAL handlers and the REAL turn collector, and each
+ * scenario's full observable shape (every call's return value or thrown error, then the collected
+ * turn) is compared as JSON bytes across four backend spellings. TWO different things are being
+ * measured, and only one of them is about backends:
+ *
+ *   - THE TRANSCRIPTS ARE REAL. Delegation resolution, deterministic child ids, escalation targets,
+ *     reviewId injection, the typed tool errors — each is pinned byte for byte, and a change to any
+ *     of them fails here. This is the load-bearing half.
+ *   - THE CROSS-BACKEND COMPARISON IS AN ERASURE CHECK, not an adapter measurement. No adapter is
+ *     loaded; the backend appears only as a YAML scalar that `deriveWorkforceConfig` discards
+ *     (`WorkforceEmployeeConfig` has no backend field), and the handlers are invoked directly
+ *     rather than through a `Backend` or `ctx.dispatchTool`. The four arms are therefore identical
+ *     by construction — which is exactly the property worth a tripwire, and is not the same claim
+ *     as "these four providers behave alike".
+ *
+ * Real adapter-level parity for these flows needs a backend an employee's declaration can select,
+ * which the grammar has no field for yet; it stays on the list rather than being implied here.
  */
 import { deriveWorkforceConfig, parseSpec } from '@rayspec/spec';
 import type { TaskRecord } from '@rayspec/tasks';

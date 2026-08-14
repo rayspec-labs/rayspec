@@ -1,11 +1,24 @@
 /**
- * WORKFORCE TOOLSET PARITY — the native toolsets an employee's turn carries are BYTE-IDENTICAL
- * whichever backend the employee's agent declares. The toolset layer is neutral by construction
- * (it never reads a backend), and this suite is the tripwire that KEEPS it so: four otherwise
- * identical declarations, one per backend, must produce identical tool specs, identical
- * turn-ending classification, and identical role tables — with `pi` participating in its one
- * legal shape (workers) and its decision-role exclusion asserted as a VALIDATION rejection, not a
- * runtime difference.
+ * WORKFORCE TOOLSET PARITY — an INJECTION-LEVEL tripwire on the toolset's backend-neutrality.
+ *
+ * WHAT THIS ACTUALLY EXERCISES, precisely, because the distinction matters and the name does not
+ * carry it: four otherwise identical declarations differing only in `agents[].backend` are parsed
+ * and derived, and the toolsets built from them must be byte-identical in tool specs, turn-ending
+ * classification and role tables. NO ADAPTER IS LOADED and no backend object exists in the run.
+ * `deriveWorkforceConfig` drops the backend entirely — `WorkforceEmployeeConfig` carries an agent
+ * ID and no backend field — so by the time `buildRoleToolset` runs, the backend identity is
+ * provably erased, and the comparison holds by construction rather than by measurement.
+ *
+ * That is worth keeping and worth naming honestly. What it catches is a REGRESSION IN THE
+ * ERASURE: the day the config gains a backend field, or the toolset starts reading one, these
+ * assertions fail. What it CANNOT catch is a real adapter divergence — tool-schema translation,
+ * name mangling, how a provider terminates a turn — because no adapter participates. The one
+ * assertion here that genuinely depends on the backend string is the parse-time `pi` decision-role
+ * rejection, and that is a spec-grammar fact, not a runtime one.
+ *
+ * Real backend-through-toolset parity — the same employee's turn driven through four live adapter
+ * translations — needs a backend the employee's declaration can select, which the current grammar
+ * has no field for. It stays on the list rather than being implied by this file's name.
  */
 import { deriveWorkforceConfig, parseSpec } from '@rayspec/spec';
 import type { TaskRecord } from '@rayspec/tasks';

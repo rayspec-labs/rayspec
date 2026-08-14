@@ -13,9 +13,15 @@
  *   (`rayspec workforce approvals approve`) → the orchestrator submits the synthesis and the root
  *   completes.
  *
- * Every assertion reads durable artifacts: task statuses and turn counts, delegation rows with
- * their original targets, both review rounds with their verdicts, the buffered message, the
- * journal, and the CLI's own status rollup.
+ * Every assertion reads durable artifacts: task statuses and turn counts, BOTH managers' merged
+ * results, the fan-out joins' own bindings and wake signals, delegation rows with their original
+ * targets, both review rounds with their verdicts, the buffered message, the journal, and the CLI's
+ * own status rollup.
+ *
+ * THE POLLS ASSERT NOTHING. Every fact a `waitUntil` predicate mentions is re-asserted afterwards,
+ * because a predicate that merely stops being false proves nothing when it never does — and the
+ * waits fail FAST (with the task table, the reviews, and which rows failed) rather than waiting out
+ * a deadline on a story that already cannot finish.
  */
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -264,17 +270,55 @@ function cli(args: string[]): { code: number; json: Record<string, unknown> } {
   return { code: out.status ?? -1, json };
 }
 
+/**
+ * Render the durable state a stalled story is stuck in. A poll that only reports "timed out" makes
+ * every failure mode look the same — a manager that never delegated, a scripted employee that
+ * threw, a task that failed — and hands the reader 180 seconds of nothing. This is what the wait
+ * prints instead.
+ */
+async function describeState(): Promise<string> {
+  const rows = await allTasks();
+  const lines = rows.map(
+    (r) =>
+      `  ${r.owner.padEnd(12)} ${r.status.padEnd(18)} turns=${r.turns_used} ` +
+      `parent=${r.parent_task_id ?? '-'} ${JSON.stringify(r.result?.summary ?? null)}`,
+  );
+  const reviews = (await (sql as ReturnType<typeof postgres>)`
+    SELECT round, verdict, reviewer FROM workforce_reviews ORDER BY round`) as unknown as Array<{
+    round: number;
+    verdict: string | null;
+    reviewer: string;
+  }>;
+  return [
+    `${rows.length} task row(s):`,
+    ...lines,
+    `reviews: ${reviews.map((r) => `round ${r.round} ${r.reviewer} ${r.verdict ?? 'pending'}`).join(' | ') || '(none)'}`,
+  ].join('\n');
+}
+
+/**
+ * Poll until the predicate holds — and FAIL FAST, with the state, on anything that means it never
+ * will. A task that reached `failed` cannot un-fail, so waiting out the deadline on one only
+ * delays the same failure and buries its cause; the timeout path prints the same state.
+ */
 async function waitUntil(
   what: string,
   predicate: () => Promise<boolean>,
-  deadlineMs = 180_000,
+  deadlineMs = 150_000,
 ): Promise<void> {
   const deadline = Date.now() + deadlineMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
+    const failed = (await allTasks()).filter((r) => r.status === 'failed');
+    if (failed.length > 0) {
+      throw new Error(
+        `while waiting for: ${what}\n` +
+          `${failed.length} task(s) FAILED — this will never become true:\n${await describeState()}`,
+      );
+    }
     await new Promise((r) => setTimeout(r, 500));
   }
-  throw new Error(`timed out waiting for: ${what}`);
+  throw new Error(`timed out waiting for: ${what}\n${await describeState()}`);
 }
 
 interface TaskRow {
@@ -417,6 +461,27 @@ describe.skipIf(!baseUrl)('workforce roles story — delegation, review loop, CL
     const tasks = await allTasks();
     const byOwner = (owner: string) => tasks.filter((r) => r.owner === owner);
 
+    // The phase-A predicate's own facts, ASSERTED — a poll that hangs proves nothing about them,
+    // and everything below reads as if they held.
+    expect(tasks.find((r) => r.task_id === root.taskId)?.status).toBe('waiting_for_user');
+    expect(
+      tasks
+        .filter((r) => r.task_id !== root.taskId)
+        .map((r) => `${r.owner}:${r.status}`)
+        .sort(),
+    ).toEqual(
+      [
+        'copy_claude:completed',
+        'copy_codex:completed',
+        'dev_oai:completed',
+        'dev_pi:completed',
+        'mgr_eng:completed',
+        'mgr_growth:completed',
+        'qa:completed',
+        'qa:completed',
+      ].sort(),
+    );
+
     // The tree: root + 2 managers + 4 workers + 2 review tasks (one per round).
     expect(tasks).toHaveLength(9);
     expect(byOwner('mgr_eng')).toHaveLength(1);
@@ -440,6 +505,51 @@ describe.skipIf(!baseUrl)('workforce roles story — delegation, review loop, CL
     const devOai = byOwner('dev_oai')[0] as TaskRow;
     expect(devOai.turns_used).toBe(1);
     expect(tasks.filter((r) => r.parent_task_id === devOai.task_id)).toHaveLength(0);
+
+    // ── BOTH MANAGERS MERGED. The story's headline claim, and previously only implied by the tree
+    //    shape: each manager took TWO turns (fan out, then synthesise) and the second turn's result
+    //    is the merge. A manager that completed without ever seeing its children's results would
+    //    have left the counts and statuses above untouched.
+    const mgrEng = byOwner('mgr_eng')[0] as TaskRow;
+    const mgrGrowth = byOwner('mgr_growth')[0] as TaskRow;
+    expect(mgrEng.turns_used).toBe(2);
+    expect(mgrGrowth.turns_used).toBe(2);
+    expect(mgrEng.result?.summary).toBe('Engineering stream merged from two workers.');
+    expect(mgrGrowth.result?.summary).toBe('Growth stream merged from two workers.');
+
+    // ── THE JOINS ACTUALLY FIRED, and each waited on its OWN fan-out's children. `join_policy` is
+    //    the park's binding: it names the children that fan-out opened, so a detached child under
+    //    the same parent can neither hold the join open nor satisfy it.
+    const parked = (await (sql as ReturnType<typeof postgres>)`
+      SELECT task_id, join_policy FROM workforce_tasks
+      WHERE task_id IN (${root.taskId}, ${mgrEng.task_id}, ${mgrGrowth.task_id})`) as unknown as Array<{
+      task_id: string;
+      join_policy: { policy: string; childTaskIds?: string[] } | null;
+    }>;
+    for (const parent of [mgrEng, mgrGrowth]) {
+      const binding = parked.find((p) => p.task_id === parent.task_id)?.join_policy;
+      expect(binding?.policy, parent.owner).toBe('all');
+      expect([...(binding?.childTaskIds ?? [])].sort(), parent.owner).toEqual(
+        tasks
+          .filter((r) => r.parent_task_id === parent.task_id)
+          .map((r) => r.task_id)
+          .sort(),
+      );
+    }
+    // The root's fan-out named its two managers, and its join woke it exactly once per round.
+    const rootBinding = parked.find((p) => p.task_id === root.taskId)?.join_policy;
+    expect([...(rootBinding?.childTaskIds ?? [])].sort()).toEqual(
+      [mgrEng.task_id, mgrGrowth.task_id].sort(),
+    );
+    const joinSignals = (await (sql as ReturnType<typeof postgres>)`
+      SELECT task_id, count(*)::int AS n FROM workforce_task_signals
+      WHERE kind = 'child_completed' GROUP BY task_id`) as unknown as Array<{
+      task_id: string;
+      n: number;
+    }>;
+    for (const parent of [root.taskId, mgrEng.task_id, mgrGrowth.task_id]) {
+      expect(joinSignals.find((s) => s.task_id === parent)?.n, parent).toBe(1);
+    }
 
     // Both review rounds are durable rows with their verdicts.
     const reviews = (await (sql as ReturnType<typeof postgres>)`
@@ -561,7 +671,9 @@ describe.skipIf(!baseUrl)('workforce roles story — delegation, review loop, CL
     expect(status.code).toBe(0);
     expect((status.json.status as { tasks: Record<string, number> }).tasks.completed).toBe(9);
     storyArmsRan++;
-  }, 360_000);
+    // The vitest budget must exceed boot (60s) + both waits (150s each) with room to spare, or a
+    // stalled phase surfaces as a bare runner timeout and the diagnostic the wait prints is lost.
+  }, 480_000);
 });
 
 // Un-skippable ran-guard: when the DB is REQUIRED, the roles story must have run TO ITS END.
