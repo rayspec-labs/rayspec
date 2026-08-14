@@ -33,9 +33,13 @@ import { ColumnType as SpecColumnType } from '@rayspec/spec';
  * direction: that switch has no `default` and is annotated `: string`, so adding a member HERE without
  * writing its arm THERE fails `tsc` with TS2366 (`Function lacks ending return statement`). A type the
  * grammar has and this set does not is therefore one the renderer genuinely cannot emit a coercion for
- * — `validateHoles` refuses the hole-set and says so rather than emitting a handler that never writes
- * the column. Kept as a local literal (rather than re-exported from the grammar) so the renderer's own
- * contract reads in one place; the GAP against the grammar is derived just below, never re-listed.
+ * — `validateHoles` refuses such a `columns[]` entry and says so rather than emitting a handler that
+ * never writes the column. This bounds the COERCED path only: `fixedValues` stamps author constants by
+ * column NAME, carries no `jsonType`, and is checked here against the injected-column denylist and the
+ * fkRevalidate/clampValues overlap rules — never against this set — so a rendered handler can still
+ * write a fractional column when the value is the author's. Kept as a local literal (rather than
+ * re-exported from the grammar) so the renderer's own contract reads in one place; the GAP against the
+ * grammar is derived just below, never re-listed.
  */
 export type ColumnType = 'text' | 'uuid' | 'timestamp' | 'integer' | 'bigint' | 'boolean' | 'jsonb';
 
@@ -422,7 +426,8 @@ function assertColumnHole(c: unknown, what: string): asserts c is ColumnHole {
     const reason =
       typeof o.jsonType === 'string' && UNRENDERABLE_COLUMN_TYPES.has(o.jsonType)
         ? ` — '${o.jsonType}' is a valid store column type, but the deterministic renderer ` +
-          'has no coercion arm for it, so a handler writing that column must be hand-written'
+          'has no coercion arm for it, so a handler that coerces that column from an untrusted arg ' +
+          'must be hand-written (a server-stamped `fixedValues` constant into that column still renders)'
         : '';
     throw new HolesError(
       `${what}.jsonType must be one of ${accepted}, got ${JSON.stringify(o.jsonType)}${reason}`,

@@ -108,7 +108,10 @@ with a declarative approximation; recommend it as a future iteration or the prod
   facade's bounded `{ gt/gte/lt/lte }` comparisons are not scaffolded); typed scalar arrays at the DB
   layer (they map to `jsonb`, never a typed scalar array). Fractional numbers ARE declarable — `double`
   and `numeric` are column types — but the `gen-handler` renderer has no coercion arm for either, so a
-  RENDERED handler cannot write one (see the holes contract below).
+  RENDERED handler cannot take one as a MODEL ARG (`validateHoles` refuses a `double`/`numeric`
+  `columns[]` entry). An author CONSTANT into such a column DOES render, via `fixedValues`, provided the
+  literal matches the column's wire envelope — a finite number for `double`, a fitting decimal string
+  for `numeric` (see the holes contract below).
 
 ## What you must NEVER touch
 
@@ -1250,8 +1253,10 @@ out-of-It.2 signal (see the list at the end of this contract), not a key to add.
       "enumValues": ["ok", "review", "violation"] }   // optional closed set (text columns only)
     // jsonType ∈ text | uuid | timestamp | integer | bigint | boolean | jsonb
     //   — NARROWER than the spec's `ColumnType` ON PURPOSE: the renderer emits one coercion arm per
-    //   type it can serve and has none for `double`/`numeric`, so a hole-set naming either is refused
-    //   with that reason and the handler must be hand-written.
+    //   type it can serve and has none for `double`/`numeric`, so a `columns[]` entry naming either is
+    //   refused with that reason. This bounds the COERCED (model-arg) path only — `fixedValues` below
+    //   stamps by column NAME and carries no `jsonType`, so an author CONSTANT into a fractional column
+    //   renders. Only a MODEL-chosen fractional value needs a hand-written handler.
   ],
   "fixedValues": { "status": "coded" },  // OPTIONAL author CONSTANTS server-stamped ON TOP of the
                                          //   coerced args (a model can never override them); keys are
@@ -1354,10 +1359,11 @@ Multi-store atomic `db.transaction(fn)` writes · concurrency-race hardening (23
 preservation / stale-reconcile) · grounding/validation over a closed evidence set · blob/stream/media
 (a document-UPLOAD pipeline IS authorable as a product-profile document — see the reference below) ·
 durable-enqueue / off-request jobs / triggers / cron · typed scalar arrays at the DB layer (→ `jsonb`) ·
-a persisted **`double`/`numeric`** column (declarable in the spec, but the renderer has no coercion arm
-for either — see the `jsonType` note in the holes contract) · vector/embedding/fuzzy/range lookups (the
-templates scaffold AND-equality filters only — the facade's bounded `{ gt/gte/lt/lte }` comparisons are
-not scaffolded). A PRD needing any of these is out of It.2 scope — say so and STOP.
+a **MODEL-CHOSEN `double`/`numeric`** value (the column itself is declarable, and an author CONSTANT
+into one renders via `fixedValues` — it is the coercion of an untrusted arg the renderer has no arm for;
+see the `jsonType` note in the holes contract) · vector/embedding/fuzzy/range lookups (the templates
+scaffold AND-equality filters only — the facade's bounded `{ gt/gte/lt/lte }` comparisons are not
+scaffolded). A PRD needing any of these is out of It.2 scope — say so and STOP.
 
 ---
 

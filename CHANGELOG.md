@@ -560,17 +560,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`rayspec gen-handler` now says WHY it cannot render a `double` or `numeric` column, instead of
-  refusing it as if the type did not exist.** The holes contract carries its own column-type set —
-  the types the deterministic renderer has a coercion arm for — and that set is deliberately
-  narrower than the grammar's, because the renderer has no arm for either fractional type. It has
-  been refused fail-closed all along, which is right; what was wrong is what the refusal said. The
-  message enumerated the seven types it accepts and stopped there, so an author who had just
-  declared a perfectly valid `numeric` money column read it as a typo and went looking for one.
-  The refusal now appends the reason and the way out: the type is a valid store column type, the
-  renderer has no coercion arm for it, so a handler writing that column must be hand-written. A type
-  the grammar does not carry either — a genuine typo like `float` — still gets the plain refusal, so
-  the two failure modes stay distinguishable.
+- **`rayspec gen-handler` now says WHY it cannot coerce a `double` or `numeric` column from a tool
+  arg, instead of refusing the type as if it did not exist.** The holes contract carries its own
+  column-type set — the types the deterministic renderer has a coercion arm for — and that set is
+  deliberately narrower than the grammar's, because the renderer has no arm for either fractional
+  type. A `columns[]` entry naming one has been refused fail-closed all along, which is right; what
+  was wrong is what the refusal said. The message enumerated the seven types it accepts and stopped
+  there, so an author who had just declared a perfectly valid `numeric` money column read it as a
+  typo and went looking for one. The refusal now appends the reason and the way out: the type is a
+  valid store column type, the renderer has no coercion arm for it, so a handler that coerces that
+  column from an untrusted arg must be hand-written. It also names the path that is NOT closed — a
+  server-stamped `fixedValues` constant into that column still renders, because `fixedValues` pins
+  author constants by column name and carries no `jsonType` — so the refusal cannot be read as "this
+  column is unwritable from a generated handler". A type the grammar does not carry either — a
+  genuine typo like `float` — still gets the plain refusal, so the two failure modes stay
+  distinguishable.
   Two smaller rot fixes ride along, both in the same file. The accepted list in the message is now
   read off the set the validator checks against, rather than spelled out a second time by hand, so
   it can never quote a vocabulary the renderer has outgrown. And the set of types the refusal calls

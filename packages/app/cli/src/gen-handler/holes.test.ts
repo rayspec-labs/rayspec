@@ -248,6 +248,39 @@ describe('validateHoles — fail-closed on malformed hole-sets', () => {
     ).not.toThrow(/coercion arm/);
   });
 
+  it('the fractional refusal scopes itself to the COERCED path — a `fixedValues` constant still renders', () => {
+    // The refusal above is about the arm `emitCoerceColumn` would need for an UNTRUSTED arg. It is not
+    // a statement about the column: `fixedValues` writes author CONSTANTS by column NAME, carries no
+    // `jsonType`, and is never routed through `assertColumnHole` — so a rendered handler does stamp a
+    // fractional column when the value is the author's, not the model's. The refusal text must say
+    // which path it closes, or it reads as "this column is unwritable here", which is false.
+    let message = '';
+    try {
+      validateHoles(
+        persist({
+          columns: [{ col: 'fx_rate', jsonType: 'double', required: true, nullable: false }],
+        }),
+      );
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    }
+    // Instrument check: the refusal fired at all and is the fractional one (not some earlier rejection).
+    expect(message).toMatch(/has no coercion arm for it/);
+    // THE PROPERTY: the way out is named for the coerced path only, and the constant path is named too.
+    expect(message).toMatch(/coerces that column from an untrusted arg/i);
+    expect(message).toMatch(/fixedValues/);
+
+    // The measurement the wording rests on: the SAME column, stamped as an author constant, is accepted
+    // and reaches the write. If this ever stops holding, the sentence above (and the skill's) is stale.
+    const holes = persist({ fixedValues: { fx_rate: 1.2345, amount_due: '7.500000' } });
+    expect(() => validateHoles(holes)).not.toThrow();
+    const src = renderHandler(holes as unknown as HandlerHoles, 'ts');
+    expect(src).toContain(
+      'Object.assign(coerced.row, { fx_rate: 1.2345, amount_due: "7.500000" });',
+    );
+    expect(src).toContain('await init.db.update(STORE, { id }, coerced.row)');
+  });
+
   it('rejects enumValues on a non-text column', () => {
     expect(() =>
       validateHoles(
