@@ -1392,14 +1392,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a file whose literal name carries such an escape — for instance a symlink named
   `docs%2Fgetting-started.html` pointing outside the mount — answered `200` with bytes from outside
   the served directory, while the identical symlink under a plainly-spelled name was correctly
-  refused. When the two decodings differ, the served name is now guarded as well (and, on a
-  `cleanUrls` mount, the `<name>.html` candidate the rewrite would resolve from it), so the refusal
-  no longer depends on how the name is spelled. This is **not** a traversal: `decodeURI` never turns
-  an escape into a `/`, and an encoded `..` was already refused by both decodings — the exposure was
-  confined to a file whose own on-disk name carries a percent escape, which no ordinary build
-  produces. For every path without such an escape the two strings are identical and nothing changes.
-  The behaviour predates this release; it is fixed here rather than carried, and pinned by an arm
-  that keeps the plainly-spelled twin as its accept control.
+  refused. When the two decodings differ, the served name is now guarded as well — and, on a
+  `cleanUrls` mount, the `<name>.html` candidate the rewrite would resolve from it. The
+  malformed-escape fallback is **mirrored** rather than approximated, which is the part that makes
+  the guard complete: on an input `decodeURI` rejects, `serve-static` does not fall back to the raw
+  string but retries each escape run on its own, so a raw-string fallback here would have agreed with
+  the other decoder on exactly the inputs where a third, different name is read
+  (`/docs%252Fgetting-started.html%` reads `docs%2Fgetting-started.html%`).
+  **Appended names are covered too.** `serve-static` resolves a directory to `<dir>/index.html` and
+  the SPA fallback names `/index.html`; neither string had ever reached the guard, so a
+  `sub/index.html` symlink pointing out of the served directory answered `200` with its bytes for
+  `GET /sub` — needing no unusual filename at all. Both are guarded now, matching the custom-404
+  branch, which already checked the name it appends.
+  This is **not** a traversal: `decodeURI` never turns an escape into a `/`, and an encoded `..` was
+  already refused by both decodings. For every path without a percent-encoded reserved character the
+  two strings are identical, and the appended-name checks fire only where such a name is actually
+  resolved, so an ordinary build sees no change. The behaviour predates this release; it is fixed
+  here rather than carried, and pinned across three mount shapes with the plainly-spelled twin of
+  each escaping symlink as the accept control.
 
 - **Two checks that certified files they never read now reach them.** The unscoped `rayspec`
   launcher — the package npm serves when a user installs the product — carries a bare name, and every
