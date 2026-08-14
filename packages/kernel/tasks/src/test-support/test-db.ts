@@ -5,9 +5,12 @@
  * their CURRENT shape inside a dedicated schema, so these suites are deterministic and isolated
  * from the db/platform/api-auth suites when turbo runs them against the same local Postgres.
  *
- * NOTE: this file is excluded from the package build (test support, not shipped code). The
- * canonical schema is packages/kernel/db/src/schema.ts; this DDL mirrors migration 0012 plus the
- * orgs root and run_events (the journal stream the engine appends to).
+ * NOTE: exported via the `@rayspec/tasks/test-support` subpath (never the main barrel) so the
+ * db-backed suites of the layers ABOVE the engine — the boot wiring included — can drive exactly
+ * the rows the engine writes. The canonical schema is packages/kernel/db/src/schema.ts; this DDL
+ * mirrors migration 0012 plus the orgs root, the agent-run tables a dispatched turn journals into,
+ * and run_events (the journal stream the engine appends
+ * to).
  */
 import { randomUUID } from 'node:crypto';
 import { forTenant } from '@rayspec/db';
@@ -54,6 +57,89 @@ export async function resetTaskSchema(db: ReturnType<typeof makeTestDb>): Promis
     CREATE TABLE orgs (
       id uuid PRIMARY KEY,
       name text,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+
+    -- The AGENT-RUN tables. A workforce turn IS an agent run: the composition calls runAgent,
+    -- which writes a run header and journals every dispatched tool step. A suite that drives a
+    -- turn end to end therefore needs these beside the workforce tables (mirrors 0001-0005/0010,
+    -- the same DDL the platform suite's own helper carries).
+    CREATE TABLE journal_steps (
+      step_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      run_id text NOT NULL,
+      tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+      backend text NOT NULL,
+      type text NOT NULL,
+      idempotency_key text NOT NULL,
+      input_hash text NOT NULL,
+      output jsonb,
+      input_tokens numeric NOT NULL DEFAULT '0',
+      output_tokens numeric NOT NULL DEFAULT '0',
+      total_tokens numeric NOT NULL DEFAULT '0',
+      cost_usd numeric NOT NULL DEFAULT '0',
+      -- cost reconciliation + provenance columns (mirrors migration 0005).
+      provider_cost_usd numeric,
+      billed_cost_usd numeric NOT NULL DEFAULT '0',
+      cost_drift boolean NOT NULL DEFAULT false,
+      produced_by text,
+      pricing_version text,
+      latency_ms numeric NOT NULL DEFAULT '0',
+      status text NOT NULL,
+      -- error classification + retry advice columns (mirrors migration 0010).
+      error_class text,
+      retry_after_ms numeric,
+      auth_mode text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX journal_run_idx ON journal_steps (run_id);
+    CREATE INDEX journal_tenant_idx ON journal_steps (tenant_id);
+    CREATE UNIQUE INDEX journal_idem_idx ON journal_steps (tenant_id, run_id, idempotency_key);
+
+    -- idempotency_keys: the tenant-scoped replay/dedup store (mirrors schema.ts). The taint path writes the
+    -- non-idempotent-taint marker here (scope='run_taint'), so run-core's chokepoint marker write needs
+    -- this core table to exist — a real deployment always has it (the test schema must mirror that).
+
+    CREATE TABLE idempotency_keys (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+      scope text NOT NULL, idem_key text NOT NULL, body_hash text NOT NULL, snapshot jsonb NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE UNIQUE INDEX idem_tenant_scope_key_idx ON idempotency_keys (tenant_id, scope, idem_key);
+
+    CREATE TABLE conversation_items (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      run_id text NOT NULL,
+      tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+      seq numeric NOT NULL,
+      -- ConvPart columns (mirrors migration 0003): one row per part, payload jsonb.
+      turn_index numeric,
+      role text NOT NULL,
+      kind text,
+      tool_call_id text,
+      payload jsonb,
+      name text,
+      content text,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX conv_run_idx ON conversation_items (run_id);
+    CREATE INDEX conv_tenant_idx ON conversation_items (tenant_id);
+
+    CREATE TABLE runs (
+      run_id text PRIMARY KEY,
+      tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+      backend text NOT NULL,
+      auth_mode text NOT NULL,
+      agent_name text NOT NULL,
+      model text NOT NULL,
+      status text NOT NULL,
+      final_text text,
+      output jsonb,
+      cost_usd numeric NOT NULL DEFAULT '0',
+      -- run-level cost roll-up columns (mirrors migration 0005).
+      provider_cost_usd numeric,
+      billed_cost_usd numeric NOT NULL DEFAULT '0',
+      cost_drift boolean NOT NULL DEFAULT false,
       created_at timestamptz NOT NULL DEFAULT now()
     );
 

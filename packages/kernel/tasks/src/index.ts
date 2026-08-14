@@ -19,7 +19,12 @@ export {
   delegationStatusSchema,
   lockDescendants,
   lockRootFirst,
+  MAX_MESSAGE_BODY_CHARS,
+  MAX_MESSAGES_PER_TURN,
+  type TurnReviewPolicy,
   TurnStateError,
+  turnMessagesSchema,
+  turnReviewPolicySchema,
 } from './apply-intents.js';
 export { type ApplyTransitionInput, applyTransition, type TaskRecord } from './apply-transition.js';
 export {
@@ -63,6 +68,8 @@ export {
   childTaskSpecSchema,
   createRootTask,
   createRootTaskInputSchema,
+  type DelegationChildSpec,
+  delegationChildSpecSchema,
   insertChildTask,
   MAX_TASK_DEPENDENCIES,
   TASK_PRIORITIES,
@@ -90,6 +97,8 @@ export { deterministicChildTaskId, newRootTaskId } from './ids.js';
 export {
   DELEGATION_REJECTION_REASONS,
   type DelegationRejectionReason,
+  ESCALATION_REASONS,
+  type EscalationReason,
   invalidIntentPlan,
   type PlanTurnInput,
   planTurnOutcome,
@@ -109,7 +118,9 @@ export {
 } from './join.js';
 export {
   applyReviewVerdict,
+  applyReviewVerdictInTx,
   ReviewAlreadyDecidedError,
+  ReviewNotForParkError,
   ReviewNotFoundError,
   type ReviewRecord,
   ReviewTaskStateError,
@@ -130,6 +141,9 @@ export {
   type DeliverSignalOutcome,
   deliverSignal,
   escalationTargetsPark,
+  OPERATOR_SIGNAL_KINDS,
+  type OperatorSignalKind,
+  operatorSignalKindSchema,
   SIGNAL_KINDS,
   type SignalKind,
   type SignalRecord,

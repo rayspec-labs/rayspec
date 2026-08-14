@@ -60,6 +60,7 @@ import {
   type StoreSpec,
 } from './grammar.js';
 import { typeScriptSourceExtensionOf } from './module-extensions.js';
+import { lintWorkforce, lintWorkforceWarnings } from './workforce-lint.js';
 
 type AjvInstance = Ajv2020Class;
 const Ajv2020Ctor = ((Ajv2020Module as { default?: unknown }).default ?? Ajv2020Module) as new (
@@ -1638,6 +1639,9 @@ export function lintSpec(spec: RaySpec): SpecError[] {
     }
   });
 
+  // ---- 7. WORKFORCE (workforce-lint.ts) — no-op when the section is absent ---------------
+  errors.push(...lintWorkforce(spec));
+
   return errors;
 }
 
@@ -1925,6 +1929,8 @@ export function lintSpecWarnings(spec: RaySpec): SpecWarning[] {
       ),
     );
   });
+
+  warnings.push(...lintWorkforceWarnings(spec));
 
   return warnings;
 }

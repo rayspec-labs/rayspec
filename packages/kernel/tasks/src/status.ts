@@ -95,7 +95,8 @@ type TransitionRow = Readonly<Record<TaskStatus, boolean>>;
  *   working → cancelled     a cancel signal absorbed at the turn boundary
  *   blocked → queued        any wake signal
  *   blocked → waiting_for_user     escalation to a human (incl. block-and-escalate exhaustion)
- *   blocked → failed        an enforced fate (quarantine retry budget spent; `dependency_failed`)
+ *   blocked → failed        an enforced fate (quarantine retry budget spent; `dependency_failed`;
+ *                           an escalated approval's own timeout, whose park is the blocked one)
  *   blocked → cancelled     cancel cascade
  *   waiting_for_review → queued    reviewer rejected and the policy says rework
  *   waiting_for_review → blocked   the review round itself hit a ceiling

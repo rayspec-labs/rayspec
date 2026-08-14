@@ -11,7 +11,8 @@
  * The safety rules the planner owns:
  *   - a pending `cancel` signal OVERRIDES the turn's own intent (the turn ran to its natural end —
  *     nothing is killed mid-flight — but its outcome is the cancellation);
- *   - fan-out acceptance checks: depth against the declared ceiling (on the materialized ancestry,
+ *   - hand-off acceptance checks, applied to EVERY tool that opens a child — the fan-out and the
+ *     buffered creates alike: depth against the declared ceiling (on the materialized ancestry,
  *     never on promises), the per-task fan-out cap (counted on the delegation table), unconditional
  *     self-hand-off rejection, and cycle rejection when a child's owner already appears among the
  *     ancestor owners — each a CLOSED rejection reason, no override flag anywhere;
@@ -23,8 +24,18 @@
  *     typed `tool_error` reason and FAILS on the second consecutive offense.
  */
 import { z } from 'zod';
-import { type ChildTaskSpec, childTaskSpecSchema } from './create-task.js';
-import { type JoinPolicy, joinPolicySchema } from './join.js';
+import { type DelegationChildSpec, delegationChildSpecSchema } from './create-task.js';
+import { fanOutJoinPolicySchema, type JoinPolicy } from './join.js';
+
+/**
+ * Message caps. A body is DATA addressed to a later turn's context, and up to
+ * `CONTEXT_MESSAGE_LIMIT` of them render verbatim into a dispatch's prompt — so an uncapped body
+ * or an uncapped count is a way to make a later turn's context whatever the writer wants it to be,
+ * at a size nothing else in the turn is allowed to reach. The numbers are deliberately generous
+ * enough that no honest hand-off notices them.
+ */
+export const MAX_MESSAGE_BODY_CHARS = 4_000;
+export const MAX_MESSAGES_PER_TURN = 20;
 
 /** The closed structured-result contract. A result that fails this never completes a task. */
 export const workerResultSchema = z.strictObject({
@@ -44,13 +55,28 @@ export const workerResultSchema = z.strictObject({
 
 export type WorkerResult = z.output<typeof workerResultSchema>;
 
+/**
+ * WHY a task is being handed up the reporting line — a CLOSED set, journaled and greppable, never
+ * model prose. The free-text `detail` rides beside it as data.
+ */
+export const ESCALATION_REASONS = [
+  'out_of_scope',
+  'insufficient_context',
+  'budget',
+  'capability_missing',
+  'policy_conflict',
+  'risk',
+] as const;
+
+export type EscalationReason = (typeof ESCALATION_REASONS)[number];
+
 /** The one turn-ending intent a handler returns. Strict at every level. */
 export const turnIntentSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('complete'), result: workerResultSchema }),
   z.strictObject({
     kind: z.literal('fan_out'),
-    children: z.array(childTaskSpecSchema).min(1),
-    joinPolicy: joinPolicySchema.prefault({ policy: 'all' }),
+    children: z.array(delegationChildSpecSchema).min(1),
+    joinPolicy: fanOutJoinPolicySchema.prefault({ policy: 'all' }),
   }),
   z.strictObject({
     kind: z.literal('request_approval'),
@@ -62,7 +88,65 @@ export const turnIntentSchema = z.discriminatedUnion('kind', [
     onTimeout: z.enum(['fail', 'escalate']).default('fail'),
     escalateTo: z.string().min(1).optional(),
   }),
-  z.strictObject({ kind: z.literal('request_review'), reviewer: z.string().min(1) }),
+  z.strictObject({
+    kind: z.literal('request_review'),
+    reviewer: z.string().min(1),
+    /**
+     * True when the reviewer is a DECLARED EMPLOYEE whose verdict arrives through a dispatched
+     * review turn — the application then also opens the reviewer's child task. Set by the caller's
+     * TRUSTED layer from declared structure (the kernel stays roster-free); false means a human
+     * decides through the verdict route, exactly as before.
+     */
+    dispatchReviewer: z.boolean().default(false),
+  }),
+  z.strictObject({
+    /**
+     * A reviewer turn's verdict on the task under review — its PARENT. `reviewId` is resolved by
+     * the caller's trusted layer from the pending review row, never accepted from model text; the
+     * application re-checks that the row belongs to the parent before any verdict applies.
+     */
+    kind: z.literal('submit_review'),
+    reviewId: z.string().min(1),
+    verdict: z.enum(['accept', 'reject']),
+    reasons: z.array(z.string().min(1)).default([]),
+    requiredChanges: z.array(z.string().min(1)).default([]),
+  }),
+  z.strictObject({
+    /**
+     * Ask the requesting party a typed question; the task parks until a `user_reply` answers it.
+     * The question is written into the SAME message table the turn-context query reads back, so it
+     * answers to the same body cap `send_message` does — otherwise the message cap is bypassable by
+     * asking a very long question.
+     */
+    kind: z.literal('request_clarification'),
+    question: z.string().min(1).max(MAX_MESSAGE_BODY_CHARS),
+  }),
+  z.strictObject({
+    /**
+     * Hand the task up the reporting line. The caller parks `blocked(escalated)`; a FRESH child
+     * task owned by the superior carries the escalation (their own open task, if any, is
+     * structurally parked on a join and may not be woken — see `afterTaskTerminal`'s reply branch
+     * for the way back). `escalateTo` is RESOLVED BY THE CALLER's trusted layer from the declared
+     * reporting edge — never a model-supplied guess the kernel would have to verify.
+     */
+    kind: z.literal('escalate'),
+    reason: z.enum(ESCALATION_REASONS),
+    detail: z.string().min(1).optional(),
+    escalateTo: z.string().min(1),
+    /** Ledger attribution for the escalation child (the superior's department), when known. */
+    escalateToDepartment: z.string().min(1).nullable().default(null),
+  }),
+  z.strictObject({
+    /**
+     * Cancel one task the caller owns or roots — the target must sit in the caller's own subtree
+     * (checked against the immutable ancestry, planner + executor both). Cascades to the target's
+     * descendants; the caller re-queues and keeps working. Not an operator kill switch.
+     */
+    kind: z.literal('cancel_task'),
+    taskId: z.string().min(1),
+    /** Journaled free text riding the turn record — never a status reason. */
+    detail: z.string().min(1).optional(),
+  }),
   z.strictObject({ kind: z.literal('yield') }),
   z.strictObject({ kind: z.literal('fail'), message: z.string().min(1) }),
 ]);
@@ -86,7 +170,7 @@ export type TurnPlan =
   | { readonly kind: 'complete'; readonly result: WorkerResult }
   | {
       readonly kind: 'fan_out';
-      readonly children: readonly ReturnType<typeof childTaskSpecSchema.parse>[];
+      readonly children: readonly ReturnType<typeof delegationChildSpecSchema.parse>[];
       readonly joinPolicy: JoinPolicy;
     }
   | {
@@ -99,7 +183,57 @@ export type TurnPlan =
       readonly escalateTo: string | null;
     }
   | { readonly kind: 'request_review'; readonly reviewer: string; readonly round: number }
-  | { readonly kind: 'review_rounds_exhausted'; readonly reviewer: string }
+  | {
+      /** A review demanded WITH a dispatched reviewer turn — the application opens the child. */
+      readonly kind: 'request_review_dispatch';
+      readonly reviewer: string;
+      readonly round: number;
+    }
+  | {
+      /**
+       * A schema-valid result whose completion a MATCHED REVIEW POLICY intercepts: the result is
+       * stored, the task parks for review instead of completing — policy overrides what the turn
+       * asked for.
+       */
+      readonly kind: 'complete_with_review';
+      readonly result: WorkerResult;
+      readonly reviewer: string;
+      readonly dispatchReviewer: boolean;
+      readonly round: number;
+      /**
+       * The EFFECTIVE round ceiling this interception was planned against — the tighter of the
+       * matched rule's own `maxRounds` and the execution-wide one. Recorded on the review park's
+       * binding so the verdict path enforces the same ceiling the planner used, rather than the
+       * budgets' half of it.
+       */
+      readonly maxRounds: number;
+    }
+  | {
+      readonly kind: 'review_rounds_exhausted';
+      readonly reviewer: string;
+      /** A schema-valid result that arrived with the rounds already spent is STORED, never dropped. */
+      readonly result: WorkerResult | null;
+    }
+  | {
+      readonly kind: 'submit_review';
+      readonly reviewId: string;
+      readonly verdict: 'accept' | 'reject';
+      readonly reasons: readonly string[];
+      readonly requiredChanges: readonly string[];
+    }
+  | { readonly kind: 'request_clarification'; readonly question: string }
+  | {
+      readonly kind: 'escalate';
+      readonly reason: EscalationReason;
+      readonly detail: string | null;
+      readonly escalateTo: string;
+      readonly escalateToDepartment: string | null;
+    }
+  | {
+      readonly kind: 'cancel_task';
+      readonly targetTaskId: string;
+      readonly detail: string | null;
+    }
   | { readonly kind: 'yield' }
   | { readonly kind: 'fail'; readonly message: string }
   | {
@@ -129,6 +263,36 @@ export interface PlanTurnInput {
   readonly priorToolError: boolean;
   /** True when a pending `cancel` signal was consumed at this turn's boundary. */
   readonly pendingCancel: boolean;
+  /**
+   * The TRUSTED review-policy match for a completing turn — computed by the caller's trusted layer
+   * from declared rules and the submitted result, never model-reachable (tool arguments are the
+   * model's only input; this field is not one). Null when no declared rule fires. The effective
+   * round ceiling is the TIGHTER of the rule's own `maxRounds` and the execution-wide ceiling.
+   */
+  readonly matchedReviewPolicy: {
+    readonly reviewer: string;
+    readonly dispatchReviewer: boolean;
+    readonly maxRounds: number;
+  } | null;
+  /**
+   * Children the turn BUFFERED for creation (the non-turn-ending create tools) — validated by the
+   * executor, applied atomically with the turn whatever its ending intent. They occupy the depth
+   * tier a fan-out child would, and the ones that are HAND-OFFS (owner differs from the task's
+   * own) count against the per-task fan-out cap exactly as delegation rows do and face the same
+   * cycle rejection; self-owned planning children are not hand-offs and do neither.
+   */
+  readonly createdChildren: readonly ReturnType<typeof delegationChildSpecSchema.parse>[];
+  /**
+   * Pre-read facts about a `cancel_task` intent's target (null for every other intent). Read from
+   * the immutable ancestry, so no lock is needed for the membership fact.
+   */
+  readonly cancelTarget: { readonly exists: boolean; readonly inCallerSubtree: boolean } | null;
+  /**
+   * THE REVIEW ASSIGNMENT this task carries, read from the parent's park binding: this task was
+   * dispatched to decide that review, and `submit_review` is the only ending that discharges it.
+   * Null for every other task.
+   */
+  readonly reviewAssignment: { readonly reviewId: string } | null;
   readonly intent: TurnIntent;
 }
 
@@ -143,10 +307,38 @@ export function invalidIntentPlan(detail: string, priorToolError: boolean): Turn
 
 export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
   if (input.pendingCancel) return { kind: 'cancelled' };
+  const bufferedRejection = rejectBufferedCreates(input);
+  if (bufferedRejection) return bufferedRejection;
   const intent = input.intent;
+  const reviewChildRejection = rejectReviewChildEnding(input);
+  if (reviewChildRejection) return reviewChildRejection;
   switch (intent.kind) {
-    case 'complete':
-      return { kind: 'complete', result: intent.result };
+    case 'complete': {
+      const policy = input.matchedReviewPolicy;
+      if (policy === null) return { kind: 'complete', result: intent.result };
+      // Policy OVERRIDES what the turn asked for: a matched rule intercepts the completion. The
+      // effective ceiling is the tighter of the rule's own rounds and the execution-wide one; a
+      // result that arrives with the rounds already spent is STORED and a human decides.
+      const effectiveMax =
+        input.maxReviewRounds !== null
+          ? Math.min(policy.maxRounds, input.maxReviewRounds)
+          : policy.maxRounds;
+      if (input.reviewRoundsUsed >= effectiveMax) {
+        return {
+          kind: 'review_rounds_exhausted',
+          reviewer: policy.reviewer,
+          result: intent.result,
+        };
+      }
+      return {
+        kind: 'complete_with_review',
+        result: intent.result,
+        reviewer: policy.reviewer,
+        dispatchReviewer: policy.dispatchReviewer,
+        round: input.reviewRoundsUsed + 1,
+        maxRounds: effectiveMax,
+      };
+    }
     case 'fan_out': {
       const rejection = rejectFanOut(input, intent.children);
       if (rejection) return rejection;
@@ -171,13 +363,61 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
     }
     case 'request_review': {
       if (input.maxReviewRounds !== null && input.reviewRoundsUsed >= input.maxReviewRounds) {
-        return { kind: 'review_rounds_exhausted', reviewer: intent.reviewer };
+        return { kind: 'review_rounds_exhausted', reviewer: intent.reviewer, result: null };
       }
+      const round = input.reviewRoundsUsed + 1;
+      return intent.dispatchReviewer
+        ? { kind: 'request_review_dispatch', reviewer: intent.reviewer, round }
+        : { kind: 'request_review', reviewer: intent.reviewer, round };
+    }
+    case 'submit_review':
       return {
-        kind: 'request_review',
-        reviewer: intent.reviewer,
-        round: input.reviewRoundsUsed + 1,
+        kind: 'submit_review',
+        reviewId: intent.reviewId,
+        verdict: intent.verdict,
+        reasons: intent.reasons,
+        requiredChanges: intent.requiredChanges,
       };
+    case 'request_clarification':
+      return { kind: 'request_clarification', question: intent.question };
+    case 'escalate': {
+      if (intent.escalateTo === input.taskOwner) {
+        return invalidIntentPlan(
+          'escalate names the escalating task’s own owner — self-escalation resolves ' +
+            'nothing and would loop. Fail-closed.',
+          input.priorToolError,
+        );
+      }
+      // DELIBERATELY not routed through `rejectFanOut`. Escalation is not delegation: the cycle
+      // check would refuse handing UP to an ancestor's owner (the normal case — the reporting
+      // chain usually owns the ancestors), and the depth ceiling would gag exactly the deep worker
+      // whose situation most needs a superior. What bounds escalation instead is the DECLARED
+      // reporting edge the caller resolved (acyclic, rooted — certified at validation) and the
+      // fact that each hop is one fresh child, budget-probed before its row is written.
+      return {
+        kind: 'escalate',
+        reason: intent.reason,
+        detail: intent.detail ?? null,
+        escalateTo: intent.escalateTo,
+        escalateToDepartment: intent.escalateToDepartment,
+      };
+    }
+    case 'cancel_task': {
+      if (input.cancelTarget === null) {
+        // Defensive: the executor always pre-reads the target for this intent kind.
+        return invalidIntentPlan(
+          'cancel_task arrived without its pre-read target facts. Fail-closed.',
+          input.priorToolError,
+        );
+      }
+      if (!input.cancelTarget.exists || !input.cancelTarget.inCallerSubtree) {
+        return invalidIntentPlan(
+          `cancel_task target '${intent.taskId}' does not exist in this task's own subtree — a ` +
+            'turn may cancel only work it owns or roots. Fail-closed.',
+          input.priorToolError,
+        );
+      }
+      return { kind: 'cancel_task', targetTaskId: intent.taskId, detail: intent.detail ?? null };
     }
     case 'yield':
       return { kind: 'yield' };
@@ -186,7 +426,92 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
   }
 }
 
-function rejectFanOut(input: PlanTurnInput, children: readonly ChildTaskSpec[]): TurnPlan | null {
+/**
+ * THE REVIEW CHILD'S LEGAL ENDINGS — the reason a review park always has an exit, and the reason a
+ * review chain is exactly one level deep.
+ *
+ * A task dispatched to decide a review exists for that one purpose, so two endings are refused:
+ *
+ *   - `complete`: the review task would finish normally and the REVIEWED task would sit in
+ *     `waiting_for_review` forever — no signal kind matches that park, no timeout sweep covers it,
+ *     and the verdict route refuses any task outside it, so nothing could ever decide the review
+ *     again. Making the mistake a typed tool error is what keeps that unreachable state unreachable.
+ *   - `request_review`: `reviewRoundsUsed` restarts at zero on every task and the reviewer role
+ *     carries `request_review`, so a reviewer that keeps asking for review is an unbounded chain
+ *     whenever no execution ceiling is declared. A review decides; it does not commission.
+ *
+ * Together these bound a RECIPROCAL pair of declared policies too (A reviews B, B reviews A): a
+ * review task cannot complete, so its completion is never policy-matched, and it cannot ask for a
+ * review of its own — the pair costs at most one review each way and cannot recurse.
+ *
+ * The assignment is read from the PARENT's park binding without a lock. A racing verdict that moves
+ * the parent out of the park can make it stale by the time this turn commits, and the refusal it
+ * produces is then a tool error the turn retries — fail-closed in the safe direction.
+ */
+function rejectReviewChildEnding(input: PlanTurnInput): TurnPlan | null {
+  if (input.reviewAssignment === null) return null;
+  if (input.intent.kind !== 'complete' && input.intent.kind !== 'request_review') return null;
+  return invalidIntentPlan(
+    `this task was dispatched to decide review '${input.reviewAssignment.reviewId}' — ` +
+      `'${input.intent.kind}' is not an ending it may take. Answer with submit_review ` +
+      '(accept or reject). Fail-closed.',
+    input.priorToolError,
+  );
+}
+
+/**
+ * The ceilings and acceptance checks buffered creates answer to. A buffered child is a child: it
+ * occupies the DEPTH tier a fan-out's would, and the HAND-OFFS among them (owner differs from the
+ * task's own) count against the per-task fan-out cap beside the existing delegation rows AND face
+ * the same CYCLE rejection a fan-out faces — a child handed to an owner who already owns an
+ * ancestor closes a loop in the task graph whichever tool opened it, and `maxDelegationDepth` is
+ * optional, so without this check an unbounded cycle needs only a spec that declares no ceiling.
+ *
+ * The self-hand-off rule has no work to do here, and that is a fact about the shape rather than an
+ * exemption: a child owned by the caller is a SELF-OWNED PLANNING CHILD — the create tool's whole
+ * point — and by definition not a hand-off. What a fan-out's self-check refuses (carrying the
+ * caller's own work away to itself) cannot be expressed on this path at all.
+ */
+function rejectBufferedCreates(input: PlanTurnInput): TurnPlan | null {
+  if (input.createdChildren.length === 0) return null;
+  if (input.maxDelegationDepth !== null && input.ancestryDepth + 1 > input.maxDelegationDepth) {
+    return {
+      kind: 'delegation_rejected',
+      reason: 'depth_exceeded',
+      detail: `created-child depth ${input.ancestryDepth + 1} exceeds maxDelegationDepth ${input.maxDelegationDepth}`,
+      fate: toolErrorFate(input.priorToolError),
+    };
+  }
+  const handOffs = input.createdChildren.filter((child) => child.owner !== input.taskOwner);
+  if (
+    input.maxDelegationsPerTask !== null &&
+    handOffs.length > 0 &&
+    input.existingDelegationCount + handOffs.length > input.maxDelegationsPerTask
+  ) {
+    return {
+      kind: 'delegation_rejected',
+      reason: 'fanout_exceeded',
+      detail: `${input.existingDelegationCount} existing + ${handOffs.length} created hand-offs exceeds maxDelegationsPerTask ${input.maxDelegationsPerTask}`,
+      fate: toolErrorFate(input.priorToolError),
+    };
+  }
+  for (const child of handOffs) {
+    if (input.ancestorOwners.includes(child.owner)) {
+      return {
+        kind: 'delegation_rejected',
+        reason: 'delegation_cycle',
+        detail: `created-child owner '${child.owner}' already owns an ancestor task`,
+        fate: toolErrorFate(input.priorToolError),
+      };
+    }
+  }
+  return null;
+}
+
+function rejectFanOut(
+  input: PlanTurnInput,
+  children: readonly DelegationChildSpec[],
+): TurnPlan | null {
   if (input.maxDelegationDepth !== null && input.ancestryDepth + 1 > input.maxDelegationDepth) {
     return {
       kind: 'delegation_rejected',
@@ -195,19 +520,23 @@ function rejectFanOut(input: PlanTurnInput, children: readonly ChildTaskSpec[]):
       fate: toolErrorFate(input.priorToolError),
     };
   }
+  // Buffered created hand-offs land in the SAME turn — they occupy cap slots beside these.
+  const bufferedHandOffs = input.createdChildren.filter(
+    (child) => child.owner !== input.taskOwner,
+  ).length;
   if (
     input.maxDelegationsPerTask !== null &&
-    input.existingDelegationCount + children.length > input.maxDelegationsPerTask
+    input.existingDelegationCount + bufferedHandOffs + children.length > input.maxDelegationsPerTask
   ) {
     return {
       kind: 'delegation_rejected',
       reason: 'fanout_exceeded',
-      detail: `${input.existingDelegationCount} existing + ${children.length} requested exceeds maxDelegationsPerTask ${input.maxDelegationsPerTask}`,
+      detail: `${input.existingDelegationCount} existing + ${bufferedHandOffs} created + ${children.length} requested exceeds maxDelegationsPerTask ${input.maxDelegationsPerTask}`,
       fate: toolErrorFate(input.priorToolError),
     };
   }
   for (const child of children) {
-    const owner = childTaskSpecSchema.parse(child).owner;
+    const owner = delegationChildSpecSchema.parse(child).owner;
     if (owner === input.taskOwner) {
       return {
         kind: 'delegation_rejected',

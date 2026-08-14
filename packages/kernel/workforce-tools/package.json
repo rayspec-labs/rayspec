@@ -1,0 +1,44 @@
+{
+  "name": "@rayspec/workforce-tools",
+  "version": "1.7.0",
+  "private": true,
+  "files": [
+    "dist"
+  ],
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rayspec/core": "workspace:*",
+    "@rayspec/db": "workspace:*",
+    "@rayspec/spec": "workspace:*",
+    "@rayspec/tasks": "workspace:*",
+    "drizzle-orm": "0.45.2",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "22.12.0",
+    "dotenv": "17.4.2",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

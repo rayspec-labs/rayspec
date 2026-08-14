@@ -5,7 +5,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { TaskRecord } from './apply-transition.js';
-import { isJoinSatisfied, joinPolicySchema, mergeChildResults } from './join.js';
+import {
+  fanOutJoinPolicySchema,
+  isJoinSatisfied,
+  joinPolicySchema,
+  mergeChildResults,
+} from './join.js';
 
 function fakeChild(taskId: string, status: string, summary: string): TaskRecord {
   return {
@@ -49,19 +54,69 @@ describe('joinPolicySchema', () => {
     expect(joinPolicySchema.safeParse({ policy: 'all', count: 2 }).success).toBe(false);
     expect(joinPolicySchema.safeParse('all').success).toBe(false);
   });
+
+  it('carries the escalation binding on the column, but never on a fan-out intent', () => {
+    expect(
+      joinPolicySchema.safeParse({ policy: 'escalation', escalationTaskId: 'task_e' }).success,
+    ).toBe(true);
+    expect(
+      fanOutJoinPolicySchema.safeParse({ policy: 'escalation', escalationTaskId: 'task_e' })
+        .success,
+    ).toBe(false);
+  });
+});
+
+describe('isJoinSatisfied (escalation)', () => {
+  it('only the bound child terminal counts — a terminal sibling never satisfies it', () => {
+    const bound = { policy: 'escalation', escalationTaskId: 'c-esc' } as const;
+    expect(isJoinSatisfied(bound, [fakeChild('c-sibling', 'completed', 'x')])).toBe(false);
+    expect(isJoinSatisfied(bound, [fakeChild('c-esc', 'working', 'y')])).toBe(false);
+    expect(isJoinSatisfied(bound, [fakeChild('c-esc', 'completed', 'y')])).toBe(true);
+  });
 });
 
 describe('isJoinSatisfied (all)', () => {
-  it('holds only when every child is terminal — failed and cancelled count as terminal', () => {
+  it('holds only when every BOUND child is terminal — failed and cancelled count as terminal', () => {
+    const bound = { policy: 'all', childTaskIds: ['a', 'b'] } as const;
     const done = [fakeChild('a', 'completed', 'x'), fakeChild('b', 'failed', 'y')];
-    expect(isJoinSatisfied({ policy: 'all' }, done)).toBe(true);
-    expect(isJoinSatisfied({ policy: 'all' }, [...done, fakeChild('c', 'working', 'z')])).toBe(
-      false,
-    );
+    expect(isJoinSatisfied(bound, done)).toBe(true);
+    expect(isJoinSatisfied(bound, [...done, fakeChild('c', 'working', 'z')])).toBe(true);
+    expect(
+      isJoinSatisfied(bound, [fakeChild('a', 'completed', 'x'), fakeChild('b', 'working', 'y')]),
+    ).toBe(false);
   });
 
-  it('an empty child set satisfies nothing', () => {
+  it('a binding-less park waits on nothing and is never satisfied — there is no whole-child reading', () => {
+    // The compat fallback is deliberately gone: a second join semantic beside the real one is the
+    // very bug the binding fixes, kept alive for rows that do not exist on this branch.
     expect(isJoinSatisfied({ policy: 'all' }, [])).toBe(false);
+    expect(isJoinSatisfied({ policy: 'all' }, [fakeChild('a', 'completed', 'x')])).toBe(false);
+  });
+
+  it('a BOUND join waits on its own round and ignores every other child of the parent', () => {
+    const bound = { policy: 'all', childTaskIds: ['a', 'b'] } as const;
+    const detached = fakeChild('detached', 'blocked', 'a buffered fire-and-forget child');
+    // The detached child never terminates; the round's own children do. Without the binding this
+    // parent stays in `awaiting_children` — the one park no operator signal may release.
+    expect(
+      isJoinSatisfied(bound, [
+        fakeChild('a', 'completed', 'x'),
+        fakeChild('b', 'cancelled', 'y'),
+        detached,
+      ]),
+    ).toBe(true);
+    // A bound child that is missing or still running holds the join open, terminal siblings or not.
+    expect(isJoinSatisfied(bound, [fakeChild('a', 'completed', 'x'), detached])).toBe(false);
+    expect(
+      isJoinSatisfied(bound, [fakeChild('a', 'completed', 'x'), fakeChild('b', 'working', 'y')]),
+    ).toBe(false);
+  });
+
+  it('an empty binding satisfies nothing, exactly as an empty child set does', () => {
+    expect(isJoinSatisfied({ policy: 'all', childTaskIds: [] }, [])).toBe(false);
+    expect(
+      isJoinSatisfied({ policy: 'all', childTaskIds: [] }, [fakeChild('a', 'completed', 'x')]),
+    ).toBe(false);
   });
 });
 

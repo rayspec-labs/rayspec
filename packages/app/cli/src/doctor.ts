@@ -26,6 +26,7 @@ import { accessSync, constants, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import {
   applyLintSuppressions,
+  experimentalSpecOptionsFromEnv,
   lintSpecWarnings,
   parseAnySpec,
   type SpecError,
@@ -49,6 +50,12 @@ export interface DoctorResult {
   readonly errors: SpecError[];
   readonly warnings: SpecWarning[];
   readonly suppressed?: SuppressedSpecWarning[];
+  /**
+   * The EXPERIMENTAL sections this document declares AND the environment enabled — present only
+   * when both hold (`['workforce']` today), so every existing envelope stays byte-identical. The
+   * CLI prints the unmissable banner off this field (stderr; stdout stays one JSON object).
+   */
+  readonly experimental?: readonly ['workforce'];
 }
 
 /**
@@ -58,7 +65,10 @@ export interface DoctorResult {
  * SpecError vocabulary has no "io" code; a read failure is surfaced as the document being unreadable).
  * NEVER throws for an invalid spec — only `ok:false`.
  */
-export async function runDoctor(positionals: readonly string[]): Promise<DoctorResult> {
+export async function runDoctor(
+  positionals: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<DoctorResult> {
   let text: string;
   let specPath: string;
   try {
@@ -75,7 +85,8 @@ export async function runDoctor(positionals: readonly string[]): Promise<DoctorR
     throw e;
   }
 
-  const parsed = parseAnySpec(text);
+  const specOptions = experimentalSpecOptionsFromEnv(env);
+  const parsed = parseAnySpec(text, specOptions);
   const errors: SpecError[] = parsed.ok ? [] : [...parsed.errors];
   // NON-FATAL advisories: only a valid backend-profile (rayspec) doc has stores/FKs to inspect (the
   // product profile has its own store handling). Warnings never affect `ok`. The nodes'
@@ -121,7 +132,18 @@ export async function runDoctor(positionals: readonly string[]): Promise<DoctorR
 
   // `suppressed` is emitted only when non-empty: a suppression-free document's envelope (and its
   // serialized bytes) stays exactly what it was before the field existed.
-  return suppressed.length > 0
-    ? { ok: errors.length === 0, errors, warnings, suppressed }
-    : { ok: errors.length === 0, errors, warnings };
+  const experimental =
+    specOptions.experimentalWorkforce === true &&
+    parsed.ok &&
+    parsed.kind === 'rayspec' &&
+    parsed.spec.workforce !== undefined
+      ? (['workforce'] as const)
+      : undefined;
+  return {
+    ok: errors.length === 0,
+    errors,
+    warnings,
+    ...(suppressed.length > 0 ? { suppressed } : {}),
+    ...(experimental !== undefined ? { experimental } : {}),
+  };
 }

@@ -26,7 +26,7 @@
  * consumes each adapter through its EXPORTED constructor only).
  */
 import type { Backend, BackendId } from '@rayspec/core';
-import { parseAnySpec } from '@rayspec/spec';
+import { experimentalSpecOptionsFromEnv, parseAnySpec } from '@rayspec/spec';
 import { declaredAgentBackends } from './boot-env-demands.js';
 import { type AgentBackendsFactory, BootConfigError } from './composition-root.js';
 import {
@@ -128,7 +128,7 @@ export function agentBackendsFactoryFromEnv(
   specText: string,
   env: NodeJS.ProcessEnv = process.env,
 ): AgentBackendsFactory | undefined {
-  const parsed = parseAnySpec(specText);
+  const parsed = parseAnySpec(specText, experimentalSpecOptionsFromEnv(env));
   // Only a parseable BACKEND-profile ('rayspec') doc reaches the agent-wiring path. A product doc, or a
   // doc that does not parse as a backend spec, needs no env-built backends here.
   if (!parsed.ok || parsed.kind !== 'rayspec') return undefined;

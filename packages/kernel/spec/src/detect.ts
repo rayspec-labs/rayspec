@@ -16,7 +16,7 @@
 import { parse as parseYaml } from 'yaml';
 import type { Result, SpecError } from './errors.js';
 import { type RaySpec, SPEC_VERSION } from './grammar.js';
-import { parseSpec } from './parse.js';
+import { type ParseSpecOptions, parseSpec } from './parse.js';
 import type { ProductSpec } from './product-grammar.js';
 import { parseProductSpec } from './product-parse.js';
 
@@ -55,13 +55,18 @@ export interface ValidateResult {
  * parser by `detectSpecKind`. An `unknown` root is routed to `parseSpec` so its existing
  * `unsupported_version`/`yaml_parse_error` message is preserved (no behavior change for RaySpec).
  */
-export function validateAnySpec(rawYamlText: string): ValidateResult {
+export function validateAnySpec(
+  rawYamlText: string,
+  options: ParseSpecOptions = {},
+): ValidateResult {
   const kind = detectSpecKind(rawYamlText);
   if (kind === 'product') {
+    // The product profile's strict root rejects the experimental sections as unknown fields on its
+    // own; the options steer the backend arm only.
     const res = parseProductSpec(rawYamlText);
     return res.ok ? { ok: true, kind, errors: [] } : { ok: false, kind, errors: res.errors };
   }
-  const res = parseSpec(rawYamlText);
+  const res = parseSpec(rawYamlText, options);
   return res.ok
     ? { ok: true, kind: 'rayspec', errors: [] }
     : { ok: false, kind: 'rayspec', errors: res.errors };
@@ -77,7 +82,7 @@ export type AnySpecParse =
   | { readonly ok: false; readonly kind: SpecKind; readonly errors: SpecError[] };
 
 /** Parse a raw spec of either family, returning the typed value on success. */
-export function parseAnySpec(rawYamlText: string): AnySpecParse {
+export function parseAnySpec(rawYamlText: string, options: ParseSpecOptions = {}): AnySpecParse {
   const kind = detectSpecKind(rawYamlText);
   if (kind === 'product') {
     const res: Result<ProductSpec, SpecError> = parseProductSpec(rawYamlText);
@@ -85,7 +90,7 @@ export function parseAnySpec(rawYamlText: string): AnySpecParse {
       ? { ok: true, kind: 'product', spec: res.value }
       : { ok: false, kind: 'product', errors: res.errors };
   }
-  const res: Result<RaySpec, SpecError> = parseSpec(rawYamlText);
+  const res: Result<RaySpec, SpecError> = parseSpec(rawYamlText, options);
   return res.ok
     ? { ok: true, kind: 'rayspec', spec: res.value }
     : { ok: false, kind: 'rayspec', errors: res.errors };

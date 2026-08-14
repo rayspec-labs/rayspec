@@ -17,9 +17,12 @@
  * dropped, never served verbatim. Ownership is probed on the tenant-scoped task row BEFORE
  * streaming — a foreign or absent task id is a uniform 404, no existence leak.
  *
- * Errors map typed: an unknown task/approval → 404 (uniform with foreign), a second decision on a
- * resolved approval → 409, a drain that cannot complete inside the HTTP window → 504 (the pause
- * itself is already in force — the response says exactly that).
+ * Errors map typed: an unknown task/approval/review → 404 (uniform with foreign), a second decision
+ * on a resolved approval or review → 409, a verdict aimed at a park waiting on a DIFFERENT review
+ * → 409 (the stale-inbox interleaving; nothing was written), a drain that cannot complete inside
+ * the HTTP window → 504 (the pause itself is already in force — the response says exactly that).
+ * Every typed engine refusal that can reach a route belongs in `mapEngineError`: one that does not
+ * surfaces as a generic 500, which reads as a broken server rather than as the refusal it is.
  */
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import { ApiError } from '@rayspec/auth-core';
@@ -36,16 +39,17 @@ import {
   haltWorkforce,
   isReservedWorkforceSegment,
   isTaskStatus,
+  operatorSignalKindSchema,
   pauseWorkforce,
   RESERVED_WORKFORCE_SEGMENTS,
   ReviewAlreadyDecidedError,
+  ReviewNotForParkError,
   ReviewNotFoundError,
   ReviewTaskStateError,
   readWorkforceRuntime,
   resolveWorkforceBudgets,
   resumeWorkforce,
   reviewVerdictSchema,
-  signalKindSchema,
   TASK_STATUSES,
   TaskNotFoundError,
   WorkforceDrainTimeoutError,
@@ -105,7 +109,11 @@ function workforceIdParam(c: Context<AppEnv>): string {
 }
 
 const signalRequestSchema = z.strictObject({
-  kind: signalKindSchema,
+  // OPERATOR kinds only. A mechanism kind posted from here would assert by hand the very fact its
+  // park is waiting to observe — releasing a fan-out join with the children still running, or an
+  // escalation park its child never answered. Those parks are structural on every engine door;
+  // this is the same door from outside. Anything else is a typed 400.
+  kind: operatorSignalKindSchema,
   payload: z.record(z.string(), z.unknown()).optional(),
   /**
    * The delivery's idempotency key. Supply one to make re-sends collapse (the engine dedupes on
@@ -190,6 +198,12 @@ function mapEngineError(err: unknown): never {
   }
   if (err instanceof ReviewTaskStateError) {
     throw new ApiError('CONFLICT', 'The task is no longer waiting for this review.');
+  }
+  if (err instanceof ReviewNotForParkError) {
+    // The stale-review interleaving: an abandoned review keeps an undecided row, so it still lists
+    // first in the inbox while a later round holds the park. Deciding it is a conflict about WHICH
+    // review the task waits on — nothing was written, and the caller can act on that.
+    throw new ApiError('CONFLICT', 'The task is waiting on a different review.');
   }
   if (err instanceof WorkforceUnknownError) {
     throw new ApiError('NOT_FOUND', 'Not found.');

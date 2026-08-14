@@ -430,7 +430,9 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     notProven: DRY_RUN_NOT_PROVEN,
   };
 
-  const { detectSpecKind, parseProductSpec, parseSpec } = await import('@rayspec/spec');
+  const { detectSpecKind, experimentalSpecOptionsFromEnv, parseProductSpec, parseSpec } =
+    await import('@rayspec/spec');
+  const specOptions = experimentalSpecOptionsFromEnv(process.env);
 
   if (detectSpecKind(specText) !== 'product') {
     const { detectStaticProfile } = await import('@rayspec/server');
@@ -451,7 +453,7 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     // The BACKEND profile — the shape `serveDeployment` boots through assembleServer. There is nothing
     // to compose (a backend document declares its own routes/handlers rather than lowering to them), so
     // the verdict is the validation `doctor` runs plus the names the document declares.
-    const backend = parseSpec(specText);
+    const backend = parseSpec(specText, specOptions);
     if (!backend.ok) return { ...base, errors: specDidNotValidate(backend.errors) };
     // A backend document MAY also declare frontend mounts (examples/notes-ui does). It is not the
     // static profile — it boots the full platform, which GATES on every mount — so the mounts are
@@ -469,7 +471,16 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
         ...(mounts.length > 0 ? { frontendMounts: mounts } : {}),
       },
       errors: [],
-      notProven: BACKEND_DRY_RUN_NOT_PROVEN,
+      notProven:
+        backend.value.workforce !== undefined
+          ? [
+              ...BACKEND_DRY_RUN_NOT_PROVEN,
+              // The redeploy gate compares the DECLARED workforce against LIVE task state, which a
+              // dry-run (no DB) cannot see.
+              'the workforce redeploy gate (removed employees/departments/teams with live ' +
+                'non-terminal tasks are checked against the database at deploy)',
+            ]
+          : BACKEND_DRY_RUN_NOT_PROVEN,
     };
   }
 

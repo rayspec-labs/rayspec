@@ -9,13 +9,13 @@
  * (task, turn number)); a recovered turn whose final transaction already committed finds it and
  * no-ops, so a crash-and-replay changes no terminal outcome and duplicates no side effect.
  *
- * Fan-in lives here too: when a task reaches a terminal status and has a parent parked on
- * `blocked(awaiting_children)`, the executor LOCKS THE PARENT ROW FIRST and only then reads the
- * siblings — under READ COMMITTED the post-lock read sees the racing sibling's committed terminal
- * row, so two last children completing concurrently cannot BOTH conclude "join not yet satisfied"
- * and strand the parent. A satisfied join writes exactly ONE `child_completed` signal (the
- * signal-key UNIQUE dedupes) and re-queues the parent; the parent's next dispatch receives the
- * full results keyed by child task id, never by completion order.
+ * Fan-in runs from here too (`afterTaskTerminal`, task-locks.ts): when a task reaches a terminal
+ * status and has a parent parked on `blocked(awaiting_children)`, the fan-in LOCKS THE PARENT ROW
+ * FIRST and only then reads the siblings — under READ COMMITTED the post-lock read sees the racing
+ * sibling's committed terminal row, so two last children completing concurrently cannot BOTH
+ * conclude "join not yet satisfied" and strand the parent. A satisfied join writes exactly ONE
+ * `child_completed` signal (the signal-key UNIQUE dedupes) and re-queues the parent; the parent's
+ * next dispatch receives the full results keyed by child task id, never by completion order.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * THE TASK LOCK ORDER — one order, every path that touches more than one task row.
@@ -44,60 +44,82 @@ import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import { probeSpend, settleTurn, type WorkforceBudgets } from './budget.js';
-import { insertChildTask } from './create-task.js';
+import { delegationChildSpecSchema, insertChildTask } from './create-task.js';
 import { TaskNotFoundError, TaskRowCorruptError, TaskVersionConflictError } from './errors.js';
 import { appendTaskEvents } from './events.js';
 import { deterministicChildTaskId } from './ids.js';
 import {
   invalidIntentPlan,
+  MAX_MESSAGE_BODY_CHARS,
+  MAX_MESSAGES_PER_TURN,
   planTurnOutcome,
   type TurnPlan,
   turnIntentSchema,
 } from './intent-applier.js';
-import { isJoinSatisfied, joinPolicySchema } from './join.js';
+import { joinPolicySchema } from './join.js';
+import {
+  applyReviewVerdictInTx,
+  ReviewAlreadyDecidedError,
+  ReviewNotForParkError,
+  ReviewTaskStateError,
+} from './reviews.js';
 import {
   absorbPendingWakes,
   consumePendingCancels,
   deliverSignal,
   escalationTargetsPark,
+  isStructuralPark,
   peekPendingCancels,
 } from './signals.js';
 import { isTaskStatus, isTerminalStatus } from './status.js';
+import {
+  afterTaskTerminal,
+  type DelegationStatus,
+  lockDescendants,
+  lockRootFirst,
+} from './task-locks.js';
+
+// The lock-order helpers, the fan-in, and the delegation-settlement vocabulary moved to
+// task-locks.ts (the review verdict path takes the same locks and may not import this module's
+// write paths). Re-exported here so the package surface is unchanged.
+export {
+  afterTaskTerminal,
+  DELEGATION_STATUSES,
+  type DelegationStatus,
+  delegationStatusSchema,
+  lockDescendants,
+  lockRootFirst,
+} from './task-locks.js';
+
+/** The strict shape of the trusted review-policy channel (`ApplyTurnInput.reviewPolicy`). */
+export const turnReviewPolicySchema = z.strictObject({
+  reviewer: z.string().min(1),
+  /** True when the reviewer is a declared employee whose verdict arrives via a dispatched turn. */
+  dispatchReviewer: z.boolean(),
+  /** The matched rule's own round ceiling; the planner takes the tighter of it and the budgets'. */
+  maxRounds: z.number().int().positive(),
+});
+
+export type TurnReviewPolicy = z.output<typeof turnReviewPolicySchema>;
+
+// The caps live in the pure planner (the lower module) so the intent schema can enforce the same
+// body limit on `request_clarification`; re-exported here so the package surface is unchanged.
+export { MAX_MESSAGE_BODY_CHARS, MAX_MESSAGES_PER_TURN } from './intent-applier.js';
 
 /**
- * The CLOSED delegation lifecycle — ONE vocabulary for `workforce_delegations.status`, which the
- * column carried in two halves with nothing narrowing it. A hand-off is OPENED (`accepted`) or
- * refused at planning (`rejected`); an accepted one SETTLES to the child's terminal status when the
- * child ends. Additive and CHECK-free, like every other closed vocabulary here: the column stays
- * `text`, the narrowing lives in code, and a new member is a code change with no migration.
+ * The strict shape of the trusted message channel (`ApplyTurnInput.messages`) — validated exactly
+ * like its siblings (`reviewPolicy`, `createdChildren`) rather than trusted as it arrives. The
+ * recipient is checked for shape here; WHICH recipients are declared is the composition's question,
+ * and the kernel stays roster-free about it.
  */
-export const DELEGATION_STATUSES = [
-  'accepted',
-  'rejected',
-  'completed',
-  'failed',
-  'cancelled',
-] as const;
-
-export type DelegationStatus = (typeof DELEGATION_STATUSES)[number];
-
-export const delegationStatusSchema = z.enum(DELEGATION_STATUSES);
-
-/**
- * Narrow a terminating task's status to the settlement half of the vocabulary. The three terminal
- * statuses are members by construction; anything else reaching a settlement is a corrupted row, not
- * a value to write through.
- */
-function settlementStatus(task: TaskRecord): DelegationStatus {
-  const parsed = delegationStatusSchema.safeParse(task.status);
-  if (!parsed.success) {
-    throw new TaskRowCorruptError(
-      task.taskId,
-      `status '${task.status}' cannot settle a delegation`,
-    );
-  }
-  return parsed.data;
-}
+export const turnMessagesSchema = z
+  .array(
+    z.strictObject({
+      recipient: z.string().min(1),
+      body: z.string().min(1).max(MAX_MESSAGE_BODY_CHARS),
+    }),
+  )
+  .max(MAX_MESSAGES_PER_TURN);
 
 /** The turn's final application refuses a task in a state it cannot explain. */
 export class TurnStateError extends Error {
@@ -133,7 +155,15 @@ const SINGLE_ROW_PLANS: ReadonlySet<TurnPlan['kind']> = new Set([
   'yield',
   'request_approval',
   'request_review',
+  // Still single-row with the stored-result extension: the result columns land on the SAME row
+  // the transition moves.
   'review_rounds_exhausted',
+  // One transition on the own row plus leaf-table writes (the question's message row, events) that
+  // no other path holds while waiting on a task row — no second TASK row is ever reached: no
+  // probe, no child, no fan-in (the park is non-terminal), and the `user_reply` wake arrives later
+  // through the delivery path. The ledger touch is `settleTurn` only, the same touch `yield`
+  // already makes on this fast path, in rank order (own task row, then ledger).
+  'request_clarification',
 ]);
 
 export interface ApplyTurnInput {
@@ -144,8 +174,25 @@ export interface ApplyTurnInput {
   readonly turnNumber: number;
   /** The handler's raw turn-ending intent; validated HERE, never assumed. */
   readonly intent: unknown;
-  /** Task-scoped messages the turn asked to append (context, never instructions). */
-  readonly messages?: readonly { readonly recipient: string; readonly body: string }[];
+  /**
+   * Task-scoped messages the turn asked to append (context, never instructions). A TRUSTED channel
+   * like its siblings: strictly validated and capped here (`turnMessagesSchema`), and applied only
+   * with an outcome the turn earned — never on the attempt a tool-error requeue will re-run.
+   */
+  readonly messages?: unknown;
+  /**
+   * The TRUSTED review-policy match for a completing turn, computed by the dispatching
+   * composition from declared rules — never derived from model output (the handler's tool
+   * arguments are the model's only input, and this field is not one). Validated strictly here;
+   * a malformed channel is a caller bug and a hard typed refusal.
+   */
+  readonly reviewPolicy?: unknown;
+  /**
+   * Children the turn BUFFERED for creation (the non-turn-ending create tools) — validated
+   * strictly here, applied atomically with the turn's ending intent. Slots 0..k-1 of this turn's
+   * deterministic child-id space belong to them; a same-turn fan-out's children continue after.
+   */
+  readonly createdChildren?: unknown;
   readonly budgets: WorkforceBudgets;
   /** The turn's actual cost; settled against the dispatch reservation. */
   readonly actualUsd?: number;
@@ -166,81 +213,6 @@ async function readTask(tx: TenantDb, taskId: string): Promise<TaskRecord> {
   if (!task) throw new TaskNotFoundError(taskId);
   if (!isTaskStatus(task.status)) throw new TaskRowCorruptError(taskId, `status '${task.status}'`);
   return task;
-}
-
-/**
- * Take the upward half of THE TASK LOCK ORDER (see the module header) for an operation on `task`:
- * its ancestors root-first, then the task itself, all `FOR UPDATE`, all BEFORE the operation's
- * first transition. `ancestryPath` is materialized root-first and immutable, so walking it IS the
- * canonical order. Returns the task re-read UNDER its own lock — the authoritative version a
- * compare-and-swap can then present without racing anyone.
- *
- * Every caller here touches a SECOND task row (the parent it fans into, the root it escalates to,
- * the descendants it cascades over), which is what makes the order load-bearing.
- */
-export async function lockRootFirst(tx: TenantDb, task: TaskRecord): Promise<TaskRecord> {
-  const ancestry = Array.isArray(task.ancestryPath) ? (task.ancestryPath as string[]) : [];
-  for (const ancestorId of ancestry) {
-    await tx
-      .select(schema.workforceTasks, { taskId: schema.workforceTasks.taskId })
-      .where(eq(schema.workforceTasks.taskId, ancestorId))
-      .for('update');
-  }
-  const rows = (await tx
-    .select(schema.workforceTasks)
-    .where(eq(schema.workforceTasks.taskId, task.taskId))
-    .for('update')) as TaskRecord[];
-  const locked = rows[0];
-  if (!locked) throw new TaskNotFoundError(task.taskId);
-  if (!isTaskStatus(locked.status)) {
-    throw new TaskRowCorruptError(task.taskId, `status '${locked.status}'`);
-  }
-  return locked;
-}
-
-/**
- * A task just reached a terminal status: settle its opening delegation record and, when its
- * parent is parked on the join, check fan-in. Exported for the cancel cascade, which terminates
- * tasks outside a turn. The parent lock this takes is already held by every caller (they went
- * through `lockRootFirst` before their transition) — re-taking it is free and keeps the fan-in
- * correct on its own terms.
- */
-export async function afterTaskTerminal(tx: TenantDb, task: TaskRecord): Promise<void> {
-  await tx
-    .update(schema.workforceDelegations, {
-      status: settlementStatus(task),
-      completedAt: new Date(),
-    })
-    .where(eq(schema.workforceDelegations.childTaskId, task.taskId));
-  if (task.parentTaskId === null) return;
-
-  // LOCK the parent row BEFORE reading siblings (see the module header: two racing last children
-  // must serialize here so the second one's sibling read sees the first one's committed terminal).
-  const parentRows = (await tx
-    .select(schema.workforceTasks)
-    .where(eq(schema.workforceTasks.taskId, task.parentTaskId))
-    .for('update')) as TaskRecord[];
-  const parent = parentRows[0];
-  if (!parent) return; // the parent left with its tenant — nothing to fan into
-  if (parent.status !== 'blocked' || parent.statusReason !== 'awaiting_children') return;
-  const policyParsed = joinPolicySchema.safeParse(parent.joinPolicy);
-  if (!policyParsed.success) return; // no declared join — the parent is blocked on something else
-  const children = (await tx
-    .select(schema.workforceTasks)
-    .where(eq(schema.workforceTasks.parentTaskId, parent.taskId))) as TaskRecord[];
-  if (!isJoinSatisfied(policyParsed.data, children)) return;
-  // The signal key is PER FAN-OUT ROUND: `turnsUsed` is frozen while the parent is parked (no
-  // turn runs), identical for every racing child in a round, and strictly larger next round — so
-  // racing last children of ONE round dedupe to one wake, while a later round's join can never
-  // collide with an earlier round's consumed key (a constant per-parent key would strand the
-  // parent forever on its second fan-out).
-  await deliverSignal(tx, {
-    taskId: parent.taskId,
-    kind: 'child_completed',
-    signalKey: `join:${parent.taskId}:${parent.turnsUsed}`,
-    payload: { childCount: children.length },
-    actor: 'system',
-  });
 }
 
 /**
@@ -276,6 +248,28 @@ async function assertClaimOwnership(tx: TenantDb, input: ApplyTurnInput): Promis
         `'${input.turnId}'`,
     );
   }
+}
+
+/**
+ * Is this task the REVIEW CHILD its parent's park is bound to? Read from the parent's binding —
+ * the same row the park lives on, so the fact cannot disagree with the park it describes. A plain
+ * read: the parent is parked and moves only by a verdict, and a racing verdict only ever makes the
+ * answer stale in the fail-closed direction (see `rejectReviewChildEnding`).
+ */
+async function readReviewAssignment(
+  tx: TenantDb,
+  task: TaskRecord,
+): Promise<{ reviewId: string } | null> {
+  if (task.parentTaskId === null) return null;
+  const rows = (await tx
+    .select(schema.workforceTasks)
+    .where(eq(schema.workforceTasks.taskId, task.parentTaskId))) as TaskRecord[];
+  const parent = rows[0];
+  if (!parent || parent.status !== 'waiting_for_review') return null;
+  const binding = joinPolicySchema.safeParse(parent.joinPolicy);
+  if (!binding.success || binding.data.policy !== 'review') return null;
+  if (binding.data.reviewTaskId !== task.taskId || binding.data.reviewId === undefined) return null;
+  return { reviewId: binding.data.reviewId };
 }
 
 /** Owners along the ancestry — the cycle-rejection input, read from rows, never from promises. */
@@ -337,10 +331,40 @@ export async function applyTurnOutcome(
       .select(schema.workforceDelegations, { id: schema.workforceDelegations.id })
       .where(eq(schema.workforceDelegations.parentTaskId, input.taskId));
 
+    // The trusted channel is validated BEFORE it can steer a plan — a malformed value is a caller
+    // bug (the composition builds it, never the model) and refuses loudly rather than degrading to
+    // "no policy fired".
+    const matchedReviewPolicy =
+      input.reviewPolicy === undefined ? null : turnReviewPolicySchema.parse(input.reviewPolicy);
+
+    // The buffered creates ride a TRUSTED channel too — validated strictly before they can plan.
+    const createdChildren = z.array(delegationChildSpecSchema).parse(input.createdChildren ?? []);
+    const messages = turnMessagesSchema.parse(input.messages ?? []);
+
     // Everything the planner needs except the one input that can only be read under a lock. The
     // fields taken from `snapshot` here (owner, ancestry) are immutable for the row's lifetime.
     const parsedIntent = turnIntentSchema.safeParse(input.intent);
+
+    // A cancel_task intent's target facts are PRE-READ from the immutable ancestry — no lock is
+    // needed for the membership fact, and the planner refuses a target outside the caller's own
+    // subtree before any lock is taken.
+    let cancelTarget: { exists: boolean; inCallerSubtree: boolean } | null = null;
+    if (parsedIntent.success && parsedIntent.data.kind === 'cancel_task') {
+      const targetRows = (await tx
+        .select(schema.workforceTasks)
+        .where(eq(schema.workforceTasks.taskId, parsedIntent.data.taskId))) as TaskRecord[];
+      const target = targetRows[0];
+      cancelTarget = {
+        exists: target !== undefined,
+        inCallerSubtree:
+          target !== undefined &&
+          Array.isArray(target.ancestryPath) &&
+          (target.ancestryPath as string[]).includes(input.taskId),
+      };
+    }
+
     const planInput = {
+      reviewAssignment: await readReviewAssignment(tx, snapshot),
       taskOwner: snapshot.owner,
       ancestryDepth: Array.isArray(snapshot.ancestryPath) ? snapshot.ancestryPath.length : 0,
       ancestorOwners: await ancestorOwners(tx, snapshot),
@@ -350,6 +374,9 @@ export async function applyTurnOutcome(
       maxReviewRounds: input.budgets.execution.maxReviewRounds ?? null,
       reviewRoundsUsed: reviewRows.length,
       priorToolError,
+      matchedReviewPolicy,
+      createdChildren,
+      cancelTarget,
     };
     const planFor = (pendingCancel: boolean): TurnPlan =>
       parsedIntent.success
@@ -365,6 +392,7 @@ export async function applyTurnOutcome(
     const speculativePlan = planFor(false);
     const singleRow =
       SINGLE_ROW_PLANS.has(speculativePlan.kind) &&
+      createdChildren.length === 0 &&
       (await peekPendingCancels(tx, input.taskId)).length === 0;
     const task = singleRow ? snapshot : await lockRootFirst(tx, snapshot);
     if (task.status !== 'working') {
@@ -376,12 +404,13 @@ export async function applyTurnOutcome(
     // planner reads moves while this turn holds the row.
     const plan: TurnPlan = cancels.length > 0 ? planFor(true) : speculativePlan;
 
-    if (plan.kind === 'cancelled') {
+    if (plan.kind === 'cancelled' || plan.kind === 'cancel_task') {
       // The cascade below reaches DOWN into the descendants, and settlement reaches into the
       // LEDGER. The rank is workforce_tasks -> workforce_budget_ledger, so the descendant locks
       // come first: a concurrent claim for a descendant holds that task row and wants the shared
       // `root:` ledger row, and taking the ledger first here closes the cycle on it. The plan is
-      // already known, so nothing forces this acquisition to wait for the settlement.
+      // already known, so nothing forces this acquisition to wait for the settlement (the
+      // cancel_task cascade stays inside the caller's subtree, which this lock set covers).
       await lockDescendants(tx, task);
     }
 
@@ -411,57 +440,46 @@ export async function applyTurnOutcome(
     const stamp = { actor: task.owner, turnId: input.turnId, turnNumber: input.turnNumber };
     let finalTask: TaskRecord | null = null;
 
-    switch (plan.kind) {
-      case 'cancelled': {
-        finalTask = await applyTransition(tx, {
+    // THE TURN'S BUFFERED EFFECTS — its created children and its messages — apply with every
+    // outcome the turn actually EARNED, and with none that overrode or refused it (a consumed
+    // cancel, a rejected hand-off, a malformed ending, a terminal fail). A tool-error requeue
+    // re-runs the turn under a NEW turn number, and the receipt keys on (task, turn): anything
+    // applied on the failed attempt is therefore applied AGAIN on the retry, with no key to
+    // collide on. Children have always been guarded this way; messages had not been, so a turn
+    // that malformed its ending sent its notes twice.
+    //
+    // ONE EXCEPTION, stated rather than papered over: a BUDGET DENIAL inside the branches below
+    // overrides the plan after this predicate was computed, so a turn whose creates were denied
+    // still applies its messages. That is deliberate — the denial is not a refusal of the TURN
+    // (the turn ran and ended legitimately, its receipt is written, and it is not re-run under a
+    // new turn number), so its messages are not duplicated by anything. The predicate keys on the
+    // PLAN because the plan is what decides whether this turn will be replayed.
+    const effectsApply =
+      plan.kind !== 'cancelled' &&
+      plan.kind !== 'fail' &&
+      plan.kind !== 'delegation_rejected' &&
+      plan.kind !== 'invalid_intent';
+    const createsApply = createdChildren.length > 0 && effectsApply;
+    if (createsApply) {
+      const probe = await probeSpend(
+        tx,
+        input.budgets,
+        {
           taskId: task.taskId,
-          expectedVersion: task.version,
-          to: 'cancelled',
-          reason: 'cancelled_by_user',
-          ...stamp,
-        });
-        await cancelDescendants(tx, finalTask, 'system');
-        await afterTaskTerminal(tx, finalTask);
-        break;
-      }
-      case 'complete': {
-        await tx
-          .update(schema.workforceTasks, {
-            result: plan.result,
-            confidence: String(plan.result.confidence),
-          })
-          .where(eq(schema.workforceTasks.taskId, task.taskId));
-        finalTask = await applyTransition(tx, {
-          taskId: task.taskId,
-          expectedVersion: task.version,
-          to: 'completed',
-          ...stamp,
-        });
-        await afterTaskTerminal(tx, finalTask);
-        break;
-      }
-      case 'fan_out': {
-        const probe = await probeSpend(
-          tx,
-          input.budgets,
-          {
-            taskId: task.taskId,
-            rootTaskId: task.rootTaskId,
-            workforceId: task.workforceId,
-            department: task.department,
-            estimateUsd: plan.children.length * input.budgets.execution.estimateUsdPerTurn,
-          },
-          plan.children.length,
-        );
-        if (!probe.allowed) {
-          finalTask = await applyBudgetExhausted(tx, task, probe.denial, input.budgets, stamp);
-          break;
-        }
-        await tx
-          .update(schema.workforceTasks, { joinPolicy: plan.joinPolicy })
-          .where(eq(schema.workforceTasks.taskId, task.taskId));
-        for (const [index, spec] of plan.children.entries()) {
+          rootTaskId: task.rootTaskId,
+          workforceId: task.workforceId,
+          department: task.department,
+          estimateUsd: createdChildren.length * input.budgets.execution.estimateUsdPerTurn,
+        },
+        createdChildren.length,
+      );
+      if (!probe.allowed) {
+        finalTask = await applyBudgetExhausted(tx, task, probe.denial, input.budgets, stamp);
+      } else {
+        for (const [index, specWithTarget] of createdChildren.entries()) {
+          const { delegatedTo, ...spec } = specWithTarget;
           const child = await insertChildTask(tx, task, input.turnNumber, index, spec);
+          if (child.owner === task.owner) continue; // a self-owned planning child is no hand-off
           const depth = Array.isArray(child.ancestryPath) ? child.ancestryPath.length : 0;
           await tx
             .insert(schema.workforceDelegations, {
@@ -469,7 +487,7 @@ export async function applyTurnOutcome(
               parentTaskId: task.taskId,
               childTaskId: child.taskId,
               delegatedBy: task.owner,
-              delegatedTo: child.owner,
+              delegatedTo: delegatedTo ?? child.owner,
               resolvedOwner: child.owner,
               goal: child.goal,
               expectedOutput: 'worker_result',
@@ -484,175 +502,616 @@ export async function applyTurnOutcome(
                 parentTaskId: task.taskId,
                 childTaskId: child.taskId,
                 delegatedBy: task.owner,
-                delegatedTo: child.owner,
+                delegatedTo: delegatedTo ?? child.owner,
+                resolvedOwner: child.owner,
                 depth,
                 goal: child.goal,
               },
             },
           ]);
         }
-        finalTask = await applyTransition(tx, {
-          taskId: task.taskId,
-          expectedVersion: task.version,
-          to: 'blocked',
-          reason: 'awaiting_children',
-          ...stamp,
-        });
-        break;
       }
-      case 'request_approval': {
-        const inserted = await tx
-          .insert(schema.workforceApprovals, {
+    }
+
+    // A creates denial above IS the turn's outcome; otherwise the plan decides.
+    if (finalTask === null) {
+      switch (plan.kind) {
+        case 'cancelled': {
+          finalTask = await applyTransition(tx, {
             taskId: task.taskId,
-            question: plan.question,
-            options: plan.options,
-            approver: plan.approver,
-            status: 'pending',
-            timeoutAt: new Date(Date.now() + plan.timeoutMs),
-            onTimeout: plan.onTimeout,
-            escalateTo: plan.escalateTo,
-          })
-          .returning({ id: schema.workforceApprovals.id });
-        const approvalId = (inserted[0] as { id: string }).id;
-        await appendTaskEvents(tx, task.taskId, [
-          {
-            type: 'workforce.approval.requested',
-            payload: {
-              approvalId,
-              taskId: task.taskId,
-              question: plan.question,
-              options: plan.options,
-              approver: plan.approver,
-              onTimeout: plan.onTimeout,
-            },
-          },
-        ]);
-        finalTask = await applyTransition(tx, {
-          taskId: task.taskId,
-          expectedVersion: task.version,
-          to: 'waiting_for_user',
-          reason: 'approval_pending',
-          ...stamp,
-        });
-        break;
-      }
-      case 'request_review': {
-        const inserted = await tx
-          .insert(schema.workforceReviews, {
+            expectedVersion: task.version,
+            to: 'cancelled',
+            reason: 'cancelled_by_user',
+            ...stamp,
+          });
+          await cancelDescendants(tx, finalTask, 'system');
+          await afterTaskTerminal(tx, finalTask);
+          break;
+        }
+        case 'complete': {
+          await tx
+            .update(schema.workforceTasks, {
+              result: plan.result,
+              confidence: String(plan.result.confidence),
+            })
+            .where(eq(schema.workforceTasks.taskId, task.taskId));
+          finalTask = await applyTransition(tx, {
             taskId: task.taskId,
-            reviewer: plan.reviewer,
-            round: plan.round,
-          })
-          .returning({ id: schema.workforceReviews.id });
-        await appendTaskEvents(tx, task.taskId, [
-          {
-            type: 'workforce.review.requested',
-            payload: {
-              reviewId: (inserted[0] as { id: string }).id,
+            expectedVersion: task.version,
+            to: 'completed',
+            ...stamp,
+          });
+          await afterTaskTerminal(tx, finalTask);
+          break;
+        }
+        case 'fan_out': {
+          const probe = await probeSpend(
+            tx,
+            input.budgets,
+            {
               taskId: task.taskId,
-              reviewer: plan.reviewer,
-              round: plan.round,
+              rootTaskId: task.rootTaskId,
+              workforceId: task.workforceId,
+              department: task.department,
+              estimateUsd: plan.children.length * input.budgets.execution.estimateUsdPerTurn,
             },
-          },
-        ]);
-        finalTask = await applyTransition(tx, {
-          taskId: task.taskId,
-          expectedVersion: task.version,
-          to: 'waiting_for_review',
-          reason: 'review_pending',
-          ...stamp,
-        });
-        break;
-      }
-      case 'review_rounds_exhausted': {
-        // The round budget is spent; a human decides rather than an accept/rework loop.
-        finalTask = await applyTransition(tx, {
-          taskId: task.taskId,
-          expectedVersion: task.version,
-          to: 'waiting_for_user',
-          ...stamp,
-        });
-        break;
-      }
-      case 'yield': {
-        finalTask = await applyTransition(tx, {
-          taskId: task.taskId,
-          expectedVersion: task.version,
-          to: 'queued',
-          queueReason: 'turn_yield',
-          ...stamp,
-        });
-        break;
-      }
-      case 'fail': {
-        finalTask = await applyTransition(tx, {
-          taskId: task.taskId,
-          expectedVersion: task.version,
-          to: 'failed',
-          ...stamp,
-        });
-        await afterTaskTerminal(tx, finalTask);
-        break;
-      }
-      case 'delegation_rejected': {
-        // Record the refusal on the delegation table (the child ids are deterministic, so the
-        // rejected rows are idempotent under re-execution too), then apply the tool-error fate.
-        const intent = parsedIntent.success ? parsedIntent.data : null;
-        if (intent?.kind === 'fan_out') {
-          for (const [index, spec] of intent.children.entries()) {
-            const childTaskId = deterministicChildTaskId(
-              tx.tenantId,
-              task.taskId,
+            plan.children.length,
+          );
+          if (!probe.allowed) {
+            finalTask = await applyBudgetExhausted(tx, task, probe.denial, input.budgets, stamp);
+            break;
+          }
+          const joinChildTaskIds: string[] = [];
+          for (const [index, specWithTarget] of plan.children.entries()) {
+            // The ORIGINAL target rides the delegation record only — the task row's `owner` IS the
+            // resolution, so the target is stripped before the child insert.
+            const { delegatedTo, ...spec } = specWithTarget;
+            // Buffered creates hold slots 0..k-1 of this turn's child-id space; fan-out children
+            // continue after them so the deterministic ids can never collide.
+            const child = await insertChildTask(
+              tx,
+              task,
               input.turnNumber,
-              index,
+              createdChildren.length + index,
+              spec,
             );
+            joinChildTaskIds.push(child.taskId);
+            const depth = Array.isArray(child.ancestryPath) ? child.ancestryPath.length : 0;
             await tx
               .insert(schema.workforceDelegations, {
                 workforceId: task.workforceId,
                 parentTaskId: task.taskId,
-                childTaskId,
+                childTaskId: child.taskId,
                 delegatedBy: task.owner,
-                delegatedTo: spec.owner,
-                resolvedOwner: spec.owner,
-                goal: spec.goal,
+                delegatedTo: delegatedTo ?? child.owner,
+                resolvedOwner: child.owner,
+                goal: child.goal,
                 expectedOutput: 'worker_result',
-                depth: (Array.isArray(task.ancestryPath) ? task.ancestryPath.length : 0) + 1,
-                status: 'rejected' satisfies DelegationStatus,
-                rejectionReason: plan.reason,
+                depth,
+                status: 'accepted' satisfies DelegationStatus,
               })
               .onConflictDoNothing();
             await appendTaskEvents(tx, task.taskId, [
               {
-                type: 'workforce.delegation.rejected',
+                type: 'workforce.delegation.accepted',
                 payload: {
                   parentTaskId: task.taskId,
-                  childTaskId,
+                  childTaskId: child.taskId,
                   delegatedBy: task.owner,
-                  delegatedTo: spec.owner,
-                  reason: plan.reason,
-                  detail: plan.detail,
+                  delegatedTo: delegatedTo ?? child.owner,
+                  resolvedOwner: child.owner,
+                  depth,
+                  goal: child.goal,
                 },
               },
             ]);
           }
+          // BIND the park to the children THIS fan-out opened. A detached buffered-create child
+          // shares the parent but was never part of this round, and must not hold the join open.
+          await tx
+            .update(schema.workforceTasks, {
+              joinPolicy: { ...plan.joinPolicy, childTaskIds: joinChildTaskIds },
+            })
+            .where(eq(schema.workforceTasks.taskId, task.taskId));
+          finalTask = await applyTransition(tx, {
+            taskId: task.taskId,
+            expectedVersion: task.version,
+            to: 'blocked',
+            reason: 'awaiting_children',
+            ...stamp,
+          });
+          break;
         }
-        finalTask = await applyToolErrorFate(tx, task, plan.fate, stamp);
-        break;
-      }
-      case 'invalid_intent': {
-        finalTask = await applyToolErrorFate(tx, task, plan.fate, stamp);
-        break;
+        case 'request_approval': {
+          const inserted = await tx
+            .insert(schema.workforceApprovals, {
+              taskId: task.taskId,
+              question: plan.question,
+              options: plan.options,
+              approver: plan.approver,
+              status: 'pending',
+              timeoutAt: new Date(Date.now() + plan.timeoutMs),
+              onTimeout: plan.onTimeout,
+              escalateTo: plan.escalateTo,
+            })
+            .returning({ id: schema.workforceApprovals.id });
+          const approvalId = (inserted[0] as { id: string }).id;
+          await appendTaskEvents(tx, task.taskId, [
+            {
+              type: 'workforce.approval.requested',
+              payload: {
+                approvalId,
+                taskId: task.taskId,
+                question: plan.question,
+                options: plan.options,
+                approver: plan.approver,
+                onTimeout: plan.onTimeout,
+              },
+            },
+          ]);
+          finalTask = await applyTransition(tx, {
+            taskId: task.taskId,
+            expectedVersion: task.version,
+            to: 'waiting_for_user',
+            reason: 'approval_pending',
+            ...stamp,
+          });
+          break;
+        }
+        case 'request_review': {
+          const inserted = await tx
+            .insert(schema.workforceReviews, {
+              taskId: task.taskId,
+              reviewer: plan.reviewer,
+              round: plan.round,
+            })
+            .returning({ id: schema.workforceReviews.id });
+          // A model-initiated review answers to the EXECUTION ceiling alone — no declared policy
+          // stands behind it, so the binding carries none and the verdict path uses the budgets'.
+          await bindReviewPark(tx, task.taskId, {
+            reviewId: (inserted[0] as { id: string }).id,
+            reviewTaskId: null,
+            maxRounds: null,
+          });
+          await appendTaskEvents(tx, task.taskId, [
+            {
+              type: 'workforce.review.requested',
+              payload: {
+                reviewId: (inserted[0] as { id: string }).id,
+                taskId: task.taskId,
+                reviewer: plan.reviewer,
+                round: plan.round,
+              },
+            },
+          ]);
+          finalTask = await applyTransition(tx, {
+            taskId: task.taskId,
+            expectedVersion: task.version,
+            to: 'waiting_for_review',
+            reason: 'review_pending',
+            ...stamp,
+          });
+          break;
+        }
+        case 'request_review_dispatch':
+        case 'complete_with_review': {
+          // A review WITH a dispatched reviewer turn (and, for the policy-intercepted completion,
+          // the stored result). Probe BEFORE any write so a denial leaves a clean row: the reviewer
+          // child is a turn to be paid for, exactly like a fan-out child.
+          const dispatchReviewer =
+            plan.kind === 'request_review_dispatch' ? true : plan.dispatchReviewer;
+          if (dispatchReviewer) {
+            const probe = await probeSpend(
+              tx,
+              input.budgets,
+              {
+                taskId: task.taskId,
+                rootTaskId: task.rootTaskId,
+                workforceId: task.workforceId,
+                department: task.department,
+                estimateUsd: input.budgets.execution.estimateUsdPerTurn,
+              },
+              1,
+            );
+            if (!probe.allowed) {
+              finalTask = await applyBudgetExhausted(tx, task, probe.denial, input.budgets, stamp);
+              break;
+            }
+          }
+          if (plan.kind === 'complete_with_review') {
+            // Policy intercepted the completion: the RESULT IS STORED (the reviewer reads it off
+            // this row) but the task parks for review instead of completing.
+            await tx
+              .update(schema.workforceTasks, {
+                result: plan.result,
+                confidence: String(plan.result.confidence),
+              })
+              .where(eq(schema.workforceTasks.taskId, task.taskId));
+          }
+          const inserted = await tx
+            .insert(schema.workforceReviews, {
+              taskId: task.taskId,
+              reviewer: plan.reviewer,
+              round: plan.round,
+            })
+            .returning({ id: schema.workforceReviews.id });
+          const reviewId = (inserted[0] as { id: string }).id;
+          let reviewTaskId: string | null = null;
+          // The reviewer child skips the delegation depth ceiling DELIBERATELY (like the escalation
+          // child): review dispatch cannot recurse, and that is now enforced rather than argued —
+          // a task bound as a review child may take NEITHER `complete` NOR `request_review`
+          // (`rejectReviewChildEnding`), so a task's review chain sits exactly one level below it.
+          if (dispatchReviewer) {
+            const child = await insertChildTask(
+              tx,
+              task,
+              input.turnNumber,
+              createdChildren.length,
+              {
+                title: `Review: ${task.title}`.slice(0, 200),
+                goal:
+                  `Review the submitted result of task ${task.taskId} (round ${plan.round}) and ` +
+                  'return a verdict.',
+                owner: plan.reviewer,
+              },
+            );
+            reviewTaskId = child.taskId;
+          }
+          // BIND the park: which review answers it, which task was dispatched to decide it, and the
+          // DECLARED policy's own round ceiling. The verdict path takes the tighter of that and the
+          // execution ceiling — it is the only way a document the kernel cannot read reaches it.
+          await bindReviewPark(tx, task.taskId, {
+            reviewId,
+            reviewTaskId,
+            maxRounds: plan.kind === 'complete_with_review' ? plan.maxRounds : null,
+          });
+          await appendTaskEvents(tx, task.taskId, [
+            {
+              type: 'workforce.review.requested',
+              payload: {
+                reviewId,
+                taskId: task.taskId,
+                reviewer: plan.reviewer,
+                round: plan.round,
+                policy: plan.kind === 'complete_with_review',
+                reviewTaskId,
+              },
+            },
+          ]);
+          finalTask = await applyTransition(tx, {
+            taskId: task.taskId,
+            expectedVersion: task.version,
+            to: 'waiting_for_review',
+            reason: 'review_pending',
+            ...stamp,
+          });
+          break;
+        }
+        case 'review_rounds_exhausted': {
+          // The round budget is spent; a human decides rather than an accept/rework loop. A result
+          // that arrived with the rounds already spent is STORED on the same row — never dropped.
+          if (plan.result !== null) {
+            await tx
+              .update(schema.workforceTasks, {
+                result: plan.result,
+                confidence: String(plan.result.confidence),
+              })
+              .where(eq(schema.workforceTasks.taskId, task.taskId));
+          }
+          finalTask = await applyTransition(tx, {
+            taskId: task.taskId,
+            expectedVersion: task.version,
+            to: 'waiting_for_user',
+            ...stamp,
+          });
+          break;
+        }
+        case 'submit_review': {
+          // A reviewer turn's verdict on the task UNDER REVIEW — this task's PARENT. The trusted
+          // layer resolved `reviewId` from the pending review row; the kernel still re-checks the
+          // linkage fail-closed, on BOTH ends: the review must belong to the parent, AND its named
+          // reviewer must be this task's own owner. Without the second check any task under the
+          // reviewed parent — a fan-out sibling, a buffered child — could decide a review addressed
+          // to someone else. Either mismatch is a tool error, one requeue then failed, exactly like
+          // any other malformed turn ending.
+          const reviewRows = (await tx
+            .select(schema.workforceReviews)
+            .where(
+              eq(schema.workforceReviews.id, plan.reviewId),
+            )) as (typeof schema.workforceReviews.$inferSelect)[];
+          const review = reviewRows[0];
+          if (
+            !review ||
+            task.parentTaskId === null ||
+            review.taskId !== task.parentTaskId ||
+            review.reviewer !== task.owner
+          ) {
+            finalTask = await applyToolErrorFate(
+              tx,
+              task,
+              priorToolError ? 'fail' : 'requeue',
+              stamp,
+            );
+            break;
+          }
+          // Apply the verdict through the ONE verdict path (reviews.ts) — same CAS, same round
+          // ceiling, same locks (this turn's `lockRootFirst` already holds the parent; re-taking is
+          // free). A verdict that lost its race (the human route decided first, or the reviewed task
+          // moved) is BENIGN: nothing was written before the refusal, and the reviewer task still
+          // completes below with the superseded outcome on record.
+          let verdictOutcome: 'applied' | 'superseded' = 'applied';
+          try {
+            await applyReviewVerdictInTx(tx, input.budgets, {
+              reviewId: plan.reviewId,
+              verdict: plan.verdict,
+              reasons: [...plan.reasons],
+              requiredChanges: [...plan.requiredChanges],
+              actor: task.owner,
+            });
+          } catch (err) {
+            if (
+              err instanceof ReviewAlreadyDecidedError ||
+              err instanceof ReviewTaskStateError ||
+              // Believed unreachable here: `plan.reviewId` was read from the PARENT's own park
+              // binding (`readReviewAssignment`), and this transaction holds the parent lock, so the
+              // park cannot name a different review by the time the verdict lands. It joins its two
+              // siblings because it is the same story — a verdict this reviewer no longer owns — and
+              // a future path that loses that identity should be superseded, not thrown out of a
+              // turn that has already written.
+              err instanceof ReviewNotForParkError
+            ) {
+              verdictOutcome = 'superseded';
+            } else {
+              throw err;
+            }
+          }
+          const reviewerResult = {
+            status: 'completed',
+            summary:
+              verdictOutcome === 'applied'
+                ? `review ${plan.verdict} (round ${review.round})`
+                : 'verdict superseded — another decision landed first',
+            findings: [...plan.reasons],
+            recommendations: [...plan.requiredChanges],
+            artifacts: [],
+            confidence: 1,
+            needsFollowUp: false,
+          };
+          await tx
+            .update(schema.workforceTasks, { result: reviewerResult, confidence: '1' })
+            .where(eq(schema.workforceTasks.taskId, task.taskId));
+          finalTask = await applyTransition(tx, {
+            taskId: task.taskId,
+            expectedVersion: task.version,
+            to: 'completed',
+            ...stamp,
+          });
+          await afterTaskTerminal(tx, finalTask);
+          break;
+        }
+        case 'escalate': {
+          // A fresh CHILD task carries the escalation to the superior — their own open task, if any,
+          // is structurally parked on the join that contains THIS task and may not be woken (the
+          // WAKES rule). The caller parks `blocked(escalated)`; the child's terminal fans back as
+          // the `escalated` signal that answers exactly that park (`afterTaskTerminal`).
+          const probe = await probeSpend(
+            tx,
+            input.budgets,
+            {
+              taskId: task.taskId,
+              rootTaskId: task.rootTaskId,
+              workforceId: task.workforceId,
+              department: task.department,
+              estimateUsd: input.budgets.execution.estimateUsdPerTurn,
+            },
+            1,
+          );
+          if (!probe.allowed) {
+            finalTask = await applyBudgetExhausted(tx, task, probe.denial, input.budgets, stamp);
+            break;
+          }
+          const child = await insertChildTask(tx, task, input.turnNumber, createdChildren.length, {
+            title: `Escalation: ${task.title}`.slice(0, 200),
+            goal:
+              `Escalated (${plan.reason}) from task ${task.taskId}: ` +
+              `${plan.detail ?? task.goal}`,
+            owner: plan.escalateTo,
+            department: plan.escalateToDepartment,
+          });
+          // BIND the park to its child: only THIS child's terminal answers `blocked(escalated)` —
+          // a detached buffered-create child (this turn's or an earlier turn's) finishing while
+          // the caller waits must not release the park (afterTaskTerminal checks the binding).
+          await tx
+            .update(schema.workforceTasks, {
+              joinPolicy: { policy: 'escalation', escalationTaskId: child.taskId },
+            })
+            .where(eq(schema.workforceTasks.taskId, task.taskId));
+          await appendTaskEvents(tx, task.taskId, [
+            {
+              type: 'workforce.escalation.raised',
+              payload: {
+                taskId: task.taskId,
+                escalationTaskId: child.taskId,
+                escalateTo: plan.escalateTo,
+                reason: plan.reason,
+                detail: plan.detail,
+              },
+            },
+          ]);
+          finalTask = await applyTransition(tx, {
+            taskId: task.taskId,
+            expectedVersion: task.version,
+            to: 'blocked',
+            reason: 'escalated',
+            ...stamp,
+          });
+          break;
+        }
+        case 'request_clarification': {
+          // The question is a MESSAGE to whoever requested this work — context for their reply,
+          // never an instruction — and the park waits for the `user_reply` that answers it
+          // (WAKES: user_reply -> blocked(clarification_pending)).
+          await tx.insert(schema.workforceMessages, {
+            taskId: task.taskId,
+            sender: task.owner,
+            recipient: task.requestedBy,
+            body: plan.question,
+          });
+          await appendTaskEvents(tx, task.taskId, [
+            {
+              type: 'workforce.message.sent',
+              payload: {
+                taskId: task.taskId,
+                sender: task.owner,
+                recipient: task.requestedBy,
+                bodyLength: plan.question.length,
+              },
+            },
+          ]);
+          finalTask = await applyTransition(tx, {
+            taskId: task.taskId,
+            expectedVersion: task.version,
+            to: 'blocked',
+            reason: 'clarification_pending',
+            ...stamp,
+          });
+          break;
+        }
+        case 'cancel_task': {
+          // The caller's whole subtree is already locked (the cancel branch above the settlement
+          // took `lockDescendants`), so every row acted on here is re-read UNDER its lock.
+          const targetRows = (await tx
+            .select(schema.workforceTasks)
+            .where(eq(schema.workforceTasks.taskId, plan.targetTaskId))) as TaskRecord[];
+          const target = targetRows[0];
+          if (target && isTaskStatus(target.status) && !isTerminalStatus(target.status)) {
+            if (target.status === 'working') {
+              // Never kill a turn mid-flight: the target absorbs the cancel at its own boundary;
+              // descendants that are NOT mid-turn cancel now (the cascade's own rule).
+              await deliverSignal(tx, {
+                taskId: target.taskId,
+                kind: 'cancel',
+                signalKey: `cancel:${task.taskId}`,
+                payload: { origin: task.taskId, detail: plan.detail },
+                actor: task.owner,
+              });
+              await cancelDescendants(tx, target, task.owner);
+            } else {
+              const done = await applyTransition(tx, {
+                taskId: target.taskId,
+                expectedVersion: target.version,
+                to: 'cancelled',
+                reason: 'cancelled_by_user',
+                actor: task.owner,
+              });
+              await cancelDescendants(tx, done, task.owner);
+              await afterTaskTerminal(tx, done);
+            }
+          }
+          // The caller keeps orchestrating: back through the one door.
+          finalTask = await applyTransition(tx, {
+            taskId: task.taskId,
+            expectedVersion: task.version,
+            to: 'queued',
+            queueReason: 'turn_yield',
+            ...stamp,
+          });
+          break;
+        }
+        case 'yield': {
+          finalTask = await applyTransition(tx, {
+            taskId: task.taskId,
+            expectedVersion: task.version,
+            to: 'queued',
+            queueReason: 'turn_yield',
+            ...stamp,
+          });
+          break;
+        }
+        case 'fail': {
+          finalTask = await applyTransition(tx, {
+            taskId: task.taskId,
+            expectedVersion: task.version,
+            to: 'failed',
+            ...stamp,
+          });
+          await afterTaskTerminal(tx, finalTask);
+          break;
+        }
+        case 'delegation_rejected': {
+          // Record the refusal on the delegation table (the child ids are deterministic, so the
+          // rejected rows are idempotent under re-execution too), then apply the tool-error fate.
+          const intent = parsedIntent.success ? parsedIntent.data : null;
+          if (intent?.kind === 'fan_out') {
+            for (const [index, spec] of intent.children.entries()) {
+              const childTaskId = deterministicChildTaskId(
+                tx.tenantId,
+                task.taskId,
+                input.turnNumber,
+                index,
+              );
+              await tx
+                .insert(schema.workforceDelegations, {
+                  workforceId: task.workforceId,
+                  parentTaskId: task.taskId,
+                  childTaskId,
+                  delegatedBy: task.owner,
+                  delegatedTo: spec.delegatedTo ?? spec.owner,
+                  resolvedOwner: spec.owner,
+                  goal: spec.goal,
+                  expectedOutput: 'worker_result',
+                  depth: (Array.isArray(task.ancestryPath) ? task.ancestryPath.length : 0) + 1,
+                  status: 'rejected' satisfies DelegationStatus,
+                  rejectionReason: plan.reason,
+                })
+                .onConflictDoNothing();
+              await appendTaskEvents(tx, task.taskId, [
+                {
+                  type: 'workforce.delegation.rejected',
+                  payload: {
+                    parentTaskId: task.taskId,
+                    childTaskId,
+                    delegatedBy: task.owner,
+                    delegatedTo: spec.delegatedTo ?? spec.owner,
+                    resolvedOwner: spec.owner,
+                    reason: plan.reason,
+                    detail: plan.detail,
+                  },
+                },
+              ]);
+            }
+          }
+          finalTask = await applyToolErrorFate(tx, task, plan.fate, stamp);
+          break;
+        }
+        case 'invalid_intent': {
+          finalTask = await applyToolErrorFate(tx, task, plan.fate, stamp);
+          break;
+        }
       }
     }
 
-    if (input.messages) {
-      for (const message of input.messages) {
+    if (effectsApply) {
+      for (const message of messages) {
         await tx.insert(schema.workforceMessages, {
           taskId: task.taskId,
           sender: task.owner,
           recipient: message.recipient,
           body: message.body,
         });
+        // The journal carries WHO wrote to WHOM and HOW MUCH — never the body: a message is
+        // untrusted data addressed to a later turn's context, not operator UX.
+        await appendTaskEvents(tx, task.taskId, [
+          {
+            type: 'workforce.message.sent',
+            payload: {
+              taskId: task.taskId,
+              sender: task.owner,
+              recipient: message.recipient,
+              bodyLength: message.body.length,
+            },
+          },
+        ]);
       }
     }
 
@@ -677,6 +1136,30 @@ export async function applyTurnOutcome(
     ]);
     return { alreadyApplied: false, plan, task: finalTask };
   });
+}
+
+/**
+ * BIND a `waiting_for_review` park to the review it waits on, on the same row the park lives on
+ * (`joinPolicy`, the park-binding column — see join.ts). Three facts nothing else can supply later:
+ * WHICH review answers the park, WHICH task was dispatched to decide it (null when a human does),
+ * and the DECLARED policy's round ceiling — a ceiling that lives in a document the kernel is
+ * deliberately roster-free about, and which the verdict path would otherwise never see.
+ */
+async function bindReviewPark(
+  tx: TenantDb,
+  taskId: string,
+  binding: { reviewId: string; reviewTaskId: string | null; maxRounds: number | null },
+): Promise<void> {
+  await tx
+    .update(schema.workforceTasks, {
+      joinPolicy: {
+        policy: 'review',
+        reviewId: binding.reviewId,
+        reviewTaskId: binding.reviewTaskId,
+        ...(binding.maxRounds !== null ? { maxRounds: binding.maxRounds } : {}),
+      },
+    })
+    .where(eq(schema.workforceTasks.taskId, taskId));
 }
 
 type Stamp = { actor: string; turnId: string; turnNumber: number };
@@ -717,18 +1200,20 @@ async function applyToolErrorFate(
  *
  * What a deferral is worth depends on the park, and the two cases are NOT the same:
  *
- *   - `awaiting_dependency`, `review_pending`, `approval_pending` — the mechanism runs independently
- *     of this denial, so the root does resume, does re-authorize, and an unchanged ceiling denies it
- *     again; at that point the root itself sits in `blocked(budget_exhausted)`, a park the
- *     escalation may target, and it surfaces there. Nothing is lost.
- *   - `awaiting_children` — the deferral does NOT surface by itself, and saying otherwise would be
- *     circular: the child whose dispatch was denied is the one the join is waiting for, so the join
- *     cannot close, the root never redispatches, and every exit from the child (raise the ceiling
- *     and signal `budget_raised`, or cancel it) is precisely the operator action the escalation
- *     existed to summon. The journal entry is the whole notification in that case, and it says so.
- *     Still strictly better than the alternative it replaced — dissolving the join and orphaning
- *     the children — but a durable deferral that can wake a structural park is a real design task,
- *     tracked as a follow-up rather than pretended away here.
+ *   - `awaiting_dependency`, `review_pending`, `approval_pending`, `clarification_pending` — the
+ *     mechanism runs independently of this denial, so the root does resume, does re-authorize, and
+ *     an unchanged ceiling denies it again; at that point the root itself sits in
+ *     `blocked(budget_exhausted)`, a park the escalation may target, and it surfaces there. Nothing
+ *     is lost.
+ *   - the STRUCTURAL parks (`awaiting_children`, `escalated`) — the deferral does NOT surface by
+ *     itself whenever the denied task is the very child the park waits on, and saying otherwise
+ *     would be circular: that child cannot terminate, so the join cannot close (or the escalation
+ *     cannot be answered), the root never redispatches, and every exit from the child (raise the
+ *     ceiling and signal `budget_raised`, or cancel it) is precisely the operator action the
+ *     escalation existed to summon. The journal entry is the whole notification in that case, and
+ *     it says so. Still strictly better than the alternative it replaced — dissolving the park and
+ *     orphaning the child — but a durable deferral that can wake a structural park is a real design
+ *     task, tracked as a follow-up rather than pretended away here.
  */
 export async function applyBudgetExhausted(
   tx: TenantDb,
@@ -778,14 +1263,15 @@ export async function applyBudgetExhausted(
             scopeKind: denial.scopeKind,
             scopeId: denial.scopeId,
             park: { status: root.status, statusReason: root.statusReason },
-            // `awaiting_children` is the one park that does NOT re-surface on its own: the denied
-            // child cannot terminate, so the join never closes and the root never redispatches.
-            // The event says which case this is rather than promising a wake that will not come.
-            surfacesWhen:
-              root.statusReason === 'awaiting_children'
-                ? 'not automatically — the join cannot close while the denied child is blocked; ' +
-                  'raise the ceiling and send budget_raised to the blocked child, or cancel it'
-                : 'the park is released by its own mechanism and the next dispatch is denied again',
+            // The STRUCTURAL parks are the ones that do NOT re-surface on their own: each waits on
+            // a child's terminal, and a denied child cannot terminate — so the join never closes
+            // (or the escalation is never answered) and the root never redispatches. The event says
+            // which case this is rather than promising a wake that will not come.
+            surfacesWhen: isStructuralPark(root.statusReason)
+              ? 'not automatically — the park waits on a child terminal that a blocked child ' +
+                'cannot reach; raise the ceiling and send budget_raised to the blocked child, or ' +
+                'cancel it'
+              : 'the park is released by its own mechanism and the next dispatch is denied again',
           },
         },
       ]);
@@ -819,53 +1305,6 @@ export async function applyBudgetExhausted(
     }
   }
   return rootId === task.taskId ? await readTask(tx, task.taskId) : blocked;
-}
-
-/**
- * Take the DOWNWARD half of THE TASK LOCK ORDER (see the module header): every non-terminal
- * descendant of `origin`, `FOR UPDATE`, in the canonical root-first order (ancestry depth, then
- * task id — the tiebreaker matters: two cascades over overlapping subtrees must agree on the order
- * of same-depth siblings). Returns the rows re-read UNDER their locks.
- *
- * The whole subtree read is a DELIBERATE full scan — a cascade that saw only a page of its
- * descendants would leave the rest running under a cancelled ancestor, so this one is bounded by
- * the subtree's own size, not by a LIMIT.
- *
- * Split out from `cancelDescendants` because the LOCKS and the WRITES have different deadlines: a
- * turn that will cascade must take these task locks BEFORE it touches the ledger (tasks -> ledger
- * is the rank), which is strictly earlier than the point the cascade itself runs. Re-locking rows
- * this transaction already holds is free, so a caller that pre-locked simply passes through here a
- * second time.
- */
-export async function lockDescendants(tx: TenantDb, origin: TaskRecord): Promise<TaskRecord[]> {
-  const subtree = (await tx
-    .select(schema.workforceTasks)
-    .where(eq(schema.workforceTasks.rootTaskId, origin.rootTaskId))) as TaskRecord[];
-  const descendants = subtree
-    .filter(
-      (t) =>
-        t.taskId !== origin.taskId &&
-        Array.isArray(t.ancestryPath) &&
-        (t.ancestryPath as string[]).includes(origin.taskId) &&
-        // Terminal is absorbing, so a terminal snapshot is a terminal row — no lock needed.
-        !(isTaskStatus(t.status) && isTerminalStatus(t.status)),
-    )
-    .sort(
-      (a, b) =>
-        (Array.isArray(a.ancestryPath) ? a.ancestryPath.length : 0) -
-          (Array.isArray(b.ancestryPath) ? b.ancestryPath.length : 0) ||
-        a.taskId.localeCompare(b.taskId),
-    );
-  const locked: TaskRecord[] = [];
-  for (const desc of descendants) {
-    const rows = (await tx
-      .select(schema.workforceTasks)
-      .where(eq(schema.workforceTasks.taskId, desc.taskId))
-      .for('update')) as TaskRecord[];
-    const row = rows[0];
-    if (row) locked.push(row);
-  }
-  return locked;
 }
 
 /**

@@ -5,21 +5,57 @@
     "outDir": "./dist"
   },
   "references": [
-    { "path": "../../kernel/core" },
-    { "path": "../../kernel/db" },
-    { "path": "../../kernel/auth-core" },
-    { "path": "../../kernel/platform" },
-    { "path": "../../workflow/durable-dbos" },
-    { "path": "../../kernel/spec" },
-    { "path": "../../compose/api-auth" },
-    { "path": "../../adapters/openai" },
-    { "path": "../../workflow/nodes/agent-runtime" },
-    { "path": "../../capabilities/audio-runtime" },
-    { "path": "../../compose/product-yaml" },
-    { "path": "../../adapters/deepgram" },
-    { "path": "../../kernel/stt-port" },
-    { "path": "../../adapters/openai-tts" },
-    { "path": "../../kernel/tts-port" }
+    {
+      "path": "../../kernel/core"
+    },
+    {
+      "path": "../../kernel/db"
+    },
+    {
+      "path": "../../kernel/auth-core"
+    },
+    {
+      "path": "../../kernel/platform"
+    },
+    {
+      "path": "../../workflow/durable-dbos"
+    },
+    {
+      "path": "../../kernel/spec"
+    },
+    {
+      "path": "../../compose/api-auth"
+    },
+    {
+      "path": "../../adapters/openai"
+    },
+    {
+      "path": "../../workflow/nodes/agent-runtime"
+    },
+    {
+      "path": "../../capabilities/audio-runtime"
+    },
+    {
+      "path": "../../compose/product-yaml"
+    },
+    {
+      "path": "../../adapters/deepgram"
+    },
+    {
+      "path": "../../kernel/stt-port"
+    },
+    {
+      "path": "../../adapters/openai-tts"
+    },
+    {
+      "path": "../../kernel/tts-port"
+    },
+    {
+      "path": "../../kernel/tasks"
+    },
+    {
+      "path": "../../kernel/workforce-tools"
+    }
   ],
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules", "**/*.test.ts"]

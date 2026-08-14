@@ -43,16 +43,32 @@ export const WORKFORCE_EVENT_TYPES = [
   'workforce.approval.timed_out',
   'workforce.review.requested',
   'workforce.review.decided',
+  /**
+   * A dispatched review task ended terminal without a verdict (cancelled, or failed on the
+   * tool-error fate) — the reviewed task is released to a human rather than left in a park whose
+   * only exit is gone. The review row stays pending and undecided; no verdict is fabricated.
+   */
+  'workforce.review.abandoned',
   'workforce.delegation.accepted',
   'workforce.delegation.rejected',
   'workforce.budget.reserved',
   'workforce.budget.settled',
   'workforce.budget.exceeded',
-  /** An exceedance whose escalation the root's park refuses; it surfaces at the next denial. */
+  /**
+   * An exceedance whose escalation the root's park refuses. Whether it EVER surfaces depends on the
+   * park, and the payload's `surfacesWhen` says which case this one is: a park released by its own
+   * mechanism re-dispatches and is denied again, but a STRUCTURAL park (`awaiting_children`,
+   * `escalated`) waits on a child terminal a blocked child cannot reach — and for that one this
+   * event is the whole notification.
+   */
   'workforce.budget.escalation_deferred',
   'workforce.control.paused',
   'workforce.control.resumed',
   'workforce.control.halted',
+  /** A task-scoped message row landed (payload carries WHO and HOW MUCH, never the body). */
+  'workforce.message.sent',
+  /** A turn escalated its task up the reporting line (the caller parks; a fresh task carries it). */
+  'workforce.escalation.raised',
 ] as const;
 
 export type WorkforceEventType = (typeof WORKFORCE_EVENT_TYPES)[number];

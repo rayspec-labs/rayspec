@@ -107,8 +107,11 @@ import {
 } from '@rayspec/platform';
 import {
   DEFAULT_EVENT_BUS_RETENTION_HOURS,
+  deriveWorkforceConfig,
   detectSpecKind,
+  experimentalSpecOptionsFromEnv,
   type FrontendSpec,
+  type ParseSpecOptions,
   parseAnySpec,
   parseProductSpec,
   parseSpec,
@@ -153,6 +156,12 @@ import { buildSttCapability, FAKE_STT_BOOT_WARNING } from './stt-capability.js';
 // would be a runtime cycle. The shape of the secret pair belongs with the code that consumes it.
 import type { TenantProvisionSecrets } from './tenant-provision.js';
 import { buildTtsCapability, FAKE_TTS_BOOT_WARNING } from './tts-capability.js';
+import {
+  assertWorkforceSpecCompatible,
+  ensureDeclaredWorkforceRuntime,
+  releaseDepartedWorkforceDeclarations,
+} from './workforce-boot.js';
+import { buildWorkforceTurnHandlers } from './workforce-turn-handlers.js';
 
 /** The default local port (overridable via PORT). Local DX only — not a reserved well-known port. */
 export const DEFAULT_PORT = 8080;
@@ -496,6 +505,13 @@ export interface ServerConfig {
    * ever fires under an unknown tenant either way. Absent for an auth-only / no-cron / no-worker boot.
    */
   cronTenantId?: string;
+  /**
+   * RAYSPEC_EXPERIMENTAL_WORKFORCE. True iff the environment opted into the EXPERIMENTAL
+   * `workforce:` spec section ('1' | 'true' | 'yes', trimmed, case-insensitive — the shared
+   * derivation in @rayspec/spec). Unset ⇒ a spec declaring the section is refused at parse with
+   * `experimental_section_disabled`, at every entry point, before any DB work.
+   */
+  experimentalWorkforce: boolean;
   /**
    * The LOCAL filesystem ROOT the fs `BlobStore` backend writes under (one
    * subdir per tenant — `<root>/<tenantId>/`). Set via RAYSPEC_BLOB_ROOT. REQUIRED iff the deployed
@@ -1130,6 +1146,7 @@ export function loadServerConfig(
   // erasure/GDPR/body-refresh gates) — default DISABLED, so a deployment that never set it has NO
   // route on which an org id can be chosen at all. See the ServerConfig field for why that matters.
   const tenantBootstrapEnabled = env.RAYSPEC_TENANT_BOOTSTRAP_ENABLED === 'true';
+  const experimentalWorkforce = experimentalSpecOptionsFromEnv(env).experimentalWorkforce === true;
 
   // The frontend-mount security-header values — the SAME env read (and the same secure defaults) the
   // static profile uses, so the two boot shapes cannot drift. Consumed only when the deployed spec
@@ -1156,6 +1173,7 @@ export function loadServerConfig(
     erasureEnabled,
     bodyRefreshEnabled,
     tenantBootstrapEnabled,
+    experimentalWorkforce,
   };
 
   const specPath = env.RAYSPEC_SPEC_PATH?.trim();
@@ -1413,6 +1431,9 @@ export function detectStaticProfile(
   if (!isStaticProfile(specSource)) return undefined;
   // isStaticProfile already proved this parses as a backend RaySpec with a non-empty frontend; re-parse
   // to hand the typed mounts to assembleStaticServer.
+  // DELIBERATELY unthreaded from the workforce opt-in: a document the default parse rejects
+  // (an experimental section included) classifies as NON-static and routes to the normal boot —
+  // the correct destination for a workforce document either way.
   const parsed = parseSpec(specSource);
   if (!parsed.ok || parsed.value.frontend === undefined || parsed.value.frontend.length === 0) {
     return undefined;
@@ -2035,7 +2056,9 @@ export async function assembleServer(
   // `detectSpecKind` key on the `product:` discriminant, and each per-profile deploy path re-parses +
   // fail-closed-validates the doc itself (deployProductYamlSpec / deployDeclaredSpec).
   const specParse = config.specPath
-    ? parseAnySpec(readFileSync(config.specPath, 'utf8'))
+    ? parseAnySpec(readFileSync(config.specPath, 'utf8'), {
+        experimentalWorkforce: config.experimentalWorkforce,
+      })
     : undefined;
   const specDispatchKind = specParse?.kind;
 
@@ -2227,6 +2250,8 @@ async function mergeExtensions(
   specPath: string,
   /** DEV/TEST ONLY — the pack module importer; undefined in production (the guarded default is used). */
   moduleImporter?: ModuleImporter,
+  /** The caller's parse opt-ins — the merged re-parse must accept exactly what the base parse did. */
+  specParseOptions: ParseSpecOptions = {},
 ): Promise<MergedExtensions> {
   // Absent / empty extensions ⇒ a true no-op for production (the original spec + source, no importer;
   // deploy() then loads deployment-own handlers with the guarded default importer). A dev/test caller may
@@ -2279,7 +2304,7 @@ async function mergeExtensions(
   // Re-serialize → YAML so deploy() re-parses + re-validates the MERGED spec (no special pass). Then
   // re-parse it ourselves to get the typed merged spec the downstream derivations consume.
   const mergedSource = stringifyYaml(mergedPlain);
-  const reparsed = parseSpec(mergedSource);
+  const reparsed = parseSpec(mergedSource, specParseOptions);
   if (!reparsed.ok) {
     throw new BootConfigError(
       `Boot aborted — the spec at ${specPath} merged with its extension packs is invalid (a pack ` +
@@ -2400,7 +2425,8 @@ async function deployDeclaredSpec(
 
   // Pre-parse to build the product tables + the first-materialization migration SQL the rollout
   // needs (deploy() re-parses internally for its own VALIDATE step — a !ok there aborts the deploy).
-  const parsed = parseSpec(specSource);
+  const specParseOptions = { experimentalWorkforce: config.experimentalWorkforce };
+  const parsed = parseSpec(specSource, specParseOptions);
   if (!parsed.ok) {
     throw new BootConfigError(
       `Boot aborted — injected spec at ${specPath} is invalid:\n${JSON.stringify(parsed.errors, null, 2)}`,
@@ -2429,6 +2455,7 @@ async function deployDeclaredSpec(
     escapeHatchRoot,
     specPath,
     opts.moduleImporter,
+    specParseOptions,
   );
 
   const specStores = [...effectiveSpec.stores];
@@ -2877,6 +2904,36 @@ async function deployDeclaredSpec(
     query: queryFn, // the SAME thunk used for the pre-flight drift classification above.
   };
 
+  // ── The WORKFORCE REDEPLOY GATE + tenant precondition (BEFORE deploy(): a refusal precedes any
+  //    DDL or mount). The platform migration chain already applied above, so the workforce tables
+  //    exist even on a first boot; an empty database passes trivially (pure additions always
+  //    deploy).
+  //
+  //    The gate runs whether or not THIS document declares a workforce, because a document that
+  //    declares none is the MAXIMAL removal — the case a declaration-keyed gate cannot ask about at
+  //    all. What makes it decidable is the declaration marker a previous declaring boot left on the
+  //    runtime row (workforce-boot.ts's header): an id no document ever declared is unmarked, so an
+  //    engine-only deployment passes by construction. A clean retirement then releases the marker,
+  //    which is why the release runs here too and only after the gate has agreed the retirement is
+  //    clean.
+  if (effectiveSpec.workforce !== undefined && !config.cronTenantId) {
+    throw new BootConfigError(
+      'Boot aborted — the spec declares a workforce but RAYSPEC_CRON_TENANT_ID is unset. A ' +
+        'workforce runs under the deployment task tenant (the same single-deployment posture ' +
+        'cron fires use); set the variable to the org id durable tasks run under. Fail-closed.',
+    );
+  }
+  if (config.cronTenantId) {
+    // The gate scopes by tenant, so the tenant SHAPE is asked first — otherwise a malformed id
+    // surfaces as `forTenant`'s raw chokepoint throw here instead of the typed boot abort the
+    // scheduler wiring below already produces for it. Same check, same message, taken earlier.
+    await assertCronTenantBootable(db, config.cronTenantId);
+    await assertWorkforceSpecCompatible(
+      forTenant(db, config.cronTenantId),
+      effectiveSpec.workforce,
+    );
+  }
+
   // ── deploy() + the post-deploy boot GATES, under one committed-DDL catch ────────────────
   // From here through the cron gates below, a refusal is raised on a schema that may ALREADY carry
   // this boot's product DDL (applyMigration commits each migration in its own transaction, so a
@@ -2901,6 +2958,8 @@ async function deployDeclaredSpec(
       // so a pack store/route/handler is validated by the SAME parseSpec/lintSpec gate (no special
       // pass), and a pack store rides the SAME migration SQL below. byte-unchanged deploy().
       specSource: effectiveSpecSource,
+      // The SAME opt-ins the pre-parse used — deploy()'s re-parse must accept exactly what it did.
+      specParse: specParseOptions,
       // '0000_product_stores.sql' on a clean DB (materialize) — or [] on a reboot (MOUNT: no
       // product DDL → existing data survives). A 'drifted' schema already failed closed above.
       migrations,
@@ -3109,6 +3168,18 @@ async function deployDeclaredSpec(
       // surface — the fire route, the deterministic tests, and the CEO demo all use it.
       fireCronNow = (name: string, instant?: Date) => cronScheduler.fireNow(name, instant);
     }
+
+    // ── RELEASE the declaration markers of workforces this document retired — LAST, and only on a
+    //    boot that got this far. The release is a commit that DISARMS the redeploy gate for those
+    //    ids, so running it beside the gate meant an abort anywhere later in this try left the
+    //    markers already cleared: the next boot of the same removing document would then sail past
+    //    a gate that had refused it a moment earlier. Deploy first, disarm after.
+    if (config.cronTenantId) {
+      await releaseDepartedWorkforceDeclarations(
+        forTenant(db, config.cronTenantId),
+        effectiveSpec.workforce,
+      );
+    }
   } catch (e) {
     // Everything above this point runs on a schema that may already carry this boot's product DDL.
     // Say what was committed, without re-wrapping (the message keeps its class and its prefix), and
@@ -3177,13 +3248,30 @@ async function deployDeclaredSpec(
     // The tenant SHAPE is boot-checkable (a malformed id never becomes valid by waiting); whether
     // the org EXISTS stays a per-pass question through the same probe the cron scheduler uses.
     await assertCronTenantBootable(db, taskTenantId);
+    // A DECLARED workforce: persist the derived budgets onto the runtime row (idempotent upsert —
+    // every reboot refreshes the ceilings the very next dispatch reads) and derive the in-memory
+    // configuration the production turn-handler resolver runs on. Org structure is never stored.
+    let workforceResolver: ResolveTurnHandler | undefined;
+    if (effectiveSpec.workforce !== undefined) {
+      await ensureDeclaredWorkforceRuntime(
+        forTenant(workerDbHandle as Db, taskTenantId),
+        effectiveSpec.workforce,
+      );
+      workforceResolver = buildWorkforceTurnHandlers({
+        db: workerDbHandle as Db,
+        tenantId: taskTenantId,
+        config: deriveWorkforceConfig(effectiveSpec.workforce),
+        registry: () => workerAgentRegistry,
+      });
+    }
     const taskScheduler = new DbosTaskScheduler({
       db: workerDbHandle,
       tenantId: taskTenantId,
       tenantExists: (passTenantId: string) => tenantOrgExists(workerDbHandle as Db, passTenantId),
-      // The owner→handler resolution seam (opts-only, like moduleImporter — no env path). Absent ⇒
+      // The owner→handler resolution seam. The opts seam (tests, like moduleImporter — no env
+      // path) keeps priority; a declared workforce wires the production resolver; absent both,
       // every dispatched owner fails typed rather than idling.
-      resolveTurnHandler: opts.workforceTurnHandlers ?? (() => undefined),
+      resolveTurnHandler: opts.workforceTurnHandlers ?? workforceResolver ?? (() => undefined),
     });
     durableExecutorInstance.attachPreLaunchHook(() => taskScheduler.registerScheduledWorkflows());
     wiredTaskScheduler = taskScheduler;

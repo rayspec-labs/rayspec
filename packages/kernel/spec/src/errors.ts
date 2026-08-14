@@ -139,6 +139,37 @@ import { z } from 'zod';
  *                               nullable column, a store step targeting an undeclared store, a filter/values
  *                               column outside the store's declared columns, a write omitting the conflict-
  *                               key column, or store vocabulary on a non-store step type. Fail-closed.
+ *  - `experimental_section_disabled` — the document declares an EXPERIMENTAL section (`workforce:`)
+ *                               and this entry point did not opt in. Fail-closed by DEFAULT: every
+ *                               caller of `parseSpec` that has not decided rejects, so the section
+ *                               can never leak into a surface that has not chosen to carry it.
+ *  - `invalid_orchestrator`   — the workforce `orchestrator` violates the entry-point rules: the
+ *                               named employee does not hold role `orchestrator`, a second employee
+ *                               holds it, or the orchestrator declares `reportsTo` (the chain roots
+ *                               AT the orchestrator).
+ *  - `invalid_manager`        — a department `manager` holds neither role `manager` nor the
+ *                               workforce `orchestrator` seat.
+ *  - `manager_in_members`     — a department manager is also listed in its own `members` (a manager
+ *                               answers FOR the department, never inside it).
+ *  - `department_mismatch`    — employee↔department membership incoherence: an employee's declared
+ *                               `department` does not list them (and they are not its manager), or a
+ *                               department member's own `department` field names a different one.
+ *  - `reporting_cycle`        — the EFFECTIVE reporting graph (explicit `reportsTo`, else the
+ *                               declared department's manager) contains a cycle (self included).
+ *  - `orphan_employee`        — an employee whose effective reporting chain never reaches the
+ *                               orchestrator (or a non-orchestrator with no effective superior).
+ *  - `invalid_reviewer`       — a review policy's `reviewer` holds neither role `reviewer` nor
+ *                               role `manager`.
+ *  - `budget_widening`        — a department budget out-rates the workforce ceiling that contains
+ *                               it (per-hour-normalized: hourly=1h, daily=24h, weekly=168h — child
+ *                               ceilings are only ever tighter, never wider).
+ *  - `reserved_workforce_id`  — the workforce id is one of the kernel's reserved path segments, or
+ *                               an employee id is `user` (the human-owner sentinel every task-owner
+ *                               column and the redeploy gate reserve).
+ *  - `reserved_tool_name`     — an agent a workforce employee runs declares a tool named after a
+ *                               NATIVE workforce tool. Natives are injected by role at dispatch and
+ *                               always win; a colliding declared tool would be silently shadowed,
+ *                               so it is refused up front.
  */
 export const SpecErrorCode = z.enum([
   'yaml_parse_error',
@@ -168,6 +199,17 @@ export const SpecErrorCode = z.enum([
   'invalid_dependency_order',
   'invalid_view',
   'invalid_store',
+  'experimental_section_disabled',
+  'invalid_orchestrator',
+  'invalid_manager',
+  'manager_in_members',
+  'department_mismatch',
+  'reporting_cycle',
+  'orphan_employee',
+  'invalid_reviewer',
+  'budget_widening',
+  'reserved_workforce_id',
+  'reserved_tool_name',
 ]);
 export type SpecErrorCode = z.infer<typeof SpecErrorCode>;
 
@@ -283,6 +325,12 @@ export const SpecWarningCode = z.enum([
   'agent_untrusted_field_precedence',
   'cron_tenant_required',
   'stale_suppression',
+  /**
+   * A `requireWhen.capabilities` label no declared employee holds. Capabilities are OPAQUE policy
+   * labels, so a rule guarding a label nobody carries yet is legal (it may arrive later) — but it
+   * can also be a typo that silently never fires, so it warns.
+   */
+  'workforce_capability_unheld',
 ]);
 export type SpecWarningCode = z.infer<typeof SpecWarningCode>;
 

@@ -30,6 +30,7 @@
 
 import {
   detectSpecKind,
+  experimentalSpecOptionsFromEnv,
   type ProductSpec,
   parseProductSpec,
   parseSpec,
@@ -727,7 +728,7 @@ export async function checkBootEnv(
     };
   }
 
-  const parsed = parseSpec(specText);
+  const parsed = parseSpec(specText, experimentalSpecOptionsFromEnv(env));
   if (!parsed.ok) {
     return {
       ok: false,

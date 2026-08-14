@@ -3,14 +3,27 @@
  * task; `reject` re-queues it for rework UNTIL the round ceiling is spent, at which point the task
  * parks in `waiting_for_user` — a human decides, rather than an infinite accept/rework loop. The
  * per-review compare-and-swap (`verdict IS NULL`) admits exactly one verdict per round.
+ *
+ * LOCK ORDER: every verdict takes THE TASK LOCK ORDER (apply-intents.ts module header — the
+ * reviewed task's ancestors root-first, then the task) BEFORE the review-row compare-and-swap.
+ * A verdict is never a single-row operation: the CAS touches the review row, `appendTaskEvents`
+ * UPDATEs the task row's event counter, and the accept path fans in to the parent — so the task
+ * half of the order is taken first on EVERY path, and any other verdict writer must do the same
+ * (a caller that CASed the review row first while a turn held the task locks would be a
+ * reviews → tasks acquisition against the turn's tasks → reviews, i.e. a deadlock by design).
+ * `applyReviewVerdictInTx` is the in-transaction entry for callers that already hold the task
+ * locks (a turn's final application); `applyReviewVerdict` wraps it in its own transaction for
+ * the HTTP verdict route.
  */
 import { schema, type TenantDb } from '@rayspec/db';
 import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
-import { afterTaskTerminal, lockRootFirst } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import type { WorkforceBudgets } from './budget.js';
+import { TaskNotFoundError } from './errors.js';
 import { appendTaskEvents } from './events.js';
+import { joinPolicySchema } from './join.js';
+import { afterTaskTerminal, lockRootFirst } from './task-locks.js';
 
 export type ReviewRecord = typeof schema.workforceReviews.$inferSelect;
 
@@ -44,6 +57,56 @@ export class ReviewTaskStateError extends Error {
   }
 }
 
+/**
+ * The effective round ceiling for a reviewed task: the tighter of the DECLARED policy's `maxRounds`
+ * (carried on the review park's binding, written when the park was opened) and the execution-wide
+ * ceiling. Either may be absent; absent on both sides means unbounded rounds, which is what an
+ * undeclared ceiling has always meant.
+ */
+function tighterRoundCeiling(task: TaskRecord, executionMax: number | null): number | null {
+  const binding = joinPolicySchema.safeParse(task.joinPolicy);
+  const policyMax =
+    binding.success && binding.data.policy === 'review' ? (binding.data.maxRounds ?? null) : null;
+  if (policyMax === null) return executionMax;
+  return executionMax === null ? policyMax : Math.min(policyMax, executionMax);
+}
+
+/**
+ * A verdict may only be applied to the park that NAMES its review. Fail-closed on the binding
+ * rather than on the row: an undecided review row is no longer proof that its park is open.
+ */
+function assertReviewMatchesPark(task: TaskRecord, reviewId: string): void {
+  const binding = joinPolicySchema.safeParse(task.joinPolicy);
+  if (!binding.success || binding.data.policy !== 'review') return;
+  // Believed unreachable: every review park this engine opens is written by `bindReviewPark`,
+  // which always names its review. A review park that names none can certify nothing, and a
+  // fail-open default inside a fail-closed check is the seam, not the odds.
+  if (binding.data.reviewId === undefined) throw new ReviewNotForParkError(reviewId, null);
+  if (binding.data.reviewId !== reviewId) {
+    throw new ReviewNotForParkError(reviewId, binding.data.reviewId);
+  }
+}
+
+/** A verdict aimed at a park that is waiting on a different review — refused, never applied. */
+export class ReviewNotForParkError extends Error {
+  readonly reviewId: string;
+  /** The review the park names, or null when the park names none at all. */
+  readonly parkReviewId: string | null;
+  constructor(reviewId: string, parkReviewId: string | null) {
+    super(
+      parkReviewId === null
+        ? `review '${reviewId}' was aimed at a review park that names no review — a park that ` +
+            'cannot say which review it waits on cannot certify that this is it. Fail-closed.'
+        : `review '${reviewId}' is not the review this task's park is waiting on ` +
+            `('${parkReviewId}') — a verdict applies only to the review its own park names, or it ` +
+            'would release a park that review never opened and spend the wrong round. Fail-closed.',
+    );
+    this.name = 'ReviewNotForParkError';
+    this.reviewId = reviewId;
+    this.parkReviewId = parkReviewId;
+  }
+}
+
 export const reviewVerdictSchema = z.strictObject({
   verdict: z.enum(['accept', 'reject']),
   reasons: z.array(z.string().min(1)).default([]),
@@ -55,100 +118,135 @@ export type ReviewVerdictInput = z.output<typeof reviewVerdictSchema> & {
   readonly actor: string;
 };
 
+/**
+ * Apply one verdict INSIDE an already-open transaction. Protocol, in lock-rank order:
+ *
+ *   1. Plain-read the review row — an unknown id or an already-decided review is a typed refusal
+ *      before any lock is taken.
+ *   2. Take THE TASK LOCK ORDER on the reviewed task (`lockRootFirst`) — before the review-row
+ *      CAS and before any write, the module-header rule.
+ *   3. Re-check the park under the lock. A task no longer in `waiting_for_review` means a racer's
+ *      verdict landed while we waited: re-read the review and report the truer error
+ *      (already-decided when the racer decided THIS review; the state refusal otherwise).
+ *   4. NOW the compare-and-swap on `verdict IS NULL` — one verdict per round; a lost CAS after the
+ *      locks is the same racer story and reports already-decided.
+ *   5. Outcome, audit event, transition (+ fan-in on accept) — all under the held locks.
+ */
+export async function applyReviewVerdictInTx(
+  tx: TenantDb,
+  budgets: WorkforceBudgets,
+  input: ReviewVerdictInput,
+): Promise<TaskRecord> {
+  const reviewRows = (await tx
+    .select(schema.workforceReviews)
+    .where(eq(schema.workforceReviews.id, input.reviewId))) as ReviewRecord[];
+  const pending = reviewRows[0];
+  if (!pending) throw new ReviewNotFoundError(input.reviewId);
+  if (pending.verdict !== null) throw new ReviewAlreadyDecidedError(input.reviewId);
+
+  const taskRows = (await tx
+    .select(schema.workforceTasks)
+    .where(eq(schema.workforceTasks.taskId, pending.taskId))) as TaskRecord[];
+  const snapshot = taskRows[0];
+  if (!snapshot) throw new TaskNotFoundError(pending.taskId);
+
+  const task = await lockRootFirst(tx, snapshot);
+  // THE PARK'S OWN BINDING decides which review may be applied to it. A park names exactly one
+  // review, and deciding a DIFFERENT one against it takes the wrong round's ceiling and releases a
+  // park that review never opened. That became reachable when an abandoned review started leaving
+  // its row undecided: the stale row lists first in the operator inbox (undecided, oldest first),
+  // and deciding it would have dissolved the LIVE review's park under the stale review's round,
+  // orphaning the live reviewer whose verdict then lands as "superseded".
+  assertReviewMatchesPark(task, input.reviewId);
+  if (task.status !== 'waiting_for_review') {
+    // A racer moved the task while we waited on the locks. If it decided THIS review, the truer
+    // refusal is already-decided; otherwise the park is genuinely gone.
+    const raced = (await tx
+      .select(schema.workforceReviews)
+      .where(eq(schema.workforceReviews.id, input.reviewId))) as ReviewRecord[];
+    if (raced[0]?.verdict !== null) throw new ReviewAlreadyDecidedError(input.reviewId);
+    throw new ReviewTaskStateError(input.reviewId, task.status);
+  }
+
+  const updated = (await tx
+    .update(schema.workforceReviews, {
+      verdict: input.verdict,
+      reasons: input.reasons,
+      requiredChanges: input.requiredChanges,
+      decidedAt: new Date(),
+    })
+    .where(
+      and(eq(schema.workforceReviews.id, input.reviewId), isNull(schema.workforceReviews.verdict)),
+    )
+    .returning()) as ReviewRecord[];
+  const review = updated[0];
+  if (!review) throw new ReviewAlreadyDecidedError(input.reviewId);
+
+  // THE TIGHTER OF THE TWO ceilings, exactly as the planner computed it when the park was opened:
+  // the DECLARED policy's own `maxRounds` (recorded on the park's binding — a policy lives in a
+  // document this module is deliberately roster-free about, so the binding is the only way it
+  // arrives here) and the execution-wide ceiling. Reading only the budgets' half made a policy
+  // `maxRounds: 1` with no execution ceiling yield `rework` forever on the verdict path.
+  const maxRounds = tighterRoundCeiling(task, budgets.execution.maxReviewRounds ?? null);
+  const outcome =
+    input.verdict === 'accept'
+      ? 'completed'
+      : maxRounds !== null && review.round >= maxRounds
+        ? 'rounds_exhausted'
+        : 'rework';
+  // The verdict is an AUDIT fact: who decided what, in which round, and what the engine did about
+  // it. The generic transition alone says the task moved, never that a reviewer moved it.
+  await appendTaskEvents(tx, task.taskId, [
+    {
+      type: 'workforce.review.decided',
+      payload: {
+        reviewId: review.id,
+        taskId: task.taskId,
+        reviewer: review.reviewer,
+        round: review.round,
+        verdict: input.verdict,
+        decidedBy: input.actor,
+        reasons: input.reasons,
+        requiredChanges: input.requiredChanges,
+        outcome,
+      },
+    },
+  ]);
+  if (outcome === 'completed') {
+    const done = await applyTransition(tx, {
+      taskId: task.taskId,
+      expectedVersion: task.version,
+      to: 'completed',
+      actor: input.actor,
+    });
+    await afterTaskTerminal(tx, done);
+    return done;
+  }
+  if (outcome === 'rounds_exhausted') {
+    // The round budget is spent — a human decides instead of another rework loop.
+    return applyTransition(tx, {
+      taskId: task.taskId,
+      expectedVersion: task.version,
+      to: 'waiting_for_user',
+      actor: input.actor,
+    });
+  }
+  // Rework: back through the one door into execution. The transition's own queued event carries
+  // the `review_verdict` queue reason; the verdict details live on the review row.
+  return applyTransition(tx, {
+    taskId: task.taskId,
+    expectedVersion: task.version,
+    to: 'queued',
+    queueReason: 'review_verdict',
+    actor: input.actor,
+  });
+}
+
+/** The route-facing entry: one verdict in its own transaction. */
 export async function applyReviewVerdict(
   tdb: TenantDb,
   budgets: WorkforceBudgets,
   input: ReviewVerdictInput,
 ): Promise<TaskRecord> {
-  return tdb.transaction(async (tx) => {
-    const updated = (await tx
-      .update(schema.workforceReviews, {
-        verdict: input.verdict,
-        reasons: input.reasons,
-        requiredChanges: input.requiredChanges,
-        decidedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.workforceReviews.id, input.reviewId),
-          isNull(schema.workforceReviews.verdict),
-        ),
-      )
-      .returning()) as ReviewRecord[];
-    const review = updated[0];
-    if (!review) {
-      const rows = (await tx
-        .select(schema.workforceReviews)
-        .where(eq(schema.workforceReviews.id, input.reviewId))) as ReviewRecord[];
-      if (!rows[0]) throw new ReviewNotFoundError(input.reviewId);
-      throw new ReviewAlreadyDecidedError(input.reviewId);
-    }
-    const taskRows = (await tx
-      .select(schema.workforceTasks)
-      .where(eq(schema.workforceTasks.taskId, review.taskId))) as TaskRecord[];
-    const snapshot = taskRows[0];
-    if (snapshot?.status !== 'waiting_for_review') {
-      throw new ReviewTaskStateError(input.reviewId, snapshot?.status ?? 'absent');
-    }
-    const maxRounds = budgets.execution.maxReviewRounds ?? null;
-    const outcome =
-      input.verdict === 'accept'
-        ? 'completed'
-        : maxRounds !== null && review.round >= maxRounds
-          ? 'rounds_exhausted'
-          : 'rework';
-    // Completing fans in to the parent — a SECOND task row — so the root-first locks come before
-    // ANY write on this task, the journal counter's own UPDATE included (apply-intents.ts's module
-    // header). The other two outcomes move one row and need no pre-lock.
-    const task = outcome === 'completed' ? await lockRootFirst(tx, snapshot) : snapshot;
-    if (task.status !== 'waiting_for_review') {
-      throw new ReviewTaskStateError(input.reviewId, task.status);
-    }
-    // The verdict is an AUDIT fact: who decided what, in which round, and what the engine did about
-    // it. The generic transition alone says the task moved, never that a reviewer moved it.
-    await appendTaskEvents(tx, task.taskId, [
-      {
-        type: 'workforce.review.decided',
-        payload: {
-          reviewId: review.id,
-          taskId: task.taskId,
-          reviewer: review.reviewer,
-          round: review.round,
-          verdict: input.verdict,
-          decidedBy: input.actor,
-          reasons: input.reasons,
-          requiredChanges: input.requiredChanges,
-          outcome,
-        },
-      },
-    ]);
-    if (outcome === 'completed') {
-      const done = await applyTransition(tx, {
-        taskId: task.taskId,
-        expectedVersion: task.version,
-        to: 'completed',
-        actor: input.actor,
-      });
-      await afterTaskTerminal(tx, done);
-      return done;
-    }
-    if (outcome === 'rounds_exhausted') {
-      // The round budget is spent — a human decides instead of another rework loop.
-      return applyTransition(tx, {
-        taskId: task.taskId,
-        expectedVersion: task.version,
-        to: 'waiting_for_user',
-        actor: input.actor,
-      });
-    }
-    // Rework: back through the one door into execution. The transition's own queued event carries
-    // the `review_verdict` queue reason; the verdict details live on the review row.
-    return applyTransition(tx, {
-      taskId: task.taskId,
-      expectedVersion: task.version,
-      to: 'queued',
-      queueReason: 'review_verdict',
-      actor: input.actor,
-    });
-  });
+  return tdb.transaction(async (tx) => applyReviewVerdictInTx(tx, budgets, input));
 }

@@ -71,6 +71,7 @@ import {
 } from '@rayspec/db';
 import {
   detectSpecKind,
+  experimentalSpecOptionsFromEnv,
   lintSpecWarnings,
   type ProductSpec,
   parseProductSpec,
@@ -188,6 +189,17 @@ export interface PlanResult {
   readonly specWarnings?: SpecWarning[];
   /** A human-readable one-line-per-advisory summary of `specWarnings` (its text surface, as `gateSummary` is the gate's). */
   readonly specWarningSummary?: string;
+  /**
+   * The EXPERIMENTAL sections this document declares AND the environment enabled — present only
+   * when both hold, so every existing envelope stays byte-identical. The CLI prints the banner off
+   * this field (stderr; stdout stays one JSON object).
+   */
+  readonly experimental?: readonly ['workforce'];
+  /**
+   * Present when the document carries the reserved `managed:` section — accepted, carried
+   * verbatim, and IGNORED by this engine. The one neutral line an operator sees about it.
+   */
+  readonly managed?: { readonly present: true; readonly note: string };
 }
 
 /** The read-only guard's refusal message (kept identical across first-materialize + update mode; secret-free). */
@@ -660,11 +672,28 @@ async function planRaySpec(
   allowlist: AllowlistEntry[],
   opts: RunPlanOpts,
 ): Promise<PlanResult> {
-  const parsed = parseSpec(newText);
+  const specOptions = experimentalSpecOptionsFromEnv(opts.env ?? process.env);
+  const parsed = parseSpec(newText, specOptions);
   if (!parsed.ok) {
     return { ok: false, phase: 'validate', ...emptyProjection(), errors: parsed.errors };
   }
   const spec = parsed.value;
+  // The additive experimental/managed markers ride EVERY successful projection below.
+  const sectionMarks: Pick<PlanResult, 'experimental' | 'managed'> = {
+    ...(specOptions.experimentalWorkforce === true && spec.workforce !== undefined
+      ? { experimental: ['workforce'] as const }
+      : {}),
+    ...(spec.managed !== undefined
+      ? {
+          managed: {
+            present: true as const,
+            note:
+              "'managed:' section present — accepted and ignored by this engine (reserved; " +
+              'carried verbatim)',
+          },
+        }
+      : {}),
+  };
   const { routes, agents } = projectRoutesAgents(spec);
   // NON-FATAL document advisories for the doc being planned. Gated exactly like `doctor`'s: only a
   // VALID backend-profile (rayspec) doc is linted — the product profile derives its stores elsewhere
@@ -675,17 +704,23 @@ async function planRaySpec(
 
   let oldStores: StoreSpec[] | undefined;
   if (oldText !== undefined) {
-    const parsedOld = parseSpec(oldText);
+    const parsedOld = parseSpec(oldText, specOptions);
     if (!parsedOld.ok) {
       return withSpecWarnings(
-        { ok: false, phase: 'validate', ...emptyProjection(), errors: parsedOld.errors },
+        {
+          ok: false,
+          phase: 'validate',
+          ...emptyProjection(),
+          errors: parsedOld.errors,
+          ...sectionMarks,
+        },
         specWarnings,
       );
     }
     oldStores = parsedOld.value.stores;
   }
 
-  return withSpecWarnings(
+  const planned = withSpecWarnings(
     await planStores({
       newStores: spec.stores,
       oldStores,
@@ -700,6 +735,7 @@ async function planRaySpec(
     }),
     specWarnings,
   );
+  return { ...planned, ...sectionMarks };
 }
 
 /** The product-profile plan: derive Tier-A stores + project section counts; update mode diffs derived. */
@@ -837,6 +873,8 @@ export interface RunPlanOpts {
    * columns fresh) — the combination without `--against` is rejected fail-closed.
    */
   reconcileInjectedColumns?: boolean;
+  /** The environment record the experimental-section opt-in is derived from (defaults to process.env). */
+  env?: NodeJS.ProcessEnv;
 }
 
 /**

@@ -27,8 +27,9 @@ import {
 describe('grammar shape pins (neutral-churn tripwire)', () => {
   it('RaySpec has exactly the expected top-level sections (extensions added)', () => {
     // Pinning the top-level shape makes ADDING a section a DELIBERATE act: `extensions` was added
-    // (the optional extension-pack section). A future top-level addition fails this and forces a
-    // conscious decision (additive/optional ⇒ no spec-version bump; a breaking change ⇒ a bump).
+    // (the optional extension-pack section), then `workforce` (optional, EXPERIMENTAL, parse-gated)
+    // and `managed` (optional, reserved-opaque). A future top-level addition fails this and forces
+    // a conscious decision (additive/optional ⇒ no spec-version bump; a breaking change ⇒ a bump).
     expect(Object.keys(RaySpec.shape).sort()).toEqual(
       [
         'agents',
@@ -37,11 +38,13 @@ describe('grammar shape pins (neutral-churn tripwire)', () => {
         'extensions',
         'frontend',
         'handlers',
+        'managed',
         'metadata',
         'stores',
         'tooling',
         'triggers',
         'version',
+        'workforce',
       ].sort(),
     );
   });

@@ -148,6 +148,12 @@ jobs:
       - name: Handler-imports gate
         run: pnpm gate:handler-imports
 
+      # Workforce dispatch boundary: the toolset layer COMPUTES typed turn intents; only the
+      # engine DISPATCHES. No workforce toolset module may import the executor, the run
+      # surface, an adapter, an app package, or the engine's write paths.
+      - name: Delegation-dispatch-boundary gate
+        run: pnpm gate:delegation-dispatch-boundary
+
       # An escape-hatch / extension-pack handler must receive every capability by injection (the
       # tenant-bound init.db / init.blob) — it may NEVER self-construct a raw DB or blob backend.
       - name: Extension-capability gate

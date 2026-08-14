@@ -326,6 +326,24 @@ function emit(obj: unknown): Promise<void> {
 }
 
 /**
+ * The unmissable EXPERIMENTAL banner — printed to STDERR (stdout stays exactly one JSON object,
+ * the documented CLI contract) whenever a doctor/plan result reports an enabled experimental
+ * section. Nobody runs an experimental section in production without having read this.
+ */
+function emitExperimentalBanner(result: { experimental?: readonly string[] }): Promise<void> {
+  if (!result.experimental || result.experimental.length === 0) return Promise.resolve();
+  const sections = result.experimental.map((s) => `'${s}:'`).join(', ');
+  return writeDrained(
+    process.stderr,
+    '==================================================================\n' +
+      `  EXPERIMENTAL: this document declares ${sections}.\n` +
+      '  Enabled by RAYSPEC_EXPERIMENTAL_WORKFORCE. The section\u2019s grammar\n' +
+      '  and behavior may change without notice. Not a stability surface.\n' +
+      '==================================================================\n',
+  );
+}
+
+/**
  * The CLI's OWN version, read at runtime from the package manifest that ships beside this entrypoint.
  *
  * Resolved against `import.meta.url`, never against the cwd: the manifest sits one directory above
@@ -480,12 +498,14 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
     case 'doctor': {
       const result = await runDoctor(parsePositionals(rest));
       await emit(result);
+      await emitExperimentalBanner(result);
       return result.ok ? 0 : 1;
     }
     case 'plan': {
       const { positionals, against, allowlist, reconcileInjectedColumns } = parsePlanArgs(rest);
       const result = await runPlan(positionals, { against, allowlist, reconcileInjectedColumns });
       await emit(result);
+      await emitExperimentalBanner(result);
       return result.ok ? 0 : 1;
     }
     case 'openapi': {

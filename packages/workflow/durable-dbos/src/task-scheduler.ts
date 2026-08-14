@@ -24,8 +24,9 @@
  *      first, so a denied or crashed claim leaks no reservation), and the turn_started journal
  *      entry. A denial rolls the claim back and parks the task `blocked(budget_exhausted)` with
  *      the declared exhaustion policy applied.
- *   2. The handler — an EFFECT-FREE turn function resolved by the task's owner; it returns one
- *      typed intent and never touches the database.
+ *   2. The handler — a turn function resolved by the task's owner; it returns one typed intent
+ *      and writes NOTHING to the workforce tables (bounded reads, and an agent run's own journal,
+ *      are its only database contact — see `TaskTurnHandler`).
  *   3. The final application (`applyTurnOutcome`): intents + settlement + transition + the
  *      receipt, one transaction, idempotent under re-execution.
  * DBOS's default recovery re-executes a PENDING body from the top with exactly these guards, so
@@ -125,13 +126,39 @@ export interface TaskTurnHandlerOutcome {
   /** The ONE turn-ending intent (validated by the engine — a malformed one never completes). */
   readonly intent: unknown;
   readonly messages?: readonly { readonly recipient: string; readonly body: string }[];
+  /**
+   * The TRUSTED review-policy match for a completing turn — computed by the dispatching
+   * composition from declared rules, never from model output, and validated strictly by the
+   * engine (`turnReviewPolicySchema`). Absent means no declared rule fired.
+   */
+  readonly reviewPolicy?: {
+    readonly reviewer: string;
+    readonly dispatchReviewer: boolean;
+    readonly maxRounds: number;
+  };
+  /**
+   * Children the turn BUFFERED for creation (the non-turn-ending create tools) — applied
+   * atomically with the ending intent; validated strictly by the engine.
+   */
+  readonly createdChildren?: readonly {
+    readonly title: string;
+    readonly goal: string;
+    readonly description?: string | null;
+    readonly owner: string;
+    readonly department?: string | null;
+    readonly priority?: 'low' | 'normal' | 'high' | 'urgent';
+    readonly delegatedTo?: string;
+  }[];
   /** The turn's actual cost, settled against the dispatch reservation. */
   readonly actualUsd?: number;
 }
 
 /**
- * A turn handler is EFFECT-FREE: it computes an intent from the context and returns. Any durable
- * effect it wants happens through the intent the engine applies — never directly.
+ * A turn handler is EFFECT-FREE with ONE stated exception: it makes NO writes to any workforce
+ * table — every task effect flows through the returned outcome the engine applies — while a
+ * handler that runs an agent journals that run under its own run id, exactly as the run surface
+ * does (re-execution re-runs the model; the FINAL application stays receipted-idempotent either
+ * way).
  */
 export type TaskTurnHandler = (ctx: TaskTurnContext) => Promise<TaskTurnHandlerOutcome>;
 
@@ -1048,6 +1075,10 @@ export class DbosTaskScheduler {
             turnNumber: job.turnNumber,
             intent: outcome.intent,
             messages: outcome.messages,
+            ...(outcome.reviewPolicy !== undefined ? { reviewPolicy: outcome.reviewPolicy } : {}),
+            ...(outcome.createdChildren !== undefined
+              ? { createdChildren: outcome.createdChildren }
+              : {}),
             budgets,
             actualUsd: outcome.actualUsd ?? 0,
           });
