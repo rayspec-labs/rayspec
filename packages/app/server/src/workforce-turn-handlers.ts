@@ -63,7 +63,10 @@ function renderTurnInput(ctx: TaskTurnContext, employee: WorkforceEmployeeConfig
     `Goal: ${ctx.task.goal}`,
   ];
   if (ctx.task.description !== null) lines.push(`Description: ${ctx.task.description}`);
-  lines.push(`Requested by: ${ctx.task.requestedBy}. Priority: ${ctx.task.priority}.`);
+  lines.push(
+    `Requested by: ${ctx.task.requestedBy}. Priority: ${ctx.task.priority}. ` +
+      `Turn ${ctx.task.turnsUsed + 1}.`,
+  );
   if (ctx.childResults !== null) {
     lines.push('', 'Completed child results, keyed by child task id:');
     lines.push(JSON.stringify(ctx.childResults, null, 1));

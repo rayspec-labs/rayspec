@@ -290,12 +290,18 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
     devDependencies:
+      '@rayspec/core':
+        specifier: workspace:*
+        version: link:../../kernel/core
       '@rayspec/durable-dbos':
         specifier: workspace:*
         version: link:../../workflow/durable-dbos
       '@rayspec/tasks':
         specifier: workspace:*
         version: link:../../kernel/tasks
+      '@rayspec/workforce-tools':
+        specifier: workspace:*
+        version: link:../../kernel/workforce-tools
       '@types/node':
         specifier: 22.12.0
         version: 22.12.0
