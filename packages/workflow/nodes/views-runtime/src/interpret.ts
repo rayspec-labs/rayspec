@@ -43,6 +43,7 @@ import { httpResponse } from '@rayspec/handler-sdk';
 import type {
   ColumnType,
   ViewAbsentShape,
+  ViewAbsentState,
   ViewConstValue,
   ViewField,
   ViewItemShape,
@@ -600,6 +601,45 @@ export function makeViewRouteHandler(compiled: CompiledView, stores: StoreIndex)
   };
 }
 
+/** One member's absent answer. Takes the whole call frame so every arm has the same signature. */
+type AbsentResponder = (
+  view: CompiledView['view'],
+  read: CompiledView['read'],
+  params: Readonly<Record<string, string>>,
+  init: RouteHandlerInit,
+) => unknown;
+
+/**
+ * The absent answer PER `ViewAbsentState` MEMBER — one entry each, no fall-through tail.
+ *
+ * `satisfies Record<ViewAbsentState, AbsentResponder>` is the enforcing mechanism: this file is a
+ * non-test module under `src/`, which the package tsconfig includes, so `pnpm typecheck`
+ * (`tsc -p tsconfig.json --noEmit`) rejects the object the moment `ViewAbsentState` grows a member
+ * this map does not answer.
+ * A future member therefore FAILS THE BUILD instead of falling through to a silent 200 — the trap an
+ * if-chain with an `empty_200` tail leaves behind. `openapi.ts` carries the twin map, so the runtime
+ * answer and the documented contract can only ever gain a member together.
+ */
+const ABSENT_RESPONSE = {
+  not_ready_409: () =>
+    httpResponse({
+      status: 409,
+      body: { error: 'not_ready', detail: 'the requested resource is not ready yet.' },
+    }),
+  // The detail is a CONSTANT — it must never carry the caller's ref, path or filter value. This
+  // body is returned by the handler and serialized verbatim by the route layer, so it does NOT
+  // pass the auth-core error chokepoint that strips `details` from a 404; there is no later stage
+  // that could remove an echoed input, so nothing derived from the request goes in here.
+  not_found_404: () =>
+    httpResponse({
+      status: 404,
+      body: { error: 'not_found', detail: 'no such resource.' },
+    }),
+  // lint guarantees read.absent for single mode; list/collect never reach here.
+  empty_200: (view, read, params, init) =>
+    finishDto(view, read.absent ? projectAbsent(read.absent, params) : {}, init),
+} satisfies Record<ViewAbsentState, AbsentResponder>;
+
 /** The declared absent behavior (single mode; also the fail-closed empty read for absent filters). */
 function finishAbsent(
   view: CompiledView['view'],
@@ -607,25 +647,9 @@ function finishAbsent(
   params: Readonly<Record<string, string>>,
   init: RouteHandlerInit,
 ): unknown {
-  if (view.absent_state === 'not_ready_409') {
-    return httpResponse({
-      status: 409,
-      body: { error: 'not_ready', detail: 'the requested resource is not ready yet.' },
-    });
-  }
-  if (view.absent_state === 'not_found_404') {
-    // The detail is a CONSTANT — it must never carry the caller's ref, path or filter value. This
-    // body is returned by the handler and serialized verbatim by the route layer, so it does NOT
-    // pass the auth-core error chokepoint that strips `details` from a 404; there is no later stage
-    // that could remove an echoed input, so nothing derived from the request goes in here.
-    return httpResponse({
-      status: 404,
-      body: { error: 'not_found', detail: 'no such resource.' },
-    });
-  }
-  // empty_200 (lint guarantees read.absent for single mode; list/collect never reach here).
-  const dto = read.absent ? projectAbsent(read.absent, params) : {};
-  return finishDto(view, dto, init);
+  // An UNDECLARED `absent_state` is the `empty_200` posture (the grammar leaves the field optional);
+  // naming that default here keeps the map total over the members and nothing else.
+  return ABSENT_RESPONSE[view.absent_state ?? 'empty_200'](view, read, params, init);
 }
 
 /** Apply the conditional-read law and return the response value. */

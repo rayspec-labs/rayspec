@@ -304,6 +304,14 @@ export async function createHarness(
      */
     blobFactory?: NonNullable<NonNullable<AppDeps['engine']>['blobFactory']>;
     /**
+     * the READ-ONLY, path-jailed local-file reader wired into `deps.engine.fsSourceFactory` (a
+     * route/tool handler's `init.fsSource`). A source-reading test passes a real
+     * `makeFsSourceFactory(tmpDir)` over a per-suite temp root — exercising the SAME injection the
+     * composition root does. Omit ⇒ `init.fsSource` is ABSENT (a handler that needs it fail-closes
+     * loudly — the unconfigured-root posture a test can also exercise).
+     */
+    fsSourceFactory?: NonNullable<NonNullable<AppDeps['engine']>['fsSourceFactory']>;
+    /**
      * the speech-to-text capability wired into `deps.engine.sttCapability` (a route/tool
      * handler's `init.stt`). A transcription test passes a recording stand-in — exercising the SAME
      * injection the composition root does. Omit ⇒ `init.stt` is ABSENT (a handler that needs it
@@ -466,6 +474,9 @@ export async function createHarness(
       // the tenant-bound blob backend for declared `stream` routes (omit ⇒ no blob backend
       // ⇒ a stream route fails closed at boot — the deploy-guard property a test can also exercise).
       ...(opts.blobFactory ? { blobFactory: opts.blobFactory } : {}),
+      // the READ-ONLY, path-jailed source a route/tool handler reads as `init.fsSource` (omit ⇒
+      // ABSENT, so a handler that needs it fail-closes loudly).
+      ...(opts.fsSourceFactory ? { fsSourceFactory: opts.fsSourceFactory } : {}),
       // the speech-to-text capability a route/tool handler reads as `init.stt` (omit ⇒ ABSENT,
       // so a handler that needs transcription fail-closes loudly).
       ...(opts.sttCapability ? { sttCapability: opts.sttCapability } : {}),
