@@ -67,6 +67,7 @@ const CHOKEPOINT_ROOTS = [
   'packages/compose/api-auth/src',
   'packages/workflow/durable-dbos/src',
   'packages/kernel/tasks/src',
+  'packages/kernel/workforce-tools/src',
   'packages/kernel/db/src',
 ];
 const ADAPTER_ROOTS = [
@@ -75,6 +76,7 @@ const ADAPTER_ROOTS = [
   'packages/adapters/pi/src',
   'packages/adapters/codex/src',
 ];
+const DELEGATION_ROOTS = ['packages/kernel/workforce-tools/src'];
 
 /** A populated tree: one benign source file under every declared root. */
 function populated(roots) {
@@ -103,6 +105,16 @@ try {
         src: 'export const toolHandlers = {\n  lookup: async () => ({ ok: true }),\n};\n',
       },
       /toolHandlers|handler/i,
+    ],
+    [
+      'delegation-dispatch-boundary',
+      'check-delegation-dispatch-boundary.mjs',
+      DELEGATION_ROOTS,
+      {
+        path: 'packages/kernel/workforce-tools/src/leak.ts',
+        src: "import { DbosTaskScheduler } from '@rayspec/durable-dbos';\nexport const s = DbosTaskScheduler;\n",
+      },
+      /durable-dbos/,
     ],
   ]) {
     // ── (C) a populated tree passes, and says how much it read ─────────────────────────────────────

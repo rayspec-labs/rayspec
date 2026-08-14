@@ -914,6 +914,40 @@ importers:
         specifier: 4.1.9
         version: 4.1.9(@opentelemetry/api@1.9.0)(@types/node@22.12.0)(@vitest/coverage-v8@4.1.9)(vite@8.0.16(@types/node@22.12.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
 
+  packages/kernel/workforce-tools:
+    dependencies:
+      '@rayspec/core':
+        specifier: workspace:*
+        version: link:../core
+      '@rayspec/db':
+        specifier: workspace:*
+        version: link:../db
+      '@rayspec/spec':
+        specifier: workspace:*
+        version: link:../spec
+      '@rayspec/tasks':
+        specifier: workspace:*
+        version: link:../tasks
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@opentelemetry/api@1.9.0)(pg@8.22.0)(postgres@3.4.9)
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: 22.12.0
+        version: 22.12.0
+      dotenv:
+        specifier: 17.4.2
+        version: 17.4.2
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 4.1.9
+        version: 4.1.9(@opentelemetry/api@1.9.0)(@types/node@22.12.0)(@vitest/coverage-v8@4.1.9)(vite@8.0.16(@types/node@22.12.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+
   packages/test/parity:
     dependencies:
       '@rayspec/core':

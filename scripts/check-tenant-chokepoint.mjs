@@ -50,6 +50,9 @@ const SCOPED_ROOTS = [
   // The task engine writes tenant-owned rows on every code path; it holds a TenantDb handed in by
   // its caller and must never name a raw factory or unscoped() — no exemption entries.
   'packages/kernel/tasks/src',
+  // The workforce toolset reads tenant-owned rows for its bounded snapshots; same posture, same
+  // zero exemptions (its import boundary is additionally held by the delegation-dispatch gate).
+  'packages/kernel/workforce-tools/src',
 ];
 
 // packages/kernel/db/src is the chokepoint's OWN home (it DEFINES makeDb/unscoped()/forTenant), so it is
