@@ -38,7 +38,7 @@ export class WorkforceCliError extends Error {
 }
 
 /** The strict deployment-entry shape: the base URL and nothing else (no credential in a file). */
-const deploymentEntrySchema = z.strictObject({ url: z.url() });
+const deploymentEntrySchema = z.strictObject({ url: z.url({ protocol: /^https?$/ }) });
 
 export interface WorkforceTransport {
   readonly baseUrl: string;
@@ -60,12 +60,24 @@ function stripTrailingSlashes(url: string): string {
   return url.replace(/\/+$/, '');
 }
 
+/** Every base-url source passes the SAME validation — the flag and env are not laxer than the
+ * deployment file. */
+function validatedBaseUrl(raw: string, source: string): string {
+  // `z.url()` alone admits any scheme (`localhost:3000` parses as scheme `localhost:`) — the
+  // transport speaks http(s) only, whichever source named the deployment.
+  const parsed = z.url({ protocol: /^https?$/ }).safeParse(raw);
+  if (!parsed.success) {
+    throw new WorkforceCliError(`${source} is not a valid URL: ${JSON.stringify(raw)}`);
+  }
+  return stripTrailingSlashes(parsed.data);
+}
+
 function resolveBaseUrl(input: ResolveTransportInput): string {
   const env = input.env ?? process.env;
-  if (input.url !== undefined) return stripTrailingSlashes(input.url);
+  if (input.url !== undefined) return validatedBaseUrl(input.url, '--url');
   const fromEnv = env.RAYSPEC_URL;
   if (fromEnv !== undefined && fromEnv.trim().length > 0) {
-    return stripTrailingSlashes(fromEnv.trim());
+    return validatedBaseUrl(fromEnv.trim(), 'RAYSPEC_URL');
   }
   const dir = join(input.cwd ?? process.cwd(), 'deployments');
   let entries: string[] = [];
@@ -180,6 +192,8 @@ export async function resolveTransport(input: ResolveTransportInput): Promise<Wo
 export interface WorkforceApiResult {
   readonly status: number;
   readonly body: unknown;
+  /** Selected response headers (lowercase names) — the pagination contract rides here. */
+  readonly headers: Readonly<Record<string, string>>;
 }
 
 /**
@@ -209,7 +223,12 @@ export async function workforceRequest(
   } catch {
     // an SSE/plain body (the events replay) stays a string
   }
-  return { status: res.status, body: parsed };
+  const headers: Record<string, string> = {};
+  for (const name of ['x-next-cursor', 'x-result-truncated']) {
+    const value = res.headers.get(name);
+    if (value !== null) headers[name] = value;
+  }
+  return { status: res.status, body: parsed, headers };
 }
 
 /** Map a non-2xx envelope onto the CLI's `errors` array (the server's own words, untranslated). */

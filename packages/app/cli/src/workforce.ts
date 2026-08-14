@@ -151,24 +151,32 @@ interface TaskNode {
   [key: string]: unknown;
 }
 
-/** Follow X-Next-Cursor… the list caps each page; the CLI walks pages until the set is complete. */
+/** The most pages one `tasks` walk may pull (bounded memory; 200 rows/page = 200k tasks). */
+const MAX_TASK_PAGES = 1000;
+
+/**
+ * Walk the task list by FOLLOWING the server's X-Next-Cursor header — the cursor is the server's
+ * opaque contract, never re-derived client-side (a re-derived cursor goes stale the day the
+ * server changes its encoding). Bounded: past MAX_TASK_PAGES the walk stops and says so.
+ */
 async function listAllTasks(
   t: WorkforceTransport,
   query: string,
-): Promise<{ rows: TaskNode[]; error?: WorkforceApiResult }> {
+): Promise<{ rows: TaskNode[]; truncated: boolean; error?: WorkforceApiResult }> {
   const rows: TaskNode[] = [];
   let cursor: string | undefined;
-  for (;;) {
+  for (let page = 0; page < MAX_TASK_PAGES; page++) {
     const path = `/v1/workforce/tasks?limit=200${query}${cursor !== undefined ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
     const res = await workforceRequest(t, 'GET', path);
-    if (res.status < 200 || res.status >= 300) return { rows, error: res };
-    const page = res.body as TaskNode[];
-    rows.push(...page);
-    if (page.length < 200) return { rows };
-    const last = page[page.length - 1];
-    if (!last) return { rows };
-    cursor = Buffer.from(JSON.stringify({ id: last.taskId }), 'utf8').toString('base64url');
+    if (res.status < 200 || res.status >= 300) return { rows, truncated: false, error: res };
+    rows.push(...(res.body as TaskNode[]));
+    const next = res.headers['x-next-cursor'];
+    if (res.headers['x-result-truncated'] !== 'true' || next === undefined) {
+      return { rows, truncated: false };
+    }
+    cursor = next;
   }
+  return { rows, truncated: true };
 }
 
 async function runTasks(args: readonly string[]): Promise<WorkforceResult> {
@@ -185,9 +193,11 @@ async function runTasks(args: readonly string[]): Promise<WorkforceResult> {
   if (typeof values.workforce === 'string') {
     query += `&workforceId=${encodeURIComponent(values.workforce)}`;
   }
-  const { rows, error } = await listAllTasks(t, query);
+  const { rows, truncated, error } = await listAllTasks(t, query);
   if (error) return outcome('workforce tasks', error, {});
-  if (values.tree !== true) return { ok: true, command: 'workforce tasks', tasks: rows };
+  if (values.tree !== true) {
+    return { ok: true, command: 'workforce tasks', tasks: rows, truncated };
+  }
 
   // --tree: nest by parentTaskId. A child whose parent fell outside the filter stays a root of its
   // own subtree (never dropped, never re-parented).
@@ -198,7 +208,7 @@ async function runTasks(args: readonly string[]): Promise<WorkforceResult> {
     if (parent) (parent.children as TaskNode[]).push(node);
     else roots.push(node);
   }
-  return { ok: true, command: 'workforce tasks', tree: roots };
+  return { ok: true, command: 'workforce tasks', tree: roots, truncated };
 }
 
 async function runTask(args: readonly string[]): Promise<WorkforceResult> {
@@ -241,7 +251,6 @@ async function runApprovals(args: readonly string[]): Promise<WorkforceResult> {
       `/v1/workforce/approvals/${encodeURIComponent(approvalId)}/decide`,
       {
         decision: action === 'approve' ? 'approve' : 'reject',
-        decidedBy: 'cli',
         ...(typeof values.reason === 'string' ? { reason: values.reason } : {}),
       },
     );

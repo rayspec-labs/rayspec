@@ -34,6 +34,9 @@ const CLI_DIST = join(repoRoot, 'packages/app/cli/dist/index.js');
 const BOOT_SCRIPT = join(here, 'test-support/workforce-e2e-serve.ts');
 
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
+/** Bumped at the story's LAST line — the ran-guard below counts completed arms, so an `it.skip`
+ * (or a story that never reached its end) fails the required run instead of passing silently. */
+let storyArmsRan = 0;
 if (dbRequired && !baseUrl) {
   throw new Error(
     'workforce-e2e.db.test: DATABASE_URL is required (CI / RAYSPEC_REQUIRE_DB_TESTS) but absent — refusing to silently skip the acceptance story.',
@@ -369,7 +372,7 @@ describe.skipIf(!baseUrl)('workforce acceptance — fan-out, approval, SIGKILL, 
       '--api-key',
       apiKey,
     ]);
-    expect(approve.code).toBe(0);
+    expect(approve.code, JSON.stringify(approve.json)).toBe(0);
     expect((approve.json.approval as { status: string }).status).toBe('approved');
 
     // The woken root completes with a summary that is a PURE FUNCTION of the merged child ids.
@@ -419,10 +422,12 @@ describe.skipIf(!baseUrl)('workforce acceptance — fan-out, approval, SIGKILL, 
     ]);
     expect(status.code).toBe(0);
     expect((status.json.status as { tasks: Record<string, number> }).tasks.completed).toBe(5);
+    storyArmsRan++;
   }, 240_000);
 });
 
-// Un-skippable ran-guard: when the DB is REQUIRED, the acceptance story must actually have run.
+// Un-skippable ran-guard: when the DB is REQUIRED, the acceptance story must have run TO ITS END
+// — an `it.skip` or an early return leaves the counter at zero and this root-level test red.
 it('the acceptance story ran when the DB is required (CI / opt-in)', () => {
-  if (dbRequired) expect(Boolean(baseUrl)).toBe(true);
+  if (dbRequired) expect(storyArmsRan).toBe(1);
 });

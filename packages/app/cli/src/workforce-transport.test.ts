@@ -51,6 +51,15 @@ describe('deployment resolution (first match wins, never a guess)', () => {
     expect(t.baseUrl).toBe('https://env.example.test');
   });
 
+  it('a malformed --url or RAYSPEC_URL is refused BEFORE any request leaves the process', async () => {
+    await expect(
+      resolveTransport({ url: 'not a url', apiKey: API_KEY, env: {}, cwd: dir }),
+    ).rejects.toThrow(/--url is not a valid URL/);
+    await expect(
+      resolveTransport({ apiKey: API_KEY, env: { RAYSPEC_URL: 'localhost:3000' }, cwd: dir }),
+    ).rejects.toThrow(/RAYSPEC_URL is not a valid URL/);
+  });
+
   it('a single unambiguous deployments/<name>.json resolves implicitly', async () => {
     const cwd = join(dir, 'single');
     mkdirSync(join(cwd, 'deployments'), { recursive: true });
