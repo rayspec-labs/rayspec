@@ -1659,12 +1659,14 @@ environments. Four refusals, each a `400` rather than a plausible-looking stream
 receives no truncation signal, however old the stream's floor is — it never had the
 history it is missing.
 
-**A blank `Last-Event-ID` is no cursor, not a bad one.** An `EventSource`'s
+**An empty `Last-Event-ID` is no cursor, not a bad one.** An `EventSource`'s
 last-event-ID string starts *empty*, so a header that is present with no value says
 exactly what an omitted header says: nothing to resume from. It is read as absent — a
 `?since=` sent alongside it still applies, and with neither you start at the tail. A
 header that does carry a value outranks `?since=`, and is checked against the four
-refusals above like any other cursor.
+refusals above like any other cursor — "no value" is the empty string exactly, so a
+header holding only characters HTTP does not count as whitespace (a non-breaking space,
+say) is a value, and a `400`.
 
 ### `topics`
 

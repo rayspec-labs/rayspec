@@ -123,9 +123,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   another tenant, a sequence that is not plain decimal digits (a hexadecimal, exponent, fractional,
   signed, padded or empty one is refused rather than **coerced**, since coercing resumes the
   subscriber somewhere it never asked for while looking successful), and one **ahead** of the stream.
-  A `Last-Event-ID` that is present but **blank** is none of them: an `EventSource`'s last-event-ID
-  string starts empty, so a blank header says exactly what an omitted one says, and it is read as
-  absent — a `?since=` sent beside it still applies. Omitting the cursor starts
+  A `Last-Event-ID` that is present but **empty** is none of them: an `EventSource`'s last-event-ID
+  string starts empty, so an empty header says exactly what an omitted one says, and it is read as
+  absent — a `?since=` sent beside it still applies. That is the empty string and nothing wider: a
+  header carrying any other value, including one made only of characters HTTP does not count as
+  whitespace, is checked against the four refusals like any other cursor. Omitting the cursor starts
   at the tail and is **not** a truncation, however old the stream's floor is. Omitting `topics` means
   **every** topic; an explicitly empty `?topics=` is a `400`, because an empty filter can only match
   nothing and that is indistinguishable from a healthy stream on a quiet workspace, and a filter

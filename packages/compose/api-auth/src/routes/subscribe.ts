@@ -274,18 +274,29 @@ async function subscribeToTenantEvents(c: Context<AppEnv>, deps: AppDeps): Promi
   // The SSE reconnect header FIRST (that is the mechanism a browser resumes with, and it is what the
   // client sends without being asked), the explicit query second for a non-EventSource client.
   //
-  // A HEADER THAT IS PRESENT BUT BLANK CARRIES NO CURSOR, and is read as though it were absent.
+  // A HEADER THAT IS PRESENT BUT EMPTY CARRIES NO CURSOR, and is read as though it were absent.
   // An `EventSource`'s last-event-ID string starts EMPTY, so "" is the value that means "I have
   // nothing to resume from" — the same statement an omitted header makes. Refusing it would put the
   // strictness at the wrong end: every refusal in `parseEventCursor` exists because a value COULD be
   // mistaken for a position in this stream and resume the subscriber somewhere it never asked for,
-  // and a blank value cannot be mistaken for anything, so reading it as absent coerces nothing. It
-  // must also not be a truthiness test on the whole expression: `??` alone falls through on
-  // null/undefined only, so a blank header would additionally swallow the `?since=` a non-browser
-  // client supplied beside it and turn a resumable request into a refused one. The header's VALUE is
-  // passed on untouched — a padded cursor is still a padded cursor and is still refused.
+  // and an empty value cannot be mistaken for anything, so reading it as absent coerces nothing.
+  //
+  // THE CLASS IS "" EXACTLY, NEVER A TRIMMED ONE. `String.trim()` also erases U+00A0 and the rest
+  // of the Unicode space, none of which HTTP treats as whitespace — so a value like that reaches
+  // this line intact, and a trimming test would read a header that IS carrying one as absent: a
+  // 200 that parks the subscriber at the tail with its backlog skipped and `rayspec.live`
+  // announcing it drained, which is the one outcome this route exists to make impossible. Trimming
+  // also buys nothing on the values it looks aimed at, because HTTP's optional whitespace is SP and
+  // HTAB, and fetch header-value normalisation has already stripped those before `c.req.header`
+  // returns ("   " arrives here as ""). A runtime that ever did hand one through would get a
+  // refusal from `parseEventCursor`, which is the safe direction. `??` alone is not the answer
+  // either: it falls through on null/undefined only, so an empty header would win over the
+  // `?since=` a non-browser client supplied beside it and turn a resumable request into a refused
+  // one. The header's VALUE is passed on untouched — a padded cursor is still a padded cursor and
+  // is still refused.
   const reconnectHeader = c.req.header('last-event-id');
-  const rawCursor = reconnectHeader?.trim() ? reconnectHeader : c.req.query('since');
+  const headerCursor = reconnectHeader === '' ? undefined : reconnectHeader;
+  const rawCursor = headerCursor ?? c.req.query('since');
 
   const tdb = forTenant(deps.db, tenantId);
   const opening = await openSubscription(tdb, tenantId, rawCursor, topics);

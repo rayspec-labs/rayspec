@@ -518,13 +518,24 @@ describe.skipIf(!hasDb)('GET /v1/subscribe — wake-driven delivery + resume', (
     const read = await readStream(res, untilEvent('rayspec.live'));
     expect(seqs(read.frames)).toEqual([2]);
 
-    // THE ACCEPT CONTROL for the arms above: only a BLANK header reads as absent. One carrying a
+    // THE ACCEPT CONTROL for the arms above: only an EMPTY header reads as absent. One carrying a
     // value that is not a cursor is still refused, never quietly downgraded to "start at the tail".
     const bogus = await subscribe(h, token, `?since=${orgId}:0`, {
       'last-event-id': 'not-a-cursor',
     });
     expect(bogus.status).toBe(400);
     expect((await bogus.json()).error.message).toContain('<tenant_id>:<seq>');
+
+    // …and "empty" is the EMPTY STRING, not every value that renders as blank. HTTP's optional
+    // whitespace is SP and HTAB only, and those are already stripped before a header value reaches
+    // this route, so nothing is gained by trimming — while a `String.trim()` additionally erases
+    // U+00A0 and the rest of the Unicode space, which HTTP does NOT strip and which therefore
+    // arrives intact. Reading one of those as absent would answer 200 and park the subscriber at
+    // the TAIL with the two rows above skipped, `rayspec.live` announcing the backlog drained: the
+    // exact silent hole every refusal in `parseEventCursor` exists to prevent.
+    const nbsp = await subscribe(h, token, `?since=${orgId}:0`, { 'last-event-id': '\u00a0' });
+    expect(nbsp.status).toBe(400);
+    expect((await nbsp.json()).error.message).toContain('<tenant_id>:<seq>');
   });
 
   it('the topic cap is the number the reference documents: 64 is served, 65 is a 400', async () => {
@@ -551,17 +562,28 @@ describe.skipIf(!hasDb)('GET /v1/subscribe — wake-driven delivery + resume', (
 
     const res = await subscribe(h, token);
     expect(res.status).toBe(200);
-    const read = await readStream(res, untilEvent('rayspec.live'));
+
+    // THIS READ MUST SPAN TWO OF THE STREAM LOOP'S READS, or "once per connection" and "once per
+    // read" produce identical bytes and the count below pins neither. What forces the second one is
+    // that the route performs its OPENING read before it returns a response, and hands that page to
+    // the first iteration instead of re-reading — so an event emitted after `subscribe` resolved
+    // cannot be in it, and the only thing that can deliver it is a later iteration's own read.
+    const reading = readStream(res, untilData(1));
+    expect((await emit(h, token, [{ topic: 'second.read', payload: 1 }])).status).toBe(200);
+    const read = await reading;
+    // The delivery IS the evidence that a second read happened.
+    expect(seqs(read.frames)).toEqual([1]);
+
     // The close that ends most of these streams is the server's own lifetime cap, so the gap before
     // the client returns is the server's to set — otherwise it is a per-implementation default and
     // the same deployment reconnects at a different speed in every client. The LITERAL is asserted,
     // not the constant: this number is written down in the reference, and the two must not drift.
     expect(read.raw.startsWith('retry: 1000\n\n')).toBe(true);
-    // Once per connection, not once per read.
+    // Once per connection, not once per read — two reads, still one field.
     expect(read.raw.match(/^retry: /gm)?.length).toBe(1);
-    // …and it is a FIELD, not a frame: a block with no `data:` dispatches no event, so the only
-    // thing this subscriber saw was the control frame.
-    expect(read.frames.map((f) => f.event)).toEqual(['rayspec.live']);
+    // …and it is a FIELD, not a frame: a block with no `data:` dispatches no event, so the blocks
+    // this subscriber dispatched are the control frame and the event, never a `retry:` one.
+    expect(read.frames.map((f) => f.event)).toEqual(['rayspec.live', 'second.read']);
   });
 
   it('R4: a cursor tagged with ANOTHER tenant is refused, and no cursor reaches another tenant’s events', async () => {
