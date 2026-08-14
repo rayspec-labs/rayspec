@@ -4,7 +4,8 @@
  *
  * Like the other example handlers (lookup-notebook.ts), this imports `@rayspec/handler-sdk`
  * type-only. This dir is in NO tsconfig (an `examples/` fixture, excluded from turbo/CI build) — the
- * loader's importer transforms the `.ts` at TEST/deploy time. The handler returns ONLY neutral data
+ * example's `build.mjs` compiles it to `dist/handlers/` for deploy, and a TEST loads this source
+ * through the loader's explicit `typeStrippingImporter` seam. The handler returns ONLY neutral data
  * (validated against the tool's `outputSchema` by dispatchTool); it is a safe deterministic read
  * (`idempotent: true`), scoped to the run's tenant by the auto-injected tenant predicate (init.db).
  */

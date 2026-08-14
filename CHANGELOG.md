@@ -505,6 +505,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`examples/agent-pack-deployment` can be deployed now, and its pack manifest stops claiming the
+  loader compiles TypeScript.** The example's whole product surface — a `notes` store, a `lookup_note`
+  tool and the `note_summarizer` agent that references it — ships as a `defineExtension` pack authored
+  in TypeScript, and the example carried no build step of any kind. The deploy runtime loads compiled
+  JavaScript only (`assertCompiledJavaScriptModule` refuses a `.ts` path before importing it), so
+  `rayspec deploy examples/agent-pack-deployment/rayspec.yaml` aborted at the pack entry — while
+  `packs/agent-pack/package.json` described the pack as "loaded at deploy/test time by loadExtensions
+  (the importer transforms the .ts)". The example now ships `build.mjs` and
+  `packs/agent-pack/tsconfig.build.json`, the same thin-`tsc`-wrapper pair `examples/stream-backend`
+  ships: `node examples/agent-pack-deployment/build.mjs` transpiles the pack's `index.ts` and
+  `handlers/*.ts` to ESM under `packs/agent-pack/dist/` and marks that output `{"type":"module"}`. The
+  built pack lands under the pack directory so the entry still resolves `@rayspec/platform` through the
+  pack's own `node_modules`, which is the first stop on Node's upward walk from the built file. A new
+  `examples/agent-pack-deployment/README.md` gives the build command and the one line a deployment
+  changes — `module: ./packs/agent-pack/dist` — and says plainly that the build clears the
+  compiled-JavaScript boundary and nothing else: the document still needs the boot environment
+  `rayspec deploy --check-env` reports, and that report is derived from a document declaring no agents
+  of its own, so it does not name the credential the pack's agent needs.
+  **The committed `rayspec.yaml` still points at the pack SOURCE, by design.** That is the form the
+  example's tests load, through the loader's explicit `typeStrippingImporter` seam, and repointing it
+  at `dist/` would also drop the pack's handler root from `gate:handler-imports` and
+  `gate:extension-capability`, which add `<packDir>/handlers` only when it exists on disk — in a clean
+  clone `dist/handlers` does not.
+  **The parenthetical was false on the test path too, not just on deploy**, so it is deleted rather
+  than narrowed: no importer transforms anything. Under plain `node` the seam importer fails with
+  `Unknown file extension ".ts"`; what strips the types under `pnpm test` is the test runner. That
+  sentence shipped byte-identically in `examples/stream-backend/packs/stream-pack/package.json`, and
+  with the neighbouring "no build/typecheck/test" framing it made eight claims across seven files —
+  both pack manifests, both pack entries, the agent pack's handler, the two `examples/*` comments in
+  `pnpm-workspace.yaml` and the stream-backend README, which additionally called its pack "a pure
+  loaded-at-deploy fixture" while the example shipped a `build.mjs`. All eight now say what is true:
+  neither pack declares a build/typecheck/test *script* and turbo runs none, and each example carries
+  its own `build.mjs` because the deploy runtime loads compiled JavaScript only.
+  `packages/app/server/src/deployable-backend-handlers.test.ts` gains the third arm of the battery it
+  already ran for `acme-notes-backend` and `stream-backend`: the production importer refuses the agent
+  pack's `.ts` source, runs the documented build, and then resolves the built `dist/` — entry, handler
+  and the pack-contributed `agents` fragment. That test is a `@rayspec/server` test and runs in CI; the
+  example itself is a `@spike/*` fixture and is not built, typechecked or tested there. (Issue #364.)
 - **A port that is already in use now refuses the boot in one actionable line instead of crashing with
   a raw Node stack.** `serve()` returns while the bind is still *pending* — immediately after the call
   the listener's `listening` is `false` and its `address()` is `null` — so neither entrypoint had

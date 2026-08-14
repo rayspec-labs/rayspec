@@ -34,9 +34,10 @@ consumer of this exact mechanism, shipped from its own repo.
   is the **in-repo** form of the platform dependency: the manifest's `workspace:*` specifiers resolve
   only inside this workspace, so a real pack in its own repo declares the same two dependencies on a
   **released** version instead — see
-  [Shipping this pack from its own repo](#shipping-this-pack-from-its-own-repo). It ships **no**
-  build/typecheck/test scripts and is excluded from CI by the `--filter='!@spike/*'` rule (a pure
-  loaded-at-deploy fixture).
+  [Shipping this pack from its own repo](#shipping-this-pack-from-its-own-repo). It declares **no**
+  build/typecheck/test scripts and is excluded from CI by the `--filter='!@spike/*'` rule. It is not
+  build-free, though: the deploy runtime loads compiled JavaScript only, so this example ships its own
+  [`build.mjs`](./build.mjs) (see [Shipping this pack from its own repo](#shipping-this-pack-from-its-own-repo)).
 - **Zero product-specific code enters the platform.** The `stream`/`BlobStore`/`extensions[]`
   primitives are strictly product-agnostic (raw `Request`/`Response`, zero audio/media vocabulary in
   core). The pack HANDLER modules import ONLY `@rayspec/handler-sdk` (type-only); the
