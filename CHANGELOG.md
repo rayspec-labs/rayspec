@@ -497,8 +497,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   address (`Boot aborted — 127.0.0.1:8191 is already in use. …`), the command that finds the process
   holding it (`lsof -nP -iTCP:<port> -sTCP:LISTEN`) and the knob that entrypoint's operator turns —
   `PORT=<n>` for `rayspec-serve`, `--port <n>` or `PORT=<n>` for `rayspec deploy` (its `--port` writes
-  `PORT`), with `RAYSPEC_HOST` / `--host` named for moving the address — then exits 1. Same shape as
-  every other boot refusal in this product.
+  `PORT`), with `RAYSPEC_HOST` / `--host` named for moving the address — then exits 1. It opens
+  `Boot aborted — `, the way this product's config refusals do.
   **Only `EADDRINUSE` changes.** Every other listen error — `EACCES` on a privileged port, a
   `getaddrinfo` failure on an unresolvable `RAYSPEC_HOST`, anything else — is re-emitted by that
   listener after it removes itself, so it reaches exactly the handling it reached before: Node's
