@@ -181,6 +181,16 @@ export async function sweepApprovalTimeouts(
         )
         .returning()) as ApprovalRecord[];
       if (claimed.length === 0) return; // a decider or another sweeper won this row
+      if (fate === 'fail') {
+        // The `fail` fate fans in to the parent — a SECOND task row — so the root-first locks come
+        // before ANY write on this task, the journal counter's own UPDATE included
+        // (apply-intents.ts's module header). `escalate` moves one row and needs no pre-lock.
+        const rows = (await tx
+          .select(schema.workforceTasks)
+          .where(eq(schema.workforceTasks.taskId, approval.taskId))) as TaskRecord[];
+        const task = rows[0];
+        if (task) await lockRootFirst(tx, task);
+      }
       await appendTaskEvents(tx, approval.taskId, [
         {
           type: 'workforce.approval.timed_out',
@@ -240,13 +250,11 @@ export async function sweepApprovalTimeouts(
         return;
       }
       await transitionWithRetry(tx, approval.taskId, async (task) => {
-        // Failing fans in to the parent, so this touches a second task row: root-first first
-        // (apply-intents.ts's module header).
-        const locked = await lockRootFirst(tx, task);
-        if (locked.status !== 'waiting_for_user') return;
+        // The ancestry is already locked above, so this read is the authoritative version.
+        if (task.status !== 'waiting_for_user') return;
         const failed = await applyTransition(tx, {
-          taskId: locked.taskId,
-          expectedVersion: locked.version,
+          taskId: task.taskId,
+          expectedVersion: task.version,
           to: 'failed',
           actor: 'scheduler',
         });

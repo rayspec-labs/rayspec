@@ -86,9 +86,9 @@ export async function applyReviewVerdict(
     const taskRows = (await tx
       .select(schema.workforceTasks)
       .where(eq(schema.workforceTasks.taskId, review.taskId))) as TaskRecord[];
-    const task = taskRows[0];
-    if (task?.status !== 'waiting_for_review') {
-      throw new ReviewTaskStateError(input.reviewId, task?.status ?? 'absent');
+    const snapshot = taskRows[0];
+    if (snapshot?.status !== 'waiting_for_review') {
+      throw new ReviewTaskStateError(input.reviewId, snapshot?.status ?? 'absent');
     }
     const maxRounds = budgets.execution.maxReviewRounds ?? null;
     const outcome =
@@ -97,6 +97,13 @@ export async function applyReviewVerdict(
         : maxRounds !== null && review.round >= maxRounds
           ? 'rounds_exhausted'
           : 'rework';
+    // Completing fans in to the parent — a SECOND task row — so the root-first locks come before
+    // ANY write on this task, the journal counter's own UPDATE included (apply-intents.ts's module
+    // header). The other two outcomes move one row and need no pre-lock.
+    const task = outcome === 'completed' ? await lockRootFirst(tx, snapshot) : snapshot;
+    if (task.status !== 'waiting_for_review') {
+      throw new ReviewTaskStateError(input.reviewId, task.status);
+    }
     // The verdict is an AUDIT fact: who decided what, in which round, and what the engine did about
     // it. The generic transition alone says the task moved, never that a reviewer moved it.
     await appendTaskEvents(tx, task.taskId, [
@@ -116,15 +123,9 @@ export async function applyReviewVerdict(
       },
     ]);
     if (outcome === 'completed') {
-      // Completing fans in to the parent, so this touches a second task row: root-first first
-      // (apply-intents.ts's module header).
-      const locked = await lockRootFirst(tx, task);
-      if (locked.status !== 'waiting_for_review') {
-        throw new ReviewTaskStateError(input.reviewId, locked.status);
-      }
       const done = await applyTransition(tx, {
-        taskId: locked.taskId,
-        expectedVersion: locked.version,
+        taskId: task.taskId,
+        expectedVersion: task.version,
         to: 'completed',
         actor: input.actor,
       });
