@@ -5,17 +5,26 @@
  * is absent, so a workforce-free document pays nothing.
  *
  * The rule set, in the order checked below: agent references resolve · exactly one orchestrator
- * seat (held by the named employee, reporting to nobody) · department managers hold the manager
- * role (or the orchestrator seat) and stand outside their own members · every member/reportsTo/
- * team reference resolves · employee↔department membership coheres in BOTH directions · the
- * EFFECTIVE reporting graph (explicit `reportsTo`, else the department's manager) is acyclic and
- * reaches the orchestrator from every employee · ids are unique within and ACROSS employees/
- * departments/teams (delegation targets are `employee:<id>`/`department:<id>`/`team:<id>` strings;
- * cross-section ambiguity would make them unreadable) · decision roles demand native structured
- * output of their backend · review policies name a reviewer-or-manager reviewer and a non-empty
- * selector · department budgets never out-rate the workforce ceiling · a usd ceiling requires the
- * task budget its per-turn estimate derives from · reserved ids and reserved native tool names are
- * refused · teams fit their declared size · a workforce requires the durable worker that runs it.
+ * seat (held by the named employee, reporting to nobody, belonging to nothing) · department
+ * managers hold the manager role (or the orchestrator seat), stand outside their own members, and
+ * manage the department they themselves belong to · every member/reportsTo/team reference
+ * resolves · employee↔department membership coheres in BOTH directions · the EFFECTIVE reporting
+ * graph (explicit `reportsTo`, else the department's manager) is acyclic and reaches the
+ * orchestrator from every employee · ids are unique within and ACROSS employees/departments/teams
+ * (delegation targets are `employee:<id>`/`department:<id>`/`team:<id>` strings; cross-section
+ * ambiguity would make them unreadable) · decision roles demand native structured output of their
+ * backend · review policies name a reviewer-or-manager reviewer and a non-empty selector ·
+ * approval rules that escalate on timeout never cover the orchestrator seat · department budgets
+ * never out-rate the workforce ceiling · a usd ceiling requires the task budget its per-turn
+ * estimate derives from · reserved ids and reserved native tool names are refused · teams fit
+ * their declared size, are LED BY A MANAGER, and hold neither their own lead nor the orchestrator
+ * among their members · a workforce requires the durable worker that runs it.
+ *
+ * A recurring shape in the structural rules: every one of them exists because some RUNTIME path
+ * keys on the declaration, and a declaration the runtime reads differently than a reader does is
+ * the defect. A team's lead is who `team:<id>` resolves to; a manager's authority is their own
+ * membership field; an approval's escalation target is the reporting edge. Where those disagree
+ * with what the document appears to say, the rule is here rather than in a comment.
  */
 import {
   type AgentSpec,
@@ -329,6 +338,27 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
         ),
       );
     }
+    // A MANAGER'S AUTHORITY IS THEIR OWN MEMBERSHIP FIELD. Delegation scoping asks which department
+    // the employee BELONGS to (`employee.department`), never which departments name them as
+    // manager — so an employee managing B while declaring A re-keys the whole grant: they reach A's
+    // members, whom they do not manage, and none of B's, whom they do. The orchestrator is exempt
+    // because it declares no membership at all (its own rule below), so nothing can disagree.
+    if (
+      manager !== undefined &&
+      manager.id !== workforce.orchestrator &&
+      manager.department !== undefined &&
+      manager.department !== department.id
+    ) {
+      errors.push(
+        specError(
+          'department_mismatch',
+          `department '${department.id}' names manager '${department.manager}', whose own ` +
+            `department is '${manager.department}' — delegation scoping keys on the manager's own ` +
+            'membership, so this grants them authority over the wrong department and none over this one',
+          path(`departments[${di}].manager`),
+        ),
+      );
+    }
     department.members.forEach((member, mi) => {
       const employee = employeeById.get(member);
       if (employee === undefined) {
@@ -437,13 +467,39 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
   }
 
   // ---- TEAMS -------------------------------------------------------------------------------
+  // A team is a DELEGATION TARGET: `team:<id>` resolves to its LEAD, and the lead is then expected
+  // to fan the work out to the members on their own turn. Every rule here follows from that one
+  // fact — a team whose lead cannot delegate, or whose lead is the delegator, is a declaration
+  // that reads like an org chart and behaves like a dead end.
   workforce.teams.forEach((team, ti) => {
-    if (!employeeById.has(team.lead)) {
+    const lead = employeeById.get(team.lead);
+    if (lead === undefined) {
       errors.push(
         specError(
           'dangling_ref',
           `team '${team.id}' lead '${team.lead}' names no declared employee`,
           path(`teams[${ti}].lead`),
+        ),
+      );
+    } else if (lead.role !== 'manager') {
+      errors.push(
+        specError(
+          'invalid_manager',
+          `team '${team.id}' lead '${team.lead}' holds role '${lead.role}' — a team lead holds ` +
+            "role 'manager': 'team:' resolves to the lead, and a worker or reviewer lead carries " +
+            'no delegation tool to fan the work out with, while the orchestrator seat would be ' +
+            'resolving a team to itself',
+          path(`teams[${ti}].lead`),
+        ),
+      );
+    }
+    if (team.members.includes(team.lead)) {
+      errors.push(
+        specError(
+          'manager_in_members',
+          `team '${team.id}' lists its lead '${team.lead}' among its own members — a lead answers ` +
+            'FOR the team, never inside it (the same rule a department manager answers to)',
+          path(`teams[${ti}].members`),
         ),
       );
     }
@@ -453,6 +509,18 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
           specError(
             'dangling_ref',
             `team '${team.id}' member '${member}' names no declared employee`,
+            path(`teams[${ti}].members[${mi}]`),
+          ),
+        );
+        return;
+      }
+      if (member === workforce.orchestrator) {
+        errors.push(
+          specError(
+            'invalid_orchestrator',
+            `team '${team.id}' lists the orchestrator '${member}' among its members — the ` +
+              'orchestrator sits above teams, and the membership would hand the team lead ' +
+              'delegation authority over the entry-point seat',
             path(`teams[${ti}].members[${mi}]`),
           ),
         );
@@ -536,6 +604,33 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
       );
     }
   });
+
+  // ---- APPROVAL RULES ----------------------------------------------------------------------
+  // An `escalate` timeout fate must NAME its next approver, and the only supplier is the requesting
+  // employee's reporting edge. The orchestrator has none by the rule above, so a rule that covers
+  // that seat declares a fate the runtime cannot build: the toolset omits `escalateTo`, the
+  // planner refuses the intent as `invalid_intent`, and the requeue re-runs the same deterministic
+  // condition straight into permanent failure. One legal-looking document, one bricked task —
+  // which is why this is a parse-time error rather than a runtime fallback nobody declared.
+  if (orchestrator !== undefined) {
+    workforce.approvals.forEach((approval, ai) => {
+      if (approval.onTimeout !== 'escalate') return;
+      const covers = approval.requireWhen.capabilities.filter((label) =>
+        orchestrator.capabilities.includes(label),
+      );
+      if (covers.length === 0) return;
+      errors.push(
+        specError(
+          'invalid_orchestrator',
+          `approval '${approval.id}' escalates on timeout and covers the orchestrator seat ` +
+            `'${orchestrator.id}' (capability ${covers.map((c) => `'${c}'`).join(', ')}) — the ` +
+            'orchestrator reports to nobody, so there is no approver to escalate to and every ' +
+            "such request would fail deterministically. Declare onTimeout: 'fail' for this seat",
+          path(`approvals[${ai}].onTimeout`),
+        ),
+      );
+    });
+  }
 
   // ---- BUDGET COHERENCE --------------------------------------------------------------------
   const workforceUsd = workforce.budgets?.workforce;

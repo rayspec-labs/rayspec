@@ -48,13 +48,13 @@ import { delegationChildSpecSchema, insertChildTask } from './create-task.js';
 import { TaskNotFoundError, TaskRowCorruptError, TaskVersionConflictError } from './errors.js';
 import { appendTaskEvents } from './events.js';
 import { deterministicChildTaskId } from './ids.js';
-import { joinPolicySchema } from './join.js';
 import {
   invalidIntentPlan,
   planTurnOutcome,
   type TurnPlan,
   turnIntentSchema,
 } from './intent-applier.js';
+import { joinPolicySchema } from './join.js';
 import {
   applyReviewVerdictInTx,
   ReviewAlreadyDecidedError,

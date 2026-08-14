@@ -250,7 +250,9 @@ async function releaseAbandonedReview(
   }
   const reviewRows = (await tx
     .select(schema.workforceReviews)
-    .where(eq(schema.workforceReviews.id, binding.data.reviewId))) as (typeof schema.workforceReviews.$inferSelect)[];
+    .where(
+      eq(schema.workforceReviews.id, binding.data.reviewId),
+    )) as (typeof schema.workforceReviews.$inferSelect)[];
   const review = reviewRows[0];
   // A decided review is the normal path: the verdict already moved the reviewed task, and this
   // terminal is just the reviewer's own turn ending afterwards.

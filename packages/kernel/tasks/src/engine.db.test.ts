@@ -92,14 +92,6 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     });
   }
 
-  /** The row's current optimistic-concurrency token — what the next transition must present. */
-  async function currentVersion(taskId: string): Promise<number> {
-    const rows = (await db.$client.unsafe(
-      `SELECT version FROM workforce_tasks WHERE task_id = '${taskId}';`,
-    )) as unknown as { version: number }[];
-    return (rows[0] as { version: number }).version;
-  }
-
   async function driveToWorking(task: TaskRecord): Promise<TaskRecord> {
     const queued = await applyTransition(tdb(), {
       taskId: task.taskId,
@@ -374,9 +366,7 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
         messages: [{ recipient: 'mgr', body: 'Interim note.' }],
         budgets: NO_BUDGETS,
       });
-      expect(await messageRows(root.taskId)).toEqual([
-        { recipient: 'mgr', body: 'Interim note.' },
-      ]);
+      expect(await messageRows(root.taskId)).toEqual([{ recipient: 'mgr', body: 'Interim note.' }]);
     });
 
     it('a consumed cancel drops the turn’s messages with the rest of its effects', async () => {

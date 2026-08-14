@@ -292,12 +292,12 @@ describe('workforce semantic lint — departments and membership', () => {
   });
 
   it('accepts the orchestrator as a department manager', () => {
-    const doc = WORKFORCE_BASE.replace('manager: mgr\n', 'manager: lead\n')
-      .replace(
-        '      reportsTo: lead\n      role: manager\n',
-        '      reportsTo: lead\n      role: worker\n',
-      )
-      .replace('      members: [dev]\n', '      members: [dev, mgr]\n');
+    // The orchestrator is also the one seat exempt from the manager-authority rule below: it
+    // declares no department of its own, so no membership can disagree with what it manages.
+    const doc = WORKFORCE_BASE.replace('manager: mgr\n', 'manager: lead\n').replace(
+      '      members: [dev]\n',
+      '      members: [dev, mgr]\n',
+    );
     const res = parseSpec(doc, ON);
     expect(res.ok).toBe(true);
   });
@@ -553,11 +553,112 @@ describe('workforce semantic lint — teams and the durable worker', () => {
     expectRejection(WORKFORCE_BASE.replace('maxSize: 3', 'maxSize: 1'), 'schema_violation');
   });
 
+  it('rejects a team led by a worker — a worker carries no delegation tool, so it is a dead end', () => {
+    expectRejection(
+      WORKFORCE_BASE.replace('      lead: mgr\n', '      lead: dev\n'),
+      'invalid_manager',
+    );
+  });
+
+  it('rejects a team led by a reviewer, for the same reason', () => {
+    expectRejection(
+      WORKFORCE_BASE.replace('      lead: mgr\n', '      lead: qa\n'),
+      'invalid_manager',
+    );
+  });
+
+  it('rejects a team led by the orchestrator — `team:` would resolve to the delegator itself', () => {
+    expectRejection(
+      WORKFORCE_BASE.replace('      lead: mgr\n', '      lead: lead\n'),
+      'invalid_manager',
+    );
+  });
+
+  it('rejects a team that lists its own lead among its members', () => {
+    expectRejection(
+      WORKFORCE_BASE.replace('members: [dev, qa]', 'members: [dev, qa, mgr]'),
+      'manager_in_members',
+    );
+  });
+
+  it('rejects the orchestrator as a team member — the seat sits above teams', () => {
+    expectRejection(
+      WORKFORCE_BASE.replace('members: [dev, qa]', 'members: [dev, qa, lead]'),
+      'invalid_orchestrator',
+    );
+  });
+
   it('rejects a workforce on a deployment without a durable worker', () => {
     expectRejection(
       WORKFORCE_BASE.replace('deployment:\n  durableWorker: true\n', ''),
       'schema_violation',
     );
+  });
+});
+
+describe('workforce semantic lint — a manager’s authority is the department they belong to', () => {
+  /** A second department managed by `mgr`, who declares `engineering` as their own. */
+  const SECOND_DEPARTMENT = WORKFORCE_BASE.replace(
+    '      budgets: { usd: 10 }\n',
+    '      budgets: { usd: 10 }\n    - id: growth\n      name: Growth\n      manager: mgr\n      mission: Tell it.\n',
+  );
+
+  it('rejects a manager who manages one department while declaring a different one as their own', () => {
+    // The delegation scoping keys on the MEMBERSHIP field (`employee.department`), never on which
+    // departments name the employee as manager — so this spec grants authority over `engineering`
+    // to the manager of `growth`, and none over `growth` at all. Neither half is what it reads as.
+    expectRejection(SECOND_DEPARTMENT, 'department_mismatch');
+  });
+
+  it('a manager who declares no department at all is not re-keyed — nothing disagrees', () => {
+    // Fail-closed rather than mis-keyed: with no membership field, the resolver's own-department
+    // lookup finds nothing and the manager reaches nobody by department. (The orchestrator-as-
+    // manager case is pinned beside the membership rules above.)
+    const res = parseSpec(
+      SECOND_DEPARTMENT.replace(
+        '      department: engineering\n      reportsTo: lead\n',
+        '      reportsTo: lead\n',
+      ),
+      ON,
+    );
+    expect(res.ok).toBe(true);
+  });
+});
+
+describe('workforce semantic lint — approval rules', () => {
+  it('rejects an escalating approval rule that covers the orchestrator seat', () => {
+    // The orchestrator has no reportsTo by lint requirement, so no escalation target exists: the
+    // toolset omits `escalateTo`, the planner refuses the intent, and the requeue re-runs the same
+    // deterministic condition into permanent failure. One legal-looking spec, one bricked task.
+    expectRejection(
+      WORKFORCE_BASE.replace(
+        '      title: Lead\n      role: orchestrator\n',
+        '      title: Lead\n      role: orchestrator\n      capabilities: [public_statement]\n',
+      ),
+      'invalid_orchestrator',
+    );
+  });
+
+  it('the same rule with onTimeout: fail is legal on that seat', () => {
+    const res = parseSpec(
+      WORKFORCE_BASE.replace(
+        '      title: Lead\n      role: orchestrator\n',
+        '      title: Lead\n      role: orchestrator\n      capabilities: [public_statement]\n',
+      ).replace('      onTimeout: escalate', '      onTimeout: fail'),
+      ON,
+    );
+    expect(res.ok).toBe(true);
+  });
+
+  it('an escalating rule covering only non-orchestrator seats stays legal', () => {
+    const res = parseSpec(
+      WORKFORCE_BASE.replace(
+        'capabilities: [production_change]',
+        'capabilities: [production_change, public_statement]',
+      ),
+      ON,
+    );
+    expect(res.ok).toBe(true);
   });
 });
 
