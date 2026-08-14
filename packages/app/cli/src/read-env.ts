@@ -38,10 +38,12 @@ import { fileURLToPath } from 'node:url';
  *      from `node_modules/@rayspec/cli/dist` they reach the consuming project's own root under npm's
  *      flat layout, and from
  *      `node_modules/.pnpm/@rayspec+cli@<version>/node_modules/@rayspec/cli/dist` they reach
- *      `node_modules/.pnpm/@rayspec+cli@<version>/` under pnpm's. Never the unscoped
- *      `node_modules/rayspec` launcher package, which ships a bin and no loader. It is the same
- *      source-relative resolution the server's loader uses, and identical to `$PWD/.env` when the CLI
- *      is run from whichever directory that resolves to.
+ *      `node_modules/.pnpm/@rayspec+cli@<version>/` under pnpm's. It is a POSITION, not a named
+ *      package: whatever directory sits four segments above this module is the install root, whatever
+ *      it happens to contain — under npm's nested layout, where this package resolves from inside
+ *      `node_modules/rayspec/node_modules/@rayspec/cli`, that directory IS the unscoped launcher
+ *      package. It is the same source-relative resolution the server's loader uses, and identical to
+ *      `$PWD/.env` when the CLI is run from whichever directory that resolves to.
  * Exported so the missing-required-variable refusal can NAME the searched paths (paths only — never
  * file contents).
  */

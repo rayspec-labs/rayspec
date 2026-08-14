@@ -6,12 +6,16 @@
  * unescape them so importPKCS8 accepts the key. Disable entirely with RAYSPEC_SKIP_DOTENV=1 (e.g. to
  * prove pure-ambient-env boot).
  *
- * The search order is the `rayspec` CLI's (packages/app/cli/src/read-env.ts): both entrypoints search
- * the same two candidates in the same order, so `rayspec deploy <spec>` and
- * `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` STARTED IN THE SAME DIRECTORY resolve the same files. The
+ * The search order is the `rayspec` CLI's (packages/app/cli/src/read-env.ts): both entrypoints apply
+ * the same two rules in the same order, so `rayspec deploy <spec>` and
+ * `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` STARTED IN THE SAME DIRECTORY read the same `./.env`. That
  * agreement rests on the working directory, because the first candidate is `$PWD`-relative: started in
  * different directories — a shell in a product repo versus a unit file's `WorkingDirectory=` — the two
  * still resolve different first candidates, each its own `$PWD/.env`.
+ * The SECOND candidate is resolved per package, from each loader's own module, so the two agree on it
+ * only where both packages sit under one root — a checkout, or npm's flat layout. Under pnpm each
+ * resolves inside its own `node_modules/.pnpm/@rayspec+<name>@<version>/`, and an install-root `.env`
+ * placed for one entrypoint is not read by the other.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -29,8 +33,9 @@ import { fileURLToPath } from 'node:url';
  *      this package: from `node_modules/@rayspec/server/dist` they reach the consuming project's own
  *      root under npm's flat layout, and from
  *      `node_modules/.pnpm/@rayspec+server@<version>/node_modules/@rayspec/server/dist` they reach
- *      `node_modules/.pnpm/@rayspec+server@<version>/` under pnpm's. Never the unscoped
- *      `node_modules/rayspec` launcher package, which ships a bin and no loader. It is the only path
+ *      `node_modules/.pnpm/@rayspec+server@<version>/` under pnpm's. It is a POSITION, not a named
+ *      package: whatever directory sits four segments above this module is the install root, whatever
+ *      it happens to contain. It is the only path
  *      this loader used to search, and identical to `$PWD/.env` when the entrypoint is run from
  *      whichever directory that resolves to.
  */

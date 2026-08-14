@@ -928,16 +928,23 @@ deployment sets its configuration through its orchestrator or secret manager.
   `.env` **second** — the install root being the directory four segments above the loader's
   own module: your checkout root when you run from a checkout, and from a registry install
   the consuming project's own root under npm's flat layout or a directory inside
-  `node_modules/.pnpm/` under pnpm's, never the unscoped `node_modules/rayspec` launcher
-  package, which ships a bin and no loader — deduplicated to one
+  `node_modules/.pnpm/` under pnpm's. It is a position rather than a named package —
+  whatever sits four segments up, including the unscoped `node_modules/rayspec` launcher
+  directory itself under npm's nested layout — deduplicated to one
   read when they are the same file. Neither file
   overrides a variable the environment already sets, and the second never overwrites a key
   the first supplied, so the precedence per key is: environment > `$PWD/.env` >
-  install-root `.env`. `RAYSPEC_SKIP_DOTENV=1` skips both. `rayspec deploy` searches the
-  same two paths in the same order, so the two entrypoints **started in the same directory**
-  resolve the same files. The first path is `$PWD`-relative, so that directory is what they
+  install-root `.env`. `RAYSPEC_SKIP_DOTENV=1` skips both. `rayspec deploy` applies the
+  same two rules in the same order, so the two entrypoints **started in the same directory**
+  read the same `./.env`. The first path is `$PWD`-relative, so that directory is what they
   have to share: a `rayspec-serve` started elsewhere — a unit file's `WorkingDirectory=`, a
-  container's `WORKDIR` — reads that directory's `./.env` instead. Where both entrypoints
+  container's `WORKDIR` — reads that directory's `./.env` instead. The **install-root**
+  candidate is resolved per package, from each loader's own module, so it is the same file
+  only where the two packages sit under one root: in a checkout, and under npm's flat
+  layout. Under pnpm each resolves inside its own
+  `node_modules/.pnpm/@rayspec+cli@<version>/` and `…/@rayspec+server@<version>/`
+  directory, so an install-root `.env` placed for one entrypoint is not read by the other.
+  Where both entrypoints
   must agree regardless, set the variables in the environment: an already-set value beats
   either file.
 - On boot it **applies the committed platform migration chain** to the target
