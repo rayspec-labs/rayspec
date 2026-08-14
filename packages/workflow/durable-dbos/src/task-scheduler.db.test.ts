@@ -18,9 +18,11 @@
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DBOS } from '@dbos-inc/dbos-sdk';
 import { forTenant } from '@rayspec/db';
 import { makeDbWithSchema } from '@rayspec/db/testing';
 import {
+  applyTransition,
   createRootTask,
   deliverSignal,
   ensureWorkforceRuntime,
@@ -33,7 +35,12 @@ import { config as loadDotenv } from 'dotenv';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DbosDurableExecutor, type DbosExecutorDeps } from './executor.js';
-import { DbosTaskScheduler, type TaskTurnContext, type TaskTurnHandler } from './task-scheduler.js';
+import {
+  DbosTaskScheduler,
+  type TaskTurnContext,
+  type TaskTurnHandler,
+  taskTurnWorkflowId,
+} from './task-scheduler.js';
 import { buildSpineSchemaSql, buildWorkforceSchemaSql } from './test-support/schema-ddl.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -64,6 +71,7 @@ let db: ReturnType<typeof makeDbWithSchema>;
 let executor: DbosDurableExecutor;
 let scheduler: DbosTaskScheduler;
 let appBaseUrl = '';
+let deadWorkflow: () => Promise<void>;
 
 /** owner -> handler; workers resolve by prefix so fan-out specs need no per-test registration. */
 const handlers = new Map<string, TaskTurnHandler>();
@@ -161,6 +169,16 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
       sweepSchedule: NEVER,
     });
     executor.attachPreLaunchHook(() => scheduler.registerScheduledWorkflows());
+    executor.attachPreLaunchHook(() => {
+      // A workflow that dies without touching any row — the corpse the salted-dispatch test buries
+      // under a task's base dispatch id.
+      deadWorkflow = DBOS.registerWorkflow(
+        async () => {
+          throw new Error('synthetic dead turn attempt');
+        },
+        { name: `test-dead-turn-${PID}` },
+      );
+    });
     await executor.start();
     await scheduler.registerQueue();
   }, 60_000);
@@ -435,5 +453,66 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
     const swept = await scheduler.runSweep();
     expect(swept.failed).toHaveLength(1);
     expect((await taskRow(root.taskId)).status).toBe('failed');
+  });
+
+  it('a DEAD prior attempt does not consume the dispatch id forever — the pass salts past it', async () => {
+    handlers.set('solo', async () => ({
+      intent: { kind: 'complete', result: { status: 'completed', summary: 'ok', confidence: 1 } },
+    }));
+    const root = await newRoot('solo');
+    // Promote by hand so the base dispatch id is known BEFORE any pass runs…
+    const queued = await applyTransition(tdb(), {
+      taskId: root.taskId,
+      expectedVersion: root.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    const baseId = taskTurnWorkflowId(root.taskId, 1, queued.version);
+    // …then bury a corpse under it: a workflow that ERRORS without ever moving the row (the shape
+    // an unexpected throw inside the claim leaves behind).
+    const handle = await DBOS.startWorkflow(deadWorkflow, { workflowID: baseId })();
+    await expect(handle.getResult()).rejects.toThrow();
+
+    // Before the salted probe, every later pass minted the identical id and deduped into the
+    // corpse — the task sat queued forever. The salt walks past it and a fresh claim completes.
+    await pumpUntil(async () => (await taskRow(root.taskId)).status === 'completed');
+    const claim = await db.$client.unsafe(
+      `SELECT turn_id FROM workforce_task_transitions WHERE task_id = '${root.taskId}' AND to_status = 'working';`,
+    );
+    expect(claim).toHaveLength(1);
+    expect(claim[0]?.turn_id).toBe(`${baseId}:r1`);
+  });
+
+  it('the sweep reaps a working row whose claimed workflow is dead, and a fresh dispatch finishes it', async () => {
+    handlers.set('solo', async () => ({
+      intent: { kind: 'complete', result: { status: 'completed', summary: 'ok', confidence: 1 } },
+    }));
+    const root = await newRoot('solo');
+    // Forge the residue a crashed-past-recovery turn leaves: a committed claim (`working`, turnId
+    // stamped) whose workflow id the engine has no live record of.
+    const queued = await applyTransition(tdb(), {
+      taskId: root.taskId,
+      expectedVersion: root.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await applyTransition(tdb(), {
+      taskId: root.taskId,
+      expectedVersion: queued.version,
+      to: 'working',
+      actor: 'scheduler',
+      turnId: `wf-task-turn:${root.taskId}:1:dead-attempt`,
+    });
+
+    const swept = await scheduler.runSweep();
+    expect(swept.reaped).toContain(root.taskId);
+    const row = await taskRow(root.taskId);
+    expect(row.status).toBe('queued');
+    const reQueued = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.task.queued' AND data->>'queueReason' = 'turn_reaped';`,
+    );
+    expect(reQueued[0]?.c).toBe(1);
+    // The reclaimed slot is real: the next passes dispatch a fresh turn and the task completes.
+    await pumpUntil(async () => (await taskRow(root.taskId)).status === 'completed');
   });
 });

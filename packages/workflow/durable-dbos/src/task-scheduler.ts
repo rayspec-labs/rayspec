@@ -72,7 +72,7 @@ import {
   type WorkforceBudgets,
   workforceBudgetsSchema,
 } from '@rayspec/tasks';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 
 /** The DBOS queue turn workflows run on (worker-concurrency capped like the run queue). */
 export const WORKFORCE_TURNS_QUEUE = 'workforce-turns';
@@ -385,8 +385,12 @@ export class DbosTaskScheduler {
             'DbosTaskScheduler.runReservePass before registerScheduledWorkflows() — the turn workflow is not registered. Fail-closed.',
           );
         }
+        const workflowId = await this.#resolveDispatchId(
+          taskTurnWorkflowId(task.taskId, turnNumber, task.version),
+        );
+        if (workflowId === undefined) continue; // salted out — logged inside, next pass retries
         await DBOS.startWorkflow(this.#turnWorkflow, {
-          workflowID: taskTurnWorkflowId(task.taskId, turnNumber, task.version),
+          workflowID: workflowId,
           queueName: WORKFORCE_TURNS_QUEUE,
         })({ tenantId: this.#deps.tenantId, taskId: task.taskId, turnNumber });
         outcome.dispatched.push({ taskId: task.taskId, turnNumber });
@@ -400,6 +404,32 @@ export class DbosTaskScheduler {
       }
     }
     return outcome;
+  }
+
+  /**
+   * Resolve the dispatch id for a candidate, salting PAST dead prior attempts. The base id is
+   * deterministic in (task, turn, version) so racing passes dedupe — but an attempt that DIED
+   * without moving the row (an unexpected throw inside the claim leaves the workflow ERRORED and
+   * the task still `queued` at the same version) would otherwise consume the id forever: every
+   * later pass would mint the identical id and dedupe into the corpse. So the pass probes the
+   * engine: a live attempt (PENDING/ENQUEUED) or an unused id dispatches as-is (dedup handles the
+   * live case); a TERMINAL status appends a retry salt and probes again — self-healing, and still
+   * deterministic across racing schedulers (both walk the same salt sequence). A bounded walk;
+   * past the bound the candidate is skipped loudly for this pass.
+   */
+  async #resolveDispatchId(baseId: string): Promise<string | undefined> {
+    const MAX_SALT = 50;
+    for (let attempt = 0; attempt <= MAX_SALT; attempt++) {
+      const id = attempt === 0 ? baseId : `${baseId}:r${attempt}`;
+      const status = await DBOS.getWorkflowStatus(id);
+      if (status === null) return id; // unused — this attempt's claim
+      if (status.status === 'PENDING' || status.status === 'ENQUEUED') return id; // live — dedup
+      // Terminal (ERROR / CANCELLED / SUCCESS-without-moving-the-row / recovery-exceeded): dead.
+    }
+    this.#logger.error(
+      `[workforce] dispatch id ${baseId} has ${MAX_SALT} dead attempts — skipping this pass (fail-loud; investigate the turn workflow's failures).`,
+    );
+    return undefined;
   }
 
   /** planned -> queued when every dependency is completed; -> blocked(awaiting_dependency) else. */
@@ -466,13 +496,63 @@ export class DbosTaskScheduler {
     return rows.length === deps.length && rows.every((r) => r.status === 'completed');
   }
 
-  /** The sweep: enforce every overdue approval's declared fate. Deterministic seam for tests. */
-  async runSweep(): Promise<ApprovalSweepOutcome> {
+  /**
+   * The sweep: enforce every overdue approval's declared fate, then REAP dead turns. A claim that
+   * committed (`working`) whose workflow later died (an ERROR, a cancellation, an exceeded
+   * recovery bound) would otherwise hold its row — and a `maxConcurrentWorkers` slot, and every
+   * drain — forever. The reaper asks the ENGINE whether the claim's own workflow id is still live
+   * (PENDING/ENQUEUED); a dead one re-queues the task through the one door (handlers are
+   * effect-free and the receipt guards double application, so a fresh dispatch of the same turn is
+   * safe). A LIVE turn is never touched, however long it runs — nothing is killed mid-flight.
+   * Deterministic seam for tests.
+   */
+  async runSweep(): Promise<ApprovalSweepOutcome & { reaped: string[] }> {
     if (!(await this.#deps.tenantExists(this.#deps.tenantId))) {
-      return { failed: [], escalated: [] };
+      return { failed: [], escalated: [], reaped: [] };
     }
     const tdb = forTenant(this.#deps.db, this.#deps.tenantId);
-    return sweepApprovalTimeouts(tdb, this.#now());
+    const approvals = await sweepApprovalTimeouts(tdb, this.#now());
+    const reaped: string[] = [];
+    const working = (await tdb
+      .select(schema.workforceTasks)
+      .where(eq(schema.workforceTasks.status, 'working'))) as TaskRecord[];
+    for (const task of working) {
+      try {
+        const claimRows = (await tdb
+          .select(schema.workforceTaskTransitions)
+          .where(
+            and(
+              eq(schema.workforceTaskTransitions.taskId, task.taskId),
+              eq(schema.workforceTaskTransitions.toStatus, 'working'),
+            ),
+          )
+          .orderBy(desc(schema.workforceTaskTransitions.createdAt))
+          .limit(1)) as (typeof schema.workforceTaskTransitions.$inferSelect)[];
+        const turnId = claimRows[0]?.turnId;
+        if (!turnId) continue; // no claim record — not this dispatcher's row to judge
+        const status = await DBOS.getWorkflowStatus(turnId);
+        const live =
+          status !== null && (status.status === 'PENDING' || status.status === 'ENQUEUED');
+        if (live) continue;
+        await applyTransition(tdb, {
+          taskId: task.taskId,
+          expectedVersion: task.version,
+          to: 'queued',
+          reason: 'tool_error',
+          actor: 'scheduler',
+          queueReason: 'turn_reaped',
+        });
+        reaped.push(task.taskId);
+        this.#logger.warn(
+          `[workforce] reaped task ${task.taskId}: its turn workflow ${turnId} is ${status?.status ?? 'absent'} — re-queued for a fresh dispatch.`,
+        );
+      } catch (err) {
+        if (!(err instanceof TaskVersionConflictError)) {
+          this.#logger.error(`[workforce] reap ${task.taskId} errored: ${String(err)}`);
+        }
+      }
+    }
+    return { ...approvals, reaped };
   }
 
   /**
@@ -480,10 +560,14 @@ export class DbosTaskScheduler {
    * See the header for the claim/handler/apply protocol and why each piece is idempotent.
    */
   async #turnBody(job: TaskTurnJob): Promise<void> {
+    // The workflow's OWN id (salt included) — captured in workflow context, stamped on the claim,
+    // and what a recovery verifies against: a stale dispatch for the same (task, turn) under a
+    // DIFFERENT id must no-op instead of mistaking another attempt's claim for its own.
+    const myWorkflowId = DBOS.workflowID ?? taskTurnWorkflowId(job.taskId, job.turnNumber, -1);
     await DBOS.runStep(
       async () => {
         const tdb = forTenant(this.#deps.db, job.tenantId);
-        const claim = await this.#claimTurn(tdb, job);
+        const claim = await this.#claimTurn(tdb, job, myWorkflowId);
         if (claim.kind !== 'claimed') return;
         const { task, budgets } = claim;
 
@@ -510,15 +594,39 @@ export class DbosTaskScheduler {
           }
         }
 
-        const applied = await applyTurnOutcome(tdb, {
-          taskId: task.taskId,
-          turnId: taskTurnWorkflowId(task.taskId, job.turnNumber, claim.claimedVersion),
-          turnNumber: job.turnNumber,
-          intent: outcome.intent,
-          messages: outcome.messages,
-          budgets,
-          actualUsd: outcome.actualUsd ?? 0,
-        });
+        let applied: Awaited<ReturnType<typeof applyTurnOutcome>>;
+        try {
+          applied = await applyTurnOutcome(tdb, {
+            taskId: task.taskId,
+            turnId: myWorkflowId,
+            turnNumber: job.turnNumber,
+            intent: outcome.intent,
+            messages: outcome.messages,
+            budgets,
+            actualUsd: outcome.actualUsd ?? 0,
+          });
+        } catch (err) {
+          // Losing a version race at the very end (a cancel cascade, an operator move) is a clean
+          // no-op ONLY when the turn's receipt exists — someone applied this turn. Anything else
+          // stays loud (the workflow records the error; the sweep's reaper re-queues the row).
+          if (err instanceof TaskVersionConflictError) {
+            const receipt = await tdb
+              .select(schema.workforceTaskTransitions, { id: schema.workforceTaskTransitions.id })
+              .where(
+                and(
+                  eq(schema.workforceTaskTransitions.taskId, job.taskId),
+                  eq(schema.workforceTaskTransitions.turnNumber, job.turnNumber),
+                ),
+              );
+            if (receipt.length > 0) {
+              this.#logger.info(
+                `[workforce] task ${job.taskId} turn ${job.turnNumber}: lost the final race to an applied receipt — clean no-op.`,
+              );
+              return;
+            }
+          }
+          throw err;
+        }
         this.#logTurn(task, job.turnNumber, applied.plan);
       },
       { name: 'taskTurn', retriesAllowed: false },
@@ -532,10 +640,8 @@ export class DbosTaskScheduler {
   async #claimTurn(
     tdb: TenantDb,
     job: TaskTurnJob,
-  ): Promise<
-    | { kind: 'claimed'; task: TaskRecord; budgets: WorkforceBudgets; claimedVersion: number }
-    | { kind: 'noop' }
-  > {
+    myWorkflowId: string,
+  ): Promise<{ kind: 'claimed'; task: TaskRecord; budgets: WorkforceBudgets } | { kind: 'noop' }> {
     try {
       return await tdb.transaction(async (tx) => {
         const receipt = await tx
@@ -564,14 +670,24 @@ export class DbosTaskScheduler {
             : EMPTY_BUDGETS;
 
         if (task.status === 'working') {
-          // Recovery of a claim that committed before the crash: the reservation exists, the
-          // turn_started entry exists — re-run the handler and apply.
-          return {
-            kind: 'claimed' as const,
-            task,
-            budgets,
-            claimedVersion: task.version - 1,
-          };
+          // A committed claim with no receipt. It is OURS only if the claim row carries THIS
+          // workflow's id — a stale dispatch under a different id (expiry + manual_unblock can
+          // legitimately mint one for the same turn number) must no-op here, or two live
+          // executions would run one turn's handler concurrently.
+          const claimRows = (await tx
+            .select(schema.workforceTaskTransitions)
+            .where(
+              and(
+                eq(schema.workforceTaskTransitions.taskId, job.taskId),
+                eq(schema.workforceTaskTransitions.toStatus, 'working'),
+              ),
+            )
+            .orderBy(desc(schema.workforceTaskTransitions.createdAt))
+            .limit(1)) as (typeof schema.workforceTaskTransitions.$inferSelect)[];
+          if (claimRows[0]?.turnId !== myWorkflowId) return { kind: 'noop' as const };
+          // Recovery of OUR claim: the reservation exists, the turn_started entry exists —
+          // re-run the handler and apply.
+          return { kind: 'claimed' as const, task, budgets };
         }
         if (task.status !== 'queued') return { kind: 'noop' as const };
 
@@ -580,7 +696,7 @@ export class DbosTaskScheduler {
           expectedVersion: task.version,
           to: 'working',
           actor: 'scheduler',
-          turnId: taskTurnWorkflowId(task.taskId, job.turnNumber, task.version),
+          turnId: myWorkflowId,
         });
 
         const decision = await authorizeTurn(
@@ -611,12 +727,12 @@ export class DbosTaskScheduler {
             payload: {
               taskId: task.taskId,
               turnNumber: job.turnNumber,
-              turnId: taskTurnWorkflowId(task.taskId, job.turnNumber, task.version),
+              turnId: myWorkflowId,
               owner: task.owner,
             },
           },
         ]);
-        return { kind: 'claimed' as const, task: working, budgets, claimedVersion: task.version };
+        return { kind: 'claimed' as const, task: working, budgets };
       });
     } catch (err) {
       if (err instanceof ClaimDenied) {
