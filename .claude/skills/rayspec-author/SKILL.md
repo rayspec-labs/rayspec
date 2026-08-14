@@ -107,9 +107,13 @@ with a declarative approximation; recommend it as a future iteration or the prod
   set; vector/embedding/fuzzy/range lookups (the templates scaffold **AND-equality filters only** — the
   facade's bounded `{ gt/gte/lt/lte }` comparisons are not scaffolded); typed scalar arrays at the DB
   layer (they map to `jsonb`, never a typed scalar array). Fractional numbers ARE declarable — `double`
-  and `numeric` are column types — but the `gen-handler` renderer has no coercion arm for either, so a
-  RENDERED handler cannot take one as a MODEL ARG (`validateHoles` refuses a `double`/`numeric`
-  `columns[]` entry). An author CONSTANT into such a column DOES render, via `fixedValues`, provided the
+  and `numeric` are column types — but the `gen-handler` renderer has no coercion arm for either on the
+  WRITE side, so a rendered handler cannot PERSIST one from a model arg (`validateHoles` refuses a
+  `double`/`numeric` `columns[]` entry). Reading is not restricted the same way: `filterCols` carries
+  column names only, is checked for snake case and never against the column vocabulary, and the lookup
+  template passes a model-supplied `number` straight into the read filter — so a model-chosen
+  fractional value CAN reach a `double`/`numeric` column as a lookup filter.
+  An author CONSTANT into such a column DOES render, via `fixedValues`, provided the
   literal matches the column's wire envelope — a finite number for `double`, a fitting decimal string
   for `numeric` (see the holes contract below).
 
@@ -1359,9 +1363,10 @@ Multi-store atomic `db.transaction(fn)` writes · concurrency-race hardening (23
 preservation / stale-reconcile) · grounding/validation over a closed evidence set · blob/stream/media
 (a document-UPLOAD pipeline IS authorable as a product-profile document — see the reference below) ·
 durable-enqueue / off-request jobs / triggers / cron · typed scalar arrays at the DB layer (→ `jsonb`) ·
-a **MODEL-CHOSEN `double`/`numeric`** value (the column itself is declarable, and an author CONSTANT
-into one renders via `fixedValues` — it is the coercion of an untrusted arg the renderer has no arm for;
-see the `jsonType` note in the holes contract) · vector/embedding/fuzzy/range lookups (the templates
+PERSISTING a **MODEL-CHOSEN `double`/`numeric`** value (the column itself is declarable; an author
+CONSTANT into one renders via `fixedValues`, and a model-chosen fractional value can still be a lookup
+FILTER — what has no renderer arm is coercing an untrusted arg on the write side; see the `jsonType`
+note in the holes contract) · vector/embedding/fuzzy/range lookups (the templates
 scaffold AND-equality filters only — the facade's bounded `{ gt/gte/lt/lte }` comparisons are not
 scaffolded). A PRD needing any of these is out of It.2 scope — say so and STOP.
 
