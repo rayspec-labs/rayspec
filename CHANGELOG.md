@@ -1141,9 +1141,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The `OPENAI_BASE_URL` note also states its blast radius, which is wider than speech: the vendored
   `openai` client defaults its base URL to that variable and the OpenAI agent backend constructs the
   client without passing one, so a boot that points the variable at a local stub sends that backend's
-  model calls to the stub as well. The Codex agent backend is the exception — it deliberately omits
+  model calls to the stub as well. Two backends are not redirected by it: Codex deliberately omits
   the variable (with `OPENAI_API_KEY`, `CODEX_API_KEY` and `CODEX_BASE_URL`) from the subprocess
-  environment it builds. **No behaviour changed** — both variables were already read exactly this way.
+  environment it builds, and Pi passes an explicit per-model base URL to every client it constructs,
+  so that client never falls back to the variable — meaning a stub set here does not contain Pi.
+  **No behaviour changed** — both variables were already read exactly this way.
 
 ### Security
 
