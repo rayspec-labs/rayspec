@@ -1099,6 +1099,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SBOM (`docs/dependency-sbom.json`) is regenerated to match. The separate `nanoid` 3.x copy
   (dev-only, behind `postcss`) is not affected by this advisory; it is raised for a different one,
   above.
+- **The transitive `@hono/node-server` copy behind the MCP SDK is raised from 1.19.14 to 1.19.15,
+  and the repository's last scanner exception is retired with it** (GHSA-frvp-7c67-39w9: a path
+  traversal in `serve-static` on Windows, reached through an encoded backslash). The reachability
+  argument that carried the exception still measures true — that copy has exactly one dependent,
+  `@modelcontextprotocol/sdk`, which uses the server for its JSON-RPC transport to a child process
+  and never for static file serving, and the advisory depends on the Windows path resolver treating
+  `\` as a separator. It was retired anyway, because the exception rested on a second claim that did
+  not survive measurement: raising the copy was said to force a foreign major version onto that SDK,
+  when the advisory's fixed version is a patch release inside the range the SDK declares
+  (`^1.19.9`). So the copy is pinned forward via a scoped `pnpm.overrides` entry
+  (`@hono/node-server@1`), exactly as the two `nanoid` copies above are, rather than carried as a
+  scanner exception. `osv-scanner.toml` now declares no suppressions at all, so every advisory the
+  scanner matches fails the dependency-audit lane. The direct dependency is untouched at 2.0.10, the
+  dependency SBOM (`docs/dependency-sbom.json`) is regenerated to match, and the graph still
+  resolves to 485 distinct packages.
 
 ## [1.7.0] - 2026-08-05
 
