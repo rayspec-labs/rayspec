@@ -548,8 +548,9 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
       `SELECT data FROM run_events WHERE run_id = '${dependent.taskId}' AND type = 'workforce.task.dependency_failed';`,
     );
     expect(journal).toHaveLength(1);
-    expect((journal[0]?.data as { dependencies: { taskId: string; status: string }[] }).dependencies)
-      .toEqual([{ taskId: prerequisite.taskId, status: 'failed' }]);
+    expect(
+      (journal[0]?.data as { dependencies: { taskId: string; status: string }[] }).dependencies,
+    ).toEqual([{ taskId: prerequisite.taskId, status: 'failed' }]);
   });
 
   it('reaping a REAL claim gives its budget reservation back — nothing is stranded in the ledger', async () => {

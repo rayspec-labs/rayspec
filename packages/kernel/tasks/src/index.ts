@@ -56,9 +56,9 @@ export {
   WorkforceDrainTimeoutError,
 } from './control.js';
 export {
+  assertDependenciesResolvable,
   type ChildTaskSpec,
   type CreateRootTaskInput,
-  assertDependenciesResolvable,
   childTaskSpecSchema,
   createRootTask,
   createRootTaskInputSchema,

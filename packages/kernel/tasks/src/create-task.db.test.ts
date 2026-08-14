@@ -98,9 +98,7 @@ describe.skipIf(!hasDb)('task creation dependencies (db)', () => {
   it('refuses a self-referential dependency', async () => {
     const task = await seedTask();
     await expect(
-      tdb().transaction((tx) =>
-        assertDependenciesResolvable(tx, task.taskId, [task.taskId]),
-      ),
+      tdb().transaction((tx) => assertDependenciesResolvable(tx, task.taskId, [task.taskId])),
     ).rejects.toThrow(TaskDependenciesInvalidError);
   });
 

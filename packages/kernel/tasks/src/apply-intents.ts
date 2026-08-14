@@ -79,7 +79,10 @@ export const delegationStatusSchema = z.enum(DELEGATION_STATUSES);
 function settlementStatus(task: TaskRecord): DelegationStatus {
   const parsed = delegationStatusSchema.safeParse(task.status);
   if (!parsed.success) {
-    throw new TaskRowCorruptError(task.taskId, `status '${task.status}' cannot settle a delegation`);
+    throw new TaskRowCorruptError(
+      task.taskId,
+      `status '${task.status}' cannot settle a delegation`,
+    );
   }
   return parsed.data;
 }

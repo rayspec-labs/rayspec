@@ -19,7 +19,13 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import { TaskNotFoundError, TaskRowCorruptError, TaskVersionConflictError } from './errors.js';
-import { isTaskStatus, REASON_RULES, STATUS_REASONS, type StatusReason, type TaskStatus } from './status.js';
+import {
+  isTaskStatus,
+  REASON_RULES,
+  STATUS_REASONS,
+  type StatusReason,
+  type TaskStatus,
+} from './status.js';
 
 /** The closed signal vocabulary. */
 export const SIGNAL_KINDS = [

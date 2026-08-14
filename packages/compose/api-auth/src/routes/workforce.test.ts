@@ -433,7 +433,7 @@ describe('/v1/workforce (the task-engine surface)', () => {
     expect(unknown.status).toBe(404);
   });
 
-  it("a fixed collection segment is reserved, and it does not shadow a workforce id or a task id", async () => {
+  it('a fixed collection segment is reserved, and it does not shadow a workforce id or a task id', async () => {
     const a = await principal('wf-reserved@example.test', 'Org WF Reserved');
     const task = await seedRoot(a.orgId, 'Not shadowed');
     const auth = { authorization: `Bearer ${a.token}` };

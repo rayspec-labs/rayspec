@@ -310,7 +310,6 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
     },
   );
 
-
   // GET /v1/workforce/tasks?status=&owner=&workforceId=&cursor=&limit= — keyset-paginated list.
   app.get(
     '/v1/workforce/tasks',
