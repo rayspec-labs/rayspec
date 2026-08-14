@@ -12,6 +12,7 @@
  * as `buildWorkforceTurnHandlers` does (the collected intent, else the raw malformed value, else a
  * yield), and hand it to the real `applyTurnOutcome`. The assertions are on durable rows.
  */
+import { schema } from '@rayspec/db';
 import { deriveWorkforceConfig, WorkforceSpec } from '@rayspec/spec';
 import type { TaskRecord } from '@rayspec/tasks';
 import {
@@ -29,6 +30,7 @@ import {
   ManagerTargetForbiddenError,
   TurnCollector,
 } from '@rayspec/workforce-tools';
+import { eq } from 'drizzle-orm';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 const hasDb = Boolean(process.env.DATABASE_URL);
@@ -249,6 +251,114 @@ describe.skipIf(!hasDb)('the toolset → engine seam (db)', () => {
     expect(refused.thrown).toBeInstanceOf(ManagerTargetForbiddenError);
     expect(refused.outcome.task).toMatchObject({ status: 'queued', statusReason: 'tool_error' });
     expect((await rowsUnder(other.taskId))[0]).toEqual({ children: 0, delegations: 0 });
+  });
+
+  it('a review park does not corrupt a SIBLING owned by the same reviewer', async () => {
+    // The parent parks on a review decided by `qa`. A sibling task under that same parent, also
+    // owned by `qa`, is NOT the review child — and `pendingReview` used to be a "newest undecided
+    // review for this parent" scan, which said it was: the sibling lost `request_review` entirely
+    // and was offered `submit_review` against a review row that is not its own to decide.
+    const root = await createRootTask(tdb(), {
+      workforceId: 'helpdesk',
+      title: 'Root',
+      goal: 'Coordinate.',
+      owner: 'lead',
+      requestedBy: 'user',
+    });
+    const reviewed = await tdb().transaction(async (tx) =>
+      insertChildTask(tx, root, 1, 0, { title: 'Reviewed', goal: 'G', owner: 'dev' }),
+    );
+    const queued = await applyTransition(tdb(), {
+      taskId: reviewed.taskId,
+      expectedVersion: reviewed.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    const working = await applyTransition(tdb(), {
+      taskId: reviewed.taskId,
+      expectedVersion: queued.version,
+      to: 'working',
+      actor: 'scheduler',
+      turnId: turnIdFor(reviewed.taskId, 1),
+    });
+    await applyTurnOutcome(tdb(), {
+      taskId: working.taskId,
+      turnId: turnIdFor(working.taskId, 1),
+      turnNumber: 1,
+      intent: {
+        kind: 'complete',
+        result: { status: 'completed', summary: 'Done.', confidence: 0.6 },
+      },
+      reviewPolicy: { reviewer: 'qa', dispatchReviewer: true, maxRounds: 2 },
+      budgets: NO_BUDGETS,
+    });
+    const children = (await db.$client.unsafe(
+      `SELECT task_id, owner FROM workforce_tasks WHERE parent_task_id = '${working.taskId}';`,
+    )) as unknown as { task_id: string; owner: string }[];
+    const reviewChild = children.find((c) => c.owner === 'qa') as { task_id: string };
+
+    // A SIBLING under the reviewed task, owned by the same reviewer, doing ordinary work.
+    const sibling = await tdb().transaction(async (tx) =>
+      insertChildTask(tx, working, 1, 5, { title: 'Sibling work', goal: 'G', owner: 'qa' }),
+    );
+    const qa = config.employees.get('qa');
+    if (!qa) throw new Error('fixture');
+    const siblingSnapshot = await buildWorkforceSnapshot(tdb(), config, sibling, qa);
+    expect(siblingSnapshot.pendingReview).toBeNull();
+    const siblingTools = buildRoleToolset({
+      employee: qa,
+      config,
+      task: sibling,
+      snapshot: siblingSnapshot,
+      collector: new TurnCollector({
+        tenantId: TENANT,
+        taskId: sibling.taskId,
+        turnNumber: 1,
+      }),
+    }).map((t) => t.spec.name);
+    expect(siblingTools).toContain('request_review');
+    // `submit_review` stays on the role table's terms, and refuses fail-closed: with no review
+    // assigned to THIS task there is no reviewId to inject, and the sibling cannot reach the
+    // reviewed task's park.
+    const siblingCollector = new TurnCollector({
+      tenantId: TENANT,
+      taskId: sibling.taskId,
+      turnNumber: 1,
+    });
+    const siblingSubmit = buildRoleToolset({
+      employee: qa,
+      config,
+      task: sibling,
+      snapshot: siblingSnapshot,
+      collector: siblingCollector,
+    }).find((t) => t.spec.name === 'submit_review');
+    expect(() =>
+      siblingSubmit?.handler({ verdict: 'accept' }, new AbortController().signal),
+    ).toThrow(/no pending review targets this task/);
+    expect(siblingCollector.finish().intent).toBeNull();
+
+    // The REAL review child still sees its own review, by the binding.
+    const reviewTask = (
+      (await tdb()
+        .select(schema.workforceTasks)
+        .where(eq(schema.workforceTasks.taskId, reviewChild.task_id))) as TaskRecord[]
+    )[0] as TaskRecord;
+    const reviewSnapshot = await buildWorkforceSnapshot(tdb(), config, reviewTask, qa);
+    expect(reviewSnapshot.pendingReview).not.toBeNull();
+    const reviewTools = buildRoleToolset({
+      employee: qa,
+      config,
+      task: reviewTask,
+      snapshot: reviewSnapshot,
+      collector: new TurnCollector({
+        tenantId: TENANT,
+        taskId: reviewTask.taskId,
+        turnNumber: 1,
+      }),
+    }).map((t) => t.spec.name);
+    expect(reviewTools).toContain('submit_review');
+    expect(reviewTools).not.toContain('request_review');
+    expect(reviewSnapshot.pendingReview?.round).toBe(1);
   });
 
   it('a manager’s buffered sub-task to an ancestor owner is refused by the engine as a cycle', async () => {

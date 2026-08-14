@@ -20,7 +20,7 @@ import { ApprovalAlreadyDecidedError, decideApproval, sweepApprovalTimeouts } fr
 import { workforceBudgetsSchema } from './budget.js';
 import { cancelTaskCascade } from './control.js';
 import { createRootTask } from './create-task.js';
-import { applyReviewVerdict } from './reviews.js';
+import { applyReviewVerdict, ReviewNotForParkError } from './reviews.js';
 import { deliverSignal } from './signals.js';
 import {
   forTenant,
@@ -907,6 +907,71 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       `SELECT result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
     );
     expect(stored[0]?.summary).toBe('Done.');
+  });
+
+  it('an abandoned review’s stale row cannot decide the NEXT round’s park', async () => {
+    const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+    await completeUnderPolicy(root.taskId, 1);
+    const reviewer1 = await reviewerChildOf(root.taskId);
+    const review1 = (
+      (await db.$client.unsafe(
+        `SELECT id FROM workforce_reviews WHERE task_id = '${root.taskId}' AND round = 1;`,
+      )) as unknown as { id: string }[]
+    )[0] as { id: string };
+    // Round 1's reviewer is cancelled: the review row stays UNDECIDED (no verdict is fabricated)
+    // and the reviewed task is released to a human.
+    await cancelTaskCascade(tdb(), { taskId: reviewer1.task_id, actor: 'user' });
+    expect(
+      (
+        await db.$client.unsafe(
+          `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+        )
+      )[0]?.status,
+    ).toBe('waiting_for_user');
+
+    // The human sends it back and a SECOND review round opens, with its own reviewer and park.
+    const requeued = await applyTransition(tdb(), {
+      taskId: root.taskId,
+      expectedVersion: await currentVersion(root.taskId),
+      to: 'queued',
+      actor: 'user',
+    });
+    await claim(root.taskId, requeued.version, 2);
+    await completeUnderPolicy(root.taskId, 2);
+    const review2 = (
+      (await db.$client.unsafe(
+        `SELECT id FROM workforce_reviews WHERE task_id = '${root.taskId}' AND round = 2;`,
+      )) as unknown as { id: string }[]
+    )[0] as { id: string };
+
+    // The STALE row still lists first in an operator inbox (undecided, oldest first). Deciding it
+    // would dissolve round 2's park under round 1's number and orphan its live reviewer, whose own
+    // verdict would then land as "superseded". The park names review 2 and nothing else.
+    await expect(
+      applyReviewVerdict(tdb(), NO_BUDGETS, {
+        reviewId: review1.id,
+        verdict: 'accept',
+        reasons: [],
+        requiredChanges: [],
+        actor: 'user:ops',
+      }),
+    ).rejects.toBeInstanceOf(ReviewNotForParkError);
+    const held = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(held[0]).toMatchObject({
+      status: 'waiting_for_review',
+      status_reason: 'review_pending',
+    });
+    // Round 2's own verdict still decides, through the park that names it.
+    const decided = await applyReviewVerdict(tdb(), NO_BUDGETS, {
+      reviewId: review2.id,
+      verdict: 'accept',
+      reasons: [],
+      requiredChanges: [],
+      actor: 'qa',
+    });
+    expect(decided.status).toBe('completed');
   });
 
   it('a verdict from a reviewer who is not the review task’s own owner is a tool error', async () => {

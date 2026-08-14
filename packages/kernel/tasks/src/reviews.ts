@@ -71,6 +71,34 @@ function tighterRoundCeiling(task: TaskRecord, executionMax: number | null): num
   return executionMax === null ? policyMax : Math.min(policyMax, executionMax);
 }
 
+/**
+ * A verdict may only be applied to the park that NAMES its review. Fail-closed on the binding
+ * rather than on the row: an undecided review row is no longer proof that its park is open.
+ */
+function assertReviewMatchesPark(task: TaskRecord, reviewId: string): void {
+  const binding = joinPolicySchema.safeParse(task.joinPolicy);
+  if (!binding.success || binding.data.policy !== 'review') return;
+  if (binding.data.reviewId !== undefined && binding.data.reviewId !== reviewId) {
+    throw new ReviewNotForParkError(reviewId, binding.data.reviewId);
+  }
+}
+
+/** A verdict aimed at a park that is waiting on a different review — refused, never applied. */
+export class ReviewNotForParkError extends Error {
+  readonly reviewId: string;
+  readonly parkReviewId: string;
+  constructor(reviewId: string, parkReviewId: string) {
+    super(
+      `review '${reviewId}' is not the review this task's park is waiting on ('${parkReviewId}') — ` +
+        'a verdict applies only to the review its own park names, or it would release a park that ' +
+        'review never opened and spend the wrong round. Fail-closed.',
+    );
+    this.name = 'ReviewNotForParkError';
+    this.reviewId = reviewId;
+    this.parkReviewId = parkReviewId;
+  }
+}
+
 export const reviewVerdictSchema = z.strictObject({
   verdict: z.enum(['accept', 'reject']),
   reasons: z.array(z.string().min(1)).default([]),
@@ -115,6 +143,13 @@ export async function applyReviewVerdictInTx(
   if (!snapshot) throw new TaskNotFoundError(pending.taskId);
 
   const task = await lockRootFirst(tx, snapshot);
+  // THE PARK'S OWN BINDING decides which review may be applied to it. A park names exactly one
+  // review, and deciding a DIFFERENT one against it takes the wrong round's ceiling and releases a
+  // park that review never opened. That became reachable when an abandoned review started leaving
+  // its row undecided: the stale row lists first in the operator inbox (undecided, oldest first),
+  // and deciding it would have dissolved the LIVE review's park under the stale review's round,
+  // orphaning the live reviewer whose verdict then lands as "superseded".
+  assertReviewMatchesPark(task, input.reviewId);
   if (task.status !== 'waiting_for_review') {
     // A racer moved the task while we waited on the locks. If it decided THIS review, the truer
     // refusal is already-decided; otherwise the park is genuinely gone.

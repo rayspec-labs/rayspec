@@ -782,6 +782,19 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
   // execution ceiling nothing bounds it. The engine refuses the intent as well
   // (`rejectReviewChildEnding`); not offering the tool is what keeps the model from spending a
   // turn discovering that.
+  // A REVIEW TASK does not carry `request_review`. The role table grants it to every role, and a
+  // reviewer employee running an ordinary task should keep it — but a task dispatched to DECIDE a
+  // review (the one its parent's park binding names) commissioning a review of its own is an
+  // unbounded chain: `reviewRoundsUsed` restarts at zero on every task, so with no declared
+  // execution ceiling nothing bounds it. The engine refuses the intent as well
+  // (`rejectReviewChildEnding`); not offering the tool is what keeps the model from spending a turn
+  // discovering that.
+  //
+  // The converse is deliberately NOT done: `submit_review` stays on the role table's terms for
+  // every role that holds it, and refuses fail-closed when the task carries no review to decide.
+  // Making the offered SET depend on the task in both directions would put the role tables and the
+  // snapshot in competition over what a role carries, and the role tables are the single source
+  // the privilege suite pins.
   const withheld: ReadonlySet<ToolName> =
     snapshot.pendingReview !== null ? new Set<ToolName>(['request_review']) : new Set<ToolName>();
   return (

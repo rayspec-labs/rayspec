@@ -15,12 +15,13 @@
 import { schema, type TenantDb } from '@rayspec/db';
 import type { WorkforceConfig, WorkforceEmployeeConfig } from '@rayspec/spec';
 import {
+  joinPolicySchema,
   readWorkforceRuntime,
   resolveWorkforceBudgets,
   type TaskRecord,
   windowStartFor,
 } from '@rayspec/tasks';
-import { and, asc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 
 /** Page caps — a snapshot is a bounded view, never a partition materialized into memory. */
 export const SNAPSHOT_SUBTREE_LIMIT = 100;
@@ -89,7 +90,15 @@ export async function buildWorkforceSnapshot(
 ): Promise<WorkforceReadSnapshot> {
   // The PARENT (the reviewed task) + the pending review row — for any role whose toolset carries
   // submit_review (reviewer, manager). Linkage is DERIVED, never model-supplied: the pending
-  // review is the parent's newest verdict-less row.
+  // review is named by the PARENT'S PARK BINDING — the durable linkage the engine wrote when it
+  // opened the park, naming both the review row and the task dispatched to decide it.
+  //
+  // NOT a "newest verdict-less row for this parent" scan, which is a mutable sibling query and was
+  // wrong in both directions: an undecided row left behind by an abandoned review permanently
+  // stripped `request_review` from every sibling owned by that reviewer and offered them
+  // `submit_review` against a dead row, while a task that was never the reviewer could be handed a
+  // review that is not its own. The binding answers "is THIS task the one dispatched to decide
+  // THAT review", which is the only question the toolset should be asking.
   let parentTask: TaskRecord | null = null;
   let pendingReview: { reviewId: string; round: number } | null = null;
   const mayReview = employee.role === 'reviewer' || employee.role === 'manager';
@@ -98,19 +107,27 @@ export async function buildWorkforceSnapshot(
       .select(schema.workforceTasks)
       .where(eq(schema.workforceTasks.taskId, task.parentTaskId))) as TaskRecord[];
     parentTask = parents[0] ?? null;
-    if (parentTask !== null) {
+    const binding =
+      parentTask !== null && parentTask.status === 'waiting_for_review'
+        ? joinPolicySchema.safeParse(parentTask.joinPolicy)
+        : null;
+    if (
+      parentTask !== null &&
+      binding !== null &&
+      binding.success &&
+      binding.data.policy === 'review' &&
+      binding.data.reviewTaskId === task.taskId &&
+      binding.data.reviewId !== undefined
+    ) {
       const reviews = (await tdb
         .select(schema.workforceReviews)
         .where(
-          and(
-            eq(schema.workforceReviews.taskId, parentTask.taskId),
-            isNull(schema.workforceReviews.verdict),
-          ),
-        )
-        .orderBy(sql`${schema.workforceReviews.round} desc`)
-        .limit(1)) as (typeof schema.workforceReviews.$inferSelect)[];
+          eq(schema.workforceReviews.id, binding.data.reviewId),
+        )) as (typeof schema.workforceReviews.$inferSelect)[];
       const review = reviews[0];
-      if (review !== undefined && review.reviewer === employee.id) {
+      // Still fail-closed on the row itself: a decided review is not pending, and a review naming a
+      // different reviewer than this task's owner is not this task's to decide.
+      if (review !== undefined && review.verdict === null && review.reviewer === employee.id) {
         pendingReview = { reviewId: review.id, round: review.round };
       }
     }
