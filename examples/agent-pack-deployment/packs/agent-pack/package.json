@@ -4,7 +4,7 @@
   "private": true,
   "license": "FSL-1.1-ALv2",
   "type": "module",
-  "description": "A SYNTHETIC extension PACK contributing an `agents` fragment — the platform's own forcing-function for a pack shipping its own OOTB agent. A @spike/* package so the CI `--filter='!@spike/*'` excludes it; a workspace member only so pnpm links @rayspec/platform (the pack ENTRY imports defineExtension from it). NOT the shape a real pack ships in: `workspace:*` resolves only inside this workspace, so copied out this manifest installs nowhere — see examples/stream-backend/README.md ('Shipping this pack from its own repo') for the out-of-repo form, which pins the released versions instead. NO build/typecheck/test: it is loaded at deploy/test time by loadExtensions (the importer transforms the .ts).",
+  "description": "A SYNTHETIC extension PACK contributing an `agents` fragment — the platform's own forcing-function for a pack shipping its own OOTB agent. A @spike/* package so the CI `--filter='!@spike/*'` excludes it; a workspace member only so pnpm links @rayspec/platform (the pack ENTRY imports defineExtension from it). NOT the shape a real pack ships in: `workspace:*` resolves only inside this workspace, so copied out this manifest installs nowhere — see examples/stream-backend/README.md ('Shipping this pack from its own repo') for the out-of-repo form, which pins the released versions instead. NO turbo build/typecheck/test task; the pack carries its own build step instead (../../build.mjs + tsconfig.build.json) because loadExtensions loads compiled JavaScript only at deploy time, and a test loads this .ts source through the loader's explicit typeStrippingImporter seam.",
   "main": "./index.ts",
   "dependencies": {
     "@rayspec/handler-sdk": "workspace:*",

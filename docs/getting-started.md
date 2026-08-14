@@ -457,11 +457,22 @@ file, until `SIGINT` / `SIGTERM`.
 > for a reviewed destructive statement). See the
 > [CLI reference](./cli-reference.md#deploy--boot-and-serve-a-declared-product).
 
-> **`rayspec deploy <spec>` and `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` are the
+> **`rayspec deploy <spec>` and `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` run the
 > same boot** — `deploy` just sets `RAYSPEC_SPEC_PATH` for you. Either one serves a
 > declared spec, and a **backend-profile spec that declares agents boots directly**
 > this way, with no hand-written wrapper — see [the backend
 > profile](#the-backend-profile-direct-agent-boot) below.
+>
+> **They are not interchangeable in every respect.** Two of the differences matter
+> for what leaves this process and for what can still register a table, and both
+> sit around that boot rather than in it. `deploy` seals the product-store
+> registrar once its boot returns (`sealProductStores()`), so nothing later in that
+> process can register a product table through the sanctioned door; `rayspec-serve`
+> never calls it, and that door stays open. And `deploy` **defaults the agent
+> trace export off**, while `rayspec-serve` keeps the agent SDK's own default,
+> which is to export to OpenAI. Both entrypoints honour `RAYSPEC_AGENT_TRACING` —
+> `openai` or `off`, a blank value counting as unset — and fail the boot by name on
+> anything else, so the export is a choice you can state on either one.
 
 The repo ships a ready-to-run **product-profile** document — one declarative YAML
 with **zero custom code** — at `examples/acme-notes/acme-notes.product.yaml`. It
@@ -614,6 +625,18 @@ RAYSPEC_SPEC_PATH=<your-backend-spec>.yaml $RAYSPEC_SERVE
 
 A missing or misconfigured credential fails the boot fast, naming the backend and
 the agent(s) that select it — never deep inside a request.
+
+Because `rayspec deploy <spec>` and the `rayspec-serve` invocation above run the
+same boot over the same document — the two differences noted under [Serving your
+declared backend](#serving-your-declared-backend) (product-store sealing and the
+agent trace-export default) sit around that boot, not in what the document
+demands — you can ask that boot what it will demand instead of
+attempting it: `rayspec deploy --check-env <your-backend-spec>.yaml` is a
+one-shot check that reports the variables this document's boot will require, why
+each is required, and whether it is currently set — it opens no database and
+binds no port, and the
+[CLI reference](./cli-reference.md#deploy--boot-and-serve-a-declared-product)
+lists what it deliberately does not check.
 
 `examples/lead-qualifier/` is the runnable worked example: a backend-profile spec
 whose declared agent runs **off-request** on the durable worker and records its

@@ -631,9 +631,18 @@ export type ViewPagination = z.infer<typeof ViewPagination>;
 /**
  * Response behavior for processing/absent data. The draft BANS `processing_200`; this enum omits it, so
  * it is fail-closed-rejected by construction (a bad-enum `schema_violation`). `not_ready_409` preserves
- * the playback-token readiness contract; `empty_200` is the empty-read-model shape.
+ * the playback-token readiness contract; `empty_200` is the empty-read-model shape; `not_found_404`
+ * says the reference itself does not exist.
+ *
+ * WHICH MEMBER IS CORRECT is decided by WHEN the backing row appears — a property of the product's
+ * write timing, not of the view: the read sees zero rows either way. `not_found_404` fits a read model
+ * whose row exists from the moment the reference is valid (a catalog / reference store materialized
+ * before any workflow runs, or a store written at acceptance). It is WRONG for a store written by a
+ * workflow step: there an absent row is a job still running, and a 404 would tell a polling client its
+ * reference does not exist — `empty_200` (with the declared `read.absent` DTO) or `not_ready_409` is
+ * the honest answer.
  */
-export const ViewAbsentState = z.enum(['empty_200', 'not_ready_409']);
+export const ViewAbsentState = z.enum(['empty_200', 'not_ready_409', 'not_found_404']);
 export type ViewAbsentState = z.infer<typeof ViewAbsentState>;
 
 /**

@@ -414,7 +414,8 @@ export const ViewField: z.ZodType<ViewField> = z.discriminatedUnion('kind', [
  *  - `list`    — many rows, PAGINATED (pagination declaration required): the top-level shape is the
  *                ENVELOPE (page_items / page_total / page_next_offset + param/const fields only).
  *  - `single`  — the first matching row: the top-level shape projects THAT row; `absent` (or
- *                `absent_state: not_ready_409`) declares what happens when there is none.
+ *                `absent_state: not_ready_409` / `not_found_404`) declares what happens when there
+ *                is none.
  *  - `collect` — ALL matching rows, aggregated: the top-level shape admits param/const/group/counts.
  */
 export const ViewReadMode = z.enum(['list', 'single', 'collect']);

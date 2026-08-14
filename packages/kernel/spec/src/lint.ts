@@ -1950,9 +1950,10 @@ export interface AppliedLintSuppressions {
  * untouched (same findings, same order) with nothing suppressed.
  *
  * SCOPE — the node the suppression sits on, never global: a warning is acknowledged only when its
- * `path` lies UNDER the suppressing node's own path (`agents[0].…`, `stores[2].…`, `api[1].…`) AND
- * a suppression on that node names its code. The same code fired by another node stays visible, and
- * a whole-document advisory (no path) is never suppressible.
+ * `path` lies UNDER the suppressing node's own path (`agents[0].…`, `stores[2].…`, `api[1].…`,
+ * `triggers[0].…`, `handlers[3].…`) AND a suppression on that node names its code. The same code
+ * fired by another node stays visible, and a whole-document advisory (no path) is never
+ * suppressible.
  *
  * STALE — evaluated against the RAW advisory list, in a fixed order: (1) partition the raw
  * advisories into suppressed/remaining, (2) emit one `stale_suppression` per acknowledgement whose
@@ -1965,8 +1966,8 @@ export function applyLintSuppressions(
   spec: RaySpec,
   warnings: readonly SpecWarning[],
 ): AppliedLintSuppressions {
-  // The node kinds that may carry `lintSuppress` (an agent, a store, a route), each with its JSON-path
-  // prefix (the scope) and a human-readable label for the stale message.
+  // The node kinds that may carry `lintSuppress` (an agent, a store, a route, a trigger, a handler),
+  // each with its JSON-path prefix (the scope) and a human-readable label for the stale message.
   const nodes = [
     ...spec.agents.map((a, i) => ({
       prefix: `agents[${i}]`,
@@ -1982,6 +1983,16 @@ export function applyLintSuppressions(
       prefix: `api[${i}]`,
       label: `route ${r.method} ${r.path}`,
       suppressions: r.lintSuppress ?? [],
+    })),
+    ...spec.triggers.map((t, i) => ({
+      prefix: `triggers[${i}]`,
+      label: `trigger '${t.name}'`,
+      suppressions: t.lintSuppress ?? [],
+    })),
+    ...spec.handlers.map((h, i) => ({
+      prefix: `handlers[${i}]`,
+      label: `handler '${h.id}'`,
+      suppressions: h.lintSuppress ?? [],
     })),
   ].filter((n) => n.suppressions.length > 0);
   if (nodes.length === 0) return { warnings: [...warnings], suppressed: [] };

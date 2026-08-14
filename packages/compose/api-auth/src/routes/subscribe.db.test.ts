@@ -552,7 +552,10 @@ describe.skipIf(!hasDb)('GET /v1/subscribe — wake-driven delivery + resume', (
     // `Number()` turns every one of these into a perfectly plausible sequence. Served, each would be
     // a 200 that silently skips events (`:0x10` resumes at 16) or replays the whole stream (`:`
     // coerces to 0) — a stream that reads exactly like a healthy one, which is the failure mode the
-    // refusals beside it exist to prevent.
+    // refusals beside it exist to prevent. A ZERO-padded sequence is the same failure written in
+    // plain digits — `:007` would resume from 7 and skip the first seven events — and no client can
+    // have received one: `formatEventCursor` interpolates a number, so every `id:` this stream
+    // writes is unpadded.
     const coercible = [
       '0x10',
       '1e1',
@@ -560,6 +563,8 @@ describe.skipIf(!hasDb)('GET /v1/subscribe — wake-driven delivery + resume', (
       '5.0',
       '+7',
       '\t3',
+      '007',
+      '00',
       '',
       '-1',
       'Infinity',

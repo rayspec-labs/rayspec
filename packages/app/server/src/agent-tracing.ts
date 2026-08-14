@@ -31,7 +31,11 @@ export { BootConfigError };
 
 /**
  * The resolved agent trace-export posture:
- *  - `'openai'` — agent traces (which carry prompts and tool arguments) are exported to OpenAI;
+ *  - `'openai'` — agent traces are exported to OpenAI. What that transport carries is run metadata
+ *    and, once an agent calls tools, its tool arguments and outputs: the model input and response are
+ *    held in `_`-prefixed span fields, which `@openai/agents-core` strips in `Span.toJSON`
+ *    (`removePrivateFields`) before the exporter serializes anything, while function spans carry
+ *    `input`/`output` unprefixed;
  *  - `'off'`    — no trace leaves this process.
  */
 export type AgentTracingPosture = 'openai' | 'off';
@@ -64,6 +68,12 @@ const POSTURE_PROBE_TRACE_NAME = 'rayspec.boot.trace-export-probe';
  *
  * It is an AFFIRMATIVE switch, not a negation of the SDK's own: the operator states an intention, and
  * the repository is not bound to a third-party SDK's variable name.
+ *
+ * The `unset ⇒ …` clause of the refusal is deliberately stated PER ENTRY POINT rather than as this
+ * function's own collapse. Both `applyDeployAgentTracing` and `applyServeAgentTracing` raise the
+ * message from here — one wording for one variable — but only `deploy` reaches the collapse above:
+ * `rayspec-serve` calls this only once a value is actually stated, and its unset default is the agent
+ * SDK's, which exports. A flat "unset ⇒ off" would be false on the entry point printing it.
  */
 export function resolveAgentTracing(env: NodeJS.ProcessEnv): AgentTracingPosture {
   const raw = env.RAYSPEC_AGENT_TRACING?.trim();
@@ -71,19 +81,21 @@ export function resolveAgentTracing(env: NodeJS.ProcessEnv): AgentTracingPosture
   if (raw === 'openai') return 'openai';
   throw new BootConfigError(
     `Boot aborted — RAYSPEC_AGENT_TRACING='${raw}' is not supported (wired: openai | off; unset ⇒ ` +
-      'off). It selects whether agent traces — which carry prompts and tool arguments — are exported ' +
-      'to OpenAI. Fail-closed.',
+      "this entry point's default: off on 'rayspec deploy', and on 'rayspec-serve' the agent SDK's " +
+      'own, which exports). It selects whether agent traces — run metadata and, once an agent calls ' +
+      'tools, its tool arguments and outputs — are exported to OpenAI. Fail-closed.',
   );
 }
 
 /**
  * Apply the `rayspec deploy` path's trace-export DEFAULT, and return the posture it selected.
  *
- * Scope is deliberate. `deploy` is the strongest available signal that the code running here belongs
- * to someone other than the operator, and exporting a third party's prompts and tool arguments to a
- * third party unasked is what this closes. A developer tracing their OWN agent through `rayspec-serve`
- * or the local dev wrapper sees their own prompts — that was never the risk case, and this does not
- * touch it.
+ * Scope is deliberate, and what is deploy-only is this DEFAULT — not the variable. `deploy` is the
+ * strongest available signal that the code running here belongs to someone other than the operator,
+ * and exporting a third party's tool arguments and tool outputs to a third party unasked is what this
+ * closes. A developer tracing their OWN agent through `rayspec-serve` or a dev-boot wrapper is looking
+ * at their own run — that was never the risk case, so the default there stays the SDK's. An
+ * explicitly stated value IS honoured on `rayspec-serve`; see `applyServeAgentTracing` below.
  *
  * Turning the export OFF is done TWICE, and the two are not redundant:
  *  1. write `OPENAI_AGENTS_DISABLE_TRACING=1`, which decides the posture for a provider that has NOT
@@ -100,12 +112,47 @@ export async function applyDeployAgentTracing(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<AgentTracingPosture> {
   const selected = resolveAgentTracing(env);
-  if (selected === 'off') {
-    env[SDK_DISABLE_TRACING_ENV] = '1';
-    const { setTracingDisabled } = await import('@openai/agents');
-    setTracingDisabled(true);
-  }
+  if (selected === 'off') await disableSdkTracing(env);
   return selected;
+}
+
+/**
+ * Apply an EXPLICITLY SET `RAYSPEC_AGENT_TRACING` on the `rayspec-serve` path, and return the posture
+ * it selected — or `undefined` when the variable states no intention and this boot changed nothing
+ * (issue #383).
+ *
+ * EXPLICIT-ONLY, and that is the whole difference from `applyDeployAgentTracing`. `resolveAgentTracing`
+ * collapses unset and blank into `off`, which is the deploy path's DEFAULT; reaching for it wholesale
+ * here would turn the export off on an entrypoint whose default has always been the SDK's, and that is
+ * a product decision, not a defect fix. So unset and blank fall through untouched, and the resolver
+ * decides only once a value is actually stated — which also means an unsupported value refuses in the
+ * same message, from the same line, on both entrypoints rather than in a second wording.
+ *
+ * Turning the export off is the same pair `applyDeployAgentTracing` takes, and here the SECOND half is
+ * the one doing the work: `serve.ts` imports the composition root — and through it `@openai/agents` —
+ * STATICALLY, so the global trace provider has already snapshotted the kill-switch before `main()` runs
+ * and the environment write alone would reach nothing. It is still written, for the child processes this
+ * boot may spawn. `setTracingDisabled` is what moves the provider this process already built, and the
+ * banner reads that provider (`observedAgentTracing`), so it states the posture that actually applies.
+ */
+export async function applyServeAgentTracing(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<AgentTracingPosture | undefined> {
+  const raw = env.RAYSPEC_AGENT_TRACING?.trim();
+  if (raw === undefined || raw === '') return undefined;
+  const selected = resolveAgentTracing(env);
+  if (selected === 'off') await disableSdkTracing(env);
+  return selected;
+}
+
+/**
+ * Turn the export off BOTH ways — the pair `applyDeployAgentTracing`'s docblock explains — shared by the
+ * two entrypoints so they cannot come to disagree about what "off" does.
+ */
+async function disableSdkTracing(env: NodeJS.ProcessEnv): Promise<void> {
+  env[SDK_DISABLE_TRACING_ENV] = '1';
+  const { setTracingDisabled } = await import('@openai/agents');
+  setTracingDisabled(true);
 }
 
 /**

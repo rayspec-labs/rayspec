@@ -74,7 +74,53 @@ seeds the catalog):
 node examples/support-intake-chat/dev-boot.mjs        # serves on :8794, live mode
 ```
 
-Then register/switch to the tenant, `PUT /conversations/{id}`, `POST /conversations/{id}/turns`
+Stop it with `Ctrl-C`: the wrapper closes the HTTP server, drains the durable worker and ends the DB
+pool, then exits.
+
+The dev-boot seeds the ORG `00000000-0000-4000-8000-000000000043` and no user, so you cannot register
+your way into it: a `POST /v1/auth/register` carrying an `orgName` creates a DIFFERENT org (its
+`activeOrgId` is that new id), and `POST /v1/orgs/00000000-0000-4000-8000-000000000043/switch` answers
+`404` because the caller is no member of it. That caller is served their OWN, empty tenant:
+`PUT /conversations/{id}` and `GET /tickets` answer `200` (`{"tickets":[]}`), but
+`POST /conversations/{id}/turns` is refused `403 conversation_event_rejected` — the turn dispatcher is
+bound to the deployment's tenant, so a foreign turn is rejected fail-closed (`cross_tenant`), with no
+workflow started and no reply. Registering WITHOUT an `orgName` gets you less far still: no org is
+created at all (`activeOrgId` comes back `null`) and all three of those calls answer `404`. The
+four `support_catalog` rows are seeded under the seeded tenant alone, so none of the demo's data is
+reachable that way either. Mint an owner invite for the seeded org instead:
+
+```bash
+DATABASE_URL="postgres://rayspec:rayspec@localhost:5433/play_support_chat" \
+  rayspec tenant ensure --org-id 00000000-0000-4000-8000-000000000043 \
+    --name 'Support Chat Co' --owner-email you@local --owner-invite-out ./owner-invite.txt
+```
+
+`DATABASE_URL` is doing real work there. `tenant ensure` provisions — and applies the migration chain
+to — whatever database it names, and the dev-boot serves the throwaway `play_support_chat` while
+deliberately ignoring `.env`'s `DATABASE_URL`; the CLI does read that file for anything the shell
+leaves unset, so without the override the org lands in your main dev database and the invite is
+nowhere the demo can see it. `RAYSPEC_API_KEY_PEPPER` comes from that same repo-root `.env` — the file
+the dev-boot took it from — and it has to be the value the demo booted with, because the invite token
+is hashed under it; minted under a different pepper the token is refused at accept. The command
+creates no user and never prints the token (it writes it to a mode-600 file); the
+[CLI reference](../../docs/cli-reference.md#tenant-ensure) has the output shape.
+
+Redeeming that token is what creates the account:
+
+```bash
+curl -s -X POST http://127.0.0.1:8794/v1/invites/accept -H 'content-type: application/json' \
+  -d '{"token":"<the contents of ./owner-invite.txt>","password":"<8+ characters>"}'
+```
+
+The `201` hands back an access token already scoped to the seeded org — no login and no switch follow.
+Then delete `./owner-invite.txt`: until it is redeemed it is a tenant-takeover credential. Re-running
+the command mints nothing once the org is claimed — it reports `already_owned` — and reports
+`pending` (writing no file at all) while an invite is still outstanding, so if you lose the token
+before redeeming it, add `--reissue-owner-invite`, which revokes the outstanding invite and mints a
+replacement; give that run a path that does not exist yet, because a minting run refuses an existing
+`--owner-invite-out` rather than overwriting it.
+
+With that token, `PUT /conversations/{id}`, `POST /conversations/{id}/turns`
 (optionally `Accept: text/event-stream`), and read `GET /tickets/{conversation_id}` + `GET /tickets`.
 
 > **LOCAL / trusted posture / NOT internet-facing** — the separate hardening layer (per-tenant

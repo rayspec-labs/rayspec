@@ -43,6 +43,10 @@ vi.mock('@rayspec/server', () => {
       return { app: { fetch: () => new Response('ok') }, close: async () => {} };
     }),
     assembleStaticServer: vi.fn(),
+    // The port-collision `'error'` listener the entrypoint attaches to whatever `serve()` returned.
+    // A no-op here: nothing in this suite binds a port (the listener below is a stub), and the
+    // refusal has its own suites — deploy-bind-refusal.test.ts and the server package's unit test.
+    attachBindRefusal: vi.fn(),
     BootTimeoutError,
     bootBanner: () => 'banner',
     bootBaseUrl: () => 'http://127.0.0.1:0',

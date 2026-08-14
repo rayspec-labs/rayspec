@@ -37,8 +37,18 @@ RAYSPEC_REQUIRE_DB_TESTS=true DATABASE_URL="postgres://…:5433/<db>" \
 
 To boot it interactively, write a thin wrapper: import `assembleServer`, register a
 deterministic executor for `agent.expense_coder`, and serve with the env above (minus the LLM key).
-Then register/switch to the tenant, seed a few `expense_policies` rows, `POST /records/{record_id}/submit`
-a claim, and read `GET /claims/{claim_ref}` + `GET /claims`.
+Either boot binds to `RAYSPEC_PRODUCT_TENANT_ID` (below), and it has to name an org that ALREADY
+exists — the boot fail-closes on an id that names no live org — so the deployment cannot create its
+own tenant, and registering once it is up only makes a different org
+(`POST /v1/orgs/{the deployment's id}/switch` then answers `404`, since that account is no member).
+Get the id first, from an auth-only boot (`pnpm --filter @rayspec/server serve` with no
+`RAYSPEC_SPEC_PATH`): `POST /v1/auth/register` with an `orgName` creates the org as part of the
+registration and returns its id as `activeOrgId`, and the token in that same response is already
+scoped to it, so there is nothing to switch to — the
+[getting-started walkthrough](../../docs/getting-started.md) covers that call; in production
+provision the org with `rayspec tenant ensure` instead. With that token, seed a few
+`expense_policies` rows, `POST /records/{record_id}/submit` a claim, and read
+`GET /claims/{claim_ref}` + `GET /claims`.
 
 ### Live extraction (real LLM) — the GENERIC (non-transcript) branch
 

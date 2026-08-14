@@ -28,6 +28,13 @@
  *           manifest rewrite).
  *     SEAM  the explicit `typeStrippingImporter` loads the raw `.ts` pack.
  *
+ *   agent-pack-deployment — the `agents`-fragment pack, also loaded by `loadExtensions`:
+ *     RED   the production importer rejects the raw `.ts` pack fail-closed.
+ *     GREEN after `build.mjs`, the production importer resolves the BUILT pack — entry, handler AND the
+ *           pack-contributed `agents` fragment (the fragment this deployment exists to force).
+ *     SEAM  the explicit `typeStrippingImporter` loads the raw `.ts` pack (the form the committed
+ *           `rayspec.yaml` points at, and the form its two consumer tests load).
+ *
  * FAIL-THE-FIX: removing the `assertCompiledJavaScriptModule(...)` call from `defaultImporter` (a
  * `.ts`-aware production runtime) flips every RED arm; a build step that stopped emitting resolvable `.js`,
  * or a `.js`-preferred resolution that stopped preferring the compiled sibling, flips a GREEN arm.
@@ -56,6 +63,8 @@ const ACME_DIR = resolve(repoRoot, 'examples/acme-notes-backend');
 const ACME_BUILD = resolve(ACME_DIR, 'build.mjs');
 const STREAM_DIR = resolve(repoRoot, 'examples/stream-backend');
 const STREAM_BUILD = resolve(STREAM_DIR, 'build.mjs');
+const AGENT_DIR = resolve(repoRoot, 'examples/agent-pack-deployment');
+const AGENT_BUILD = resolve(AGENT_DIR, 'build.mjs');
 
 const require = createRequire(import.meta.url);
 // The REAL, compiled `@rayspec/platform` entry (the js-only runtime a deploy loads modules through) — the
@@ -149,11 +158,15 @@ describe('deployable backend examples — compiled-JavaScript boundary (fail-the
     // `@rayspec/platform` as a VALUE, so the built entry must resolve it from the workspace — which needs
     // the built pack to live inside the repo tree; this runs under vitest's workspace-aware resolver).
     execFileSync(process.execPath, [STREAM_BUILD], { stdio: 'pipe' });
+    // The agent pack's build step, same reason: its ENTRY imports `@rayspec/platform` as a VALUE, so the
+    // built entry has to sit inside the repo tree to resolve it through the pack's own `node_modules`.
+    execFileSync(process.execPath, [AGENT_BUILD], { stdio: 'pipe' });
   }, 120_000);
 
   afterAll(() => {
     rmSync(tmp, { recursive: true, force: true });
     rmSync(join(STREAM_DIR, 'packs', 'stream-pack', 'dist'), { recursive: true, force: true });
+    rmSync(join(AGENT_DIR, 'packs', 'agent-pack', 'dist'), { recursive: true, force: true });
   });
 
   // ── acme-notes-backend: deployment-own `.ts` handlers via loadHandlers ──────────────────────────────
@@ -229,6 +242,49 @@ describe('deployable backend examples — compiled-JavaScript boundary (fail-the
 
     it('SEAM: the explicit typeStrippingImporter loads the raw .ts pack (dev works via the seam)', async () => {
       expect(await loadPack(sourceRef, typeStrippingImporter)).toBe(3);
+    });
+  });
+
+  // ── agent-pack-deployment: the `agents`-fragment pack via loadExtensions ─────────────────────────────
+  describe('agent-pack-deployment extension pack', () => {
+    const sourceRef = { id: 'agent_pack', module: './packs/agent-pack', version: '1.0.0' };
+    const builtRef = { id: 'agent_pack', module: './packs/agent-pack/dist', version: '1.0.0' };
+
+    /** Resolve the pack via the given importer, then load its handlers — the full composition-root path. */
+    async function loadPack(
+      ref: typeof sourceRef,
+      importer: typeof defaultImporter,
+    ): Promise<{ handlers: number; agents: string[] }> {
+      const loaded = await loadExtensions([ref], {
+        packsRoot: AGENT_DIR,
+        deploymentRoot: AGENT_DIR,
+        importer,
+      });
+      const handlers = await loadHandlers(AGENT_DIR, loaded.handlers, loaded.importer);
+      return { handlers: handlers.size, agents: loaded.agents.map((a) => a.id) };
+    }
+
+    it('RED: the production importer rejects the raw .ts pack fail-closed (the guard)', async () => {
+      const err = await loadPack(sourceRef, defaultImporter).catch((e) => e);
+      expect(err).toBeInstanceOf(ExtensionLoadError);
+      expect((err as Error).message).toMatch(/TypeScript source|compiled JavaScript/i);
+    });
+
+    it('GREEN: after the build, the production importer resolves the built pack (entry, handler, agent)', async () => {
+      // The manifest keeps its authored `.ts` module path; `.js`-preferred resolution loads the compiled
+      // `handlers/lookup-note.js` the build emitted. The `agents` fragment is what this deployment exists
+      // to force, so assert it survives the built path — not just that the entry imported.
+      expect(await loadPack(builtRef, defaultImporter)).toEqual({
+        handlers: 1,
+        agents: ['note_summarizer'],
+      });
+    });
+
+    it('SEAM: the explicit typeStrippingImporter loads the raw .ts pack (dev works via the seam)', async () => {
+      expect(await loadPack(sourceRef, typeStrippingImporter)).toEqual({
+        handlers: 1,
+        agents: ['note_summarizer'],
+      });
     });
   });
 });
