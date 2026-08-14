@@ -1481,7 +1481,8 @@ const speech = await init.tts.synthesize('Guten Morgen.', {
   speed: 1.25,     // clamped into the provider's range
   format: 'mp3',   // 'mp3' | 'opus' | 'wav'
 })
-// speech.bytes (Uint8Array), speech.contentType ('audio/mpeg'), speech.durationSeconds
+// speech.bytes (Uint8Array), speech.contentType ('audio/mpeg' from this provider —
+// read it, never derive it from the `format` you asked for), speech.durationSeconds
 return httpResponse(Buffer.from(speech.bytes).toString('base64'), {
   headers: { 'x-audio-content-type': speech.contentType },
 })
@@ -1506,7 +1507,13 @@ today:
   closed rather than failing every call at request time.
 - **`fake`** — a deterministic offline synthesizer for dev and CI: every call
   returns the same fixed-length tone, byte-identical, and nothing is spoken or
-  contacted. The boot **warns** loudly (warn-only — it never blocks a dev boot).
+  contacted. It **always answers WAV**: `format` is validated for membership
+  exactly as the live provider validates it, but nothing is encoded, so the bytes
+  are a PCM tone and `contentType` is an honest `audio/wav` whatever container was
+  requested. The refusals match the wired provider; the container does not — a
+  handler (or a test) that pins `contentType` to the requested `format` passes
+  against `openai` and fails against `fake`. The boot **warns** loudly (warn-only —
+  it never blocks a dev boot).
 
 Unlike `transcribe`, `synthesize` **rejects** rather than returning a status union
 (the happy path is the audio itself). A failure is a `TtsAdapterError` carrying a
@@ -1523,8 +1530,10 @@ that passes in CI cannot first fail in production:
   characters) is **refused**, never truncated into a recording that stops
   mid-sentence and looks successful.
 - **voice membership is closed.** An unknown voice is refused rather than silently
-  falling back to a default the caller did not ask for. `speed`, by contrast, is
-  **clamped** into the supported range rather than refused.
+  falling back to a default the caller did not ask for — a blank string is an
+  unknown voice, not an absent one, so only an omitted `voice` resolves to the
+  adapter's default. `speed`, by contrast, is **clamped** into the supported range
+  rather than refused.
 
 #### `init.emit` — append to the tenant's event stream
 

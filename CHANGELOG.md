@@ -255,15 +255,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supply it), an unsupported provider name is refused at boot naming the wired ones, and
   `TTS_PROVIDER=fake` is a working deterministic offline synthesizer for dev and CI (every call
   returns the same fixed-length tone, byte-identical; the boot warns loudly that nothing is being
-  spoken, warn-only). Unlike `transcribe`, `synthesize` rejects rather than returning a status union —
-  the happy path is the audio itself — with a structured, content-free `TtsAdapterError` that never
-  echoes the text, the response body, or the credential. Two limits are enforced before any provider
-  call, so a rejected request is never billed: the 4096-character text cap is **fail-closed** (an
-  over-long text is refused, never truncated into a recording that stops mid-sentence), and an unknown
-  voice is refused rather than silently falling back to a default, while `speed` is clamped into the
-  supported range. The offline provider enforces exactly those same limits — it is handed the live
-  adapter's own policy — so a request that passes in CI cannot first fail in production. Deployments
-  that set no provider boot and serve exactly as before.
+  spoken, warn-only). The fake validates `format` exactly as the live provider does but encodes
+  nothing, so it always answers WAV bytes under an honest `audio/wav` content type whatever container
+  was requested — read `contentType`, never derive it from the requested `format`. Unlike
+  `transcribe`, `synthesize` rejects rather than returning a status union — the happy path is the
+  audio itself — with a structured, content-free `TtsAdapterError` that never echoes the text, the
+  response body, or the credential (the SDK re-exports the type, so a handler can name what it
+  caught). Two limits are enforced before any provider call, so a rejected request is never billed:
+  the 4096-character text cap is **fail-closed** (an over-long text is refused, never truncated into
+  a recording that stops mid-sentence), and an unknown voice is refused rather than silently falling
+  back to a default — a blank string is an unknown voice, not an absent one, so only an omitted
+  `voice` resolves to the adapter's default — while `speed` is clamped into the supported range. The
+  offline provider enforces exactly those same limits — it is handed the live adapter's own policy —
+  so a request that passes in CI cannot first fail in production. Deployments that set no provider
+  boot and serve exactly as before.
 
 - **Transcription reaches a backend-profile handler as the optional `init.stt` capability, behind the
   existing `STT_PROVIDER` contract.** The platform shipped a real speech-to-text stack — the neutral
@@ -1122,6 +1127,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the authoring skill and the invoice-intake example, but nowhere in this example's own docs.
   **No behaviour changed** — the correction is in the README, and the platform paths it now
   describes are the ones that already shipped.
+
+- **`OPENAI_BASE_URL` and `DEEPGRAM_BASE_URL` are documented in `.env.example`.** Both speech
+  adapters read a base URL from the environment at call time — the OpenAI synthesis adapter and the
+  Deepgram transcription adapter, each falling back to the provider's real host — and neither
+  variable appeared in the environment surface the reference points readers at, so the only way to
+  find the seam was to read the adapter source. The speech section now carries both, commented out
+  beside `TTS_PROVIDER`, as what they are: optional test/dev seams for pointing a suite or a dev
+  boot at a local stub, with the trailing slash stripped either way and unset meaning the real host.
+  The `OPENAI_BASE_URL` note also states what it is *not* — the Codex agent backend deliberately
+  omits that variable (with `OPENAI_API_KEY`, `CODEX_API_KEY` and `CODEX_BASE_URL`) from the
+  subprocess environment it builds, so setting it never redirects Codex. **No behaviour changed** —
+  both variables were already read exactly this way.
 
 ### Security
 

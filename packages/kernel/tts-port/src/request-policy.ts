@@ -61,9 +61,15 @@ export function contentTypeForTtsFormat(format: TtsAudioFormat): string {
  *   1. `text` must be non-blank — an empty synthesis is a caller bug, not a silent zero-length file.
  *   2. `text` must be within `maxTextLength`. FAIL-CLOSED: over the cap the call is REFUSED. Truncating
  *      would hand back a recording that stops mid-sentence and looks successful. The length is measured
- *      in UTF-16 code units, so a text of astral characters is measured conservatively (the refusal can
- *      only ever be stricter than the provider's own count, never laxer).
- *   3. `voice`, when named, must be a MEMBER of the adapter's list — never a silent fallback.
+ *      in UTF-16 code units (`String#length`) — never FEWER than the code points the text holds (an
+ *      astral character is two units, one code point), so against a provider that counts code points
+ *      this refusal is the conservative one. It is NOT conservative against a provider that counts
+ *      BYTES: 4096 `ä` are 4096 code units and 8192 UTF-8 bytes. Which of the two a given provider
+ *      applies is the ADAPTER's knowledge, expressed in the `maxTextLength` it states; this guard
+ *      measures that number in code units and does not claim to restate the provider's own limit.
+ *   3. `voice`, when named, must be a MEMBER of the adapter's list — never a silent fallback. A
+ *      named-but-BLANK voice is a named one: it is trimmed, fails membership, and is REFUSED. Only
+ *      an ABSENT `voice` resolves to `defaultVoice`.
  *   4. `format`, when named, must be one the port speaks.
  *   5. `speed`, when named, must be finite, and is then CLAMPED into [minSpeed, maxSpeed] — a rate
  *      outside the range is a clamp, not a refusal (the documented contract for this field).
@@ -88,7 +94,11 @@ export function normalizeTtsRequest(
     );
   }
 
-  const voice = request.voice?.trim() || policy.defaultVoice;
+  // ABSENT (or `null` from an untyped caller) ⇒ the policy default. NAMED ⇒ the caller's value,
+  // trimmed and then membership-checked below — a BLANK one included. Treating `''`/`'   '` as
+  // absent would resolve a voice the caller DID pass into a default it did not ask for, which is
+  // exactly the silent fallback rule 3 rules out.
+  const voice = request.voice == null ? policy.defaultVoice : request.voice.trim();
   if (!policy.voices.includes(voice)) {
     throw new TtsAdapterError(
       'unsupported_option',

@@ -11,7 +11,8 @@ export interface TtsSynthesizeRequest {
    *  an over-long text is REFUSED, never silently truncated into a partial recording. */
   text: string;
   /** The provider voice id. The adapter validates MEMBERSHIP against its own closed list — an unknown
-   *  voice is refused rather than quietly falling back to a default the caller did not ask for. */
+   *  voice is refused rather than quietly falling back to a default the caller did not ask for. That
+   *  includes a BLANK one: only an ABSENT `voice` resolves to the adapter's default. */
   voice?: string;
   /** Speaking rate; CLAMPED into the provider's supported range (out-of-range is not an error). */
   speed?: number;

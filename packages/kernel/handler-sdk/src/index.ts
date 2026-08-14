@@ -95,7 +95,14 @@ export type {
 // the provider-NEUTRAL text-to-speech port (no provider is named or imported there). Re-exported on
 // the same conduit as the transcript types above so a handler names the request/result types from the
 // ONE SDK package; TYPE-ONLY, so the SDK still ships no runtime.
+//
+// `TtsAdapterError` travels with them, exactly as `SttAdapterError` does above: `synthesize` rejects
+// with one, so a handler that wants to type its catch must be able to NAME it — and a handler may
+// import no other package. It is a CLASS in the port but crosses as a TYPE: the shape and `code` are
+// nameable, `instanceof` is not, because a value export would give this runtime-free SDK a runtime
+// edge to the port. `speech-error-typepin.ts` fails `tsc -b` if either name is dropped here.
 export type {
+  TtsAdapterError,
   TtsAudioFormat,
   TtsErrorCode,
   TtsSynthesisResult,
