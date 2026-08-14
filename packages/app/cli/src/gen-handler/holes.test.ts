@@ -10,6 +10,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ColumnType as SpecColumnType } from '@rayspec/spec';
 import { describe, expect, it } from 'vitest';
 import type { HandlerHoles } from './holes.js';
 import {
@@ -209,6 +210,44 @@ describe('validateHoles — fail-closed on malformed hole-sets', () => {
       ),
     ).toThrow(/bigint/);
   });
+
+  it('every grammar `ColumnType` is either accepted or refused WITH THE REASON it cannot be rendered', () => {
+    // The renderer serves a SUBSET of the grammar's column vocabulary (`emitCoerceColumn` has one
+    // coercion arm per type it can serve, and none for the fractional pair). A hole-set naming a type
+    // outside the subset must be refused — that part already holds — but the refusal has to say WHY,
+    // otherwise a valid store column reads back as a typo. Every type is taken from the grammar enum
+    // itself, so this stays honest when the vocabulary grows again.
+    const accepted: string[] = [];
+    const explained: string[] = [];
+    const bareRefusal: string[] = [];
+    for (const type of SpecColumnType.options) {
+      try {
+        validateHoles(
+          persist({ columns: [{ col: 'x', jsonType: type, required: true, nullable: false }] }),
+        );
+        accepted.push(type);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        (/has no coercion arm for it/.test(message) ? explained : bareRefusal).push(type);
+      }
+    }
+    // Accept control: the loop really did run a hole-set through the validator, not throw on setup.
+    expect(accepted).toContain('text');
+    // THE PROPERTY: no grammar column type is refused as if it were an unknown word.
+    expect(bareRefusal).toEqual([]);
+    // Instrument check: the "explained" bucket is reachable, and the two fractional types are the
+    // ones the renderer cannot serve today.
+    expect(explained).toContain('double');
+    expect(explained).toContain('numeric');
+    // A type the GRAMMAR does not carry either keeps the plain unknown-type refusal — the reason
+    // clause must not fire for a genuine typo.
+    expect(() =>
+      validateHoles(
+        persist({ columns: [{ col: 'x', jsonType: 'float', required: true, nullable: false }] }),
+      ),
+    ).not.toThrow(/coercion arm/);
+  });
+
   it('rejects enumValues on a non-text column', () => {
     expect(() =>
       validateHoles(

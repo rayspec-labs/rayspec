@@ -142,7 +142,8 @@ stores:
     surface as a JSON **number** while its magnitude is at most
     **9 007 199 254 740 991** (`Number.MAX_SAFE_INTEGER`). Beyond that the
     request is refused with `400 VALIDATION_ERROR` rather than rounded — on a
-    `create`/`update` body, on a `?<col>=` or `?<col>__in=` filter, on a keyset
+    `create`/`update` body, on a `?<col>=`, a `?<col>__in=` or a
+    `?<col>__gt=`-family (`__gt`/`__gte`/`__lt`/`__lte`) filter, on a keyset
     cursor, **and on the way out**. The outbound refusal is deliberate and can
     fire on a request the caller did not get wrong: a value can reach the column
     by a route other than the REST write path (a hand-written migration, a
@@ -1358,7 +1359,8 @@ handlers:
   handler**; same shape and semantics as [`lintSuppress` on an agent](#agents): a
   `code` naming an advisory (never an error) and a **required, non-empty**
   `because` recording why the finding does not apply here. This is the node the
-  `typescript_handler_module` advisory — the one a `.ts` `module` raises — is
+  `typescript_handler_module` advisory — the one a TypeScript `module` raises
+  (`.ts`, `.tsx`, `.mts`, `.cts`) — is
   reported on. Acknowledging it records the reviewed decision (a build step
   compiles the module before deploy, say) and quiets `doctor`; the deploy loader
   still loads compiled JavaScript only, and `plan` still reports the raw advisory.
