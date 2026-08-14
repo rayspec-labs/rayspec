@@ -518,8 +518,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rayspec-serve` is only what an explicit value now does: `off` disables the export (through the
   SDK's programmatic `setTracingDisabled`, because that entrypoint's static imports have already
   built the trace provider, so writing the SDK's environment switch alone would arrive too late),
-  `openai` is a no-op, and anything else aborts the boot with the same message `deploy` has always
-  used, before the config load and before any port is bound.
+  `openai` is a no-op, and anything else aborts the boot with the same message `deploy` raises, from
+  the same line — not a second, entrypoint-specific wording — before the config load and before any
+  port is bound.
   **Who is affected:** a deployment that exports `RAYSPEC_AGENT_TRACING` process-wide and relies on
   `rayspec-serve` ignoring it. With `off` that boot stops exporting; with an unsupported value it now
   refuses to start rather than booting and exporting. `deploy --check-env` still does not list this
