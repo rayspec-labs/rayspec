@@ -1,11 +1,14 @@
 /**
  * `rayspec deploy` — the agent trace export is OFF unless the operator asks for it (issue #287).
  *
- * `@openai/agents` exports traces to OpenAI by default and those traces carry prompts and tool
- * arguments. `deploy` is the strongest available signal that the workload running here belongs to
- * someone other than the operator, so on THAT path the export becomes an affirmative choice —
- * `RAYSPEC_AGENT_TRACING=openai` — while `rayspec-serve` and the local dev wrapper keep the SDK
- * default (a developer tracing their own agent sees their own prompts; that was never the risk case).
+ * `@openai/agents` exports traces to OpenAI by default; what leaves on that transport is run metadata
+ * and, once an agent calls tools, its tool arguments and outputs (the SDK strips the model prompt
+ * fields before export). `deploy` is the strongest available signal that the workload running here
+ * belongs to someone other than the operator, so on THAT path the export becomes an affirmative
+ * choice — `RAYSPEC_AGENT_TRACING=openai`. What is deploy-only is that DEFAULT, not the variable:
+ * `rayspec-serve` honours an explicitly stated value and keeps the SDK default only when it is unset
+ * (`applyServeAgentTracing`, issue #383), while the dev-boot wrappers (examples/local-boot,
+ * deployments/acme-notes) assemble the server themselves and never read it.
  *
  * WHAT THIS FILE PINS, and what it deliberately does not. The decisive question — does the SDK still
  * export? — is answered against the real SDK, in a child process at `NODE_ENV=production`, by
