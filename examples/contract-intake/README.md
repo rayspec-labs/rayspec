@@ -51,3 +51,6 @@ Interactive dev-boot (a throwaway play DB; a FILE product also needs `RAYSPEC_BL
 ```bash
 node examples/contract-intake/dev-boot.mjs   # auto-creates play_contract, serves on :8793
 ```
+
+Stop it with `Ctrl-C`: the wrapper closes the HTTP server, drains the durable worker and ends the DB
+pool, then exits.

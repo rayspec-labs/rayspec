@@ -1679,7 +1679,25 @@ deterministic mode with an injected executor via the e2e-wrapper pattern above).
 dev-boot must set `RAYSPEC_RESPONDER_MODE`** (`live` + the config's provider key for a real reply, or
 `deterministic` with an injected reply Backend) — the example is
 `examples/support-intake-chat/dev-boot.mjs` (it seeds the catalog + boots live) — but NO blob env (a
-chat turn moves no bytes).
+chat turn moves no bytes). **A dev-boot must also own its shutdown**: capture the `serve()` return value
+and wire `SIGINT`/`SIGTERM` to it, exactly as `packages/app/server/src/serve.ts` does for the shipped
+entrypoint —
+```js
+const httpServer = serve({ fetch: server.app.fetch, hostname: config.host, port: config.port }, cb);
+const shutdown = (signal) => {
+  console.log(`\n[dev-boot] ${signal} received — shutting down…`);
+  httpServer.close(async () => {
+    await server.close();   // drains the durable worker, then ends the DB pool
+    process.exit(0);
+  });
+};
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+```
+Without that handler the wrapper survives BOTH signals and keeps serving: the SIGINT/SIGTERM handlers
+`@openai/agents-core`'s tracing provider and `signal-exit` install each act only when no OTHER listener
+is registered, so with both loaded neither ends the process. Do NOT add `SIGHUP` — `signal-exit` is its
+only listener there, which is why that one signal already stops such a wrapper.
 
 **Live extraction (real LLM) via the generic entrypoint** — works for an AUDIO product (the pilot customer, the
 transcript branch) AND — since the file-ingest work — for a NON-audio product: an agent that declares NO

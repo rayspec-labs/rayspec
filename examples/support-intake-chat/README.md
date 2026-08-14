@@ -74,6 +74,9 @@ seeds the catalog):
 node examples/support-intake-chat/dev-boot.mjs        # serves on :8794, live mode
 ```
 
+Stop it with `Ctrl-C`: the wrapper closes the HTTP server, drains the durable worker and ends the DB
+pool, then exits.
+
 Then register/switch to the tenant, `PUT /conversations/{id}`, `POST /conversations/{id}/turns`
 (optionally `Accept: text/event-stream`), and read `GET /tickets/{conversation_id}` + `GET /tickets`.
 

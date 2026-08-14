@@ -9,7 +9,8 @@
  *  - a deduped no-op (already fired this firing key) still returns 202 with `fired:false`;
  *  - tenant-scoping: tenant B cannot fire tenant A's trigger — the route threads B's server-derived
  *    tenant, the tenant-scoped firer returns notFound → uniform 404 (no existence leak);
- *  - fail-closed: an unknown / non-manual trigger → 404; no auth → 401; no wired firer → 501;
+ *  - fail-closed: an unknown / non-manual trigger → 404; no auth → 401; no wired firer → 501 (whose
+ *    operator-visible wording is pinned verbatim, and must never echo the requested name);
  *  - the fire is rate-limited (cost-DoS bound), and it writes an immutable audit trail.
  */
 
@@ -49,18 +50,29 @@ class FakeManualTriggerFirer implements ManualTriggerFirer {
 const firer = new FakeManualTriggerFirer();
 let h: Harness;
 
+/**
+ * The VERBATIM 501 refusal — the operator-visible string the route answers when no firer is wired.
+ * Pinned here because it is the whole diagnosis an operator gets: it must name the route's
+ * `kind:'manual'` restriction and the deployment-level cause, and it must never echo the requested
+ * name (that would make the refusal a per-name existence oracle the uniform 404 deliberately is not).
+ */
+const NO_FIRER_REFUSAL =
+  'This route fires `kind: manual` triggers only — a `cron` trigger fires on its own schedule ' +
+  'and is not fireable here. Declare a `kind: manual` trigger in the deployed document; no ' +
+  'manual-trigger firer is wired on this deployment.';
+
 /** Provision a principal (registered user → org → switch → JWT) — the org creator is an owner (store:write). */
-async function principal(email: string, orgName: string) {
-  const reg = await jsonRequest(h.app, 'POST', '/v1/auth/register', {
+async function principal(email: string, orgName: string, on: Harness = h) {
+  const reg = await jsonRequest(on.app, 'POST', '/v1/auth/register', {
     body: { email, password: 'a-long-enough-password' },
   });
   const t0 = (await reg.json()).accessToken as string;
-  const orgRes = await jsonRequest(h.app, 'POST', '/v1/orgs', {
+  const orgRes = await jsonRequest(on.app, 'POST', '/v1/orgs', {
     body: { name: orgName },
     headers: { authorization: `Bearer ${t0}` },
   });
   const orgId = (await orgRes.json()).id as string;
-  const switchRes = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/switch`, {
+  const switchRes = await jsonRequest(on.app, 'POST', `/v1/orgs/${orgId}/switch`, {
     headers: { authorization: `Bearer ${t0}` },
   });
   const token = (await switchRes.json()).accessToken as string;
@@ -163,6 +175,11 @@ describe('POST /v1/triggers/:name/fire (the manual-trigger fire control path)', 
       headers: { authorization: `Bearer ${a.token}` },
     });
     expect(res.status).toBe(404);
+    // The uniform 404 body — the same 'Not found.' every unknown/foreign/non-manual name gets, and it
+    // never echoes the requested name (no existence leak).
+    const text = await res.text();
+    expect(JSON.parse(text).error).toMatchObject({ code: 'NOT_FOUND', message: 'Not found.' });
+    expect(text).not.toContain('nightly-cron');
     expect(firer.calls[0]).toEqual({ tenantId: a.orgId, name: 'nightly-cron' });
   });
 
@@ -236,22 +253,38 @@ describe('POST /v1/triggers/:name/fire with NO wired firer (fail-closed 501)', (
   });
 
   it('501 when no manual-trigger firer is wired (never a silent no-op 202)', async () => {
-    const reg = await jsonRequest(hNo.app, 'POST', '/v1/auth/register', {
-      body: { email: 'trig-off@example.test', password: 'a-long-enough-password' },
-    });
-    const t0 = (await reg.json()).accessToken as string;
-    const orgRes = await jsonRequest(hNo.app, 'POST', '/v1/orgs', {
-      body: { name: 'Org Off' },
-      headers: { authorization: `Bearer ${t0}` },
-    });
-    const orgId = (await orgRes.json()).id as string;
-    const switchRes = await jsonRequest(hNo.app, 'POST', `/v1/orgs/${orgId}/switch`, {
-      headers: { authorization: `Bearer ${t0}` },
-    });
-    const token = (await switchRes.json()).accessToken as string;
+    const p = await principal('trig-off@example.test', 'Org Off', hNo);
     const res = await jsonRequest(hNo.app, 'POST', '/v1/triggers/manual-refresh/fire', {
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${p.token}` },
     });
     expect(res.status).toBe(501);
+    const body = await res.json();
+    expect(body.error.code).toBe('NOT_IMPLEMENTED');
+    // The whole operator-visible diagnosis, verbatim.
+    expect(body.error.message).toBe(NO_FIRER_REFUSAL);
+  });
+
+  it('the 501 names the kind:manual restriction and never echoes the requested name', async () => {
+    const p = await principal('trig-off-cron@example.test', 'Org Off Cron', hNo);
+    // A cron-shaped name: the guard is on the WIRING, not on the name, so this refusal is the same
+    // one 'manual-refresh' gets — the route holds no trigger registry and cannot tell a declared cron
+    // trigger from a name that was never declared.
+    const res = await jsonRequest(hNo.app, 'POST', '/v1/triggers/nightly-cron/fire', {
+      headers: { authorization: `Bearer ${p.token}` },
+    });
+    expect(res.status).toBe(501);
+    const text = await res.text();
+    const message = JSON.parse(text).error.message as string;
+    // What the operator must be able to read off the refusal: the route fires `kind: manual` only, a
+    // cron trigger is not fireable here, and the deployment-level cause.
+    expect(message).toContain('`kind: manual`');
+    expect(message).toContain(
+      'a `cron` trigger fires on its own schedule and is not fireable here',
+    );
+    expect(message).toContain('no manual-trigger firer is wired on this deployment');
+    // SECURITY: the refusal is raised before tenant reconciliation and before the rate limiter, so
+    // echoing the requested name would turn it into a per-name existence oracle for any authenticated
+    // caller. The name never appears in the response.
+    expect(text).not.toContain('nightly-cron');
   });
 });

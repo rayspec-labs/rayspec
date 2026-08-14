@@ -1319,9 +1319,11 @@ The error cases:
   `trigger-fire` rate bucket: **30 fires per 60 seconds per tenant+name**. An
   over-quota call dispatches nothing; the retry advice rides in the body as
   `error.details.retryAfterMs` — this `429` carries no `Retry-After` header.
-- **`501`** — no manual-trigger firer is wired on this deployment (the spec
-  declares no `manual` trigger, or no durable worker is configured). Fail-closed:
-  never a silent no-op `202`.
+- **`501`** — the deployed document declares no `kind: manual` trigger, so no
+  manual-trigger firer is wired on this deployment. The refusal is
+  deployment-level and never names the requested trigger — a deployment with at
+  least one manual trigger answers the `404` above for a `cron` name instead.
+  Fail-closed: never a silent no-op `202`.
 
 ## `handlers`
 

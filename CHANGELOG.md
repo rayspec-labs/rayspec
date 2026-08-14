@@ -480,6 +480,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the variable without quoting it. The verdict also names the `.env` files
   the CLI's auto-loader searched, which is usually the answer to a disputed "unset".
 
+### Changed
+
+- **The `501` from `POST /v1/triggers/{name}/fire` now names the manual-trigger requirement instead
+  of a durable worker.** It read `Manual trigger firing requires a configured durable worker and a
+  declared manual trigger. No manual-trigger firer is wired on this deployment.`, and the worker half
+  of that sentence is never the but-for cause: the composition root wires the fire seam exactly when
+  the deployed document declares a `kind: manual` trigger, so setting `deployment.durableWorker: true`
+  alone never clears the refusal. Nor can a document declare a manual trigger *without* the worker —
+  that is a lint error at parse/deploy time, with the boot abort as its runtime backstop — so the
+  reader most likely to meet the refusal, an operator on an all-`cron` document such as the shipped
+  `acme-notes-backend`, whose single trigger is `kind: cron`, was pointed at a component that is
+  already there. It now reads: *"This route fires `kind: manual` triggers only — a `cron` trigger
+  fires on its own schedule and is not fireable here. Declare a `kind: manual` trigger in the
+  deployed document; no manual-trigger firer is wired on this deployment."*
+  **No behaviour changed**: same `501`, same `NOT_IMPLEMENTED` code, same guard on the same wiring
+  (the composition root wires the fire seam only when the deployed document declares a `kind: manual`
+  trigger). The refusal stays **deployment-level and never names the requested trigger** — it is
+  raised before the firer's tenant reconciliation and before the `trigger-fire` rate limiter, so
+  echoing the name would answer "does this trigger exist?" for any authenticated caller, which is
+  exactly what the route's uniform `404` (unknown name, non-`manual` kind, foreign tenant) refuses to
+  answer. The trigger reference's `501` bullet now states the same cause; the `404` bullet is
+  unchanged.
+
 ### Fixed
 
 - **A port that is already in use now refuses the boot in one actionable line instead of crashing with
@@ -506,6 +529,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unhandled-`'error'` report, with its frames, and exit 1. The address in the refusal is built from the
   host and port the entrypoint already resolved, never from the error object, because a listen error
   carries `address`/`port` for some codes only. (Issue #365.)
+- **`Ctrl-C` now stops the example dev-boot servers.** `examples/contract-intake/dev-boot.mjs`,
+  `examples/support-intake-chat/dev-boot.mjs` and `examples/support-ticket-triage/dev-boot.mjs` kept
+  running after `SIGINT` and after `SIGTERM` — still answering `/health` 200 — so a developer who
+  pressed `Ctrl-C` was left with a live server still holding its database pool and its durable worker.
+  Each wrapper now owns its shutdown: it captures the `serve()` return value and, on `SIGINT`/`SIGTERM`,
+  closes the HTTP server, awaits `server.close()` (which drains the durable worker, then ends the
+  database pool) and exits `0` — the same wiring `packages/app/server/src/serve.ts` gives the shipped
+  `rayspec-serve` entrypoint, which is why that entrypoint is not affected.
+  **Nothing in a dependency changed.** The wrappers registered no signal handler of their own, and the
+  `SIGINT`/`SIGTERM` handlers their dependencies install each act only when no *other* listener is
+  registered — `@openai/agents-core`'s tracing provider exits only when `process.listeners(sig).length`
+  is not greater than 1, and `signal-exit` re-raises the signal only when that count equals its own
+  listener count — so with both loaded neither one ended the process. An owning handler is what
+  terminates it now, whatever the dependencies decide. `SIGHUP` is deliberately left unlistened:
+  `signal-exit` registers for it and `@openai/agents-core` does not, so `signal-exit` is its sole
+  listener there and re-raises it — that path is unchanged. The two example READMEs that gave a boot
+  command with no stop instruction (`contract-intake`, `support-intake-chat`) now name `Ctrl-C`, and the
+  authoring skill's dev-boot pattern teaches the handler. (Issue #360.)
 - **A deploy that is refused *after* its product-store DDL applied now names the tables it already
   committed, instead of reading as if nothing had happened.** Each migration is applied in its own
   transaction, so it is committed the moment it returns; every refusal raised after the migrate step
