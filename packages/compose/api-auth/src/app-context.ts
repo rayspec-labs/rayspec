@@ -370,6 +370,17 @@ export interface ManualTriggerFirer {
   }): Promise<ManualTriggerFireResult>;
 }
 
+/**
+ * The task-engine control seam the workforce routes are wired with. Deliberately THIN: the routes
+ * do their reads and writes through the tenant chokepoint + the engine's own typed operations
+ * (@rayspec/tasks); the seam only carries what the DISPATCHER owns — the presence signal (a wired
+ * seam means a durable worker exists to run what the routes park or wake) and the latency nudge.
+ */
+export interface WorkforceControl {
+  /** Nudge the dispatcher after a route-made state change. Best-effort; the tick is the guarantee. */
+  kick(): void;
+}
+
 /** Everything the app needs, wired once at construction. */
 export interface AppDeps {
   db: Db;
@@ -456,6 +467,16 @@ export interface AppDeps {
    * by the composition root; the platform main line ships none.
    */
   manualTriggerFirer?: ManualTriggerFirer;
+  /**
+   * the OPTIONAL task-engine seam. When wired, the `/v1/workforce/*` surface (tasks, signals,
+   * approvals, per-task journal replay, pause/resume/halt) is live — reads on `store:read`,
+   * mutations on `store:write`, all through the tenant chokepoint. When ABSENT, every workforce
+   * route is a clean fail-closed 501 (the task engine requires a configured durable worker to
+   * dispatch anything, and a decision accepted on a worker-less deployment would be a silent
+   * trap). `kick()` nudges the dispatcher after a state change a route just made — best-effort
+   * latency, the scheduled tick is the guarantee. PRODUCT-AGNOSTIC: wired by the composition root.
+   */
+  workforce?: WorkforceControl;
   /**
    * OPTIONAL override for the per-request JSON/body byte cap the route interpreters enforce on
    * body-bearing routes (register/login, the declared `{handler}` + store CRUD routes, reprocess). A

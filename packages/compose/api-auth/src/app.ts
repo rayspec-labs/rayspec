@@ -39,6 +39,7 @@ import { registerReprocessRoutes } from './routes/reprocess.js';
 import { registerRunsRoutes } from './routes/runs.js';
 import { registerSubscribeRoutes } from './routes/subscribe.js';
 import { registerTriggerRoutes } from './routes/triggers.js';
+import { registerWorkforceRoutes } from './routes/workforce.js';
 
 /** A ContentfulStatusCode-compatible cast for Hono's c.json status arg. */
 type HttpStatus = Parameters<Context['json']>[1];
@@ -217,6 +218,11 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
   // the manual-trigger fire route (opt-in; 501 when no firer is wired). Same middleware chain
   // (server-derived tenant, store:write); the firer restricts to kind:'manual' fail-closed.
   registerTriggerRoutes(app, effectiveDeps);
+  // the task-engine surface (tasks / signals / approvals / journal replay / pause-resume-halt).
+  // Registered unconditionally and gated INSIDE on the wired dispatcher seam — a deployment with
+  // no durable worker answers a clean fail-closed 501, never a 404 routing hunt. Same middleware
+  // chain (server-derived tenant; reads store:read, mutations store:write).
+  registerWorkforceRoutes(app, effectiveDeps);
   // the tenant event-stream subscription (GET /v1/subscribe, SSE). Same middleware chain
   // (server-derived tenant, events:read). Registered unconditionally and gated INSIDE on the same
   // signal that decides whether a handler init carries `init.emit` — the injected event bus — so a

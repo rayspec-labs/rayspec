@@ -523,6 +523,12 @@ export async function createHarness(
      */
     manualTriggerFirer?: AppDeps['manualTriggerFirer'];
     /**
+     * the OPTIONAL task-engine seam wired into `deps.workforce` (the `/v1/workforce/*` routes'
+     * injected dependency). A workforce-route suite injects a stub whose `kick()` records the
+     * nudge; omit ⇒ the whole surface fail-closes 501 (the unwired posture a test can also exercise).
+     */
+    workforce?: AppDeps['workforce'];
+    /**
      * trusted-proxy CIDRs wired into `deps.trustedProxies` (the rate-limiter client-identity
      * resolution). Default UNSET ⇒ no forwarding header is trusted (the socket peer is the identity).
      * A served-app suite behind loopback opts in (e.g. `['127.0.0.0/8', '::1/128']`) so an
@@ -671,6 +677,7 @@ export async function createHarness(
     engine,
     ...(opts.sessionReprocessor ? { sessionReprocessor: opts.sessionReprocessor } : {}),
     ...(opts.manualTriggerFirer ? { manualTriggerFirer: opts.manualTriggerFirer } : {}),
+    ...(opts.workforce ? { workforce: opts.workforce } : {}),
     ...(opts.trustedProxies !== undefined ? { trustedProxies: opts.trustedProxies } : {}),
     ...(opts.maxJsonBodyBytes !== undefined ? { maxJsonBodyBytes: opts.maxJsonBodyBytes } : {}),
   };

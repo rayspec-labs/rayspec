@@ -7,13 +7,35 @@
     "jsxImportSource": "hono/jsx"
   },
   "references": [
-    { "path": "../../kernel/core" },
-    { "path": "../../kernel/db" },
-    { "path": "../../kernel/auth-core" },
-    { "path": "../../kernel/platform" },
-    { "path": "../product-yaml" },
-    { "path": "../../kernel/spec" }
+    {
+      "path": "../../kernel/core"
+    },
+    {
+      "path": "../../kernel/db"
+    },
+    {
+      "path": "../../kernel/auth-core"
+    },
+    {
+      "path": "../../kernel/platform"
+    },
+    {
+      "path": "../product-yaml"
+    },
+    {
+      "path": "../../kernel/spec"
+    },
+    {
+      "path": "../../kernel/tasks"
+    }
   ],
-  "include": ["src/**/*.ts", "src/**/*.tsx"],
-  "exclude": ["dist", "node_modules", "**/*.test.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules",
+    "**/*.test.ts"
+  ]
 }

@@ -71,12 +71,13 @@ import {
   runAgent,
   signalRunCancelled,
 } from '@rayspec/platform';
-import { and, asc, eq, gt } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import type { AgentRegistryEntry, AppDeps, AppEnv } from '../app-context.js';
 import { readBoundedJson } from '../http/bounded-body.js';
+import { replayJournalEventsAsSse, resolveLastEventId } from '../http/journal-replay.js';
 import { requireAuth, requirePermission, resolveTenant } from '../http/middleware.js';
 
 /** The HTTP status codes the sync run endpoint maps an errorClass to (Hono's c.json status arg). */
@@ -1207,16 +1208,6 @@ function statusForErrorClass(
   }
 }
 
-/** Resolve the resume cursor: Last-Event-ID header takes precedence over ?lastEventId=. */
-function resolveLastEventId(c: Context): number {
-  const header = c.req.header('last-event-id');
-  const query = c.req.query('lastEventId');
-  const raw = header ?? query;
-  if (raw === undefined) return -1; // -1 ⇒ replay from seq 0 (seq > -1)
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) ? n : -1;
-}
-
 /**
  * Map ONE NeutralEvent to an SSE frame, FAIL-CLOSED: id = seq, event = type, data = JSON of the
  * event. Returns undefined (the frame is OMITTED) if the event cannot be faithfully serialized —
@@ -1234,33 +1225,16 @@ function toSseFrame(event: {
 }
 
 /**
- * REPLAY a run's events from run_events as SSE — ONE-SHOT, not a live tail. It streams the durable
- * rows with `seq > afterSeq` (ordered by seq) and then ENDS the stream; it does NOT subscribe to or
- * poll for events persisted after this read. For a SYNC run the run is already complete by the
- * time anyone reads /events, so this returns the whole stream. For a ASYNC (off-request) run the
- * run may still be in flight: the client pulls newly-persisted events by RE-REQUESTING from the last
- * seq it saw (reconnect-and-replay) — a live server-push tail is intentionally not built (the
- * durable run_events table makes resume a real read path). Tenant-scoped via the supplied TenantDb;
- * `id:` = seq so the client resumes from Last-Event-ID.
+ * REPLAY a run's events from run_events as SSE — the shared one-shot journal replay
+ * (http/journal-replay.ts, which owns the streaming mechanics + the resume-cursor contract) with
+ * THIS surface's fail-closed validator: a stored jsonb `data` is attacker-/corruption-reachable, so
+ * exactly like rehydrateConversation re-validates conversation_items.payload — we re-parse it as
+ * a neutral NeutralEvent and DROP (omit) any row whose data does not match the neutral shape
+ * (fail-closed: never serve an unvalidated stored frame). The validated value (not the raw row)
+ * is what we serialize, so a poisoned row cannot leak a non-neutral payload to the client.
  */
 function replayEventsAsSse(c: Context, tdb: TenantDb, runId: string, afterSeq: number): Response {
-  return streamSSE(c, async (stream) => {
-    const rows = await tdb
-      .select(schema.runEvents)
-      .where(and(eq(schema.runEvents.runId, runId), gt(schema.runEvents.seq, String(afterSeq))))
-      .orderBy(asc(schema.runEvents.seq));
-    for (const row of rows as Array<{ seq: string; type: string; data: unknown }>) {
-      if (stream.aborted) break;
-      // Re-validate-on-read: a stored jsonb `data` is attacker-/corruption-reachable, so
-      // exactly like rehydrateConversation re-validates conversation_items.payload — we re-parse it as
-      // a neutral NeutralEvent and DROP (omit) any row whose data does not match the neutral shape
-      // (fail-closed: never serve an unvalidated stored frame). The validated value (not the raw row)
-      // is what we serialize, so a poisoned row cannot leak a non-neutral payload to the client.
-      const data = serializeEventData(row.data);
-      if (data === undefined) continue; // omit a non-neutral / unserializable row, never fabricate
-      await stream.writeSSE({ id: String(row.seq), event: row.type, data });
-    }
-  });
+  return replayJournalEventsAsSse(c, tdb, runId, afterSeq, serializeEventData);
 }
 
 /**

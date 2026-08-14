@@ -555,6 +555,9 @@ importers:
       '@rayspec/spec':
         specifier: workspace:*
         version: link:../../kernel/spec
+      '@rayspec/tasks':
+        specifier: workspace:*
+        version: link:../../kernel/tasks
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2(@opentelemetry/api@1.9.0)(pg@8.22.0)(postgres@3.4.9)
