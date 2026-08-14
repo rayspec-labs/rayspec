@@ -46,7 +46,7 @@ One flag stands outside the subcommand grammar. `rayspec --version` (or `-v`)
 reports the CLI's own version on **stdout** and exits `0`:
 
 ```json
-{ "ok": true, "version": "1.7.0" }
+{ "ok": true, "version": "1.8.0" }
 ```
 
 The value is read from the CLI package's own manifest at run time, so it names
