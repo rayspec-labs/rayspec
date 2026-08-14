@@ -3,8 +3,16 @@
  * real Postgres — whole invariants on durable artifacts, no fakes. The receipts suite is the
  * restart story's kernel: re-applying a committed turn changes nothing and duplicates nothing.
  */
+import { schema, type TenantDb } from '@rayspec/db';
+import { eq } from 'drizzle-orm';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { applyTurnOutcome, DELEGATION_STATUSES } from './apply-intents.js';
+import {
+  applyBudgetExhausted,
+  applyTurnOutcome,
+  DELEGATION_STATUSES,
+  lockRootFirst,
+  TurnStateError,
+} from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import { ApprovalAlreadyDecidedError, decideApproval, sweepApprovalTimeouts } from './approvals.js';
 import { workforceBudgetsSchema } from './budget.js';
@@ -62,6 +70,26 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     });
   }
 
+  /** The dispatch id a turn claims under — the same id its application then presents. */
+  function turnIdFor(taskId: string, turnNumber: number): string {
+    return `wf-task-turn:${taskId}:${turnNumber}`;
+  }
+
+  /**
+   * Take a turn's claim exactly as `#claimTurn` does: the `queued -> working` transition STAMPED
+   * with the dispatching turn's own id. An unstamped claim is not a claim the application will
+   * accept — `applyTurnOutcome` refuses to apply over a turn it does not own.
+   */
+  function claim(taskId: string, expectedVersion: number, turnNumber: number): Promise<TaskRecord> {
+    return applyTransition(tdb(), {
+      taskId,
+      expectedVersion,
+      to: 'working',
+      actor: 'scheduler',
+      turnId: turnIdFor(taskId, turnNumber),
+    });
+  }
+
   async function driveToWorking(task: TaskRecord): Promise<TaskRecord> {
     const queued = await applyTransition(tdb(), {
       taskId: task.taskId,
@@ -69,18 +97,13 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       to: 'queued',
       actor: 'scheduler',
     });
-    return applyTransition(tdb(), {
-      taskId: task.taskId,
-      expectedVersion: queued.version,
-      to: 'working',
-      actor: 'scheduler',
-    });
+    return claim(task.taskId, queued.version, 1);
   }
 
   function turn(taskId: string, turnNumber: number, intent: unknown, actualUsd = 0) {
     return applyTurnOutcome(tdb(), {
       taskId,
-      turnId: `wf-task-turn:${taskId}:${turnNumber}`,
+      turnId: turnIdFor(taskId, turnNumber),
       turnNumber,
       intent,
       budgets: NO_BUDGETS,
@@ -176,12 +199,7 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
         to: 'queued',
         actor: 'scheduler',
       });
-      await applyTransition(tdb(), {
-        taskId: c.task_id,
-        expectedVersion: queued.version,
-        to: 'working',
-        actor: 'scheduler',
-      });
+      await claim(c.task_id, queued.version, 1);
     }
     await Promise.all(
       children.map((c) => turn(c.task_id, 1, { kind: 'complete', result: RESULT })),
@@ -283,7 +301,7 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     const reviewTurn = (turnNumber: number) =>
       applyTurnOutcome(tdb(), {
         taskId: root.taskId,
-        turnId: `wf-task-turn:${root.taskId}:${turnNumber}`,
+        turnId: turnIdFor(root.taskId, turnNumber),
         turnNumber,
         intent: { kind: 'request_review', reviewer: 'reviewer-1' },
         budgets,
@@ -304,12 +322,7 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(rejected.status).toBe('queued');
 
     // Rework round 2: dispatch again, request review again, reject again — rounds now exhausted.
-    await applyTransition(tdb(), {
-      taskId: root.taskId,
-      expectedVersion: rejected.version,
-      to: 'working',
-      actor: 'scheduler',
-    });
+    await claim(root.taskId, rejected.version, 2);
     const r2 = await reviewTurn(2);
     expect(r2.task?.status).toBe('waiting_for_review');
     const review2 = (await db.$client.unsafe(
@@ -364,12 +377,7 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       to: 'queued',
       actor: 'scheduler',
     });
-    await applyTransition(tdb(), {
-      taskId: first.task_id,
-      expectedVersion: q.version,
-      to: 'working',
-      actor: 'scheduler',
-    });
+    await claim(first.task_id, q.version, 1);
     await turn(first.task_id, 1, { kind: 'complete', result: RESULT });
     // … rejected (a hand-off refused at planning) …
     const second = children[1] as { task_id: string; version: number };
@@ -379,15 +387,10 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       to: 'queued',
       actor: 'scheduler',
     });
-    await applyTransition(tdb(), {
-      taskId: second.task_id,
-      expectedVersion: q2.version,
-      to: 'working',
-      actor: 'scheduler',
-    });
+    await claim(second.task_id, q2.version, 1);
     await applyTurnOutcome(tdb(), {
       taskId: second.task_id,
-      turnId: `wf-task-turn:${second.task_id}:1`,
+      turnId: turnIdFor(second.task_id, 1),
       turnNumber: 1,
       intent: { kind: 'fan_out', children: [{ title: 'GC', goal: 'G', owner: 'worker-9' }] },
       budgets,
@@ -414,7 +417,7 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     // Root fans out fine (depth 1)…
     const ok = await applyTurnOutcome(tdb(), {
       taskId: root.taskId,
-      turnId: `wf-task-turn:${root.taskId}:1`,
+      turnId: turnIdFor(root.taskId, 1),
       turnNumber: 1,
       intent: { kind: 'fan_out', children: [{ title: 'C', goal: 'G', owner: 'worker-1' }] },
       budgets,
@@ -432,19 +435,14 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       to: 'queued',
       actor: 'scheduler',
     });
-    await applyTransition(tdb(), {
-      taskId: child.task_id,
-      expectedVersion: q.version,
-      to: 'working',
-      actor: 'scheduler',
-    });
+    await claim(child.task_id, q.version, 1);
     const grandchildIntent = {
       kind: 'fan_out',
       children: [{ title: 'GC', goal: 'G', owner: 'worker-2' }],
     };
     const rejected = await applyTurnOutcome(tdb(), {
       taskId: child.task_id,
-      turnId: `wf-task-turn:${child.task_id}:1`,
+      turnId: turnIdFor(child.task_id, 1),
       turnNumber: 1,
       intent: grandchildIntent,
       budgets,
@@ -461,15 +459,10 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     });
 
     // Second consecutive offense is terminal.
-    await applyTransition(tdb(), {
-      taskId: child.task_id,
-      expectedVersion: (rejected.task as TaskRecord).version,
-      to: 'working',
-      actor: 'scheduler',
-    });
+    await claim(child.task_id, (rejected.task as TaskRecord).version, 2);
     const failed = await applyTurnOutcome(tdb(), {
       taskId: child.task_id,
-      turnId: `wf-task-turn:${child.task_id}:2`,
+      turnId: turnIdFor(child.task_id, 2),
       turnNumber: 2,
       intent: grandchildIntent,
       budgets,
@@ -484,12 +477,7 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     const first = await turn(root.taskId, 1, bad);
     expect(first.task?.status).toBe('queued');
     expect(first.task?.statusReason).toBe('tool_error');
-    await applyTransition(tdb(), {
-      taskId: root.taskId,
-      expectedVersion: (first.task as TaskRecord).version,
-      to: 'working',
-      actor: 'scheduler',
-    });
+    await claim(root.taskId, (first.task as TaskRecord).version, 2);
     const second = await turn(root.taskId, 2, bad);
     expect(second.task?.status).toBe('failed');
   });
@@ -502,7 +490,7 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     const root = await driveToWorking(await newRoot());
     const out = await applyTurnOutcome(tdb(), {
       taskId: root.taskId,
-      turnId: `wf-task-turn:${root.taskId}:1`,
+      turnId: turnIdFor(root.taskId, 1),
       turnNumber: 1,
       intent: { kind: 'fan_out', children: [{ title: 'C', goal: 'G', owner: 'worker-1' }] },
       budgets,
@@ -538,12 +526,7 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
           to: 'queued',
           actor: 'scheduler',
         });
-        await applyTransition(tdb(), {
-          taskId: c.task_id,
-          expectedVersion: queued.version,
-          to: 'working',
-          actor: 'scheduler',
-        });
+        await claim(c.task_id, queued.version, 1);
         await turn(c.task_id, 1, { kind: 'complete', result: RESULT });
       }
     }
@@ -560,12 +543,7 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
 
     // Round two: the parent works again and fans out a fresh pair. Before the per-round join key,
     // this round's wake collided with round one's signal row and the parent stayed blocked forever.
-    await applyTransition(tdb(), {
-      taskId: root.taskId,
-      expectedVersion: (parent[0] as { version: number }).version,
-      to: 'working',
-      actor: 'scheduler',
-    });
+    await claim(root.taskId, (parent[0] as { version: number }).version, 2);
     await turn(root.taskId, 2, {
       kind: 'fan_out',
       children: [1, 2].map((i) => ({ title: `R2-${i}`, goal: `G${i}`, owner: `worker-${i}` })),
@@ -600,7 +578,7 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     // The turn ends in a denied fan-out → blocked(budget_exhausted) → the pending raise absorbs.
     await applyTurnOutcome(tdb(), {
       taskId: root.taskId,
-      turnId: `wf-task-turn:${root.taskId}:1`,
+      turnId: turnIdFor(root.taskId, 1),
       turnNumber: 1,
       intent: { kind: 'fan_out', children: [{ title: 'C', goal: 'G', owner: 'worker-1' }] },
       budgets,
@@ -658,12 +636,7 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
         to: 'queued',
         actor: 'scheduler',
       });
-      await applyTransition(tdb(), {
-        taskId: c.task_id,
-        expectedVersion: queued.version,
-        to: 'working',
-        actor: 'scheduler',
-      });
+      await claim(c.task_id, queued.version, 1);
       await turn(c.task_id, 1, { kind: 'complete', result: RESULT });
     }
     const woken = await db.$client.unsafe(
@@ -728,6 +701,302 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(woke).toEqual({ delivered: true, woke: true });
   });
 
+  describe('a budget escalation binds on the park, not just on the status', () => {
+    const ESCALATING = workforceBudgetsSchema.parse({
+      subtree: { usd: 0.1 },
+      execution: { estimateUsdPerTurn: 1, onBudgetExhausted: 'block_and_escalate' },
+    });
+    const DENIAL = {
+      scopeKind: 'root',
+      scopeId: 'subtree',
+      ceiling: { kind: 'usd', limit: 0.1 },
+      consumed: 0.2,
+    };
+
+    async function record(tx: TenantDb, taskId: string): Promise<TaskRecord> {
+      const rows = (await tx
+        .select(schema.workforceTasks)
+        .where(eq(schema.workforceTasks.taskId, taskId))) as TaskRecord[];
+      return rows[0] as TaskRecord;
+    }
+
+    /** Deny a CHILD's dispatch under `block_and_escalate`, holding the caller's locks first. */
+    async function denyChild(childTaskId: string): Promise<void> {
+      await tdb().transaction(async (tx) => {
+        const child = await lockRootFirst(tx, await record(tx, childTaskId));
+        await applyBudgetExhausted(tx, child, DENIAL, ESCALATING, { actor: 'system' });
+      });
+    }
+
+    async function rowOf(taskId: string): Promise<Record<string, unknown>> {
+      const rows = await db.$client.unsafe(
+        `SELECT status, status_reason, version FROM workforce_tasks WHERE task_id = '${taskId}';`,
+      );
+      return rows[0] as Record<string, unknown>;
+    }
+
+    async function versionOf(taskId: string): Promise<number> {
+      return (await rowOf(taskId)).version as number;
+    }
+
+    /** Re-park a task that is `blocked` on something else, through the one door. */
+    async function reparkThroughAWorkingTurn(taskId: string): Promise<TaskRecord> {
+      const queued = await applyTransition(tdb(), {
+        taskId,
+        expectedVersion: await versionOf(taskId),
+        to: 'queued',
+        actor: 'scheduler',
+      });
+      return claim(taskId, queued.version, 2);
+    }
+
+    async function deferredEvents(taskId: string): Promise<number> {
+      const rows = await db.$client.unsafe(
+        `SELECT count(*)::int AS c FROM run_events WHERE run_id = '${taskId}' AND type = 'workforce.budget.escalation_deferred';`,
+      );
+      return (rows[0] as { c: number }).c;
+    }
+
+    /** root -> fan-out -> [c1, c2], parent parked on the join. */
+    async function fanOutTwo(): Promise<{ root: TaskRecord; children: string[] }> {
+      const root = await driveToWorking(await newRoot());
+      await turn(root.taskId, 1, {
+        kind: 'fan_out',
+        children: [1, 2].map((i) => ({ title: `S${i}`, goal: `G${i}`, owner: `worker-${i}` })),
+      });
+      const rows = (await db.$client.unsafe(
+        `SELECT task_id FROM workforce_tasks WHERE parent_task_id = '${root.taskId}' ORDER BY task_id;`,
+      )) as unknown as { task_id: string }[];
+      return { root, children: rows.map((r) => r.task_id) };
+    }
+
+    it('the fan-out join survives it, and still completes', async () => {
+      const { root, children } = await fanOutTwo();
+      const parkedBefore = await rowOf(root.taskId);
+
+      // A child's dispatch is denied. Escalating the root here would move it out of
+      // `awaiting_children`, and the fan-in would then find no park to answer and never write the
+      // join signal at all — the join simply gone, the children orphaned.
+      await denyChild(children[0] as string);
+      expect(await rowOf(root.taskId)).toEqual(parkedBefore);
+      expect(await deferredEvents(root.taskId)).toBe(1);
+
+      // The join still closes: the denied child ends terminal through the cascade, the other
+      // completes its turn, and the parent wakes with one signal.
+      await cancelTaskCascade(tdb(), { taskId: children[0] as string, actor: 'user' });
+      const second = (await db.$client.unsafe(
+        `SELECT version FROM workforce_tasks WHERE task_id = '${children[1]}';`,
+      )) as unknown as { version: number }[];
+      const queued = await applyTransition(tdb(), {
+        taskId: children[1] as string,
+        expectedVersion: (second[0] as { version: number }).version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+      await claim(children[1] as string, queued.version, 1);
+      await turn(children[1] as string, 1, { kind: 'complete', result: RESULT });
+
+      expect((await rowOf(root.taskId)).status).toBe('queued');
+      const joinSignals = await db.$client.unsafe(
+        `SELECT count(*)::int AS c FROM workforce_task_signals WHERE task_id = '${root.taskId}' AND kind = 'child_completed';`,
+      );
+      expect(joinSignals[0]?.c).toBe(1);
+    });
+
+    it('a dependency park survives it, and the dependency wake still answers it', async () => {
+      const { root, children } = await fanOutTwo();
+      // Re-park the root on a DEPENDENCY: its exit is the scheduler's wake scan, whose predicate is
+      // the park itself — an escalation out of it leaves that predicate forever.
+      const working = await reparkThroughAWorkingTurn(root.taskId);
+      await applyTransition(tdb(), {
+        taskId: root.taskId,
+        expectedVersion: working.version,
+        to: 'blocked',
+        reason: 'awaiting_dependency',
+        actor: 'scheduler',
+      });
+      const parkedBefore = await rowOf(root.taskId);
+
+      await denyChild(children[0] as string);
+      expect(await rowOf(root.taskId)).toEqual(parkedBefore);
+      expect(await deferredEvents(root.taskId)).toBe(1);
+
+      const woke = await deliverSignal(tdb(), {
+        taskId: root.taskId,
+        kind: 'dependency_completed',
+        signalKey: `deps:${root.taskId}`,
+        actor: 'scheduler',
+      });
+      expect(woke).toEqual({ delivered: true, woke: true });
+    });
+
+    it('a review park survives it, and the verdict still decides the task', async () => {
+      const { root, children } = await fanOutTwo();
+      const w = await reparkThroughAWorkingTurn(root.taskId);
+      await applyTurnOutcome(tdb(), {
+        taskId: root.taskId,
+        turnId: turnIdFor(root.taskId, 2),
+        turnNumber: 2,
+        intent: { kind: 'request_review', reviewer: 'reviewer-1' },
+        budgets: NO_BUDGETS,
+      });
+      expect(w.status).toBe('working');
+      const parkedBefore = await rowOf(root.taskId);
+      expect(parkedBefore).toMatchObject({
+        status: 'waiting_for_review',
+        status_reason: 'review_pending',
+      });
+
+      // The verdict route refuses any task outside `waiting_for_review`, so an escalation here
+      // leaves the review permanently undecidable.
+      await denyChild(children[0] as string);
+      expect(await rowOf(root.taskId)).toEqual(parkedBefore);
+      expect(await deferredEvents(root.taskId)).toBe(1);
+
+      const review = (await db.$client.unsafe(
+        `SELECT id FROM workforce_reviews WHERE task_id = '${root.taskId}';`,
+      )) as unknown as { id: string }[];
+      const accepted = await applyReviewVerdict(tdb(), NO_BUDGETS, {
+        reviewId: review[0]?.id as string,
+        verdict: 'accept',
+        actor: 'reviewer-1',
+      });
+      expect(accepted.status).toBe('completed');
+    });
+
+    it('an approval park survives it, and the decision still wakes the task', async () => {
+      const { root, children } = await fanOutTwo();
+      const w = await reparkThroughAWorkingTurn(root.taskId);
+      await applyTurnOutcome(tdb(), {
+        taskId: root.taskId,
+        turnId: turnIdFor(root.taskId, 2),
+        turnNumber: 2,
+        intent: { kind: 'request_approval', question: 'Proceed?', timeoutMs: 60_000 },
+        budgets: NO_BUDGETS,
+      });
+      expect(w.status).toBe('working');
+      const parkedBefore = await rowOf(root.taskId);
+
+      await denyChild(children[0] as string);
+      expect(await rowOf(root.taskId)).toEqual(parkedBefore);
+      expect(await deferredEvents(root.taskId)).toBe(1);
+
+      const approvals = (await db.$client.unsafe(
+        `SELECT id FROM workforce_approvals WHERE task_id = '${root.taskId}';`,
+      )) as unknown as { id: string }[];
+      await decideApproval(tdb(), {
+        approvalId: approvals[0]?.id as string,
+        decision: 'approve',
+        decidedBy: 'user',
+      });
+      expect((await rowOf(root.taskId)).status).toBe('queued');
+    });
+
+    it('a SELF escalation hands back the row the escalation left, not the pre-escalation one', async () => {
+      const root = await driveToWorking(await newRoot());
+      // A pending operator override the turn boundary would absorb if it read a stale `blocked`.
+      await deliverSignal(tdb(), {
+        taskId: root.taskId,
+        kind: 'manual_unblock',
+        signalKey: 'op-override',
+        actor: 'user',
+      });
+      // root == task: the denial blocks it AND escalates it in one transaction. Reporting the
+      // pre-escalation row made the follow-up absorption present a spent version, and the whole
+      // turn transaction aborted on the conflict — every re-execution the same way.
+      const out = await applyTurnOutcome(tdb(), {
+        taskId: root.taskId,
+        turnId: turnIdFor(root.taskId, 1),
+        turnNumber: 1,
+        intent: { kind: 'fan_out', children: [{ title: 'C', goal: 'G', owner: 'worker-1' }] },
+        budgets: ESCALATING,
+      });
+      expect(out.task?.status).toBe('waiting_for_user');
+      expect((await rowOf(root.taskId)).version).toBe(out.task?.version);
+    });
+  });
+
+  it('a turn applies only over its OWN claim — a stale body cannot overwrite the successor', async () => {
+    const root = await driveToWorking(await newRoot());
+    // The reaper believes this turn is dead and re-queues it; a fresh dispatch claims the same turn
+    // number under a NEW id. The first body was never actually stopped.
+    const requeued = await applyTransition(tdb(), {
+      taskId: root.taskId,
+      expectedVersion: root.version,
+      to: 'queued',
+      reason: 'tool_error',
+      actor: 'scheduler',
+      queueReason: 'turn_reaped',
+    });
+    await applyTransition(tdb(), {
+      taskId: root.taskId,
+      expectedVersion: requeued.version,
+      to: 'working',
+      actor: 'scheduler',
+      turnId: 'wf-task-turn:successor',
+    });
+
+    // The stale body arrives with its own (now superseded) claim id.
+    await expect(
+      applyTurnOutcome(tdb(), {
+        taskId: root.taskId,
+        turnId: turnIdFor(root.taskId, 1),
+        turnNumber: 1,
+        intent: { kind: 'complete', result: RESULT },
+        budgets: NO_BUDGETS,
+      }),
+    ).rejects.toThrow(TurnStateError);
+    const untouched = await db.$client.unsafe(
+      `SELECT status, turns_used FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(untouched[0]).toMatchObject({ status: 'working', turns_used: 0 });
+
+    // The successor, presenting the claim it actually holds, applies.
+    const applied = await applyTurnOutcome(tdb(), {
+      taskId: root.taskId,
+      turnId: 'wf-task-turn:successor',
+      turnNumber: 1,
+      intent: { kind: 'complete', result: RESULT },
+      budgets: NO_BUDGETS,
+    });
+    expect(applied.task?.status).toBe('completed');
+  });
+
+  it('a manual_unblock declines a deadline park instead of livelocking against it', async () => {
+    const root = await newRoot();
+    const queued = await applyTransition(tdb(), {
+      taskId: root.taskId,
+      expectedVersion: root.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    const parked = await applyTransition(tdb(), {
+      taskId: root.taskId,
+      expectedVersion: queued.version,
+      to: 'blocked',
+      reason: 'deadline_exceeded',
+      actor: 'scheduler',
+    });
+
+    // The deadline is an absolute fact on the row: waking the task only lets the next reserve pass
+    // re-park it against the same instant, journaling a fresh park every tick forever.
+    const delivery = await deliverSignal(tdb(), {
+      taskId: root.taskId,
+      kind: 'manual_unblock',
+      signalKey: 'op-unblock',
+      actor: 'user',
+    });
+    expect(delivery).toEqual({ delivered: true, woke: false });
+    const row = await db.$client.unsafe(
+      `SELECT status, status_reason, version FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(row[0]).toMatchObject({
+      status: 'blocked',
+      status_reason: 'deadline_exceeded',
+      version: parked.version,
+    });
+  });
+
   it('cancel cascades root-first; a working descendant is signalled, never killed', async () => {
     const root = await driveToWorking(await newRoot());
     await turn(root.taskId, 1, {
@@ -745,12 +1014,7 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       to: 'queued',
       actor: 'scheduler',
     });
-    await applyTransition(tdb(), {
-      taskId: c0.task_id,
-      expectedVersion: q0.version,
-      to: 'working',
-      actor: 'scheduler',
-    });
+    await claim(c0.task_id, q0.version, 1);
 
     const outcome = await cancelTaskCascade(tdb(), { taskId: root.taskId, actor: 'user' });
     expect(outcome.cancelled).toContain(root.taskId);

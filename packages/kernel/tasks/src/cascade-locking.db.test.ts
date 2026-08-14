@@ -15,9 +15,10 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { applyTurnOutcome } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
-import { workforceBudgetsSchema } from './budget.js';
+import { authorizeTurn, releaseTurnReservation, workforceBudgetsSchema } from './budget.js';
 import { cancelTaskCascade } from './control.js';
 import { createRootTask } from './create-task.js';
+import { ensureWorkforceRuntime } from './runtime.js';
 import { deliverSignal } from './signals.js';
 import {
   forTenant,
@@ -62,17 +63,30 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
 
   const tdb = () => forTenant(db, TENANT_A);
 
+  /** The dispatch id a turn claims under — the same id its application then presents. */
+  function turnIdFor(taskId: string, turnNumber: number): string {
+    return `wf-task-turn:${taskId}:${turnNumber}`;
+  }
+
   function turn(taskId: string, turnNumber: number, intent: unknown) {
     return applyTurnOutcome(tdb(), {
       taskId,
-      turnId: `wf-task-turn:${taskId}:${turnNumber}`,
+      turnId: turnIdFor(taskId, turnNumber),
       turnNumber,
       intent,
       budgets: NO_BUDGETS,
     });
   }
 
-  async function driveTo(taskId: string, to: 'queued' | 'working'): Promise<TaskRecord> {
+  /**
+   * `to: 'working'` STAMPS the claim with the dispatching turn's own id, exactly as `#claimTurn`
+   * does — an application refuses to apply over a claim it does not own.
+   */
+  async function driveTo(
+    taskId: string,
+    to: 'queued' | 'working',
+    turnNumber = 1,
+  ): Promise<TaskRecord> {
     const rows = (await db.$client.unsafe(
       `SELECT version FROM workforce_tasks WHERE task_id = '${taskId}';`,
     )) as unknown as { version: number }[];
@@ -81,6 +95,7 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
       expectedVersion: (rows[0] as { version: number }).version,
       to,
       actor: 'scheduler',
+      ...(to === 'working' ? { turnId: turnIdFor(taskId, turnNumber) } : {}),
     });
   }
 
@@ -127,7 +142,7 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
     const leaf = await childOf(middle);
     // The middle task back into execution: its join is real, but this suite needs it mid-turn.
     await driveTo(middle, 'queued');
-    await driveTo(middle, 'working');
+    await driveTo(middle, 'working', 2);
     return { root: rootTask.taskId, middle, leaf };
   }
 
@@ -155,6 +170,74 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
       release();
       await session;
     };
+  }
+
+  /**
+   * Hold ONE budget-ledger row's lock on a separate session. The row must already exist for a
+   * `FOR UPDATE` to hold anything, so the caller materializes the scope set first.
+   */
+  async function holdLedgerRow(scopeKind: string, scopeId: string): Promise<() => Promise<void>> {
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let taken: () => void = () => {};
+    const acquired = new Promise<void>((resolve) => {
+      taken = resolve;
+    });
+    const session = holder.$client.begin(async (sql) => {
+      const rows =
+        await sql`SELECT id FROM workforce_budget_ledger WHERE scope_kind = ${scopeKind} AND scope_id = ${scopeId} FOR UPDATE`;
+      if (rows.length === 0) throw new Error(`no ${scopeKind} ledger row for ${scopeId} to hold`);
+      taken();
+      await held;
+    });
+    await acquired;
+    return async () => {
+      release();
+      await session;
+    };
+  }
+
+  /** Materialize a task's canonical ledger scope rows without reserving anything. */
+  async function materializeLedgerScopes(taskId: string, rootTaskId: string): Promise<void> {
+    await tdb().transaction(async (tx) => {
+      await releaseTurnReservation(tx, NO_BUDGETS, {
+        taskId,
+        rootTaskId,
+        workforceId: 'wf',
+        department: null,
+        estimateUsd: 0,
+      });
+    });
+  }
+
+  /**
+   * A claim transaction shaped exactly like the dispatcher's `#claimTurn`: the runtime row, then
+   * the task row's compare-and-swap, then the ledger rows in canonical scope order.
+   */
+  async function claimTurnFor(taskId: string, rootTaskId: string): Promise<void> {
+    const rows = (await db.$client.unsafe(
+      `SELECT version FROM workforce_tasks WHERE task_id = '${taskId}';`,
+    )) as unknown as { version: number }[];
+    const expectedVersion = (rows[0] as { version: number }).version;
+    await tdb().transaction(async (tx) => {
+      await ensureWorkforceRuntime(tx, 'wf');
+      await applyTransition(tx, {
+        taskId,
+        expectedVersion,
+        to: 'working',
+        actor: 'scheduler',
+        turnId: turnIdFor(taskId, 1),
+      });
+      await authorizeTurn(tx, NO_BUDGETS, {
+        taskId,
+        rootTaskId,
+        workforceId: 'wf',
+        department: null,
+        estimateUsd: 0,
+      });
+    });
   }
 
   /** Backends currently waiting on a lock — how the suite knows an operation has parked. */
@@ -202,6 +285,45 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
     expect(await statusOf(middle)).toBe('cancelled');
     expect(await statusOf(leaf)).toBe('cancelled');
     expect(await statusOf(root)).toBe('cancelled');
+  });
+
+  it('a cancelling turn and a descendant claim QUEUE: the turn takes no ledger row before its task locks', async () => {
+    const { root, middle, leaf } = await threeDeep();
+    await driveTo(leaf, 'queued');
+    // The leaf's own scope rows have to EXIST for a third session to hold one of them.
+    await materializeLedgerScopes(leaf, root);
+    // The middle task's turn will absorb this cancel, so its plan cascades DOWN into the leaf.
+    await deliverSignal(tdb(), {
+      taskId: middle,
+      kind: 'cancel',
+      signalKey: `cancel:${middle}`,
+      actor: 'user',
+    });
+
+    // The claim parks on its FIRST ledger row (task scope, canonical rank 0) holding the leaf's
+    // TASK row — the wrong-order half of the cycle is now armed and waiting.
+    const releaseLedger = await holdLedgerRow('task', leaf);
+    const claim = claimTurnFor(leaf, root);
+    await waitForBlocked(1);
+
+    // The cancelling turn wants that same leaf task row. Taking the subtree's ledger rows first
+    // (settle, then cascade) makes this tasks -> ledger -> tasks: the claim then wants the `root:`
+    // ledger row the turn is sitting on, Postgres finds the cycle, and one of them is killed — the
+    // cancel 500s having cancelled nothing, or the turn dies leaking its reservation.
+    const cancellingTurn = turn(middle, 2, { kind: 'complete', result: RESULT });
+    await waitForBlocked(2);
+
+    await releaseLedger();
+    await expect(claim).resolves.toBeUndefined();
+    await expect(cancellingTurn).resolves.toBeDefined();
+
+    expect(await statusOf(middle)).toBe('cancelled');
+    // The leaf won its claim, so the cascade signalled it rather than cancelling it mid-turn.
+    expect(await statusOf(leaf)).toBe('working');
+    const signalled = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_task_signals WHERE task_id = '${leaf}' AND kind = 'cancel';`,
+    );
+    expect(signalled[0]?.c).toBe(1);
   });
 
   it('a cancel racing the reserve pass completes the cascade instead of throwing it away', async () => {

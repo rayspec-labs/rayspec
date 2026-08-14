@@ -71,6 +71,8 @@ async function seedPendingApproval(orgId: string) {
     expectedVersion: queued.version,
     to: 'working',
     actor: 'scheduler',
+    // The claim carries the id the application below presents: a turn applies only over its own.
+    turnId: 't1',
   });
   await applyTurnOutcome(tdb, {
     taskId: task.taskId,
@@ -100,6 +102,8 @@ async function seedPendingReview(orgId: string) {
     expectedVersion: queued.version,
     to: 'working',
     actor: 'scheduler',
+    // The claim carries the id the application below presents: a turn applies only over its own.
+    turnId: 't1',
   });
   await applyTurnOutcome(tdb, {
     taskId: task.taskId,

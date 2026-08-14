@@ -22,19 +22,24 @@
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * Task rows are locked ROOT-FIRST: a task's ancestors before the task, the task before its
  * descendants, ties inside a level broken by task id. An operation takes the locks on its way UP
- * (`lockRootFirst`) BEFORE its first transition, and `cancelDescendants` takes the ones on its way
+ * (`lockRootFirst`) BEFORE its first transition, and `lockDescendants` takes the ones on its way
  * DOWN in the same order. Two operations whose row sets overlap therefore acquire the intersection
  * in the same sequence and QUEUE instead of deadlocking — an operator cancel holding a parent waits
  * for the completing child's turn to finish, rather than the two waiting on each other until
  * Postgres kills one (which turned a cancel into a 500 that did nothing, and a turn into a leaked
  * reservation). A single-row transition needs no pre-lock: it holds one row and wants nothing else,
- * so it can never be half of a cycle.
+ * so it can never be half of a cycle — `SINGLE_ROW_INTENTS` is where a turn claims that exemption.
  *
  * Rank against the other row types this engine locks: workforce_runtime -> workforce_tasks ->
- * workforce_budget_ledger (established by the dispatcher's claim transaction).
+ * workforce_budget_ledger (established by the dispatcher's claim transaction). BOTH halves of the
+ * task order are taken before the FIRST LEDGER ROW, not merely before the first transition: a turn
+ * that will cascade knows its plan before it settles, so it takes the descendant locks up front
+ * rather than reaching back down for them with ledger rows already in hand — which is a
+ * tasks -> ledger -> tasks acquisition, and closes a cycle against any concurrent claim that shares
+ * the subtree's `root:` ledger row.
  */
 import { schema, type TenantDb } from '@rayspec/db';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import { probeSpend, settleTurn, type WorkforceBudgets } from './budget.js';
@@ -45,11 +50,18 @@ import { deterministicChildTaskId } from './ids.js';
 import {
   invalidIntentPlan,
   planTurnOutcome,
+  type TurnIntent,
   type TurnPlan,
   turnIntentSchema,
 } from './intent-applier.js';
 import { isJoinSatisfied, joinPolicySchema } from './join.js';
-import { absorbPendingWakes, consumePendingCancels, deliverSignal } from './signals.js';
+import {
+  absorbPendingWakes,
+  consumePendingCancels,
+  deliverSignal,
+  escalationTargetsPark,
+  peekPendingCancels,
+} from './signals.js';
 import { isTaskStatus, isTerminalStatus } from './status.js';
 
 /**
@@ -99,6 +111,29 @@ export class TurnStateError extends Error {
     this.taskId = taskId;
   }
 }
+
+/**
+ * The intents whose application touches exactly ONE task row: a transition on the task itself and
+ * nothing else. Every other intent reaches a SECOND row — the parent it fans in to
+ * (`afterTaskTerminal`), the root it escalates to, the descendants it cascades over — and so must
+ * take the root-first locks before its first write. The module header's own rule is that a
+ * single-row transition needs no pre-lock; honouring it is what keeps a yield from serializing
+ * every other turn in the subtree on the root row.
+ *
+ * Classified by INTENT, not by plan, because the locks have to be taken before the plan is
+ * computed. That is sound because the planner cannot widen one of these three: a valid `yield`
+ * plans `yield`, a valid `request_approval` plans `request_approval`, and a valid `request_review`
+ * plans `request_review` or `review_rounds_exhausted` — all four single-row. The ONE thing that
+ * overrides an intent is a pending cancel, which is why the caller checks for one before trusting
+ * this set. A malformed intent is not in it either (its tool-error fate can fail the task, which
+ * fans in). Kept EXPLICIT rather than inferred, so a new intent kind has to be classified
+ * deliberately.
+ */
+const SINGLE_ROW_INTENTS: ReadonlySet<TurnIntent['kind']> = new Set([
+  'yield',
+  'request_approval',
+  'request_review',
+]);
 
 export interface ApplyTurnInput {
   readonly taskId: string;
@@ -207,6 +242,41 @@ export async function afterTaskTerminal(tx: TenantDb, task: TaskRecord): Promise
   });
 }
 
+/**
+ * The claim a turn applies must be the claim that turn TOOK. `#claimTurn` stamps the dispatching
+ * workflow's own id on the `queued -> working` transition row, and the latest such row IS the
+ * current claim — the same read `#claimTurn` performs before it runs a handler.
+ *
+ * A mismatch means the row was re-queued and re-claimed under this body's feet: the reaper acts on
+ * workflows the engine merely BELIEVES are dead, and a CANCELLED workflow is not a stopped body.
+ * Applying this turn's intent over the successor's claim would settle away the successor's
+ * reservation and overwrite the state it is building, so it is a typed refusal — not a no-op that
+ * would report the turn as landed.
+ */
+async function assertClaimOwnership(tx: TenantDb, input: ApplyTurnInput): Promise<void> {
+  const claimRows = (await tx
+    .select(schema.workforceTaskTransitions)
+    .where(
+      and(
+        eq(schema.workforceTaskTransitions.taskId, input.taskId),
+        eq(schema.workforceTaskTransitions.toStatus, 'working'),
+      ),
+    )
+    .orderBy(
+      desc(schema.workforceTaskTransitions.createdAt),
+      desc(schema.workforceTaskTransitions.id),
+    )
+    .limit(1)) as (typeof schema.workforceTaskTransitions.$inferSelect)[];
+  const claimedBy = claimRows[0]?.turnId ?? null;
+  if (claimedBy !== input.turnId) {
+    throw new TurnStateError(
+      input.taskId,
+      `a live claim held by turn '${claimedBy ?? '(unstamped)'}' rather than by this turn ` +
+        `'${input.turnId}'`,
+    );
+  }
+}
+
 /** Owners along the ancestry — the cycle-rejection input, read from rows, never from promises. */
 async function ancestorOwners(tx: TenantDb, task: TaskRecord): Promise<string[]> {
   const ids = Array.isArray(task.ancestryPath) ? (task.ancestryPath as string[]) : [];
@@ -236,15 +306,32 @@ export async function applyTurnOutcome(
       );
     if (receipt.length > 0) return { alreadyApplied: true, plan: null, task: null };
 
-    // Root-first BEFORE the first transition (see the module header): this turn may fan in to its
-    // parent, escalate to its root, or cascade into its descendants, and the cancel cascade walks
-    // the same rows from the top.
-    const task = await lockRootFirst(tx, await readTask(tx, input.taskId));
+    const snapshot = await readTask(tx, input.taskId);
+    if (snapshot.status !== 'working') {
+      throw new TurnStateError(input.taskId, `status '${snapshot.status}'`);
+    }
+    // The row is `working`, but is it working under THIS turn's claim? The reaper re-queues a turn
+    // whose workflow the engine merely BELIEVES is dead (a cancelled workflow is not a stopped
+    // body), so a stale execution can arrive here over a successor's live claim — and applying its
+    // intent would settle away the successor's reservation and overwrite its state. The claim row
+    // carries the id that took it; compare, exactly as `#claimTurn` does before it runs a handler.
+    await assertClaimOwnership(tx, input);
+
+    // THE TASK LOCKS, BEFORE the first write and before any other row type (see the module header).
+    // Which locks this turn needs follows from the intent, and only a pending cancel can turn one
+    // of the three single-row intents into something that touches a second row — so the cancels are
+    // PEEKED here (a read takes no lock) and consumed below, under the locks.
+    const parsedIntent = turnIntentSchema.safeParse(input.intent);
+    const singleRow =
+      parsedIntent.success &&
+      SINGLE_ROW_INTENTS.has(parsedIntent.data.kind) &&
+      (await peekPendingCancels(tx, input.taskId)).length === 0;
+    const task = singleRow ? snapshot : await lockRootFirst(tx, snapshot);
     if (task.status !== 'working') {
       throw new TurnStateError(input.taskId, `status '${task.status}'`);
     }
 
-    const cancels = await consumePendingCancels(tx, input.taskId);
+    const cancels = singleRow ? [] : await consumePendingCancels(tx, input.taskId);
     const pendingCancel = cancels.length > 0;
 
     // One prior tool_error re-queue means THIS offense is terminal (one retry, then failed).
@@ -266,7 +353,6 @@ export async function applyTurnOutcome(
       .select(schema.workforceDelegations, { id: schema.workforceDelegations.id })
       .where(eq(schema.workforceDelegations.parentTaskId, input.taskId));
 
-    const parsedIntent = turnIntentSchema.safeParse(input.intent);
     const plan: TurnPlan = parsedIntent.success
       ? planTurnOutcome({
           taskOwner: task.owner,
@@ -282,6 +368,15 @@ export async function applyTurnOutcome(
           intent: parsedIntent.data,
         })
       : invalidIntentPlan(parsedIntent.error.message, priorToolError);
+
+    if (plan.kind === 'cancelled') {
+      // The cascade below reaches DOWN into the descendants, and settlement reaches into the
+      // LEDGER. The rank is workforce_tasks -> workforce_budget_ledger, so the descendant locks
+      // come first: a concurrent claim for a descendant holds that task row and wants the shared
+      // `root:` ledger row, and taking the ledger first here closes the cycle on it. The plan is
+      // already known, so nothing forces this acquisition to wait for the settlement.
+      await lockDescendants(tx, task);
+    }
 
     // Settle FIRST: the task-row roll-up takes the task lock (canonical order), then the ledger.
     const actualUsd = input.actualUsd ?? 0;
@@ -602,6 +697,19 @@ async function applyToolErrorFate(
  * A denied dispatch/fan-out blocks with the typed reason, journals the exceedance, and applies the
  * declared exhaustion policy (`block_and_escalate` additionally parks the ROOT for a human, with a
  * payload naming what would unblock it).
+ *
+ * PRECONDITION: the caller holds this task's root-first locks (`lockRootFirst`) before calling.
+ * The escalation writes a SECOND task row — the root — so the lock order is the caller's to
+ * establish; taking it here instead would make the acquisition order depend on which branch runs.
+ *
+ * The escalation is REASON-MATCHED (`escalationTargetsPark`, signals.ts). A root parked on a
+ * mechanism — a fan-out join, a dependency, a pending review or approval — is NOT moved: the
+ * transition would erase the very exit that park is waiting for, and the mechanism would then have
+ * nowhere to land (the fan-in bails and never writes the join signal at all). Such an escalation is
+ * DEFERRED, and deferral loses nothing: the root cannot resume without re-authorizing at its next
+ * dispatch, an unchanged ceiling denies it again, and at that point the root itself sits in
+ * `blocked(budget_exhausted)` — a park the escalation may target. A root that never needs another
+ * turn never needed the escalation. The deferral is journaled so the wait is visible meanwhile.
  */
 export async function applyBudgetExhausted(
   tx: TenantDb,
@@ -630,58 +738,81 @@ export async function applyBudgetExhausted(
       },
     },
   ]);
-  if (budgets.execution.onBudgetExhausted === 'block_and_escalate') {
-    const rootId = task.rootTaskId;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      const root = rootId === task.taskId ? blocked : await readTask(tx, rootId);
-      if (root.status !== 'blocked' && root.status !== 'waiting_for_review') break;
-      try {
-        await applyTransition(tx, {
-          taskId: root.taskId,
-          expectedVersion: root.version,
-          to: 'waiting_for_user',
-          actor: 'system',
-        });
-        await appendTaskEvents(tx, root.taskId, [
-          {
-            type: 'workforce.budget.exceeded',
-            payload: {
-              taskId: root.taskId,
-              escalatedFrom: task.taskId,
-              scopeKind: denial.scopeKind,
-              scopeId: denial.scopeId,
-              unblock: 'raise the ceiling and send a budget_raised signal',
-            },
+  if (budgets.execution.onBudgetExhausted !== 'block_and_escalate') return blocked;
+
+  const rootId = task.rootTaskId;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    // Re-read every attempt, this task included: the transition above moved it, and a retry that
+    // presented the pre-transition version could never win the compare-and-swap.
+    const root = await readTask(tx, rootId);
+    if (!escalationTargetsPark(root.status, root.statusReason)) {
+      // A root that has already ended needs no human and will never dispatch again — there is
+      // nothing to escalate and nothing a deferral could later surface, so it is not journaled as
+      // one.
+      if (isTaskStatus(root.status) && isTerminalStatus(root.status)) break;
+      await appendTaskEvents(tx, root.taskId, [
+        {
+          type: 'workforce.budget.escalation_deferred',
+          payload: {
+            taskId: root.taskId,
+            escalatedFrom: task.taskId,
+            scopeKind: denial.scopeKind,
+            scopeId: denial.scopeId,
+            park: { status: root.status, statusReason: root.statusReason },
+            surfacesWhen:
+              'the park is released by its own mechanism and the next dispatch is denied again',
           },
-        ]);
-        break;
-      } catch (err) {
-        // ONLY a lost version race retries; anything else is a real defect and must stay loud.
-        if (!(err instanceof TaskVersionConflictError)) throw err;
-      }
+        },
+      ]);
+      break;
+    }
+    try {
+      const escalated = await applyTransition(tx, {
+        taskId: root.taskId,
+        expectedVersion: root.version,
+        to: 'waiting_for_user',
+        actor: 'system',
+      });
+      await appendTaskEvents(tx, root.taskId, [
+        {
+          type: 'workforce.budget.exceeded',
+          payload: {
+            taskId: root.taskId,
+            escalatedFrom: task.taskId,
+            scopeKind: denial.scopeKind,
+            scopeId: denial.scopeId,
+            unblock: 'raise the ceiling and send a budget_raised signal',
+          },
+        },
+      ]);
+      // When the escalated root IS this task, the escalation moved the row the caller is about to
+      // act on — hand back what the row became, never the pre-escalation snapshot.
+      return rootId === task.taskId ? escalated : blocked;
+    } catch (err) {
+      // ONLY a lost version race retries; anything else is a real defect and must stay loud.
+      if (!(err instanceof TaskVersionConflictError)) throw err;
     }
   }
-  return blocked;
+  return rootId === task.taskId ? await readTask(tx, task.taskId) : blocked;
 }
 
 /**
- * Cancel every non-terminal descendant, root-first; working ones absorb a cancel signal.
+ * Take the DOWNWARD half of THE TASK LOCK ORDER (see the module header): every non-terminal
+ * descendant of `origin`, `FOR UPDATE`, in the canonical root-first order (ancestry depth, then
+ * task id — the tiebreaker matters: two cascades over overlapping subtrees must agree on the order
+ * of same-depth siblings). Returns the rows re-read UNDER their locks.
  *
  * The whole subtree read is a DELIBERATE full scan — a cascade that saw only a page of its
  * descendants would leave the rest running under a cancelled ancestor, so this one is bounded by
  * the subtree's own size, not by a LIMIT.
  *
- * Every row this will act on is locked FIRST, in the canonical root-first order (ancestry depth,
- * then task id — the tiebreaker matters: two cascades over overlapping subtrees must agree on the
- * order of same-depth siblings). The act-on decision is then made from the LOCKED row, never from
- * the snapshot: a descendant that ended its turn between the two reads is cancelled rather than
- * signalled into a task that will never run again.
+ * Split out from `cancelDescendants` because the LOCKS and the WRITES have different deadlines: a
+ * turn that will cascade must take these task locks BEFORE it touches the ledger (tasks -> ledger
+ * is the rank), which is strictly earlier than the point the cascade itself runs. Re-locking rows
+ * this transaction already holds is free, so a caller that pre-locked simply passes through here a
+ * second time.
  */
-export async function cancelDescendants(
-  tx: TenantDb,
-  origin: TaskRecord,
-  actor: string,
-): Promise<{ cancelled: string[]; signalled: string[] }> {
+export async function lockDescendants(tx: TenantDb, origin: TaskRecord): Promise<TaskRecord[]> {
   const subtree = (await tx
     .select(schema.workforceTasks)
     .where(eq(schema.workforceTasks.rootTaskId, origin.rootTaskId))) as TaskRecord[];
@@ -709,6 +840,22 @@ export async function cancelDescendants(
     const row = rows[0];
     if (row) locked.push(row);
   }
+  return locked;
+}
+
+/**
+ * Cancel every non-terminal descendant, root-first; working ones absorb a cancel signal.
+ *
+ * Every row this will act on is locked FIRST (`lockDescendants`). The act-on decision is then made
+ * from the LOCKED row, never from the snapshot: a descendant that ended its turn between the two
+ * reads is cancelled rather than signalled into a task that will never run again.
+ */
+export async function cancelDescendants(
+  tx: TenantDb,
+  origin: TaskRecord,
+  actor: string,
+): Promise<{ cancelled: string[]; signalled: string[] }> {
+  const locked = await lockDescendants(tx, origin);
   const cancelled: string[] = [];
   const signalled: string[] = [];
   for (const desc of locked) {

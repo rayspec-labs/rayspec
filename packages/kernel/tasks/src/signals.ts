@@ -13,6 +13,11 @@
  * alone, on BOTH paths (delivery and turn-boundary absorption). A status-only match is what lets a
  * signal dissolve a park it says nothing about: a raised ceiling releasing a task waiting on a
  * dependency, an operator override dissolving a fan-out join. See `WAKES`.
+ *
+ * This module owns that park vocabulary for EVERY door, not just for signals: the budget
+ * escalation's door reads it through `escalationTargetsPark`. A rule enforced on one door and not
+ * the next is not a rule — the same status-only coarseness that let an override dissolve a join
+ * let an escalation dissolve it from the other side.
  */
 import { schema, type TenantDb } from '@rayspec/db';
 import { and, eq, isNull } from 'drizzle-orm';
@@ -60,13 +65,45 @@ interface Park {
 const STRUCTURAL_PARK: StatusReason = 'awaiting_children';
 
 /**
- * Every reason a `blocked` task may carry except the structural one — DERIVED from `REASON_RULES`,
- * so a newly declared blocked reason is operator-unblockable by construction and the exclusion
- * above stays the single explicit fact.
+ * The parks an operator's `manual_unblock` may NOT release. Two exclusions, for two different
+ * reasons:
+ *
+ *   - `awaiting_children` is the STRUCTURAL park above — an override changes no fact about the
+ *     children, and dissolving it destroys the join;
+ *   - `deadline_exceeded` is an ABSOLUTE fact on the row, not a condition an operator can answer
+ *     from here. A wake re-queues the task and the very next reserve pass re-parks it against the
+ *     same instant — a livelock that journals a fresh park every tick. Every OTHER blocked reason
+ *     has a real lever behind it (raise the ceiling, decide the approval, answer the clarification),
+ *     so the unblock that follows can actually succeed; this one has none, and an unblock that
+ *     "works" and immediately undoes itself is worse than one that honestly declines. The rescue
+ *     for a deadline-expired task is `cancel`.
+ */
+const NOT_OPERATOR_UNBLOCKABLE: readonly StatusReason[] = [STRUCTURAL_PARK, 'deadline_exceeded'];
+
+/**
+ * Every reason a `blocked` task may carry except those two — DERIVED from `REASON_RULES`, so a
+ * newly declared blocked reason is operator-unblockable by construction and the exclusions above
+ * stay the single explicit fact.
  */
 const OPERATOR_UNBLOCKABLE: readonly StatusReason[] = STATUS_REASONS.filter(
-  (reason) => reason !== STRUCTURAL_PARK && REASON_RULES[reason].includes('blocked'),
+  (reason) =>
+    !NOT_OPERATOR_UNBLOCKABLE.includes(reason) && REASON_RULES[reason].includes('blocked'),
 );
+
+/**
+ * Parks whose exit is a MECHANISM rather than a human: the fan-in join, the dependency wake, the
+ * verdict route, the approval decision. Each is released by a specific path that matches on the
+ * park itself, so a transition OUT of the park erases the exit — which is why no door may move a
+ * task sitting in one "for its own good". `STRUCTURAL_PARK` is the strongest member (its mechanism
+ * cannot even be re-armed); the rest are listed here so the rule binds on every door, not just on
+ * `WAKES`.
+ */
+const MECHANISM_PARK_REASONS: readonly StatusReason[] = [
+  STRUCTURAL_PARK,
+  'awaiting_dependency',
+  'review_pending',
+  'approval_pending',
+];
 
 /**
  * The PARK each kind answers. Reason-matched, so a signal releases only what its meaning speaks to:
@@ -98,15 +135,54 @@ const WAKES: Readonly<Record<SignalKind, readonly Park[]>> = Object.freeze({
   cancel: [],
 });
 
+/**
+ * The parks a BUDGET ESCALATION may transition (`applyBudgetExhausted`, apply-intents.ts). An
+ * escalation moves a ROOT to `waiting_for_user` so a human can raise the ceiling — legitimate only
+ * where the root is already waiting on a human, or on nothing at all. A `MECHANISM_PARK_REASONS`
+ * park must survive it: the transition erases the exit and the mechanism has nowhere to land (the
+ * fan-in bails and never writes its join signal; the dependency wake's scan predicate no longer
+ * matches; the verdict route refuses any task outside `waiting_for_review`). `waiting_for_review`
+ * is therefore absent as a status, exactly as it is absent from `WAKES`.
+ *
+ * The rule is `WAKES`' rule one door over: a park is released by what ANSWERS it, never by what
+ * merely arrives while it is open.
+ */
+const BUDGET_ESCALATION_PARKS: readonly Park[] = Object.freeze([
+  {
+    status: 'blocked',
+    reasons: [
+      // The reasonless block, plus every blocked reason whose exit is already a human.
+      null,
+      ...STATUS_REASONS.filter(
+        (reason) =>
+          REASON_RULES[reason].includes('blocked') && !MECHANISM_PARK_REASONS.includes(reason),
+      ),
+    ],
+  } satisfies Park,
+]);
+
 function isSignalKind(value: string): value is SignalKind {
   return (SIGNAL_KINDS as readonly string[]).includes(value);
 }
 
-/** Does this kind answer the park the task is actually sitting in? */
-function answersPark(kind: SignalKind, status: string, statusReason: string | null): boolean {
-  return WAKES[kind].some(
+/** Is the task's actual park — the (status, reason) pair — a member of this park set? */
+function matchesPark(parks: readonly Park[], status: string, statusReason: string | null): boolean {
+  return parks.some(
     (park) => park.status === status && park.reasons.some((reason) => reason === statusReason),
   );
+}
+
+/** Does this kind answer the park the task is actually sitting in? */
+function answersPark(kind: SignalKind, status: string, statusReason: string | null): boolean {
+  return matchesPark(WAKES[kind], status, statusReason);
+}
+
+/**
+ * May a budget escalation move a root out of the park it currently sits in? False for every
+ * mechanism-exit park, whose escalation the caller DEFERS instead (see `applyBudgetExhausted`).
+ */
+export function escalationTargetsPark(status: string, statusReason: string | null): boolean {
+  return matchesPark(BUDGET_ESCALATION_PARKS, status, statusReason);
 }
 
 export type SignalRecord = typeof schema.workforceTaskSignals.$inferSelect;
@@ -189,8 +265,32 @@ export async function deliverSignal(
 }
 
 /**
+ * READ the still-pending cancels without consuming or locking anything. The turn's final
+ * transaction asks this BEFORE it takes its task locks, because a pending cancel is what decides
+ * how many rows the turn will touch — and therefore which locks it must take. Consuming here
+ * instead would put a signal-row lock ahead of the task locks, inverting the order every cancel
+ * cascade takes (task rows first, then the cancel signal it delivers) and deadlocking against it.
+ *
+ * A cancel that lands between this read and the lock is simply one that arrived too late for this
+ * turn: it stays pending and the next turn boundary absorbs it, exactly as one arriving a moment
+ * later would.
+ */
+export async function peekPendingCancels(tx: TenantDb, taskId: string): Promise<SignalRecord[]> {
+  return (await tx
+    .select(schema.workforceTaskSignals)
+    .where(
+      and(
+        eq(schema.workforceTaskSignals.taskId, taskId),
+        eq(schema.workforceTaskSignals.kind, 'cancel'),
+        isNull(schema.workforceTaskSignals.consumedAt),
+      ),
+    )) as SignalRecord[];
+}
+
+/**
  * Consume the still-pending CANCEL signals for a task (marks consumed_at, returns them) — called
- * by the turn's final transaction so a pending `cancel` overrides the turn's own outcome. ONLY
+ * by the turn's final transaction, UNDER its task locks, so a pending `cancel` overrides the turn's
+ * own outcome without inverting the lock order (see `peekPendingCancels`). ONLY
  * cancels are consumed here: every other pending signal is left pending, because a wake-shaped
  * signal that arrived mid-turn must survive the turn boundary (a `budget_raised` delivered while
  * the task was `working` has to be able to wake the `blocked(budget_exhausted)` the turn is about

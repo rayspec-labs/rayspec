@@ -17,6 +17,7 @@ export {
   DELEGATION_STATUSES,
   type DelegationStatus,
   delegationStatusSchema,
+  lockDescendants,
   lockRootFirst,
   TurnStateError,
 } from './apply-intents.js';
@@ -128,6 +129,7 @@ export {
   type DeliverSignalInput,
   type DeliverSignalOutcome,
   deliverSignal,
+  escalationTargetsPark,
   SIGNAL_KINDS,
   type SignalKind,
   type SignalRecord,

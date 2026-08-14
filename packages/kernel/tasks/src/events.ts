@@ -48,6 +48,8 @@ export const WORKFORCE_EVENT_TYPES = [
   'workforce.budget.reserved',
   'workforce.budget.settled',
   'workforce.budget.exceeded',
+  /** An exceedance whose escalation the root's park refuses; it surfaces at the next denial. */
+  'workforce.budget.escalation_deferred',
   'workforce.control.paused',
   'workforce.control.resumed',
   'workforce.control.halted',
