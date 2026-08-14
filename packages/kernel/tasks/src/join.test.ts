@@ -76,16 +76,21 @@ describe('isJoinSatisfied (escalation)', () => {
 });
 
 describe('isJoinSatisfied (all)', () => {
-  it('holds only when every child is terminal — failed and cancelled count as terminal', () => {
+  it('holds only when every BOUND child is terminal — failed and cancelled count as terminal', () => {
+    const bound = { policy: 'all', childTaskIds: ['a', 'b'] } as const;
     const done = [fakeChild('a', 'completed', 'x'), fakeChild('b', 'failed', 'y')];
-    expect(isJoinSatisfied({ policy: 'all' }, done)).toBe(true);
-    expect(isJoinSatisfied({ policy: 'all' }, [...done, fakeChild('c', 'working', 'z')])).toBe(
-      false,
-    );
+    expect(isJoinSatisfied(bound, done)).toBe(true);
+    expect(isJoinSatisfied(bound, [...done, fakeChild('c', 'working', 'z')])).toBe(true);
+    expect(
+      isJoinSatisfied(bound, [fakeChild('a', 'completed', 'x'), fakeChild('b', 'working', 'y')]),
+    ).toBe(false);
   });
 
-  it('an empty child set satisfies nothing', () => {
+  it('a binding-less park waits on nothing and is never satisfied — there is no whole-child reading', () => {
+    // The compat fallback is deliberately gone: a second join semantic beside the real one is the
+    // very bug the binding fixes, kept alive for rows that do not exist on this branch.
     expect(isJoinSatisfied({ policy: 'all' }, [])).toBe(false);
+    expect(isJoinSatisfied({ policy: 'all' }, [fakeChild('a', 'completed', 'x')])).toBe(false);
   });
 
   it('a BOUND join waits on its own round and ignores every other child of the parent', () => {

@@ -140,5 +140,6 @@ export function emptySnapshot(task: TaskRecord): WorkforceReadSnapshot {
     departmentTasks: [],
     workforceState: null,
     pendingReview: null,
+    activeTeamIds: [],
   };
 }

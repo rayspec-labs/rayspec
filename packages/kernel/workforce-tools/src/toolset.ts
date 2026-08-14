@@ -100,7 +100,11 @@ const requestApprovalArgsSchema = z.strictObject({
   options: z.array(z.string().min(1)).optional(),
 });
 
-const clarificationArgsSchema = z.strictObject({ question: z.string().min(1) });
+const clarificationArgsSchema = z.strictObject({
+  // Same cap as a message body: the question is written into the message table the turn-context
+  // query reads back, so an uncapped question is the message cap with an extra step.
+  question: z.string().min(1).max(MAX_MESSAGE_BODY_CHARS),
+});
 
 const escalateArgsSchema = z.strictObject({
   reason: z.enum(ESCALATION_REASONS),
@@ -233,9 +237,11 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
       spec: {
         name: 'delegate_task',
         description:
-          'End this turn by delegating one or more child tasks. Targets: employee:<id>, ' +
-          'department:<id> (its manager answers), team:<id> (its lead answers). All children ' +
-          'fan out together and this task waits for all of them.',
+          'End this turn by delegating one or more child tasks. Targets: employee:<id>' +
+          (employee.role === 'orchestrator'
+            ? ', department:<id> (its manager answers), team:<id> (its lead answers)'
+            : ' and department:<id> (its manager answers), within your own scope') +
+          '. All children fan out together and this task waits for all of them.',
         parameters: {
           type: 'object',
           properties: {
@@ -272,7 +278,7 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
             target = parseDelegationTarget(entry.target);
             resolved = resolveDelegationTarget(config, target);
             if (employee.role === 'manager') {
-              assertManagerMayTarget(config, employee, target, resolved);
+              assertManagerMayTarget(config, employee, target, resolved, snapshot.activeTeamIds);
             }
           } catch (err) {
             if (err instanceof WorkforceToolError) refuseEnding(args, err);
@@ -333,7 +339,7 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
       spec: {
         name: 'create_subtask',
         description:
-          'Create a child task owned by a member of your department (does not end the turn). ' +
+          'Create a child task owned by a member of your own department (does not end the turn). ' +
           'Returns the task id. The row is written when the turn ends.',
         parameters: {
           type: 'object',
@@ -351,9 +357,12 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
       handler: (args) => {
         assertTurnOpen();
         const spec = createSubtaskArgsSchema.parse(args);
+        // A buffering tool cannot record a turn-ending refusal (there is no ending to fate), so the
+        // refusal simply surfaces to the model as a typed tool error and the turn continues — the
+        // caller may still end it correctly. What must NOT happen is the create landing anyway.
         const target = parseDelegationTarget(spec.target);
         const resolved = resolveDelegationTarget(config, target);
-        assertManagerMayTarget(config, employee, target, resolved);
+        assertManagerMayTarget(config, employee, target, resolved, snapshot.activeTeamIds);
         const taskId = collector.recordCreatedChild({
           title: spec.title,
           goal: spec.goal,
@@ -497,7 +506,9 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
           'reply.',
         parameters: {
           type: 'object',
-          properties: { question: { type: 'string', minLength: 1 } },
+          properties: {
+            question: { type: 'string', minLength: 1, maxLength: MAX_MESSAGE_BODY_CHARS },
+          },
           required: ['question'],
           additionalProperties: false,
         },

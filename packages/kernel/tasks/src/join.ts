@@ -41,9 +41,10 @@ export const fanOutJoinPolicySchema = z.strictObject({
  *                   policy declared — the verdict path's only way to know a ceiling that lives in a
  *                   document the kernel deliberately cannot read.
  *
- * `childTaskIds` is OPTIONAL for one reason only: a parent parked by a fan-out written before the
- * ids were recorded carries `{policy:'all'}` alone, and must keep the behaviour it parked under
- * rather than strand on a binding it never had. Every fan-out this engine writes names its children.
+ * `childTaskIds` stays OPTIONAL in the SCHEMA (the column is jsonb and a row could carry anything)
+ * but is not optional in MEANING: every fan-out this engine writes names its children, and a park
+ * that names none waits on nothing. There is deliberately no whole-child fallback — that reading is
+ * the bug the binding exists to fix.
  */
 export const joinPolicySchema = z.strictObject({
   policy: z.enum(['all', 'escalation', 'review']),
@@ -77,14 +78,13 @@ export function isJoinSatisfied(policy: JoinPolicy, children: readonly TaskRecor
   const terminal = (c: TaskRecord): boolean => isTaskStatus(c.status) && isTerminalStatus(c.status);
   switch (policy.policy) {
     case 'all': {
-      if (policy.childTaskIds === undefined) {
-        // A pre-binding park: the whole child set is what it was parked against.
-        return children.length > 0 && children.every(terminal);
-      }
+      // NO fallback for a binding-less `all`: every fan-out this engine writes names its children,
+      // and a second join semantic living beside the real one is a standing trap — the whole-child
+      // reading is exactly the bug the binding exists to fix, kept alive for rows that do not
+      // exist. A park with no ids waits on nothing and is not satisfied.
       const terminalIds = new Set(children.filter(terminal).map((c) => c.taskId));
-      return (
-        policy.childTaskIds.length > 0 && policy.childTaskIds.every((id) => terminalIds.has(id))
-      );
+      const bound = policy.childTaskIds ?? [];
+      return bound.length > 0 && bound.every((id) => terminalIds.has(id));
     }
     case 'escalation':
       // Never consulted through the awaiting_children branch (an escalated park is answered by

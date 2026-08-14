@@ -27,6 +27,16 @@ import { z } from 'zod';
 import { type DelegationChildSpec, delegationChildSpecSchema } from './create-task.js';
 import { fanOutJoinPolicySchema, type JoinPolicy } from './join.js';
 
+/**
+ * Message caps. A body is DATA addressed to a later turn's context, and up to
+ * `CONTEXT_MESSAGE_LIMIT` of them render verbatim into a dispatch's prompt — so an uncapped body
+ * or an uncapped count is a way to make a later turn's context whatever the writer wants it to be,
+ * at a size nothing else in the turn is allowed to reach. The numbers are deliberately generous
+ * enough that no honest hand-off notices them.
+ */
+export const MAX_MESSAGE_BODY_CHARS = 4_000;
+export const MAX_MESSAGES_PER_TURN = 20;
+
 /** The closed structured-result contract. A result that fails this never completes a task. */
 export const workerResultSchema = z.strictObject({
   status: z.enum(['completed', 'partial', 'failed', 'needs_clarification']),
@@ -102,9 +112,14 @@ export const turnIntentSchema = z.discriminatedUnion('kind', [
     requiredChanges: z.array(z.string().min(1)).default([]),
   }),
   z.strictObject({
-    /** Ask the requesting party a typed question; the task parks until a `user_reply` answers it. */
+    /**
+     * Ask the requesting party a typed question; the task parks until a `user_reply` answers it.
+     * The question is written into the SAME message table the turn-context query reads back, so it
+     * answers to the same body cap `send_message` does — otherwise the message cap is bypassable by
+     * asking a very long question.
+     */
     kind: z.literal('request_clarification'),
-    question: z.string().min(1),
+    question: z.string().min(1).max(MAX_MESSAGE_BODY_CHARS),
   }),
   z.strictObject({
     /**

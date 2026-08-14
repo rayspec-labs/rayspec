@@ -50,6 +50,8 @@ import { appendTaskEvents } from './events.js';
 import { deterministicChildTaskId } from './ids.js';
 import {
   invalidIntentPlan,
+  MAX_MESSAGE_BODY_CHARS,
+  MAX_MESSAGES_PER_TURN,
   planTurnOutcome,
   type TurnPlan,
   turnIntentSchema,
@@ -99,15 +101,9 @@ export const turnReviewPolicySchema = z.strictObject({
 
 export type TurnReviewPolicy = z.output<typeof turnReviewPolicySchema>;
 
-/**
- * Message caps. A body is DATA addressed to a later turn's context, and up to
- * `CONTEXT_MESSAGE_LIMIT` of them render verbatim into a dispatch's prompt — so an uncapped body
- * or an uncapped count is a way to make a later turn's context whatever the writer wants it to be,
- * at a size nothing else in the turn is allowed to reach. The numbers are deliberately generous
- * enough that no honest hand-off notices them.
- */
-export const MAX_MESSAGE_BODY_CHARS = 4_000;
-export const MAX_MESSAGES_PER_TURN = 20;
+// The caps live in the pure planner (the lower module) so the intent schema can enforce the same
+// body limit on `request_clarification`; re-exported here so the package surface is unchanged.
+export { MAX_MESSAGE_BODY_CHARS, MAX_MESSAGES_PER_TURN } from './intent-applier.js';
 
 /**
  * The strict shape of the trusted message channel (`ApplyTurnInput.messages`) — validated exactly
@@ -450,6 +446,13 @@ export async function applyTurnOutcome(
     // applied on the failed attempt is therefore applied AGAIN on the retry, with no key to
     // collide on. Children have always been guarded this way; messages had not been, so a turn
     // that malformed its ending sent its notes twice.
+    //
+    // ONE EXCEPTION, stated rather than papered over: a BUDGET DENIAL inside the branches below
+    // overrides the plan after this predicate was computed, so a turn whose creates were denied
+    // still applies its messages. That is deliberate — the denial is not a refusal of the TURN
+    // (the turn ran and ended legitimately, its receipt is written, and it is not re-run under a
+    // new turn number), so its messages are not duplicated by anything. The predicate keys on the
+    // PLAN because the plan is what decides whether this turn will be replayed.
     const effectsApply =
       plan.kind !== 'cancelled' &&
       plan.kind !== 'fail' &&

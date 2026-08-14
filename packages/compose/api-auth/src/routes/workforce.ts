@@ -36,6 +36,7 @@ import {
   haltWorkforce,
   isReservedWorkforceSegment,
   isTaskStatus,
+  operatorSignalKindSchema,
   pauseWorkforce,
   RESERVED_WORKFORCE_SEGMENTS,
   ReviewAlreadyDecidedError,
@@ -45,7 +46,6 @@ import {
   resolveWorkforceBudgets,
   resumeWorkforce,
   reviewVerdictSchema,
-  signalKindSchema,
   TASK_STATUSES,
   TaskNotFoundError,
   WorkforceDrainTimeoutError,
@@ -105,7 +105,11 @@ function workforceIdParam(c: Context<AppEnv>): string {
 }
 
 const signalRequestSchema = z.strictObject({
-  kind: signalKindSchema,
+  // OPERATOR kinds only. A mechanism kind posted from here would assert by hand the very fact its
+  // park is waiting to observe — releasing a fan-out join with the children still running, or an
+  // escalation park its child never answered. Those parks are structural on every engine door;
+  // this is the same door from outside. Anything else is a typed 400.
+  kind: operatorSignalKindSchema,
   payload: z.record(z.string(), z.unknown()).optional(),
   /**
    * The delivery's idempotency key. Supply one to make re-sends collapse (the engine dedupes on

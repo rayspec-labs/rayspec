@@ -374,6 +374,34 @@ describe('/v1/workforce (the task-engine surface)', () => {
     expect(await dup.json()).toEqual({ delivered: false, woke: false });
   });
 
+  it('the route accepts OPERATOR kinds only — a mechanism kind is a typed 400', async () => {
+    const a = await principal('wf-kinds@example.test', 'Org WF Kinds');
+    const task = await seedRoot(a.orgId);
+    // Each of these is written by the path that establishes the fact it reports. Accepting them
+    // here would let a caller assert that fact by hand and release the park waiting to observe it.
+    for (const kind of [
+      'child_completed',
+      'escalated',
+      'review_verdict',
+      'approval_decided',
+      'cancel',
+    ]) {
+      const res = await jsonRequest(h.app, 'POST', `/v1/workforce/tasks/${task.taskId}/signal`, {
+        body: { kind },
+        headers: { authorization: `Bearer ${a.token}` },
+      });
+      expect(res.status, kind).toBe(400);
+    }
+    // The three an operator genuinely holds the lever for are still accepted.
+    for (const kind of ['manual_unblock', 'budget_raised', 'user_reply']) {
+      const res = await jsonRequest(h.app, 'POST', `/v1/workforce/tasks/${task.taskId}/signal`, {
+        body: { kind, signalKey: `op-${kind}` },
+        headers: { authorization: `Bearer ${a.token}` },
+      });
+      expect(res.status, kind).toBe(202);
+    }
+  });
+
   it('an operator override RECORDS but does not release a structural park, through the route', async () => {
     const a = await principal('wf-structural@example.test', 'Org WF Structural');
     const tdb = forTenant(h.db, a.orgId);

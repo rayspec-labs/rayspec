@@ -47,6 +47,31 @@ export const SIGNAL_KINDS = [
 
 export type SignalKind = (typeof SIGNAL_KINDS)[number];
 
+/**
+ * The signal kinds an OPERATOR may post from outside the engine.
+ *
+ * The rest of `SIGNAL_KINDS` are MECHANISM kinds: `child_completed` is written by the fan-in,
+ * `escalated` by the escalation reply, `review_verdict`/`approval_decided` by their own decision
+ * paths, `cancel` by the cascade. Each is the exit of a park that answers to it, and each is
+ * written by the code that establishes the fact it reports. Accepting them from a request lets a
+ * caller assert that fact by hand — posting `child_completed` releases a fan-out join with its
+ * children still running, and `escalated` releases an escalation park whose child never answered,
+ * which is precisely what the structural-park rule spends its effort preventing on every internal
+ * door. A gate enforced on the engine's doors and not on the HTTP one is not a gate.
+ *
+ * The three here are the ones an operator genuinely holds the lever for: they raised the ceiling,
+ * they decided to proceed, they answered the question.
+ */
+export const OPERATOR_SIGNAL_KINDS = [
+  'manual_unblock',
+  'budget_raised',
+  'user_reply',
+] as const satisfies readonly SignalKind[];
+
+export type OperatorSignalKind = (typeof OPERATOR_SIGNAL_KINDS)[number];
+
+export const operatorSignalKindSchema = z.enum(OPERATOR_SIGNAL_KINDS);
+
 export const signalKindSchema = z.enum(SIGNAL_KINDS);
 
 /** One park a wake kind answers: a status, and the reasons within it (`null` = the reasonless park). */

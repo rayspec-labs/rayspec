@@ -88,17 +88,27 @@ export function resolveDelegationTarget(
 
 /**
  * The manager restriction. Throws unless the RESOLVED owner is a member of the manager's own
- * department or a member of a team the manager leads. A `team:` target is refused outright — see
- * the module header: it resolves to the team's lead, which is the manager themselves for a team
- * they lead (self-delegation) and a forbidden owner for one they do not. (Orchestrators are
- * unrestricted; workers and reviewers carry no delegation tool at all, so this is never consulted
- * for them.)
+ * department, or a member of a team the manager leads AND THIS TASK IS THAT TEAM'S WORK.
+ *
+ * `activeTeamIds` carries the second condition, read from the delegation chain (snapshot.ts): the
+ * teams whose `team:` delegation opened this task or an ancestor. Without it the led-team grant was
+ * unbounded — a manager who leads a cross-functional team could delegate to any of its members from
+ * ANY task, on any subject, and charge it to that member's department. Teams are deliberately
+ * cross-functional, so the fix is not to force members to share a department; it is to let the
+ * grant exist only where the team is why the work is happening. Outside team work a manager
+ * targets their own department, exactly as the description says.
+ *
+ * A `team:` target is refused outright — see the module header: it resolves to the team's lead,
+ * which is the manager themselves for a team they lead (self-delegation) and a forbidden owner for
+ * one they do not. (Orchestrators are unrestricted; workers and reviewers carry no delegation tool
+ * at all, so this is never consulted for them.)
  */
 export function assertManagerMayTarget(
   config: WorkforceConfig,
   manager: WorkforceEmployeeConfig,
   target: DelegationTarget,
   resolved: ResolvedTarget,
+  activeTeamIds: readonly string[] = [],
 ): void {
   if (target.kind === 'team') {
     throw new ManagerTargetForbiddenError(
@@ -111,7 +121,9 @@ export function assertManagerMayTarget(
   const ownDepartment =
     manager.department !== null ? config.departments.get(manager.department) : undefined;
   if (ownDepartment?.members.includes(resolved.owner)) return;
-  const ledTeams = [...config.teams.values()].filter((team) => team.lead === manager.id);
-  if (ledTeams.some((team) => team.members.includes(resolved.owner))) return;
+  const ledTeamsOnThisWork = [...config.teams.entries()].filter(
+    ([teamId, team]) => team.lead === manager.id && activeTeamIds.includes(teamId),
+  );
+  if (ledTeamsOnThisWork.some(([, team]) => team.members.includes(resolved.owner))) return;
   throw new ManagerTargetForbiddenError(manager.id, resolved.delegatedTo);
 }

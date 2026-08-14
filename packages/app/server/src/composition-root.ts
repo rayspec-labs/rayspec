@@ -2928,9 +2928,10 @@ async function deployDeclaredSpec(
     // surfaces as `forTenant`'s raw chokepoint throw here instead of the typed boot abort the
     // scheduler wiring below already produces for it. Same check, same message, taken earlier.
     await assertCronTenantBootable(db, config.cronTenantId);
-    const workforceGateDb = forTenant(db, config.cronTenantId);
-    await assertWorkforceSpecCompatible(workforceGateDb, effectiveSpec.workforce);
-    await releaseDepartedWorkforceDeclarations(workforceGateDb, effectiveSpec.workforce);
+    await assertWorkforceSpecCompatible(
+      forTenant(db, config.cronTenantId),
+      effectiveSpec.workforce,
+    );
   }
 
   // ── deploy() + the post-deploy boot GATES, under one committed-DDL catch ────────────────
@@ -3166,6 +3167,18 @@ async function deployDeclaredSpec(
       // with a scheduled fire for the same instant (firingKey is instant-truncated). Generic control
       // surface — the fire route, the deterministic tests, and the CEO demo all use it.
       fireCronNow = (name: string, instant?: Date) => cronScheduler.fireNow(name, instant);
+    }
+
+    // ── RELEASE the declaration markers of workforces this document retired — LAST, and only on a
+    //    boot that got this far. The release is a commit that DISARMS the redeploy gate for those
+    //    ids, so running it beside the gate meant an abort anywhere later in this try left the
+    //    markers already cleared: the next boot of the same removing document would then sail past
+    //    a gate that had refused it a moment earlier. Deploy first, disarm after.
+    if (config.cronTenantId) {
+      await releaseDepartedWorkforceDeclarations(
+        forTenant(db, config.cronTenantId),
+        effectiveSpec.workforce,
+      );
     }
   } catch (e) {
     // Everything above this point runs on a schema that may already carry this boot's product DDL.

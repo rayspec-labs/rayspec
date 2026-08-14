@@ -140,9 +140,33 @@ describe('delegation targets and the manager restriction', () => {
       assertManagerMayTarget(config, mgr, target, resolved);
     };
     expect(() => may('employee:dev')).not.toThrow(); // own department member
-    expect(() => may('employee:qa')).not.toThrow(); // member of a team they lead
     expect(() => may('employee:copy')).toThrow(ManagerTargetForbiddenError); // another department
     expect(() => may('department:growth')).toThrow(ManagerTargetForbiddenError);
+    // `qa` is a member of the team mgr LEADS but sits outside mgr's department. Outside that
+    // team's work the grant does not exist: teams are cross-functional, so an unscoped led-team
+    // grant is unbounded cross-department delegation — and cross-department budget charging —
+    // from a lint-clean document.
+    expect(() => may('employee:qa')).toThrow(ManagerTargetForbiddenError);
+  });
+
+  it('the led-team grant exists exactly where the task IS that team’s work', () => {
+    const mgr = config.employees.get('mgr');
+    if (!mgr) throw new Error('fixture');
+    const may = (raw: string, activeTeamIds: readonly string[]) => {
+      const target = parseDelegationTarget(raw);
+      const resolved = resolveDelegationTarget(config, target);
+      assertManagerMayTarget(config, mgr, target, resolved, activeTeamIds);
+    };
+    // Inside the team's own subtree — the delegation chain records `team:fix_team` — the member is
+    // reachable. `activeTeamIds` is read off that chain, never from anything the model says.
+    expect(() => may('employee:qa', ['fix_team'])).not.toThrow();
+    // A DIFFERENT team's work grants nothing, and neither does a team mgr does not lead.
+    expect(() => may('employee:qa', ['other_team'])).toThrow(ManagerTargetForbiddenError);
+    // Own-department members stay reachable everywhere, team work or not.
+    expect(() => may('employee:dev', [])).not.toThrow();
+    expect(() => may('employee:dev', ['fix_team'])).not.toThrow();
+    // And team work never widens the grant beyond the team's own members.
+    expect(() => may('employee:copy', ['fix_team'])).toThrow(ManagerTargetForbiddenError);
   });
 
   it('`team:` is the orchestrator seat’s move — a manager may not target one, led or not', () => {

@@ -21,7 +21,7 @@ import {
   type TaskRecord,
   windowStartFor,
 } from '@rayspec/tasks';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
 /** Page caps — a snapshot is a bounded view, never a partition materialized into memory. */
 export const SNAPSHOT_SUBTREE_LIMIT = 100;
@@ -65,6 +65,12 @@ export interface WorkforceReadSnapshot {
   readonly workforceState: WorkforceStateView | null;
   /** The pending review this task exists to decide (review tasks only). */
   readonly pendingReview: { readonly reviewId: string; readonly round: number } | null;
+  /**
+   * The teams whose `team:` DELEGATION opened this task or one of its ancestors — the durable fact
+   * that says "this task IS team work", read off the delegation chain rather than inferred. A
+   * manager's authority over a led team's members is scoped to it (see `assertManagerMayTarget`).
+   */
+  readonly activeTeamIds: readonly string[];
 }
 
 const TERMINAL = ['completed', 'failed', 'cancelled'];
@@ -232,5 +238,33 @@ export async function buildWorkforceSnapshot(
     };
   }
 
-  return { task, parentTask, subtreeTasks, departmentTasks, workforceState, pendingReview };
+  // THE TEAM-WORK FACT. A `team:` delegation records its original target verbatim on the delegation
+  // row, so the chain from this task up to the root says which team's work this is — and nothing
+  // the model says can change it.
+  const ancestry = Array.isArray(task.ancestryPath) ? (task.ancestryPath as string[]) : [];
+  const chainIds = [task.taskId, ...ancestry];
+  const teamRows = (await tdb
+    .select(schema.workforceDelegations, {
+      delegatedTo: schema.workforceDelegations.delegatedTo,
+    })
+    .where(inArray(schema.workforceDelegations.childTaskId, chainIds))) as Array<{
+    delegatedTo: string;
+  }>;
+  const activeTeamIds = [
+    ...new Set(
+      teamRows
+        .map((row) => /^team:(.+)$/.exec(row.delegatedTo)?.[1])
+        .filter((id): id is string => id !== undefined),
+    ),
+  ].sort();
+
+  return {
+    task,
+    parentTask,
+    subtreeTasks,
+    departmentTasks,
+    workforceState,
+    pendingReview,
+    activeTeamIds,
+  };
 }
