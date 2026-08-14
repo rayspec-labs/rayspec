@@ -14,7 +14,7 @@
  * from there).
  */
 import { schema, type TenantDb } from '@rayspec/db';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { afterTaskTerminal, cancelDescendants, lockRootFirst } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import { TaskNotFoundError, TaskRowCorruptError, TaskVersionConflictError } from './errors.js';
@@ -124,16 +124,17 @@ export class WorkforceDrainTimeoutError extends Error {
   }
 }
 
+/** Counted IN the database — a drain poll must not materialize the working set to size it. */
 async function workingCount(tdb: TenantDb, workforceId: string): Promise<number> {
-  const rows = await tdb
-    .select(schema.workforceTasks, { taskId: schema.workforceTasks.taskId })
+  const rows = (await tdb
+    .select(schema.workforceTasks, { count: sql<number>`count(*)::int` })
     .where(
       and(
         eq(schema.workforceTasks.workforceId, workforceId),
         eq(schema.workforceTasks.status, 'working'),
       ),
-    );
-  return rows.length;
+    )) as Array<{ count: number }>;
+  return rows[0]?.count ?? 0;
 }
 
 export interface PauseWorkforceInput {

@@ -73,7 +73,7 @@ import {
   type WorkforceBudgets,
   workforceBudgetsSchema,
 } from '@rayspec/tasks';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 
 /** The DBOS queue turn workflows run on (worker-concurrency capped like the run queue). */
 export const WORKFORCE_TURNS_QUEUE = 'workforce-turns';
@@ -172,7 +172,27 @@ const CONSOLE_LOGGER: TaskSchedulerLogger = {
   error: (m) => console.error(m),
 };
 
-const PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+/**
+ * The dispatch rank, in SQL so a BOUNDED candidate scan pages in the order the pass dispatches in —
+ * ordering by the `priority` text itself would put 'low' ahead of 'urgent', and a page taken in the
+ * wrong order is a low-priority task jumping an urgent one that sat just outside it. A priority
+ * outside the closed set sorts with `normal`, the same default the creation schema applies.
+ */
+const PRIORITY_RANK_SQL = sql`case ${schema.workforceTasks.priority}
+  when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 when 'low' then 3 else 2 end`;
+
+/**
+ * Per-tick scan bounds. A pass is a BOUNDED unit of work over an unbounded table: it takes a page
+ * in a deterministic order and the next tick (5s later) takes the rest — the alternative is one
+ * pass materializing a tenant's whole task partition into process memory. Counts and cascades that
+ * would be WRONG when truncated are aggregated in the database or documented as deliberate full
+ * scans instead of being capped.
+ */
+const RESERVE_SCAN_LIMIT = 500;
+const SWEEP_SCAN_LIMIT = 500;
+/** How much of a task's own history a turn handler receives as context, newest kept. */
+const CONTEXT_SIGNAL_LIMIT = 200;
+const CONTEXT_MESSAGE_LIMIT = 200;
 
 const EMPTY_BUDGETS = workforceBudgetsSchema.parse({});
 
@@ -301,31 +321,45 @@ export class DbosTaskScheduler {
     await this.#promotePlanned(tdb, outcome);
     await this.#wakeDependencySatisfied(tdb);
 
-    const queued = (await tdb
+    // One page of candidates, ordered in the DATABASE by the same key the pass dispatches in
+    // (priority band, then oldest queued) — so the bound cannot let a low-priority row jump ahead
+    // of an urgent one that happened to sit outside the page.
+    const candidates = (await tdb
       .select(schema.workforceTasks)
-      .where(eq(schema.workforceTasks.status, 'queued'))) as TaskRecord[];
-    if (queued.length === 0) return outcome;
-    const working = (await tdb
-      .select(schema.workforceTasks)
-      .where(eq(schema.workforceTasks.status, 'working'))) as TaskRecord[];
+      .where(eq(schema.workforceTasks.status, 'queued'))
+      .orderBy(
+        PRIORITY_RANK_SQL,
+        asc(schema.workforceTasks.queuedAt),
+        asc(schema.workforceTasks.taskId),
+      )
+      .limit(RESERVE_SCAN_LIMIT)) as TaskRecord[];
+    if (candidates.length === 0) return outcome;
+    // The concurrency counts are aggregated IN the database: a LIMIT here would understate the
+    // caps it feeds, and materializing every working row to count them is the unbounded read.
+    const workingGroups = (await tdb
+      .select(schema.workforceTasks, {
+        workforceId: schema.workforceTasks.workforceId,
+        department: schema.workforceTasks.department,
+        count: sql<number>`count(*)::int`,
+      })
+      .where(eq(schema.workforceTasks.status, 'working'))
+      .groupBy(schema.workforceTasks.workforceId, schema.workforceTasks.department)) as Array<{
+      workforceId: string | null;
+      department: string | null;
+      count: number;
+    }>;
 
     const workforceCount = new Map<string, number>();
     const departmentCount = new Map<string, number>();
-    for (const t of working) {
-      const wf = t.workforceId ?? '';
-      workforceCount.set(wf, (workforceCount.get(wf) ?? 0) + 1);
-      if (t.department !== null) {
-        const key = `${wf}/${t.department}`;
-        departmentCount.set(key, (departmentCount.get(key) ?? 0) + 1);
+    for (const g of workingGroups) {
+      const wf = g.workforceId ?? '';
+      workforceCount.set(wf, (workforceCount.get(wf) ?? 0) + g.count);
+      if (g.department !== null) {
+        departmentCount.set(`${wf}/${g.department}`, g.count);
       }
     }
 
     const budgetsCache = new Map<string, { paused: boolean; budgets: WorkforceBudgets }>();
-    const candidates = [...queued].sort(
-      (a, b) =>
-        (PRIORITY_RANK[a.priority] ?? 2) - (PRIORITY_RANK[b.priority] ?? 2) ||
-        (a.queuedAt?.getTime() ?? 0) - (b.queuedAt?.getTime() ?? 0),
-    );
 
     for (const task of candidates) {
       try {
@@ -446,7 +480,9 @@ export class DbosTaskScheduler {
   async #promotePlanned(tdb: TenantDb, outcome: { promoted: string[] }): Promise<void> {
     const planned = (await tdb
       .select(schema.workforceTasks)
-      .where(eq(schema.workforceTasks.status, 'planned'))) as TaskRecord[];
+      .where(eq(schema.workforceTasks.status, 'planned'))
+      .orderBy(asc(schema.workforceTasks.createdAt), asc(schema.workforceTasks.taskId))
+      .limit(RESERVE_SCAN_LIMIT)) as TaskRecord[];
     for (const task of planned) {
       try {
         const verdict = await this.#dependencyVerdict(tdb, task);
@@ -492,7 +528,9 @@ export class DbosTaskScheduler {
           eq(schema.workforceTasks.status, 'blocked'),
           eq(schema.workforceTasks.statusReason, 'awaiting_dependency'),
         ),
-      )) as TaskRecord[];
+      )
+      .orderBy(asc(schema.workforceTasks.createdAt), asc(schema.workforceTasks.taskId))
+      .limit(RESERVE_SCAN_LIMIT)) as TaskRecord[];
     for (const task of parked) {
       try {
         const verdict = await this.#dependencyVerdict(tdb, task);
@@ -607,7 +645,9 @@ export class DbosTaskScheduler {
     const reaped: string[] = [];
     const working = (await tdb
       .select(schema.workforceTasks)
-      .where(eq(schema.workforceTasks.status, 'working'))) as TaskRecord[];
+      .where(eq(schema.workforceTasks.status, 'working'))
+      .orderBy(asc(schema.workforceTasks.startedAt), asc(schema.workforceTasks.taskId))
+      .limit(SWEEP_SCAN_LIMIT)) as TaskRecord[];
     for (const task of working) {
       try {
         const claimRows = (await tdb
@@ -618,7 +658,12 @@ export class DbosTaskScheduler {
               eq(schema.workforceTaskTransitions.toStatus, 'working'),
             ),
           )
-          .orderBy(desc(schema.workforceTaskTransitions.createdAt))
+          // `id` breaks a created_at tie: two claim rows can share a timestamp, and "the latest
+          // claim" must be one row, not whichever the planner happened to return.
+          .orderBy(
+            desc(schema.workforceTaskTransitions.createdAt),
+            desc(schema.workforceTaskTransitions.id),
+          )
           .limit(1)) as (typeof schema.workforceTaskTransitions.$inferSelect)[];
         const turnId = claimRows[0]?.turnId;
         if (!turnId) continue; // no claim record — not this dispatcher's row to judge
@@ -680,6 +725,14 @@ export class DbosTaskScheduler {
     const myWorkflowId = DBOS.workflowID ?? taskTurnWorkflowId(job.taskId, job.turnNumber, -1);
     await DBOS.runStep(
       async () => {
+        // The payload is durable state a recovery replays, not a source of scope: every other path
+        // re-derives the tenant from the deps. Assert the two agree rather than binding a handle to
+        // whatever a payload happens to carry.
+        if (job.tenantId !== this.#deps.tenantId) {
+          throw new Error(
+            `turn workflow for task ${job.taskId} carries tenant ${job.tenantId} but this scheduler serves ${this.#deps.tenantId} — refusing to bind a handle to a payload-supplied scope. Fail-closed.`,
+          );
+        }
         const tdb = forTenant(this.#deps.db, job.tenantId);
         const claim = await this.#claimTurn(tdb, job, myWorkflowId);
         if (claim.kind !== 'claimed') return;
@@ -796,7 +849,10 @@ export class DbosTaskScheduler {
                 eq(schema.workforceTaskTransitions.toStatus, 'working'),
               ),
             )
-            .orderBy(desc(schema.workforceTaskTransitions.createdAt))
+            .orderBy(
+              desc(schema.workforceTaskTransitions.createdAt),
+              desc(schema.workforceTaskTransitions.id),
+            )
             .limit(1)) as (typeof schema.workforceTaskTransitions.$inferSelect)[];
           if (claimRows[0]?.turnId !== myWorkflowId) return { kind: 'noop' as const };
           // Recovery of OUR claim: the reservation exists, the turn_started entry exists —
@@ -877,7 +933,15 @@ export class DbosTaskScheduler {
     });
   }
 
-  /** Assemble the read-only handler context (protocol step 2's input). */
+  /**
+   * Assemble the read-only handler context (protocol step 2's input).
+   *
+   * The signal and message histories are BOUNDED to their newest entries and then presented oldest
+   * first: the wake that re-queued this task is the newest row, so the cap can never drop the entry
+   * a turn actually reasons from, and a long-lived task's history cannot grow the context without
+   * limit. The children read is a DELIBERATE full scan — a join merges over ALL of them, and a page
+   * of children would silently produce a partial result keyed by child id.
+   */
   async #assembleContext(tdb: TenantDb, task: TaskRecord): Promise<TaskTurnContext> {
     const children = (await tdb
       .select(schema.workforceTasks)
@@ -887,14 +951,14 @@ export class DbosTaskScheduler {
     );
     const signals = (await tdb
       .select(schema.workforceTaskSignals)
-      .where(
-        eq(schema.workforceTaskSignals.taskId, task.taskId),
-      )) as (typeof schema.workforceTaskSignals.$inferSelect)[];
+      .where(eq(schema.workforceTaskSignals.taskId, task.taskId))
+      .orderBy(desc(schema.workforceTaskSignals.createdAt), desc(schema.workforceTaskSignals.id))
+      .limit(CONTEXT_SIGNAL_LIMIT)) as (typeof schema.workforceTaskSignals.$inferSelect)[];
     const messages = (await tdb
       .select(schema.workforceMessages)
-      .where(
-        eq(schema.workforceMessages.taskId, task.taskId),
-      )) as (typeof schema.workforceMessages.$inferSelect)[];
+      .where(eq(schema.workforceMessages.taskId, task.taskId))
+      .orderBy(desc(schema.workforceMessages.createdAt), desc(schema.workforceMessages.id))
+      .limit(CONTEXT_MESSAGE_LIMIT)) as (typeof schema.workforceMessages.$inferSelect)[];
     return {
       task,
       childResults:
