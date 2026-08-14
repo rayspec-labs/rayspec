@@ -74,8 +74,11 @@ seeds the catalog):
 node examples/support-intake-chat/dev-boot.mjs        # serves on :8794, live mode
 ```
 
-This runs in the foreground — give the steps below a second shell. Stop it with `Ctrl-C`: the
-wrapper closes the HTTP server, drains the durable worker and ends the DB pool, then exits.
+This runs in the foreground — give the steps below a second shell. Stop it with `Ctrl-C` once it is up:
+the wrapper closes the HTTP server, drains the durable worker and ends the DB pool, then exits. Two
+things it does not cover: a request still in flight when you press it holds the exit until that request
+finishes (the port refuses new connections immediately), and a `Ctrl-C` during the boot itself arrives
+before the wrapper has registered its handler.
 
 The dev-boot seeds the ORG `00000000-0000-4000-8000-000000000043` and no user, so you cannot register
 your way into it: a `POST /v1/auth/register` carrying an `orgName` creates a DIFFERENT org (its

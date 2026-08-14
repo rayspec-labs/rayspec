@@ -768,14 +768,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unhandled-`'error'` report, with its frames, and exit 1. The address in the refusal is built from the
   host and port the entrypoint already resolved, never from the error object, because a listen error
   carries `address`/`port` for some codes only. (Issue #365.)
-- **`Ctrl-C` now stops the example dev-boot servers.** `examples/contract-intake/dev-boot.mjs`,
-  `examples/support-intake-chat/dev-boot.mjs` and `examples/support-ticket-triage/dev-boot.mjs` kept
-  running after `SIGINT` and after `SIGTERM` — still answering `/health` 200 — so a developer who
-  pressed `Ctrl-C` was left with a live server still holding its database pool and its durable worker.
+- **`Ctrl-C` now stops the example dev-boot servers once they are up.**
+  `examples/contract-intake/dev-boot.mjs`, `examples/support-intake-chat/dev-boot.mjs` and
+  `examples/support-ticket-triage/dev-boot.mjs` kept running after `SIGINT` and after `SIGTERM` —
+  still answering `/health` 200 — so a developer who pressed `Ctrl-C` was left with a live server
+  still holding its database pool and its durable worker.
   Each wrapper now owns its shutdown: it captures the `serve()` return value and, on `SIGINT`/`SIGTERM`,
   closes the HTTP server, awaits `server.close()` (which drains the durable worker, then ends the
   database pool) and exits `0` — the same wiring `packages/app/server/src/serve.ts` gives the shipped
   `rayspec-serve` entrypoint, which is why that entrypoint is not affected.
+  **Two bounds the handler does not remove**, both of them consequences of that same wiring rather than
+  of these wrappers. The exit runs inside `httpServer.close()`'s callback, and Node invokes that callback
+  only once every open connection has ended: the port stops accepting the moment the signal lands, but a
+  request still in flight holds the process until it finishes. And the handler is registered only after
+  the boot completes, so a `Ctrl-C` during the boot is not the wrapper's to answer — before its
+  dependencies install the handlers described next, the signal kills the process outright and the
+  graceful path never runs; from there until `serve()` returns it does nothing at all and the server
+  finishes coming up. `packages/app/server/src/serve.ts` behaves the same way in both cases.
   **Nothing in a dependency changed.** The wrappers registered no signal handler of their own, and the
   `SIGINT`/`SIGTERM` handlers their dependencies install each act only when no *other* listener is
   registered — `@openai/agents-core`'s tracing provider exits only when `process.listeners(sig).length`
