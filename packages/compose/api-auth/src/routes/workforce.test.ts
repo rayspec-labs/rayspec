@@ -85,6 +85,35 @@ async function seedPendingApproval(orgId: string) {
   return { task, approvalId: (approvals[0] as { id: string }).id };
 }
 
+/** Drive a seeded task to `working` and end its turn parked in review. */
+async function seedPendingReview(orgId: string) {
+  const tdb = forTenant(h.db, orgId);
+  const task = await seedRoot(orgId, 'Review subject');
+  const queued = await applyTransition(tdb, {
+    taskId: task.taskId,
+    expectedVersion: task.version,
+    to: 'queued',
+    actor: 'scheduler',
+  });
+  await applyTransition(tdb, {
+    taskId: task.taskId,
+    expectedVersion: queued.version,
+    to: 'working',
+    actor: 'scheduler',
+  });
+  await applyTurnOutcome(tdb, {
+    taskId: task.taskId,
+    turnId: 't1',
+    turnNumber: 1,
+    intent: { kind: 'request_review', reviewer: 'reviewer-1' },
+    budgets: NO_BUDGETS,
+  });
+  const reviews = await h.db.$client.unsafe(
+    `SELECT id FROM workforce_reviews WHERE task_id = '${task.taskId}';`,
+  );
+  return { task, reviewId: (reviews[0] as { id: string }).id };
+}
+
 describe('/v1/workforce (the task-engine surface)', () => {
   beforeAll(async () => {
     h = await createHarness({
@@ -171,11 +200,15 @@ describe('/v1/workforce (the task-engine surface)', () => {
     const { task, approvalId } = await seedPendingApproval(a.orgId);
 
     const res = await jsonRequest(h.app, 'POST', `/v1/workforce/approvals/${approvalId}/decide`, {
-      body: { decision: 'approve', decidedBy: 'wf-approve@example.test' },
+      body: { decision: 'approve' },
       headers: { authorization: `Bearer ${a.token}` },
     });
     expect(res.status).toBe(200);
-    expect((await res.json()).status).toBe('approved');
+    const decided = await res.json();
+    expect(decided.status).toBe('approved');
+    // Attribution is SERVER-derived from the verified principal — a body-asserted identity is
+    // rejected by the strict schema, so nobody can sign a decision as someone else.
+    expect(decided.decidedBy).toMatch(/^user:/);
     expect(kicks).toBe(1);
     const row = await h.db.$client.unsafe(
       `SELECT status FROM workforce_tasks WHERE task_id = '${task.taskId}';`,
@@ -183,10 +216,77 @@ describe('/v1/workforce (the task-engine surface)', () => {
     expect(row[0]?.status).toBe('queued');
 
     const rerun = await jsonRequest(h.app, 'POST', `/v1/workforce/approvals/${approvalId}/decide`, {
-      body: { decision: 'reject', decidedBy: 'wf-approve@example.test' },
+      body: { decision: 'reject' },
       headers: { authorization: `Bearer ${a.token}` },
     });
     expect(rerun.status).toBe(409);
+
+    const impersonation = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/approvals/${approvalId}/decide`,
+      {
+        body: { decision: 'approve', decidedBy: 'someone-else' },
+        headers: { authorization: `Bearer ${a.token}` },
+      },
+    );
+    expect(impersonation.status).toBe(400);
+  });
+
+  it('a review verdict resolves a parked review once (409 on the rerun) and the inbox is tenant-scoped', async () => {
+    const a = await principal('wf-review@example.test', 'Org WF Review');
+    const b = await principal('wf-review-b@example.test', 'Org WF Review B');
+    const { task, reviewId } = await seedPendingReview(a.orgId);
+    await seedPendingReview(b.orgId);
+
+    // The undecided-review inbox mirrors the approvals inbox: caller tenant only.
+    const inbox = await jsonRequest(h.app, 'GET', '/v1/workforce/reviews', {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(inbox.status).toBe(200);
+    const rows = (await inbox.json()) as Array<{ id: string; taskId: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.id).toBe(reviewId);
+
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/reviews/${reviewId}/verdict`, {
+      body: { verdict: 'accept' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ reviewId, taskStatus: 'completed' });
+    expect(kicks).toBe(1);
+    const row = await h.db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${task.taskId}';`,
+    );
+    expect(row[0]?.status).toBe('completed');
+
+    const rerun = await jsonRequest(h.app, 'POST', `/v1/workforce/reviews/${reviewId}/verdict`, {
+      body: { verdict: 'reject', reasons: ['too late'] },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(rerun.status).toBe(409);
+
+    // A foreign verdict is a uniform 404 — tenant B cannot even learn the review exists.
+    const foreign = await jsonRequest(h.app, 'POST', `/v1/workforce/reviews/${reviewId}/verdict`, {
+      body: { verdict: 'accept' },
+      headers: { authorization: `Bearer ${b.token}` },
+    });
+    expect(foreign.status).toBe(404);
+  });
+
+  it('a reject verdict re-queues the task for rework through the one door', async () => {
+    const a = await principal('wf-rework@example.test', 'Org WF Rework');
+    const { task, reviewId } = await seedPendingReview(a.orgId);
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/reviews/${reviewId}/verdict`, {
+      body: { verdict: 'reject', reasons: ['missing tests'], requiredChanges: ['add coverage'] },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).taskStatus).toBe('queued');
+    const row = await h.db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${task.taskId}';`,
+    );
+    expect(row[0]?.status).toBe('queued');
   });
 
   it('the approvals inbox lists pending rows for the caller tenant only', async () => {
@@ -303,7 +403,10 @@ describe('/v1/workforce (the task-engine surface)', () => {
   it('the status view reports control state, counts, queue depth, and budget headroom', async () => {
     const a = await principal('wf-status@example.test', 'Org WF Status');
     const tdb = forTenant(h.db, a.orgId);
-    await ensureWorkforceRuntime(tdb, 'wf', { workforce: { usd: 10 } });
+    await ensureWorkforceRuntime(tdb, 'wf', {
+      workforce: { usd: 10 },
+      execution: { estimateUsdPerTurn: 0.5 },
+    });
     const task = await seedRoot(a.orgId);
     await applyTransition(tdb, {
       taskId: task.taskId,

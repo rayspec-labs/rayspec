@@ -27,33 +27,57 @@ import { forTenant, schema, type TenantDb } from '@rayspec/db';
 import {
   ApprovalAlreadyDecidedError,
   ApprovalNotFoundError,
+  applyReviewVerdict,
   approvalDecisionSchema,
   cancelTaskCascade,
   decideApproval,
   deliverSignal,
+  ensureWorkforceRuntime,
   haltWorkforce,
   isTaskStatus,
   pauseWorkforce,
+  ReviewAlreadyDecidedError,
+  ReviewNotFoundError,
+  ReviewTaskStateError,
   readWorkforceRuntime,
   resolveWorkforceBudgets,
   resumeWorkforce,
+  reviewVerdictSchema,
   signalKindSchema,
   TASK_STATUSES,
   TaskNotFoundError,
   WorkforceDrainTimeoutError,
   WorkforceUnknownError,
   windowStartFor,
+  workforceBudgetsSchema,
   workforceJournalEventSchema,
 } from '@rayspec/tasks';
-import { and, asc, eq, gt, gte } from 'drizzle-orm';
+import { and, asc, eq, gt, gte, isNull, sql } from 'drizzle-orm';
+import type { Context } from 'hono';
 import { z } from 'zod';
 import type { AppDeps, AppEnv, WorkforceControl } from '../app-context.js';
 import { readBoundedJson } from '../http/bounded-body.js';
 import { replayJournalEventsAsSse, resolveLastEventId } from '../http/journal-replay.js';
 import { requireAuth, requirePermission, resolveTenant } from '../http/middleware.js';
 
+/**
+ * The journal actor: the VERIFIED principal, never a client-asserted name. `requireAuth()` runs
+ * before every caller, so an unresolved principal is unreachable; the fallback is a closed
+ * sentinel rather than a guessable identity. This string lands in `decided_by`, transition rows,
+ * and journal events — the engine's accountability trail.
+ */
+function actorFrom(c: Context<AppEnv>): string {
+  const p = c.get('principal');
+  if (p?.kind === 'user' && p.userId !== undefined) return `user:${p.userId}`;
+  if (p?.apiKeyId !== undefined) return `api-key:${p.apiKeyId}`;
+  return 'principal:unresolved';
+}
+
 const DEFAULT_PAGE = 50;
 const MAX_PAGE = 200;
+
+/** The approval rows' closed status vocabulary (the filter refuses free text, like the task list). */
+const APPROVAL_STATUSES = ['pending', 'approved', 'rejected', 'timed_out', 'escalated'] as const;
 
 /** The drain window an HTTP pause may hold the request for; past it → 504 (the pause holds). */
 const HTTP_DRAIN_TIMEOUT_MS = 25_000;
@@ -83,6 +107,8 @@ const haltRequestSchema = z.strictObject({
 });
 
 const WINDOW_RE = /^(\d{1,3})([hd])$/;
+/** The widest cost window a single request may materialize (bounded read, like the task list). */
+const MAX_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
 
 /** Parse a `?window=` like `24h` / `7d` into milliseconds; fail-closed on anything else. */
 function parseWindowMs(raw: string | undefined): number {
@@ -94,7 +120,11 @@ function parseWindowMs(raw: string | undefined): number {
     });
   }
   const n = Number.parseInt(m[1] as string, 10);
-  return m[2] === 'h' ? n * 60 * 60 * 1000 : n * 24 * 60 * 60 * 1000;
+  const ms = m[2] === 'h' ? n * 60 * 60 * 1000 : n * 24 * 60 * 60 * 1000;
+  if (ms > MAX_WINDOW_MS) {
+    throw new ApiError('VALIDATION_ERROR', "window must not exceed '90d'.", { window: raw });
+  }
+  return ms;
 }
 
 /** Serialize a stored workforce journal row fail-closed (drop anything off-vocabulary). */
@@ -126,8 +156,18 @@ function tenantHandle(deps: AppDeps, tenantId: string | undefined): TenantDb {
 
 /** Map the engine's typed refusals onto the HTTP envelope; rethrow anything unexpected. */
 function mapEngineError(err: unknown): never {
-  if (err instanceof TaskNotFoundError || err instanceof ApprovalNotFoundError) {
+  if (
+    err instanceof TaskNotFoundError ||
+    err instanceof ApprovalNotFoundError ||
+    err instanceof ReviewNotFoundError
+  ) {
     throw new ApiError('NOT_FOUND', 'Not found.');
+  }
+  if (err instanceof ReviewAlreadyDecidedError) {
+    throw new ApiError('CONFLICT', 'The review already carries a verdict.');
+  }
+  if (err instanceof ReviewTaskStateError) {
+    throw new ApiError('CONFLICT', 'The task is no longer waiting for this review.');
   }
   if (err instanceof WorkforceUnknownError) {
     throw new ApiError('NOT_FOUND', 'Not found.');
@@ -228,11 +268,19 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       requireWorkforce(deps);
       const tdb = tenantHandle(deps, c.get('tenantId'));
       const status = c.req.query('status') ?? 'pending';
+      if (!APPROVAL_STATUSES.includes(status as (typeof APPROVAL_STATUSES)[number])) {
+        throw new ApiError('VALIDATION_ERROR', 'Unknown approval status.', {
+          allowed: APPROVAL_STATUSES,
+        });
+      }
       const rows = await tdb
         .select(schema.workforceApprovals)
         .where(eq(schema.workforceApprovals.status, status))
-        .orderBy(asc(schema.workforceApprovals.createdAt));
-      return c.json(rows as unknown as Record<string, unknown>[], 200);
+        .orderBy(asc(schema.workforceApprovals.createdAt))
+        .limit(MAX_PAGE + 1);
+      const truncated = rows.length > MAX_PAGE;
+      c.header('X-Result-Truncated', truncated ? 'true' : 'false');
+      return c.json(rows.slice(0, MAX_PAGE) as unknown as Record<string, unknown>[], 200);
     },
   );
 
@@ -322,20 +370,23 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       try {
         const runtime = await readWorkforceRuntime(tdb, workforceId);
         const budgets = resolveWorkforceBudgets(runtime.budgets, workforceId);
-        const tasks = (await tdb
-          .select(schema.workforceTasks)
-          .where(eq(schema.workforceTasks.workforceId, workforceId))) as TaskRow[];
+        // Aggregated IN the database — the view must not materialize the tenant's task
+        // partition into process memory to count nine statuses.
+        const grouped = (await tdb
+          .select(schema.workforceTasks, {
+            status: schema.workforceTasks.status,
+            count: sql<number>`count(*)::int`,
+            oldestQueuedAt: sql<Date | null>`min(${schema.workforceTasks.queuedAt})`,
+          })
+          .where(eq(schema.workforceTasks.workforceId, workforceId))
+          .groupBy(schema.workforceTasks.status)) as Array<{
+          status: string;
+          count: number;
+          oldestQueuedAt: Date | null;
+        }>;
         const byStatus: Record<string, number> = {};
-        for (const t of tasks) byStatus[t.status] = (byStatus[t.status] ?? 0) + 1;
-        const oldestQueuedAt = tasks
-          .filter((t) => t.status === 'queued' && t.queuedAt !== null)
-          .reduce<Date | null>(
-            (oldest, t) =>
-              oldest === null || (t.queuedAt as Date).getTime() < oldest.getTime()
-                ? (t.queuedAt as Date)
-                : oldest,
-            null,
-          );
+        for (const g of grouped) byStatus[g.status] = g.count;
+        const oldestQueuedAt = grouped.find((g) => g.status === 'queued')?.oldestQueuedAt ?? null;
         // Headroom on the CURRENT workforce window, from the ledger row that enforces it.
         const ceiling = budgets.workforce?.usd ?? null;
         let consumedUsd = 0;
@@ -400,7 +451,7 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
           kind: body.kind,
           signalKey: body.signalKey ?? `api:${body.kind}:${crypto.randomUUID()}`,
           payload: body.payload,
-          actor: 'user',
+          actor: actorFrom(c),
         });
         workforce.kick();
         return c.json({ delivered: outcome.delivered, woke: outcome.woke }, 202);
@@ -423,7 +474,7 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       try {
         const outcome = await cancelTaskCascade(tdb, {
           taskId: c.req.param('id'),
-          actor: 'user',
+          actor: actorFrom(c),
           ...(body.reason !== undefined ? { reason: body.reason } : {}),
         });
         workforce.kick();
@@ -449,10 +500,85 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
           approvalId: c.req.param('id'),
           decision: body.decision,
           ...(body.reason !== undefined ? { reason: body.reason } : {}),
-          decidedBy: body.decidedBy,
+          decidedBy: actorFrom(c),
         });
         workforce.kick();
         return c.json(approval as unknown as Record<string, unknown>, 200);
+      } catch (err) {
+        mapEngineError(err);
+      }
+    },
+  );
+
+  // GET /v1/workforce/reviews — the undecided-review inbox (a parked review must be decidable,
+  // exactly as a parked approval is; an enterable state with no exit would be a defect).
+  app.get(
+    '/v1/workforce/reviews',
+    requireAuth(),
+    resolveTenant(deps),
+    requirePermission(deps, 'store:read'),
+    async (c) => {
+      requireWorkforce(deps);
+      const tdb = tenantHandle(deps, c.get('tenantId'));
+      const rows = (await tdb
+        .select(schema.workforceReviews)
+        .where(isNull(schema.workforceReviews.verdict))
+        .orderBy(asc(schema.workforceReviews.createdAt))
+        .limit(MAX_PAGE + 1)) as Array<typeof schema.workforceReviews.$inferSelect>;
+      const truncated = rows.length > MAX_PAGE;
+      c.header('X-Result-Truncated', truncated ? 'true' : 'false');
+      return c.json(rows.slice(0, MAX_PAGE) as unknown as Record<string, unknown>[], 200);
+    },
+  );
+
+  // POST /v1/workforce/reviews/:id/verdict — apply one verdict (accept completes; reject reworks
+  // through queued until the round ceiling parks the task for a human).
+  app.post(
+    '/v1/workforce/reviews/:id/verdict',
+    requireAuth(),
+    resolveTenant(deps),
+    requirePermission(deps, 'store:write'),
+    async (c) => {
+      const workforce = requireWorkforce(deps);
+      const tdb = tenantHandle(deps, c.get('tenantId'));
+      const body = reviewVerdictSchema.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
+      const reviewId = c.req.param('id');
+      try {
+        // Resolve the round ceiling from the task's own workforce declaration (a bare platform
+        // task reviews under the empty declaration — no ceiling, never a guessed one).
+        const reviewRows = (await tdb
+          .select(schema.workforceReviews)
+          .where(eq(schema.workforceReviews.id, reviewId))) as Array<
+          typeof schema.workforceReviews.$inferSelect
+        >;
+        const review = reviewRows[0];
+        if (!review) throw new ApiError('NOT_FOUND', 'Not found.');
+        const taskRows = (await tdb
+          .select(schema.workforceTasks)
+          .where(eq(schema.workforceTasks.taskId, review.taskId))) as TaskRow[];
+        const workforceId = taskRows[0]?.workforceId ?? null;
+        // Same posture as the dispatcher's claim: ensure the runtime row (idempotent upsert) and
+        // resolve the declared ceilings from it; a bare platform task reviews under the empty
+        // declaration.
+        const budgets =
+          workforceId !== null
+            ? resolveWorkforceBudgets(
+                (await ensureWorkforceRuntime(tdb, workforceId)).budgets,
+                workforceId,
+              )
+            : workforceBudgetsSchema.parse({});
+        const task = await applyReviewVerdict(tdb, budgets, {
+          reviewId,
+          verdict: body.verdict,
+          reasons: body.reasons,
+          requiredChanges: body.requiredChanges,
+          actor: actorFrom(c),
+        });
+        workforce.kick();
+        return c.json(
+          { reviewId, verdict: body.verdict, taskId: task.taskId, taskStatus: task.status },
+          200,
+        );
       } catch (err) {
         mapEngineError(err);
       }
@@ -472,7 +598,7 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       try {
         const runtime = await pauseWorkforce(tdb, {
           workforceId: c.req.param('workforceId'),
-          actor: 'user',
+          actor: actorFrom(c),
           drain: body.drain,
           drainTimeoutMs: HTTP_DRAIN_TIMEOUT_MS,
         });
@@ -495,7 +621,7 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       try {
         const runtime = await resumeWorkforce(tdb, {
           workforceId: c.req.param('workforceId'),
-          actor: 'user',
+          actor: actorFrom(c),
         });
         workforce.kick();
         return c.json({ workforceId: runtime.workforceId, paused: runtime.paused }, 200);
@@ -518,7 +644,7 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       try {
         const outcome = await haltWorkforce(tdb, {
           workforceId: c.req.param('workforceId'),
-          actor: 'user',
+          actor: actorFrom(c),
           reason: body.reason,
           drainTimeoutMs: HTTP_DRAIN_TIMEOUT_MS,
         });

@@ -44,11 +44,16 @@ export class ApprovalAlreadyDecidedError extends Error {
 export const approvalDecisionSchema = z.strictObject({
   decision: z.enum(['approve', 'reject']),
   reason: z.string().min(1).optional(),
-  decidedBy: z.string().min(1),
 });
 
 export type ApprovalDecisionInput = z.output<typeof approvalDecisionSchema> & {
   readonly approvalId: string;
+  /**
+   * The VERIFIED deciding principal — server-derived by the caller from its authenticated
+   * context, never a client-asserted body field (the approval row is the engine's human-in-the-
+   * loop accountability artifact).
+   */
+  readonly decidedBy: string;
 };
 
 /**
