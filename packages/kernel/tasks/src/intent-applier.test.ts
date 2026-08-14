@@ -31,6 +31,7 @@ function input(over: Partial<PlanTurnInput> = {}): PlanTurnInput {
     reviewRoundsUsed: 0,
     priorToolError: false,
     pendingCancel: false,
+    matchedReviewPolicy: null,
     intent: turnIntentSchema.parse({ kind: 'complete', result: RESULT }),
     ...over,
   };
@@ -207,7 +208,7 @@ describe('review planning', () => {
     const plan = planTurnOutcome(
       input({ intent: review, maxReviewRounds: 2, reviewRoundsUsed: 2 }),
     );
-    expect(plan).toEqual({ kind: 'review_rounds_exhausted', reviewer: 'reviewer-1' });
+    expect(plan).toEqual({ kind: 'review_rounds_exhausted', reviewer: 'reviewer-1', result: null });
   });
 
   it('no declared ceiling means no exhaustion', () => {
@@ -311,6 +312,110 @@ describe('escalation planning', () => {
         reason: 'risk',
         escalateTo: 'mgr',
         override: true,
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('policy-intercepted completion', () => {
+  const policy = { reviewer: 'qa', dispatchReviewer: true, maxRounds: 2 };
+
+  it('a matched policy turns a completion into a review with the stored result', () => {
+    expect(planTurnOutcome(input({ matchedReviewPolicy: policy }))).toEqual({
+      kind: 'complete_with_review',
+      result: workerResultSchema.parse(RESULT),
+      reviewer: 'qa',
+      dispatchReviewer: true,
+      round: 1,
+    });
+  });
+
+  it('policy rounds spent parks for a human WITH the result stored', () => {
+    expect(planTurnOutcome(input({ matchedReviewPolicy: policy, reviewRoundsUsed: 2 }))).toEqual({
+      kind: 'review_rounds_exhausted',
+      reviewer: 'qa',
+      result: workerResultSchema.parse(RESULT),
+    });
+  });
+
+  it('the effective ceiling is the TIGHTER of the rule and the execution-wide one', () => {
+    // Execution-wide 1 beats the rule's 2.
+    expect(
+      planTurnOutcome(
+        input({ matchedReviewPolicy: policy, maxReviewRounds: 1, reviewRoundsUsed: 1 }),
+      ),
+    ).toMatchObject({ kind: 'review_rounds_exhausted' });
+    // The rule's 2 beats an execution-wide 5.
+    expect(
+      planTurnOutcome(
+        input({ matchedReviewPolicy: policy, maxReviewRounds: 5, reviewRoundsUsed: 2 }),
+      ),
+    ).toMatchObject({ kind: 'review_rounds_exhausted' });
+    // Below both, the review dispatches.
+    expect(
+      planTurnOutcome(
+        input({ matchedReviewPolicy: policy, maxReviewRounds: 5, reviewRoundsUsed: 1 }),
+      ),
+    ).toMatchObject({ kind: 'complete_with_review', round: 2 });
+  });
+
+  it('a human-decided policy keeps dispatchReviewer false', () => {
+    expect(
+      planTurnOutcome(
+        input({ matchedReviewPolicy: { reviewer: 'user', dispatchReviewer: false, maxRounds: 1 } }),
+      ),
+    ).toMatchObject({ kind: 'complete_with_review', reviewer: 'user', dispatchReviewer: false });
+  });
+});
+
+describe('review dispatch and reviewer verdicts', () => {
+  it('request_review with dispatchReviewer plans the dispatched variant', () => {
+    expect(
+      planTurnOutcome(
+        input({
+          intent: turnIntentSchema.parse({
+            kind: 'request_review',
+            reviewer: 'qa',
+            dispatchReviewer: true,
+          }),
+        }),
+      ),
+    ).toEqual({ kind: 'request_review_dispatch', reviewer: 'qa', round: 1 });
+  });
+
+  it('submit_review passes through verbatim', () => {
+    expect(
+      planTurnOutcome(
+        input({
+          intent: turnIntentSchema.parse({
+            kind: 'submit_review',
+            reviewId: 'rev-1',
+            verdict: 'reject',
+            reasons: ['thin evidence'],
+            requiredChanges: ['add the table'],
+          }),
+        }),
+      ),
+    ).toEqual({
+      kind: 'submit_review',
+      reviewId: 'rev-1',
+      verdict: 'reject',
+      reasons: ['thin evidence'],
+      requiredChanges: ['add the table'],
+    });
+  });
+
+  it('the verdict enum is closed and unknown keys are refused', () => {
+    expect(
+      turnIntentSchema.safeParse({ kind: 'submit_review', reviewId: 'r', verdict: 'maybe' })
+        .success,
+    ).toBe(false);
+    expect(
+      turnIntentSchema.safeParse({
+        kind: 'submit_review',
+        reviewId: 'r',
+        verdict: 'accept',
+        force: true,
       }).success,
     ).toBe(false);
   });

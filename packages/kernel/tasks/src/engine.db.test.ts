@@ -273,6 +273,238 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(still[0]?.messages).toBe(1);
   });
 
+  const QA_POLICY = { reviewer: 'qa', dispatchReviewer: true, maxRounds: 2 };
+
+  /** Drive a task's next turn to a policy-intercepted completion. */
+  function completeUnderPolicy(taskId: string, turnNumber: number) {
+    return applyTurnOutcome(tdb(), {
+      taskId,
+      turnId: turnIdFor(taskId, turnNumber),
+      turnNumber,
+      intent: { kind: 'complete', result: { ...RESULT, confidence: 0.6 } },
+      reviewPolicy: QA_POLICY,
+      budgets: NO_BUDGETS,
+    });
+  }
+
+  async function reviewerChildOf(
+    taskId: string,
+  ): Promise<{ task_id: string; version: number; owner: string; status: string }> {
+    const rows = (await db.$client.unsafe(
+      `SELECT task_id, version, owner, status FROM workforce_tasks WHERE parent_task_id = '${taskId}' AND status <> 'completed' ORDER BY created_at DESC LIMIT 1;`,
+    )) as unknown as { task_id: string; version: number; owner: string; status: string }[];
+    const child = rows[0];
+    if (!child) throw new Error('expected a dispatched reviewer child');
+    return child;
+  }
+
+  async function driveChildToWorking(taskId: string, turnNumber = 1): Promise<void> {
+    const rows = (await db.$client.unsafe(
+      `SELECT version, status FROM workforce_tasks WHERE task_id = '${taskId}';`,
+    )) as unknown as { version: number; status: string }[];
+    const row = rows[0] as { version: number; status: string };
+    const queued =
+      row.status === 'queued'
+        ? { version: row.version }
+        : await applyTransition(tdb(), {
+            taskId,
+            expectedVersion: row.version,
+            to: 'queued',
+            actor: 'scheduler',
+          });
+    await applyTransition(tdb(), {
+      taskId,
+      expectedVersion: queued.version,
+      to: 'working',
+      actor: 'scheduler',
+      turnId: turnIdFor(taskId, turnNumber),
+    });
+  }
+
+  it('a matched policy intercepts completion; the dispatched reviewer drives rework, acceptance, then exhaustion', async () => {
+    const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+
+    // Round 1: the policy intercepts the completion — result STORED, task parked for review,
+    // reviewer child dispatched.
+    const parked = await completeUnderPolicy(root.taskId, 1);
+    expect(parked.plan?.kind).toBe('complete_with_review');
+    expect(parked.task?.status).toBe('waiting_for_review');
+    expect(parked.task?.statusReason).toBe('review_pending');
+    const stored = await db.$client.unsafe(
+      `SELECT result->>'summary' AS summary, confidence FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(stored[0]?.summary).toBe('Done.');
+    const requested = (await db.$client.unsafe(
+      `SELECT data FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.review.requested' ORDER BY seq::numeric;`,
+    )) as unknown as { data: { policy: boolean; reviewTaskId: string; round: number } }[];
+    expect(requested).toHaveLength(1);
+    expect(requested[0]?.data.policy).toBe(true);
+    const reviewer1 = await reviewerChildOf(root.taskId);
+    expect(reviewer1.owner).toBe('qa');
+    expect(requested[0]?.data.reviewTaskId).toBe(reviewer1.task_id);
+
+    // The reviewer REJECTS: the reviewed task re-queues for rework, the reviewer task completes.
+    const review1 = (await db.$client.unsafe(
+      `SELECT id FROM workforce_reviews WHERE task_id = '${root.taskId}' AND round = 1;`,
+    )) as unknown as { id: string }[];
+    await driveChildToWorking(reviewer1.task_id);
+    const verdict1 = await applyTurnOutcome(tdb(), {
+      taskId: reviewer1.task_id,
+      turnId: turnIdFor(reviewer1.task_id, 1),
+      turnNumber: 1,
+      intent: {
+        kind: 'submit_review',
+        reviewId: (review1[0] as { id: string }).id,
+        verdict: 'reject',
+        reasons: ['thin evidence'],
+        requiredChanges: ['add the measurements'],
+      },
+      budgets: NO_BUDGETS,
+    });
+    expect(verdict1.task?.status).toBe('completed');
+    const afterReject = await db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(afterReject[0]?.status).toBe('queued');
+
+    // Round 2: rework resubmits under the same policy; the second reviewer ACCEPTS.
+    await driveChildToWorking(root.taskId, 2);
+    const parked2 = await completeUnderPolicy(root.taskId, 2);
+    expect(parked2.task?.status).toBe('waiting_for_review');
+    const reviewer2 = await reviewerChildOf(root.taskId);
+    const review2 = (await db.$client.unsafe(
+      `SELECT id FROM workforce_reviews WHERE task_id = '${root.taskId}' AND round = 2;`,
+    )) as unknown as { id: string }[];
+    await driveChildToWorking(reviewer2.task_id);
+    await applyTurnOutcome(tdb(), {
+      taskId: reviewer2.task_id,
+      turnId: turnIdFor(reviewer2.task_id, 1),
+      turnNumber: 1,
+      intent: {
+        kind: 'submit_review',
+        reviewId: (review2[0] as { id: string }).id,
+        verdict: 'accept',
+      },
+      budgets: NO_BUDGETS,
+    });
+    const accepted = await db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(accepted[0]?.status).toBe('completed');
+  });
+
+  it('a completion arriving with the policy rounds spent parks for a human WITH the result stored', async () => {
+    const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+    // Two rounds already consumed on the review table.
+    await db.$client.unsafe(
+      `INSERT INTO workforce_reviews (tenant_id, task_id, reviewer, round, verdict) VALUES ('${TENANT_A}', '${root.taskId}', 'qa', 1, 'reject'), ('${TENANT_A}', '${root.taskId}', 'qa', 2, 'reject');`,
+    );
+    const out = await completeUnderPolicy(root.taskId, 1);
+    expect(out.plan?.kind).toBe('review_rounds_exhausted');
+    expect(out.task?.status).toBe('waiting_for_user');
+    const stored = await db.$client.unsafe(
+      `SELECT result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(stored[0]?.summary).toBe('Done.');
+  });
+
+  it('a reviewer verdict that lost its race completes the reviewer task as superseded', async () => {
+    const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+    await completeUnderPolicy(root.taskId, 1);
+    const reviewer = await reviewerChildOf(root.taskId);
+    const review = (await db.$client.unsafe(
+      `SELECT id FROM workforce_reviews WHERE task_id = '${root.taskId}' AND round = 1;`,
+    )) as unknown as { id: string }[];
+    // The HUMAN verdict route decides first.
+    await applyReviewVerdict(tdb(), NO_BUDGETS, {
+      reviewId: (review[0] as { id: string }).id,
+      verdict: 'accept',
+      reasons: [],
+      requiredChanges: [],
+      actor: 'user:qa-lead',
+    });
+    // The dispatched reviewer's turn then lands — benign, recorded as superseded.
+    await driveChildToWorking(reviewer.task_id);
+    const out = await applyTurnOutcome(tdb(), {
+      taskId: reviewer.task_id,
+      turnId: turnIdFor(reviewer.task_id, 1),
+      turnNumber: 1,
+      intent: {
+        kind: 'submit_review',
+        reviewId: (review[0] as { id: string }).id,
+        verdict: 'reject',
+        reasons: ['too late'],
+      },
+      budgets: NO_BUDGETS,
+    });
+    expect(out.task?.status).toBe('completed');
+    const summary = await db.$client.unsafe(
+      `SELECT result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${reviewer.task_id}';`,
+    );
+    expect(summary[0]?.summary).toContain('superseded');
+    // The winner's outcome stands.
+    const rootRow = await db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(rootRow[0]?.status).toBe('completed');
+  });
+
+  it('a review id that does not belong to the parent is a tool error — requeue once, then failed', async () => {
+    const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+    await completeUnderPolicy(root.taskId, 1);
+    const reviewer = await reviewerChildOf(root.taskId);
+    // A FOREIGN review row (another task's pending review).
+    const other = await driveToWorking(await newRoot({ owner: 'dev-2' }));
+    await turn(other.taskId, 1, { kind: 'request_review', reviewer: 'qa' });
+    const foreign = (await db.$client.unsafe(
+      `SELECT id FROM workforce_reviews WHERE task_id = '${other.taskId}';`,
+    )) as unknown as { id: string }[];
+
+    const forged = {
+      kind: 'submit_review',
+      reviewId: (foreign[0] as { id: string }).id,
+      verdict: 'accept',
+    };
+    await driveChildToWorking(reviewer.task_id);
+    const first = await applyTurnOutcome(tdb(), {
+      taskId: reviewer.task_id,
+      turnId: turnIdFor(reviewer.task_id, 1),
+      turnNumber: 1,
+      intent: forged,
+      budgets: NO_BUDGETS,
+    });
+    expect(first.task?.status).toBe('queued');
+    expect(first.task?.statusReason).toBe('tool_error');
+    await driveChildToWorking(reviewer.task_id, 2);
+    const second = await applyTurnOutcome(tdb(), {
+      taskId: reviewer.task_id,
+      turnId: turnIdFor(reviewer.task_id, 2),
+      turnNumber: 2,
+      intent: forged,
+      budgets: NO_BUDGETS,
+    });
+    expect(second.task?.status).toBe('failed');
+    // The foreign review is untouched.
+    const untouched = await db.$client.unsafe(
+      `SELECT verdict FROM workforce_reviews WHERE task_id = '${other.taskId}';`,
+    );
+    expect(untouched[0]?.verdict).toBeNull();
+  });
+
+  it('a malformed trusted review-policy channel is a hard typed refusal', async () => {
+    const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+    await expect(
+      applyTurnOutcome(tdb(), {
+        taskId: root.taskId,
+        turnId: turnIdFor(root.taskId, 1),
+        turnNumber: 1,
+        intent: { kind: 'complete', result: RESULT },
+        reviewPolicy: { reviewer: 'qa' },
+        budgets: NO_BUDGETS,
+      }),
+    ).rejects.toThrow();
+  });
+
   it('escalate parks the caller, opens the escalation child, and the child completing wakes it', async () => {
     const root = await driveToWorking(await newRoot({ owner: 'worker-1' }));
     const out = await turn(root.taskId, 1, {

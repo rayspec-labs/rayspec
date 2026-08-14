@@ -77,7 +77,29 @@ export const turnIntentSchema = z.discriminatedUnion('kind', [
     onTimeout: z.enum(['fail', 'escalate']).default('fail'),
     escalateTo: z.string().min(1).optional(),
   }),
-  z.strictObject({ kind: z.literal('request_review'), reviewer: z.string().min(1) }),
+  z.strictObject({
+    kind: z.literal('request_review'),
+    reviewer: z.string().min(1),
+    /**
+     * True when the reviewer is a DECLARED EMPLOYEE whose verdict arrives through a dispatched
+     * review turn — the application then also opens the reviewer's child task. Set by the caller's
+     * TRUSTED layer from declared structure (the kernel stays roster-free); false means a human
+     * decides through the verdict route, exactly as before.
+     */
+    dispatchReviewer: z.boolean().default(false),
+  }),
+  z.strictObject({
+    /**
+     * A reviewer turn's verdict on the task under review — its PARENT. `reviewId` is resolved by
+     * the caller's trusted layer from the pending review row, never accepted from model text; the
+     * application re-checks that the row belongs to the parent before any verdict applies.
+     */
+    kind: z.literal('submit_review'),
+    reviewId: z.string().min(1),
+    verdict: z.enum(['accept', 'reject']),
+    reasons: z.array(z.string().min(1)).default([]),
+    requiredChanges: z.array(z.string().min(1)).default([]),
+  }),
   z.strictObject({
     /** Ask the requesting party a typed question; the task parks until a `user_reply` answers it. */
     kind: z.literal('request_clarification'),
@@ -134,7 +156,37 @@ export type TurnPlan =
       readonly escalateTo: string | null;
     }
   | { readonly kind: 'request_review'; readonly reviewer: string; readonly round: number }
-  | { readonly kind: 'review_rounds_exhausted'; readonly reviewer: string }
+  | {
+      /** A review demanded WITH a dispatched reviewer turn — the application opens the child. */
+      readonly kind: 'request_review_dispatch';
+      readonly reviewer: string;
+      readonly round: number;
+    }
+  | {
+      /**
+       * A schema-valid result whose completion a MATCHED REVIEW POLICY intercepts: the result is
+       * stored, the task parks for review instead of completing — policy overrides what the turn
+       * asked for.
+       */
+      readonly kind: 'complete_with_review';
+      readonly result: WorkerResult;
+      readonly reviewer: string;
+      readonly dispatchReviewer: boolean;
+      readonly round: number;
+    }
+  | {
+      readonly kind: 'review_rounds_exhausted';
+      readonly reviewer: string;
+      /** A schema-valid result that arrived with the rounds already spent is STORED, never dropped. */
+      readonly result: WorkerResult | null;
+    }
+  | {
+      readonly kind: 'submit_review';
+      readonly reviewId: string;
+      readonly verdict: 'accept' | 'reject';
+      readonly reasons: readonly string[];
+      readonly requiredChanges: readonly string[];
+    }
   | { readonly kind: 'request_clarification'; readonly question: string }
   | {
       readonly kind: 'escalate';
@@ -172,6 +224,17 @@ export interface PlanTurnInput {
   readonly priorToolError: boolean;
   /** True when a pending `cancel` signal was consumed at this turn's boundary. */
   readonly pendingCancel: boolean;
+  /**
+   * The TRUSTED review-policy match for a completing turn — computed by the caller's trusted layer
+   * from declared rules and the submitted result, never model-reachable (tool arguments are the
+   * model's only input; this field is not one). Null when no declared rule fires. The effective
+   * round ceiling is the TIGHTER of the rule's own `maxRounds` and the execution-wide ceiling.
+   */
+  readonly matchedReviewPolicy: {
+    readonly reviewer: string;
+    readonly dispatchReviewer: boolean;
+    readonly maxRounds: number;
+  } | null;
   readonly intent: TurnIntent;
 }
 
@@ -188,8 +251,31 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
   if (input.pendingCancel) return { kind: 'cancelled' };
   const intent = input.intent;
   switch (intent.kind) {
-    case 'complete':
-      return { kind: 'complete', result: intent.result };
+    case 'complete': {
+      const policy = input.matchedReviewPolicy;
+      if (policy === null) return { kind: 'complete', result: intent.result };
+      // Policy OVERRIDES what the turn asked for: a matched rule intercepts the completion. The
+      // effective ceiling is the tighter of the rule's own rounds and the execution-wide one; a
+      // result that arrives with the rounds already spent is STORED and a human decides.
+      const effectiveMax =
+        input.maxReviewRounds !== null
+          ? Math.min(policy.maxRounds, input.maxReviewRounds)
+          : policy.maxRounds;
+      if (input.reviewRoundsUsed >= effectiveMax) {
+        return {
+          kind: 'review_rounds_exhausted',
+          reviewer: policy.reviewer,
+          result: intent.result,
+        };
+      }
+      return {
+        kind: 'complete_with_review',
+        result: intent.result,
+        reviewer: policy.reviewer,
+        dispatchReviewer: policy.dispatchReviewer,
+        round: input.reviewRoundsUsed + 1,
+      };
+    }
     case 'fan_out': {
       const rejection = rejectFanOut(input, intent.children);
       if (rejection) return rejection;
@@ -214,14 +300,21 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
     }
     case 'request_review': {
       if (input.maxReviewRounds !== null && input.reviewRoundsUsed >= input.maxReviewRounds) {
-        return { kind: 'review_rounds_exhausted', reviewer: intent.reviewer };
+        return { kind: 'review_rounds_exhausted', reviewer: intent.reviewer, result: null };
       }
-      return {
-        kind: 'request_review',
-        reviewer: intent.reviewer,
-        round: input.reviewRoundsUsed + 1,
-      };
+      const round = input.reviewRoundsUsed + 1;
+      return intent.dispatchReviewer
+        ? { kind: 'request_review_dispatch', reviewer: intent.reviewer, round }
+        : { kind: 'request_review', reviewer: intent.reviewer, round };
     }
+    case 'submit_review':
+      return {
+        kind: 'submit_review',
+        reviewId: intent.reviewId,
+        verdict: intent.verdict,
+        reasons: intent.reasons,
+        requiredChanges: intent.requiredChanges,
+      };
     case 'request_clarification':
       return { kind: 'request_clarification', question: intent.question };
     case 'escalate': {

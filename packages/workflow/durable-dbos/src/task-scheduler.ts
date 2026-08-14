@@ -125,6 +125,16 @@ export interface TaskTurnHandlerOutcome {
   /** The ONE turn-ending intent (validated by the engine — a malformed one never completes). */
   readonly intent: unknown;
   readonly messages?: readonly { readonly recipient: string; readonly body: string }[];
+  /**
+   * The TRUSTED review-policy match for a completing turn — computed by the dispatching
+   * composition from declared rules, never from model output, and validated strictly by the
+   * engine (`turnReviewPolicySchema`). Absent means no declared rule fired.
+   */
+  readonly reviewPolicy?: {
+    readonly reviewer: string;
+    readonly dispatchReviewer: boolean;
+    readonly maxRounds: number;
+  };
   /** The turn's actual cost, settled against the dispatch reservation. */
   readonly actualUsd?: number;
 }
@@ -1048,6 +1058,7 @@ export class DbosTaskScheduler {
             turnNumber: job.turnNumber,
             intent: outcome.intent,
             messages: outcome.messages,
+            ...(outcome.reviewPolicy !== undefined ? { reviewPolicy: outcome.reviewPolicy } : {}),
             budgets,
             actualUsd: outcome.actualUsd ?? 0,
           });

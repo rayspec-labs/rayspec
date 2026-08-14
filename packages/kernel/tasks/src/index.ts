@@ -19,7 +19,9 @@ export {
   delegationStatusSchema,
   lockDescendants,
   lockRootFirst,
+  type TurnReviewPolicy,
   TurnStateError,
+  turnReviewPolicySchema,
 } from './apply-intents.js';
 export { type ApplyTransitionInput, applyTransition, type TaskRecord } from './apply-transition.js';
 export {

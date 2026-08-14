@@ -18,11 +18,11 @@
 import { schema, type TenantDb } from '@rayspec/db';
 import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
-import { afterTaskTerminal, lockRootFirst } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import type { WorkforceBudgets } from './budget.js';
 import { TaskNotFoundError } from './errors.js';
 import { appendTaskEvents } from './events.js';
+import { afterTaskTerminal, lockRootFirst } from './task-locks.js';
 
 export type ReviewRecord = typeof schema.workforceReviews.$inferSelect;
 
