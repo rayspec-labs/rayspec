@@ -566,6 +566,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`rayspec gen-handler` now says WHY it cannot coerce a `double` or `numeric` column from a tool
+  arg, instead of refusing the type as if it did not exist.** The holes contract carries its own
+  column-type set — the types the deterministic renderer has a coercion arm for — and that set is
+  deliberately narrower than the grammar's, because the renderer has no arm for either fractional
+  type. A `columns[]` entry naming one has been refused fail-closed all along, which is right; what
+  was wrong is what the refusal said. The message enumerated the seven types it accepts and stopped
+  there, so an author who had just declared a perfectly valid `numeric` money column read it as a
+  typo and went looking for one. The refusal now appends the reason and the way out: the type is a
+  valid store column type, the renderer has no coercion arm for it, so a handler that coerces that
+  column from an untrusted arg must be hand-written. It also names the path that is NOT closed — a
+  server-stamped `fixedValues` constant into that column still renders, because `fixedValues` pins
+  author constants by column name and carries no `jsonType` — so the refusal cannot be read as "this
+  column is unwritable from a generated handler". A type the grammar does not carry either — a
+  genuine typo like `float` — still gets the plain refusal, so the two failure modes stay
+  distinguishable.
+  Two smaller rot fixes ride along, both in the same file. The accepted list in the message is now
+  read off the set the validator checks against, rather than spelled out a second time by hand, so
+  it can never quote a vocabulary the renderer has outgrown. And the set of types the refusal calls
+  out by reason is DERIVED, by subtracting the renderer's set from the grammar's enum — nothing
+  re-lists `double` and `numeric`, so a type added to the grammar is explained on its own and one
+  that gains a renderer arm drops out on its own. The neighbouring comment claimed the local set
+  mirrored the grammar's and that floats map to `jsonb`; neither has been true since the fractional
+  types landed. It now states the subset relationship, and names what enforces it: the renderer's
+  coercion switch has no `default` and returns `string`, so adding a member to the local set without
+  writing its arm fails `tsc`.
+  No accepted hole-set renders differently — the seven renderable types, their coercion arms and the
+  emitted bytes are untouched.
+
 - **The generated OpenAPI document stops describing a `list` filter the server refuses, and its
   `numeric` pattern is now the envelope the server enforces.** Three corrections to what
   `GET /v1/openapi.json` publishes for declared `{store}` routes. Each is a document-accuracy fix —
@@ -1072,6 +1100,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   serialized, because `__proto__` alone is a setter rather than a plain key.
 
 ### Documentation
+
+- **The column-type vocabulary is swept: `double` and `numeric` now appear everywhere the closed set
+  is enumerated.** The reference page was updated when the two fractional types landed; the two
+  surfaces a reader actually starts from were not. The concepts page still called the vocabulary
+  "`text`, `uuid`, `timestamp`, `integer`, `bigint`, `boolean`, and `jsonb`" — the first thing a
+  first-time reader is told about columns, and flatly wrong. The authoring skill repeated the
+  seven-type list in three more places and, under what it cannot express, told an author that floats
+  map to `jsonb`. Every one of those now names all nine types.
+  Widening a list is not enough on its own, because `numeric` is the one column type that does not
+  parse without more: `precision` and `scale` are REQUIRED on it and rejected on every other type,
+  and an author following the old list would have written `type: numeric` and met a lint error the
+  page never mentioned. So the skill's store reference gains the two keys and a short entry on the
+  pair — `double` is float64 on the wire and never money; `numeric` is the exact decimal, crosses
+  the wire as a string in both directions, and refuses a JSON number — and the concepts page names
+  the split in one sentence.
+  One place stays at seven ON PURPOSE and now says so: the `jsonType` set of a `gen-handler` holes
+  file, which is what the renderer can emit a coercion for, not what a store may declare.
+
+- **Three sentences that had outgrown the code they describe.** Each states a closed set that a
+  later change widened, and each is now the set the code actually implements.
+  The reference page called the `typescript_handler_module` advisory "the one a `.ts` `module`
+  raises". The trigger set is four-wide — `.ts`, `.tsx`, `.mts`, `.cts`, matched case-folded from
+  one shared vocabulary — so an author reading that sentence could reasonably conclude a `.tsx`
+  handler raises nothing and needs no build step.
+  The same page enumerates the surfaces the `bigint` JSON boundary is enforced on, and the list
+  predates the comparison filters: a `?<col>__gt=`-family bound is coerced by the same routine as
+  equality and refuses an out-of-range value identically. The sentence understated the enforcement
+  rather than over-claiming it, but an enumeration that is read as exhaustive should be one.
+  The concepts page promised an `X-Next-Cursor` "on every non-empty page". A relevance-ranked
+  full-text page is ordered by rank rather than by a stored column and therefore mints no keyset
+  cursor — the one non-empty page that carries none. That exception was already stated on the
+  reference page, in the OpenAPI document and in the authoring skill; the summary page is now
+  consistent with them, which matters because a client polling that header is the reader most likely
+  to have started there.
 
 - **`rayspec deploy --host <addr>` is documented.** The flag has always been accepted and has always
   been printed by `rayspec deploy --help`, but the CLI reference's deploy section described the

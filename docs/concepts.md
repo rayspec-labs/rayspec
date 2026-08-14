@@ -75,7 +75,10 @@ stores:
 ```
 
 Column types are a small, closed vocabulary: `text`, `uuid`, `timestamp`,
-`integer`, `bigint`, `boolean`, and `jsonb`. Store and column names are validated as safe
+`integer`, `bigint`, `boolean`, `jsonb`, `double`, and `numeric` — the last two
+being the fractional pair (`double` for float64 measurements, `numeric` for exact
+decimals such as money, which declares its `precision` and `scale` and crosses the
+wire as a string). Store and column names are validated as safe
 identifiers, so a name can never smuggle SQL into a generated statement. A store
 may declare a child→parent foreign key to another store. From a store the platform
 generates the Drizzle schema and the migration, which is diffed and passed through a
@@ -126,7 +129,9 @@ columns), an opt-in case-insensitive substring search
 pagination — all
 folded through the tenant predicate, capped at a fixed page size (it signals
 truncation with an `X-Result-Truncated` header and returns an `X-Next-Cursor` on
-every non-empty page). A
+every non-empty **keyset-ordered** page — a relevance-ranked full-text page
+(`?__search=`) is ordered by rank rather than by a stored column, so it carries
+none). A
 read that needs an **offset** page or a total **count** is a `handler` route, whose
 injected data facade adds `limit`/`offset` paging and a filtered count (equality
 and the same bounded comparisons — no `like`/`OR`). Second, `handler` routes are
