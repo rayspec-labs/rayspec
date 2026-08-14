@@ -457,8 +457,9 @@ export interface HandlerInit {
  *    reissues it, which is what makes a hole a REAL signal (retention) rather than noise.
  *  - ATOMIC WITH THE HANDLER'S OWN WRITES on a route handler: the engine appends the request's events
  *    as the last statement before its transaction commits, so a subscriber can never observe an event
- *    announcing a state change that is not yet readable. A tool handler has no outer transaction (by
- *    design — see `HandlerDb`), so there each emit is its own statement, durable as it returns.
+ *    announcing a state change that is not yet readable. A tool that carries `emit` is always one an
+ *    in-request run drives, and that surface hands a tool a plain handle with no outer transaction —
+ *    so there each emit is its own statement, durable as it returns.
  *  - `await` is the durability boundary a caller sees on a tool; on a route the call BUFFERS and the
  *    engine flushes at the transaction boundary — deliberately, because allocating at the call site
  *    would hold the tenant's counter lock for the rest of the handler and serialise the whole tenant
