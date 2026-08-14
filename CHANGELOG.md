@@ -304,8 +304,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mislead the author-named query surface (`projection_query_shadow`) — never a runtime surprise.
   Keyset pagination is projection-immune (the cursor is minted from the stored row, so paging
   works with `id` renamed or dropped), and a projected route serializes exactly its projected
-  field set. Purely additive: a document without `project` parses, serves, and documents
-  byte-identically.
+  field set. Additive with one exception: a document without `project` parses, serves, and
+  documents exactly as before the key existed, except for a store that declares a column named
+  `__proto__` — the un-projected serializer now emits that column instead of swallowing it, which
+  is its own entry in this release.
 
 - **Two fractional column types for declared stores: `double` (PostgreSQL `float8`) and `numeric`
   with required `precision`/`scale` (exact decimals).** The column vocabulary had no honest home
@@ -962,8 +964,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the checkout root, where the two candidates are one file, it behaves exactly as before.
   (Issue #384.)
 
-- **A `numeric` column holding a `NaN` is refused on read, like a non-finite `double` — and the page
-  carrying it no longer mints a cursor no client can follow.** PostgreSQL's `numeric` accepts `NaN`,
+- **A `numeric` column holding a `NaN` is refused on read, like a non-finite `double` — and a page
+  that serves it no longer mints a cursor no client can follow.** PostgreSQL's `numeric` accepts `NaN`,
   which is not a decimal at all. Neither write path produces one — the request body validator and the
   handler facade both check the same plain-decimal shape — so only a direct SQL write or a
   hand-written migration can plant one, and until now both read paths handed it straight out: the
@@ -975,8 +977,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Filter '<column>' must be a plain decimal string (no exponent).` — a `400` on a filter the client
   never wrote, with no way to page past the row. Both serializers now refuse such a value with the
   same `400 VALIDATION_ERROR` shape the `bigint` and `double` read guards use, naming the column and
-  the row id and never the value; a page that refuses mints no cursor, so the feed cannot strand a
-  client mid-scroll. This is the one read guard keyed on the DECLARED column type rather than the
+  the row id and never the value. A page is serialized before its pagination headers are minted, so
+  the refusal takes the whole page and mints no cursor: on any route that serves the column, the feed
+  cannot strand a client mid-scroll. The guard reaches exactly as far as the serializer and no
+  further — a route whose `project` drops the column never serializes it, so the guard never sees the
+  value; that page is served, and because `order` is validated against the store's columns and not
+  against the projection (the documented author-named query surface), a page ordered on the dropped
+  column still mints the `NaN` cursor the next request refuses. Both arms — the refusal and its
+  reach — are pinned in `store-fractional.db.test.ts`, each with the other as its accept control.
+  This is the one read guard keyed on the DECLARED column type rather than the
   value shape, and it has to be: a `numeric` value is a string, exactly like the `text` value beside
   it, where `NaN` is ordinary data no read may refuse. Nothing legitimate is affected — every
   rendering PostgreSQL produces for a decimal passes the check, `±Infinity` cannot reach a column that

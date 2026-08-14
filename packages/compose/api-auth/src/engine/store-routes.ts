@@ -266,7 +266,9 @@ export function makeStoreHandler(args: {
    * registrar — a route-level `project` overrides the store-level one wholesale). READ-SIDE ONLY:
    * it is resolved ONCE at registration into a `snake → wire name` map and threaded to every
    * `serializeRow` site below; the request path (body schemas, casing normalizer, list query) never
-   * sees it. Absent ⇒ the historical snake wire shape, byte-identical.
+   * sees it. Absent ⇒ the historical snake wire shape, with the single exception `serializeRow`'s
+   * header names: a column declared as `__proto__` is now serialized on that path too, where the
+   * plain-object accumulator used to swallow it.
    */
   project?: ResponseProjection;
 }): (c: Context<AppEnv>) => Promise<Response> {

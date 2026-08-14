@@ -231,11 +231,18 @@ stores:
     than a response carrying a "decimal" no decimal parser accepts. (No write
     path produces one — both refuse the string — and PostgreSQL itself refuses
     `±Infinity` for a column that declares a precision and scale.) The refusal
-    keeps the feed followable, too: a page is refused as a whole, so no keyset
-    cursor is ever minted on such a row. Filters and keyset cursors carry the same string
-    form and compare exactly server-side: a filter value beyond the declared
-    scale matches nothing rather than matching a rounded neighbour. Both
-    fractional types are orderable and usable as keyset pagination columns.
+    keeps the feed followable wherever the column is served: a page is
+    serialized before its pagination headers are minted, so the refusal takes
+    the whole page and no keyset cursor is minted on that row. A `project`
+    that drops the column is outside that reach — the serializer skips a
+    column the projection omits before the read guards run, and `order` is
+    validated against the store's columns, never against the projection, so a
+    page ordered on the dropped column is still served and still mints a
+    cursor the next request refuses as a filter value. Filters and keyset
+    cursors carry the same string form and compare exactly server-side: a
+    filter value beyond the declared scale matches nothing rather than
+    matching a rounded neighbour. Both fractional types are orderable and
+    usable as keyset pagination columns.
 
     **Changing a numeric column's `precision`/`scale`** is a real schema
     change: the diff emits a single `ALTER … SET DATA TYPE numeric(<p>, <s>)`,
@@ -710,8 +717,13 @@ The projection is **read-side only** and **fail-closed**:
 - **Keyset pagination is projection-immune.** The `X-Next-Cursor` is minted from
   the stored row, so paging keeps working when the response renames `id` away or
   a `fields` allowlist drops it entirely.
-- **Purely additive.** No `project` key ⇒ byte-identical responses, documents,
-  and write behaviour.
+- **Additive, with one exception.** No `project` key ⇒ the same responses,
+  documents, and write behaviour as before the key existed. The exception is a
+  store that declares a column named `__proto__` — a legal, `doctor`-clean
+  column name: the un-projected serializer now emits it like any other column,
+  where the plain object it used to accumulate into swallowed a string value
+  outright and, for a `jsonb` value, took the stored object as the response's
+  prototype.
 
 ### The `created_by` actor stamp
 

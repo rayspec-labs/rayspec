@@ -293,8 +293,14 @@ export function toDbValues(
  * the true stored value — but it is outside the documented read envelope (a decimal string with
  * exactly `scale` fractional digits), and a keyset page minted on such a row hands the client an
  * `after=` cursor whose value the next request rejects as a filter, i.e. a feed no client can page
- * past. Refusing at the serializer means no page carrying the row is ever served, so no cursor is
- * ever minted on it.
+ * past. Refusing at the serializer bounds the guard to exactly what the serializer sees. Where the
+ * column IS served that is the whole harm: the list handler serializes a page BEFORE minting its
+ * pagination headers (store-routes.ts), so the refusal takes the page and no cursor is minted on
+ * the row. Where the column is NOT served it reaches nothing — the projection omission below runs
+ * BEFORE these guards, so a projected-out value is never inspected, the page is served, and
+ * `parseOrder` (store-query.ts) validates `order` against `store.columns` and never against the
+ * projection, so a page ordered on the dropped column still mints the cursor the next request
+ * refuses as a filter. Both arms are pinned in store-fractional.db.test.ts.
  *
  * PROJECTION (`projection` — the resolved `snake → wire name` map from `resolveResponseProjection`,
  * threaded by the route that declared a `project`): each column's value is emitted under its WIRE
@@ -341,8 +347,8 @@ export function serializeRow(
   const out: Record<string, unknown> = Object.create(null);
   for (const [key, value] of Object.entries(row)) {
     const snake = camelToSnake.get(key) ?? key;
-    // The wire name this column serializes under: its snake name (no projection — historical
-    // behaviour, byte-identical), or the projection's resolved name; absent ⇒ omitted.
+    // The wire name this column serializes under: its snake name (no projection — the historical
+    // author-named shape), or the projection's resolved name; absent ⇒ omitted.
     const wireName = projection === undefined ? snake : projection.get(snake);
     if (wireName === undefined) continue;
     if (typeof value === 'bigint') {
