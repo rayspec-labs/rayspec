@@ -888,6 +888,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value is unchanged, and under `RAYSPEC_SKIP_DOTENV=1` the suffix is omitted because nothing was
   searched.
 
+- **A subscription cursor with a zero-padded sequence is refused rather than coerced.**
+  `GET /v1/subscribe?since=<tenant_id>:007` answered `200` and resumed from 7, skipping the seven
+  events below it, and `:00` replayed the stream from the floor — while the route's own `400` body,
+  the spec reference and this changelog already described a padded sequence as refused. The
+  sequence half must now be the canonical spelling the stream itself writes: `0`, or digits with no
+  leading zero. No cursor this platform issues is affected: the SSE `id:` is built by interpolating
+  a number, so it never carries a leading zero, and a client echoing an `id:` back (as
+  `Last-Event-ID` or `?since=`) resumes exactly as before — `:0`, the replay-from-floor cursor,
+  included. (Issue #385.)
+
 ### Documentation
 
 - **`rayspec deploy --host <addr>` is documented.** The flag has always been accepted and has always
