@@ -71,6 +71,7 @@ import {
   ensureWorkforceRuntime,
   isTaskStatus,
   isTerminalStatus,
+  lockRootFirst,
   type MergedChildResult,
   mergeChildResults,
   releaseTurnReservation,
@@ -229,7 +230,7 @@ export class DbosTaskScheduler {
   readonly #logger: TaskSchedulerLogger;
   #registered = false;
   #turnWorkflow?: (job: TaskTurnJob) => Promise<void>;
-  #passInFlight: Promise<void> | null = null;
+  #passRunning = false;
   #passQueued = false;
 
   constructor(deps: TaskSchedulerDeps) {
@@ -308,20 +309,20 @@ export class DbosTaskScheduler {
    * independently, and the header says so.
    */
   async #passCoalesced(): Promise<void> {
-    if (this.#passInFlight) {
+    // The claim is taken SYNCHRONOUSLY, before the first await: an async body runs to its first
+    // await on the caller's turn, so a second caller can never observe the flag still down.
+    if (this.#passRunning) {
       this.#passQueued = true;
       return;
     }
-    this.#passInFlight = (async () => {
+    this.#passRunning = true;
+    try {
       do {
         this.#passQueued = false;
         await this.runReservePass();
       } while (this.#passQueued);
-    })();
-    try {
-      await this.#passInFlight;
     } finally {
-      this.#passInFlight = null;
+      this.#passRunning = false;
     }
   }
 
@@ -957,15 +958,19 @@ export class DbosTaskScheduler {
       const rows = (await tx
         .select(schema.workforceTasks)
         .where(eq(schema.workforceTasks.taskId, job.taskId))) as TaskRecord[];
-      const task = rows[0];
-      if (task?.status !== 'queued') return;
+      const snapshot = rows[0];
+      if (snapshot?.status !== 'queued') return;
+      // Lock rank: the runtime row, then the task rows. `block_and_escalate` additionally parks the
+      // ROOT, so this touches a second task row and takes the root-first locks up front.
       const budgets =
-        task.workforceId !== null
+        snapshot.workforceId !== null
           ? resolveWorkforceBudgets(
-              (await ensureWorkforceRuntime(tx, task.workforceId)).budgets,
-              task.workforceId,
+              (await ensureWorkforceRuntime(tx, snapshot.workforceId)).budgets,
+              snapshot.workforceId,
             )
           : EMPTY_BUDGETS;
+      const task = await lockRootFirst(tx, snapshot);
+      if (task.status !== 'queued') return;
       await applyBudgetExhausted(tx, task, denial, budgets, { actor: 'scheduler' });
     });
   }
