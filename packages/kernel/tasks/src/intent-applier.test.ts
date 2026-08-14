@@ -225,3 +225,26 @@ describe('invalid intents', () => {
     expect(invalidIntentPlan('bad', true)).toMatchObject({ kind: 'invalid_intent', fate: 'fail' });
   });
 });
+
+describe('clarification planning', () => {
+  it('request_clarification passes through with its question', () => {
+    expect(
+      planTurnOutcome(
+        input({
+          intent: turnIntentSchema.parse({
+            kind: 'request_clarification',
+            question: 'Which environment is the target?',
+          }),
+        }),
+      ),
+    ).toEqual({ kind: 'request_clarification', question: 'Which environment is the target?' });
+  });
+
+  it('the question is required and unknown keys are refused', () => {
+    expect(turnIntentSchema.safeParse({ kind: 'request_clarification' }).success).toBe(false);
+    expect(
+      turnIntentSchema.safeParse({ kind: 'request_clarification', question: 'q', to: 'user' })
+        .success,
+    ).toBe(false);
+  });
+});

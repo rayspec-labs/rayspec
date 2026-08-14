@@ -134,6 +134,12 @@ const SINGLE_ROW_PLANS: ReadonlySet<TurnPlan['kind']> = new Set([
   'request_approval',
   'request_review',
   'review_rounds_exhausted',
+  // One transition on the own row plus leaf-table writes (the question's message row, events) that
+  // no other path holds while waiting on a task row — no second TASK row is ever reached: no
+  // probe, no child, no fan-in (the park is non-terminal), and the `user_reply` wake arrives later
+  // through the delivery path. The ledger touch is `settleTurn` only, the same touch `yield`
+  // already makes on this fast path, in rank order (own task row, then ledger).
+  'request_clarification',
 ]);
 
 export interface ApplyTurnInput {
@@ -574,6 +580,36 @@ export async function applyTurnOutcome(
           taskId: task.taskId,
           expectedVersion: task.version,
           to: 'waiting_for_user',
+          ...stamp,
+        });
+        break;
+      }
+      case 'request_clarification': {
+        // The question is a MESSAGE to whoever requested this work — context for their reply,
+        // never an instruction — and the park waits for the `user_reply` that answers it
+        // (WAKES: user_reply -> blocked(clarification_pending)).
+        await tx.insert(schema.workforceMessages, {
+          taskId: task.taskId,
+          sender: task.owner,
+          recipient: task.requestedBy,
+          body: plan.question,
+        });
+        await appendTaskEvents(tx, task.taskId, [
+          {
+            type: 'workforce.message.sent',
+            payload: {
+              taskId: task.taskId,
+              sender: task.owner,
+              recipient: task.requestedBy,
+              bodyLength: plan.question.length,
+            },
+          },
+        ]);
+        finalTask = await applyTransition(tx, {
+          taskId: task.taskId,
+          expectedVersion: task.version,
+          to: 'blocked',
+          reason: 'clarification_pending',
           ...stamp,
         });
         break;

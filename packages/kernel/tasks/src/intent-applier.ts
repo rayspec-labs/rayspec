@@ -63,6 +63,11 @@ export const turnIntentSchema = z.discriminatedUnion('kind', [
     escalateTo: z.string().min(1).optional(),
   }),
   z.strictObject({ kind: z.literal('request_review'), reviewer: z.string().min(1) }),
+  z.strictObject({
+    /** Ask the requesting party a typed question; the task parks until a `user_reply` answers it. */
+    kind: z.literal('request_clarification'),
+    question: z.string().min(1),
+  }),
   z.strictObject({ kind: z.literal('yield') }),
   z.strictObject({ kind: z.literal('fail'), message: z.string().min(1) }),
 ]);
@@ -100,6 +105,7 @@ export type TurnPlan =
     }
   | { readonly kind: 'request_review'; readonly reviewer: string; readonly round: number }
   | { readonly kind: 'review_rounds_exhausted'; readonly reviewer: string }
+  | { readonly kind: 'request_clarification'; readonly question: string }
   | { readonly kind: 'yield' }
   | { readonly kind: 'fail'; readonly message: string }
   | {
@@ -179,6 +185,8 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
         round: input.reviewRoundsUsed + 1,
       };
     }
+    case 'request_clarification':
+      return { kind: 'request_clarification', question: intent.question };
     case 'yield':
       return { kind: 'yield' };
     case 'fail':

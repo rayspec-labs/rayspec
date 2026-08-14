@@ -227,6 +227,52 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     ]);
   });
 
+  it('request_clarification parks the task, messages the requester, and a user_reply wakes it', async () => {
+    const root = await driveToWorking(await newRoot());
+    const out = await turn(root.taskId, 1, {
+      kind: 'request_clarification',
+      question: 'Which quarter does the report cover?',
+    });
+    expect(out.task?.status).toBe('blocked');
+    expect(out.task?.statusReason).toBe('clarification_pending');
+    const messages = await db.$client.unsafe(
+      `SELECT sender, recipient, body FROM workforce_messages WHERE task_id = '${root.taskId}';`,
+    );
+    expect(messages).toEqual([
+      {
+        sender: 'coordinator',
+        recipient: 'user',
+        body: 'Which quarter does the report cover?',
+      },
+    ]);
+
+    // The reply is the wake: user_reply answers exactly blocked(clarification_pending).
+    const woke = await deliverSignal(tdb(), {
+      taskId: root.taskId,
+      kind: 'user_reply',
+      signalKey: 'reply:1',
+      payload: { answer: 'Q3' },
+      actor: 'user',
+    });
+    expect(woke.woke).toBe(true);
+    const row = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(row[0]).toEqual({ status: 'queued', status_reason: null });
+
+    // Receipt idempotency: re-applying the SAME turn after the wake is a read-only no-op.
+    const replay = await turn(root.taskId, 1, {
+      kind: 'request_clarification',
+      question: 'Which quarter does the report cover?',
+    });
+    expect(replay.alreadyApplied).toBe(true);
+    const still = await db.$client.unsafe(
+      `SELECT status, count(*) OVER ()::int AS messages FROM workforce_tasks t JOIN workforce_messages m ON m.task_id = t.task_id WHERE t.task_id = '${root.taskId}';`,
+    );
+    expect(still[0]?.status).toBe('queued');
+    expect(still[0]?.messages).toBe(1);
+  });
+
   it('buffered turn messages land as rows AND journal workforce.message.sent without the body', async () => {
     const root = await driveToWorking(await newRoot());
     await applyTurnOutcome(tdb(), {
