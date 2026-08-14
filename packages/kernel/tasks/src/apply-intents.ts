@@ -99,6 +99,31 @@ export const turnReviewPolicySchema = z.strictObject({
 
 export type TurnReviewPolicy = z.output<typeof turnReviewPolicySchema>;
 
+/**
+ * Message caps. A body is DATA addressed to a later turn's context, and up to
+ * `CONTEXT_MESSAGE_LIMIT` of them render verbatim into a dispatch's prompt — so an uncapped body
+ * or an uncapped count is a way to make a later turn's context whatever the writer wants it to be,
+ * at a size nothing else in the turn is allowed to reach. The numbers are deliberately generous
+ * enough that no honest hand-off notices them.
+ */
+export const MAX_MESSAGE_BODY_CHARS = 4_000;
+export const MAX_MESSAGES_PER_TURN = 20;
+
+/**
+ * The strict shape of the trusted message channel (`ApplyTurnInput.messages`) — validated exactly
+ * like its siblings (`reviewPolicy`, `createdChildren`) rather than trusted as it arrives. The
+ * recipient is checked for shape here; WHICH recipients are declared is the composition's question,
+ * and the kernel stays roster-free about it.
+ */
+export const turnMessagesSchema = z
+  .array(
+    z.strictObject({
+      recipient: z.string().min(1),
+      body: z.string().min(1).max(MAX_MESSAGE_BODY_CHARS),
+    }),
+  )
+  .max(MAX_MESSAGES_PER_TURN);
+
 /** The turn's final application refuses a task in a state it cannot explain. */
 export class TurnStateError extends Error {
   readonly taskId: string;
@@ -152,8 +177,12 @@ export interface ApplyTurnInput {
   readonly turnNumber: number;
   /** The handler's raw turn-ending intent; validated HERE, never assumed. */
   readonly intent: unknown;
-  /** Task-scoped messages the turn asked to append (context, never instructions). */
-  readonly messages?: readonly { readonly recipient: string; readonly body: string }[];
+  /**
+   * Task-scoped messages the turn asked to append (context, never instructions). A TRUSTED channel
+   * like its siblings: strictly validated and capped here (`turnMessagesSchema`), and applied only
+   * with an outcome the turn earned — never on the attempt a tool-error requeue will re-run.
+   */
+  readonly messages?: unknown;
   /**
    * The TRUSTED review-policy match for a completing turn, computed by the dispatching
    * composition from declared rules — never derived from model output (the handler's tool
@@ -313,6 +342,7 @@ export async function applyTurnOutcome(
 
     // The buffered creates ride a TRUSTED channel too — validated strictly before they can plan.
     const createdChildren = z.array(delegationChildSpecSchema).parse(input.createdChildren ?? []);
+    const messages = turnMessagesSchema.parse(input.messages ?? []);
 
     // Everything the planner needs except the one input that can only be read under a lock. The
     // fields taken from `snapshot` here (owner, ancestry) are immutable for the row's lifetime.
@@ -413,17 +443,19 @@ export async function applyTurnOutcome(
     const stamp = { actor: task.owner, turnId: input.turnId, turnNumber: input.turnNumber };
     let finalTask: TaskRecord | null = null;
 
-    // BUFFERED CREATES apply with every outcome the turn actually earned — never with an outcome
-    // that overrode or refused it (a consumed cancel, a rejected hand-off, a malformed ending, a
-    // terminal fail): a tool-error requeue re-runs the turn under a NEW turn number, so children
-    // applied on the failed attempt would duplicate on the retry. Probe-before-rows, exactly like
-    // a fan-out: each created child is a turn to be paid for.
-    const createsApply =
-      createdChildren.length > 0 &&
+    // THE TURN'S BUFFERED EFFECTS — its created children and its messages — apply with every
+    // outcome the turn actually EARNED, and with none that overrode or refused it (a consumed
+    // cancel, a rejected hand-off, a malformed ending, a terminal fail). A tool-error requeue
+    // re-runs the turn under a NEW turn number, and the receipt keys on (task, turn): anything
+    // applied on the failed attempt is therefore applied AGAIN on the retry, with no key to
+    // collide on. Children have always been guarded this way; messages had not been, so a turn
+    // that malformed its ending sent its notes twice.
+    const effectsApply =
       plan.kind !== 'cancelled' &&
       plan.kind !== 'fail' &&
       plan.kind !== 'delegation_rejected' &&
       plan.kind !== 'invalid_intent';
+    const createsApply = createdChildren.length > 0 && effectsApply;
     if (createsApply) {
       const probe = await probeSpend(
         tx,
@@ -1045,8 +1077,8 @@ export async function applyTurnOutcome(
       }
     }
 
-    if (input.messages) {
-      for (const message of input.messages) {
+    if (effectsApply) {
+      for (const message of messages) {
         await tx.insert(schema.workforceMessages, {
           taskId: task.taskId,
           sender: task.owner,

@@ -11,6 +11,8 @@ import {
   applyTurnOutcome,
   DELEGATION_STATUSES,
   lockRootFirst,
+  MAX_MESSAGE_BODY_CHARS,
+  MAX_MESSAGES_PER_TURN,
   TurnStateError,
 } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
@@ -116,6 +118,22 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       intent,
       budgets: NO_BUDGETS,
       actualUsd,
+    });
+  }
+
+  function turnWithMessages(
+    taskId: string,
+    turnNumber: number,
+    intent: unknown,
+    messages: { recipient: string; body: string }[],
+  ) {
+    return applyTurnOutcome(tdb(), {
+      taskId,
+      turnId: turnIdFor(taskId, turnNumber),
+      turnNumber,
+      intent,
+      messages,
+      budgets: NO_BUDGETS,
     });
   }
 
@@ -322,6 +340,91 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       `SELECT count(*)::int AS c FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
     );
     expect(still[0]?.c).toBe(2);
+  });
+
+  describe('task-scoped messages ride the turn they were earned on', () => {
+    async function messageRows(taskId: string): Promise<{ recipient: string; body: string }[]> {
+      return (await db.$client.unsafe(
+        `SELECT recipient, body FROM workforce_messages WHERE task_id = '${taskId}' ORDER BY created_at, id;`,
+      )) as unknown as { recipient: string; body: string }[];
+    }
+
+    it('a turn that takes the tool-error fate writes NO messages — the retry would duplicate them', async () => {
+      const root = await driveToWorking(await newRoot());
+      const out = await applyTurnOutcome(tdb(), {
+        taskId: root.taskId,
+        turnId: turnIdFor(root.taskId, 1),
+        turnNumber: 1,
+        // A malformed ending: the turn re-runs under a NEW turn number, so anything applied here
+        // lands twice. The receipt keys on (task, turn), and the retry is a different turn.
+        intent: { kind: 'complete', result: { summary: 'no confidence field' } },
+        messages: [{ recipient: 'mgr', body: 'Interim note.' }],
+        budgets: NO_BUDGETS,
+      });
+      expect(out.plan?.kind).toBe('invalid_intent');
+      expect(await messageRows(root.taskId)).toEqual([]);
+
+      // The retry is the turn that earns them, and it writes exactly one row.
+      await claim(root.taskId, await currentVersion(root.taskId), 2);
+      await applyTurnOutcome(tdb(), {
+        taskId: root.taskId,
+        turnId: turnIdFor(root.taskId, 2),
+        turnNumber: 2,
+        intent: { kind: 'complete', result: RESULT },
+        messages: [{ recipient: 'mgr', body: 'Interim note.' }],
+        budgets: NO_BUDGETS,
+      });
+      expect(await messageRows(root.taskId)).toEqual([
+        { recipient: 'mgr', body: 'Interim note.' },
+      ]);
+    });
+
+    it('a consumed cancel drops the turn’s messages with the rest of its effects', async () => {
+      const root = await driveToWorking(await newRoot());
+      await deliverSignal(tdb(), {
+        taskId: root.taskId,
+        kind: 'cancel',
+        signalKey: 'op-cancel',
+        actor: 'user',
+      });
+      const out = await turnWithMessages(root.taskId, 1, { kind: 'complete', result: RESULT }, [
+        { recipient: 'mgr', body: 'Never sent.' },
+      ]);
+      expect(out.plan?.kind).toBe('cancelled');
+      expect(await messageRows(root.taskId)).toEqual([]);
+    });
+
+    it('the channel is validated and bounded, exactly like every sibling trusted channel', async () => {
+      const root = await driveToWorking(await newRoot());
+      const reject = (messages: unknown) =>
+        expect(
+          applyTurnOutcome(tdb(), {
+            taskId: root.taskId,
+            turnId: turnIdFor(root.taskId, 1),
+            turnNumber: 1,
+            intent: { kind: 'yield' },
+            messages: messages as { recipient: string; body: string }[],
+            budgets: NO_BUDGETS,
+          }),
+        ).rejects.toThrow();
+      await reject([{ recipient: 'mgr' }]);
+      await reject([{ recipient: '', body: 'x' }]);
+      await reject([{ recipient: 'mgr', body: 'x', channel: 'email' }]);
+      await reject([{ recipient: 'mgr', body: 'x'.repeat(MAX_MESSAGE_BODY_CHARS + 1) }]);
+      await reject(
+        Array.from({ length: MAX_MESSAGES_PER_TURN + 1 }, () => ({
+          recipient: 'mgr',
+          body: 'x',
+        })),
+      );
+      // Nothing landed, and the task never left `working` — a malformed trusted channel is a
+      // caller bug that refuses loudly, never a turn that degrades to "no messages".
+      expect(await messageRows(root.taskId)).toEqual([]);
+      const row = await db.$client.unsafe(
+        `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      );
+      expect(row[0]?.status).toBe('working');
+    });
   });
 
   it('a buffered HAND-OFF to an ancestor owner is refused as a cycle, exactly like a fan-out', async () => {
