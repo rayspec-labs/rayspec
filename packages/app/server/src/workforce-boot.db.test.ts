@@ -4,7 +4,7 @@
  * persistence onto the runtime row. Uses the task engine's own test schema helpers — the gate
  * reads exactly the rows the engine writes.
  */
-import { WorkforceSpec } from '@rayspec/spec';
+import { parseSpec, WorkforceSpec } from '@rayspec/spec';
 import { createRootTask, resolveWorkforceBudgets } from '@rayspec/tasks';
 import { forTenant, makeTestDb, resetTaskSchema } from '@rayspec/tasks/test-support';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -302,5 +302,58 @@ describe('the delegated_to parser', () => {
     expect(parseDelegatedTo('department:eng')).toEqual({ kind: 'department', id: 'eng' });
     expect(parseDelegatedTo('team:fix_team')).toEqual({ kind: 'team', id: 'fix_team' });
     expect(parseDelegatedTo('dev')).toEqual({ kind: 'employee', id: 'dev' });
+  });
+});
+
+/**
+ * The gate and the marker writer are guarded ASYMMETRICALLY in the composition root: the gate (and
+ * the release beside it) run on `config.cronTenantId` alone, while `ensureDeclaredWorkforceRuntime`
+ * — the marker's only writer — additionally requires the wired durable worker. A configuration that
+ * satisfied the first and never the second would DECLARE a workforce whose declaration is never
+ * recorded, and the next boot could then drop or rename it unseen: the maximal removals the marker
+ * exists to make decidable.
+ *
+ * It is unreachable, and by a rule rather than by a convention: a document that declares
+ * `workforce:` is a lint ERROR without `deployment.durableWorker: true`, so no document can arm the
+ * gate without also arming the marker writer. This pins that linkage on the boot side — a later
+ * change that relaxes the rule fails here, where the consequence lives.
+ */
+describe('the redeploy gate and the declaration marker cannot be configured apart', () => {
+  const DECLARING_SPEC = `
+version: '1.0'
+metadata:
+  name: workforce-boot-linkage
+deployment:
+  durableWorker: true
+agents:
+  - id: lead_agent
+    name: lead_agent
+    backend: openai
+    model: gpt-4o-mini
+    instructions: Coordinate the workforce.
+workforce:
+  id: helpdesk
+  name: Helpdesk
+  orchestrator: lead
+  employees:
+    - id: lead
+      agent: lead_agent
+      title: Lead
+      role: orchestrator
+`;
+
+  it('a document that declares a workforce cannot deploy without the durable worker', () => {
+    const withWorker = parseSpec(DECLARING_SPEC, { experimentalWorkforce: true });
+    expect(withWorker.ok).toBe(true);
+
+    const withoutWorker = parseSpec(
+      DECLARING_SPEC.replace('deployment:\n  durableWorker: true\n', ''),
+      { experimentalWorkforce: true },
+    );
+    expect(withoutWorker.ok).toBe(false);
+    if (withoutWorker.ok) return;
+    expect(withoutWorker.errors.map((e) => e.message).join('\n')).toContain(
+      'deployment.durableWorker: true',
+    );
   });
 });

@@ -569,6 +569,88 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(children[0]).toEqual({ c: 3, ids: 3 });
   });
 
+  it('the SAME-TURN join binds the fan-out round only — read off the binding, then driven', async () => {
+    // One turn buffers a fire-and-forget child AND fans out. All three rows share the parent, so
+    // the BINDING is the only thing that says which of them the join waits on — there is no
+    // whole-child fallback to fall back to. The buffered child parks on an approval and never
+    // terminates: if it were in the round, the parent would sit in `awaiting_children` forever,
+    // the one park no operator signal may release.
+    const root = await driveToWorking(await newRoot());
+    const out = await applyTurnOutcome(tdb(), {
+      taskId: root.taskId,
+      turnId: turnIdFor(root.taskId, 1),
+      turnNumber: 1,
+      intent: {
+        kind: 'fan_out',
+        children: [1, 2].map((i) => ({ title: `F${i}`, goal: `G${i}`, owner: `worker-${i}` })),
+      },
+      createdChildren: [{ title: 'Detached', goal: 'Runs on regardless.', owner: 'worker-9' }],
+      budgets: NO_BUDGETS,
+    });
+    expect(out.task?.statusReason).toBe('awaiting_children');
+
+    const children = (await db.$client.unsafe(
+      `SELECT task_id, owner, version FROM workforce_tasks WHERE parent_task_id = '${root.taskId}' ORDER BY owner;`,
+    )) as unknown as { task_id: string; owner: string; version: number }[];
+    expect(children.map((c) => c.owner)).toEqual(['worker-1', 'worker-2', 'worker-9']);
+    const fanOut = children.slice(0, 2);
+    const buffered = children[2] as (typeof children)[number];
+
+    const bound = (
+      (await db.$client.unsafe(
+        `SELECT join_policy FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      )) as unknown as { join_policy: { policy: string; childTaskIds: string[] } }[]
+    )[0] as { join_policy: { policy: string; childTaskIds: string[] } };
+    expect(bound.join_policy).toEqual({
+      policy: 'all',
+      childTaskIds: fanOut.map((c) => c.task_id),
+    });
+    expect(bound.join_policy.childTaskIds).not.toContain(buffered.task_id);
+
+    // The buffered child parks on an approval — it will not terminate on its own.
+    const bufferedQueued = await applyTransition(tdb(), {
+      taskId: buffered.task_id,
+      expectedVersion: buffered.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await claim(buffered.task_id, bufferedQueued.version, 1);
+    await turn(buffered.task_id, 1, {
+      kind: 'request_approval',
+      question: 'Proceed?',
+      timeoutMs: 60_000,
+    });
+
+    for (const child of fanOut) {
+      const queued = await applyTransition(tdb(), {
+        taskId: child.task_id,
+        expectedVersion: child.version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+      await claim(child.task_id, queued.version, 1);
+      await turn(child.task_id, 1, { kind: 'complete', result: RESULT });
+    }
+
+    // The round is complete, so the join is: the parent wakes exactly once with the buffered child
+    // still live under it.
+    const woken = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(woken[0]).toEqual({ status: 'queued', status_reason: null });
+    const joinSignals = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_task_signals WHERE task_id = '${root.taskId}' AND kind = 'child_completed';`,
+    );
+    expect(joinSignals[0]?.c).toBe(1);
+    const stillParked = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${buffered.task_id}';`,
+    );
+    expect(stillParked[0]).toMatchObject({
+      status: 'waiting_for_user',
+      status_reason: 'approval_pending',
+    });
+  });
+
   it('buffered creates the budget cannot pay for park the task and create nothing', async () => {
     const root = await driveToWorking(await newRoot());
     const out = await applyTurnOutcome(tdb(), {
@@ -1248,6 +1330,57 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(signals.map((s) => s.signal_key)).toEqual([`escalated:${escalation.task_id}`]);
   });
 
+  it('CANCELLING the escalation child releases the caller — the one lever the park leaves open', async () => {
+    // `blocked(escalated)` is structural: no operator signal may dissolve it (signals.ts), and the
+    // escape it names instead is CANCEL THE CHILD. This drives that lever end to end — the child's
+    // terminal takes the park's OWN exit (the escalation reply), so the caller is released rather
+    // than having its exit erased while the child still lives.
+    const root = await driveToWorking(await newRoot({ owner: 'worker-1' }));
+    await turn(root.taskId, 1, {
+      kind: 'escalate',
+      reason: 'capability_missing',
+      detail: 'needs a production credential',
+      escalateTo: 'mgr',
+      escalateToDepartment: 'eng',
+    });
+    const child = (
+      (await db.$client.unsafe(
+        `SELECT task_id FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+      )) as unknown as { task_id: string }[]
+    )[0] as { task_id: string };
+    const parked = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(parked[0]).toMatchObject({ status: 'blocked', status_reason: 'escalated' });
+
+    // The superior will never answer — the operator cancels their escalation task instead.
+    const outcome = await cancelTaskCascade(tdb(), { taskId: child.task_id, actor: 'user' });
+    expect(outcome.cancelled).toEqual([child.task_id]);
+
+    const released = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(released[0]).toEqual({ status: 'queued', status_reason: null });
+    // Released THROUGH the park's own mechanism: the escalation reply, carrying the child's
+    // terminal — not an override that erased it.
+    const signal = (await db.$client.unsafe(
+      `SELECT kind, signal_key, payload FROM workforce_task_signals WHERE task_id = '${root.taskId}';`,
+    )) as unknown as {
+      kind: string;
+      signal_key: string;
+      payload: { escalationTaskId: string; status: string };
+    }[];
+    expect(signal).toHaveLength(1);
+    expect(signal[0]).toMatchObject({
+      kind: 'escalated',
+      signal_key: `escalated:${child.task_id}`,
+    });
+    expect(signal[0]?.payload).toMatchObject({
+      escalationTaskId: child.task_id,
+      status: 'cancelled',
+    });
+  });
+
   it('a denied escalation blocks with the typed budget reason and opens no child', async () => {
     // The escalation child cannot be paid for: the subtree usd ceiling is below one per-turn
     // estimate (the child draws on the shared root scope — the task's own ceiling deliberately
@@ -1428,6 +1561,54 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       status: 'pending',
       on_timeout: 'fail',
     });
+  });
+
+  it('the escalated approval’s decision still wakes the task — the chain keeps its exit', async () => {
+    // The timeout chain MOVES the park: `waiting_for_user(approval_pending)` becomes
+    // `blocked(approval_pending)`, a different (status, reason) pair with its own wake set. The
+    // decision on the RE-ISSUED request has to answer that pair too — a wake set that covered only
+    // the park the request STARTED in would leave the escalation trading a hung approval for a
+    // task whose own decision no longer reaches it.
+    const root = await driveToWorking(await newRoot());
+    await turn(root.taskId, 1, {
+      kind: 'request_approval',
+      question: 'Proceed?',
+      timeoutMs: 1,
+      onTimeout: 'escalate',
+      escalateTo: 'ops-lead',
+    });
+    expect(
+      (await sweepApprovalTimeouts(tdb(), new Date(Date.now() + 10_000))).escalated,
+    ).toHaveLength(1);
+    const blocked = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(blocked[0]).toMatchObject({ status: 'blocked', status_reason: 'approval_pending' });
+
+    const pending = (await db.$client.unsafe(
+      `SELECT id, approver FROM workforce_approvals WHERE task_id = '${root.taskId}' AND status = 'pending';`,
+    )) as unknown as { id: string; approver: string }[];
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.approver).toBe('ops-lead');
+
+    const decided = await decideApproval(tdb(), {
+      approvalId: (pending[0] as { id: string }).id,
+      decision: 'approve',
+      decidedBy: 'ops-lead',
+    });
+    expect(decided.status).toBe('approved');
+    const woken = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(woken[0]).toEqual({ status: 'queued', status_reason: null });
+    // Woken by the decision that answers it — the escalated approval's own key, consumed.
+    const signals = (await db.$client.unsafe(
+      `SELECT kind, signal_key, consumed_at FROM workforce_task_signals WHERE task_id = '${root.taskId}';`,
+    )) as unknown as { kind: string; signal_key: string; consumed_at: Date | null }[];
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.kind).toBe('approval_decided');
+    expect(signals[0]?.signal_key).toBe(`approval:${decided.id}`);
+    expect(signals[0]?.consumed_at).not.toBeNull();
   });
 
   it('review: reject reworks through queued; the round past the ceiling parks for a human; accept completes', async () => {
