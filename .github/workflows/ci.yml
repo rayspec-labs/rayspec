@@ -5,7 +5,7 @@ name: CI
 #
 #   lane1-deterministic  — no Postgres, no secrets. install → typecheck → lint → build →
 #                          gitleaks → the non-DB platform gates → check:deploy-entrypoint →
-#                          gate:parity → the deterministic test subset (the 20 non-DB packages).
+#                          gate:parity → the deterministic test subset (the 23 non-DB packages).
 #                          REQUIRED merge check. Fast, hermetic.
 #
 #   lane2-db             — ephemeral Postgres service. install → build → the DB gates
@@ -26,11 +26,11 @@ name: CI
 # The test split is by TURBO --filter, not self-skip: GitHub sets CI=true, which arms the
 # un-skippable DB ran-guards (they hard-FAIL, they do not skip, when DATABASE_URL is absent). So the
 # 9 Postgres-backed packages MUST be excluded from lane 1 at the filter level — they run only in
-# lane 2 (with a DB). lane1 ∪ lane2 == every @rayspec/* package, with no package in both.
+# lane 2 (with a DB). lane1 ∪ lane2 == every @rayspec/* package PLUS the unscoped `rayspec` launcher,
+# with no package in both. The launcher's name carries no scope, so the @rayspec/* glob cannot reach
+# it; lane 1 names it explicitly (see the deterministic subset below).
 #
 # Intentionally NOT run in CI:
-#   • gate:tracker-hygiene — scans PM-workspace tracker docs that are not part of this repo; it is a
-#     workspace-doc invariant, not a code invariant. Run locally via `pnpm gate:workspace`.
 #   • a Rust-SDK job — the in-repo Rust client SDK is developed and tested outside this repo's CI.
 # ────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -273,15 +273,25 @@ jobs:
       - name: Parity wire-golden / replay gate
         run: pnpm gate:parity
 
-      # ── Deterministic test subset — the 20 non-DB, non-parity packages ────────────────────────────
+      # ── Deterministic test subset — the 23 non-DB, non-parity packages ────────────────────────────
       # Split by turbo --filter (NOT self-skip): under CI=true the DB ran-guards HARD-FAIL when
       # DATABASE_URL is absent, so the 9 Postgres-backed packages are excluded here and run only in
       # lane 2. @rayspec/parity is excluded because it ran as the gate step above. No DATABASE_URL is
-      # set → this lane touches no Postgres. @spike/* is auto-excluded (the base filter is @rayspec/*).
+      # set → this lane touches no Postgres. @spike/* matches none of the filters below, so it never
+      # enters this scope.
+      #
+      # The count, derived from the filters: 32 @rayspec/* workspace members − the 9 Postgres-backed
+      # ones − @rayspec/parity + the `rayspec` launcher = 23. Recount after adding or moving a package
+      # with `pnpm exec turbo run test <the filters below> --dry-run=text` and read "Packages in Scope".
+      #
+      # `rayspec` is the UNSCOPED launcher npm serves when a user installs the product, so the
+      # @rayspec/* glob cannot match it and it needs its own exact-name filter. It belongs in this lane:
+      # its suite spawns the two built bins (the Build step above produces both) and touches no Postgres.
       - name: Test (deterministic subset)
         run: |
           pnpm exec turbo run test \
             --filter='@rayspec/*' \
+            --filter='rayspec' \
             --filter='!@rayspec/adapter-openai' \
             --filter='!@rayspec/cli' \
             --filter='!@rayspec/server' \

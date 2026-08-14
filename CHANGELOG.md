@@ -1078,6 +1078,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Two checks that certified files they never read now reach them.** The unscoped `rayspec`
+  launcher — the package npm serves when a user installs the product — carries a bare name, and every
+  `--filter` in the two required CI lanes was either the `@rayspec/*` glob or an explicit
+  `@rayspec/<name>`. It was the only test-carrying workspace member no lane filter matched, so its
+  suite ran in **no required check**:
+  the only test of the shipped bin, four cases that spawn the launcher and the `@rayspec/cli` bin side
+  by side and compare exit code, stdout, stderr and the scaffold they write. Lane 1 now names it
+  explicitly, which is where it belongs — the suite spawns two built bins and touches no Postgres — so
+  the deterministic subset goes from 22 packages to 23. Separately, the anti-re-accretion gate
+  (`pnpm gate:no-archaeology`) enumerates tracked files under a fixed path allowlist, and three
+  example directories were never added to it: `examples/live-workspace-events`, `examples/notes-ui`
+  and `examples/agent-boot-backend`, 7 scanned files between them. Anything under a path the
+  allowlist does not name is not read, so the gate passed on them the way it passes on a clean tree.
+  **Neither gap was hiding a live failure:** the launcher suite is green on this tree and the three
+  example directories carry no forbidden token — what changes is that a regression in either place is
+  now loud instead of silent. The stale ci.yml comment pointing at a `pnpm gate:workspace` script
+  (never defined in this repository, nor the `gate:tracker-hygiene` it named) is deleted rather
+  than renamed, and the deterministic-subset count, wrong in both places it appeared, is corrected and
+  now carries the derivation and the command that recounts it. Repository infrastructure only: no
+  published package, API or runtime behavior changes.
+
 - **The transitive `nanoid` copy behind the test runner is raised from 3.3.17 to 3.3.18**
   (GHSA-2v37-7h3g-55p8: `customAlphabet` and `customRandom` loop indefinitely when configured with a
   size of 0, hanging the calling thread). That copy has exactly one dependent, `postcss`, which is
