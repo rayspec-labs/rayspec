@@ -15,6 +15,8 @@ import type { NeutralTool } from '@rayspec/core';
 import type { WorkforceConfig, WorkforceEmployeeConfig } from '@rayspec/spec';
 import {
   ESCALATION_REASONS,
+  MAX_MESSAGE_BODY_CHARS,
+  MAX_MESSAGES_PER_TURN,
   type TaskRecord,
   turnIntentSchema,
   workerResultSchema,
@@ -22,6 +24,7 @@ import {
 import { z } from 'zod';
 import type { TurnCollector } from './collector.js';
 import {
+  ApprovalEscalationTargetMissingError,
   EscalationTargetMissingError,
   ReservedToolNameError,
   TaskNotVisibleError,
@@ -106,7 +109,7 @@ const cancelArgsSchema = z.strictObject({
 
 const sendMessageArgsSchema = z.strictObject({
   recipient: z.string().min(1),
-  body: z.string().min(1),
+  body: z.string().min(1).max(MAX_MESSAGE_BODY_CHARS),
 });
 
 const getTaskArgsSchema = z.strictObject({ taskId: z.string().min(1).optional() });
@@ -141,10 +144,30 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
     }
   };
 
+  /**
+   * A turn-ending tool that REFUSES records the refusal before it throws, so the turn lands on the
+   * DECLARED tool-error fate (requeue once, then fail). Without the record a refused ending is
+   * indistinguishable from a turn that never ended at all: the composition yields, the task
+   * re-dispatches with a fresh budget, and a deterministic refusal loops for free. A later VALID
+   * ending in the same turn clears the marker (`TurnCollector.finish`), so recording costs an
+   * in-turn recovery nothing.
+   */
+  const refuseEnding: (args: unknown, err: WorkforceToolError) => never = (args, err) => {
+    collector.recordMalformed(args, err.message);
+    throw err;
+  };
+
   const endTurn = (intent: unknown): { recorded: true; kind: string } => {
-    const validated = turnIntentSchema.parse(intent);
-    collector.recordIntent(validated);
-    return { recorded: true, kind: validated.kind };
+    // The INTENT layer refuses exactly as the argument layer does. A bare `.parse` here threw a
+    // raw ZodError past the collector, so a turn whose ending failed the engine's own schema
+    // yielded instead of taking the fate that schema refusal is supposed to drive.
+    const parsed = turnIntentSchema.safeParse(intent);
+    if (!parsed.success) {
+      collector.recordMalformed(intent, parsed.error.message);
+      throw new WorkforceToolError(`invalid turn-ending intent: ${parsed.error.message}`);
+    }
+    collector.recordIntent(parsed.data);
+    return { recorded: true, kind: parsed.data.kind };
   };
 
   const summaryFor = (taskId: string) => snapshot.subtreeTasks.find((row) => row.taskId === taskId);
@@ -228,11 +251,21 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
       },
       handler: (args) => {
         const { tasks } = parseEnding(delegateArgsSchema, args);
+        // A target that does not resolve, or one this manager may not reach, is a REFUSED ENDING —
+        // recorded so the turn takes the tool-error fate. It used to throw past the collector and
+        // yield, which handed a deterministically forbidden delegation an unbounded retry loop.
         const children = tasks.map((entry) => {
-          const target = parseDelegationTarget(entry.target);
-          const resolved = resolveDelegationTarget(config, target);
-          if (employee.role === 'manager') {
-            assertManagerMayTarget(config, employee, target, resolved);
+          let target: ReturnType<typeof parseDelegationTarget>;
+          let resolved: ReturnType<typeof resolveDelegationTarget>;
+          try {
+            target = parseDelegationTarget(entry.target);
+            resolved = resolveDelegationTarget(config, target);
+            if (employee.role === 'manager') {
+              assertManagerMayTarget(config, employee, target, resolved);
+            }
+          } catch (err) {
+            if (err instanceof WorkforceToolError) refuseEnding(args, err);
+            throw err;
           }
           return {
             title: entry.title,
@@ -364,18 +397,24 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
         allowed.delete(employee.id);
         const reviewer = requested ?? policyReviewers.find((id) => id !== employee.id) ?? 'user';
         if (!allowed.has(reviewer)) {
-          throw new WorkforceToolError(
-            `'${reviewer}' is not a reviewer you may request — your reviewers are the declared ` +
-              "policies covering you, your own superior (holding role 'reviewer' or 'manager'), " +
-              "or 'user' for a human decision; never yourself.",
+          refuseEnding(
+            args,
+            new WorkforceToolError(
+              `'${reviewer}' is not a reviewer you may request — your reviewers are the declared ` +
+                "policies covering you, your own superior (holding role 'reviewer' or 'manager'), " +
+                "or 'user' for a human decision; never yourself.",
+            ),
           );
         }
         if (reviewer !== 'user') {
           const target = config.employees.get(reviewer);
           if (!target || (target.role !== 'reviewer' && target.role !== 'manager')) {
-            throw new WorkforceToolError(
-              `'${reviewer}' is not a declared reviewer — a reviewer holds role 'reviewer' or ` +
-                "'manager', or use 'user' for a human decision.",
+            refuseEnding(
+              args,
+              new WorkforceToolError(
+                `'${reviewer}' is not a declared reviewer — a reviewer holds role 'reviewer' or ` +
+                  "'manager', or use 'user' for a human decision.",
+              ),
             );
           }
         }
@@ -411,6 +450,18 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
           candidate.capabilities.some((label) => employee.capabilities.includes(label)),
         );
         const onTimeout = rule?.onTimeout ?? 'fail';
+        // An escalate fate must NAME its target, and the reporting edge is the only supplier. A
+        // seat with no superior (the orchestrator, by lint requirement) therefore cannot request an
+        // approval under an escalating rule at all — the intent would be refused by the planner as
+        // `invalid_intent`, and the requeue would re-run the same deterministic condition straight
+        // into permanent failure. The lint refuses such a document at parse; this is the defense
+        // for a configuration built in code, and it keeps the fate typed and recorded.
+        if (onTimeout === 'escalate' && employee.reportsTo === null) {
+          refuseEnding(
+            args,
+            new ApprovalEscalationTargetMissingError(employee.id, rule?.id ?? '(unnamed)'),
+          );
+        }
         return endTurn({
           kind: 'request_approval',
           question,
@@ -418,7 +469,6 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
           approver: 'user',
           timeoutMs: rule?.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS,
           onTimeout,
-          // An escalate fate must NAME its target; the reporting edge supplies it.
           ...(onTimeout === 'escalate' && employee.reportsTo !== null
             ? { escalateTo: employee.reportsTo }
             : {}),
@@ -468,7 +518,7 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
       handler: (args) => {
         const { reason, detail } = parseEnding(escalateArgsSchema, args);
         const superior = employee.reportsTo;
-        if (superior === null) throw new EscalationTargetMissingError(employee.id);
+        if (superior === null) refuseEnding(args, new EscalationTargetMissingError(employee.id));
         return endTurn({
           kind: 'escalate',
           reason,
@@ -502,9 +552,12 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
         const { verdict, reasons, requiredChanges } = parseEnding(submitReviewArgsSchema, args);
         const pending = snapshot.pendingReview;
         if (pending === null) {
-          throw new WorkforceToolError(
-            'no pending review targets this task — submit_review decides the review a dispatched ' +
-              'review task carries, and this task carries none.',
+          refuseEnding(
+            args,
+            new WorkforceToolError(
+              'no pending review targets this task — submit_review decides the review a ' +
+                'dispatched review task carries, and this task carries none.',
+            ),
           );
         }
         return endTurn({
@@ -538,11 +591,14 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
       handler: (args) => {
         const { taskId, detail } = parseEnding(cancelArgsSchema, args);
         if (taskId === task.taskId) {
-          throw new WorkforceToolError(
-            'a task cannot cancel itself — submit a result or escalate instead.',
+          refuseEnding(
+            args,
+            new WorkforceToolError(
+              'a task cannot cancel itself — submit a result or escalate instead.',
+            ),
           );
         }
-        if (summaryFor(taskId) === undefined) throw new TaskNotVisibleError(taskId);
+        if (summaryFor(taskId) === undefined) refuseEnding(args, new TaskNotVisibleError(taskId));
         return endTurn({
           kind: 'cancel_task',
           taskId,
@@ -563,7 +619,7 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
           type: 'object',
           properties: {
             recipient: { type: 'string', minLength: 1 },
-            body: { type: 'string', minLength: 1 },
+            body: { type: 'string', minLength: 1, maxLength: MAX_MESSAGE_BODY_CHARS },
           },
           required: ['recipient', 'body'],
           additionalProperties: false,
@@ -572,6 +628,14 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
       handler: (args) => {
         assertTurnOpen();
         const { recipient, body } = sendMessageArgsSchema.parse(args);
+        // The engine caps the channel too (a caller-bug refusal there); refusing HERE is what makes
+        // it a tool error the model reads instead of a turn the composition cannot apply.
+        if (collector.messageCount >= MAX_MESSAGES_PER_TURN) {
+          throw new WorkforceToolError(
+            `a turn may buffer at most ${MAX_MESSAGES_PER_TURN} messages — this one is full. ` +
+              'Messages are context for a later turn, not a transport.',
+          );
+        }
         if (recipient !== 'user' && !config.employees.has(recipient)) {
           throw new WorkforceToolError(
             `'${recipient}' is not a declared employee — messages address declared employees or ` +
@@ -700,5 +764,16 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
     },
   };
 
-  return TOOLSETS_BY_ROLE[employee.role].map((name) => handlers[name]);
+  // A REVIEW TASK does not carry `request_review`. The role table grants it to every role, and a
+  // reviewer employee running an ordinary task should keep it — but a task dispatched to DECIDE a
+  // review (the one with a pending review on its snapshot) commissioning a review of its own is an
+  // unbounded chain: `reviewRoundsUsed` restarts at zero on every task, so with no declared
+  // execution ceiling nothing bounds it. The engine refuses the intent as well
+  // (`rejectReviewChildEnding`); not offering the tool is what keeps the model from spending a
+  // turn discovering that.
+  const withheld: ReadonlySet<ToolName> =
+    snapshot.pendingReview !== null ? new Set<ToolName>(['request_review']) : new Set<ToolName>();
+  return TOOLSETS_BY_ROLE[employee.role]
+    .filter((name) => !withheld.has(name))
+    .map((name) => handlers[name]);
 }

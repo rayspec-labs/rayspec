@@ -17,6 +17,7 @@ export {
   TurnCollector,
 } from './collector.js';
 export {
+  ApprovalEscalationTargetMissingError,
   DelegationTargetInvalidError,
   EscalationTargetMissingError,
   ManagerTargetForbiddenError,

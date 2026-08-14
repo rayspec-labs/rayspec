@@ -81,6 +81,11 @@ export class TurnCollector {
     if (this.#malformed === null) this.#malformed = { raw, detail };
   }
 
+  /** How many messages this turn has buffered — the per-turn cap's input. */
+  get messageCount(): number {
+    return this.#messages.length;
+  }
+
   recordMessage(message: BufferedMessage): void {
     this.#messages.push(message);
   }

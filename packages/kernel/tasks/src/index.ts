@@ -19,8 +19,11 @@ export {
   delegationStatusSchema,
   lockDescendants,
   lockRootFirst,
+  MAX_MESSAGE_BODY_CHARS,
+  MAX_MESSAGES_PER_TURN,
   type TurnReviewPolicy,
   TurnStateError,
+  turnMessagesSchema,
   turnReviewPolicySchema,
 } from './apply-intents.js';
 export { type ApplyTransitionInput, applyTransition, type TaskRecord } from './apply-transition.js';

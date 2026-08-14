@@ -6,10 +6,13 @@
  * reporting edge, reviewId injection from the snapshot (never from arguments), buffered creates
  * returning deterministic ids, and read-tool visibility.
  */
+import type { WorkforceConfig, WorkforceEmployeeConfig } from '@rayspec/spec';
 import { deterministicChildTaskId, workerResultSchema } from '@rayspec/tasks';
 import { describe, expect, it } from 'vitest';
 import { TurnCollector } from './collector.js';
 import {
+  ApprovalEscalationTargetMissingError,
+  DelegationTargetInvalidError,
   ManagerTargetForbiddenError,
   TaskNotVisibleError,
   TurnAlreadyEndedError,
@@ -27,6 +30,14 @@ import { assertNoReservedCollisions, buildRoleToolset } from './toolset.js';
 const config = fixtureConfig();
 
 function turnFor(employeeId: string, snapshotOver: Partial<Record<string, unknown>> = {}) {
+  return turnWith(config, employeeId, snapshotOver);
+}
+
+function turnWith(
+  config: WorkforceConfig,
+  employeeId: string,
+  snapshotOver: Partial<Record<string, unknown>> = {},
+) {
   const employee = config.employees.get(employeeId);
   if (!employee) throw new Error(`fixture employee '${employeeId}' missing`);
   const task = fixtureTask({ owner: employeeId, department: employee.department });
@@ -120,7 +131,7 @@ describe('delegation targets and the manager restriction', () => {
     });
   });
 
-  it('a manager reaches own department members, led teams, and led-team members — nothing else', () => {
+  it('a manager reaches own department members and led-team members — nothing else', () => {
     const mgr = config.employees.get('mgr');
     if (!mgr) throw new Error('fixture');
     const may = (raw: string) => {
@@ -129,17 +140,53 @@ describe('delegation targets and the manager restriction', () => {
       assertManagerMayTarget(config, mgr, target, resolved);
     };
     expect(() => may('employee:dev')).not.toThrow(); // own department member
-    expect(() => may('team:fix_team')).not.toThrow(); // a team they lead
     expect(() => may('employee:qa')).not.toThrow(); // member of a team they lead
     expect(() => may('employee:copy')).toThrow(ManagerTargetForbiddenError); // another department
     expect(() => may('department:growth')).toThrow(ManagerTargetForbiddenError);
   });
 
-  it('the manager restriction binds inside the delegate_task handler too', () => {
-    const { call } = turnFor('mgr');
+  it('`team:` is the orchestrator seat’s move — a manager may not target one, led or not', () => {
+    const mgr = config.employees.get('mgr');
+    if (!mgr) throw new Error('fixture');
+    const may = (raw: string) => {
+      const target = parseDelegationTarget(raw);
+      const resolved = resolveDelegationTarget(config, target);
+      assertManagerMayTarget(config, mgr, target, resolved);
+    };
+    // `fix_team` is led BY mgr: it resolves to mgr, so this was the self-delegation the engine
+    // refused two turns later. The refusal is now immediate, typed, and says what to do instead.
+    expect(() => may('team:fix_team')).toThrow(ManagerTargetForbiddenError);
+    expect(() => may('team:fix_team')).toThrow(/orchestrator seat/);
+    // The orchestrator's own `team:` delegation still resolves to the lead and is unrestricted.
+    const { call, collector } = turnFor('lead');
+    call('delegate_task', {
+      tasks: [{ target: 'team:fix_team', title: 'Fix', goal: 'Fix it.' }],
+    });
+    expect(collector.finish().intent).toMatchObject({
+      kind: 'fan_out',
+      children: [{ owner: 'mgr', delegatedTo: 'team:fix_team' }],
+    });
+  });
+
+  it('the manager restriction binds inside the delegate_task handler too, on the declared fate', () => {
+    const { call, collector } = turnFor('mgr');
     expect(() =>
       call('delegate_task', { tasks: [{ target: 'employee:copy', title: 'T', goal: 'G' }] }),
     ).toThrow(ManagerTargetForbiddenError);
+    // The refusal is RECORDED: a forbidden delegation is a malformed ending, so the engine applies
+    // the requeue-once-then-fail fate. Left unrecorded it read as "the turn never ended" and the
+    // composition yielded — a deterministic refusal with a free retry every turn.
+    const collected = collector.finish();
+    expect(collected.intent).toBeNull();
+    expect(collected.malformed).not.toBeNull();
+  });
+
+  it('an unresolvable delegation target is a recorded refusal too, not a silent yield', () => {
+    const { call, collector } = turnFor('lead');
+    expect(() =>
+      call('delegate_task', { tasks: [{ target: 'employee:nobody', title: 'T', goal: 'G' }] }),
+    ).toThrow(DelegationTargetInvalidError);
+    expect(collector.finish().malformed).not.toBeNull();
   });
 });
 
@@ -206,6 +253,39 @@ describe('escalation and reviews', () => {
     const qa = turnFor('qa');
     expect(() => qa.call('request_review', { reviewer: 'qa' })).toThrow(WorkforceToolError);
     expect(qa.collector.finish().intent).toBeNull();
+  });
+
+  it('a REVIEW task carries no request_review — a review decides, it does not commission', () => {
+    const reviewing = turnFor('qa', { pendingReview: { reviewId: 'rev-1', round: 1 } });
+    expect(() => reviewing.call('request_review', {})).toThrow(/not offered/);
+    // The same reviewer on an ORDINARY task keeps the tool: the withholding is a property of the
+    // task, not of the role. `reviewRoundsUsed` restarts at zero per task, so a review task that
+    // could ask for review was an unbounded chain whenever no execution ceiling was declared.
+    const ordinary = turnFor('qa');
+    expect(() => ordinary.call('request_review', {})).not.toThrow();
+  });
+
+  it('an escalating approval rule on a seat with no superior is refused, not sent to the planner', () => {
+    // The orchestrator has no `reportsTo` by lint requirement, so the toolset can name no
+    // escalation target — the intent would be `invalid_intent` at the planner and the requeue would
+    // re-run the same deterministic condition into permanent failure. The lint refuses such a
+    // document; this is the defense for a configuration built in code.
+    const topSeatCovered: WorkforceConfig = {
+      ...config,
+      employees: new Map(config.employees).set('lead', {
+        ...(config.employees.get('lead') as WorkforceEmployeeConfig),
+        capabilities: ['public_statement'],
+      }),
+    };
+    const { call, collector } = turnWith(topSeatCovered, 'lead');
+    expect(() => call('request_approval', { question: 'Ship it?' })).toThrow(
+      ApprovalEscalationTargetMissingError,
+    );
+    const collected = collector.finish();
+    expect(collected.intent).toBeNull();
+    // Recorded, so the turn takes the declared tool-error fate rather than yielding into a retry
+    // of the very same deterministic refusal.
+    expect(collected.malformed).not.toBeNull();
   });
 
   it('request_approval pulls the declared window for the caller capabilities and names the escalation target', () => {

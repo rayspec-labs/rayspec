@@ -5,10 +5,20 @@
  * lead (the lead fans out to the members with the `all` join on its own later turn and takes the
  * synthesis turn when the join wakes it) — resolution never expands a team into N children itself.
  *
+ * `team:` IS THEREFORE ORCHESTRATOR-ONLY, and that is the semantic rather than an omission. A team
+ * resolves to its lead, and the lint requires that lead to hold role `manager` — so the only seat
+ * that can address a team without naming its own owner is the one above every manager. A manager
+ * targeting a team they lead resolved to THEMSELVES and the engine refused the result as
+ * `self_delegation`; a manager targeting a team they do not lead was already forbidden. Both arms
+ * failed, so nothing legal is being taken away — what changes is that the refusal is now typed,
+ * immediate, and says why, instead of costing a turn and a requeue to discover.
+ *
  * The manager restriction lives HERE, in the trusted layer the model's tool call passes through:
- * a manager's legal targets are the members of their own department, the teams they LEAD, and the
- * members of those teams. The kernel cannot re-check this (it is roster-free by design), which is
- * why the resolver is the enforcement point and the tests pin it per role.
+ * a manager's legal targets are the members of their own department and the members of the teams
+ * they LEAD. The kernel cannot re-check this (it is roster-free by design), which is why the
+ * resolver is the enforcement point and the tests pin it per role. The team-member grant is bounded
+ * by the lint that certified the team: a lead holds role `manager`, is not among their own members,
+ * and the orchestrator is a member of nothing.
  */
 import type { WorkforceConfig, WorkforceEmployeeConfig } from '@rayspec/spec';
 import { DelegationTargetInvalidError, ManagerTargetForbiddenError } from './errors.js';
@@ -78,9 +88,11 @@ export function resolveDelegationTarget(
 
 /**
  * The manager restriction. Throws unless the RESOLVED owner is a member of the manager's own
- * department, or the target is a team the manager leads, or the owner is a member of a team the
- * manager leads. (Orchestrators are unrestricted; workers and reviewers carry no delegation tool
- * at all, so this is never consulted for them.)
+ * department or a member of a team the manager leads. A `team:` target is refused outright — see
+ * the module header: it resolves to the team's lead, which is the manager themselves for a team
+ * they lead (self-delegation) and a forbidden owner for one they do not. (Orchestrators are
+ * unrestricted; workers and reviewers carry no delegation tool at all, so this is never consulted
+ * for them.)
  */
 export function assertManagerMayTarget(
   config: WorkforceConfig,
@@ -88,14 +100,18 @@ export function assertManagerMayTarget(
   target: DelegationTarget,
   resolved: ResolvedTarget,
 ): void {
-  const ledTeams = [...config.teams.entries()].filter(([, team]) => team.lead === manager.id);
   if (target.kind === 'team') {
-    if (ledTeams.some(([teamId]) => teamId === target.id)) return;
-    throw new ManagerTargetForbiddenError(manager.id, resolved.delegatedTo);
+    throw new ManagerTargetForbiddenError(
+      manager.id,
+      resolved.delegatedTo,
+      'a team resolves to its lead, so addressing one is the orchestrator seat’s move — name the ' +
+        'team members you need (employee:<id>), or hand the whole team’s work to its lead',
+    );
   }
   const ownDepartment =
     manager.department !== null ? config.departments.get(manager.department) : undefined;
   if (ownDepartment?.members.includes(resolved.owner)) return;
-  if (ledTeams.some(([, team]) => team.members.includes(resolved.owner))) return;
+  const ledTeams = [...config.teams.values()].filter((team) => team.lead === manager.id);
+  if (ledTeams.some((team) => team.members.includes(resolved.owner))) return;
   throw new ManagerTargetForbiddenError(manager.id, resolved.delegatedTo);
 }

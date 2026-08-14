@@ -34,12 +34,31 @@ export class DelegationTargetInvalidError extends WorkforceToolError {
 }
 
 export class ManagerTargetForbiddenError extends WorkforceToolError {
-  constructor(manager: string, target: string) {
+  constructor(manager: string, target: string, detail?: string) {
     super(
       `manager '${manager}' may not delegate to '${target}' — a manager's legal targets are the ` +
-        'members of their own department, the teams they lead, and the members of those teams.',
+        'members of their own department and the members of the teams they lead' +
+        (detail === undefined ? '.' : `: ${detail}.`),
     );
     this.name = 'ManagerTargetForbiddenError';
+  }
+}
+
+/**
+ * An approval rule declares `onTimeout: 'escalate'` for an employee with no superior — the
+ * reporting chain roots at the orchestrator, so there is no next approver to name. The lint refuses
+ * such a document at parse; this is the defense for a code-built configuration that never went
+ * through it, and it keeps the refusal a typed tool error on the declared fate rather than an
+ * intent the planner rejects deterministically on every retry until the task fails.
+ */
+export class ApprovalEscalationTargetMissingError extends WorkforceToolError {
+  constructor(employeeId: string, ruleId: string) {
+    super(
+      `approval rule '${ruleId}' escalates on timeout, but employee '${employeeId}' has no ` +
+        'superior to escalate to — an approval this seat requests can only have a human fate. ' +
+        'Declare the rule with onTimeout: fail for this seat.',
+    );
+    this.name = 'ApprovalEscalationTargetMissingError';
   }
 }
 
