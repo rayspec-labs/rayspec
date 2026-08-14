@@ -5,9 +5,11 @@
  * still PENDING — immediately after the call the listener's `listening` is false and its `address()`
  * is null — so a taken port never reaches the call site as a thrown error. It arrives a tick later as
  * an `'error'` event, and with nothing listening for it Node's default handling prints the raw
- * `node:events` unhandled-`'error'` report and exits 1. That is why a port collision was the one boot
- * failure this product did not refuse in the deliberate one-line form every other one uses — and why
- * the fix has to be an `'error'` listener registered by the entrypoint that resolved the address.
+ * `node:events` unhandled-`'error'` report and exits 1. That is why a port collision reached the
+ * operator as that stack rather than in the deliberate one-line form this product's config refusals
+ * use (`Boot aborted — PORT='abc' is not a valid TCP port (1–65535).`) — and why the fix has to be an
+ * `'error'` listener registered by the entrypoint that resolved the address. Other listen errors reach
+ * the operator the same raw way and still do; only the collision is refused here (see below).
  *
  * The message is built HERE, by a pure function, so the line an operator reads is unit-testable
  * without binding anything (the same reason the composition root keeps its longer refusals as

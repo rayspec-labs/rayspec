@@ -486,7 +486,9 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
         await emit(outcome.result);
         return outcome.result.ok ? 0 : 1;
       }
-      // 'served' — the server is listening; the process stays alive until a signal fires shutdown.
+      // 'served' — the listener has been CREATED, with the bind possibly still pending (`serve()`
+      // does not wait for it), so a taken port is refused by that listener's own 'error' handler and
+      // never surfaces here; the open port + signal handlers keep the process alive until shutdown.
       return 0;
     }
     case 'tenant': {

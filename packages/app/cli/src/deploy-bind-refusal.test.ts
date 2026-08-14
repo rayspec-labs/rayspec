@@ -1,7 +1,7 @@
 /**
  * `rayspec deploy` — WHAT AN OPERATOR SEES when the port is already taken.
  *
- * This is the one boot failure the CLI could not refuse: `serve()` returns while the bind is still
+ * This is a boot failure the CLI could not refuse: `serve()` returns while the bind is still
  * pending (immediately after the call `server.listening` is false and `server.address()` is null), so
  * `serveDeployment` resolves, the caller believes the deployment is served, and the EADDRINUSE lands
  * afterwards as an unhandled `'error'` event — a raw `node:events` stack, after the boot has already
