@@ -90,6 +90,14 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     });
   }
 
+  /** The row's current optimistic-concurrency token — what the next transition must present. */
+  async function currentVersion(taskId: string): Promise<number> {
+    const rows = (await db.$client.unsafe(
+      `SELECT version FROM workforce_tasks WHERE task_id = '${taskId}';`,
+    )) as unknown as { version: number }[];
+    return (rows[0] as { version: number }).version;
+  }
+
   async function driveToWorking(task: TaskRecord): Promise<TaskRecord> {
     const queued = await applyTransition(tdb(), {
       taskId: task.taskId,
@@ -144,12 +152,17 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     const out = await turn(root.taskId, 1, intent);
     expect(out.task?.status).toBe('blocked');
     expect(out.task?.statusReason).toBe('awaiting_children');
-    expect(out.task?.joinPolicy).toEqual({ policy: 'all' });
 
     const children = await db.$client.unsafe(
       `SELECT task_id, status, owner, root_task_id, ancestry_path FROM workforce_tasks WHERE parent_task_id = '${root.taskId}' ORDER BY owner;`,
     );
     expect(children).toHaveLength(4);
+    // The park's BINDING names exactly the children this fan-out opened — the join waits on them
+    // and on nothing that merely shares the parent.
+    expect(out.task?.joinPolicy).toEqual({
+      policy: 'all',
+      childTaskIds: children.map((c) => c.task_id),
+    });
     for (const c of children) {
       expect(c.status).toBe('planned');
       expect(c.root_task_id).toBe(root.taskId);
@@ -309,6 +322,135 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       `SELECT count(*)::int AS c FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
     );
     expect(still[0]?.c).toBe(2);
+  });
+
+  it('a buffered HAND-OFF to an ancestor owner is refused as a cycle, exactly like a fan-out', async () => {
+    // root(coordinator) -> child(mgr). The manager buffers a create handed to 'coordinator' — the
+    // owner of its own ancestor. A fan-out naming that owner is refused `delegation_cycle`; the
+    // buffered path must not be the way around the same check.
+    const root = await driveToWorking(await newRoot());
+    await turn(root.taskId, 1, {
+      kind: 'fan_out',
+      children: [{ title: 'Slice', goal: 'G', owner: 'mgr' }],
+    });
+    const child = (
+      (await db.$client.unsafe(
+        `SELECT task_id, version FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+      )) as unknown as { task_id: string; version: number }[]
+    )[0] as { task_id: string; version: number };
+    const queued = await applyTransition(tdb(), {
+      taskId: child.task_id,
+      expectedVersion: child.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await claim(child.task_id, queued.version, 1);
+
+    const out = await applyTurnOutcome(tdb(), {
+      taskId: child.task_id,
+      turnId: turnIdFor(child.task_id, 1),
+      turnNumber: 1,
+      intent: { kind: 'yield' },
+      createdChildren: [{ title: 'Back up', goal: 'G', owner: 'coordinator' }],
+      budgets: NO_BUDGETS,
+    });
+    expect(out.plan).toMatchObject({ kind: 'delegation_rejected', reason: 'delegation_cycle' });
+    const grandchildren = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_tasks WHERE parent_task_id = '${child.task_id}';`,
+    );
+    expect(grandchildren[0]?.c).toBe(0);
+    // The refusal takes the declared tool-error fate — one requeue, then failed.
+    expect(out.task).toMatchObject({ status: 'queued', statusReason: 'tool_error' });
+  });
+
+  it('a SELF-owned buffered create is a planning child, never a hand-off, and stays legal', async () => {
+    const root = await driveToWorking(await newRoot());
+    const out = await applyTurnOutcome(tdb(), {
+      taskId: root.taskId,
+      turnId: turnIdFor(root.taskId, 1),
+      turnNumber: 1,
+      intent: { kind: 'yield' },
+      createdChildren: [{ title: 'Plan', goal: 'G', owner: 'coordinator' }],
+      budgets: NO_BUDGETS,
+    });
+    expect(out.plan?.kind).toBe('yield');
+    const children = await db.$client.unsafe(
+      `SELECT owner FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+    );
+    expect(children.map((c) => c.owner)).toEqual(['coordinator']);
+  });
+
+  it('a live buffered child does NOT wedge the parent’s next fan-out join', async () => {
+    // Turn 1 buffers a fire-and-forget child; turn 2 fans out to two others. The join belongs to
+    // THAT fan-out — the buffered child was never part of it, and its own park (an approval it is
+    // waiting on) must not hold the parent in `awaiting_children`, the one park no operator signal
+    // may release.
+    const root = await driveToWorking(await newRoot());
+    await applyTurnOutcome(tdb(), {
+      taskId: root.taskId,
+      turnId: turnIdFor(root.taskId, 1),
+      turnNumber: 1,
+      intent: { kind: 'yield' },
+      createdChildren: [{ title: 'Detached', goal: 'G', owner: 'worker-9' }],
+      budgets: NO_BUDGETS,
+    });
+    const buffered = (
+      (await db.$client.unsafe(
+        `SELECT task_id FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+      )) as unknown as { task_id: string }[]
+    )[0] as { task_id: string };
+
+    await claim(root.taskId, await currentVersion(root.taskId), 2);
+    await turn(root.taskId, 2, {
+      kind: 'fan_out',
+      children: [1, 2].map((i) => ({ title: `S${i}`, goal: `G${i}`, owner: `worker-${i}` })),
+    });
+    const fanOutChildren = (await db.$client.unsafe(
+      `SELECT task_id, version FROM workforce_tasks WHERE parent_task_id = '${root.taskId}' AND task_id <> '${buffered.task_id}' ORDER BY task_id;`,
+    )) as unknown as { task_id: string; version: number }[];
+    expect(fanOutChildren).toHaveLength(2);
+
+    // The buffered child parks on an approval — it will not terminate on its own.
+    const bufferedQueued = await applyTransition(tdb(), {
+      taskId: buffered.task_id,
+      expectedVersion: 1,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await claim(buffered.task_id, bufferedQueued.version, 1);
+    await turn(buffered.task_id, 1, {
+      kind: 'request_approval',
+      question: 'Proceed?',
+      timeoutMs: 60_000,
+    });
+
+    for (const c of fanOutChildren) {
+      const queued = await applyTransition(tdb(), {
+        taskId: c.task_id,
+        expectedVersion: c.version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+      await claim(c.task_id, queued.version, 1);
+      await turn(c.task_id, 1, { kind: 'complete', result: RESULT });
+    }
+
+    const woken = await db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(woken[0]?.status).toBe('queued');
+    const joinSignals = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_task_signals WHERE task_id = '${root.taskId}' AND kind = 'child_completed';`,
+    );
+    expect(joinSignals[0]?.c).toBe(1);
+    // The detached child is untouched — the join neither waited for it nor cancelled it.
+    const stillParked = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${buffered.task_id}';`,
+    );
+    expect(stillParked[0]).toMatchObject({
+      status: 'waiting_for_user',
+      status_reason: 'approval_pending',
+    });
   });
 
   it('buffered creates and a same-turn fan-out share the child-id space without collision', async () => {

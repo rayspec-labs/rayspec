@@ -11,7 +11,8 @@
  * The safety rules the planner owns:
  *   - a pending `cancel` signal OVERRIDES the turn's own intent (the turn ran to its natural end —
  *     nothing is killed mid-flight — but its outcome is the cancellation);
- *   - fan-out acceptance checks: depth against the declared ceiling (on the materialized ancestry,
+ *   - hand-off acceptance checks, applied to EVERY tool that opens a child — the fan-out and the
+ *     buffered creates alike: depth against the declared ceiling (on the materialized ancestry,
  *     never on promises), the per-task fan-out cap (counted on the delegation table), unconditional
  *     self-hand-off rejection, and cycle rejection when a child's owner already appears among the
  *     ancestor owners — each a CLOSED rejection reason, no override flag anywhere;
@@ -255,8 +256,8 @@ export interface PlanTurnInput {
    * Children the turn BUFFERED for creation (the non-turn-ending create tools) — validated by the
    * executor, applied atomically with the turn whatever its ending intent. They occupy the depth
    * tier a fan-out child would, and the ones that are HAND-OFFS (owner differs from the task's
-   * own) count against the per-task fan-out cap exactly as delegation rows do; self-owned planning
-   * children are not hand-offs and do not.
+   * own) count against the per-task fan-out cap exactly as delegation rows do and face the same
+   * cycle rejection; self-owned planning children are not hand-offs and do neither.
    */
   readonly createdChildren: readonly ReturnType<typeof delegationChildSpecSchema.parse>[];
   /**
@@ -395,12 +396,17 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
 }
 
 /**
- * The ceilings buffered creates answer to: the DEPTH tier they would occupy (they are children,
- * exactly as a fan-out's) and — for the HAND-OFFS among them (owner differs from the task's own) —
- * the per-task fan-out cap, counted with the existing delegation rows. Self- and cycle-hand-off
- * rules deliberately do NOT apply: a self-owned planning child is the create tool's whole point,
- * and none of these children carries execution away from the caller's declared structure (the
- * trusted layer resolved each owner before buffering).
+ * The ceilings and acceptance checks buffered creates answer to. A buffered child is a child: it
+ * occupies the DEPTH tier a fan-out's would, and the HAND-OFFS among them (owner differs from the
+ * task's own) count against the per-task fan-out cap beside the existing delegation rows AND face
+ * the same CYCLE rejection a fan-out faces — a child handed to an owner who already owns an
+ * ancestor closes a loop in the task graph whichever tool opened it, and `maxDelegationDepth` is
+ * optional, so without this check an unbounded cycle needs only a spec that declares no ceiling.
+ *
+ * The self-hand-off rule has no work to do here, and that is a fact about the shape rather than an
+ * exemption: a child owned by the caller is a SELF-OWNED PLANNING CHILD — the create tool's whole
+ * point — and by definition not a hand-off. What a fan-out's self-check refuses (carrying the
+ * caller's own work away to itself) cannot be expressed on this path at all.
  */
 function rejectBufferedCreates(input: PlanTurnInput): TurnPlan | null {
   if (input.createdChildren.length === 0) return null;
@@ -412,18 +418,28 @@ function rejectBufferedCreates(input: PlanTurnInput): TurnPlan | null {
       fate: toolErrorFate(input.priorToolError),
     };
   }
-  const handOffs = input.createdChildren.filter((child) => child.owner !== input.taskOwner).length;
+  const handOffs = input.createdChildren.filter((child) => child.owner !== input.taskOwner);
   if (
     input.maxDelegationsPerTask !== null &&
-    handOffs > 0 &&
-    input.existingDelegationCount + handOffs > input.maxDelegationsPerTask
+    handOffs.length > 0 &&
+    input.existingDelegationCount + handOffs.length > input.maxDelegationsPerTask
   ) {
     return {
       kind: 'delegation_rejected',
       reason: 'fanout_exceeded',
-      detail: `${input.existingDelegationCount} existing + ${handOffs} created hand-offs exceeds maxDelegationsPerTask ${input.maxDelegationsPerTask}`,
+      detail: `${input.existingDelegationCount} existing + ${handOffs.length} created hand-offs exceeds maxDelegationsPerTask ${input.maxDelegationsPerTask}`,
       fate: toolErrorFate(input.priorToolError),
     };
+  }
+  for (const child of handOffs) {
+    if (input.ancestorOwners.includes(child.owner)) {
+      return {
+        kind: 'delegation_rejected',
+        reason: 'delegation_cycle',
+        detail: `created-child owner '${child.owner}' already owns an ancestor task`,
+        fate: toolErrorFate(input.priorToolError),
+      };
+    }
   }
   return null;
 }

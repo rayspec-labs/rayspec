@@ -87,6 +87,32 @@ describe('isJoinSatisfied (all)', () => {
   it('an empty child set satisfies nothing', () => {
     expect(isJoinSatisfied({ policy: 'all' }, [])).toBe(false);
   });
+
+  it('a BOUND join waits on its own round and ignores every other child of the parent', () => {
+    const bound = { policy: 'all', childTaskIds: ['a', 'b'] } as const;
+    const detached = fakeChild('detached', 'blocked', 'a buffered fire-and-forget child');
+    // The detached child never terminates; the round's own children do. Without the binding this
+    // parent stays in `awaiting_children` — the one park no operator signal may release.
+    expect(
+      isJoinSatisfied(bound, [
+        fakeChild('a', 'completed', 'x'),
+        fakeChild('b', 'cancelled', 'y'),
+        detached,
+      ]),
+    ).toBe(true);
+    // A bound child that is missing or still running holds the join open, terminal siblings or not.
+    expect(isJoinSatisfied(bound, [fakeChild('a', 'completed', 'x'), detached])).toBe(false);
+    expect(
+      isJoinSatisfied(bound, [fakeChild('a', 'completed', 'x'), fakeChild('b', 'working', 'y')]),
+    ).toBe(false);
+  });
+
+  it('an empty binding satisfies nothing, exactly as an empty child set does', () => {
+    expect(isJoinSatisfied({ policy: 'all', childTaskIds: [] }, [])).toBe(false);
+    expect(
+      isJoinSatisfied({ policy: 'all', childTaskIds: [] }, [fakeChild('a', 'completed', 'x')]),
+    ).toBe(false);
+  });
 });
 
 describe('mergeChildResults determinism', () => {

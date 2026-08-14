@@ -501,9 +501,7 @@ export async function applyTurnOutcome(
             finalTask = await applyBudgetExhausted(tx, task, probe.denial, input.budgets, stamp);
             break;
           }
-          await tx
-            .update(schema.workforceTasks, { joinPolicy: plan.joinPolicy })
-            .where(eq(schema.workforceTasks.taskId, task.taskId));
+          const joinChildTaskIds: string[] = [];
           for (const [index, specWithTarget] of plan.children.entries()) {
             // The ORIGINAL target rides the delegation record only — the task row's `owner` IS the
             // resolution, so the target is stripped before the child insert.
@@ -517,6 +515,7 @@ export async function applyTurnOutcome(
               createdChildren.length + index,
               spec,
             );
+            joinChildTaskIds.push(child.taskId);
             const depth = Array.isArray(child.ancestryPath) ? child.ancestryPath.length : 0;
             await tx
               .insert(schema.workforceDelegations, {
@@ -547,6 +546,13 @@ export async function applyTurnOutcome(
               },
             ]);
           }
+          // BIND the park to the children THIS fan-out opened. A detached buffered-create child
+          // shares the parent but was never part of this round, and must not hold the join open.
+          await tx
+            .update(schema.workforceTasks, {
+              joinPolicy: { ...plan.joinPolicy, childTaskIds: joinChildTaskIds },
+            })
+            .where(eq(schema.workforceTasks.taskId, task.taskId));
           finalTask = await applyTransition(tx, {
             taskId: task.taskId,
             expectedVersion: task.version,
