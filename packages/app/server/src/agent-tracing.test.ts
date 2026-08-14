@@ -35,6 +35,7 @@ vi.mock('@openai/agents', async (importOriginal) => {
 
 import {
   applyDeployAgentTracing,
+  applyServeAgentTracing,
   observedAgentTracing,
   resolveAgentTracing,
 } from './agent-tracing.js';
@@ -112,6 +113,58 @@ describe('applyDeployAgentTracing — BOTH halves of turning the export off', ()
     const env: NodeJS.ProcessEnv = { RAYSPEC_AGENT_TRACING: 'OPENAI' };
     await expect(applyDeployAgentTracing(env)).rejects.toBeInstanceOf(BootConfigError);
     expect(env[SDK_SWITCH]).toBeUndefined();
+  });
+});
+
+describe('applyServeAgentTracing — EXPLICIT-ONLY, so it cannot move the serve default', () => {
+  it('applies NOTHING when the variable is unset, and says so by returning undefined', async () => {
+    // The load-bearing arm. `resolveAgentTracing` collapses unset into `off`; reusing it wholesale here
+    // would turn the export off on an entrypoint whose default is the SDK's, which is a product
+    // decision this reader deliberately does not take.
+    const env: NodeJS.ProcessEnv = {};
+    await expect(applyServeAgentTracing(env)).resolves.toBeUndefined();
+    expect(env[SDK_SWITCH]).toBeUndefined();
+    expect(h.programmaticCalls).toEqual([]);
+  });
+
+  it('treats a BLANK value as unset — the same reading `resolveAgentTracing` gives it', async () => {
+    for (const raw of ['', '   ']) {
+      const env: NodeJS.ProcessEnv = { RAYSPEC_AGENT_TRACING: raw };
+      await expect(applyServeAgentTracing(env)).resolves.toBeUndefined();
+      expect(env[SDK_SWITCH]).toBeUndefined();
+    }
+    expect(h.programmaticCalls).toEqual([]);
+  });
+
+  it("turns the export off for 'off' — both halves, as on the deploy path", async () => {
+    const env: NodeJS.ProcessEnv = { RAYSPEC_AGENT_TRACING: 'off' };
+    await expect(applyServeAgentTracing(env)).resolves.toBe('off');
+    expect(env[SDK_SWITCH]).toBe('1');
+    expect(h.programmaticCalls).toEqual([true]);
+  });
+
+  it("leaves both of the SDK's switches alone for 'openai'", async () => {
+    const env: NodeJS.ProcessEnv = { RAYSPEC_AGENT_TRACING: 'openai' };
+    await expect(applyServeAgentTracing(env)).resolves.toBe('openai');
+    expect(env[SDK_SWITCH]).toBeUndefined();
+    expect(h.programmaticCalls).toEqual([]);
+  });
+
+  it('refuses an unsupported value in the SAME message the deploy path refuses it in', async () => {
+    // One wording for one variable: a second, entrypoint-specific sentence would be a second thing to
+    // keep true. The refusal is raised by `resolveAgentTracing`, which both entrypoints reach.
+    const raw = 'NoNsEnSe';
+    const serveErr = await applyServeAgentTracing({ RAYSPEC_AGENT_TRACING: raw }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    const deployErr = await applyDeployAgentTracing({ RAYSPEC_AGENT_TRACING: raw }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(serveErr).toBeInstanceOf(BootConfigError);
+    expect((serveErr as Error).message).toContain(`RAYSPEC_AGENT_TRACING='${raw}'`);
+    expect((serveErr as Error).message).toBe((deployErr as Error).message);
   });
 });
 

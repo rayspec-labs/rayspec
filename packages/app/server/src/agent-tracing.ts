@@ -100,12 +100,47 @@ export async function applyDeployAgentTracing(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<AgentTracingPosture> {
   const selected = resolveAgentTracing(env);
-  if (selected === 'off') {
-    env[SDK_DISABLE_TRACING_ENV] = '1';
-    const { setTracingDisabled } = await import('@openai/agents');
-    setTracingDisabled(true);
-  }
+  if (selected === 'off') await disableSdkTracing(env);
   return selected;
+}
+
+/**
+ * Apply an EXPLICITLY SET `RAYSPEC_AGENT_TRACING` on the `rayspec-serve` path, and return the posture
+ * it selected — or `undefined` when the variable states no intention and this boot changed nothing
+ * (issue #383).
+ *
+ * EXPLICIT-ONLY, and that is the whole difference from `applyDeployAgentTracing`. `resolveAgentTracing`
+ * collapses unset and blank into `off`, which is the deploy path's DEFAULT; reaching for it wholesale
+ * here would turn the export off on an entrypoint whose default has always been the SDK's, and that is
+ * a product decision, not a defect fix. So unset and blank fall through untouched, and the resolver
+ * decides only once a value is actually stated — which also means an unsupported value refuses in the
+ * same message, from the same line, on both entrypoints rather than in a second wording.
+ *
+ * Turning the export off is the same pair `applyDeployAgentTracing` takes, and here the SECOND half is
+ * the one doing the work: `serve.ts` imports the composition root — and through it `@openai/agents` —
+ * STATICALLY, so the global trace provider has already snapshotted the kill-switch before `main()` runs
+ * and the environment write alone would reach nothing. It is still written, for the child processes this
+ * boot may spawn. `setTracingDisabled` is what moves the provider this process already built, and the
+ * banner reads that provider (`observedAgentTracing`), so it states the posture that actually applies.
+ */
+export async function applyServeAgentTracing(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<AgentTracingPosture | undefined> {
+  const raw = env.RAYSPEC_AGENT_TRACING?.trim();
+  if (raw === undefined || raw === '') return undefined;
+  const selected = resolveAgentTracing(env);
+  if (selected === 'off') await disableSdkTracing(env);
+  return selected;
+}
+
+/**
+ * Turn the export off BOTH ways — the pair `applyDeployAgentTracing`'s docblock explains — shared by the
+ * two entrypoints so they cannot come to disagree about what "off" does.
+ */
+async function disableSdkTracing(env: NodeJS.ProcessEnv): Promise<void> {
+  env[SDK_DISABLE_TRACING_ENV] = '1';
+  const { setTracingDisabled } = await import('@openai/agents');
+  setTracingDisabled(true);
 }
 
 /**

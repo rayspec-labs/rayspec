@@ -503,6 +503,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer. The trigger reference's `501` bullet now states the same cause; the `404` bullet is
   unchanged.
 
+- **`rayspec-serve` now honours an explicitly set `RAYSPEC_AGENT_TRACING`, and refuses a value it
+  cannot act on.** The variable had exactly one reader, reached only from `rayspec deploy`, so on
+  `rayspec-serve` an operator could set `RAYSPEC_AGENT_TRACING=off`, watch the boot banner state
+  `Trace export: EXPORTING TO OPENAI`, and have the agent SDK go on exporting — and a typo such as
+  `RAYSPEC_AGENT_TRACING=NoNsEnSe` was ignored there, while the same value fail-closes by name on
+  `deploy`. What that transport carries is run metadata and, once an agent calls tools, the tool
+  arguments and tool outputs (the SDK strips the prompt fields before export).
+  **Unset — including blank — is unchanged**, and deliberately so: `rayspec-serve` keeps the agent
+  SDK's own default, which is to export, and `rayspec deploy` keeps its default of `off`. The new
+  reader is explicit-only for that reason: it hands off to `resolveAgentTracing` — the same refusal,
+  in the same words — only once a value is actually stated, so that function's collapse of unset into
+  `off` is never reached from `rayspec-serve`, and the deploy path behaves as before. What changes on
+  `rayspec-serve` is only what an explicit value now does: `off` disables the export (through the
+  SDK's programmatic `setTracingDisabled`, because that entrypoint's static imports have already
+  built the trace provider, so writing the SDK's environment switch alone would arrive too late),
+  `openai` is a no-op, and anything else aborts the boot with the same message `deploy` has always
+  used, before the config load and before any port is bound.
+  **Who is affected:** a deployment that exports `RAYSPEC_AGENT_TRACING` process-wide and relies on
+  `rayspec-serve` ignoring it. With `off` that boot stops exporting; with an unsupported value it now
+  refuses to start rather than booting and exporting. `deploy --check-env` still does not list this
+  variable — it reports the variables a document's boot *demands*, and tracing is not demanded.
+  The getting-started guide's two "same boot" claims about `rayspec deploy <spec>` and
+  `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` now name what still differs between the entrypoints: this
+  trace-export default, and `sealProductStores()`, which `deploy` calls after its boot returns and
+  `rayspec-serve` never calls. The `Trace export: OFF` banner line drops the `on 'rayspec deploy'`
+  qualifier from its remediation hint, which is now true on both entrypoints.
+
 ### Fixed
 
 - **`examples/agent-pack-deployment` can be deployed now, and its pack manifest stops claiming the

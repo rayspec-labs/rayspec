@@ -152,7 +152,7 @@ export function bootBanner(server: BootedServer, base: string): string {
   } else {
     lines.push(
       '    Trace export:          OFF — no agent trace (prompts, tool arguments) leaves this process ' +
-        "(set RAYSPEC_AGENT_TRACING=openai on 'rayspec deploy' to export them to OpenAI)",
+        '(set RAYSPEC_AGENT_TRACING=openai to export them to OpenAI)',
     );
   }
   lines.push(RULE);
