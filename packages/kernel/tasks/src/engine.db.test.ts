@@ -11,6 +11,7 @@ import { workforceBudgetsSchema } from './budget.js';
 import { cancelTaskCascade } from './control.js';
 import { createRootTask } from './create-task.js';
 import { applyReviewVerdict } from './reviews.js';
+import { deliverSignal } from './signals.js';
 import {
   forTenant,
   makeTestDb,
@@ -425,6 +426,103 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       `SELECT count(*)::int AS c FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
     );
     expect(noChildren[0]?.c).toBe(0);
+  });
+
+  it('a SECOND fan-out round joins and wakes the parent again — the join key is per round', async () => {
+    const root = await driveToWorking(await newRoot());
+
+    async function completeAllChildren(): Promise<void> {
+      const children = (await db.$client.unsafe(
+        `SELECT task_id, version FROM workforce_tasks WHERE parent_task_id = '${root.taskId}' AND status = 'planned' ORDER BY task_id;`,
+      )) as unknown as { task_id: string; version: number }[];
+      expect(children).toHaveLength(2);
+      for (const c of children) {
+        const queued = await applyTransition(tdb(), {
+          taskId: c.task_id,
+          expectedVersion: c.version,
+          to: 'queued',
+          actor: 'scheduler',
+        });
+        await applyTransition(tdb(), {
+          taskId: c.task_id,
+          expectedVersion: queued.version,
+          to: 'working',
+          actor: 'scheduler',
+        });
+        await turn(c.task_id, 1, { kind: 'complete', result: RESULT });
+      }
+    }
+
+    await turn(root.taskId, 1, {
+      kind: 'fan_out',
+      children: [1, 2].map((i) => ({ title: `R1-${i}`, goal: `G${i}`, owner: `worker-${i}` })),
+    });
+    await completeAllChildren();
+    let parent = await db.$client.unsafe(
+      `SELECT status, version FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(parent[0]?.status).toBe('queued');
+
+    // Round two: the parent works again and fans out a fresh pair. Before the per-round join key,
+    // this round's wake collided with round one's signal row and the parent stayed blocked forever.
+    await applyTransition(tdb(), {
+      taskId: root.taskId,
+      expectedVersion: (parent[0] as { version: number }).version,
+      to: 'working',
+      actor: 'scheduler',
+    });
+    await turn(root.taskId, 2, {
+      kind: 'fan_out',
+      children: [1, 2].map((i) => ({ title: `R2-${i}`, goal: `G${i}`, owner: `worker-${i}` })),
+    });
+    await completeAllChildren();
+
+    parent = await db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(parent[0]?.status).toBe('queued');
+    const joinSignals = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_task_signals WHERE task_id = '${root.taskId}' AND kind = 'child_completed';`,
+    );
+    expect(joinSignals[0]?.c).toBe(2);
+  });
+
+  it('a budget_raised delivered MID-TURN survives the boundary and wakes the park it answers', async () => {
+    const budgets = workforceBudgetsSchema.parse({
+      subtree: { usd: 0.1 },
+      execution: { estimateUsdPerTurn: 1 },
+    });
+    const root = await driveToWorking(await newRoot());
+    // The raise lands while the task is working — not wakeable, so the signal stays pending.
+    const delivery = await deliverSignal(tdb(), {
+      taskId: root.taskId,
+      kind: 'budget_raised',
+      signalKey: 'raise-mid-turn',
+      actor: 'user',
+    });
+    expect(delivery).toEqual({ delivered: true, woke: false });
+
+    // The turn ends in a denied fan-out → blocked(budget_exhausted) → the pending raise absorbs.
+    await applyTurnOutcome(tdb(), {
+      taskId: root.taskId,
+      turnId: `wf-task-turn:${root.taskId}:1`,
+      turnNumber: 1,
+      intent: { kind: 'fan_out', children: [{ title: 'C', goal: 'G', owner: 'worker-1' }] },
+      budgets,
+    });
+    const row = await db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(row[0]?.status).toBe('queued');
+    const consumed = await db.$client.unsafe(
+      `SELECT consumed_at FROM workforce_task_signals WHERE task_id = '${root.taskId}' AND kind = 'budget_raised';`,
+    );
+    expect(consumed[0]?.consumed_at).not.toBeNull();
+    // The journal shows the task DID pass through the park — absorption is a wake, not a skip.
+    const parked = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_task_transitions WHERE task_id = '${root.taskId}' AND to_status = 'blocked' AND status_reason = 'budget_exhausted';`,
+    );
+    expect(parked[0]?.c).toBe(1);
   });
 
   it('cancel cascades root-first; a working descendant is signalled, never killed', async () => {

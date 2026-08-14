@@ -60,7 +60,10 @@ describe.skipIf(!hasDb)('budget ledger (db)', () => {
 
   it('a workforce usd ceiling admits exactly the affordable turns, then denies with the typed scope', async () => {
     const tdb = forTenant(db, TENANT_A);
-    const budgets = workforceBudgetsSchema.parse({ workforce: { usd: 2.5 } });
+    const budgets = workforceBudgetsSchema.parse({
+      workforce: { usd: 2.5 },
+      execution: { estimateUsdPerTurn: 1 },
+    });
     expect((await authorizeTurn(tdb, budgets, proposal('t1', 1))).allowed).toBe(true);
     expect((await authorizeTurn(tdb, budgets, proposal('t2', 1))).allowed).toBe(true);
     const third = await authorizeTurn(tdb, budgets, proposal('t3', 1));
@@ -76,7 +79,10 @@ describe.skipIf(!hasDb)('budget ledger (db)', () => {
   });
 
   it('ceilings hold under CONCURRENT spend: 6 racers, usd 3, estimate 1 — exactly 3 admitted', async () => {
-    const budgets = workforceBudgetsSchema.parse({ workforce: { usd: 3 } });
+    const budgets = workforceBudgetsSchema.parse({
+      workforce: { usd: 3 },
+      execution: { estimateUsdPerTurn: 1 },
+    });
     const race = Array.from({ length: 6 }, (_, i) =>
       authorizeTurn(forTenant(db, TENANT_A), budgets, proposal(`t${i}`, 1)),
     );
@@ -93,7 +99,10 @@ describe.skipIf(!hasDb)('budget ledger (db)', () => {
 
   it('a denial mutates nothing — no ledger rows exist after a denied first authorize', async () => {
     const tdb = forTenant(db, TENANT_A);
-    const budgets = workforceBudgetsSchema.parse({ workforce: { usd: 0.5 } });
+    const budgets = workforceBudgetsSchema.parse({
+      workforce: { usd: 0.5 },
+      execution: { estimateUsdPerTurn: 1 },
+    });
     const denied = await authorizeTurn(tdb, budgets, proposal('t1', 1));
     expect(denied.allowed).toBe(false);
     const rows = await db.$client.unsafe('SELECT count(*)::int AS c FROM workforce_budget_ledger;');
@@ -119,7 +128,10 @@ describe.skipIf(!hasDb)('budget ledger (db)', () => {
 
   it('settlement releases the reservation, records the actual, and rolls the task row up', async () => {
     const tdb = forTenant(db, TENANT_A);
-    const budgets = workforceBudgetsSchema.parse({ workforce: { usd: 10 } });
+    const budgets = workforceBudgetsSchema.parse({
+      workforce: { usd: 10 },
+      execution: { estimateUsdPerTurn: 1 },
+    });
     const task = await createRootTask(tdb, {
       workforceId: 'wf',
       title: 'Roll-up subject',
@@ -146,7 +158,10 @@ describe.skipIf(!hasDb)('budget ledger (db)', () => {
 
   it('over-settlement lands once and the NEXT authorize is the denial — never a truncation', async () => {
     const tdb = forTenant(db, TENANT_A);
-    const budgets = workforceBudgetsSchema.parse({ workforce: { usd: 1 } });
+    const budgets = workforceBudgetsSchema.parse({
+      workforce: { usd: 1 },
+      execution: { estimateUsdPerTurn: 1 },
+    });
     const task = await createRootTask(tdb, {
       workforceId: 'wf',
       title: 'Overrun subject',
@@ -178,7 +193,10 @@ describe.skipIf(!hasDb)('budget ledger (db)', () => {
   });
 
   it('sibling tasks share one root scope: concurrent subtree spend holds the subtree ceiling', async () => {
-    const budgets = workforceBudgetsSchema.parse({ subtree: { usd: 2 } });
+    const budgets = workforceBudgetsSchema.parse({
+      subtree: { usd: 2 },
+      execution: { estimateUsdPerTurn: 1 },
+    });
     const race = Array.from({ length: 5 }, (_, i) =>
       authorizeTurn(
         forTenant(db, TENANT_A),
@@ -196,7 +214,10 @@ describe.skipIf(!hasDb)('budget ledger (db)', () => {
 
   it('windowed workforce scopes bucket by UTC day — separate rows, separate headroom', async () => {
     const tdb = forTenant(db, TENANT_A);
-    const budgets = workforceBudgetsSchema.parse({ workforce: { usd: 1, window: 'daily' } });
+    const budgets = workforceBudgetsSchema.parse({
+      workforce: { usd: 1, window: 'daily' },
+      execution: { estimateUsdPerTurn: 1 },
+    });
     const day1 = new Date('2026-08-14T09:00:00Z');
     const day2 = new Date('2026-08-15T09:00:00Z');
     expect((await authorizeTurn(tdb, budgets, proposal('t1', 1), day1)).allowed).toBe(true);

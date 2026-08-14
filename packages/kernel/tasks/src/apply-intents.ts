@@ -22,7 +22,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import { probeSpend, settleTurn, type WorkforceBudgets } from './budget.js';
 import { insertChildTask } from './create-task.js';
-import { TaskNotFoundError, TaskRowCorruptError } from './errors.js';
+import { TaskNotFoundError, TaskRowCorruptError, TaskVersionConflictError } from './errors.js';
 import { appendTaskEvents } from './events.js';
 import { deterministicChildTaskId } from './ids.js';
 import {
@@ -32,7 +32,7 @@ import {
   turnIntentSchema,
 } from './intent-applier.js';
 import { isJoinSatisfied, joinPolicySchema } from './join.js';
-import { consumePendingSignals, deliverSignal } from './signals.js';
+import { absorbPendingWakes, consumePendingCancels, deliverSignal } from './signals.js';
 import { isTaskStatus, isTerminalStatus } from './status.js';
 
 /** The turn's final application refuses a task in a state it cannot explain. */
@@ -106,10 +106,15 @@ export async function afterTaskTerminal(tx: TenantDb, task: TaskRecord): Promise
     .select(schema.workforceTasks)
     .where(eq(schema.workforceTasks.parentTaskId, parent.taskId))) as TaskRecord[];
   if (!isJoinSatisfied(policyParsed.data, children)) return;
+  // The signal key is PER FAN-OUT ROUND: `turnsUsed` is frozen while the parent is parked (no
+  // turn runs), identical for every racing child in a round, and strictly larger next round — so
+  // racing last children of ONE round dedupe to one wake, while a later round's join can never
+  // collide with an earlier round's consumed key (a constant per-parent key would strand the
+  // parent forever on its second fan-out).
   await deliverSignal(tx, {
     taskId: parent.taskId,
     kind: 'child_completed',
-    signalKey: `join:${parent.taskId}`,
+    signalKey: `join:${parent.taskId}:${parent.turnsUsed}`,
     payload: { childCount: children.length },
     actor: 'system',
   });
@@ -149,8 +154,8 @@ export async function applyTurnOutcome(
       throw new TurnStateError(input.taskId, `status '${task.status}'`);
     }
 
-    const signals = await consumePendingSignals(tx, input.taskId);
-    const pendingCancel = signals.some((s) => s.kind === 'cancel');
+    const cancels = await consumePendingCancels(tx, input.taskId);
+    const pendingCancel = cancels.length > 0;
 
     // One prior tool_error re-queue means THIS offense is terminal (one retry, then failed).
     const priorReceipt = (await tx
@@ -418,6 +423,13 @@ export async function applyTurnOutcome(
       }
     }
 
+    // The narrow post-turn absorption (signals.ts): a wake that arrived mid-turn and answers the
+    // park this turn just applied re-queues the task NOW instead of stranding it.
+    if (finalTask && finalTask.status === 'blocked') {
+      const absorbed = await absorbPendingWakes(tx, finalTask);
+      if (absorbed) finalTask = await readTask(tx, task.taskId);
+    }
+
     await appendTaskEvents(tx, task.taskId, [
       {
         type: 'workforce.task.turn_ended',
@@ -512,8 +524,9 @@ export async function applyBudgetExhausted(
           },
         ]);
         break;
-      } catch {
-        // A racer moved the root; re-read and retry (bounded), else leave it be.
+      } catch (err) {
+        // ONLY a lost version race retries; anything else is a real defect and must stay loud.
+        if (!(err instanceof TaskVersionConflictError)) throw err;
       }
     }
   }

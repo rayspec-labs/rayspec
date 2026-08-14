@@ -87,6 +87,23 @@ describe('mergeChildResults determinism', () => {
     }
   });
 
+  it('the canonical bytes are PINNED — self-consistency alone would pass a gutted serializer', () => {
+    const child = {
+      taskId: 'c-alpha',
+      status: 'completed',
+      statusReason: null,
+      result: { status: 'completed', summary: 'first', findings: [], confidence: 0.8 },
+      confidence: '0.8',
+      costUsd: '0.1',
+      turnsUsed: 1,
+    } as unknown as TaskRecord;
+    expect(mergeChildResults([child]).canonicalJson).toBe(
+      '{"c-alpha":{"confidence":"0.8","costUsd":"0.1","result":{"confidence":0.8,"findings":[],' +
+        '"status":"completed","summary":"first"},"status":"completed","statusReason":null,' +
+        '"turnsUsed":1}}',
+    );
+  });
+
   it('canonicalization sorts nested result keys too', () => {
     const a = fakeChild('c1', 'completed', 's');
     const b = {

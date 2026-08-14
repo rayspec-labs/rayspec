@@ -3,9 +3,10 @@ import { createHash, randomUUID } from 'node:crypto';
 /**
  * Task ids. A ROOT task gets a random UUID — its identity is born at creation. A CHILD task's id is
  * DETERMINISTIC in `(tenant, parent task, turn, slot index)`: a fan-out is applied inside a turn
- * whose whole body re-executes on crash recovery, so the re-executed application must re-derive the
- * SAME child ids and collide on the primary key (plus the delegation UNIQUE) instead of opening a
- * second set of children. Same construction as `durableWorkflowRunId` in @rayspec/workflow-durable:
+ * whose whole body re-executes on crash recovery, so a re-derived application collides on the
+ * primary key (plus the delegation UNIQUE) and aborts loudly instead of opening a second set of
+ * children — the defense-in-depth layer beneath the receipt guard that makes re-execution a clean
+ * no-op in the first place. Same construction as `durableWorkflowRunId` in @rayspec/workflow-durable:
  * tenant-namespaced by construction, formatted as a v5-shaped UUID over a SHA-256 so it reads as a
  * normal UUID while staying a pure function of the inputs. NOT security-sensitive — determinism and
  * tenant-disjointness are the contract, not RFC-4122 namespace semantics.

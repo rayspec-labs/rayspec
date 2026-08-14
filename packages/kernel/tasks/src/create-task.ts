@@ -3,8 +3,10 @@
  *
  * Every row is born `planned` (the literal below is the single place the initial status is
  * written; the exhaustiveness gate holds that alongside applyTransition's monopoly on updates).
- * Roots get a random id; children get ids DETERMINISTIC in (tenant, parent, turn, slot) so a
- * re-executed fan-out collides on the PK instead of duplicating (ids.ts). Inputs are validated
+ * Roots get a random id; children get ids DETERMINISTIC in (tenant, parent, turn, slot), so a
+ * re-application that somehow slipped past the receipt guard collides LOUDLY on the PK and aborts
+ * its transaction — defense in depth against silent duplication, not a silent no-op (the receipt
+ * check in apply-intents.ts is what makes re-execution a clean no-op). Inputs are validated
  * fail-closed with strict schemas — unknown keys are rejected, priorities and reference shapes are
  * closed vocabularies — and creation journals `workforce.task.created` in the same transaction, so
  * a task that did not journal was never created.

@@ -37,9 +37,20 @@ describe('workforceBudgetsSchema', () => {
     const parsed = workforceBudgetsSchema.parse({
       workforce: { usd: 5 },
       departments: { growth: { usd: 2 } },
+      execution: { estimateUsdPerTurn: 0.05 },
     });
     expect(parsed.workforce?.window).toBe('daily');
     expect(parsed.departments?.growth?.window).toBe('daily');
+  });
+
+  it('a usd ceiling without a positive per-turn estimate is refused (the ceiling would never bite)', () => {
+    expect(() => workforceBudgetsSchema.parse({ workforce: { usd: 5 } })).toThrow();
+    expect(() => workforceBudgetsSchema.parse({ departments: { growth: { usd: 2 } } })).toThrow();
+    expect(() =>
+      workforceBudgetsSchema.parse({ task: { usd: 1 }, execution: { estimateUsdPerTurn: 0 } }),
+    ).toThrow();
+    // Turn-count ceilings alone need no estimate — they meter turns, not dollars.
+    expect(() => workforceBudgetsSchema.parse({ task: { turns: 3 } })).not.toThrow();
   });
 });
 
@@ -77,6 +88,7 @@ describe('ledgerScopesFor', () => {
     task: { usd: 2.5, turns: 12 },
     subtree: { usd: 10 },
     departments: { growth: { usd: 12 } },
+    execution: { estimateUsdPerTurn: 0.1 },
   });
   const now = new Date('2026-08-14T13:00:00Z');
 

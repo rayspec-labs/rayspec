@@ -54,7 +54,7 @@ const turnsCeilingSchema = z.number().int().positive();
  * The declared ceiling configuration persisted on `workforce_runtime.budgets`. STRICT at every
  * nesting level — an unknown key is a refusal, not a silently ignored wish.
  */
-export const workforceBudgetsSchema = z.strictObject({
+const rawWorkforceBudgetsSchema = z.strictObject({
   /** Whole-workforce ceilings, enforced per calendar window (UTC). */
   workforce: z
     .strictObject({
@@ -106,6 +106,32 @@ export const workforceBudgetsSchema = z.strictObject({
       estimateUsdPerTurn: z.number().nonnegative().finite().default(0),
     })
     .prefault({}),
+});
+
+/**
+ * FAIL-CLOSED coherence rule: a USD ceiling with a ZERO per-turn reservation estimate cannot bound
+ * CONCURRENT dispatch — every racing authorize would read `settled + reserved + 0 <= ceiling` and
+ * admit, and the ceiling would bite only after the money is spent. A declaration that names a usd
+ * ceiling anywhere must therefore also declare a positive `execution.estimateUsdPerTurn`; refusing
+ * at validation beats discovering the overrun in the ledger. Turns-only ceilings are unaffected
+ * (dispatched turns are counted at authorize, so they bound concurrency on their own).
+ */
+export const workforceBudgetsSchema = rawWorkforceBudgetsSchema.superRefine((value, ctx) => {
+  const declaresUsd =
+    value.workforce?.usd !== undefined ||
+    value.task?.usd !== undefined ||
+    value.subtree?.usd !== undefined ||
+    Object.values(value.departments ?? {}).some((d) => d.usd !== undefined);
+  if (declaresUsd && value.execution.estimateUsdPerTurn <= 0) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['execution', 'estimateUsdPerTurn'],
+      message:
+        'a usd ceiling is declared but execution.estimateUsdPerTurn is 0 — a zero reservation ' +
+        'cannot bound concurrent dispatch, so the ceiling would only bite after the overrun. ' +
+        'Declare a positive per-turn estimate. Fail-closed.',
+    });
+  }
 });
 
 export type WorkforceBudgets = z.output<typeof workforceBudgetsSchema>;
@@ -380,6 +406,13 @@ export async function probeSpend(
  * Settle one turn's actual inside the turn's final transaction (which already holds the task row's
  * lock — task row FIRST, ledger rows after, always). Releases the reservation (floored at zero)
  * and records the actual; the task row's own roll-up moves in the same breath.
+ *
+ * WINDOW-BOUNDARY honesty: scopes are derived with the settle-time clock, so a turn that crosses a
+ * window boundary releases from (and settles into) the NEW bucket while its reservation sits in
+ * the OLD one. That is deliberate and self-limiting: authorization only ever reads the CURRENT
+ * bucket, so a phantom reservation in a past bucket can never deny a future turn, and settling
+ * into the current bucket counts the spend against the window that is actually enforcing — the
+ * conservative direction.
  */
 export async function settleTurn(
   tx: TenantDb,

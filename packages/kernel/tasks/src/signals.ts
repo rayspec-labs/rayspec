@@ -131,19 +131,70 @@ export async function deliverSignal(
 }
 
 /**
- * Consume every still-pending signal for a task (marks consumed_at, returns the rows) — called by
- * the turn's final transaction so signal payloads reach the next context and a pending `cancel`
- * overrides the turn's own outcome.
+ * Consume the still-pending CANCEL signals for a task (marks consumed_at, returns them) — called
+ * by the turn's final transaction so a pending `cancel` overrides the turn's own outcome. ONLY
+ * cancels are consumed here: every other pending signal is left pending, because a wake-shaped
+ * signal that arrived mid-turn must survive the turn boundary (a `budget_raised` delivered while
+ * the task was `working` has to be able to wake the `blocked(budget_exhausted)` the turn is about
+ * to park into — consuming it here would strand the task with no wake path). Non-cancel signals
+ * reach the handler as CONTEXT regardless of consumption state.
  */
-export async function consumePendingSignals(tx: TenantDb, taskId: string): Promise<SignalRecord[]> {
+export async function consumePendingCancels(tx: TenantDb, taskId: string): Promise<SignalRecord[]> {
   const rows = (await tx
     .update(schema.workforceTaskSignals, { consumedAt: new Date() })
     .where(
       and(
         eq(schema.workforceTaskSignals.taskId, taskId),
+        eq(schema.workforceTaskSignals.kind, 'cancel'),
         isNull(schema.workforceTaskSignals.consumedAt),
       ),
     )
     .returning()) as SignalRecord[];
   return rows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+}
+
+/**
+ * The NARROW post-turn absorption rule: after a turn's final transition, a still-pending signal
+ * may wake the task it just parked — but only where the signal's meaning matches the park reason,
+ * so a stale signal can never release a park it does not answer:
+ *   - `budget_raised`  wakes `blocked(budget_exhausted)` — the raised ceiling arrived mid-turn;
+ *   - `manual_unblock` wakes any `blocked` — the operator's explicit override.
+ * Decision-shaped signals (`approval_decided`, `user_reply`, …) are deliberately NOT absorbed: a
+ * stale decision pending from an earlier request must never release a NEW `waiting_for_user` park
+ * — those wake only through their own delivery path, keyed per request. Returns the absorbed
+ * signal when a wake applied, null otherwise.
+ */
+export async function absorbPendingWakes(
+  tx: TenantDb,
+  task: { taskId: string; status: string; statusReason: string | null; version: number },
+): Promise<SignalRecord | null> {
+  if (task.status !== 'blocked') return null;
+  const pending = (await tx
+    .select(schema.workforceTaskSignals)
+    .where(
+      and(
+        eq(schema.workforceTaskSignals.taskId, task.taskId),
+        isNull(schema.workforceTaskSignals.consumedAt),
+      ),
+    )) as SignalRecord[];
+  const applicable = pending
+    .filter(
+      (s) =>
+        s.kind === 'manual_unblock' ||
+        (s.kind === 'budget_raised' && task.statusReason === 'budget_exhausted'),
+    )
+    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+  const wake = applicable[0];
+  if (!wake) return null;
+  await applyTransition(tx, {
+    taskId: task.taskId,
+    expectedVersion: task.version,
+    to: 'queued',
+    actor: 'system',
+    queueReason: wake.kind,
+  });
+  await tx
+    .update(schema.workforceTaskSignals, { consumedAt: new Date() })
+    .where(eq(schema.workforceTaskSignals.id, wake.id));
+  return wake;
 }

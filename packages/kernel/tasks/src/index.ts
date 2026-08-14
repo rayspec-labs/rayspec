@@ -113,7 +113,8 @@ export {
   type WorkforceRuntimeRecord,
 } from './runtime.js';
 export {
-  consumePendingSignals,
+  absorbPendingWakes,
+  consumePendingCancels,
   type DeliverSignalInput,
   type DeliverSignalOutcome,
   deliverSignal,
