@@ -1162,18 +1162,26 @@ Notes that matter:
   Do not reach for `spa: true` to fix broken extensionless links — it answers EVERY unmatched path with
   the root document, so a genuinely broken link comes back `200`. `cleanUrls` keeps `404` terminal (for
   `spa: false`). A mount may set both: the order is exact file → `<path>.html` → `<path>/index.html` →
-  the SPA fallback → `404.html`/404. ONE behaviour changes when you opt in — a site shipping BOTH
+  the SPA fallback → `404.html`/404. TWO behaviours change when you opt in — (1) a site shipping BOTH
   `<path>.html` and `<path>/index.html` starts serving `<path>.html` where the directory index served
-  before; a trailing-slash request (`/docs/`) still resolves the directory index. EXTENSIONLESS is the
-  exact domain: a TYPED path (last segment carries a `.`, e.g. `/app.js`, `/data.json`) is never
-  rewritten, so a missing asset stays a `404` instead of being answered from a `<name>.<ext>.html`
-  sibling; only the last segment decides, so `/guide/1.2/notes` still resolves.
+  before; (2) on a mount shipping a root `404.html`, `/404` is extensionless like any other path, so it
+  serves that page with 200 — on an `spa: false` mount that flips the status (the miss branch answered
+  those bytes with 404), on an `spa: true` one it flips the document (the fallback runs before the
+  `404.html` branch, so the shell already answered 200). Host parity either way — Netlify / Vercel /
+  GitHub Pages all serve `/404` as a page. A trailing-slash request (`/docs/`) still resolves the directory
+  index. EXTENSIONLESS is the exact domain: a TYPED path (last segment carries a `.`, e.g. `/app.js`,
+  `/data.json`) is never rewritten, so a missing asset stays a `404` instead of being answered from a
+  `<name>.<ext>.html` sibling; only the last segment decides, so `/guide/1.2/notes` still resolves.
 - Mount responses carry `Content-Security-Policy: default-src 'self'; frame-ancestors 'none';
   object-src 'none'; base-uri 'self'` plus a `Permissions-Policy` (both boot shapes — a static profile
   app-wide, a full backend on its mount responses; `RAYSPEC_FRONTEND_CSP` / `RAYSPEC_PERMISSIONS_POLICY`
   replace either verbatim). No `style-src`/`script-src` ⇒ an inline `<style>`/`<script>` in a served page
-  is **BLOCKED**, and SILENTLY: the response is a 200 with the exact bytes, only the rendered page
-  differs. Author the assets with CSS and JS in FILES referenced by `href`/`src`, never inline.
+  is **BLOCKED** — and so are a `style="…"` attribute and an `on*=` handler, which fall back to the same
+  `default-src`. No REQUEST shows it: the response is a 200 with the exact bytes, only the rendered page
+  differs. The BOOT does: it scans the served HTML against the policy in force and warns once, naming the
+  files — warn-only (it never fails a boot), bounded (200 HTML files per boot, the first 1 MiB of one
+  file, 5 files named), a heuristic text scan rather than a parser, and silenced by an override that
+  permits the shape. Author the assets with CSS and JS in FILES referenced by `href`/`src`, never inline.
 - **Not in v1:** SSR, template rendering, an asset build/bundle pipeline, cache/CDN headers, and the
   product profile — `frontend` is backend-profile only. (Range and HEAD ARE honored: a byte-`Range` GET
   returns **`206`** partial content and a `HEAD` returns **`200`**; an **UNSATISFIABLE** range — a start
