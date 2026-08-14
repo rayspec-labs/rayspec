@@ -224,10 +224,25 @@ stores:
     above. A read returns the exact stored value in PostgreSQL's canonical
     rendering with exactly `scale` fractional digits (`7.5` written into a
     `numeric(24, 6)` column reads back `7.500000` — the same value,
-    canonically rendered). Filters and keyset cursors carry the same string
-    form and compare exactly server-side: a filter value beyond the declared
-    scale matches nothing rather than matching a rounded neighbour. Both
-    fractional types are orderable and usable as keyset pagination columns.
+    canonically rendered) — and refuses anything else: a `numeric` column can
+    also hold `NaN` at the SQL level, which is not a decimal at all, so a value
+    planted there by direct SQL makes the read a `400 VALIDATION_ERROR` naming
+    the column and the row id, exactly as a non-finite `double` does, rather
+    than a response carrying a "decimal" no decimal parser accepts. (No write
+    path produces one — both refuse the string — and PostgreSQL itself refuses
+    `±Infinity` for a column that declares a precision and scale.) The refusal
+    keeps the feed followable wherever the column is served: a page is
+    serialized before its pagination headers are minted, so the refusal takes
+    the whole page and no keyset cursor is minted on that row. A `project`
+    that drops the column is outside that reach — the serializer skips a
+    column the projection omits before the read guards run, and `order` is
+    validated against the store's columns, never against the projection, so a
+    page ordered on the dropped column is still served and still mints a
+    cursor the next request refuses as a filter value. Filters and keyset
+    cursors carry the same string form and compare exactly server-side: a
+    filter value beyond the declared scale matches nothing rather than
+    matching a rounded neighbour. Both fractional types are orderable and
+    usable as keyset pagination columns.
 
     **Changing a numeric column's `precision`/`scale`** is a real schema
     change: the diff emits a single `ALTER … SET DATA TYPE numeric(<p>, <s>)`,
@@ -705,8 +720,13 @@ The projection is **read-side only** and **fail-closed**:
 - **Keyset pagination is projection-immune.** The `X-Next-Cursor` is minted from
   the stored row, so paging keeps working when the response renames `id` away or
   a `fields` allowlist drops it entirely.
-- **Purely additive.** No `project` key ⇒ byte-identical responses, documents,
-  and write behaviour.
+- **Additive, with one exception.** No `project` key ⇒ the same responses,
+  documents, and write behaviour as before the key existed. The exception is a
+  store that declares a column named `__proto__` — a legal, `doctor`-clean
+  column name: the un-projected serializer now emits it like any other column,
+  where the plain object it used to accumulate into swallowed a string value
+  outright and, for a `jsonb` value, took the stored object as the response's
+  prototype.
 
 ### The `created_by` actor stamp
 
@@ -1373,7 +1393,10 @@ bounded comparison filters (`{ column: { gt: bound } }` and `gte`/`lt`/`lte`, on
 non-nullable, non-jsonb declared columns — read filters only), `orderBy`,
 `limit`/`offset` paging, and a filtered `count`** over the tenant-scoped store
 (still tenant-predicated beneath; no `like`/`OR`
-operators). A read that passes **no** `orderBy` comes back in `id` ascending order —
+operators). A filter on a `timestamp` column takes either a `Date` or the ISO
+string the facade itself hands back for that column — as an equality value, as a
+set-membership element, or as a comparison bound — and an unparseable date string
+is refused as a client error, the same way the write path refuses it. A read that passes **no** `orderBy` comes back in `id` ascending order —
 the same default the `list` op applies — so a handler never receives rows in an
 unspecified physical order. That default is the injected `id`, a random UUID, so it
 is a **stable** order and not a chronological one: order by `created_at` if you want
