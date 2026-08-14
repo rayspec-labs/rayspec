@@ -109,6 +109,7 @@ export {
 } from './join.js';
 export {
   applyReviewVerdict,
+  applyReviewVerdictInTx,
   ReviewAlreadyDecidedError,
   ReviewNotFoundError,
   type ReviewRecord,
