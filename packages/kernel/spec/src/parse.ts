@@ -9,11 +9,14 @@
  *                             object. A missing/unsupported version -> one clean
  *                             `unsupported_version` SpecError, NOT a wall of strict-shape errors.
  *   3. RESERVED DOCUMENT KEY — `scanReservedDocumentKeys` over the RAW loaded object: a mapping key
- *                             named `__proto__` is the one key the shape validator cannot see (it
- *                             skips it by name), so it is refused HERE or nowhere. Short-circuits
- *                             like the version check: the document the shape parse would read is
- *                             not the document the author wrote, so its issues would be reported
- *                             against a different document.
+ *                             named `__proto__` is refused HERE or nowhere, for two different
+ *                             reasons. Where the shape parse validates keys, it skips this one BY
+ *                             NAME — a strict `z.object` accepts it and raises no
+ *                             `unrecognized_keys` issue. Where the grammar is free-form
+ *                             (`z.unknown()`), it inspects no key at all. Either way this pass is
+ *                             the only one that can see it. Short-circuits like the version check:
+ *                             the document the shape parse would read is not the document the author
+ *                             wrote, so its issues would be reported against a different document.
  *   4. STRICT ZOD PARSE      — `RaySpec.safeParse`. EVERY Zod issue maps to a SpecError with
  *                             a JSON path; an `unrecognized_keys` issue -> `unknown_field` (one per
  *                             offending key), everything else -> `schema_violation`. Returns the

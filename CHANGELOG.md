@@ -534,7 +534,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A mapping key written literally as `__proto__` is now refused at the parse boundary of both
   document profiles (`reserved_document_key`), anywhere in the document.** It is the one key name the
-  shape validator cannot report on. The YAML loader builds it as a genuine own property — it *defines*
+  shape validator will not report on *where it validates keys at all* — and in a free-form slot it
+  validates none, so the parse boundary is the only pass that can see it either way. The YAML loader
+  builds it as a genuine own property — it *defines*
   the property rather than assigning it, so the prototype setter is bypassed — and the validator then
   skips that key by name, in both readers a spec goes through — the strict-object unrecognized-key
   walk and the record branch — without raising an issue.

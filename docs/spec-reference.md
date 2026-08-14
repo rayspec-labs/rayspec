@@ -38,8 +38,9 @@ object level rejects an unknown or misspelled key rather than ignoring it, so a
 typo fails validation instead of silently doing nothing.
 
 One key name is refused outright, anywhere in either profile: a mapping key
-written literally as `__proto__`. It is the one key the shape validator cannot
-report on, and what it did with the key depended on where the key sat. Where the
+written literally as `__proto__`. It is the one key the shape validator will not
+report on where it validates keys at all — and what it did with the key depended
+on where the key sat. Where the
 grammar reads the level, the validator skips that key by name without raising an
 issue, so the key was dropped and whatever was written under it did nothing: a
 `rename` written under it renamed nothing, a view field written under it vanished

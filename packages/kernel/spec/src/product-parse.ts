@@ -8,10 +8,13 @@
  *   2. VERSION CHECK FIRST   — a product document declares `version:'1.0'` with a `product:` section;
  *                              a missing/unsupported version → one clean `unsupported_version`.
  *   3. RESERVED DOCUMENT KEY — `scanReservedDocumentKeys` over the RAW object: a mapping key named
- *                              `__proto__` is the one key the shape validator cannot see (it skips it
- *                              by name), so it is refused HERE or nowhere. Short-circuits for the same
- *                              reason the guardrails do: the document the later passes would read is
- *                              not the document the author wrote.
+ *                              `__proto__` is refused HERE or nowhere, for two different reasons —
+ *                              where the shape parse validates keys it skips this one BY NAME (a
+ *                              strict `z.object` raises no `unrecognized_keys` for it), and in a
+ *                              free-form region such as a `contracts` entry body it inspects no key
+ *                              at all. Short-circuits for the same reason the guardrails do: the
+ *                              document the later passes would read is not the document the author
+ *                              wrote.
  *   4. NO-CODE GUARDRAILS    — `scanProductGuardrails` over the RAW object: specific,
  *                              explaining `no_code_in_yaml`/`provider_native_leak` errors. If ANY fire,
  *                              they are returned WITHOUT running the shape/lint passes — a doc smuggling
