@@ -1187,6 +1187,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A static mount's containment guard now inspects the name the file server actually reads.** The
+  mount handler decoded the request path with `decodeURIComponent` and ran the fail-closed guard —
+  dotfiles, traversal, and the realpath symlink-escape check — on that string, while
+  `@hono/node-server`'s `serve-static` resolves the path it decodes with `decodeURI`. Those agree on
+  every path except one carrying a percent-encoded **reserved** character (`/ ? # : @ & = + $ ,`),
+  and there the guard cleared one name while a different one was served. A served directory holding
+  a file whose literal name carries such an escape — for instance a symlink named
+  `docs%2Fgetting-started.html` pointing outside the mount — answered `200` with bytes from outside
+  the served directory, while the identical symlink under a plainly-spelled name was correctly
+  refused. When the two decodings differ, the served name is now guarded as well (and, on a
+  `cleanUrls` mount, the `<name>.html` candidate the rewrite would resolve from it), so the refusal
+  no longer depends on how the name is spelled. This is **not** a traversal: `decodeURI` never turns
+  an escape into a `/`, and an encoded `..` was already refused by both decodings — the exposure was
+  confined to a file whose own on-disk name carries a percent escape, which no ordinary build
+  produces. For every path without such an escape the two strings are identical and nothing changes.
+  The behaviour predates this release; it is fixed here rather than carried, and pinned by an arm
+  that keeps the plainly-spelled twin as its accept control.
+
 - **Two checks that certified files they never read now reach them.** The unscoped `rayspec`
   launcher — the package npm serves when a user installs the product — carries a bare name, and every
   `--filter` in the two required CI lanes was either the `@rayspec/*` glob or an explicit

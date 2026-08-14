@@ -755,6 +755,11 @@ describe('mountFrontend — cleanUrls (extensionless resolution, opt-in)', () =>
     mkdirSync(outside, { recursive: true });
     writeFileSync(join(outside, 'secret.html'), CLEAN_SYMLINK_SECRET, 'utf8');
     symlinkSync(join(outside, 'secret.html'), join(dir, 'leak.html'));
+    // The SAME escaping symlink under a name carrying a percent-encoded `/`. The two decoders
+    // disagree on `/docs%2Fgetting-started`: the guard sees `docs/getting-started` (a real, safe
+    // page in this fixture — which is what makes the request pass the gate at all), the file server
+    // resolves this literal name. Both spellings of the escape are pinned below.
+    symlinkSync(join(outside, 'secret.html'), join(dir, 'docs%2Fgetting-started.html'));
     fixtureRoot = root;
   });
 
@@ -764,6 +769,34 @@ describe('mountFrontend — cleanUrls (extensionless resolution, opt-in)', () =>
 
   const cleanMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: false, cleanUrls: true };
   const offMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: false, cleanUrls: false };
+
+  // The guard runs on the name THIS handler decodes; the file server reads the name IT decodes. On a
+  // percent-encoded reserved character those differ, and before the fix the containment check ran on
+  // one name while the other was served — a symlink out of the mount came back 200 with its bytes.
+  // The plainly-spelled twin is the accept control: it must stay refused, proving the guard itself
+  // works and that these arms measure the divergence rather than a broken fixture.
+  it('a percent-encoded name that escapes the mount is refused, like its plainly-spelled twin', async () => {
+    for (const mount of [cleanMount, offMount]) {
+      const app = buildApp([mount], fixtureRoot);
+
+      // ACCEPT CONTROL — the same symlink, ordinary name: refused today and after.
+      const control = await app.request('/leak.html');
+      expect(control.status).toBe(404);
+      expect(await control.text()).not.toContain(CLEAN_SYMLINK_SECRET);
+
+      // The divergent spelling must reach the same verdict, on both mount shapes.
+      const escaped = await app.request('/docs%2Fgetting-started.html');
+      expect(escaped.status).toBe(404);
+      expect(await escaped.text()).not.toContain(CLEAN_SYMLINK_SECRET);
+    }
+
+    // And through the clean-URL rewrite, where the guard cleared `docs/getting-started` — a real,
+    // servable page — while the rewrite resolved the escaping literal name instead.
+    const clean = buildApp([cleanMount], fixtureRoot);
+    const viaRewrite = await clean.request('/docs%2Fgetting-started');
+    expect(viaRewrite.status).toBe(404);
+    expect(await viaRewrite.text()).not.toContain(CLEAN_SYMLINK_SECRET);
+  });
 
   it('cleanUrls:true — an extensionless link resolves to <path>.html (200 + that page)', async () => {
     const app = buildApp([cleanMount], fixtureRoot);

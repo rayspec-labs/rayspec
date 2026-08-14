@@ -129,6 +129,21 @@ function decodeOnce(pathname: string): string {
 }
 
 /**
+ * Decode a request path the way the file server will: `@hono/node-server`'s `serve-static` resolves
+ * `tryDecode(path, decodeURI)` (measured in its `serve-static.cjs`), and `decodeURI` leaves the
+ * reserved set (`/ ? # : @ & = + $ ,`) encoded. So for a path carrying a percent-encoded reserved
+ * character this returns a DIFFERENT string than `decodeOnce` — the name actually resolved on disk.
+ * Tolerant of a malformed escape in the same way, for the same reason.
+ */
+function decodeAsServed(pathname: string): string {
+  try {
+    return decodeURI(pathname);
+  } catch {
+    return pathname;
+  }
+}
+
+/**
  * Is `path` (the FULL decoded request path) under a platform-reserved namespace (`/v1`, `/health`,
  * `/oidc`)? Such a path must NEVER be answered by a static mount — decline it so a registered platform
  * route wins and an unregistered one gets the uniform 404 (never a file / SPA shell). Uses the SAME set
@@ -1053,6 +1068,25 @@ export function mountFrontend<E extends Env>(
       // Fail-closed guard BEFORE serving — a refused path skips the file/SPA server entirely and
       // falls through to the platform's uniform 404 (never the SPA shell).
       if (!isSafeStaticPath(baseDir, realBaseDir, subPath)) return next();
+      // …and the guard must inspect the name that will actually be READ, not only the one decoded
+      // here. The two decoders diverge on a percent-encoded reserved character: this handler decodes
+      // with `decodeURIComponent`, the file server with `decodeURI`. For `/docs%2Fgetting-started`
+      // the check above clears `docs/getting-started` while the file server resolves the literal
+      // `docs%2Fgetting-started` — a different name, whose dotfile, containment and symlink-escape
+      // checks never ran. A build carrying such a file (a symlink out of the served directory under
+      // that name) was therefore served 200 with bytes from outside the mount, while the identical
+      // symlink under a plainly-spelled name was refused. So when the two decodings differ, the
+      // served name is guarded too — and, for a `cleanUrls` mount, the `<name>.html` candidate the
+      // rewrite would resolve from it. Identical strings for every path without such an escape, so
+      // this is a no-op on any ordinary build.
+      const servedFullPath = decodeAsServed(c.req.path);
+      const servedSubPath = route === '/' ? servedFullPath : servedFullPath.slice(route.length);
+      if (servedSubPath !== subPath) {
+        if (!isSafeStaticPath(baseDir, realBaseDir, servedSubPath)) return next();
+        if (cleanUrls && !isSafeStaticPath(baseDir, realBaseDir, `${servedSubPath}.html`)) {
+          return next();
+        }
+      }
       // RFC-7233: an UNSATISFIABLE Range (start at/after EOF, or reversed) gets a proper 416 rather than
       // serveStatic's malformed 0-byte 206 (closed beyond EOF) or ERR_OUT_OF_RANGE → 500 (open beyond
       // EOF). Runs AFTER the fail-closed guard (a refused path already 404'd) and ONLY when a Range
