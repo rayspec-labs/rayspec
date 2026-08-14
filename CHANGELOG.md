@@ -978,6 +978,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fail-closes on an id that names no live org. **No behaviour changed** — the correction is in the
   three READMEs, and the platform paths they now describe are the ones that already shipped.
 
+- **`examples/contract-intake/README.md` now says how to reach the tenant its dev-boot seeds.** The
+  wrapper seeds the org `00000000-0000-4000-8000-000000000042` and no principal — a booted demo has
+  one org, zero users and zero memberships — so a reader who followed the README could call none of
+  the product: `PUT /files/{file_id}`, `POST /files/{file_id}/submit` and `GET /contracts` all
+  answer `401`, and the file carried no auth step of any kind. Registering does not reach that org
+  either: a `POST /v1/auth/register` carrying an `orgName` creates a different one and
+  `POST /v1/orgs/{the seeded id}/switch` answers `404` to a non-member, whose own empty tenant then
+  serves `200` on the reads and on an upload but is refused `403` at the submit, with the reason
+  named (`cross_tenant`). The README now walks the shipped path instead — `rayspec tenant ensure`
+  against the demo's own `play_contract` database mints an owner invite for that exact org, and
+  `POST /v1/invites/accept` redeems it into an account whose `201` already carries an org-scoped
+  token, so no login and no switch follow. It states why the `DATABASE_URL` override is load-bearing
+  (the dev-boot ignores `.env`'s value, the CLI does not), why `RAYSPEC_API_KEY_PEPPER` has to be the
+  value the demo booted with (the invite token is hashed under it, and under a different one it is
+  refused at accept), why the invite file has to be deleted, and what a re-run does instead of
+  minting a second token — `already_owned` once the org is claimed, `pending` while an invite is
+  outstanding, and `--reissue-owner-invite` for a token lost before redemption. It also names this
+  example's own upload pair, `PUT /files/{file_id}` → `POST /files/{file_id}/submit`: neither route
+  appeared anywhere under `examples/contract-intake/` — the capability mounts them, so the authored
+  document does not declare them, and they were written down in the `@rayspec/file-runtime` README,
+  the authoring skill and the invoice-intake example, but nowhere in this example's own docs.
+  **No behaviour changed** — the correction is in the README, and the platform paths it now
+  describes are the ones that already shipped.
+
 ### Security
 
 - **The transitive `nanoid` copy behind the test runner is raised from 3.3.17 to 3.3.18**
