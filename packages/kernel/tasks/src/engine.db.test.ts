@@ -525,6 +525,114 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(parked[0]?.c).toBe(1);
   });
 
+  it('a stale manual_unblock does NOT dissolve the fan-out join it arrived alongside', async () => {
+    const root = await driveToWorking(await newRoot());
+    // The operator's override lands mid-turn — not wakeable while `working`, so it stays pending.
+    const delivery = await deliverSignal(tdb(), {
+      taskId: root.taskId,
+      kind: 'manual_unblock',
+      signalKey: 'op-override',
+      actor: 'user',
+    });
+    expect(delivery).toEqual({ delivered: true, woke: false });
+
+    // The turn ends in a fan-out. The parent's park is STRUCTURAL — an override says nothing about
+    // whether the children are done, so the same transaction must not absorb the signal into a
+    // wake: doing so ran the parent with childResults null and orphaned the children.
+    await turn(root.taskId, 1, {
+      kind: 'fan_out',
+      children: [1, 2].map((i) => ({ title: `S${i}`, goal: `G${i}`, owner: `worker-${i}` })),
+    });
+    const parked = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(parked[0]).toMatchObject({ status: 'blocked', status_reason: 'awaiting_children' });
+    const stillPending = await db.$client.unsafe(
+      `SELECT consumed_at FROM workforce_task_signals WHERE task_id = '${root.taskId}' AND kind = 'manual_unblock';`,
+    );
+    expect(stillPending[0]?.consumed_at).toBeNull();
+
+    // The join is intact: the children finishing is what wakes the parent, with their results.
+    const children = (await db.$client.unsafe(
+      `SELECT task_id, version FROM workforce_tasks WHERE parent_task_id = '${root.taskId}' ORDER BY task_id;`,
+    )) as unknown as { task_id: string; version: number }[];
+    for (const c of children) {
+      const queued = await applyTransition(tdb(), {
+        taskId: c.task_id,
+        expectedVersion: c.version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+      await applyTransition(tdb(), {
+        taskId: c.task_id,
+        expectedVersion: queued.version,
+        to: 'working',
+        actor: 'scheduler',
+      });
+      await turn(c.task_id, 1, { kind: 'complete', result: RESULT });
+    }
+    const woken = await db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(woken[0]?.status).toBe('queued');
+    const joinSignals = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_task_signals WHERE task_id = '${root.taskId}' AND kind = 'child_completed';`,
+    );
+    expect(joinSignals[0]?.c).toBe(1);
+  });
+
+  it('a wake releases only the park it ANSWERS — a raised ceiling is not a dependency or a decision', async () => {
+    const parkedOn = async (reason: 'awaiting_dependency' | 'approval_pending') => {
+      const task = await newRoot();
+      return applyTransition(tdb(), {
+        taskId: task.taskId,
+        expectedVersion: task.version,
+        to: 'blocked',
+        reason,
+        actor: 'scheduler',
+      });
+    };
+    const onDependency = await parkedOn('awaiting_dependency');
+    const onApproval = await parkedOn('approval_pending');
+
+    for (const parked of [onDependency, onApproval]) {
+      const delivery = await deliverSignal(tdb(), {
+        taskId: parked.taskId,
+        kind: 'budget_raised',
+        signalKey: `raise:${parked.taskId}`,
+        actor: 'user',
+      });
+      expect(delivery).toEqual({ delivered: true, woke: false });
+      const row = await db.$client.unsafe(
+        `SELECT status, status_reason, version FROM workforce_tasks WHERE task_id = '${parked.taskId}';`,
+      );
+      expect(row[0]).toMatchObject({ status: 'blocked', version: parked.version });
+    }
+
+    // The park a raised ceiling DOES answer still wakes, through the same one match.
+    const exhausted = await parkedOn('awaiting_dependency');
+    const onBudget = await applyTransition(tdb(), {
+      taskId: exhausted.taskId,
+      expectedVersion: exhausted.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    const blocked = await applyTransition(tdb(), {
+      taskId: onBudget.taskId,
+      expectedVersion: onBudget.version,
+      to: 'blocked',
+      reason: 'budget_exhausted',
+      actor: 'scheduler',
+    });
+    const woke = await deliverSignal(tdb(), {
+      taskId: blocked.taskId,
+      kind: 'budget_raised',
+      signalKey: 'raise-answered',
+      actor: 'user',
+    });
+    expect(woke).toEqual({ delivered: true, woke: true });
+  });
+
   it('cancel cascades root-first; a working descendant is signalled, never killed', async () => {
     const root = await driveToWorking(await newRoot());
     await turn(root.taskId, 1, {

@@ -4,18 +4,22 @@
  * A signal is one row in `workforce_task_signals`, idempotent on `(tenant, task, signal_key)`: a
  * re-sent delivery collides on the UNIQUE key and no-ops instead of waking a task twice. The kind
  * set is CLOSED; free-text signal kinds are refused at the edge. Delivery wakes a parked task by
- * re-queueing it through `applyTransition` (the matrix rules: `blocked` wakes on ANY wake kind,
- * `waiting_for_user` only on a decision-shaped one), and the wake carries the signal kind as the
- * queue reason so the journal says WHY the task woke. A signal delivered to a task that is not in
- * a wakeable state stays pending and is consumed at the next turn boundary (`cancel` is exactly
- * that: recorded now, absorbed at the turn's end — never killing a turn mid-flight).
+ * re-queueing it through `applyTransition`, and the wake carries the signal kind as the queue
+ * reason so the journal says WHY the task woke. A signal delivered to a task that is not in a
+ * wakeable state stays pending and is consumed at the next turn boundary (`cancel` is exactly that:
+ * recorded now, absorbed at the turn's end — never killing a turn mid-flight).
+ *
+ * WHAT A SIGNAL MAY RELEASE is matched on the PARK — the (status, reason) pair — not on the status
+ * alone, on BOTH paths (delivery and turn-boundary absorption). A status-only match is what lets a
+ * signal dissolve a park it says nothing about: a raised ceiling releasing a task waiting on a
+ * dependency, an operator override dissolving a fan-out join. See `WAKES`.
  */
 import { schema, type TenantDb } from '@rayspec/db';
 import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import { TaskNotFoundError, TaskRowCorruptError, TaskVersionConflictError } from './errors.js';
-import { isTaskStatus, type TaskStatus } from './status.js';
+import { isTaskStatus, REASON_RULES, STATUS_REASONS, type StatusReason, type TaskStatus } from './status.js';
 
 /** The closed signal vocabulary. */
 export const SIGNAL_KINDS = [
@@ -34,23 +38,70 @@ export type SignalKind = (typeof SIGNAL_KINDS)[number];
 
 export const signalKindSchema = z.enum(SIGNAL_KINDS);
 
+/** One park a wake kind answers: a status, and the reasons within it (`null` = the reasonless park). */
+interface Park {
+  readonly status: TaskStatus;
+  readonly reasons: readonly (StatusReason | null)[];
+}
+
 /**
- * Which parked statuses each kind wakes. `blocked` wakes on any wake signal (the matrix's
- * `blocked -> queued` row); `waiting_for_user` wakes only on a decision (`approval_decided`,
- * `user_reply`) — a child completing must not release a task parked on a human. `cancel` wakes
- * nothing: it is absorbed at a turn boundary or applied by the cancel cascade.
+ * The ONE park no override may dissolve. A fan-out join is STRUCTURAL: the parent waits on a fact
+ * about its children, which an operator's override does not change. Releasing it runs the parent
+ * with no child results and orphans the children — their fan-in finds the parent no longer parked
+ * and bails, so the join is simply gone. The lever on a wedged join is cancelling the blocking
+ * child: its terminal status satisfies the join through the join's own path.
  */
-const WAKES: Readonly<Record<SignalKind, readonly TaskStatus[]>> = Object.freeze({
-  approval_decided: ['blocked', 'waiting_for_user'],
-  review_verdict: ['blocked'],
-  child_completed: ['blocked'],
-  dependency_completed: ['blocked'],
-  escalated: ['blocked'],
-  user_reply: ['blocked', 'waiting_for_user'],
-  budget_raised: ['blocked'],
-  manual_unblock: ['blocked'],
+const STRUCTURAL_PARK: StatusReason = 'awaiting_children';
+
+/**
+ * Every reason a `blocked` task may carry except the structural one — DERIVED from `REASON_RULES`,
+ * so a newly declared blocked reason is operator-unblockable by construction and the exclusion
+ * above stays the single explicit fact.
+ */
+const OPERATOR_UNBLOCKABLE: readonly StatusReason[] = STATUS_REASONS.filter(
+  (reason) => reason !== STRUCTURAL_PARK && REASON_RULES[reason].includes('blocked'),
+);
+
+/**
+ * The PARK each kind answers. Reason-matched, so a signal releases only what its meaning speaks to:
+ * a raised ceiling answers `blocked(budget_exhausted)` and nothing else; a decision answers the
+ * approval park it was made against, not a task parked on a dependency or on its children.
+ *
+ * `waiting_for_review` appears nowhere, and neither does `review_verdict`'s park: a review's exit is
+ * its verdict route, which decides once under its own compare-and-swap — a posted signal must not
+ * be a second door into it. `cancel` wakes nothing either: it is absorbed at a turn boundary or
+ * applied by the cancel cascade.
+ */
+const WAKES: Readonly<Record<SignalKind, readonly Park[]>> = Object.freeze({
+  approval_decided: [
+    { status: 'waiting_for_user', reasons: ['approval_pending'] },
+    { status: 'blocked', reasons: ['approval_pending'] },
+  ],
+  review_verdict: [],
+  child_completed: [{ status: 'blocked', reasons: ['awaiting_children'] }],
+  dependency_completed: [{ status: 'blocked', reasons: ['awaiting_dependency'] }],
+  escalated: [{ status: 'blocked', reasons: ['escalated'] }],
+  user_reply: [
+    // The reasonless `waiting_for_user` park — "a human decides" (review rounds spent, an
+    // escalated budget). An approval park has its own decision path and is not this.
+    { status: 'waiting_for_user', reasons: [null] },
+    { status: 'blocked', reasons: ['clarification_pending'] },
+  ],
+  budget_raised: [{ status: 'blocked', reasons: ['budget_exhausted'] }],
+  manual_unblock: [{ status: 'blocked', reasons: OPERATOR_UNBLOCKABLE }],
   cancel: [],
 });
+
+function isSignalKind(value: string): value is SignalKind {
+  return (SIGNAL_KINDS as readonly string[]).includes(value);
+}
+
+/** Does this kind answer the park the task is actually sitting in? */
+function answersPark(kind: SignalKind, status: string, statusReason: string | null): boolean {
+  return WAKES[kind].some(
+    (park) => park.status === status && park.reasons.some((reason) => reason === statusReason),
+  );
+}
 
 export type SignalRecord = typeof schema.workforceTaskSignals.$inferSelect;
 
@@ -104,8 +155,9 @@ export async function deliverSignal(
       if (!isTaskStatus(task.status)) {
         throw new TaskRowCorruptError(input.taskId, `status '${task.status}'`);
       }
-      if (!WAKES[input.kind].includes(task.status)) {
-        // Not wakeable right now — the signal stays pending for the next turn boundary.
+      if (!answersPark(input.kind, task.status, task.statusReason)) {
+        // This kind does not answer the park the task sits in (or the task is not parked at all) —
+        // the signal stays pending for the next turn boundary.
         return { delivered: true, woke: false };
       }
       try {
@@ -154,21 +206,26 @@ export async function consumePendingCancels(tx: TenantDb, taskId: string): Promi
 }
 
 /**
- * The NARROW post-turn absorption rule: after a turn's final transition, a still-pending signal
- * may wake the task it just parked — but only where the signal's meaning matches the park reason,
- * so a stale signal can never release a park it does not answer:
- *   - `budget_raised`  wakes `blocked(budget_exhausted)` — the raised ceiling arrived mid-turn;
- *   - `manual_unblock` wakes any `blocked` — the operator's explicit override.
- * Decision-shaped signals (`approval_decided`, `user_reply`, …) are deliberately NOT absorbed: a
- * stale decision pending from an earlier request must never release a NEW `waiting_for_user` park
- * — those wake only through their own delivery path, keyed per request. Returns the absorbed
- * signal when a wake applied, null otherwise.
+ * The signal kinds a TURN BOUNDARY may absorb: a wake that landed while the task was `working`
+ * (never wakeable) and answers the park the turn just applied. Decision-shaped signals
+ * (`approval_decided`, `user_reply`, …) are deliberately absent — a stale decision pending from an
+ * earlier request must never release a NEW park; those wake only through their own delivery path,
+ * keyed per request.
+ */
+const ABSORBED_AT_TURN_BOUNDARY: readonly SignalKind[] = ['budget_raised', 'manual_unblock'];
+
+/**
+ * The NARROW post-turn absorption rule: after a turn's final transition, a still-pending signal may
+ * wake the task it just parked — but only an absorbable kind, and only where it ANSWERS the park
+ * (the same `WAKES` match the delivery path uses), so a stale signal can never release a park it
+ * does not speak to. `awaiting_children` is unreachable here for exactly that reason: a fan-out
+ * that ends a turn must not be dissolved by an operator override the same transaction absorbs.
+ * Returns the absorbed signal when a wake applied, null otherwise.
  */
 export async function absorbPendingWakes(
   tx: TenantDb,
   task: { taskId: string; status: string; statusReason: string | null; version: number },
 ): Promise<SignalRecord | null> {
-  if (task.status !== 'blocked') return null;
   const pending = (await tx
     .select(schema.workforceTaskSignals)
     .where(
@@ -180,8 +237,9 @@ export async function absorbPendingWakes(
   const applicable = pending
     .filter(
       (s) =>
-        s.kind === 'manual_unblock' ||
-        (s.kind === 'budget_raised' && task.statusReason === 'budget_exhausted'),
+        isSignalKind(s.kind) &&
+        ABSORBED_AT_TURN_BOUNDARY.includes(s.kind) &&
+        answersPark(s.kind, task.status, task.statusReason),
     )
     .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   const wake = applicable[0];
