@@ -90,6 +90,24 @@ export const DEFAULT_EVENT_POLL_INTERVAL_MS = 5_000;
 /** Rows scanned per read. The (tenant_id, seq) primary key makes this an ordered range scan. */
 export const EVENT_PAGE_LIMIT = 500;
 
+/**
+ * The reconnect delay this stream asks its clients to wait, written once as the SSE `retry:` field.
+ *
+ * WHY THE SERVER STATES IT. The close that ends most of these streams is the server's OWN lifetime
+ * cap, not a failure — a reconnect is a step in the protocol here, not an exception. Left unstated,
+ * the gap before the client comes back is whatever that client's implementation defaults to, and
+ * those defaults differ, so one deployment resumes at a different speed in every browser for a close
+ * it scheduled itself. Nothing is LOST across the gap either way (the resume checkpoint is what
+ * guarantees that, see `formatResumeCheckpoint`); this makes its LENGTH the server's decision.
+ *
+ * WHY ONE SECOND AND NOT LESS. A client is told this once and reuses it for every reconnect,
+ * including the ones after a failed connect — `EventSource` reconnects on this interval and is not
+ * required to back off — so the number is also the request rate one subscriber puts on a server that
+ * is down. A second is short against a cap measured in minutes and slow enough that a fleet
+ * reconnecting into an outage is not a hammer.
+ */
+const SSE_RETRY_MS = 1_000;
+
 /** The most topics one subscription may filter on (a bound on the filter, not a product limit). */
 const MAX_SUBSCRIBE_TOPICS = 64;
 
@@ -255,7 +273,19 @@ async function subscribeToTenantEvents(c: Context<AppEnv>, deps: AppDeps): Promi
   const topics = parseSubscribeTopics(c.req.query('topics'));
   // The SSE reconnect header FIRST (that is the mechanism a browser resumes with, and it is what the
   // client sends without being asked), the explicit query second for a non-EventSource client.
-  const rawCursor = c.req.header('last-event-id') ?? c.req.query('since');
+  //
+  // A HEADER THAT IS PRESENT BUT BLANK CARRIES NO CURSOR, and is read as though it were absent.
+  // An `EventSource`'s last-event-ID string starts EMPTY, so "" is the value that means "I have
+  // nothing to resume from" — the same statement an omitted header makes. Refusing it would put the
+  // strictness at the wrong end: every refusal in `parseEventCursor` exists because a value COULD be
+  // mistaken for a position in this stream and resume the subscriber somewhere it never asked for,
+  // and a blank value cannot be mistaken for anything, so reading it as absent coerces nothing. It
+  // must also not be a truthiness test on the whole expression: `??` alone falls through on
+  // null/undefined only, so a blank header would additionally swallow the `?since=` a non-browser
+  // client supplied beside it and turn a resumable request into a refused one. The header's VALUE is
+  // passed on untouched — a padded cursor is still a padded cursor and is still refused.
+  const reconnectHeader = c.req.header('last-event-id');
+  const rawCursor = reconnectHeader?.trim() ? reconnectHeader : c.req.query('since');
 
   const tdb = forTenant(deps.db, tenantId);
   const opening = await openSubscription(tdb, tenantId, rawCursor, topics);
@@ -304,7 +334,15 @@ async function subscribeToTenantEvents(c: Context<AppEnv>, deps: AppDeps): Promi
     stream.onAbort(() => wakeUp());
 
     try {
+      // The reconnect delay, stated before any frame so that even a subscriber the cap closes
+      // immediately is already holding it. Like the resume checkpoint this is a field and not a
+      // frame — a block with no `data:` dispatches no event — so no client sees an extra event.
+      await stream.write(`retry: ${SSE_RETRY_MS}\n\n`);
+
       while (!stream.aborted && Date.now() < deadline) {
+        // Where this iteration's read starts, so the drain below can tell an iteration that made
+        // progress from one that cannot.
+        const scannedFrom = cursor;
         const page =
           prefetched ??
           (await tdb.readEventPage({
@@ -353,8 +391,23 @@ async function subscribeToTenantEvents(c: Context<AppEnv>, deps: AppDeps): Promi
           await stream.write(formatResumeCheckpoint(tenantId, cursor));
         }
 
-        // More backlog behind this page — drain it without waiting.
-        if (page.scannedThrough < page.lastSeq) continue;
+        // More backlog behind this page — drain it without waiting, FOR AS LONG AS THE READS ARE
+        // MOVING. This `continue` skips the poll wait and the heartbeat with it, so what makes it
+        // terminate is that every iteration it grants advances the cursor past at least one scanned
+        // row that will never be scanned again: a drain burst is therefore bounded by the number of
+        // rows between the cursor and the tail, and ends by reaching it.
+        //
+        // A read that scanned NOTHING advances nothing, and re-reading the same window can only
+        // return the same nothing — so on that read the loop waits instead of draining. It is
+        // reachable only with a counter standing above every surviving row (rows removed out of
+        // band, a partial restore): the retention sweep raises the floor in the DELETE's own
+        // statement and the truncation arm above then jumps the cursor to it, and an emit allocates
+        // its sequence above the counter under the counter row's lock, so no shipped write path
+        // opens that gap and none can ever fill it. Announcing the backlog drained there is honest —
+        // no row exists for the subscriber to be missing — and it leaves a stream that heartbeats
+        // and delivers whatever is emitted next, rather than one re-reading an empty window with no
+        // wait until the lifetime cap.
+        if (cursor > scannedFrom && page.scannedThrough < page.lastSeq) continue;
 
         if (!announcedLive) {
           announcedLive = true;

@@ -15,6 +15,11 @@
  *   - R3 — an OMITTED `topics` delivers every topic; a filter delivers only its topics; a filter
  *     crosses a WHOLE PAGE of rows it skipped to reach its own event; an EXPLICITLY EMPTY
  *     `?topics=` is a 400.
+ *   - THE CURSOR SOURCES — an empty `Last-Event-ID` is the "no cursor yet" an `EventSource` starts
+ *     in, so it starts the subscriber at the tail and leaves an accompanying `?since=` in force; a
+ *     header that carries a value still outranks the query, and one that is not a cursor is a 400.
+ *   - the `topics` cap is the number the reference documents (64 served, 65 refused).
+ *   - the `retry:` field is on the wire before anything else, once per connection.
  *   - R4 — a cursor tagged with another tenant is refused, and cross-tenant delivery is impossible.
  *   - R5 — a FRESH subscriber on a stream with a non-zero retention floor gets NO truncation signal.
  *   - R6 — a cursor above the high-water mark is refused, not served as an empty stream, and a
@@ -25,6 +30,8 @@
  *
  *  POLL-DRIVEN suite (NO wake wired at all — the posture where every notify is lost):
  *   - delivery still happens, on the subscriber's own read;
+ *   - a counter standing above every surviving row leaves the loop waiting on its poll interval,
+ *     not draining an empty window without one;
  *   - R2 — the floor is re-checked on EVERY read: retention that runs while a subscriber sits idle
  *     reaches it as a truncation frame, not as a hole.
  *
@@ -124,6 +131,12 @@ interface StreamRead {
    * by an `id:` field. This is the value the resume protocol actually turns on.
    */
   lastEventId?: string;
+  /**
+   * Every byte the server wrote, before the parser dropped anything. The frame list above models
+   * what a client DISPATCHES, so it necessarily hides the two things on this wire that dispatch
+   * nothing — the `retry:` field and the heartbeat comment — and those are assertable only here.
+   */
+  raw: string;
   closed: boolean;
   elapsedMs: number;
 }
@@ -151,6 +164,7 @@ async function readStream(
   const started = Date.now();
   const deadline = started + budgetMs;
   let buffer = '';
+  let raw = '';
   let closed = false;
   let lastEventId: string | undefined;
   const frames: Frame[] = [];
@@ -166,7 +180,9 @@ async function readStream(
       break;
     }
     if (chunk.value === undefined) break; // the test's own budget expired, not a server close
-    buffer += decoder.decode(chunk.value, { stream: true });
+    const text = decoder.decode(chunk.value, { stream: true });
+    raw += text;
+    buffer += text;
     let idx = buffer.indexOf('\n\n');
     while (idx >= 0) {
       const block = parseBlock(buffer.slice(0, idx));
@@ -183,6 +199,7 @@ async function readStream(
   return {
     frames,
     ...(lastEventId !== undefined ? { lastEventId } : {}),
+    raw,
     closed,
     elapsedMs: Date.now() - started,
   };
@@ -452,6 +469,101 @@ describe.skipIf(!hasDb)('GET /v1/subscribe — wake-driven delivery + resume', (
     }
   });
 
+  it('an EMPTY Last-Event-ID is “no cursor yet”, not a malformed cursor — the subscriber starts at the tail', async () => {
+    const { orgId, token } = await principal(h, 'blankheader@example.com', 'BlankHeaderOrg');
+    await emit(h, token, [
+      { topic: 'before', payload: 1 },
+      { topic: 'before', payload: 2 },
+    ]);
+
+    // The state an `EventSource` is in before it has ever seen an `id:` — it is holding nothing to
+    // resume from. A client or an intermediary that writes that state into the header is making the
+    // SAME statement as one that omits it, so refusing it would be a 400 for a request that carries
+    // no cursor at all.
+    const res = await subscribe(h, token, '', { 'last-event-id': '' });
+    expect(res.status).toBe(200);
+    const read = await readStream(res, untilEvent('rayspec.live'));
+    // No cursor ⇒ the tail, and the tail is published as a checkpoint so the reconnect resumes.
+    expect(dataFrames(read.frames)).toEqual([]);
+    expect(read.lastEventId).toBe(`${orgId}:2`);
+    expect(read.frames.some((f) => f.event === 'rayspec.truncated')).toBe(false);
+  });
+
+  it('an EMPTY Last-Event-ID does not swallow the ?since= supplied beside it', async () => {
+    const { orgId, token } = await principal(h, 'blanksince@example.com', 'BlankSinceOrg');
+    await emit(h, token, [
+      { topic: 'backlog', payload: 1 },
+      { topic: 'backlog', payload: 2 },
+    ]);
+
+    // A non-EventSource client that sets the reconnect header from an empty variable and passes its
+    // real cursor as the query: the header carries no position, so the query is what resumes it.
+    const res = await subscribe(h, token, `?since=${orgId}:0`, { 'last-event-id': '' });
+    expect(res.status).toBe(200);
+    const read = await readStream(res, untilEvent('rayspec.live'));
+    expect(seqs(read.frames)).toEqual([1, 2]);
+  });
+
+  it('a NON-EMPTY Last-Event-ID still outranks ?since=, and a header that is not a cursor is still a 400', async () => {
+    const { orgId, token } = await principal(h, 'headerwins@example.com', 'HeaderWinsOrg');
+    await emit(h, token, [
+      { topic: 'row', payload: 1 },
+      { topic: 'row', payload: 2 },
+    ]);
+
+    // Precedence is unchanged: the header is the mechanism a browser resumes with, so it outranks
+    // the query whenever it carries a position.
+    const res = await subscribe(h, token, `?since=${orgId}:0`, { 'last-event-id': `${orgId}:1` });
+    expect(res.status).toBe(200);
+    const read = await readStream(res, untilEvent('rayspec.live'));
+    expect(seqs(read.frames)).toEqual([2]);
+
+    // THE ACCEPT CONTROL for the arms above: only a BLANK header reads as absent. One carrying a
+    // value that is not a cursor is still refused, never quietly downgraded to "start at the tail".
+    const bogus = await subscribe(h, token, `?since=${orgId}:0`, {
+      'last-event-id': 'not-a-cursor',
+    });
+    expect(bogus.status).toBe(400);
+    expect((await bogus.json()).error.message).toContain('<tenant_id>:<seq>');
+  });
+
+  it('the topic cap is the number the reference documents: 64 is served, 65 is a 400', async () => {
+    const { token } = await principal(h, 'topiccap@example.com', 'TopicCapOrg');
+    const filter = (n: number): string => Array.from({ length: n }, (_, i) => `t.${i}`).join(',');
+
+    const over = await subscribe(h, token, `?topics=${filter(65)}`);
+    expect(over.status).toBe(400);
+    const body = await over.json();
+    expect(body.error.code).toBe('VALIDATION_ERROR');
+    expect(body.error.message).toContain('more than 64 topics');
+
+    // THE ACCEPT CONTROL — the cap itself is served, so the refusal above is the bound and not a
+    // route that turns down any long filter. A client reads this number in the docs rather than
+    // discovering it by being refused.
+    const at = await subscribe(h, token, `?topics=${filter(64)}`);
+    expect(at.status).toBe(200);
+    const read = await readStream(at, untilEvent('rayspec.live'));
+    expect(read.frames.some((f) => f.event === 'rayspec.live')).toBe(true);
+  });
+
+  it('the stream states its own reconnect delay as an SSE `retry:` field, before anything else', async () => {
+    const { token } = await principal(h, 'retryfield@example.com', 'RetryFieldOrg');
+
+    const res = await subscribe(h, token);
+    expect(res.status).toBe(200);
+    const read = await readStream(res, untilEvent('rayspec.live'));
+    // The close that ends most of these streams is the server's own lifetime cap, so the gap before
+    // the client returns is the server's to set — otherwise it is a per-implementation default and
+    // the same deployment reconnects at a different speed in every client. The LITERAL is asserted,
+    // not the constant: this number is written down in the reference, and the two must not drift.
+    expect(read.raw.startsWith('retry: 1000\n\n')).toBe(true);
+    // Once per connection, not once per read.
+    expect(read.raw.match(/^retry: /gm)?.length).toBe(1);
+    // …and it is a FIELD, not a frame: a block with no `data:` dispatches no event, so the only
+    // thing this subscriber saw was the control frame.
+    expect(read.frames.map((f) => f.event)).toEqual(['rayspec.live']);
+  });
+
   it('R4: a cursor tagged with ANOTHER tenant is refused, and no cursor reaches another tenant’s events', async () => {
     const a = await principal(h, 'tenant-a@example.com', 'TenantA');
     const b = await principal(h, 'tenant-b@example.com', 'TenantB');
@@ -649,6 +761,43 @@ describe.skipIf(!hasDb)('GET /v1/subscribe — the periodic read is the delivery
     await emit(h, token, [{ topic: 'polled', payload: { ok: true } }]);
     const { frames } = await reading;
     expect(dataFrames(frames).map((f) => f.event)).toEqual(['polled']);
+  });
+
+  it('a counter standing above every surviving row does not turn the drain into an unwaited read loop', async () => {
+    const { orgId, token } = await principal(h, 'drain@example.com', 'DrainOrg');
+    await emit(h, token, [
+      { topic: 'row', payload: 1 },
+      { topic: 'row', payload: 2 },
+    ]);
+    // The counter left claiming a backlog no row can satisfy. Nothing this platform writes produces
+    // it — the retention sweep raises the floor inside the DELETE's own statement, and erasing a
+    // tenant drops the counter row together with its events — so it is planted directly, in the
+    // shape an out-of-band delete or a partial restore would leave. Every read from here on scans
+    // an EMPTY window while `last_seq` still stands ahead of the cursor, which is the state in
+    // which "there is more behind this page, drain it without waiting" can never come true.
+    await h.db.$client.unsafe(
+      'UPDATE tenant_event_streams SET last_seq = 500 WHERE tenant_id = $1',
+      [orgId],
+    );
+
+    const res = await subscribe(h, token, `?since=${orgId}:0`);
+    expect(res.status).toBe(200);
+    // No stop condition: this read ends on its own budget, so what it captures is what the stream
+    // did with several poll intervals of its own time.
+    const read = await readStream(res, () => false, 9_000);
+
+    // The rows that exist are delivered…
+    expect(seqs(read.frames)).toEqual([1, 2]);
+    // …and the subscriber is then told it is live — the announcement a draining loop skips. It is
+    // honest here: a read that scanned nothing cannot advance the cursor, and no future emit can
+    // land in the gap either, because a sequence is allocated above `last_seq` and nothing will
+    // ever be written between the cursor and the number the counter is standing on.
+    const live = read.frames.find((f) => f.event === 'rayspec.live');
+    expect(live).toBeDefined();
+    expect(JSON.parse(live?.data ?? '{}')).toEqual({ from: 2 });
+    // The heartbeat is the direct observation that the loop PARKED on its poll timer instead of
+    // spinning: draining skips the wait, so a loop that kept draining never writes one.
+    expect(read.raw).toContain(': keepalive');
   });
 
   it('R2: the floor is re-checked on EVERY read — retention that runs mid-subscription arrives as a signal, not a hole', async () => {

@@ -123,10 +123,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   another tenant, a sequence that is not plain decimal digits (a hexadecimal, exponent, fractional,
   signed, padded or empty one is refused rather than **coerced**, since coercing resumes the
   subscriber somewhere it never asked for while looking successful), and one **ahead** of the stream.
-  Omitting the cursor starts
+  A `Last-Event-ID` that is present but **blank** is none of them: an `EventSource`'s last-event-ID
+  string starts empty, so a blank header says exactly what an omitted one says, and it is read as
+  absent — a `?since=` sent beside it still applies. Omitting the cursor starts
   at the tail and is **not** a truncation, however old the stream's floor is. Omitting `topics` means
   **every** topic; an explicitly empty `?topics=` is a `400`, because an empty filter can only match
-  nothing and that is indistinguishable from a healthy stream on a quiet workspace.
+  nothing and that is indistinguishable from a healthy stream on a quiet workspace, and a filter
+  naming more than **64** topics is a `400` as well — a documented bound on the filter rather than
+  one a client discovers by being refused.
   Each read takes the events above the cursor together with the stream's retention floor **from one
   snapshot**, so a subscriber can never be told its cursor is fine about events that are already gone,
   and the floor is re-checked on **every** read rather than once at connect — a connection held open
@@ -147,7 +151,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the reconnect gap while `rayspec.live` reported the backlog drained. A **resume checkpoint** (an
   `id:` line and nothing else, which the event-stream grammar defines as a cursor update that
   dispatches no event) is written whenever the cursor moves without a delivery, so the cap costs a
-  round trip and no events. There is no WebSocket surface, and none is
+  round trip and no events. The stream also states the reconnect delay itself, as an SSE **`retry:`**
+  field (one second) written before its first frame: the close is the server's own, so how long the
+  client waits before coming back is the server's decision rather than a per-client default — and
+  those defaults differ, which would otherwise make the same deployment resume at a different speed
+  in every browser. There is no WebSocket surface, and none is
   planned: SSE plus a durable cursor covers the case, and the durable rows — not the connection — are
   what make a resume correct. `examples/live-workspace-events` is the whole loop in one bootable
   document.
