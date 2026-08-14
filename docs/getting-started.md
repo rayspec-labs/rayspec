@@ -389,11 +389,15 @@ window knowingly, or scale the three buckets for the run:
 RAYSPEC_AUTH_RATE_MULTIPLIER=100   # scales max per bucket; default 1
 ```
 
-The multiplier is a positive integer and applies to exactly the three buckets
-above — the windows and every other limit are untouched. It is dev/CI-only by
-convention: any value other than 1 makes the boot log a loud one-line warning
+The multiplier is a positive integer up to 1000 and applies to exactly the three
+buckets above — the windows and every other limit are untouched. It is dev/CI-only
+by convention: any value other than 1 makes the boot log a loud one-line warning
 naming the variable and the value, so it cannot sit in a production environment
-silently, and a value that is not a positive integer aborts the boot outright.
+silently, and a value that is not a positive integer, or one above 1000, aborts
+the boot outright. The ceiling is the same fail-closed shape
+`RAYSPEC_ACCESS_TOKEN_TTL_SECONDS` has: this variable scales a throttle, so an
+unbounded value would switch it off by arithmetic rather than by configuration —
+and ×1000 already means 5000 registrations a minute.
 
 ---
 

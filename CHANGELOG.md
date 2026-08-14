@@ -246,6 +246,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory index. The option is echoed in the `deploy --dry-run` verdict for **both** the
   static and the backend profile, so the preview names the resolution boot will use, and the static
   profile's boot banner marks a mount that sets it.
+  **One source-level note for anyone building against the tree in TypeScript:** `FrontendSpec` is
+  the *parsed* mount type, and a key with a schema default is required on it (this is why `spa` was
+  already required there), so a hand-written `FrontendSpec` literal now needs `cleanUrls` as well.
+  Nothing about a `rayspec.yaml` document changes — the key stays optional in YAML and defaults to
+  `false` — and no runtime behaviour changes; it is only literals written in TypeScript against the
+  parsed type that gain a key. The mount literals inside this repository's own tests are updated to
+  match.
 
 - **Speech synthesis reaches a backend-profile handler as the optional `init.tts` capability, behind a
   new `TTS_PROVIDER` contract — the egress half of the audio pipeline.** The platform shipped a real
@@ -391,8 +398,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tiers) are untouched. Unset, blank or an explicit 1 leaves the limiter byte-identical to before —
   five registrations per source per minute, `429` on the sixth. Any other value makes the boot log
   a loud one-line warning naming the variable and the value, so the dev/CI posture can never sit in
-  a production environment silently; a value that is not a positive integer aborts the boot with a
-  refusal naming the variable and the value, in the same shape as the other env refusals. The
+  a production environment silently; a value that is not a positive integer **or is above 1000**
+  aborts the boot with a refusal naming the variable and the value, in the same shape as the other
+  env refusals. The ceiling is deliberate and matches the shape
+  `RAYSPEC_ACCESS_TOKEN_TTL_SECONDS` already had: the variable scales a *throttle*, so an unbounded
+  value is a way to switch that throttle off by arithmetic — at ×1e9 the `register` bucket admits
+  5e9 registrations a minute, which is no limit at all. ×1000 is ten times the documented example
+  and already means 5000 registrations a minute, so no harness meets the bound. The
   getting-started docs gain a "Testing against a live boot" section naming the buckets and their
   windows, so suite authors can also stagger registrations knowingly instead.
 - **A spec node can acknowledge a `doctor` advisory with `lintSuppress` — with a mandatory recorded
@@ -477,7 +489,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider-side `parallel_tool_calls: false`, so the model stops batching at the source, and caps
   the SDK loop's local tool concurrency at 1, so a batch that still arrives executes strictly in
   emission-index order; with the flag off neither setting is sent and the provider's own default
-  (parallel) applies, exactly as before. On every backend the platform additionally serializes
+  (parallel) applies, exactly as before. Both `openai` settings are conditioned on the agent
+  actually declaring tools: an agent that sets the flag with an empty `tools` list has no call to
+  order, so neither setting is sent and its request is byte-identical to the one it sent before —
+  the same wire shape as the flag being off. On every backend the platform additionally serializes
   the run's tool dispatch through a per-run FIFO width-1 queue in front of the tool dispatcher,
   so a batched turn's calls run strictly in emission order — handlers, events, and journal steps
   included. A backend that could honor neither level is rejected at validation time with a

@@ -95,8 +95,8 @@ function buildApp(mounts: FrontendSpec[], specDir: string): Hono {
   return app;
 }
 
-const spaMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: true };
-const plainMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: false };
+const spaMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: true, cleanUrls: false };
+const plainMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: false, cleanUrls: false };
 /** The specDir is `webDir/../..` (the temp root), so `web/dist` resolves back to webDir. */
 function specDir(): string {
   return join(webDir, '..', '..');
@@ -233,8 +233,8 @@ describe('mountFrontend — non-root mount + longest-route-first ordering', () =
       mountFrontend(
         app,
         [
-          { route: '/', dir: 'web/dist', spa: true },
-          { route: '/admin', dir: 'admin', spa: false },
+          { route: '/', dir: 'web/dist', spa: true, cleanUrls: false },
+          { route: '/admin', dir: 'admin', spa: false, cleanUrls: false },
         ],
         root,
       );
@@ -671,8 +671,8 @@ describe('mountFrontend — custom 404.html page', () => {
     mountFrontend(
       app,
       [
-        { route: '/docs', dir: 'docs', spa: false },
-        { route: '/', dir: 'app', spa: true },
+        { route: '/docs', dir: 'docs', spa: false, cleanUrls: false },
+        { route: '/', dir: 'app', spa: true, cleanUrls: false },
       ],
       root,
     );

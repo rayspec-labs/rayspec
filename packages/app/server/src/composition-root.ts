@@ -1315,6 +1315,16 @@ export function parseAccessTokenTtlSeconds(env: NodeJS.ProcessEnv): number {
 }
 
 /**
+ * The hard ceiling on the auth rate-limit multiplier. The variable scales a THROTTLE, so an
+ * unbounded value is a way to switch that throttle off by arithmetic: at ×1e9 the `register`
+ * bucket's 5/min becomes 5e9/min, which no caller can exhaust. ×1000 is an order of magnitude above
+ * the documented 100 and turns register/login/refresh into 5000/10000/30000 per minute — headroom
+ * no test harness reaches, and still a limit. Fail-closed above it, exactly as
+ * MAX_ACCESS_TOKEN_TTL_SECONDS bounds its own knob.
+ */
+export const MAX_AUTH_RATE_MULTIPLIER = 1000;
+
+/**
  * resolve the dev/CI auth rate-limit multiplier from env, fail-closed on an invalid value.
  *
  *  - RAYSPEC_AUTH_RATE_MULTIPLIER — unset/blank ⇒ 1 (the production limits, byte-identical). A
@@ -1323,18 +1333,20 @@ export function parseAccessTokenTtlSeconds(env: NodeJS.ProcessEnv): number {
  *    not trip the `register` bucket mid-run; windows and every other bucket are untouched. Any
  *    value other than 1 is announced with a loud one-line boot warning
  *    (`authRateMultiplierBanner`), so it can never sit in a production environment silently. A
- *    non-integer or ≤ 0 value ABORTS the boot.
+ *    non-integer, ≤ 0, OR > MAX_AUTH_RATE_MULTIPLIER (1000) value ABORTS the boot.
  */
 export function parseAuthRateMultiplier(env: NodeJS.ProcessEnv): number {
   const raw = env.RAYSPEC_AUTH_RATE_MULTIPLIER?.trim();
   if (raw === undefined || raw === '') return 1;
   const n = Number(raw);
-  if (!Number.isInteger(n) || n <= 0) {
+  if (!Number.isInteger(n) || n <= 0 || n > MAX_AUTH_RATE_MULTIPLIER) {
     throw new BootConfigError(
-      `Boot aborted — RAYSPEC_AUTH_RATE_MULTIPLIER='${raw}' is not a positive integer. It is the ` +
-        'dev/CI multiplier that scales the max of the login/register/refresh rate-limit buckets ' +
-        '(default 1 = the production limits). Fail-closed (a bad multiplier must never silently ' +
-        'fall back — falling back to the production limits would reproduce exactly the ' +
+      `Boot aborted — RAYSPEC_AUTH_RATE_MULTIPLIER='${raw}' is not a positive integer ≤ ` +
+        `${MAX_AUTH_RATE_MULTIPLIER}. It is the dev/CI multiplier that scales the max of the ` +
+        'login/register/refresh rate-limit buckets (default 1 = the production limits). The ' +
+        'ceiling exists because the variable scales a THROTTLE: an unbounded multiplier removes ' +
+        'it by arithmetic rather than by configuration. Fail-closed (a bad multiplier must never ' +
+        'silently fall back — falling back to the production limits would reproduce exactly the ' +
         'far-from-cause 429s the variable exists to remove, and guessing a scale would silently ' +
         'weaken an auth throttle).',
     );
