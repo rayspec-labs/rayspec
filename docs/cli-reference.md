@@ -929,8 +929,12 @@ deployment sets its configuration through its orchestrator or secret manager.
   overrides a variable the environment already sets, and the second never overwrites a key
   the first supplied, so the precedence per key is: environment > `$PWD/.env` >
   checkout-root `.env`. `RAYSPEC_SKIP_DOTENV=1` skips both. `rayspec deploy` searches the
-  same two paths in the same order, so the two entrypoints resolve the same configuration
-  out of the same checkout.
+  same two paths in the same order, so the two entrypoints **started in the same directory**
+  resolve the same files. The first path is `$PWD`-relative, so that directory is what they
+  have to share: a `rayspec-serve` started elsewhere — a unit file's `WorkingDirectory=`, a
+  container's `WORKDIR` — reads that directory's `./.env` instead. Where both entrypoints
+  must agree regardless, set the variables in the environment: an already-set value beats
+  either file.
 - On boot it **applies the committed platform migration chain** to the target
   database (idempotent — it bootstraps a clean database and no-ops on an up-to-date
   one), then materializes a spec's declared stores on a clean database or mounts them

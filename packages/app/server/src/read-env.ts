@@ -6,9 +6,12 @@
  * unescape them so importPKCS8 accepts the key. Disable entirely with RAYSPEC_SKIP_DOTENV=1 (e.g. to
  * prove pure-ambient-env boot).
  *
- * The search order is the `rayspec` CLI's (packages/app/cli/src/read-env.ts): the two entrypoints
- * resolve configuration from the same files in the same order, so `rayspec deploy <spec>` and
- * `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` cannot read different values out of one checkout.
+ * The search order is the `rayspec` CLI's (packages/app/cli/src/read-env.ts): both entrypoints search
+ * the same two candidates in the same order, so `rayspec deploy <spec>` and
+ * `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` STARTED IN THE SAME DIRECTORY resolve the same files. The
+ * agreement rests on the working directory, because the first candidate is `$PWD`-relative: started in
+ * different directories — a shell in a product repo versus a unit file's `WorkingDirectory=` — the two
+ * still resolve different first candidates, each its own `$PWD/.env`.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';

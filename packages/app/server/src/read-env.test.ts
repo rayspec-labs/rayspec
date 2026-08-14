@@ -14,10 +14,14 @@
  *       a `./.env` and reading the refusal that file's value produces. Every arm of (1) would stay green
  *       against an entrypoint that loads nothing.
  *
- * DB-free, secret-free, port-free. The entrypoint arms hand the child three BLANK boot secrets: blank is
- * still SET, so the loader leaves them alone (no-override), and `loadServerConfig` counts a blank secret
- * as missing — so every arm refuses before a socket is opened, whether or not the machine running this
- * suite has a checkout-root `.env`.
+ * DB-free, secret-free, port-free. The entrypoint arms run the SHIPPED module, so their install-root
+ * candidate is this checkout's own `.env` — a file this suite does not control. They hand the child a
+ * blank value for every key that could carry the boot past the secret gate (`BLANK_SECRETS` below names
+ * them and says why each is there), so on a machine that has such a file they still refuse before a
+ * socket is opened, a secret is resolved or a database is reached. `RAYSPEC_AGENT_TRACING` is the one
+ * key they cannot pin — it is the value they measure — so an UNUSABLE value for it in that file would
+ * change which refusal the accept-control arm reads (the other three either set it themselves or skip
+ * the load; `.env.example` ships that line commented out).
  */
 import { spawnSync } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -34,11 +38,33 @@ const SERVE = join(here, 'serve.ts');
 /** The refusal `loadServerConfig` raises — the step AFTER the `.env` load under test. */
 const CONFIG_REFUSAL = 'required env var(s) missing';
 
-/** Present (so the loader never fills them) and blank (so the boot refuses at the secret gate). */
+/**
+ * Every key that can carry the boot past the secret gate, PRESENT and BLANK. Present is what disarms
+ * them: the loader's no-override rule is `key in process.env`, so a checkout-root `.env` — the
+ * install-root candidate these arms resolve for real — can supply none of them. Blank is what makes the
+ * boot stop: `loadServerConfig` counts a blank secret as missing.
+ *
+ * The three plain secrets alone are not enough, and both gaps are things a `.env` next to this checkout
+ * can carry:
+ *   - the `<VAR>_FILE` mounts, which TAKE PRECEDENCE over the plain variable (boot-env-demands.ts): set,
+ *     the boot resolves real secrets and runs the migration chain against whatever database they name.
+ *     A blank one does not count as set, so the gate still refuses;
+ *   - `RAYSPEC_SPEC_PATH`, which `serve.ts` classifies BEFORE `loadServerConfig` — pointed at a
+ *     frontend-only spec it branches to the static boot, which requires none of the three secrets and
+ *     binds a port. `detectStaticBoot` trims, so blank reads as unset.
+ * `PORT` needs no entry: every arm refuses ahead of the bind.
+ *
+ * `RAYSPEC_AGENT_TRACING` is deliberately absent — it is the value these arms measure, and pinning it
+ * would make the `RAYSPEC_SKIP_DOTENV` arm below pass against a loader that ignored the flag.
+ */
 const BLANK_SECRETS = {
   DATABASE_URL: '',
   RAYSPEC_JWT_SIGNING_KEY: '',
   RAYSPEC_API_KEY_PEPPER: '',
+  DATABASE_URL_FILE: '',
+  RAYSPEC_JWT_SIGNING_KEY_FILE: '',
+  RAYSPEC_API_KEY_PEPPER_FILE: '',
+  RAYSPEC_SPEC_PATH: '',
 };
 
 /** Imports the copied loader, runs it, and reports what the named keys ended up as. */
@@ -199,7 +225,7 @@ describe('rayspec-serve — the entrypoint reads the invoking directory .env', (
 
   it('reads nothing when the invoking directory has no .env — the accept control', () => {
     // Without this arm the assertion above would also pass against an entrypoint that refuses every
-    // boot. The three blank secrets are what this arm stops on.
+    // boot. The blank secrets are what this arm stops on.
     const { status, stderr } = boot();
 
     expect(status).toBe(1);
@@ -226,5 +252,23 @@ describe('rayspec-serve — the entrypoint reads the invoking directory .env', (
     expect(stderr).toContain(
       "[rayspec-serve] Boot aborted — RAYSPEC_AGENT_TRACING='from_shell' is not supported",
     );
+  });
+});
+
+/**
+ * What keeps the four arms above independent of the machine they run on. They boot the SHIPPED module,
+ * so their install-root candidate is this checkout's own `.env` — a file this suite does not control —
+ * and `BLANK_SECRETS` is what stops either candidate from steering the boot. That rests on one property
+ * of the no-override rule: BLANK counts as SET. The arm below pins it, on exactly those keys.
+ */
+describe('loadLocalDotenvIfPresent — a blank value is still set, so no .env can fill it', () => {
+  it('leaves every key BLANK_SECRETS pins blank, from either candidate', () => {
+    const keys = Object.keys(BLANK_SECRETS);
+    // Both candidates carry all of them, so neither position can supply one. The accept control that
+    // these files were read at all is the install-root arm above, which runs the same helper.
+    const body = `${keys.map((k) => `${k}=from_dotenv`).join('\n')}\n`;
+    const env = load({ installRoot: body, product: body }, keys, BLANK_SECRETS);
+
+    expect(env).toEqual(Object.fromEntries(keys.map((k) => [k, ''])));
   });
 });

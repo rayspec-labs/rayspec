@@ -535,8 +535,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` now name two differences that matter for what leaves the
   process and for what can still register a table — this trace-export default, and
   `sealProductStores()`, which `deploy` calls after its boot returns and `rayspec-serve` never calls —
-  without claiming to have counted every difference between the two entrypoints (`withBootTimeout` and
-  the `.env` search order differ as well).
+  without claiming to have counted every difference between the two entrypoints (`withBootTimeout`
+  differs as well).
   **The operator-facing messages are corrected while they are being touched.** The refusal an
   unusable value raises stated `unset ⇒ off`, which is false on the entrypoint this change makes it
   reachable from; it now states the default per entry point. And both `Trace export:` banner lines said
