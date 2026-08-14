@@ -235,8 +235,10 @@ export function parseDeployArgs(args: readonly string[]): {
 /**
  * The `deploy` entrypoint. Resolves + pre-flight-reads the spec (the same fail-closed path jail + size
  * cap doctor/plan use), then either runs the DB-free `--dry-run` compose (returns a verdict) or boots +
- * serves the deployment (long-running; returns `{kind:'served'}` after the server is listening — the
- * open port + signal handlers keep the process alive until SIGINT/SIGTERM).
+ * serves the deployment (long-running; returns `{kind:'served'}` once the listener has been CREATED,
+ * with the bind still pending — a failed bind is refused by the listener's own `'error'` handler, not
+ * through this return — and the open port + signal handlers keep the process alive until
+ * SIGINT/SIGTERM).
  */
 export async function runDeploy(args: readonly string[]): Promise<DeployOutcome> {
   const { positionals, dryRun, checkEnv, port, host, applyMigration, allowlist } =
@@ -567,7 +569,9 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
  * directly, parity with rayspec-serve), then SEALS the door (deploy owns its process + boots once). On a
  * fail-closed boot error (missing env / a missing agent credential surfacing as a BootConfigError, an
  * unreviewed destructive migration via DeployError, a product-boot misconfig) it prints an actionable
- * message + exits 1 (mirrors deployments/acme-notes/serve.mts). Returns once the server is listening;
+ * message + exits 1 (mirrors deployments/acme-notes/serve.mts). Returns once the listener has been
+ * CREATED, with the bind still PENDING — `serve()` does not wait for it, which is why a taken port is
+ * refused by that listener's own `'error'` handler (attachBindRefusal) and never by the catch below;
  * the open port + SIGINT/SIGTERM handlers keep the process alive.
  *
  * All of the above is the NORMAL boot. A FRONTEND-ONLY (static-profile) spec takes the DB-less /
@@ -643,6 +647,7 @@ export async function serveDeployment(
     assembleOptsFromEnv,
     assembleServer,
     assembleStaticServer,
+    attachBindRefusal,
     BootTimeoutError,
     bootBanner,
     bootBaseUrl,
@@ -681,6 +686,14 @@ export async function serveDeployment(
           console.log(staticBootBanner(staticServer, bootBaseUrl(info.address, info.port)));
         },
       );
+      // `serve()` returns with the bind still PENDING, so a taken port arrives as an `'error'` event
+      // rather than as a throw the catch below could see — hence a listener, which answers a
+      // collision with one line and re-emits any other listen error untouched (bind-refusal.ts).
+      attachBindRefusal(httpStatic, {
+        host: staticConfig.host,
+        port: staticConfig.port,
+        prefix: '[rayspec deploy]',
+      });
       const shutdownStatic = (signal: string): void => {
         console.log(`\n[rayspec deploy] ${signal} received — shutting down…`);
         httpStatic.close(async () => {
@@ -711,6 +724,13 @@ export async function serveDeployment(
         console.log(bootBanner(server, bootBaseUrl(info.address, info.port)));
       },
     );
+    // The same bind refusal the static branch above attaches: a taken port refuses the boot instead
+    // of landing as an unhandled listen `'error'` after the migrations have already been applied.
+    attachBindRefusal(httpServer, {
+      host: config.host,
+      port: config.port,
+      prefix: '[rayspec deploy]',
+    });
 
     const shutdown = (signal: string): void => {
       console.log(`\n[rayspec deploy] ${signal} received — shutting down…`);

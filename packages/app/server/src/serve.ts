@@ -26,6 +26,7 @@ import { serve } from '@hono/node-server';
 import { DeployError } from '@rayspec/api-auth';
 import type { FrontendSpec } from '@rayspec/spec';
 import { bootBanner, bootBaseUrl, staticBootBanner } from './banner.js';
+import { attachBindRefusal } from './bind-refusal.js';
 import { BootTimeoutError, resolveBootTimeoutMs, withBootTimeout } from './boot-timeout.js';
 import {
   assembleServer,
@@ -102,6 +103,14 @@ async function main(): Promise<void> {
         console.log(staticBootBanner(staticServer, bootBaseUrl(info.address, info.port)));
       },
     );
+    // `serve()` returns with the bind still PENDING, so a taken port arrives as an `'error'` event
+    // rather than as a throw — hence a listener, which answers a collision with one line and
+    // re-emits any other listen error untouched (bind-refusal.ts).
+    attachBindRefusal(httpServer, {
+      host: staticConfig.host,
+      port: staticConfig.port,
+      prefix: '[rayspec-serve]',
+    });
     const shutdown = (signal: string) => {
       console.log(`\n[rayspec-serve] ${signal} received — shutting down…`);
       httpServer.close(async () => {
@@ -136,6 +145,13 @@ async function main(): Promise<void> {
       console.log(bootBanner(server, bootBaseUrl(info.address, info.port)));
     },
   );
+  // The same bind refusal the static branch above attaches: a taken port refuses the boot instead of
+  // landing as an unhandled listen `'error'` after the migrations have already been applied.
+  attachBindRefusal(httpServer, {
+    host: config.host,
+    port: config.port,
+    prefix: '[rayspec-serve]',
+  });
 
   // Graceful shutdown: stop accepting connections, end the DB pool, exit. Wired to SIGINT/SIGTERM.
   const shutdown = (signal: string) => {
