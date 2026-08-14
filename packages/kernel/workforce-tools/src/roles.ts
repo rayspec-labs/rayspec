@@ -39,6 +39,33 @@ export const TURN_ENDING_TOOLS: ReadonlySet<ToolName> = new Set([
   'submit_review',
 ]);
 
+/**
+ * The model-facing form an in-process MCP bridge gives a neutral tool: `mcp__<server>__<tool>`.
+ * Anchored and narrow on purpose — it matches the bridged form and nothing else, so a name that
+ * never went through a bridge cannot be mangled by it.
+ */
+const MCP_BRIDGED_TOOL_NAME = /^mcp__[a-z0-9-]+__(?<tool>.+)$/;
+
+/**
+ * Does a tool name AS A BACKEND RECORDED IT on the transcript name a turn-ending tool?
+ *
+ * Adapters do not agree on the recorded form. OpenAI, Codex and pi report the neutral name the
+ * toolset dispatched under; the Anthropic adapter bridges the toolset as an in-process MCP server
+ * and keeps the model-facing `mcp__rayspec__<tool>` verbatim in its re-derived transcript. Reading
+ * the transcript is how the composition learns that an ending was ATTEMPTED and refused before the
+ * handler ran, so a check that knew only the neutral form silently degraded that fate to a yield on
+ * the one adapter that prefixes.
+ *
+ * The NEUTRAL SUFFIX is what both forms share, so match on that. This is deliberately a READ-SIDE
+ * normalization rather than a change to what the Anthropic adapter records: the transcript is the
+ * source of record and the prefixed name is what the model actually called, and no other adapter
+ * can be affected by a strip that is the identity on every name without the bridged prefix.
+ */
+export function isTurnEndingToolName(recordedName: string): boolean {
+  const neutral = MCP_BRIDGED_TOOL_NAME.exec(recordedName)?.groups?.tool ?? recordedName;
+  return TURN_ENDING_TOOLS.has(neutral as ToolName);
+}
+
 export const TOOLSETS_BY_ROLE: Readonly<Record<EmployeeRole, readonly ToolName[]>> = Object.freeze({
   orchestrator: [
     'create_task',

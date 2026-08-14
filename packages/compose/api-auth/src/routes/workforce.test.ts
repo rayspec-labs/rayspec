@@ -119,6 +119,14 @@ async function seedPendingReview(orgId: string) {
   return { task, reviewId: (reviews[0] as { id: string }).id };
 }
 
+/** The task row's current optimistic-concurrency version — a transition applies over its own. */
+async function versionOf(orgId: string, taskId: string): Promise<number> {
+  const rows = (await forTenant(h.db, orgId)
+    .select(schema.workforceTasks, { version: schema.workforceTasks.version })
+    .where(eq(schema.workforceTasks.taskId, taskId))) as Array<{ version: number }>;
+  return (rows[0] as { version: number }).version;
+}
+
 describe('/v1/workforce (the task-engine surface)', () => {
   beforeAll(async () => {
     h = await createHarness({
@@ -277,6 +285,67 @@ describe('/v1/workforce (the task-engine surface)', () => {
       headers: { authorization: `Bearer ${b.token}` },
     });
     expect(foreign.status).toBe(404);
+  });
+
+  it('a stale review decided from the inbox is a typed 409, not a 500', async () => {
+    // The natural interleaving the binding check exists to refuse, driven through its own front
+    // door: an abandoned review leaves its row undecided, so it still lists FIRST in the inbox
+    // (oldest first) after the next round opened its own park. An operator clicks it. The engine
+    // refuses — but the refusal was unmapped here and surfaced as a generic 500, which reads as a
+    // broken server rather than as the conflict it is.
+    const a = await principal('wf-stale-review@example.test', 'Org WF Stale Review');
+    const { task, reviewId: staleId } = await seedPendingReview(a.orgId);
+    const tdb = forTenant(h.db, a.orgId);
+    // The reviewer never delivered: the park is released to a human, the row stays undecided.
+    const released = await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: await versionOf(a.orgId, task.taskId),
+      to: 'waiting_for_user',
+      actor: 'system',
+    });
+    // The human sends it back, and a SECOND round opens its own park bound to its own review.
+    const requeued = await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: released.version,
+      to: 'queued',
+      actor: 'user',
+    });
+    await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: requeued.version,
+      to: 'working',
+      actor: 'scheduler',
+      turnId: 't2',
+    });
+    await applyTurnOutcome(tdb, {
+      taskId: task.taskId,
+      turnId: 't2',
+      turnNumber: 2,
+      intent: { kind: 'request_review', reviewer: 'reviewer-1' },
+      budgets: NO_BUDGETS,
+    });
+
+    // The stale row is still the one the inbox offers first.
+    const inbox = await jsonRequest(h.app, 'GET', '/v1/workforce/reviews', {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    const rows = (await inbox.json()) as Array<{ id: string }>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.id).toBe(staleId);
+
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/reviews/${staleId}/verdict`, {
+      body: { verdict: 'accept' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(409);
+    // Nothing was written: round 2's park still holds its own reviewer's exit.
+    const held = await h.db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${task.taskId}';`,
+    );
+    expect(held[0]).toMatchObject({
+      status: 'waiting_for_review',
+      status_reason: 'review_pending',
+    });
   });
 
   it('a reject verdict re-queues the task for rework through the one door', async () => {

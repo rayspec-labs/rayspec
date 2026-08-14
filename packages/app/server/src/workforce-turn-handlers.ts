@@ -32,10 +32,9 @@ import {
   assertNoReservedCollisions,
   buildRoleToolset,
   buildWorkforceSnapshot,
+  isTurnEndingToolName,
   MALFORMED_TURN_ENDING,
   matchReviewPolicy,
-  type ToolName,
-  TURN_ENDING_TOOLS,
   TurnCollector,
 } from '@rayspec/workforce-tools';
 
@@ -171,10 +170,13 @@ export function buildWorkforceTurnHandlers(deps: WorkforceTurnHandlerDeps): Reso
       // never ended its turn. Asking whether a turn-ending tool was CALLED distinguishes "tried to
       // end and was refused" from "never tried" — the first takes the fate, the second yields. A
       // backend reporting no transcript degrades to the yield, which is the safe direction.
+      //
+      // Asked through `isTurnEndingToolName`, which matches the NEUTRAL SUFFIX: adapters disagree
+      // on the name they record (the Anthropic one bridges the toolset as an in-process MCP server
+      // and keeps `mcp__rayspec__<tool>` verbatim), and a check that knew only the neutral form
+      // left this fate open on exactly that adapter.
       const attemptedEnding = result.conversation.some((turn) =>
-        turn.parts.some(
-          (part) => part.kind === 'tool_call' && TURN_ENDING_TOOLS.has(part.name as ToolName),
-        ),
+        turn.parts.some((part) => part.kind === 'tool_call' && isTurnEndingToolName(part.name)),
       );
       const intent =
         collected.intent ??

@@ -236,11 +236,17 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
     delegate_task: {
       spec: {
         name: 'delegate_task',
+        // A DESCRIPTION NAMES ONLY WHAT THIS SEAT CAN REACH. The manager arm used to advertise
+        // `department:<id>`, which a lint-clean document makes unreachable from a manager: it
+        // resolves to that department's manager, and `manager_in_members` guarantees a manager is
+        // not among the members — their own department resolves to themselves (self-delegation),
+        // every other one to a forbidden owner. Offering it cost a turn to discover the refusal.
         description:
           'End this turn by delegating one or more child tasks. Targets: employee:<id>' +
           (employee.role === 'orchestrator'
             ? ', department:<id> (its manager answers), team:<id> (its lead answers)'
-            : ' and department:<id> (its manager answers), within your own scope') +
+            : ' — the members of your own department, plus the members of a team you lead while ' +
+              "this task is that team's work") +
           '. All children fan out together and this task waits for all of them.',
         parameters: {
           type: 'object',
@@ -786,13 +792,6 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
     },
   };
 
-  // A REVIEW TASK does not carry `request_review`. The role table grants it to every role, and a
-  // reviewer employee running an ordinary task should keep it — but a task dispatched to DECIDE a
-  // review (the one with a pending review on its snapshot) commissioning a review of its own is an
-  // unbounded chain: `reviewRoundsUsed` restarts at zero on every task, so with no declared
-  // execution ceiling nothing bounds it. The engine refuses the intent as well
-  // (`rejectReviewChildEnding`); not offering the tool is what keeps the model from spending a
-  // turn discovering that.
   // A REVIEW TASK does not carry `request_review`. The role table grants it to every role, and a
   // reviewer employee running an ordinary task should keep it — but a task dispatched to DECIDE a
   // review (the one its parent's park binding names) commissioning a review of its own is an

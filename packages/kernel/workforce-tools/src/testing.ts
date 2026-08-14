@@ -12,8 +12,17 @@
 import type { AgentSpec, Backend, BackendId, RunContext, RunResult } from '@rayspec/core';
 
 export interface ScriptedToolCall {
+  /** The NEUTRAL tool name the call dispatches under — what `ctx.dispatchTool` receives. */
   readonly name: string;
   readonly args: unknown;
+  /**
+   * The name the backend RECORDS on the transcript, when a real one would not record the neutral
+   * name it dispatched. The Anthropic adapter bridges the toolset as an in-process MCP server, so
+   * the model calls — and the re-derived transcript keeps, verbatim — `mcp__rayspec__<tool>` while
+   * the dispatch still carries the neutral name. Absent means the two agree, which is what the
+   * OpenAI, Codex and pi adapters report.
+   */
+  readonly recordedName?: string;
 }
 
 export type TurnScript = readonly ScriptedToolCall[];
@@ -48,9 +57,10 @@ export function makeScriptedBackend(
           throw new Error('scripted backend requires ctx.dispatchTool — none was wired.');
         }
         const toolCallId = `scripted-${step}`;
-        parts.push({ kind: 'tool_call', toolCallId, name: call.name, args: call.args });
+        const recorded = call.recordedName ?? call.name;
+        parts.push({ kind: 'tool_call', toolCallId, name: recorded, args: call.args });
         const result = await ctx.dispatchTool(call.name, call.args, toolCallId);
-        results.push({ kind: 'tool_result', toolCallId, name: call.name, result });
+        results.push({ kind: 'tool_result', toolCallId, name: recorded, result });
       }
       return {
         runId: ctx.runId,

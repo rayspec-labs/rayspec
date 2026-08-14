@@ -60,6 +60,7 @@ import { joinPolicySchema } from './join.js';
 import {
   applyReviewVerdictInTx,
   ReviewAlreadyDecidedError,
+  ReviewNotForParkError,
   ReviewTaskStateError,
 } from './reviews.js';
 import {
@@ -848,7 +849,17 @@ export async function applyTurnOutcome(
               actor: task.owner,
             });
           } catch (err) {
-            if (err instanceof ReviewAlreadyDecidedError || err instanceof ReviewTaskStateError) {
+            if (
+              err instanceof ReviewAlreadyDecidedError ||
+              err instanceof ReviewTaskStateError ||
+              // Believed unreachable here: `plan.reviewId` was read from the PARENT's own park
+              // binding (`readReviewAssignment`), and this transaction holds the parent lock, so the
+              // park cannot name a different review by the time the verdict lands. It joins its two
+              // siblings because it is the same story — a verdict this reviewer no longer owns — and
+              // a future path that loses that identity should be superseded, not thrown out of a
+              // turn that has already written.
+              err instanceof ReviewNotForParkError
+            ) {
               verdictOutcome = 'superseded';
             } else {
               throw err;

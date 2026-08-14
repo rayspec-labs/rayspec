@@ -38,6 +38,7 @@ export { type MatchedReviewPolicy, matchReviewPolicy } from './review-policy.js'
 export {
   EMPLOYEE_ROLES,
   type EmployeeRole,
+  isTurnEndingToolName,
   TOOLSETS_BY_ROLE,
   type ToolName,
   TURN_ENDING_TOOLS,

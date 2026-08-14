@@ -8,7 +8,12 @@
 import type { WorkforceEmployeeConfig } from '@rayspec/spec';
 import { describe, expect, it } from 'vitest';
 import { TurnCollector } from './collector.js';
-import { EMPLOYEE_ROLES, TOOLSETS_BY_ROLE, TURN_ENDING_TOOLS } from './roles.js';
+import {
+  EMPLOYEE_ROLES,
+  isTurnEndingToolName,
+  TOOLSETS_BY_ROLE,
+  TURN_ENDING_TOOLS,
+} from './roles.js';
 import { emptySnapshot, fixtureConfig, fixtureTask } from './test-support/fixtures.js';
 import { buildRoleToolset } from './toolset.js';
 
@@ -157,5 +162,24 @@ describe('non-aggregation', () => {
     for (const name of TURN_ENDING_TOOLS) {
       expect(Object.values(TOOLSETS_BY_ROLE).flat()).toContain(name);
     }
+  });
+
+  it('the transcript classifier reads both recorded forms and widens neither', () => {
+    // A backend records the name the MODEL called: neutral on OpenAI/Codex/pi, the bridged
+    // `mcp__<server>__<tool>` on Anthropic. Both name the same tool and must classify the same.
+    for (const name of TURN_ENDING_TOOLS) {
+      expect(isTurnEndingToolName(name)).toBe(true);
+      expect(isTurnEndingToolName(`mcp__rayspec__${name}`)).toBe(true);
+    }
+    // And the strip is not a licence: a read tool ends no turn in either form, and a name that
+    // merely CONTAINS an ending's is not one.
+    for (const name of ['get_task', 'mcp__rayspec__get_task', 'send_message']) {
+      expect(isTurnEndingToolName(name)).toBe(false);
+    }
+    expect(isTurnEndingToolName('not_submit_result')).toBe(false);
+    // The SERVER half is not pinned on purpose: an adapter that bridges this toolset under another
+    // server name still dispatched through the same chokepoint, and the transcript carries only
+    // sanctioned tools. Reading it as an ending is the safe direction — the fate, not a free retry.
+    expect(isTurnEndingToolName('mcp__other__submit_result')).toBe(true);
   });
 });

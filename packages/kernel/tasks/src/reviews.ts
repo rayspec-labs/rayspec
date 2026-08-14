@@ -78,7 +78,11 @@ function tighterRoundCeiling(task: TaskRecord, executionMax: number | null): num
 function assertReviewMatchesPark(task: TaskRecord, reviewId: string): void {
   const binding = joinPolicySchema.safeParse(task.joinPolicy);
   if (!binding.success || binding.data.policy !== 'review') return;
-  if (binding.data.reviewId !== undefined && binding.data.reviewId !== reviewId) {
+  // Believed unreachable: every review park this engine opens is written by `bindReviewPark`,
+  // which always names its review. A review park that names none can certify nothing, and a
+  // fail-open default inside a fail-closed check is the seam, not the odds.
+  if (binding.data.reviewId === undefined) throw new ReviewNotForParkError(reviewId, null);
+  if (binding.data.reviewId !== reviewId) {
     throw new ReviewNotForParkError(reviewId, binding.data.reviewId);
   }
 }
@@ -86,12 +90,16 @@ function assertReviewMatchesPark(task: TaskRecord, reviewId: string): void {
 /** A verdict aimed at a park that is waiting on a different review — refused, never applied. */
 export class ReviewNotForParkError extends Error {
   readonly reviewId: string;
-  readonly parkReviewId: string;
-  constructor(reviewId: string, parkReviewId: string) {
+  /** The review the park names, or null when the park names none at all. */
+  readonly parkReviewId: string | null;
+  constructor(reviewId: string, parkReviewId: string | null) {
     super(
-      `review '${reviewId}' is not the review this task's park is waiting on ('${parkReviewId}') — ` +
-        'a verdict applies only to the review its own park names, or it would release a park that ' +
-        'review never opened and spend the wrong round. Fail-closed.',
+      parkReviewId === null
+        ? `review '${reviewId}' was aimed at a review park that names no review — a park that ` +
+            'cannot say which review it waits on cannot certify that this is it. Fail-closed.'
+        : `review '${reviewId}' is not the review this task's park is waiting on ` +
+            `('${parkReviewId}') — a verdict applies only to the review its own park names, or it ` +
+            'would release a park that review never opened and spend the wrong round. Fail-closed.',
     );
     this.name = 'ReviewNotForParkError';
     this.reviewId = reviewId;

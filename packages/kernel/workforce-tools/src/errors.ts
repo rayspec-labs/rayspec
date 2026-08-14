@@ -37,7 +37,8 @@ export class ManagerTargetForbiddenError extends WorkforceToolError {
   constructor(manager: string, target: string, detail?: string) {
     super(
       `manager '${manager}' may not delegate to '${target}' — a manager's legal targets are the ` +
-        'members of their own department and the members of the teams they lead' +
+        'members of their own department, plus the members of a team they lead while the task is ' +
+        "that team's work" +
         (detail === undefined ? '.' : `: ${detail}.`),
     );
     this.name = 'ManagerTargetForbiddenError';

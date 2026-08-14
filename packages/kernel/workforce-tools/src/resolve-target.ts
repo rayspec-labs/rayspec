@@ -14,9 +14,12 @@
  * immediate, and says why, instead of costing a turn and a requeue to discover.
  *
  * The manager restriction lives HERE, in the trusted layer the model's tool call passes through:
- * a manager's legal targets are the members of their own department and the members of the teams
- * they LEAD. The kernel cannot re-check this (it is roster-free by design), which is why the
- * resolver is the enforcement point and the tests pin it per role. The team-member grant is bounded
+ * a manager's legal targets are the members of their own department, plus the members of a team
+ * they LEAD while the task is that team's work (`assertManagerMayTarget` carries the scoping — an
+ * unscoped led-team grant was an unbounded cross-department door). `department:` is not among them
+ * for a manager: it resolves to that department's manager, whom `manager_in_members` keeps out of
+ * every member list. The kernel cannot re-check any of this (it is roster-free by design), which is
+ * why the resolver is the enforcement point and the tests pin it per role. The team-member grant is bounded
  * by the lint that certified the team: a lead holds role `manager`, is not among their own members,
  * and the orchestrator is a member of nothing.
  */

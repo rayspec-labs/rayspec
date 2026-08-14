@@ -1611,6 +1611,61 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(signals[0]?.consumed_at).not.toBeNull();
   });
 
+  it('the escalated approval’s OWN timeout applies its declared fail fate — the chain ends', async () => {
+    // The other end of the chain. The escalation re-issues the request with a terminal `fail`
+    // fate, and the module header promises every hung approval its DECLARED fate — but the
+    // escalation also MOVED the park to `blocked(approval_pending)`, so a fail fate that only
+    // knows `waiting_for_user` reaches nothing. The task then sits parked forever on an approval
+    // that reads `timed_out`, rescuable only by an operator, while the sweep reports a failure it
+    // never applied.
+    const root = await driveToWorking(await newRoot());
+    await turn(root.taskId, 1, {
+      kind: 'request_approval',
+      question: 'Proceed?',
+      timeoutMs: 1,
+      onTimeout: 'escalate',
+      escalateTo: 'ops-lead',
+    });
+    const first = await sweepApprovalTimeouts(tdb(), new Date(Date.now() + 10_000));
+    expect(first).toEqual({ failed: [], escalated: [expect.any(String)] });
+
+    // The re-issued request's window is a fresh minute from the escalating sweep's clock; run the
+    // second sweep past it.
+    const escalated = (await db.$client.unsafe(
+      `SELECT id FROM workforce_approvals WHERE task_id = '${root.taskId}' AND status = 'pending';`,
+    )) as unknown as { id: string }[];
+    const second = await sweepApprovalTimeouts(tdb(), new Date(Date.now() + 200_000));
+    expect(second).toEqual({ failed: [(escalated[0] as { id: string }).id], escalated: [] });
+    const rows = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(rows[0]).toMatchObject({ status: 'failed' });
+    // Both requests are resolved: the first escalated, the second timed out with its fate applied.
+    const approvals = (await db.$client.unsafe(
+      `SELECT status FROM workforce_approvals WHERE task_id = '${root.taskId}' ORDER BY created_at;`,
+    )) as unknown as { status: string }[];
+    expect(approvals.map((a) => a.status)).toEqual(['escalated', 'timed_out']);
+  });
+
+  it('a sweep that cannot apply the fail fate does not report one', async () => {
+    // The return value is what a scheduler tick journals, so it has to describe what happened. A
+    // task cancelled out from under a pending approval leaves the row overdue with nowhere to
+    // land: the approval resolves to `timed_out`, and the sweep says it failed NOTHING.
+    const root = await driveToWorking(await newRoot());
+    await turn(root.taskId, 1, { kind: 'request_approval', question: 'Proceed?', timeoutMs: 1 });
+    await cancelTaskCascade(tdb(), { taskId: root.taskId, actor: 'user' });
+    const swept = await sweepApprovalTimeouts(tdb(), new Date(Date.now() + 10_000));
+    expect(swept).toEqual({ failed: [], escalated: [] });
+    const rows = await db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(rows[0]?.status).toBe('cancelled');
+    const approvals = (await db.$client.unsafe(
+      `SELECT status FROM workforce_approvals WHERE task_id = '${root.taskId}';`,
+    )) as unknown as { status: string }[];
+    expect(approvals[0]?.status).toBe('timed_out');
+  });
+
   it('review: reject reworks through queued; the round past the ceiling parks for a human; accept completes', async () => {
     const budgets = workforceBudgetsSchema.parse({ execution: { maxReviewRounds: 2 } });
     const root = await driveToWorking(await newRoot());

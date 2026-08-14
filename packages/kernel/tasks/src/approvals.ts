@@ -149,11 +149,17 @@ async function transitionWithRetry(
 }
 
 /**
- * Enforce the declared fate of every overdue pending approval. `fail` fails the parked task;
- * `escalate` closes this request, re-issues it to the DECLARED escalation target with a fresh
- * window (and a terminal `fail` fate — the chain ends at a human, never in a loop), and moves the
- * task to `blocked(approval_pending)` so the escalated decision wakes it. Concurrency-safe: the
- * per-row `status = 'pending'` compare-and-swap makes two sweepers admit one winner per approval.
+ * Enforce the declared fate of every overdue pending approval. `fail` fails the task parked on the
+ * approval — in EITHER of the two parks an approval wait can occupy, the `waiting_for_user` one a
+ * request opens and the `blocked` one an escalation moves it to, so the chain's terminal fate lands
+ * where the chain actually left the task. `escalate` closes this request, re-issues it to the
+ * DECLARED escalation target with a fresh window (and that terminal `fail` fate — the chain ends at
+ * a human, never in a loop), and moves the task to `blocked(approval_pending)` so the escalated
+ * decision wakes it. Concurrency-safe: the per-row `status = 'pending'` compare-and-swap makes two
+ * sweepers admit one winner per approval.
+ *
+ * The RETURN VALUE reports what was applied, not what was attempted: an approval whose task had
+ * already moved beyond any approval park resolves to `timed_out` and appears in neither list.
  *
  * BOUNDED per tick (`APPROVAL_SWEEP_LIMIT`), like every other per-tick scan in this engine, and
  * safely so: a swept approval leaves the `pending` predicate, so the page always advances.
@@ -266,7 +272,21 @@ export async function sweepApprovalTimeouts(
       }
       await transitionWithRetry(tx, approval.taskId, async (task) => {
         // The ancestry is already locked above, so this read is the authoritative version.
-        if (task.status !== 'waiting_for_user') return;
+        //
+        // TWO PARKS, ONE LINKAGE. A request parks its task in `waiting_for_user(approval_pending)`;
+        // an ESCALATED request's own timeout finds the task in `blocked(approval_pending)`, where
+        // the escalate branch above moved it — the same wait one hop along the chain, which the
+        // wake set already treats as one park (`WAKES.approval_decided`, signals.ts). A fail fate
+        // that knew only the first park reached nothing for exactly the requests a re-issue covers,
+        // and the chain's terminal fate silently became "parked until an operator notices".
+        // The REASON is the linkage and nothing wider is admitted: a task blocked on its children,
+        // on a dependency or on a clarification is not waiting on this approval.
+        if (
+          task.status !== 'waiting_for_user' &&
+          !(task.status === 'blocked' && task.statusReason === 'approval_pending')
+        ) {
+          return;
+        }
         const failed = await applyTransition(tx, {
           taskId: task.taskId,
           expectedVersion: task.version,
@@ -274,8 +294,11 @@ export async function sweepApprovalTimeouts(
           actor: 'scheduler',
         });
         await afterTaskTerminal(tx, failed);
+        // RECORDED ONLY WHERE IT APPLIED. The sweep's return is what a scheduler tick journals, so
+        // an unconditional push outside the callback asserted a failure for every row whose task
+        // had moved on (cancelled, already terminal) — a return value that lies about the work.
+        outcome.failed.push(approval.id);
       });
-      outcome.failed.push(approval.id);
     });
   }
   return outcome;

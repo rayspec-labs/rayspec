@@ -245,6 +245,41 @@ describe.skipIf(!hasDb)('the turn chain: dispatch validate-in → composition �
     expect(ok.applied.plan).toMatchObject({ kind: 'escalate', escalateTo: 'mgr' });
   });
 
+  it('the SAME refusal takes the fate on an MCP-PREFIXED transcript (the Anthropic shape)', async () => {
+    // The transcript check is the only record of an ending the chokepoint refused before the
+    // handler — and the adapters do not agree on the name they record. OpenAI, Codex and pi report
+    // the neutral name; the Anthropic adapter bridges the toolset as an in-process MCP server and
+    // keeps `mcp__rayspec__<tool>` verbatim. Testing bare names alone left the fate open on exactly
+    // the flagship adapter: the refused ending degraded to a yield, and the deterministic
+    // free-retry loop the requeue-once-then-fail fate exists to bound ran unbounded.
+    const task = await workingTaskFor('dev');
+    const { outcome, applied } = await runTurn(task, [
+      {
+        name: 'submit_result',
+        recordedName: 'mcp__rayspec__submit_result',
+        args: {
+          kind: 'complete',
+          result: { status: 'completed', summary: 'Slipped past review.', confidence: 0.1 },
+        },
+      },
+    ]);
+    expect(outcome.intent).toEqual({ kind: 'malformed_turn_ending' });
+    expect(applied.plan?.kind).toBe('invalid_intent');
+    expect(await rowOf(task.taskId)).toMatchObject({
+      status: 'queued',
+      status_reason: 'tool_error',
+    });
+  });
+
+  it('a PREFIXED read tool still yields — normalization did not make every call an ending', async () => {
+    const task = await workingTaskFor('dev');
+    const { outcome, applied } = await runTurn(task, [
+      { name: 'get_task', recordedName: 'mcp__rayspec__get_task', args: {} },
+    ]);
+    expect(outcome.intent).toEqual({ kind: 'yield' });
+    expect(applied.plan?.kind).toBe('yield');
+  });
+
   it('a run that ends no turn still yields — the fate is for endings that were ATTEMPTED', async () => {
     const task = await workingTaskFor('dev');
     const { outcome, applied } = await runTurn(task, [{ name: 'get_task', args: {} }]);
