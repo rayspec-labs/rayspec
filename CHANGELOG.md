@@ -529,15 +529,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gate:extension-capability`, which add `<packDir>/handlers` only when it exists on disk — in a clean
   clone `dist/handlers` does not.
   **The parenthetical was false on the test path too, not just on deploy**, so it is deleted rather
-  than narrowed: no importer transforms anything. Under plain `node` the seam importer fails with
-  `Unknown file extension ".ts"`; what strips the types under `pnpm test` is the test runner. That
+  than narrowed: no importer transforms anything. `typeStrippingImporter` is the production importer
+  minus the compiled-JavaScript assertion — a bare dynamic `import()` of the module's own file URL — so
+  whether an un-built `.ts` executes is the RUNTIME's business and never the loader's: the test
+  runner's transform under `pnpm test`, Node's own type stripping on the versions that do it by
+  default, and `Unknown file extension ".ts"` on a Node that does not. (That is why the production
+  boundary is an explicit extension check rather than a reliance on `import()` failing, as
+  `assertCompiledJavaScriptModule`'s own docblock says.) That
   sentence shipped byte-identically in `examples/stream-backend/packs/stream-pack/package.json`, and
-  with the neighbouring "no build/typecheck/test" framing it made eight claims across seven files —
+  with the neighbouring "no build/typecheck/test" framing it made nine claims across seven files —
   both pack manifests, both pack entries, the agent pack's handler, the two `examples/*` comments in
-  `pnpm-workspace.yaml` and the stream-backend README, which additionally called its pack "a pure
-  loaded-at-deploy fixture" while the example shipped a `build.mjs`. All eight now say what is true:
-  neither pack declares a build/typecheck/test *script* and turbo runs none, and each example carries
-  its own `build.mjs` because the deploy runtime loads compiled JavaScript only.
+  `pnpm-workspace.yaml` and two paragraphs of the stream-backend README, which called its pack "a pure
+  loaded-at-deploy fixture" while the example shipped a `build.mjs`, and told a reader that its
+  source-pointing spec "works in this repository because the dev/test importer strips types on the way
+  in" — the same misattribution, plus a compiled-JavaScript boundary wrongly localized to out-of-repo
+  deployments. All nine now say what is true:
+  neither pack declares a build/typecheck/test *script* and turbo runs none, each example carries
+  its own `build.mjs` because the deploy runtime loads compiled JavaScript only, and the seam is named
+  as the opt-in it is.
   `packages/app/server/src/deployable-backend-handlers.test.ts` gains the third arm of the battery it
   already ran for `acme-notes-backend` and `stream-backend`: the production importer refuses the agent
   pack's `.ts` source, runs the documented build, and then resolves the built `dist/` — entry, handler

@@ -126,9 +126,12 @@ extensions:
 ```
 
 Note the difference from the committed `rayspec.yaml` at the top of this page, which points at
-`./packs/stream-pack` — the pack SOURCE. That form works in this repository because the dev/test
-importer strips types on the way in; a deploy runtime loads compiled JavaScript only, so an
-out-of-repo deployment points at the built directory.
+`./packs/stream-pack` — the pack SOURCE. That is the form this example's tests load, opting into the
+loader's explicit `typeStrippingImporter` seam. The seam strips nothing itself — it is the production
+importer minus the compiled-JavaScript assertion, a bare dynamic `import()` — so whether an un-built
+`.ts` entry executes is the RUNTIME's business, and under `pnpm test` it is the test runner's
+transform that handles it. A deploy runtime loads compiled JavaScript only, in this repository as
+much as outside it, so a deployment points at the built directory.
 
 To walk it with this pack: `node examples/stream-backend/build.mjs`, copy `packs/stream-pack/`
 (without its workspace-linked `node_modules`) anywhere outside the repo, do the three steps above.
