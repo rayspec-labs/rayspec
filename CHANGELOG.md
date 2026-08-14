@@ -552,6 +552,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A mapping key written literally as `__proto__` is now refused at the parse boundary of both
+  document profiles (`reserved_document_key`), anywhere in the document.** It is the one key name the
+  shape validator will not report on *where it validates keys at all* — and in a free-form slot it
+  validates none, so the parse boundary is the only pass that can see it either way. The YAML loader
+  builds it as a genuine own property — it *defines*
+  the property rather than assigning it, so the prototype setter is bypassed — and the validator then
+  skips that key by name, in both readers a spec goes through — the strict-object unrecognized-key
+  walk and the record branch — without raising an issue.
+  **What that cost, measured on this grammar.** Where the grammar reads the level, the key is dropped
+  and the document that reached every rule downstream was not the document the author wrote:
+  `api[].project.rename: { __proto__: … }` parsed clean, linted clean and did *nothing* — the column
+  kept its own name on the wire and in the OpenAPI document while the author read the document as a
+  rename. A `__proto__` key at the document root, or in `metadata`, passed the strict unknown-key
+  rejection that refuses every other unknown key. Every record dock behaved the same way: product
+  `metadata`, a store step's `filter`/`values`, a view's `fields`/`params`, `contracts`. Inside a
+  FREE-FORM schema slot the behaviour is the opposite and matters just as much: a tool's `parameters`
+  and the body of a `contracts` entry are open `z.unknown()` regions the validator never descends
+  into, so there the key is not dropped — it survives the parse with its value intact and is carried
+  through to what the engine serves (a contract property named `__proto__` reaches
+  `components.schemas` in the emitted OpenAPI document). Unreported in both directions, which is why
+  the refusal belongs at the parse boundary and not in the grammar. The view-name denylist that
+  already named `__proto__` (`VIEW_RESERVED_NAMES`) shows the same split: for the positions it reads
+  from mapping keys — fields, params, filter/match columns — the key was already gone by the time the
+  lint ran, so that member could not fire for a document anyone actually wrote; for a counts *bucket*,
+  which is an array value and which the refusal deliberately leaves alone, it fires on a parsed
+  document today. One scan over the raw loaded document closes the reportable gap at once, and it is
+  the only place in the pipeline where the key is both still present and inspectable. The scan is
+  cycle-guarded, because a YAML alias resolves to the very node its anchor labels and an unguarded
+  walk of such a document would not return.
+  **This is a validation behaviour change, and it is deliberate**: a document that used to parse now
+  fails, with the error pointed at the offending key. No shipped example or fixture document declares
+  such a key (checked across every tracked `.yaml`/`.yml`). Two classes of author document are
+  affected, and they are not the same. One was already broken without being told: the key sat on a
+  level the grammar reads, was dropped, and the meaning written under it did nothing — that author now
+  finds out. The other was *working*: the key sat in a free-form schema slot, survived the parse and
+  was served in the emitted API contract. That document parsed before and is refused now; renaming the
+  property is the migration. Loading such a document never reparented an object either way — the YAML
+  loader *defines* the property rather than assigning it, so the `__proto__` setter is never reached.
+  **Only `__proto__` is refused.** `constructor` and `prototype` survive the shape parse as ordinary
+  keys, so they need no parse-boundary refusal and keep their existing treatment: a store column named
+  `constructor` is a legal declaration this platform serves, and a *view field* named `constructor` is
+  still rejected by the view lint on a parsed document. And the refusal is about a **key**: a
+  `__proto__` *value* is untouched, so a store column named `__proto__` stays legal and is served
+  under its own name.
+
 - **The `501` from `POST /v1/triggers/{name}/fire` now names the manual-trigger requirement instead
   of a durable worker.** It read `Manual trigger firing requires a configured durable worker and a
   declared manual trigger. No manual-trigger firer is wired on this deployment.`, and the worker half
@@ -1205,6 +1250,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **The two prose lists of which columns `omitInjected` drops can no longer age quietly.** The
+  `ResponseProjection` doc comment in the grammar and the `project` section of the spec reference each
+  spell out, by name, the seven server-injected columns a projection removes and the spared `id`. Both
+  are correct today — checked against the generated injected-column list — but both were written by
+  hand, while the code that enforces the rule *derives* the set from that generated list. A ninth
+  injected column would change what the platform does and leave both documents quietly describing the
+  old set, with nothing to notice.
+  A test now reads both documents off disk and compares the names they list to the injected set minus
+  `id`, so adding an injected column turns it red until both documents name it. The chain closes end to
+  end: the set the test compares against is this package's copy of the injected columns, which is
+  itself pinned by an existing equality assertion against the generated list. The extractor requires
+  *exactly one* marker sentence per document and **throws** otherwise, so rewriting the sentence out
+  of reach — or duplicating it — fails loudly instead of silently finding nothing and passing. No
+  prose changed and no behaviour changed — what is new is that the next injected column reds a test
+  instead of aging two documents.
+
 - **The list of boots that ignore `RAYSPEC_AGENT_TRACING` was wrong in the direction that matters.**
   `.env.example` named two wrappers as the ones that "assemble the server themselves and never read
   this variable at all". Five boots assemble the server themselves. The three the list omitted are the
@@ -1245,6 +1306,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documented entrypoints have run it since issue #384. Two stale module paths in the CLI loader's
   comments (`packages/cli/{src,dist}`, which has never existed at that spelling) are corrected in the
   same pass.
+
 - **The column-type vocabulary is swept: `double` and `numeric` now appear everywhere the closed set
   is enumerated.** The reference page was updated when the two fractional types landed; the two
   surfaces a reader actually starts from were not. The concepts page still called the vocabulary

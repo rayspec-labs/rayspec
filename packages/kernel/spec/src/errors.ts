@@ -26,6 +26,21 @@ import { z } from 'zod';
  *                               defence in depth; it reports when `lintSpec` is run directly over a
  *                               spec value assembled in code rather than parsed.
  *  - `unknown_field`          — a `.strict()` unknown-key rejection (fail-closed: any extra key).
+ *  - `reserved_document_key`  — the raw document carries a mapping key literally named `__proto__`
+ *                               (anywhere, on either profile). It is refused by a scan over the
+ *                               LOADED YAML rather than by the grammar, because no grammar rule can
+ *                               report on it: `yaml` makes it a genuine own property, and where the
+ *                               grammar reads the level the shape validator skips it by name in both
+ *                               its readers — the strict unknown-key walk and the record branch —
+ *                               without raising an issue, so the key is dropped and what was written
+ *                               under it did nothing (a `project.rename` under that key renamed
+ *                               nothing; a view field under it vanished). Inside a free-form
+ *                               `z.unknown()` slot (a tool's `parameters`, a `contracts` body) the
+ *                               level is not inspected at all, so there the key is NOT dropped — it
+ *                               survives the parse and is emitted into the API contract, unreported.
+ *                               Only `__proto__`: `constructor`/`prototype` survive validation as
+ *                               ordinary keys and stay legal. Applies to a KEY only — a store
+ *                               column named `__proto__` is a value and is still served.
  *  - `dangling_ref`          — a cross-reference points at an id/name that is not declared.
  *  - `duplicate_name`         — two entries in one section share an id/name.
  *  - `capability_violation`   — an agent demands a capability its chosen backend lacks
@@ -145,6 +160,7 @@ export const SpecErrorCode = z.enum([
   'unsupported_version',
   'schema_violation',
   'unknown_field',
+  'reserved_document_key',
   'dangling_ref',
   'duplicate_name',
   'capability_violation',

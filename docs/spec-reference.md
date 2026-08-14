@@ -37,6 +37,23 @@ document against the matching set of sections. Both profiles are strict: every
 object level rejects an unknown or misspelled key rather than ignoring it, so a
 typo fails validation instead of silently doing nothing.
 
+One key name is refused outright, anywhere in either profile: a mapping key
+written literally as `__proto__`. It is the one key the shape validator will not
+report on where it validates keys at all — and what it did with the key depended
+on where the key sat. Where the
+grammar reads the level, the validator skips that key by name without raising an
+issue, so the key was dropped and whatever was written under it did nothing: a
+`rename` written under it renamed nothing, a view field written under it vanished
+from the response. Inside a free-form schema slot — a tool's `parameters`, the
+body of a `contracts` entry — the validator does not inspect the level at all, so
+there the key was *not* dropped: it survived into the parsed document with its
+value intact and was carried into the API contract emitted from it. Either way no
+rule could say a word about it. Such a document now fails validation with
+`reserved_document_key`, pointed at the key; if you were relying on a `__proto__`
+property inside a free-form schema slot, rename that property. This is about a
+**key**. A `__proto__` *value* is untouched: a store column named `__proto__` stays
+a legal declaration and is served under its own name.
+
 The rest of this document is in two halves — the backend profile first (the
 concrete starting point), then the product profile.
 
