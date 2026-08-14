@@ -56,29 +56,39 @@ interface Park {
 }
 
 /**
- * The ONE park no override may dissolve. A fan-out join is STRUCTURAL: the parent waits on a fact
- * about its children, which an operator's override does not change. Releasing it runs the parent
- * with no child results and orphans the children — their fan-in finds the parent no longer parked
- * and bails, so the join is simply gone. The lever on a wedged join is cancelling the blocking
- * child: its terminal status satisfies the join through the join's own path.
+ * The parks no override may dissolve, because each waits on a CHILD TASK's terminal — a fact an
+ * operator's override does not change, on a row the override does not touch:
+ *
+ *   - `awaiting_children` is the fan-out join. Releasing it runs the parent with no child results
+ *     and orphans the children — their fan-in finds the parent no longer parked and bails, so the
+ *     join is simply gone.
+ *   - `escalated` is the same shape one hop up: the caller waits on the ONE escalation child bound
+ *     to it on its own row (`joinPolicy`), and only that child's terminal is the reply. Releasing
+ *     it erases the exit while the child is still live — the child's fan-in then finds no matching
+ *     park, `afterTaskTerminal`'s binding check drops the reply, and the superior's answer vanishes
+ *     with nothing journalled. An override that lands mid-turn dissolved the park INSIDE the very
+ *     transaction that created it.
+ *
+ * The lever on either is the same: CANCEL THE CHILD. Its terminal status satisfies the park through
+ * the park's own path — the join's fan-in, or the escalation reply — so the exit is taken rather
+ * than erased.
  */
-const STRUCTURAL_PARK: StatusReason = 'awaiting_children';
+const STRUCTURAL_PARKS: readonly StatusReason[] = ['awaiting_children', 'escalated'];
 
 /**
- * The parks an operator's `manual_unblock` may NOT release. Two exclusions, for two different
- * reasons:
- *
- *   - `awaiting_children` is the STRUCTURAL park above — an override changes no fact about the
- *     children, and dissolving it destroys the join;
- *   - `deadline_exceeded` is an ABSOLUTE fact on the row, not a condition an operator can answer
- *     from here. A wake re-queues the task and the very next reserve pass re-parks it against the
- *     same instant — a livelock that journals a fresh park every tick. Every OTHER blocked reason
- *     has a real lever behind it (raise the ceiling, decide the approval, answer the clarification),
- *     so the unblock that follows can actually succeed; this one has none, and an unblock that
- *     "works" and immediately undoes itself is worse than one that honestly declines. The rescue
- *     for a deadline-expired task is `cancel`.
+ * The parks an operator's `manual_unblock` may NOT release: the structural ones above, plus
+ * `deadline_exceeded` — an ABSOLUTE fact on the row, not a condition an operator can answer from
+ * here. A wake re-queues the task and the very next reserve pass re-parks it against the same
+ * instant — a livelock that journals a fresh park every tick. Every OTHER blocked reason has a real
+ * lever behind it (raise the ceiling, decide the approval, answer the clarification), so the
+ * unblock that follows can actually succeed; this one has none, and an unblock that "works" and
+ * immediately undoes itself is worse than one that honestly declines. The rescue for a
+ * deadline-expired task is `cancel`.
  */
-const NOT_OPERATOR_UNBLOCKABLE: readonly StatusReason[] = [STRUCTURAL_PARK, 'deadline_exceeded'];
+const NOT_OPERATOR_UNBLOCKABLE: readonly StatusReason[] = [
+  ...STRUCTURAL_PARKS,
+  'deadline_exceeded',
+];
 
 /**
  * Every reason a `blocked` task may carry except those two — DERIVED from `REASON_RULES`, so a
@@ -91,18 +101,25 @@ const OPERATOR_UNBLOCKABLE: readonly StatusReason[] = STATUS_REASONS.filter(
 );
 
 /**
- * Parks whose exit is a MECHANISM rather than a human: the fan-in join, the dependency wake, the
- * verdict route, the approval decision. Each is released by a specific path that matches on the
- * park itself, so a transition OUT of the park erases the exit — which is why no door may move a
- * task sitting in one "for its own good". `STRUCTURAL_PARK` is the strongest member (its mechanism
- * cannot even be re-armed); the rest are listed here so the rule binds on every door, not just on
- * `WAKES`.
+ * Parks whose exit is a MECHANISM rather than a human: the fan-in join, the escalation reply, the
+ * dependency wake, the verdict route, the approval decision, the clarification reply. Each is
+ * released by a specific path that matches on the park itself, so a transition OUT of the park
+ * erases the exit — which is why no door may move a task sitting in one "for its own good". The
+ * `STRUCTURAL_PARKS` are the strongest members (their mechanism cannot even be re-armed: the child
+ * carrying the exit is already live and will never be dispatched again); the rest are listed here
+ * so the rule binds on every door, not just on `WAKES`.
+ *
+ * `clarification_pending` belongs here for the reason `approval_pending` does: the reply is keyed
+ * to the question that was asked, so a task moved out of the park leaves that reply with no park
+ * to answer — it is refused on delivery and stays pending forever, while the question is never
+ * asked again.
  */
 const MECHANISM_PARK_REASONS: readonly StatusReason[] = [
-  STRUCTURAL_PARK,
+  ...STRUCTURAL_PARKS,
   'awaiting_dependency',
   'review_pending',
   'approval_pending',
+  'clarification_pending',
 ];
 
 /**
@@ -183,6 +200,15 @@ function answersPark(kind: SignalKind, status: string, statusReason: string | nu
  */
 export function escalationTargetsPark(status: string, statusReason: string | null): boolean {
   return matchesPark(BUDGET_ESCALATION_PARKS, status, statusReason);
+}
+
+/**
+ * Is this park one whose exit is a CHILD TASK's terminal (`STRUCTURAL_PARKS`)? Read by the deferral
+ * journal, which must say whether a deferred escalation resurfaces on its own — and for these two
+ * it does not when the denied task is the very child the park waits on.
+ */
+export function isStructuralPark(statusReason: string | null): boolean {
+  return STRUCTURAL_PARKS.some((reason) => reason === statusReason);
 }
 
 export type SignalRecord = typeof schema.workforceTaskSignals.$inferSelect;
@@ -324,8 +350,9 @@ const ABSORBED_AT_TURN_BOUNDARY: readonly SignalKind[] = ['budget_raised', 'manu
  * The NARROW post-turn absorption rule: after a turn's final transition, a still-pending signal may
  * wake the task it just parked — but only an absorbable kind, and only where it ANSWERS the park
  * (the same `WAKES` match the delivery path uses), so a stale signal can never release a park it
- * does not speak to. `awaiting_children` is unreachable here for exactly that reason: a fan-out
- * that ends a turn must not be dissolved by an operator override the same transaction absorbs.
+ * does not speak to. The `STRUCTURAL_PARKS` are unreachable here for exactly that reason: a fan-out
+ * or an escalation that ends a turn must not be dissolved by an operator override the same
+ * transaction absorbs — the child carrying the park's exit is already live at that point.
  * Returns the absorbed signal when a wake applied, null otherwise.
  */
 export async function absorbPendingWakes(

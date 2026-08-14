@@ -1328,6 +1328,69 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(joinSignals[0]?.c).toBe(1);
   });
 
+  it('a stale manual_unblock does NOT dissolve the escalation park it arrived alongside', async () => {
+    const root = await driveToWorking(await newRoot());
+    // The operator's override lands mid-turn — not wakeable while `working`, so it stays pending.
+    const delivery = await deliverSignal(tdb(), {
+      taskId: root.taskId,
+      kind: 'manual_unblock',
+      signalKey: 'op-override',
+      actor: 'user',
+    });
+    expect(delivery).toEqual({ delivered: true, woke: false });
+
+    // The turn ends by escalating. The park is STRUCTURAL in exactly the fan-out join's sense: its
+    // exit is the escalation child's terminal, and the child is already live when the override is
+    // absorbed. Dissolving the park here erases that exit — the superior's answer then finds the
+    // caller unparked, the binding check drops the reply, and the answer vanishes.
+    await turn(root.taskId, 1, { kind: 'escalate', reason: 'risk', escalateTo: 'mgr' });
+    const parked = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(parked[0]).toMatchObject({ status: 'blocked', status_reason: 'escalated' });
+    const stillPending = await db.$client.unsafe(
+      `SELECT consumed_at FROM workforce_task_signals WHERE task_id = '${root.taskId}' AND kind = 'manual_unblock';`,
+    );
+    expect(stillPending[0]?.consumed_at).toBeNull();
+
+    // The escalation is intact: the superior's answer is what wakes the caller.
+    const child = (
+      (await db.$client.unsafe(
+        `SELECT task_id, version FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+      )) as unknown as { task_id: string; version: number }[]
+    )[0] as { task_id: string; version: number };
+    const queued = await applyTransition(tdb(), {
+      taskId: child.task_id,
+      expectedVersion: child.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await claim(child.task_id, queued.version, 1);
+    await turn(child.task_id, 1, { kind: 'complete', result: RESULT });
+    const woken = await db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(woken[0]?.status).toBe('queued');
+  });
+
+  it('a manual_unblock delivered to an escalation park declines instead of dissolving it', async () => {
+    const root = await driveToWorking(await newRoot());
+    await turn(root.taskId, 1, { kind: 'escalate', reason: 'risk', escalateTo: 'mgr' });
+    // The delivery path matches on the PARK, not the status: an override answers no fact about
+    // the escalation child, so it stays pending exactly as it does against a fan-out join.
+    const delivery = await deliverSignal(tdb(), {
+      taskId: root.taskId,
+      kind: 'manual_unblock',
+      signalKey: 'op-override',
+      actor: 'user',
+    });
+    expect(delivery).toEqual({ delivered: true, woke: false });
+    const held = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(held[0]).toMatchObject({ status: 'blocked', status_reason: 'escalated' });
+  });
+
   it('a wake releases only the park it ANSWERS — a raised ceiling is not a dependency or a decision', async () => {
     const parkedOn = async (reason: 'awaiting_dependency' | 'approval_pending') => {
       const task = await newRoot();
@@ -1569,6 +1632,76 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
         decidedBy: 'user',
       });
       expect((await rowOf(root.taskId)).status).toBe('queued');
+    });
+
+    it('an escalation park survives it, and the escalation child still answers it', async () => {
+      const { root, children } = await fanOutTwo();
+      const w = await reparkThroughAWorkingTurn(root.taskId);
+      await applyTurnOutcome(tdb(), {
+        taskId: root.taskId,
+        turnId: turnIdFor(root.taskId, 2),
+        turnNumber: 2,
+        intent: { kind: 'escalate', reason: 'risk', escalateTo: 'mgr' },
+        budgets: NO_BUDGETS,
+      });
+      expect(w.status).toBe('working');
+      const parkedBefore = await rowOf(root.taskId);
+      expect(parkedBefore).toMatchObject({ status: 'blocked', status_reason: 'escalated' });
+
+      // The escalation park's exit is its OWN child's terminal, bound on the caller's row. Moving
+      // the caller out of it erases that exit: the child's fan-in finds no matching park, the
+      // binding check drops the reply, and the superior's answer is lost with nothing journalled.
+      await denyChild(children[0] as string);
+      expect(await rowOf(root.taskId)).toEqual(parkedBefore);
+      expect(await deferredEvents(root.taskId)).toBe(1);
+
+      const escalation = (
+        (await db.$client.unsafe(
+          `SELECT task_id, version FROM workforce_tasks WHERE parent_task_id = '${root.taskId}' AND owner = 'mgr';`,
+        )) as unknown as { task_id: string; version: number }[]
+      )[0] as { task_id: string; version: number };
+      const queued = await applyTransition(tdb(), {
+        taskId: escalation.task_id,
+        expectedVersion: escalation.version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+      await claim(escalation.task_id, queued.version, 1);
+      await turn(escalation.task_id, 1, { kind: 'complete', result: RESULT });
+      expect((await rowOf(root.taskId)).status).toBe('queued');
+    });
+
+    it('a clarification park survives it, and the reply still wakes the task', async () => {
+      const { root, children } = await fanOutTwo();
+      const w = await reparkThroughAWorkingTurn(root.taskId);
+      await applyTurnOutcome(tdb(), {
+        taskId: root.taskId,
+        turnId: turnIdFor(root.taskId, 2),
+        turnNumber: 2,
+        intent: { kind: 'request_clarification', question: 'Which region?' },
+        budgets: NO_BUDGETS,
+      });
+      expect(w.status).toBe('working');
+      const parkedBefore = await rowOf(root.taskId);
+      expect(parkedBefore).toMatchObject({
+        status: 'blocked',
+        status_reason: 'clarification_pending',
+      });
+
+      // The clarification park's exit is the `user_reply` keyed to the question that was asked.
+      // An escalation out of it leaves that reply with no park to answer — it is refused on
+      // delivery and stays pending forever, while the question is never asked again.
+      await denyChild(children[0] as string);
+      expect(await rowOf(root.taskId)).toEqual(parkedBefore);
+      expect(await deferredEvents(root.taskId)).toBe(1);
+
+      const woke = await deliverSignal(tdb(), {
+        taskId: root.taskId,
+        kind: 'user_reply',
+        signalKey: `reply:${root.taskId}`,
+        actor: 'user',
+      });
+      expect(woke).toEqual({ delivered: true, woke: true });
     });
 
     it('a SELF escalation hands back the row the escalation left, not the pre-escalation one', async () => {

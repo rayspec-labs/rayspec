@@ -64,6 +64,7 @@ import {
   consumePendingCancels,
   deliverSignal,
   escalationTargetsPark,
+  isStructuralPark,
   peekPendingCancels,
 } from './signals.js';
 import { isTaskStatus, isTerminalStatus } from './status.js';
@@ -1076,18 +1077,20 @@ async function applyToolErrorFate(
  *
  * What a deferral is worth depends on the park, and the two cases are NOT the same:
  *
- *   - `awaiting_dependency`, `review_pending`, `approval_pending` — the mechanism runs independently
- *     of this denial, so the root does resume, does re-authorize, and an unchanged ceiling denies it
- *     again; at that point the root itself sits in `blocked(budget_exhausted)`, a park the
- *     escalation may target, and it surfaces there. Nothing is lost.
- *   - `awaiting_children` — the deferral does NOT surface by itself, and saying otherwise would be
- *     circular: the child whose dispatch was denied is the one the join is waiting for, so the join
- *     cannot close, the root never redispatches, and every exit from the child (raise the ceiling
- *     and signal `budget_raised`, or cancel it) is precisely the operator action the escalation
- *     existed to summon. The journal entry is the whole notification in that case, and it says so.
- *     Still strictly better than the alternative it replaced — dissolving the join and orphaning
- *     the children — but a durable deferral that can wake a structural park is a real design task,
- *     tracked as a follow-up rather than pretended away here.
+ *   - `awaiting_dependency`, `review_pending`, `approval_pending`, `clarification_pending` — the
+ *     mechanism runs independently of this denial, so the root does resume, does re-authorize, and
+ *     an unchanged ceiling denies it again; at that point the root itself sits in
+ *     `blocked(budget_exhausted)`, a park the escalation may target, and it surfaces there. Nothing
+ *     is lost.
+ *   - the STRUCTURAL parks (`awaiting_children`, `escalated`) — the deferral does NOT surface by
+ *     itself whenever the denied task is the very child the park waits on, and saying otherwise
+ *     would be circular: that child cannot terminate, so the join cannot close (or the escalation
+ *     cannot be answered), the root never redispatches, and every exit from the child (raise the
+ *     ceiling and signal `budget_raised`, or cancel it) is precisely the operator action the
+ *     escalation existed to summon. The journal entry is the whole notification in that case, and
+ *     it says so. Still strictly better than the alternative it replaced — dissolving the park and
+ *     orphaning the child — but a durable deferral that can wake a structural park is a real design
+ *     task, tracked as a follow-up rather than pretended away here.
  */
 export async function applyBudgetExhausted(
   tx: TenantDb,
@@ -1137,14 +1140,15 @@ export async function applyBudgetExhausted(
             scopeKind: denial.scopeKind,
             scopeId: denial.scopeId,
             park: { status: root.status, statusReason: root.statusReason },
-            // `awaiting_children` is the one park that does NOT re-surface on its own: the denied
-            // child cannot terminate, so the join never closes and the root never redispatches.
-            // The event says which case this is rather than promising a wake that will not come.
-            surfacesWhen:
-              root.statusReason === 'awaiting_children'
-                ? 'not automatically — the join cannot close while the denied child is blocked; ' +
-                  'raise the ceiling and send budget_raised to the blocked child, or cancel it'
-                : 'the park is released by its own mechanism and the next dispatch is denied again',
+            // The STRUCTURAL parks are the ones that do NOT re-surface on their own: each waits on
+            // a child's terminal, and a denied child cannot terminate — so the join never closes
+            // (or the escalation is never answered) and the root never redispatches. The event says
+            // which case this is rather than promising a wake that will not come.
+            surfacesWhen: isStructuralPark(root.statusReason)
+              ? 'not automatically — the park waits on a child terminal that a blocked child ' +
+                'cannot reach; raise the ceiling and send budget_raised to the blocked child, or ' +
+                'cancel it'
+              : 'the park is released by its own mechanism and the next dispatch is denied again',
           },
         },
       ]);
