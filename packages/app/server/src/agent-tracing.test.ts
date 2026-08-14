@@ -1,17 +1,22 @@
 /**
  * The agent trace-export switch (issue #287).
  *
- * `@openai/agents` exports traces to OpenAI by DEFAULT, and those traces carry prompts and tool
- * arguments. On the `rayspec deploy` path that is somebody else's content leaving for a third party
- * without being asked, so on THAT path the export becomes an affirmative choice.
+ * `@openai/agents` exports traces to OpenAI by DEFAULT; what leaves on that transport is run metadata
+ * and, once an agent calls tools, its tool arguments and outputs (the SDK strips the model prompt
+ * fields before export). On the `rayspec deploy` path that is somebody else's content leaving for a
+ * third party without being asked, so on THAT path the export becomes an affirmative choice. What is
+ * deploy-only is that DEFAULT, not the variable: `rayspec-serve` honours an explicitly stated value
+ * and keeps the SDK's exporting default only when it is unset (issue #383).
  *
- * Pinned here: the affirmative switch, its fail-closed arm, the deliberate blank handling, and the two
+ * Pinned here: the affirmative switch, its fail-closed arm, the deliberate blank handling, the two
  * things `applyDeployAgentTracing` does to turn the export off — the environment write AND the SDK's
- * own programmatic switch. What this file deliberately does NOT assert is the resulting SDK BEHAVIOUR:
- * `@openai/agents-core`'s config disables tracing whenever `NODE_ENV === 'test'`, so inside a vitest
- * worker every arm would report "off" whether the code worked or not. That measurement lives in
- * `packages/app/cli/src/deploy-agent-tracing.sdk.test.ts`, which takes it in a child process at
- * `NODE_ENV=production`, where the two arms can actually differ.
+ * own programmatic switch — and `applyServeAgentTracing`'s explicit-only reading, whose unset arm is
+ * the control that goes red if the serve default is ever moved. What this file deliberately does NOT
+ * assert is the resulting SDK BEHAVIOUR: `@openai/agents-core`'s config disables tracing whenever
+ * `NODE_ENV === 'test'`, so inside a vitest worker every arm would report "off" whether the code
+ * worked or not. That measurement is taken in a child process at `NODE_ENV=production`, where the
+ * arms can actually differ, by `packages/app/cli/src/deploy-agent-tracing.sdk.test.ts` and
+ * `packages/app/cli/src/serve-agent-tracing.sdk.test.ts`.
  *
  * No DB, no network, no secrets.
  */
@@ -35,6 +40,7 @@ vi.mock('@openai/agents', async (importOriginal) => {
 
 import {
   applyDeployAgentTracing,
+  applyServeAgentTracing,
   observedAgentTracing,
   resolveAgentTracing,
 } from './agent-tracing.js';
@@ -112,6 +118,58 @@ describe('applyDeployAgentTracing — BOTH halves of turning the export off', ()
     const env: NodeJS.ProcessEnv = { RAYSPEC_AGENT_TRACING: 'OPENAI' };
     await expect(applyDeployAgentTracing(env)).rejects.toBeInstanceOf(BootConfigError);
     expect(env[SDK_SWITCH]).toBeUndefined();
+  });
+});
+
+describe('applyServeAgentTracing — EXPLICIT-ONLY, so it cannot move the serve default', () => {
+  it('applies NOTHING when the variable is unset, and says so by returning undefined', async () => {
+    // The load-bearing arm. `resolveAgentTracing` collapses unset into `off`; reusing it wholesale here
+    // would turn the export off on an entrypoint whose default is the SDK's, which is a product
+    // decision this reader deliberately does not take.
+    const env: NodeJS.ProcessEnv = {};
+    await expect(applyServeAgentTracing(env)).resolves.toBeUndefined();
+    expect(env[SDK_SWITCH]).toBeUndefined();
+    expect(h.programmaticCalls).toEqual([]);
+  });
+
+  it('treats a BLANK value as unset — the same reading `resolveAgentTracing` gives it', async () => {
+    for (const raw of ['', '   ']) {
+      const env: NodeJS.ProcessEnv = { RAYSPEC_AGENT_TRACING: raw };
+      await expect(applyServeAgentTracing(env)).resolves.toBeUndefined();
+      expect(env[SDK_SWITCH]).toBeUndefined();
+    }
+    expect(h.programmaticCalls).toEqual([]);
+  });
+
+  it("turns the export off for 'off' — both halves, as on the deploy path", async () => {
+    const env: NodeJS.ProcessEnv = { RAYSPEC_AGENT_TRACING: 'off' };
+    await expect(applyServeAgentTracing(env)).resolves.toBe('off');
+    expect(env[SDK_SWITCH]).toBe('1');
+    expect(h.programmaticCalls).toEqual([true]);
+  });
+
+  it("leaves both of the SDK's switches alone for 'openai'", async () => {
+    const env: NodeJS.ProcessEnv = { RAYSPEC_AGENT_TRACING: 'openai' };
+    await expect(applyServeAgentTracing(env)).resolves.toBe('openai');
+    expect(env[SDK_SWITCH]).toBeUndefined();
+    expect(h.programmaticCalls).toEqual([]);
+  });
+
+  it('refuses an unsupported value in the SAME message the deploy path refuses it in', async () => {
+    // One wording for one variable: a second, entrypoint-specific sentence would be a second thing to
+    // keep true. The refusal is raised by `resolveAgentTracing`, which both entrypoints reach.
+    const raw = 'NoNsEnSe';
+    const serveErr = await applyServeAgentTracing({ RAYSPEC_AGENT_TRACING: raw }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    const deployErr = await applyDeployAgentTracing({ RAYSPEC_AGENT_TRACING: raw }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(serveErr).toBeInstanceOf(BootConfigError);
+    expect((serveErr as Error).message).toContain(`RAYSPEC_AGENT_TRACING='${raw}'`);
+    expect((serveErr as Error).message).toBe((deployErr as Error).message);
   });
 });
 

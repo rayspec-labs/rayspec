@@ -136,23 +136,39 @@ export function bootBanner(server: BootedServer, base: string): string {
 
   // The OBSERVED agent trace-export posture. Printed on every boot this banner covers, in BOTH
   // directions, because the defect class here is silence: nobody should lose tracing without being
-  // told, and nobody should have their prompts and tool arguments leave for a third party without
-  // being told either. `server.agentTracing` was read off the SDK's own global trace provider, not
-  // derived from any variable — so this line stays honest on the entry points that never change the
-  // SDK default, and it cannot say OFF on a boot that is still exporting. Like the housekeeping block
-  // above, every line names the variable behind the value it prints.
+  // told, and nobody should have their tool arguments and tool outputs leave for a third party
+  // without being told either. `server.agentTracing` was read off the SDK's own global trace provider,
+  // not derived from any variable — so this line stays honest on the entry points that never change
+  // the SDK default, and it cannot say OFF on a boot that is still exporting. Like the housekeeping
+  // block above, every line names the variable behind the value it prints.
+  //
+  // WHAT THE TRANSPORT CARRIES, stated the way the SDK actually behaves rather than as "prompts leave
+  // the machine": the model input and the model response are held in PRIVATE span fields (`_input` /
+  // `_response`, set by `@openai/agents-openai`'s responses model) and `@openai/agents-core` strips
+  // every `_`-prefixed key in `Span.toJSON` (`removePrivateFields`) before the exporter serializes it.
+  // Function spans carry `input`/`output` unprefixed, so tool arguments and tool outputs DO leave.
+  //
+  // WHY THE REMEDIATION HINT NAMES ITS TWO ENTRY POINTS. This banner has four call sites — serve.ts,
+  // the `deploy` command, examples/local-boot/serve.ts and deployments/acme-notes/serve.mts — and only
+  // the first two read RAYSPEC_AGENT_TRACING; the two dev-boot wrappers assemble the server themselves
+  // and never consult it. An unscoped "set RAYSPEC_AGENT_TRACING=…" would be an instruction that does
+  // nothing on half of them.
   lines.push('');
   lines.push('  Agent tracing (observed):');
   if (server.agentTracing === 'openai') {
     lines.push(
-      '    Trace export:          EXPORTING TO OPENAI — agent traces carry prompts and tool arguments, ' +
-        "and they leave this process (on 'rayspec deploy' that is RAYSPEC_AGENT_TRACING=openai; " +
-        'elsewhere it is the agent SDK default)',
+      '    Trace export:          EXPORTING TO OPENAI — agent traces leave this process: run metadata ' +
+        'and, once an agent calls tools, its tool arguments and outputs (the agent SDK strips the ' +
+        "model prompt fields before export). Stop it with RAYSPEC_AGENT_TRACING=off on 'rayspec " +
+        "deploy' / 'rayspec-serve' — the dev-boot wrappers do not read that variable and follow the " +
+        'agent SDK default',
     );
   } else {
     lines.push(
-      '    Trace export:          OFF — no agent trace (prompts, tool arguments) leaves this process ' +
-        "(set RAYSPEC_AGENT_TRACING=openai on 'rayspec deploy' to export them to OpenAI)",
+      '    Trace export:          OFF — no agent trace (run metadata, and tool arguments and outputs ' +
+        'once an agent calls tools) leaves this process. Export them to OpenAI with ' +
+        "RAYSPEC_AGENT_TRACING=openai on 'rayspec deploy' / 'rayspec-serve' — the dev-boot wrappers " +
+        'do not read that variable',
     );
   }
   lines.push(RULE);
