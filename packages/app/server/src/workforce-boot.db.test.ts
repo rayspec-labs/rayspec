@@ -112,7 +112,7 @@ describe.skipIf(!hasDb)('workforce boot wiring (db)', () => {
     await expect(assertWorkforceSpecCompatible(tdb(), withoutDev)).rejects.toThrow(task.taskId);
   });
 
-  describe('the WHOLE workforce is a declaration too — the maximal removal is checked', () => {
+  describe('the workforce ID is a declaration too — a rename is a removal', () => {
     async function liveTask(workforceId: string) {
       return createRootTask(tdb(), {
         workforceId,
@@ -124,15 +124,15 @@ describe.skipIf(!hasDb)('workforce boot wiring (db)', () => {
       });
     }
 
-    it('refuses a redeploy that drops the workforce section while live work runs under it', async () => {
-      const task = await liveTask('helpdesk');
-      // Removing ONE employee refuses; removing every employee, every department and every team at
-      // once is the same removal, maximal — and it used to skip the gate entirely, because a gate
-      // that only runs when a workforce is declared cannot see a workforce that no longer is.
-      const refusal = assertWorkforceSpecCompatible(tdb(), undefined);
-      await expect(refusal).rejects.toBeInstanceOf(WorkforceSpecChangeError);
-      await expect(refusal).rejects.toMatchObject({ taskIds: [task.taskId] });
-      await expect(assertWorkforceSpecCompatible(tdb(), undefined)).rejects.toThrow('helpdesk');
+    it('a document declaring NO workforce is UNGATED — the case the schema cannot decide', async () => {
+      await liveTask('helpdesk');
+      // This is the maximal removal and it deploys. Not an oversight: a task row's `workforce_id`
+      // is set by whoever created the task, so live work under an id is exactly as consistent with
+      // an engine-only deployment (a shipped posture — `/v1/workforce` serves it) as with a
+      // workforce that was just deleted, and nothing on any row says a DOCUMENT ever declared it.
+      // Refusing on the shared evidence would abort every engine-only boot. Pinned so the gap is a
+      // recorded decision rather than a silent pass; closing it needs a stored prior declaration.
+      await expect(assertWorkforceSpecCompatible(tdb(), undefined)).resolves.toBeUndefined();
     });
 
     it('refuses a redeploy that RENAMES the workforce id out from under live work', async () => {
@@ -152,23 +152,25 @@ describe.skipIf(!hasDb)('workforce boot wiring (db)', () => {
       );
     });
 
-    it('a workforce-free document with no live workforce work deploys, as it always has', async () => {
-      // A bare platform task carries no workforce id and is not a workforce declaration.
+    it('terminal work under a departed workforce id never refuses', async () => {
+      const done = await liveTask('helpdesk');
+      await db.$client.unsafe(
+        `UPDATE workforce_tasks SET status = 'completed' WHERE task_id = '${done.taskId}';`,
+      );
+      const renamed = WorkforceSpec.parse({
+        ...JSON.parse(JSON.stringify(DECLARED)),
+        id: 'helpdesk_v2',
+      });
+      await expect(assertWorkforceSpecCompatible(tdb(), renamed)).resolves.toBeUndefined();
+    });
+
+    it('a bare platform task carries no workforce id and is never a workforce declaration', async () => {
       await createRootTask(tdb(), {
         title: 'Bare platform task',
         goal: 'G',
         owner: 'user',
         requestedBy: 'user',
       });
-      await expect(assertWorkforceSpecCompatible(tdb(), undefined)).resolves.toBeUndefined();
-    });
-
-    it('terminal work under a departed workforce id never refuses', async () => {
-      const done = await liveTask('helpdesk');
-      await db.$client.unsafe(
-        `UPDATE workforce_tasks SET status = 'completed' WHERE task_id = '${done.taskId}';`,
-      );
-      await expect(assertWorkforceSpecCompatible(tdb(), undefined)).resolves.toBeUndefined();
       const renamed = WorkforceSpec.parse({
         ...JSON.parse(JSON.stringify(DECLARED)),
         id: 'helpdesk_v2',

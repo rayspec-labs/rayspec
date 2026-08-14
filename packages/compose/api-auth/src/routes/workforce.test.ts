@@ -12,7 +12,7 @@
  *  - pause/resume/halt work the runtime row; a body outside the strict schema is a 400;
  *  - the whole surface fail-closes 501 when no dispatcher seam is wired.
  */
-import { forTenant } from '@rayspec/db';
+import { forTenant, schema } from '@rayspec/db';
 import {
   applyTransition,
   applyTurnOutcome,
@@ -20,6 +20,7 @@ import {
   ensureWorkforceRuntime,
   workforceBudgetsSchema,
 } from '@rayspec/tasks';
+import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
 
@@ -341,11 +342,14 @@ describe('/v1/workforce (the task-engine surface)', () => {
       to: 'working',
       actor: 'scheduler',
     });
+    // A park an operator override legitimately answers: the ceiling is a lever they hold. (The
+    // STRUCTURAL parks — `awaiting_children`, `escalated` — are answered by a child's terminal and
+    // are pinned as declining below.)
     await applyTransition(tdb, {
       taskId: task.taskId,
       expectedVersion: working.version,
       to: 'blocked',
-      reason: 'escalated',
+      reason: 'budget_exhausted',
       actor: 'coordinator',
     });
 
@@ -368,6 +372,44 @@ describe('/v1/workforce (the task-engine surface)', () => {
       headers: { authorization: `Bearer ${a.token}` },
     });
     expect(await dup.json()).toEqual({ delivered: false, woke: false });
+  });
+
+  it('an operator override RECORDS but does not release a structural park, through the route', async () => {
+    const a = await principal('wf-structural@example.test', 'Org WF Structural');
+    const tdb = forTenant(h.db, a.orgId);
+    const task = await seedRoot(a.orgId);
+    const queued = await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: task.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    const working = await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: queued.version,
+      to: 'working',
+      actor: 'scheduler',
+    });
+    // `escalated` waits on the escalation child's terminal, exactly as `awaiting_children` waits on
+    // the fan-out's. An override answers no fact about that child and would erase the only exit.
+    await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: working.version,
+      to: 'blocked',
+      reason: 'escalated',
+      actor: 'coordinator',
+    });
+
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/tasks/${task.taskId}/signal`, {
+      body: { kind: 'manual_unblock', signalKey: 'op-structural' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(202); // the delivery is recorded — it simply wakes nothing
+    expect(await res.json()).toEqual({ delivered: true, woke: false });
+    const rows = await tdb
+      .select(schema.workforceTasks, { status: schema.workforceTasks.status })
+      .where(eq(schema.workforceTasks.taskId, task.taskId));
+    expect(rows[0]).toMatchObject({ status: 'blocked' });
   });
 
   it('pause/resume/halt work the runtime row; halt demands its reason (strict 400 without)', async () => {

@@ -2903,17 +2903,16 @@ async function deployDeclaredSpec(
   // ── The WORKFORCE REDEPLOY GATE + tenant precondition (BEFORE deploy(): a refusal precedes any
   //    DDL or mount). The platform migration chain already applied above, so the workforce tables
   //    exist even on a first boot; an empty database passes trivially (pure additions always
-  //    deploy). The gate runs whether or not THIS document declares a workforce: a document that
-  //    declares none is the maximal removal, and a renamed id is a removal too — both used to slip
-  //    past a gate that only ran for a declared section (see workforce-boot.ts's header).
-  if (effectiveSpec.workforce !== undefined && !config.cronTenantId) {
-    throw new BootConfigError(
-      'Boot aborted — the spec declares a workforce but RAYSPEC_CRON_TENANT_ID is unset. A ' +
-        'workforce runs under the deployment task tenant (the same single-deployment posture ' +
-        'cron fires use); set the variable to the org id durable tasks run under. Fail-closed.',
-    );
-  }
-  if (config.cronTenantId) {
+  //    deploy). A document declaring NO workforce is deliberately not gated — see
+  //    workforce-boot.ts's header for why that case is undecidable on the current schema.
+  if (effectiveSpec.workforce !== undefined) {
+    if (!config.cronTenantId) {
+      throw new BootConfigError(
+        'Boot aborted — the spec declares a workforce but RAYSPEC_CRON_TENANT_ID is unset. A ' +
+          'workforce runs under the deployment task tenant (the same single-deployment posture ' +
+          'cron fires use); set the variable to the org id durable tasks run under. Fail-closed.',
+      );
+    }
     // The gate scopes by tenant, so the tenant SHAPE is asked first — otherwise a malformed id
     // surfaces as `forTenant`'s raw chokepoint throw here instead of the typed boot abort the
     // scheduler wiring below already produces for it. Same check, same message, taken earlier.

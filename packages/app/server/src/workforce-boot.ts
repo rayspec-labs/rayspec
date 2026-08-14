@@ -12,12 +12,34 @@
  * delegation whose original target names a departed employee/department/team. `deploy --dry-run`
  * has no database and cannot run this check; its output says so.
  *
- * THE GATE READS THE DATABASE FIRST AND THE DOCUMENT SECOND, which is what makes the two maximal
- * removals checkable at all. A gate keyed on the declared id can only ever ask "is this id's live
- * work still declared?" — so deleting the whole section left nothing to ask on behalf of, and
- * RENAMING the id pointed every query at an id no row carried, matching zero rows and passing
- * trivially while the live tasks kept dispatching under the old one. Live workforce ids are
- * therefore enumerated from the task rows, and each is checked against what the document declares.
+ * THE GATE READS THE DATABASE FIRST AND THE DOCUMENT SECOND. A gate keyed on the declared id can
+ * only ever ask "is THIS id's live work still declared?", so RENAMING `workforce.id` pointed every
+ * query at an id no row carried: it matched zero rows and passed trivially while the live tasks
+ * kept dispatching under the old id, against a runtime row nothing would refresh again. Live
+ * workforce ids are therefore enumerated from the task rows and each is checked against what the
+ * document declares.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * WHAT THIS GATE CANNOT SEE: A DOCUMENT THAT DROPS `workforce:` ENTIRELY.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * That is the maximal removal, and it is NOT checked here — not as an oversight, but because the
+ * database cannot distinguish the two situations it would have to tell apart:
+ *
+ *   - a deployment that DECLARED a workforce and just removed it (live work is stranded: with no
+ *     declaration, no turn-handler resolver is wired and every dispatched owner fails typed), and
+ *   - a deployment that NEVER declared one and runs the task engine directly (`workforce_tasks`
+ *     rows carry a `workforce_id` for budget and control scoping whoever created them — the
+ *     `/v1/workforce` surface exists precisely for this, and it is a shipped, supported posture).
+ *
+ * Both leave IDENTICAL evidence: non-terminal tasks with a workforce id, a runtime row (the
+ * scheduler creates one on first dispatch), delegation rows, a journal. Nothing on any row records
+ * that a DOCUMENT once declared the id. Refusing on the shared evidence would abort every
+ * engine-only deployment, so the gate declines to guess.
+ *
+ * Closing it needs the one thing the module header above says does not exist — a stored prior
+ * declaration — which is a deliberate design decision (what to record, where, and how a first boot
+ * after the change behaves), not a fix-up. Until then this case is UNGATED and named as such here,
+ * rather than implied to be covered by the rename check next to it.
  */
 import { schema, type TenantDb } from '@rayspec/db';
 import { deriveWorkforceBudgets, type WorkforceSpec } from '@rayspec/spec';
@@ -103,15 +125,16 @@ export async function assertWorkforceSpecCompatible(
     department: string | null;
   }>;
 
-  // 1. Live work under a workforce id the document no longer declares — the section deleted, or
-  //    the id renamed. Its employees/departments are not checked individually: the whole workforce
-  //    is gone, and naming every member of it would bury the fact that matters.
+  // 1. Live work under a workforce id this document declares DIFFERENTLY — the id was renamed. Its
+  //    employees/departments are not checked individually: the whole workforce is gone under that
+  //    name, and naming every member of it would bury the fact that matters. Only reachable when a
+  //    workforce IS declared; see the header for why a document declaring none cannot ask this.
   const ownTasks: typeof tasks = [];
   for (const task of tasks) {
-    if (task.workforceId !== declaredId) {
+    if (declaredId !== null && task.workforceId !== declaredId) {
       missing.add(`workforce '${task.workforceId}'`);
       strandedTaskIds.add(task.taskId);
-    } else {
+    } else if (task.workforceId === declaredId) {
       ownTasks.push(task);
     }
   }
