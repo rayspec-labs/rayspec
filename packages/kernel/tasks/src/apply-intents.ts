@@ -28,7 +28,8 @@
  * for the completing child's turn to finish, rather than the two waiting on each other until
  * Postgres kills one (which turned a cancel into a 500 that did nothing, and a turn into a leaked
  * reservation). A single-row transition needs no pre-lock: it holds one row and wants nothing else,
- * so it can never be half of a cycle — `SINGLE_ROW_INTENTS` is where a turn claims that exemption.
+ * so it can never be half of a cycle — `SINGLE_ROW_PLANS` is where a turn claims that exemption,
+ * and it is keyed on the turn's computed PLAN because an intent does not determine its own reach.
  *
  * Rank against the other row types this engine locks: workforce_runtime -> workforce_tasks ->
  * workforce_budget_ledger (established by the dispatcher's claim transaction). BOTH halves of the
@@ -50,7 +51,6 @@ import { deterministicChildTaskId } from './ids.js';
 import {
   invalidIntentPlan,
   planTurnOutcome,
-  type TurnIntent,
   type TurnPlan,
   turnIntentSchema,
 } from './intent-applier.js';
@@ -113,26 +113,27 @@ export class TurnStateError extends Error {
 }
 
 /**
- * The intents whose application touches exactly ONE task row: a transition on the task itself and
- * nothing else. Every other intent reaches a SECOND row — the parent it fans in to
+ * The PLANS whose application touches exactly ONE task row: a transition on the task itself and
+ * nothing else. Every other plan reaches a SECOND row — the parent it fans in to
  * (`afterTaskTerminal`), the root it escalates to, the descendants it cascades over — and so must
  * take the root-first locks before its first write. The module header's own rule is that a
  * single-row transition needs no pre-lock; honouring it is what keeps a yield from serializing
  * every other turn in the subtree on the root row.
  *
- * Classified by INTENT, not by plan, because the locks have to be taken before the plan is
- * computed. That is sound because the planner cannot widen one of these three: a valid `yield`
- * plans `yield`, a valid `request_approval` plans `request_approval`, and a valid `request_review`
- * plans `request_review` or `review_rounds_exhausted` — all four single-row. The ONE thing that
- * overrides an intent is a pending cancel, which is why the caller checks for one before trusting
- * this set. A malformed intent is not in it either (its tool-error fate can fail the task, which
- * fans in). Kept EXPLICIT rather than inferred, so a new intent kind has to be classified
- * deliberately.
+ * Classified by PLAN, never by intent. An intent-shaped exemption is unsound because the planner
+ * REJECTS intents the schema accepts: `{kind:'request_approval', onTimeout:'escalate'}` with no
+ * `escalateTo` parses (the field is optional) and plans `invalid_intent`, whose tool-error fate is
+ * terminal after a prior offense — and a terminal task fans in to its parent. Reading the intent
+ * would hand exactly that turn the fast path and no parent lock. The planner is PURE, so the
+ * caller simply asks it what this turn will do before taking any lock, and trusts the answer only
+ * for the plans listed here. Kept EXPLICIT rather than inferred, so a new plan kind has to be
+ * classified deliberately.
  */
-const SINGLE_ROW_INTENTS: ReadonlySet<TurnIntent['kind']> = new Set([
+const SINGLE_ROW_PLANS: ReadonlySet<TurnPlan['kind']> = new Set([
   'yield',
   'request_approval',
   'request_review',
+  'review_rounds_exhausted',
 ]);
 
 export interface ApplyTurnInput {
@@ -317,23 +318,6 @@ export async function applyTurnOutcome(
     // carries the id that took it; compare, exactly as `#claimTurn` does before it runs a handler.
     await assertClaimOwnership(tx, input);
 
-    // THE TASK LOCKS, BEFORE the first write and before any other row type (see the module header).
-    // Which locks this turn needs follows from the intent, and only a pending cancel can turn one
-    // of the three single-row intents into something that touches a second row — so the cancels are
-    // PEEKED here (a read takes no lock) and consumed below, under the locks.
-    const parsedIntent = turnIntentSchema.safeParse(input.intent);
-    const singleRow =
-      parsedIntent.success &&
-      SINGLE_ROW_INTENTS.has(parsedIntent.data.kind) &&
-      (await peekPendingCancels(tx, input.taskId)).length === 0;
-    const task = singleRow ? snapshot : await lockRootFirst(tx, snapshot);
-    if (task.status !== 'working') {
-      throw new TurnStateError(input.taskId, `status '${task.status}'`);
-    }
-
-    const cancels = singleRow ? [] : await consumePendingCancels(tx, input.taskId);
-    const pendingCancel = cancels.length > 0;
-
     // One prior tool_error re-queue means THIS offense is terminal (one retry, then failed).
     const priorReceipt = (await tx
       .select(schema.workforceTaskTransitions)
@@ -353,21 +337,44 @@ export async function applyTurnOutcome(
       .select(schema.workforceDelegations, { id: schema.workforceDelegations.id })
       .where(eq(schema.workforceDelegations.parentTaskId, input.taskId));
 
-    const plan: TurnPlan = parsedIntent.success
-      ? planTurnOutcome({
-          taskOwner: task.owner,
-          ancestryDepth: Array.isArray(task.ancestryPath) ? task.ancestryPath.length : 0,
-          ancestorOwners: await ancestorOwners(tx, task),
-          existingDelegationCount: delegationRows.length,
-          maxDelegationDepth: input.budgets.delegation?.maxDepth ?? null,
-          maxDelegationsPerTask: input.budgets.delegation?.maxPerTask ?? null,
-          maxReviewRounds: input.budgets.execution.maxReviewRounds ?? null,
-          reviewRoundsUsed: reviewRows.length,
-          priorToolError,
-          pendingCancel,
-          intent: parsedIntent.data,
-        })
-      : invalidIntentPlan(parsedIntent.error.message, priorToolError);
+    // Everything the planner needs except the one input that can only be read under a lock. The
+    // fields taken from `snapshot` here (owner, ancestry) are immutable for the row's lifetime.
+    const parsedIntent = turnIntentSchema.safeParse(input.intent);
+    const planInput = {
+      taskOwner: snapshot.owner,
+      ancestryDepth: Array.isArray(snapshot.ancestryPath) ? snapshot.ancestryPath.length : 0,
+      ancestorOwners: await ancestorOwners(tx, snapshot),
+      existingDelegationCount: delegationRows.length,
+      maxDelegationDepth: input.budgets.delegation?.maxDepth ?? null,
+      maxDelegationsPerTask: input.budgets.delegation?.maxPerTask ?? null,
+      maxReviewRounds: input.budgets.execution.maxReviewRounds ?? null,
+      reviewRoundsUsed: reviewRows.length,
+      priorToolError,
+    };
+    const planFor = (pendingCancel: boolean): TurnPlan =>
+      parsedIntent.success
+        ? planTurnOutcome({ ...planInput, pendingCancel, intent: parsedIntent.data })
+        : invalidIntentPlan(parsedIntent.error.message, priorToolError);
+
+    // THE TASK LOCKS, BEFORE the first write and before any other row type (see the module header).
+    // WHICH locks this turn needs is a property of its PLAN, not of the intent it was handed — so
+    // the pure planner is asked first, and its answer is trusted only for the plans that provably
+    // move one row. The single input the planner still lacks is a pending cancel, which overrides
+    // every intent; the cancels are PEEKED here (a read takes no lock) and consumed below, under
+    // the locks, so a non-empty peek alone disqualifies the fast path.
+    const speculativePlan = planFor(false);
+    const singleRow =
+      SINGLE_ROW_PLANS.has(speculativePlan.kind) &&
+      (await peekPendingCancels(tx, input.taskId)).length === 0;
+    const task = singleRow ? snapshot : await lockRootFirst(tx, snapshot);
+    if (task.status !== 'working') {
+      throw new TurnStateError(input.taskId, `status '${task.status}'`);
+    }
+
+    const cancels = singleRow ? [] : await consumePendingCancels(tx, input.taskId);
+    // A cancel consumed under the lock is the ONE thing that can change the plan; nothing else the
+    // planner reads moves while this turn holds the row.
+    const plan: TurnPlan = cancels.length > 0 ? planFor(true) : speculativePlan;
 
     if (plan.kind === 'cancelled') {
       // The cascade below reaches DOWN into the descendants, and settlement reaches into the
@@ -706,10 +713,22 @@ async function applyToolErrorFate(
  * mechanism — a fan-out join, a dependency, a pending review or approval — is NOT moved: the
  * transition would erase the very exit that park is waiting for, and the mechanism would then have
  * nowhere to land (the fan-in bails and never writes the join signal at all). Such an escalation is
- * DEFERRED, and deferral loses nothing: the root cannot resume without re-authorizing at its next
- * dispatch, an unchanged ceiling denies it again, and at that point the root itself sits in
- * `blocked(budget_exhausted)` — a park the escalation may target. A root that never needs another
- * turn never needed the escalation. The deferral is journaled so the wait is visible meanwhile.
+ * DEFERRED and journaled, never dropped silently.
+ *
+ * What a deferral is worth depends on the park, and the two cases are NOT the same:
+ *
+ *   - `awaiting_dependency`, `review_pending`, `approval_pending` — the mechanism runs independently
+ *     of this denial, so the root does resume, does re-authorize, and an unchanged ceiling denies it
+ *     again; at that point the root itself sits in `blocked(budget_exhausted)`, a park the
+ *     escalation may target, and it surfaces there. Nothing is lost.
+ *   - `awaiting_children` — the deferral does NOT surface by itself, and saying otherwise would be
+ *     circular: the child whose dispatch was denied is the one the join is waiting for, so the join
+ *     cannot close, the root never redispatches, and every exit from the child (raise the ceiling
+ *     and signal `budget_raised`, or cancel it) is precisely the operator action the escalation
+ *     existed to summon. The journal entry is the whole notification in that case, and it says so.
+ *     Still strictly better than the alternative it replaced — dissolving the join and orphaning
+ *     the children — but a durable deferral that can wake a structural park is a real design task,
+ *     tracked as a follow-up rather than pretended away here.
  */
 export async function applyBudgetExhausted(
   tx: TenantDb,
@@ -759,8 +778,14 @@ export async function applyBudgetExhausted(
             scopeKind: denial.scopeKind,
             scopeId: denial.scopeId,
             park: { status: root.status, statusReason: root.statusReason },
+            // `awaiting_children` is the one park that does NOT re-surface on its own: the denied
+            // child cannot terminate, so the join never closes and the root never redispatches.
+            // The event says which case this is rather than promising a wake that will not come.
             surfacesWhen:
-              'the park is released by its own mechanism and the next dispatch is denied again',
+              root.statusReason === 'awaiting_children'
+                ? 'not automatically — the join cannot close while the denied child is blocked; ' +
+                  'raise the ceiling and send budget_raised to the blocked child, or cancel it'
+                : 'the park is released by its own mechanism and the next dispatch is denied again',
           },
         },
       ]);

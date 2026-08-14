@@ -326,6 +326,57 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
     expect(signalled[0]?.c).toBe(1);
   });
 
+  it('a turn whose PLAN fans in takes the root-first locks, whatever its intent looked like', async () => {
+    // A schema-valid `request_approval` the PLANNER rejects: `onTimeout: 'escalate'` with no
+    // `escalateTo` parses (the field is optional) and plans `invalid_intent`. After a prior
+    // tool error its fate is `fail` — which fans in to the parent. An exemption granted on the
+    // INTENT hands that turn the single-row fast path and no root-first lock at all.
+    const MALFORMED_APPROVAL = {
+      kind: 'request_approval',
+      question: 'Publish the statement?',
+      timeoutMs: 60_000,
+      onTimeout: 'escalate',
+    };
+    const rootTask = await createRootTask(tdb(), {
+      workforceId: 'wf',
+      title: 'Root',
+      goal: 'Drive the cascade.',
+      owner: 'coordinator',
+      requestedBy: 'user',
+    });
+    await driveTo(rootTask.taskId, 'queued');
+    await driveTo(rootTask.taskId, 'working');
+    await turn(rootTask.taskId, 1, {
+      kind: 'fan_out',
+      children: [{ title: 'Child', goal: 'Child work.', owner: 'worker-child' }],
+    });
+    const child = await childOf(rootTask.taskId);
+
+    // Turn 1 leaves the child re-queued with the typed tool_error receipt…
+    await driveTo(child, 'queued');
+    await driveTo(child, 'working');
+    const first = await turn(child, 1, MALFORMED_APPROVAL);
+    expect(first.plan).toMatchObject({ kind: 'invalid_intent', fate: 'requeue' });
+    expect(await statusOf(child)).toBe('queued');
+    // …so THIS turn's fate is terminal, and a terminal child fans in to its parent.
+    await driveTo(child, 'working', 2);
+
+    // The turn parks inside `afterTaskTerminal`, holding the child row, one statement short of
+    // wanting the parent.
+    const release = await holdDelegationOf(child);
+    const failingTurn = turn(child, 2, MALFORMED_APPROVAL);
+    await waitForBlocked(1);
+    // The operator cancel walks the same subtree from the top: it holds the parent and wants the
+    // child. Without the root-first locks these two wait on each other and Postgres kills one.
+    const operatorCancel = cancelTaskCascade(tdb(), { taskId: rootTask.taskId, actor: 'user' });
+    await waitForBlocked(2);
+
+    await release();
+    await expect(failingTurn).resolves.toBeDefined();
+    await expect(operatorCancel).resolves.toBeDefined();
+    expect(await statusOf(child)).toBe('failed');
+  });
+
   it('a cancel racing the reserve pass completes the cascade instead of throwing it away', async () => {
     const { root, middle, leaf } = await threeDeep();
     // Park the middle task so the whole subtree is cancellable without a turn in flight.

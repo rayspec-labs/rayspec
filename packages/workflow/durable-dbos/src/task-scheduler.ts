@@ -200,10 +200,18 @@ const PRIORITY_RANK_SQL = sql`case ${schema.workforceTasks.priority}
  *
  * A bound is only half the invariant. The other half is that the page must ADVANCE, and each scan
  * says which way it earns that: `#promotePlanned` because every row it examines leaves the set;
- * the candidate page because the two conditions that would skip a row are excluded in SQL before
- * the page is taken; the dependency wake and the reaper because they carry a keyset cursor. A
- * bounded scan whose rows can be skipped in place and is taken from the top every tick is not a
- * bound, it is a starvation window — which is the one failure this file may not ship.
+ * the dependency wake and the reaper because they carry a keyset cursor; the candidate page
+ * because the scopes that cannot dispatch AT ALL this tick — paused, already at cap — are excluded
+ * in SQL before the page is taken. A bounded scan whose rows can be skipped in place and is taken
+ * from the top every tick is not a bound, it is a starvation window.
+ *
+ * The candidate page's guarantee is the WEAKEST of the four, and stated exactly: the exclusion is
+ * computed ONCE, before the page, so it removes a workforce that was already saturated — but the
+ * pass then FILLS the cap itself and skips the remainder of the page in place. A workforce with a
+ * deep backlog and a small cap therefore still occupies page slots for the tick that fills its cap,
+ * and delays the rest of the tenant by roughly (its backlog / page size) ticks before its rows stop
+ * being drawn. That is a latency residual, not a permanent stall — the next tick sees it at cap and
+ * excludes it — and closing it properly needs predicate-side saturation or cap-aware paging.
  */
 export const RESERVE_SCAN_LIMIT = 500;
 export const SWEEP_SCAN_LIMIT = 500;
@@ -414,12 +422,18 @@ export class DbosTaskScheduler {
     // (priority band, then oldest queued) — so the bound cannot let a low-priority row jump ahead
     // of an urgent one that happened to sit outside the page.
     //
-    // The page is taken over the DISPATCHABLE rows only. A skipped candidate gets no transition, so
-    // it holds the identical slot in the identical page on every subsequent tick: one paused — or
-    // merely at-capacity — workforce with more queued tasks than the page holds would silently stop
-    // dispatch for every other workforce in the tenant, forever. Both of those conditions are
-    // knowable BEFORE the page is taken, so they are excluded in the predicate rather than skipped
-    // in the loop, and the rows they exclude are counted from the same database-side aggregate.
+    // The page is taken over the rows that were dispatchable AT SCOPE-RESOLUTION TIME. A skipped
+    // candidate gets no transition, so it holds the identical slot in the identical page on every
+    // subsequent tick: one paused — or already at-capacity — workforce with more queued tasks than
+    // the page holds would otherwise stop dispatch for every other workforce in the tenant,
+    // forever. Both of those conditions are knowable before the page is taken, so they are excluded
+    // in the predicate, and the rows they exclude are counted from the same database-side aggregate.
+    //
+    // What the predicate does NOT remove is a workforce this pass saturates itself: the loop below
+    // fills the cap and then skips the remainder of the page IN PLACE. Those skips are real and
+    // still counted, and they cost the rest of the tenant roughly (backlog / page) ticks of delay
+    // before that workforce stops being drawn — bounded, self-clearing on the next tick's
+    // exclusion, and tracked as a follow-up rather than closed here.
     const candidates = (await tdb
       .select(schema.workforceTasks)
       .where(and(eq(schema.workforceTasks.status, 'queued'), ...skipped.exclusions))
@@ -520,13 +534,19 @@ export class DbosTaskScheduler {
    * The scopes this pass cannot dispatch into, as SQL the candidate page is taken UNDER.
    *
    * Two conditions are decided per WORKFORCE (or per department) rather than per task — the pause
-   * flag and a concurrency cap already met — and both are knowable before a single candidate row is
-   * read. Deciding them in the loop instead is what starves the tenant: the skipped rows keep their
-   * place in the ordering, so they refill the same page every tick and nothing behind them is ever
-   * examined. Deciding them here keeps the page full of rows the pass can actually act on.
+   * flag and a concurrency cap ALREADY met when the scopes are resolved — and both are knowable
+   * before a single candidate row is read. Deciding them in the loop instead is what starves the
+   * tenant: the skipped rows keep their place in the ordering, so they refill the same page every
+   * tick and nothing behind them is ever examined. Deciding them here keeps the page full of rows
+   * the pass can act on. A cap the pass fills DURING its own loop is still skipped in place there;
+   * the header says what that costs.
    *
    * The counts come from the same database-side aggregate, so `paused`/`saturated` in the outcome
-   * report every candidate the pass declined — not just the ones that fit in a page.
+   * report every candidate those two conditions declined — not just the ones that fit in a page.
+   * A THIRD condition declines rows and is deliberately counted by NEITHER: a workforce whose
+   * stored budgets will not parse is excluded from the page (its candidates could only throw) and
+   * reported through the error log alone, because it is a misconfiguration to fix, not a queue
+   * state to report. The outcome's counters are therefore a lower bound on rows declined.
    *
    * Warms `budgetsCache` on the way through: every workforce with a queued task needs its runtime
    * row read exactly once per pass, whether it is excluded here or dispatched below.
