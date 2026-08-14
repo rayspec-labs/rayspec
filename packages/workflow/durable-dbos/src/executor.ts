@@ -597,6 +597,12 @@ export class DbosDurableExecutor implements DurableExecutor {
     // default (`update_if_latest_version`) only writes the queue row when THIS process's version is
     // the newest row in `application_versions`, and otherwise degrades the upsert to ON CONFLICT DO
     // NOTHING — so a second deployment's `workerConcurrency` would look accepted and never apply.
+    // WHAT IT DOES NOT BUY: per-deployment queue CONFIG. `applicationVersion` fences CLAIMING, not
+    // this row. DBOS's `queues` table is keyed on the queue NAME alone (no application_version
+    // column; `always_update` upserts `ON CONFLICT (name) DO UPDATE` — verified against the pinned
+    // 4.21.6 sysdb migrations + `system_database.ts`), and the name here is a process-independent
+    // constant. So two deployments sharing one system database share ONE row: whichever booted most
+    // recently sets `workerConcurrency` for both. Differing values need separate system databases.
     await DBOS.registerQueue(AGENT_RUNS_QUEUE, {
       workerConcurrency: this.#config.workerConcurrency ?? DEFAULT_WORKER_CONCURRENCY,
       onConflict: 'always_update',

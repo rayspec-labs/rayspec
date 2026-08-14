@@ -1772,7 +1772,8 @@ export function appliedProductDdlBootNote(
     "Editing the spec's stores FIRST is what turns this into a second, confusing failure: the live " +
     'schema is then DRIFTED against the edited spec and that boot fail-closes on the drift — ' +
     'reconcile it with a reviewed FORWARD migration (`rayspec plan <new-spec> --against <old-spec>`, ' +
-    'then `rayspec deploy --apply-migration <delta.sql>`), never a hand-written down-migration; ' +
+    'then `rayspec deploy --apply-migration <delta.sql>`, adding `--allowlist <file.json>` to cover ' +
+    'any reviewed destructive statement the delta carries), never a hand-written down-migration; ' +
     'there are none. On a THROWAWAY local database `rayspec dev db --reset --yes` starts over ' +
     'instead — it is NOT a table-level cleanup: it DROPs the whole database AND its `_dbos_sys` ' +
     'sibling WITH (FORCE) and re-creates one empty database, so the platform tables and every org ' +
@@ -2512,6 +2513,10 @@ async function deployDeclaredSpec(
       schemaState === 'absent'
         ? [{ name: '0000_product_stores.sql', sql: generateProductSql(specStores), allowlist: [] }]
         : []; // present-matching → MOUNT: NO product DDL (existing data survives)
+    // A spec that REMOVED stores also lands here, including one that removed them all (`auth-only`
+    // below): the classifier is superset-blind and answers `present-matching`, so the orphaned tables
+    // stay in the database, with their rows, and nothing reports them. Fail-safe and deliberate —
+    // see the blind-spot note on `classifyProductSchema`.
     deployMode =
       specStores.length === 0 ? 'auth-only' : schemaState === 'absent' ? 'materialized' : 'mounted';
   }
