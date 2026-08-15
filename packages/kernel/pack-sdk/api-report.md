@@ -1,7 +1,7 @@
 # Public API report — @rayspec/pack-sdk
 
 <!--
-GENERATED FILE — do not edit by hand.
+GENERATED FILE — do not edit by hand. [rayspec-public-api-report/v1]
 
 Derived from this package's BUILT type declarations by scripts/check-public-api-report.mjs, so it
 records the surface a consumer of the published package actually gets. Any change to that surface
