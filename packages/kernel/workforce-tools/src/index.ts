@@ -10,6 +10,8 @@
  * an employee's agent and applies the collected intent lives with the composition root, on the
  * other side of the gate.
  */
+
+export { classifyTurnIntent } from './classify.js';
 export {
   type BufferedCreatedChild,
   type BufferedMessage,

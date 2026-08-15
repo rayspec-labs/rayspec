@@ -54,6 +54,7 @@ import {
   MAX_MESSAGES_PER_TURN,
   planTurnOutcome,
   type TurnPlan,
+  turnClassificationSchema,
   turnIntentSchema,
 } from './intent-applier.js';
 import { joinPolicySchema } from './join.js';
@@ -193,6 +194,14 @@ export interface ApplyTurnInput {
    * deterministic child-id space belong to them; a same-turn fan-out's children continue after.
    */
   readonly createdChildren?: unknown;
+  /**
+   * The turn's CLASSIFICATION — which way a decision seat moved its task, derived by the
+   * dispatching composition from the TYPED collected intent (never from model prose; a refused
+   * or absent ending carries none). A TRUSTED channel like `reviewPolicy`: validated strictly
+   * against the closed vocabulary here, journaled on `turn_ended`, and a malformed value is a
+   * caller bug and a hard typed refusal.
+   */
+  readonly classification?: unknown;
   readonly budgets: WorkforceBudgets;
   /** The turn's actual cost; settled against the dispatch reservation. */
   readonly actualUsd?: number;
@@ -340,6 +349,13 @@ export async function applyTurnOutcome(
     // The buffered creates ride a TRUSTED channel too — validated strictly before they can plan.
     const createdChildren = z.array(delegationChildSpecSchema).parse(input.createdChildren ?? []);
     const messages = turnMessagesSchema.parse(input.messages ?? []);
+    // The classification channel steers NOTHING — it is journaled truth about the decision the
+    // typed intent already carries — but a malformed value is the same caller bug its siblings
+    // refuse, so it validates the same way.
+    const classification =
+      input.classification === undefined
+        ? null
+        : turnClassificationSchema.parse(input.classification);
 
     // Everything the planner needs except the one input that can only be read under a lock. The
     // fields taken from `snapshot` here (owner, ancestry) are immutable for the row's lifetime.
@@ -1131,6 +1147,9 @@ export async function applyTurnOutcome(
           turnNumber: input.turnNumber,
           outcome: plan.kind,
           costUsd: actualUsd,
+          // Present on decision-seat turns that ended with a typed intent; absent elsewhere
+          // (worker turns, refused endings) — the vocabulary's own presence rule.
+          ...(classification !== null ? { classification } : {}),
         },
       },
     ]);

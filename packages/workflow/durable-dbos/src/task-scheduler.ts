@@ -151,6 +151,13 @@ export interface TaskTurnHandlerOutcome {
   }[];
   /** The turn's actual cost, settled against the dispatch reservation. */
   readonly actualUsd?: number;
+  /**
+   * The turn's CLASSIFICATION — which way a decision seat moved its task, derived by the
+   * composition from the TYPED collected intent (never from model prose) and journaled by the
+   * engine on `turn_ended`. Absent on worker turns and on turns that ended without a valid
+   * intent; validated against the closed vocabulary by the engine.
+   */
+  readonly classification?: 'direct' | 'delegate' | 'team' | 'review' | 'escalate';
 }
 
 /**
@@ -1078,6 +1085,9 @@ export class DbosTaskScheduler {
             ...(outcome.reviewPolicy !== undefined ? { reviewPolicy: outcome.reviewPolicy } : {}),
             ...(outcome.createdChildren !== undefined
               ? { createdChildren: outcome.createdChildren }
+              : {}),
+            ...(outcome.classification !== undefined
+              ? { classification: outcome.classification }
               : {}),
             budgets,
             actualUsd: outcome.actualUsd ?? 0,
