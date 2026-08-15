@@ -59,7 +59,7 @@ export interface TtsSynthesizeOptions {
 }
 
 /**
- * The neutral speech-synthesis capability a route/tool handler may receive as `init.tts`.
+ * The neutral speech-synthesis capability a route, tool or trigger handler may receive as `init.tts`.
  *
  * `synthesize` returns the AUDIO on success. A provider-side condition — a missing credential, an
  * upstream error, malformed provider output — comes back as a REJECTED promise carrying a

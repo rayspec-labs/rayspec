@@ -59,7 +59,7 @@ export interface SttTranscribeOptions {
 }
 
 /**
- * The neutral transcription capability a route/tool handler may receive as `init.stt`.
+ * The neutral transcription capability a route, tool or trigger handler may receive as `init.stt`.
  *
  * `transcribe` NEVER throws for a provider-side condition: a missing credential, an upstream error, or
  * malformed provider output comes back as the `failed` variant of `SttTranscriptionResult` carrying a

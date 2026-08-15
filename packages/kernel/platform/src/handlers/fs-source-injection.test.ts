@@ -1,10 +1,10 @@
 /**
- * fs-source capability INJECTION tests — the READ-ONLY `init.fsSource` reaches BOTH a TOOL handler and a
- * ROUTE handler by injection, jailed by construction, and is ABSENT (fail-closed) when no source root is
- * wired.
+ * fs-source capability INJECTION tests — the READ-ONLY `init.fsSource` reaches a TOOL handler, a
+ * ROUTE handler and a TRIGGER handler by injection, jailed by construction, and is ABSENT
+ * (fail-closed) when no source root is wired.
  *
  * FAIL-THE-FIX against a REAL fs source (the load-bearing path jail, not a re-implementation):
- *   - a tool / route handler receives an `init.fsSource` that reads a jailed file;
+ *   - a tool / route / trigger handler receives an `init.fsSource` that reads a jailed file;
  *   - a jail escape through it is REFUSED (the handler can never read outside the root);
  *   - FAIL-CLOSED when no factory is wired: `init.fsSource` is undefined → the handler fail-closes.
  * MUTATING-TO-RED: drop the fsSourceFactory arg → `init.fsSource` is undefined when it SHOULD be present
@@ -20,6 +20,8 @@ import type {
   RouteHandlerInit,
   ToolHandler,
   ToolHandlerInit,
+  TriggerHandler,
+  TriggerHandlerInit,
 } from '@rayspec/handler-sdk';
 import type { RaySpec } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
@@ -27,7 +29,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { makeFsSourceFactory } from '../fs-source/fs-source.js';
 import type { ResolvedHandler } from './handler-runtime.js';
 import { buildToolFactory } from './resolve-tools.js';
-import { invokeRouteHandler, invokeRouteHandlerDetached } from './route-init.js';
+import {
+  invokeRouteHandler,
+  invokeRouteHandlerDetached,
+  invokeTriggerHandler,
+} from './route-init.js';
 
 const TENANT = '00000000-0000-0000-0000-0000000000aa';
 const noTables: ReadonlyMap<string, PgTable> = new Map();
@@ -184,5 +190,39 @@ describe('fs-source injection — ROUTE handler', () => {
     await expect(
       invokeRouteHandlerDetached(fsRouteFn, fakeTdb(), noTables, params),
     ).rejects.toThrow(/init\.fsSource is undefined/);
+  });
+});
+
+// ── TRIGGER handler injection ───────────────────────────────────────────────────────────────────
+
+let triggerBody: string | undefined;
+
+const fsTriggerFn: TriggerHandler = async (init: TriggerHandlerInit) => {
+  if (!init.fsSource)
+    throw new Error('trigger fail-closed: init.fsSource is undefined (no source root wired)');
+  const r = await init.fsSource.read('ref/note.md');
+  triggerBody = isNotFound(r) ? undefined : dec(r.bytes);
+};
+
+describe('fs-source injection — TRIGGER handler', () => {
+  it('injects the SAME jailed init.fsSource a route handler receives', async () => {
+    triggerBody = undefined;
+    await invokeTriggerHandler(fsTriggerFn, fakeTdb(), noTables, 'nightly', fsSourceFactory);
+    expect(triggerBody).toBe('the reference note body');
+  });
+
+  it('FAILS CLOSED — a trigger init has NO fsSource when no factory is wired', async () => {
+    await expect(invokeTriggerHandler(fsTriggerFn, fakeTdb(), noTables, 'nightly')).rejects.toThrow(
+      /init\.fsSource is undefined/,
+    );
+  });
+
+  it('omits init.fsSource entirely when no factory is wired (ABSENT, not undefined)', async () => {
+    let hasFsSource = true;
+    const probe: TriggerHandler = async (init: TriggerHandlerInit) => {
+      hasFsSource = 'fsSource' in (init as object);
+    };
+    await invokeTriggerHandler(probe, fakeTdb(), noTables, 'nightly');
+    expect(hasFsSource).toBe(false); // ABSENT, not undefined — the init shape stays exact
   });
 });

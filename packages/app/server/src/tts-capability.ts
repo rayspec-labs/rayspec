@@ -1,5 +1,6 @@
 /**
- * The BACKEND-profile text-to-speech capability — what a route/tool handler receives as `init.tts`.
+ * The BACKEND-profile text-to-speech capability — what a route, tool or trigger handler receives as
+ * `init.tts`.
  *
  * This is the EGRESS twin of `stt-capability.ts`, and deliberately much thinner. The STT port is
  * REFERENCE-keyed (a finalized session/track ref resolved to bytes by an injected resolver), so that

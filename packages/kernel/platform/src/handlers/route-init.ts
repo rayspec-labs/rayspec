@@ -386,17 +386,43 @@ export async function invokeStreamRouteHandler(
 /**
  * Invoke a declared TRIGGER handler inside a tenant transaction (the contract the durable worker
  * uses; not fired synchronously today). `triggerName` is the declared trigger's name (DATA).
+ *
+ * The three DEPLOYMENT-STATIC capabilities a `handler`-kind route init carries — `fsSource`, `stt`,
+ * `tts` — are threaded here on the SAME terms: none of them is request-derived (the fs-source root is
+ * a shared read root, the speech handles take the bytes/text the handler holds), so a handler that
+ * works over HTTP does the same work when a trigger fires it. Each is spread-when-wired, so a
+ * deployment that configured none builds the byte-identical init this took before. Nothing ELSE is
+ * threaded here and this seam is unchanged for the rest: `mintPlayToken`, `enqueue` and `emit` are
+ * assembled PER REQUEST by the api interpreter (the mint from the authed caller, the emit as a buffer
+ * against the route transaction it flushes into), and `blob` is the byte-moving handle a `stream`-kind
+ * route and a tool get — `invokeRouteHandler` never carries it either.
  */
 export async function invokeTriggerHandler(
   fn: TriggerHandler,
   tdb: TenantDb,
   productTables: ReadonlyMap<string, PgTable>,
   triggerName: string,
+  // An OPTIONAL READ-ONLY, path-jailed fs-source factory — see invokeRouteHandler. Threaded
+  // identically so a trigger fire receives `init.fsSource` the same way a route request does.
+  fsSourceFactory?: FsSourceFactory,
+  // An OPTIONAL speech-to-text capability — see invokeRouteHandler. Threaded identically so a
+  // trigger fire receives `init.stt` the same way a route request does.
+  stt?: SttCapability,
+  // An OPTIONAL text-to-speech capability — see invokeRouteHandler. Threaded identically so a
+  // trigger fire receives `init.tts` the same way a route request does.
+  tts?: TtsCapability,
 ): Promise<void> {
   await tdb.transaction(async (txTdb) => {
     const init: TriggerHandlerInit = {
       tenantId: txTdb.tenantId,
       db: makeHandlerDb(txTdb, productTables),
+      // The READ-ONLY, path-jailed fs-source handle (no tenant arg — a shared deployment-static read root).
+      // Spread so ABSENT when no source root is configured — keeping the init shape exact.
+      ...(fsSourceFactory ? { fsSource: fsSourceFactory() } : {}),
+      // The speech-to-text capability (spread so ABSENT when no STT provider is configured).
+      ...(stt ? { stt } : {}),
+      // The text-to-speech capability (spread so ABSENT when no TTS provider is configured).
+      ...(tts ? { tts } : {}),
       triggerName,
     };
     await getHandlerRuntime().invokeTrigger(fn, init);

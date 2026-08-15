@@ -507,7 +507,7 @@ export interface ServerConfig {
   blobRoot?: string;
   /**
    * The LOCAL filesystem ROOT the READ-ONLY `FsSource` capability reads under — the jail root a
-   * tool/route handler's `init.fsSource` is confined to (deployment-static assets: reference material,
+   * route, tool or trigger handler's `init.fsSource` is confined to (deployment-static assets: reference material,
    * templates, a static content directory the deployer placed on the box). Set via
    * RAYSPEC_FS_SOURCE_ROOT. OPTIONAL: unset ⇒ no fs-source is wired (`init.fsSource` is absent; a
    * handler that needs it fail-closes loudly). Unlike `blobRoot` no route KIND requires it — it is
@@ -526,7 +526,7 @@ export interface ServerConfig {
    */
   mediaSigningKey?: string;
   /**
-   * The speech-to-text provider a route/tool handler's `init.stt` transcribes through — set via
+   * The speech-to-text provider a route, tool or trigger handler's `init.stt` transcribes through — set via
    * STT_PROVIDER (`deepgram | fake`, the SAME env contract the product profile's audio pipeline uses).
    * OPTIONAL: unset ⇒ no STT capability is wired (`init.stt` is absent; a handler that needs it
    * fail-closes loudly) — never a boot error, since no spec signal says a handler transcribes. Carried
@@ -541,7 +541,7 @@ export interface ServerConfig {
    */
   deepgramApiKey?: string;
   /**
-   * The text-to-speech provider a route/tool handler's `init.tts` synthesizes through — set via
+   * The text-to-speech provider a route, tool or trigger handler's `init.tts` synthesizes through — set via
    * TTS_PROVIDER (`openai | fake`). OPTIONAL: unset ⇒ no TTS capability is wired (`init.tts` is
    * absent; a handler that needs it fail-closes loudly) — never a boot error, since no spec signal
    * says a handler synthesizes speech. Carried RAW here; an unsupported value is fail-closed-refused
@@ -2627,7 +2627,7 @@ async function deployDeclaredSpec(
   }
 
   // ── The SPEECH-TO-TEXT capability build (`init.stt`) ───────────────────────
-  // A route/tool handler transcribes audio bytes through the provider the deployment selected with
+  // A route, tool or trigger handler transcribes audio bytes through the provider the deployment selected with
   // STT_PROVIDER. Purely deploy-config-gated (no route KIND requires it, unlike the stream→blob
   // guard, and no spec signal says a handler transcribes): build the capability when a provider is
   // configured, else leave it undefined (`init.stt` is then ABSENT and a handler that reads it
@@ -3077,6 +3077,17 @@ async function deployDeclaredSpec(
         executor: durableExecutorInstance,
         productTables,
         invokeTriggerHandler,
+        // The three DEPLOYMENT-STATIC capabilities a `handler`-kind ROUTE init carries, threaded to
+        // the trigger dispatch on the SAME terms and for the SAME reason they are threaded into the
+        // worker's agent registry above: none is request-derived (`fsSourceFactory()` reads the
+        // deployment's jailed source root; `sttCapability`/`ttsCapability` are provider handles that
+        // take the bytes/text the handler already holds), so a handler fired by a trigger does the
+        // work it does when the same handler is called over HTTP — instead of throwing on a capability
+        // that is configured. Spread-when-wired, so a deployment that configured none wires a
+        // byte-identical scheduler to before.
+        ...(fsSourceFactory ? { fsSourceFactory } : {}),
+        ...(sttCapability ? { stt: sttCapability } : {}),
+        ...(ttsCapability ? { tts: ttsCapability } : {}),
         // The per-firing existence probe. Bound to the WORKER pool (the pool the fire itself dispatches
         // off) so the check never borrows an HTTP connection, and re-evaluated on every call — that is
         // what makes an org created mid-life start firing without a restart. The tenant is the one the

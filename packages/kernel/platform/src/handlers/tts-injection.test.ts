@@ -1,12 +1,12 @@
 /**
- * TTS capability INJECTION tests — the optional `init.tts` speech-synthesis capability reaches BOTH a
- * TOOL handler and a ROUTE handler by injection, carries the handler's text + plain options through
- * verbatim, and is ABSENT (fail-closed) when no provider is wired.
+ * TTS capability INJECTION tests — the optional `init.tts` speech-synthesis capability reaches a TOOL
+ * handler, a ROUTE handler and a TRIGGER handler by injection, carries the handler's text + plain
+ * options through verbatim, and is ABSENT (fail-closed) when no provider is wired.
  *
  * FAIL-THE-FIX against a recording stand-in capability (this layer ROUTES the handle; the real
  * adapter-backed capability — provider selection, the request policy, the deterministic fake — is
  * proven in @rayspec/server's `tts-capability.unit.test.ts`):
- *   - a tool / route handler receives an `init.tts` whose `synthesize(text, opts)` it can call;
+ *   - a tool / route / trigger handler receives an `init.tts` whose `synthesize(text, opts)` it can call;
  *   - the EXACT text + the plain option record reach the capability (serializable-shaped pass-through);
  *   - FAIL-CLOSED when nothing is wired: `init.tts` is ABSENT (not `undefined`) → the handler fail-closes.
  * MUTATING-TO-RED: drop the `tts` argument thread → `init.tts` is undefined when it SHOULD be present
@@ -18,6 +18,8 @@ import type {
   RouteHandlerInit,
   ToolHandler,
   ToolHandlerInit,
+  TriggerHandler,
+  TriggerHandlerInit,
   TtsCapability,
   TtsSynthesisResult,
   TtsSynthesizeOptions,
@@ -27,7 +29,11 @@ import type { PgTable } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
 import type { ResolvedHandler } from './handler-runtime.js';
 import { buildToolFactory } from './resolve-tools.js';
-import { invokeRouteHandler, invokeRouteHandlerDetached } from './route-init.js';
+import {
+  invokeRouteHandler,
+  invokeRouteHandlerDetached,
+  invokeTriggerHandler,
+} from './route-init.js';
 
 const TENANT = '00000000-0000-0000-0000-0000000000aa';
 const noTables: ReadonlyMap<string, PgTable> = new Map();
@@ -223,6 +229,53 @@ describe('tts injection — ROUTE handler', () => {
       return null;
     };
     await invokeRouteHandler(probe, fakeTdb(), noTables, params);
+    expect(hasTts).toBe(false); // ABSENT, not undefined — the init shape stays exact
+  });
+});
+
+// ── TRIGGER handler injection ───────────────────────────────────────────────────────────────────
+
+let triggerAudio: string | undefined;
+
+const ttsTriggerFn: TriggerHandler = async (init: TriggerHandlerInit) => {
+  if (!init.tts)
+    throw new Error('trigger fail-closed: init.tts is undefined (no TTS provider wired)');
+  const result = await init.tts.synthesize(TEXT, { format: 'wav' });
+  triggerAudio = new TextDecoder().decode(result.bytes);
+};
+
+describe('tts injection — TRIGGER handler', () => {
+  it('injects the SAME init.tts a route handler receives', async () => {
+    const tts = recordingTts();
+    triggerAudio = undefined;
+    await invokeTriggerHandler(
+      ttsTriggerFn,
+      fakeTdb(),
+      noTables,
+      'nightly',
+      undefined, // fsSourceFactory
+      undefined, // stt
+      tts,
+    );
+    expect(triggerAudio).toBe('Guten Morgen./-/-/wav');
+    // The EXACT text + the plain option record crossed the seam (serializable-shaped, unwrapped).
+    expect(tts.calls).toHaveLength(1);
+    expect(tts.calls[0]?.text).toBe(TEXT);
+    expect(tts.calls[0]?.opts).toEqual({ format: 'wav' });
+  });
+
+  it('FAILS CLOSED — a trigger init has NO tts when no provider is wired', async () => {
+    await expect(
+      invokeTriggerHandler(ttsTriggerFn, fakeTdb(), noTables, 'nightly'),
+    ).rejects.toThrow(/init\.tts is undefined/);
+  });
+
+  it('omits init.tts entirely when no provider is wired (ABSENT, not undefined)', async () => {
+    let hasTts = true;
+    const probe: TriggerHandler = async (init: TriggerHandlerInit) => {
+      hasTts = 'tts' in (init as object);
+    };
+    await invokeTriggerHandler(probe, fakeTdb(), noTables, 'nightly');
     expect(hasTts).toBe(false); // ABSENT, not undefined — the init shape stays exact
   });
 });
