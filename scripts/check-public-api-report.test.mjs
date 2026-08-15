@@ -13,7 +13,7 @@
  * without touching this checkout. The throwaway packages carry `dist` and NO `src`, which is also how
  * this test pins the "derived from the built declarations, not from source" contract.
  *
- * Five cases, so a pass means something:
+ * Ten cases, so a pass means something:
  *
  *   (Z) NO package declares the marker — PASSES, and says the set was empty rather than staying quiet.
  *   (C) a declared, populated, up-to-date package PASSES, the count is reported, and the written
@@ -23,6 +23,17 @@
  *   (G) a declared package with NO report FAILS CLOSED, naming the package.
  *   (B) a declared package that was never built FAILS CLOSED — an unbuilt package must never be
  *       recorded as an empty surface.
+ *   (D) a name with SEVERAL declarations (an overload set) keeps every one of them, and a default
+ *       export is recorded — driven by declarations the compiler really emitted, and each removal is
+ *       a diff.
+ *   (N) a namespace re-export of a module INSIDE the package is read through: a change to a member
+ *       FAILS. One that leaves the package stays a single opaque line.
+ *   (S) a declaration file that opens with a `#!` line keeps every export, and a signature change in
+ *       the first one FAILS.
+ *   (U) a top-level export the parser cannot read FAILS CLOSED, naming the file and the statement —
+ *       an unreadable export is never dropped quietly.
+ *   (O) a report whose package no longer declares the marker FAILS — a guard cannot retire itself by
+ *       leaving its artifact behind.
  *
  * Standalone (no test framework is wired for the gate scripts): `node <thisfile>`; exit 0 = pass.
  */
@@ -115,6 +126,33 @@ function tree({ declared = true, built = true } = {}) {
       : {}),
   };
 }
+
+/** A throwaway tree whose declared package carries exactly the given `dist` files. */
+function treeWith(dist) {
+  const files = { 'pnpm-workspace.yaml': WORKSPACE_YAML, 'package.json': ROOT_MANIFEST };
+  files[`${PKG}/package.json`] = manifest({ declared: true });
+  for (const [name, contents] of Object.entries(dist)) files[`${PKG}/dist/${name}`] = contents;
+  return files;
+}
+
+// The VERBATIM emit of the repo's TypeScript (`tsc --emitDeclarationOnly`) for
+//
+//     export class Kernel { readonly id: string = 'a'; }
+//     export function pick(value: string): string;
+//     export function pick(value: number): number;
+//     export function pick(value: unknown): unknown { return value; }
+//     export default Kernel;
+//
+// — pasted rather than hand-written, so arm (D) cannot be satisfied by a shape the parser happens to
+// like. The `;` after `export default Kernel` and the two consecutive `pick` lines are what the
+// COMPILER produces, and both are exactly what a name-keyed reader loses.
+const EMITTED_DTS = `export declare class Kernel {
+    readonly id: string;
+}
+export declare function pick(value: string): string;
+export declare function pick(value: number): number;
+export default Kernel;
+`;
 
 const created = [];
 try {
@@ -274,6 +312,143 @@ try {
       '(B) a refused --write must not erase the report',
     );
     console.log('ok (B) — an unbuilt declared package fails closed and its report survives');
+  }
+
+  // ── (D) every declaration of a name, and the default export ────────────────────────────────────
+  // A name routinely carries more than one top-level declaration — an overload set here, a `const`
+  // beside a `type` of the same name elsewhere — and each one is a promise on its own. A reader that
+  // keeps the LAST one records a surface the package does not have, and the removal of any other
+  // declaration then compares clean.
+  {
+    const { ws, script } = throwawayRepo(treeWith({ 'index.d.ts': EMITTED_DTS }));
+    created.push(ws);
+    assert.equal(runGate(script, ['--write']).code, 0, '(D) --write must succeed');
+    const report = readFileSync(join(ws, PKG, 'api-report.md'), 'utf8');
+    assert.match(report, /^3 export\(s\)\./m, '(D) the default export must be counted');
+    assert.ok(
+      report.includes('### `default` — `dist/index.d.ts` (declared as `Kernel`)'),
+      '(D) a default export must be recorded, and say what it is declared as',
+    );
+    assert.ok(
+      report.includes('export declare function pick(value: string): string;') &&
+        report.includes('export declare function pick(value: number): number;'),
+      '(D) BOTH overloads must be recorded, not just the last one',
+    );
+
+    // Each declaration has to be load-bearing on its own: remove ONE overload, keep the other.
+    const indexPath = join(ws, PKG, 'dist/index.d.ts');
+    writeFileSync(
+      indexPath,
+      EMITTED_DTS.replace('export declare function pick(value: string): string;\n', ''),
+    );
+    const dropped = runGate(script);
+    assert.notEqual(dropped.code, 0, '(D) removing ONE overload must FAIL');
+    assert.match(dropped.err, /value: string/, '(D) the removed overload must appear in the diff');
+
+    // …and so does the default export.
+    writeFileSync(indexPath, EMITTED_DTS.replace('export default Kernel;\n', ''));
+    const undefaulted = runGate(script);
+    assert.notEqual(undefaulted.code, 0, '(D) removing the default export must FAIL');
+    assert.match(
+      undefaulted.err,
+      /default/,
+      '(D) the removed default export must appear in the diff',
+    );
+    console.log('ok (D) — every declaration of a name is recorded, and so is the default export');
+  }
+
+  // ── (N) a namespace re-export inside the package is read through ───────────────────────────────
+  // `export * as ns from './local.js'` is inside this package's own readable closure, so recording it
+  // as one opaque line would hide every member behind a line that never changes.
+  {
+    const INDEX = `export * as codes from './codes.js';
+export * as elsewhere from 'other-package';
+`;
+    const CODES = `export declare const CODE_A: 'a';
+export declare const CODE_B: 'b';
+`;
+    const { ws, script } = throwawayRepo(treeWith({ 'index.d.ts': INDEX, 'codes.d.ts': CODES }));
+    created.push(ws);
+    assert.equal(runGate(script, ['--write']).code, 0, '(N) --write must succeed');
+    const report = readFileSync(join(ws, PKG, 'api-report.md'), 'utf8');
+    assert.ok(
+      report.includes('#### `codes.CODE_A`') &&
+        report.includes("export declare const CODE_B: 'b';"),
+      '(N) the members of a LOCAL namespace re-export must be recorded',
+    );
+    assert.ok(
+      report.includes('### `elsewhere` — re-exported from `other-package` (namespace re-export)'),
+      '(N) a namespace re-export that LEAVES the package stays one opaque line',
+    );
+    writeFileSync(join(ws, PKG, 'dist/codes.d.ts'), CODES.replace("CODE_B: 'b'", 'CODE_B: string'));
+    const changed = runGate(script);
+    assert.notEqual(changed.code, 0, '(N) a change INSIDE a local namespace re-export must FAIL');
+    assert.match(changed.err, /CODE_B/, '(N) the changed member must appear in the diff');
+    console.log('ok (N) — a local namespace re-export is read through, a foreign one stays opaque');
+  }
+
+  // ── (S) a declaration file that opens with a `#!` line ─────────────────────────────────────────
+  // An executable entry point emits one, it is not a comment and carries no `;`, so leaving it in
+  // glues it to the first declaration and costs that export.
+  {
+    const INDEX = `#!/usr/bin/env node
+export declare function main(argv: string[]): Promise<void>;
+export declare function run(): void;
+`;
+    const { ws, script } = throwawayRepo(treeWith({ 'index.d.ts': INDEX }));
+    created.push(ws);
+    assert.equal(runGate(script, ['--write']).code, 0, '(S) --write must succeed');
+    const report = readFileSync(join(ws, PKG, 'api-report.md'), 'utf8');
+    assert.match(report, /^2 export\(s\)\./m, '(S) both exports must be counted');
+    assert.ok(report.includes('### `main`'), '(S) the export after the `#!` line must be recorded');
+    writeFileSync(
+      join(ws, PKG, 'dist/index.d.ts'),
+      INDEX.replace('main(argv: string[])', 'main(argv: string[], json: boolean)'),
+    );
+    const changed = runGate(script);
+    assert.notEqual(changed.code, 0, '(S) a signature change in that export must FAIL');
+    assert.match(changed.err, /json: boolean/, '(S) the changed signature must appear in the diff');
+    console.log('ok (S) — a `#!` line does not swallow the export that follows it');
+  }
+
+  // ── (U) an export the parser cannot read fails CLOSED ──────────────────────────────────────────
+  // The alternative is the worst outcome available: the export leaves the report silently, and every
+  // later change to it then compares clean.
+  {
+    const { ws, script } = throwawayRepo(
+      treeWith({ 'index.d.ts': 'declare function legacy(a: string): void;\nexport = legacy;\n' }),
+    );
+    created.push(ws);
+    for (const args of [[], ['--write']]) {
+      const r = runGate(script, args);
+      assert.notEqual(r.code, 0, `(U) an unreadable export must fail CLOSED (args: ${args})`);
+      assert.match(r.err, /cannot read/, '(U) the fail-closed reason must be named');
+      assert.match(r.err, /index\.d\.ts/, '(U) the file must be named');
+      assert.match(r.err, /export = legacy;/, '(U) the statement must be quoted');
+    }
+    console.log('ok (U) — an export the parser cannot read fails closed instead of vanishing');
+  }
+
+  // ── (O) a report nobody declares any more fails ────────────────────────────────────────────────
+  // The empty PASS is sound only while "nothing has opted in" is TRUE. A committed report is the
+  // tree's own evidence that something did, so a one-key edit to a manifest must not be able to
+  // retire the guard and leave the report behind to rot.
+  {
+    const { ws, script } = throwawayRepo(tree());
+    created.push(ws);
+    assert.equal(runGate(script, ['--write']).code, 0, '(O) the fixture must start green');
+    writeFileSync(join(ws, PKG, 'package.json'), manifest({ declared: false }));
+    writeFileSync(
+      join(ws, PKG, 'dist/index.d.ts'),
+      `${INDEX_DTS}export declare function addedAfterTheMarkerWasLost(): void;\n`,
+    );
+    for (const args of [[], ['--write']]) {
+      const r = runGate(script, args);
+      assert.notEqual(r.code, 0, `(O) an unclaimed report must FAIL (args: ${args})`);
+      assert.match(r.err, /claimed by NO manifest/, '(O) the reason must be named');
+      assert.match(r.err, /api-report\.md/, '(O) the orphaned report must be named');
+    }
+    console.log('ok (O) — a report whose package dropped the marker fails instead of rotting');
   }
 
   console.log('\npublic-api-report gate regression: ALL CASES PASSED');

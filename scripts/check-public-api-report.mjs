@@ -27,12 +27,22 @@
  * vanish: an empty result means no manifest declared the key, which is a fact about the manifests, and
  * a package that DOES declare it can never be skipped (see below).
  *
+ * A REPORT IS ITS OWN DECLARATION. The empty PASS is only sound while "nothing has opted in" is TRUE,
+ * and a committed report is the tree's own evidence that something did. Every report carries a stamp,
+ * and the scan walks the workspace directories for stamped files no manifest claims: a package that
+ * loses the marker (a merge resolution, a rebase, `pnpm pkg delete`) — or whose directory drops out of
+ * the `packages:` patterns — FAILS while its report is still in the tree, instead of retiring the
+ * guard and leaving the report to rot.
+ *
  * WHAT IS FAIL-CLOSED. Everything about a package that HAS declared the key:
  *   - a missing or unreadable report file FAILS, naming the package and the regeneration command;
  *   - a report that disagrees with the declarations FAILS, printing the unified diff;
  *   - a manifest that names no type entry point FAILS;
  *   - MISSING built type declarations FAIL ("build first") — an unbuilt package can never be read as
- *     an empty surface, which would otherwise let a `--write` erase the whole report.
+ *     an empty surface, which would otherwise let a `--write` erase the whole report;
+ *   - a top-level `export …` statement NO branch of the parser understands FAILS, naming the file and
+ *     the statement. There is no "dropped quietly" path: an export the gate cannot read would cost a
+ *     section in the report and make every later change to it invisible.
  *
  * DERIVED FROM `dist`, NOT FROM SOURCE. The report is read from the `.d.ts` files the build emits and
  * the manifest points at, so it records what a CONSUMER of the published package gets — including the
@@ -44,9 +54,16 @@
  * Comments are stripped (a doc-comment edit is not a surface change) and the package VERSION is not
  * recorded (a release bump must not churn every report).
  *
+ * EVERY DECLARATION OF A NAME, not just the last one. One name routinely carries several top-level
+ * declarations — an overload set, a `const` exported next to a `type` of the same name, merged
+ * `interface` blocks — and each one is a promise on its own. They are all recorded, in file order,
+ * inside that name's single section, so removing one overload is a diff.
+ *
  * SCOPE BOUNDARY, stated rather than hidden: a re-export from ANOTHER package (`export * from
- * '@scope/pkg'`) cannot be enumerated from this package's own declarations. It is recorded verbatim as
- * an opaque re-export line, so the FACT is reviewable even though the borrowed names are not listed.
+ * '@scope/pkg'`, `export * as ns from '@scope/pkg'`) cannot be enumerated from this package's own
+ * declarations. It is recorded verbatim as an opaque re-export line, so the FACT is reviewable even
+ * though the borrowed names are not listed. A namespace re-export of a module INSIDE the package is
+ * readable, so it is read: its members are recorded under the namespace's section.
  *
  * NO DEPENDENCIES. Node builtins only, like the other gates under scripts/ — the type declarations are
  * read as text. A checked-in report is worth nothing if regenerating it needs a toolchain the gate had
@@ -64,6 +81,14 @@ const WRITE = process.argv.includes('--write');
 /** The opt-in marker a package sets in its own manifest to join the scan. */
 const MARKER = 'rayspecPublicApi';
 const REGENERATE = 'node scripts/check-public-api-report.mjs --write';
+/**
+ * The stamp every generated report carries in its header. It is what makes an ORPHANED report
+ * findable: a report is evidence that a package opted in, so one nobody claims is a retired guard.
+ * Deliberately a token no prose about this gate would spell out.
+ */
+const REPORT_STAMP = 'rayspec-public-api-report/v1';
+/** Directories the orphan scan never descends into. */
+const SKIP_DIRS = new Set(['node_modules', '.git', '.turbo', 'coverage']);
 /** Cap the printed diff so a wholesale rewrite cannot bury the CI log. */
 const MAX_DIFF_LINES = 200;
 /** Above this many DP cells the diff falls back to a whole-region replacement (see `diffOps`). */
@@ -163,6 +188,16 @@ function workspacePackageDirs() {
 }
 
 // ─── reading a `.d.ts` ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * Drop a leading `#!` line. A declaration file emitted for an executable entry point starts with one
+ * (three built `.d.ts` in this repo do), it is NOT a comment, and it carries no `;` — so leaving it in
+ * would glue it to the first declaration and make that whole statement unreadable, costing an export.
+ * The newline is kept so nothing else shifts.
+ */
+function stripShebang(src) {
+  return src.startsWith('#!') ? src.slice(src.indexOf('\n') + 1 || src.length) : src;
+}
 
 /**
  * Drop comments, preserving line structure (every newline inside a block comment is kept) and every
@@ -284,11 +319,20 @@ const DECL_RE = new RegExp(`^(?:declare\\s+)?(?:abstract\\s+)?(${DECL_KEYWORD})\
 const EXPORT_DECL_RE = new RegExp(
   `^export\\s+(?:declare\\s+)?(?:abstract\\s+)?(${DECL_KEYWORD})\\s+(${NAME})`,
 );
-const STAR_AS_RE = new RegExp(`^export\\s+\\*\\s+as\\s+(${NAME})\\s+from\\s+['"]([^'"]+)['"]`);
-const STAR_RE = /^export\s+\*\s+from\s+['"]([^'"]+)['"]/;
+const STAR_AS_RE = new RegExp(
+  `^export\\s+(?:type\\s+)?\\*\\s+as\\s+(${NAME})\\s+from\\s+['"]([^'"]+)['"]`,
+);
+const STAR_RE = /^export\s+(?:type\s+)?\*\s+from\s+['"]([^'"]+)['"]/;
 const CLAUSE_RE = /^export\s+(?:type\s+)?\{([^}]*)\}(?:\s*from\s*['"]([^'"]+)['"])?/;
 const IMPORT_CLAUSE_RE = /^import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/;
-const DEFAULT_EXPORT_RE = new RegExp(`^export\\s+default\\s+(${NAME})\\s*$`);
+// `export default Kernel;` — the trailing `;` is part of the statement `topLevelStatements` cuts, and
+// it is what tsc emits, so the anchor has to allow it or the branch below is dead code.
+const DEFAULT_EXPORT_RE = new RegExp(`^export\\s+default\\s+(${NAME})\\s*;?\\s*$`);
+// `export default class Widget { … }` / `export default function main(): void;` — the default export
+// IS the declaration. The name binds locally only, so it is recorded under `default`.
+const DEFAULT_DECL_RE = new RegExp(
+  `^export\\s+default\\s+(?:declare\\s+)?(?:abstract\\s+)?(${DECL_KEYWORD})\\s+(${NAME})`,
+);
 
 /** Parse `A, B as C, type D` into `[{ local, exported }]`. */
 function parseClause(body) {
@@ -304,6 +348,27 @@ function parseClause(body) {
 }
 
 /**
+ * Refuse a top-level `export` statement no branch of the parser claimed. Dropping it would cost a
+ * section in the report and make every later change to that export invisible — the exact failure this
+ * gate exists to prevent — so an unreadable form fails LOUDLY instead, the same posture a relative
+ * specifier that resolves to nothing already has.
+ */
+function refuseStatement(file, statement) {
+  const head = statement.replace(/\s+/g, ' ').trim();
+  const shown = head.length > 120 ? `${head.slice(0, 119)}…` : head;
+  const hint = /^export\s*=/.test(head)
+    ? '\n  (`export = X` assigns the WHOLE module; a consumer names it at the import site, so there ' +
+      'is no exported name to record.)'
+    : '';
+  die(
+    `${rel(file)} has a top-level export this gate cannot read:\n` +
+      `    ${shown}${hint}\n` +
+      '  The surface cannot be recorded completely, so the report is not written. Teach the gate this ' +
+      'form rather than letting an export fall out of the report.',
+  );
+}
+
+/**
  * Read ONE declaration file into the parts the surface is assembled from: what it declares, what it
  * exports (and from where), and the star re-exports it forwards.
  */
@@ -316,12 +381,20 @@ function parseDeclarationFile(file) {
   }
   const mod = {
     file,
-    locals: new Map(), // declared name → statement text
+    locals: new Map(), // declared name → [statement text, …] in file order
     imports: new Map(), // local name → { module, name }
     exports: new Map(), // exported name → origin
     stars: [], // `export * from '…'` specifiers, in file order
   };
-  for (const statement of topLevelStatements(stripComments(raw))) {
+  // A name can carry SEVERAL top-level declarations (an overload set, a `const` beside a `type` of the
+  // same name, merged `interface` blocks). Each is a promise of its own, so they accumulate — keying
+  // them by name alone would record the last and let the removal of any other one pass unseen.
+  const declare = (name, statement) => {
+    const seen = mod.locals.get(name);
+    if (seen) seen.push(statement);
+    else mod.locals.set(name, [statement]);
+  };
+  for (const statement of topLevelStatements(stripComments(stripShebang(raw)))) {
     const head = statement.replace(/\s+/g, ' ').trim();
     if (head.startsWith('import')) {
       const clause = head.match(IMPORT_CLAUSE_RE);
@@ -333,7 +406,9 @@ function parseDeclarationFile(file) {
       }
       continue;
     }
-    if (head.startsWith('export')) {
+    // `export` as a WORD: the branch below refuses what it cannot read, so an identifier that merely
+    // starts with those six letters must not be dragged into it.
+    if (/^export\b/.test(head)) {
       const starAs = head.match(STAR_AS_RE);
       if (starAs) {
         mod.exports.set(starAs[1], { kind: 'namespace', module: starAs[2] });
@@ -359,15 +434,23 @@ function parseDeclarationFile(file) {
         mod.exports.set('default', { kind: 'local', local: asDefault[1] });
         continue;
       }
-      const decl = statement.match(EXPORT_DECL_RE);
-      if (decl) {
-        mod.locals.set(decl[2], statement);
-        mod.exports.set(decl[2], { kind: 'local', local: decl[2] });
+      const defaultDecl = head.match(DEFAULT_DECL_RE);
+      if (defaultDecl) {
+        declare(defaultDecl[2], statement);
+        mod.exports.set('default', { kind: 'local', local: defaultDecl[2] });
+        continue;
       }
+      const decl = head.match(EXPORT_DECL_RE);
+      if (decl) {
+        declare(decl[2], statement);
+        mod.exports.set(decl[2], { kind: 'local', local: decl[2] });
+        continue;
+      }
+      refuseStatement(file, statement);
       continue;
     }
-    const decl = statement.match(DECL_RE);
-    if (decl) mod.locals.set(decl[2], statement);
+    const decl = head.match(DECL_RE);
+    if (decl) declare(decl[2], statement);
   }
   return mod;
 }
@@ -440,7 +523,18 @@ function surfaceOf(file, cache, open = new Set()) {
 /** Where one exported name is declared, and the declaration text to print for it. */
 function resolveOrigin(file, mod, origin, cache, open) {
   if (origin.kind === 'namespace') {
-    return { external: origin.module, note: 'namespace re-export' };
+    // `export * as ns from '…'` is opaque only when the module leaves the package. A RELATIVE
+    // specifier is inside this package's own readable closure — treating it as foreign would hide
+    // every member of an idiomatic grouped export behind one unchanging line.
+    const target = resolveDeclaration(file, origin.module);
+    if (target === null) return { external: origin.module, note: 'namespace re-export' };
+    if (target === undefined) {
+      die(
+        `${rel(file)} re-exports the namespace '${origin.module}', which resolves to no declaration ` +
+          'file.\n  The surface cannot be read completely, so the report is not written.',
+      );
+    }
+    return { namespace: origin.module, file: target, surface: surfaceOf(target, cache, open) };
   }
   if (origin.kind === 'from' || origin.kind === 'local') {
     const via =
@@ -459,8 +553,8 @@ function resolveOrigin(file, mod, origin, cache, open) {
       const inner = surfaceOf(target, cache, open);
       return inner.names.get(via.name) ?? { unresolved: via.name, from: rel(target) };
     }
-    const text = mod.locals.get(origin.local);
-    if (text) return { file, name: origin.local, text };
+    const texts = mod.locals.get(origin.local);
+    if (texts) return { file, name: origin.local, texts };
   }
   return { unresolved: origin.local ?? origin.name ?? 'default', from: rel(file) };
 }
@@ -476,6 +570,65 @@ function normalizeDeclaration(text) {
     .join('\n');
 }
 
+/** The opaque star re-exports of one surface, as a bullet list. */
+function renderOpaque(out, opaque) {
+  if (opaque.length === 0) return;
+  out.push('', 'Opaque re-export(s) — the borrowed names are owned by another package:', '');
+  for (const specifier of [...new Set(opaque)].sort()) {
+    out.push(`- \`export * from '${specifier}'\``);
+  }
+}
+
+/**
+ * ONE exported name, at heading depth `level`. A namespace re-export of a module inside the package
+ * recurses into its members (`seen` breaks a re-export cycle); everything else is one section.
+ */
+function renderName(out, pkgDir, name, decl, level, seen) {
+  const hash = '#'.repeat(Math.min(level, 6));
+  if (decl.namespace) {
+    if (seen.has(decl.file)) {
+      out.push(
+        '',
+        `${hash} \`${name}\` — namespace re-export of \`${decl.namespace}\` (recorded above)`,
+      );
+      return;
+    }
+    const members = [...decl.surface.names.keys()].sort();
+    out.push(
+      '',
+      `${hash} \`${name}\` — namespace re-export of \`${decl.namespace}\` — \`${rel2(pkgDir, decl.file)}\``,
+      '',
+      `${members.length} member(s).`,
+    );
+    renderOpaque(out, decl.surface.opaque);
+    seen.add(decl.file);
+    for (const member of members) {
+      renderName(out, pkgDir, `${name}.${member}`, decl.surface.names.get(member), level + 1, seen);
+    }
+    seen.delete(decl.file);
+    return;
+  }
+  if (decl.external) {
+    const leaf = name.slice(name.lastIndexOf('.') + 1);
+    const what = decl.note ?? (decl.name && decl.name !== leaf ? `as \`${decl.name}\`` : '');
+    out.push(
+      '',
+      `${hash} \`${name}\` — re-exported from \`${decl.external}\`${what ? ` (${what})` : ''}`,
+    );
+    return;
+  }
+  if (decl.unresolved) {
+    out.push('', `${hash} \`${name}\` — declared outside the readable declaration closure`);
+    return;
+  }
+  const leaf = name.slice(name.lastIndexOf('.') + 1);
+  const alias = decl.name !== leaf ? ` (declared as \`${decl.name}\`)` : '';
+  out.push('', `${hash} \`${name}\` — \`${rel2(pkgDir, decl.file)}\`${alias}`, '', '```ts');
+  // Every declaration this name carries, in file order — an overload set, or a value exported beside
+  // a type of the same name, is several promises and each one has to be in the bytes.
+  out.push(decl.texts.map(normalizeDeclaration).join('\n'), '```');
+}
+
 /**
  * THE ONE renderer — used by BOTH `--write` and the comparison, so the committed report and the bytes
  * it is compared against can never drift apart in format.
@@ -485,7 +638,7 @@ function renderReport(pkg) {
     `# Public API report — ${pkg.name}`,
     '',
     '<!--',
-    'GENERATED FILE — do not edit by hand.',
+    `GENERATED FILE — do not edit by hand. [${REPORT_STAMP}]`,
     '',
     "Derived from this package's BUILT type declarations by scripts/check-public-api-report.mjs, so it",
     'records the surface a consumer of the published package actually gets. Any change to that surface',
@@ -498,30 +651,9 @@ function renderReport(pkg) {
     const sorted = [...entry.surface.names.keys()].sort();
     out.push('', `## Entry point \`${entry.subpath}\` — \`${rel2(pkg.dir, entry.file)}\``, '');
     out.push(`${sorted.length} export(s).`);
-    if (entry.surface.opaque.length > 0) {
-      out.push('', 'Opaque re-export(s) — the borrowed names are owned by another package:', '');
-      for (const specifier of [...new Set(entry.surface.opaque)].sort()) {
-        out.push(`- \`export * from '${specifier}'\``);
-      }
-    }
+    renderOpaque(out, entry.surface.opaque);
     for (const name of sorted) {
-      const decl = entry.surface.names.get(name);
-      if (decl.external) {
-        const what = decl.note ?? (decl.name && decl.name !== name ? `as \`${decl.name}\`` : '');
-        out.push(
-          '',
-          `### \`${name}\` — re-exported from \`${decl.external}\`${what ? ` (${what})` : ''}`,
-        );
-        continue;
-      }
-      if (decl.unresolved) {
-        out.push('', `### \`${name}\` — declared outside the readable declaration closure`);
-        continue;
-      }
-      const where = rel2(pkg.dir, decl.file);
-      const alias = decl.name !== name ? ` (declared as \`${decl.name}\`)` : '';
-      out.push('', `### \`${name}\` — \`${where}\`${alias}`, '', '```ts');
-      out.push(normalizeDeclaration(decl.text), '```');
+      renderName(out, pkg.dir, name, entry.surface.names.get(name), 3, new Set());
     }
   }
   return `${out.join('\n')}\n`;
@@ -625,6 +757,43 @@ function declaredPackages(dirs) {
     declared.push({ name: label, dir, reportPath, entries });
   }
   return declared;
+}
+
+/**
+ * Generated reports in the tree that the declared set does NOT claim. A report is a package's own
+ * evidence that it opted in, so an unclaimed one means the guard was retired while the artifact stayed
+ * — the marker was dropped from the manifest, the marker now points somewhere else, or the package
+ * directory fell out of the `packages:` patterns. Each case leaves a stale report nobody verifies.
+ */
+function orphanReports(dirs, claimed) {
+  const visited = new Set();
+  const orphans = [];
+  const walk = (dir) => {
+    if (visited.has(dir)) return;
+    visited.add(dir);
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = join(dir, e.name);
+      if (e.isDirectory()) {
+        if (!SKIP_DIRS.has(e.name)) walk(full);
+        continue;
+      }
+      if (!e.isFile() || !e.name.endsWith('.md') || claimed.has(full)) continue;
+      try {
+        // The stamp lives in the header, so a bounded read is enough for any report.
+        if (readFileSync(full, 'utf8').slice(0, 1024).includes(REPORT_STAMP)) orphans.push(full);
+      } catch {
+        /* unreadable: not a report this gate wrote */
+      }
+    }
+  };
+  for (const dir of dirs) walk(dir);
+  return orphans.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 // ─── the unified diff (node builtins only) ──────────────────────────────────────────────────────
@@ -731,13 +900,28 @@ function unifiedDiff(committed, fresh, label, context = 3) {
 const dirs = workspacePackageDirs();
 const declared = declaredPackages(dirs);
 
+// Before anything else, including the empty-set PASS: a report nobody claims is a retired guard.
+const orphans = orphanReports(dirs, new Set(declared.map((pkg) => pkg.reportPath)));
+if (orphans.length > 0) {
+  die(
+    `${orphans.length} public-API report(s) in the tree are claimed by NO manifest:\n` +
+      orphans.map((f) => `    ${rel(f)}`).join('\n') +
+      `\n  A report is generated from a package's "${MARKER}" key, so an unclaimed one means the key ` +
+      'was dropped or re-pointed, or the package left the workspace patterns — the surface is no ' +
+      'longer verified while the file stays in the tree.\n' +
+      '  Restore the declaration, or delete the report.',
+  );
+}
+
 if (declared.length === 0) {
   const what = WRITE ? 'nothing to regenerate' : 'PASSED: 0 declared package(s)';
   console.log(
-    `public-api-report gate ${what}; ${dirs.length} workspace manifest(s) scanned.\n` +
+    `public-api-report gate ${what}; ${dirs.length} workspace manifest(s) scanned, ` +
+      'no unclaimed report found.\n' +
       `  No package declares "${MARKER}". The scanned set is DECLARED DATA read from the manifests, ` +
       'not a fixed directory root, so an empty set means nothing has opted in — a package that DOES ' +
-      'declare the key can never be skipped.',
+      'declare the key can never be skipped, and a report left behind by one that dropped the key ' +
+      'FAILS instead of rotting.',
   );
   process.exit(0);
 }
