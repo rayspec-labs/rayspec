@@ -98,9 +98,11 @@ interface Candidate {
 }
 
 function clampText(text: string): string {
-  return text.length <= RECALL_HIT_TEXT_MAX_CHARS
-    ? text
-    : `${text.slice(0, RECALL_HIT_TEXT_MAX_CHARS - 1)}…`;
+  if (text.length <= RECALL_HIT_TEXT_MAX_CHARS) return text;
+  let sliced = text.slice(0, RECALL_HIT_TEXT_MAX_CHARS - 1);
+  // Never cut an astral pair in half — a lone surrogate is mangled text, not a shorter string.
+  if (/[\uD800-\uDBFF]$/.test(sliced)) sliced = sliced.slice(0, -1);
+  return `${sliced}…`;
 }
 
 function resultSummary(result: unknown): string | null {
@@ -172,7 +174,10 @@ export class TaskHistoryMemoryProvider implements WorkforceMemoryProvider {
 
     // Corpus 2 — journaled decisions on the SAME scoped set (any status: a rejection on a task
     // still in rework is exactly the memory a sibling turn wants). Two bounded reads because the
-    // journal carries no owner column — the scoped task page resolves the ids first.
+    // journal carries no owner column — the scoped task page resolves the ids first. HONEST
+    // BOUND: the page keys on the TASK's creation time (newest 200 inside the window), so a
+    // fresh decision on a task created before the window — or past the newest-200 page — is not
+    // recalled. Omission, never a leak; a decidedAt-keyed page is the refinement if it bites.
     const scopedTaskRows = (await this.#tdb
       .select(tasks, { taskId: tasks.taskId, title: tasks.title, goal: tasks.goal })
       .where(

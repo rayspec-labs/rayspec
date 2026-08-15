@@ -41,6 +41,7 @@ import {
   SECTION_HEADERS,
   TURN_ENDING_REMINDER,
 } from './prompt.js';
+import { TOOLSETS_BY_ROLE } from './roles.js';
 
 /**
  * The whole-input ceiling and the per-section budgets, in bytes (utf-8). Deliberately coherent:
@@ -236,6 +237,7 @@ function renderPolicies(input: TurnInputFacts): string {
       : 'Per-task ceilings: none declared.',
   );
 
+  const holdsDelegation = TOOLSETS_BY_ROLE[input.employee.role].includes('delegate_task');
   if (facts.legalTargets.length > 0) {
     const depthLabel =
       facts.delegationDepthRemaining !== null
@@ -247,6 +249,13 @@ function renderPolicies(input: TurnInputFacts): string {
         : 'no per-task fan-out ceiling';
     lines.push(`Delegation: ${depthLabel}, ${fanOutLabel}.`);
     lines.push(`Legal delegation targets: ${facts.legalTargets.join(', ')}.`);
+  } else if (holdsDelegation) {
+    lines.push(
+      facts.delegationDepthRemaining === 0
+        ? 'Delegation: the depth ceiling is spent on this task — no hand-off is legal from here.'
+        : 'Delegation: no target is legal from this task (every declared target already owns ' +
+            'work above it in the chain).',
+    );
   } else {
     lines.push('Delegation: your toolset carries no delegation tool on this task.');
   }
@@ -276,14 +285,20 @@ function renderPolicies(input: TurnInputFacts): string {
     );
   }
 
-  if (facts.approvalRule !== null) {
-    lines.push(
-      `Approval rule covering you: ${facts.approvalRule.id} — request_approval runs on its ` +
-        `declared window (${windowLabel(facts.approvalRule.timeoutMs)}, then ` +
-        `${facts.approvalRule.onTimeout}).`,
-    );
-  } else {
-    lines.push('Approval rule covering you: none declared for your capabilities.');
+  // The approval line renders ONLY for seats whose toolset carries request_approval: for a
+  // worker, "none declared" would be a false statement about the document (a rule may well cover
+  // its labels — the seat just cannot act on it), and naming the rule would advertise a tool the
+  // runtime refuses. A fact a seat cannot act on is not a fact for its turn.
+  if (TOOLSETS_BY_ROLE[input.employee.role].includes('request_approval')) {
+    if (facts.approvalRule !== null) {
+      lines.push(
+        `Approval rule covering you: ${facts.approvalRule.id} — request_approval runs on its ` +
+          `declared window (${windowLabel(facts.approvalRule.timeoutMs)}, then ` +
+          `${facts.approvalRule.onTimeout}).`,
+      );
+    } else {
+      lines.push('Approval rule covering you: none declared for your capabilities.');
+    }
   }
   return lines.join('\n');
 }

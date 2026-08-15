@@ -58,25 +58,38 @@ export interface TurnFacts {
 }
 
 /**
- * The legal-target computation mirrors the resolver's enforcement (`resolve-target.ts`), stated
- * once here as a comment pair so a drift is a review finding, not a surprise:
+ * The legal-target computation mirrors the FULL enforcement — the resolver's role rules AND the
+ * planner's hand-off refusals — stated once here as a comment pair so a drift is a review
+ * finding, not a surprise:
  *   - an orchestrator addresses any department, any team, and any employee but itself;
  *   - a manager addresses their own department's members, plus the members of a team they LEAD
  *     while this task is that team's work (`snapshot.activeTeamIds` — the delegation-chain fact);
- *   - workers and reviewers hold no delegation tool.
+ *   - workers and reviewers hold no delegation tool;
+ *   - a target RESOLVING to a seat that already owns an ancestor of this task is subtracted
+ *     (the planner refuses it as `delegation_cycle`, terminally after a retry — a fact list
+ *     advertising it would steer the model into the requeue-then-fail fate);
+ *   - at delegation depth 0 nothing is legal at all.
  */
 function legalTargetsFor(
   config: WorkforceConfig,
   employee: WorkforceEmployeeConfig,
   snapshot: WorkforceReadSnapshot,
+  depthRemaining: number | null,
 ): readonly string[] {
+  if (depthRemaining !== null && depthRemaining <= 0) return [];
+  const ancestors = new Set(snapshot.ancestorOwners);
+  // The RESOLVED owner is what the cycle rule sees: a department resolves to its manager, a team
+  // to its lead — the same resolution `resolve-target.ts` applies.
+  const departmentLegal = (id: string): boolean =>
+    !ancestors.has(config.departments.get(id)?.manager ?? '');
+  const teamLegal = (id: string): boolean => !ancestors.has(config.teams.get(id)?.lead ?? '');
+  const employeeLegal = (id: string): boolean => id !== employee.id && !ancestors.has(id);
+
   if (employee.role === 'orchestrator') {
     return [
-      ...[...config.departments.keys()].map((id) => `department:${id}`),
-      ...[...config.teams.keys()].map((id) => `team:${id}`),
-      ...[...config.employees.keys()]
-        .filter((id) => id !== employee.id)
-        .map((id) => `employee:${id}`),
+      ...[...config.departments.keys()].filter(departmentLegal).map((id) => `department:${id}`),
+      ...[...config.teams.keys()].filter(teamLegal).map((id) => `team:${id}`),
+      ...[...config.employees.keys()].filter(employeeLegal).map((id) => `employee:${id}`),
     ];
   }
   if (employee.role === 'manager') {
@@ -90,7 +103,7 @@ function legalTargetsFor(
       )
       .flatMap(([, team]) => team.members);
     // Declaration order, first occurrence wins — a member reachable through both grants renders once.
-    return [...new Set([...own, ...led])].map((id) => `employee:${id}`);
+    return [...new Set([...own, ...led])].filter(employeeLegal).map((id) => `employee:${id}`);
   }
   return [];
 }
@@ -128,8 +141,9 @@ export function computeTurnFacts(input: {
   const ancestryDepth = Array.isArray(task.ancestryPath)
     ? (task.ancestryPath as string[]).length
     : 0;
+  const depthRemaining = maxDepth !== null ? Math.max(maxDepth - ancestryDepth, 0) : null;
   return {
-    legalTargets: legalTargetsFor(config, employee, snapshot),
+    legalTargets: legalTargetsFor(config, employee, snapshot, depthRemaining),
     reviewRules: applicableReviewRules(config.reviewPolicies, employee),
     approvalRule: TOOLSETS_BY_ROLE[employee.role].includes('request_approval')
       ? matchApprovalRule(config, employee)
@@ -141,7 +155,7 @@ export function computeTurnFacts(input: {
       taskCeilingUsd: budgets.task?.usd ?? null,
       taskCeilingTurns: budgets.task?.turns ?? null,
     },
-    delegationDepthRemaining: maxDepth !== null ? Math.max(maxDepth - ancestryDepth, 0) : null,
+    delegationDepthRemaining: depthRemaining,
     delegationsPerTaskLimit: budgets.delegation?.maxPerTask ?? null,
   };
 }

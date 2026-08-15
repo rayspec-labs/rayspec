@@ -54,6 +54,36 @@ describe('computeTurnFacts', () => {
     expect(onTeamWork.legalTargets).toEqual(['employee:dev', 'employee:qa']);
   });
 
+  it('subtracts targets the cycle rule refuses, and zeroes everything at depth 0', () => {
+    // The manager owns an ancestor (an escalation chain): handing work back to a seat above the
+    // task is the planner's delegation_cycle refusal, so the fact list must not advertise it —
+    // employee:mgr goes, and department:eng goes WITH it (it RESOLVES to mgr).
+    const task = fixtureTask({ owner: 'lead', ancestryPath: ['task_root', 'task_mid'] });
+    const withAncestors = computeTurnFacts({
+      config,
+      employee: employee('lead'),
+      task,
+      snapshot: emptySnapshot(task, { ancestorOwners: ['mgr'] }),
+    });
+    expect(withAncestors.legalTargets).not.toContain('employee:mgr');
+    expect(withAncestors.legalTargets).not.toContain('department:eng');
+    expect(withAncestors.legalTargets).not.toContain('team:fix_team'); // its lead IS mgr
+    expect(withAncestors.legalTargets).toContain('department:growth');
+    expect(withAncestors.legalTargets).toContain('employee:dev');
+
+    // Depth spent: every hand-off is refused depth_exceeded, so nothing is legal at all.
+    const spent = computeTurnFacts({
+      config,
+      employee: employee('lead'),
+      task: fixtureTask({ owner: 'lead', ancestryPath: ['a', 'b', 'c'] }),
+      snapshot: emptySnapshot(task, {
+        budgets: { ...emptySnapshot(task).budgets, delegation: { maxDepth: 3 } },
+      }),
+    });
+    expect(spent.delegationDepthRemaining).toBe(0);
+    expect(spent.legalTargets).toEqual([]);
+  });
+
   it('gives workers and reviewers no delegation targets — and empty is the stated fact', () => {
     for (const id of ['dev', 'qa']) {
       const task = fixtureTask({ owner: id });

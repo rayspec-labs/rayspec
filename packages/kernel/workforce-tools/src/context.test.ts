@@ -207,6 +207,17 @@ describe('assembleTurnInput', () => {
     expect(rendered).not.toContain('d'.repeat(30_000));
   });
 
+  it('never ends a truncation on a split astral pair — trimmed text stays well-formed', () => {
+    const rendered = assembleTurnInput(
+      inputFor({
+        task: fixtureTask({ goal: 'g'.repeat(30_000), description: '😀'.repeat(10_000) }),
+      }),
+    );
+    expect(rendered).toContain('…[truncated: byte budget]');
+    // No lone surrogate anywhere in the assembled bytes (isWellFormed covers the cut point).
+    expect(rendered.isWellFormed()).toBe(true);
+  });
+
   it('refuses a mandatory config-derived section that outgrows its budget, typed', () => {
     const employee = {
       ...(config.employees.get('dev') as NonNullable<ReturnType<typeof config.employees.get>>),

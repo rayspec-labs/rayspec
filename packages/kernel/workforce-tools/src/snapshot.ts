@@ -77,6 +77,13 @@ export interface WorkforceReadSnapshot {
    */
   readonly activeTeamIds: readonly string[];
   /**
+   * The OWNERS of this task's ancestors (deduped, ancestry order) — the seats the engine's
+   * delegation-cycle rule refuses as targets from here. Read off the immutable ancestry ids
+   * (one bounded IN query, ≤ the delegation depth), so the scaffolding can subtract them from
+   * the legal-target facts instead of advertising a hand-off the planner will terminally refuse.
+   */
+  readonly ancestorOwners: readonly string[];
+  /**
    * The declared ceilings, resolved off the runtime row — every role, every turn (the scaffolding
    * presents headroom and limits as facts before the model runs; a single-row read). The row
    * exists for any declared workforce (boot upserts it) and for any dispatched one (the scheduler
@@ -274,6 +281,28 @@ export async function buildWorkforceSnapshot(
     };
   }
 
+  // THE CYCLE RULE'S SUBJECTS: who owns the chain above this task. The ancestry ids are
+  // immutable on the row; one bounded read resolves them to owners (ancestry order, deduped).
+  const ancestryIds = Array.isArray(task.ancestryPath) ? (task.ancestryPath as string[]) : [];
+  let ancestorOwners: readonly string[] = [];
+  if (ancestryIds.length > 0) {
+    const ancestorRows = (await tdb
+      .select(schema.workforceTasks, {
+        taskId: schema.workforceTasks.taskId,
+        owner: schema.workforceTasks.owner,
+      })
+      .where(inArray(schema.workforceTasks.taskId, ancestryIds))) as Array<{
+      taskId: string;
+      owner: string;
+    }>;
+    const ownerById = new Map(ancestorRows.map((row) => [row.taskId, row.owner]));
+    ancestorOwners = [
+      ...new Set(
+        ancestryIds.map((id) => ownerById.get(id)).filter((o): o is string => o !== undefined),
+      ),
+    ];
+  }
+
   // THE TEAM-WORK FACT. A `team:` delegation records its original target verbatim on the delegation
   // row, so the chain from this task up to the root says which team's work this is — and nothing
   // the model says can change it.
@@ -302,6 +331,7 @@ export async function buildWorkforceSnapshot(
     workforceState,
     pendingReview,
     activeTeamIds,
+    ancestorOwners,
     budgets,
     dependencyResults,
   };

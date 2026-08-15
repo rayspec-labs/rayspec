@@ -53,7 +53,11 @@ export class SingleTaskPlanStrategy implements OrchestrationStrategy {
     return Promise.resolve({
       steps: [
         {
-          title: input.goal.length <= 200 ? input.goal : `${input.goal.slice(0, 197)}...`,
+          // Never split an astral pair at the trim — a lone surrogate is mangled text.
+          title:
+            input.goal.length <= 200
+              ? input.goal
+              : `${input.goal.slice(0, 197).replace(/[\uD800-\uDBFF]$/, '')}...`,
           goal: input.goal,
           owner: input.defaultOwner,
           department: null,
