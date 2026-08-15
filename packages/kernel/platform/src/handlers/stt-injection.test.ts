@@ -1,12 +1,12 @@
 /**
- * STT capability INJECTION tests — the optional `init.stt` transcription capability reaches BOTH a
- * TOOL handler and a ROUTE handler by injection, carries the handler's bytes + plain options through
- * verbatim, and is ABSENT (fail-closed) when no provider is wired.
+ * STT capability INJECTION tests — the optional `init.stt` transcription capability reaches a TOOL
+ * handler, a ROUTE handler and a TRIGGER handler by injection, carries the handler's bytes + plain
+ * options through verbatim, and is ABSENT (fail-closed) when no provider is wired.
  *
  * FAIL-THE-FIX against a recording stand-in capability (this layer ROUTES the handle; the real
  * adapter-backed capability — provider selection, the bytes→ref resolver wrap, the deterministic fake —
  * is proven in @rayspec/server's `stt-capability.unit.test.ts`):
- *   - a tool / route handler receives an `init.stt` whose `transcribe(bytes, opts)` it can call;
+ *   - a tool / route / trigger handler receives an `init.stt` whose `transcribe(bytes, opts)` it can call;
  *   - the EXACT bytes + the plain option record reach the capability (serializable-shaped pass-through);
  *   - FAIL-CLOSED when nothing is wired: `init.stt` is ABSENT (not `undefined`) → the handler fail-closes.
  * MUTATING-TO-RED: drop the `stt` argument thread → `init.stt` is undefined when it SHOULD be present
@@ -21,13 +21,19 @@ import type {
   SttTranscriptionResult,
   ToolHandler,
   ToolHandlerInit,
+  TriggerHandler,
+  TriggerHandlerInit,
 } from '@rayspec/handler-sdk';
 import type { RaySpec } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
 import type { ResolvedHandler } from './handler-runtime.js';
 import { buildToolFactory } from './resolve-tools.js';
-import { invokeRouteHandler, invokeRouteHandlerDetached } from './route-init.js';
+import {
+  invokeRouteHandler,
+  invokeRouteHandlerDetached,
+  invokeTriggerHandler,
+} from './route-init.js';
 
 const TENANT = '00000000-0000-0000-0000-0000000000aa';
 const noTables: ReadonlyMap<string, PgTable> = new Map();
@@ -222,6 +228,45 @@ describe('stt injection — ROUTE handler', () => {
       return null;
     };
     await invokeRouteHandler(probe, fakeTdb(), noTables, params);
+    expect(hasStt).toBe(false); // ABSENT, not undefined — the init shape stays exact
+  });
+});
+
+// ── TRIGGER handler injection ───────────────────────────────────────────────────────────────────
+
+let triggerText: string | undefined;
+
+const sttTriggerFn: TriggerHandler = async (init: TriggerHandlerInit) => {
+  if (!init.stt)
+    throw new Error('trigger fail-closed: init.stt is undefined (no STT provider wired)');
+  const result = await init.stt.transcribe(AUDIO, { contentType: 'audio/ogg' });
+  triggerText = result.transcript?.full_text;
+};
+
+describe('stt injection — TRIGGER handler', () => {
+  it('injects the SAME init.stt a route handler receives', async () => {
+    const stt = recordingStt();
+    triggerText = undefined;
+    await invokeTriggerHandler(sttTriggerFn, fakeTdb(), noTables, 'nightly', undefined, stt);
+    expect(triggerText).toBe('6 bytes/audio/ogg/-');
+    // The EXACT bytes + the plain option record crossed the seam (serializable-shaped, unwrapped).
+    expect(stt.calls).toHaveLength(1);
+    expect([...(stt.calls[0]?.bytes ?? [])]).toEqual([...AUDIO]);
+    expect(stt.calls[0]?.opts).toEqual({ contentType: 'audio/ogg' });
+  });
+
+  it('FAILS CLOSED — a trigger init has NO stt when no provider is wired', async () => {
+    await expect(
+      invokeTriggerHandler(sttTriggerFn, fakeTdb(), noTables, 'nightly'),
+    ).rejects.toThrow(/init\.stt is undefined/);
+  });
+
+  it('omits init.stt entirely when no provider is wired (ABSENT, not undefined)', async () => {
+    let hasStt = true;
+    const probe: TriggerHandler = async (init: TriggerHandlerInit) => {
+      hasStt = 'stt' in (init as object);
+    };
+    await invokeTriggerHandler(probe, fakeTdb(), noTables, 'nightly');
     expect(hasStt).toBe(false); // ABSENT, not undefined — the init shape stays exact
   });
 });

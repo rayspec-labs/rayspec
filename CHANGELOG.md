@@ -5,6 +5,27 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A trigger handler now receives `init.fsSource`, `init.stt` and `init.tts`.** Those three
+  capabilities reached a `handler`-kind route and a tool but never a trigger, so a handler that read
+  a file from the deployment's source root or transcribed audio worked when it was called over HTTP
+  and threw on the missing handle the moment the same work was fired by a trigger. Nothing about the
+  three is request-specific — the source root is a shared, deployment-static read root and the two
+  speech handles take the bytes or text the handler already holds — so the trigger init now builds
+  them exactly as the route init does.
+  **The presence rule is unchanged, and it is now the same rule on both paths:** a capability is on
+  the init only when the deployment configured it (`RAYSPEC_FS_SOURCE_ROOT`, `STT_PROVIDER`,
+  `TTS_PROVIDER`), and an unconfigured one is absent from the init object rather than present with an
+  `undefined` value — so a handler that needs one still fail-closes loudly on the missing handle. A
+  deployment that configured none of the three builds a byte-identical trigger init to before.
+  **Nothing else crosses.** `init.blob`, `init.mintPlayToken`, `init.enqueue` and `init.emit` are
+  built per request and still do not reach a trigger. The handler-SDK docstrings and the "Optional
+  handler capabilities" table in the spec reference described the trigger init as carrying only
+  `{ tenantId, db, triggerName }`; both now say what the builders do.
+
 ## [1.8.0] - 2026-08-15
 
 ### Added

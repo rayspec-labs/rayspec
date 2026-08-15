@@ -3077,6 +3077,17 @@ async function deployDeclaredSpec(
         executor: durableExecutorInstance,
         productTables,
         invokeTriggerHandler,
+        // The three DEPLOYMENT-STATIC capabilities a `handler`-kind ROUTE init carries, threaded to
+        // the trigger dispatch on the SAME terms and for the SAME reason they are threaded into the
+        // worker's agent registry above: none is request-derived (`fsSourceFactory()` reads the
+        // deployment's jailed source root; `sttCapability`/`ttsCapability` are provider handles that
+        // take the bytes/text the handler already holds), so a handler fired by a trigger does the
+        // work it does when the same handler is called over HTTP — instead of throwing on a capability
+        // that is configured. Spread-when-wired, so a deployment that configured none wires a
+        // byte-identical scheduler to before.
+        ...(fsSourceFactory ? { fsSourceFactory } : {}),
+        ...(sttCapability ? { stt: sttCapability } : {}),
+        ...(ttsCapability ? { tts: ttsCapability } : {}),
         // The per-firing existence probe. Bound to the WORKER pool (the pool the fire itself dispatches
         // off) so the check never borrows an HTTP connection, and re-evaluated on every call — that is
         // what makes an org created mid-life start firing without a restart. The tenant is the one the

@@ -3,8 +3,9 @@
  *
  * The seam this layer owns is placement + timing, so that is what is asserted (the durable ordering
  * itself is proven against a real Postgres in @rayspec/db's event-bus.db.test.ts):
- *   - a ROUTE init and a TOOL init carry `emit`; a TRIGGER init does NOT (the same boundary
- *     `fsSource`/`stt`/`tts` draw), and neither builder invents one;
+ *   - a ROUTE init and a TOOL init carry `emit`; a TRIGGER init does NOT (unlike the
+ *     deployment-static `fsSource`/`stt`/`tts` a trigger init does carry), and neither builder
+ *     invents one;
  *   - ABSENT, not undefined-valued, when no bus is wired: `'emit' in init === false`;
  *   - a ROUTE handler's emits are BUFFERED and written ONCE, as the last thing before the transaction
  *     ends — never one write per call, which would hold the tenant's counter lock across the handler;
@@ -301,7 +302,7 @@ describe('init.emit — TOOL injection (immediate: a tool has no outer transacti
 });
 
 describe('init.emit — the TRIGGER boundary (deliberately not reached)', () => {
-  it('a trigger init carries no `emit` — the same boundary fsSource/stt/tts already draw', async () => {
+  it('a trigger init carries no `emit` — unlike the deployment-static fsSource/stt/tts', async () => {
     triggerSawEmit = undefined;
     await invokeTriggerHandler(probeTrigger, fakeTdb(), noTables, 'nightly');
     expect(triggerSawEmit).toBe(false);

@@ -1468,11 +1468,11 @@ everywhere:
 | Field | What it is | Reaches | Configured by |
 | --- | --- | --- | --- |
 | `init.blob` | Tenant-bound binary storage (opaque keys). | `stream`-kind routes (always) and tools | a blob backend — `RAYSPEC_BLOB_ROOT`, or one an extension pack provides — and only built when the spec declares a `stream` route |
-| `init.fsSource` | Read-only, path-jailed reader over a deployment-static root. | `handler`-kind routes and tools | `RAYSPEC_FS_SOURCE_ROOT` |
+| `init.fsSource` | Read-only, path-jailed reader over a deployment-static root. | `handler`-kind routes, tools and triggers | `RAYSPEC_FS_SOURCE_ROOT` |
 | `init.mintPlayToken` | Mint a short-lived `?token=` for a `stream` playback route. | `handler`-kind routes | `RAYSPEC_MEDIA_SIGNING_KEY` |
 | `init.enqueue` | Enqueue a durable, off-request agent run. | `handler`-kind routes | a configured durable worker |
-| `init.stt` | Transcribe audio bytes (speech-to-text). | `handler`-kind routes and tools | `STT_PROVIDER` |
-| `init.tts` | Synthesize audio from text (text-to-speech). | `handler`-kind routes and tools | `TTS_PROVIDER` |
+| `init.stt` | Transcribe audio bytes (speech-to-text). | `handler`-kind routes, tools and triggers | `STT_PROVIDER` |
+| `init.tts` | Synthesize audio from text (text-to-speech). | `handler`-kind routes, tools and triggers | `TTS_PROVIDER` |
 | `init.emit` | Append a durable, per-tenant-sequenced event to the tenant's stream. | `handler`-kind routes and the tools of an **in-request** agent run (never those of an enqueued one — see below) | `deployment.eventBus.enabled` (a product deployment has it structurally, with nothing to declare) |
 
 Two boundaries the table implies are worth spelling out.
@@ -1484,8 +1484,12 @@ Two boundaries the table implies are worth spelling out.
   blob backend) and **nothing else from this table**. In particular a `handler`-kind
   route never receives `init.blob`, however `RAYSPEC_BLOB_ROOT` is set — move bytes
   through a `stream` route or a tool, and pass the handler a key, not a handle.
-- A **trigger** handler receives only `{ tenantId, db, triggerName }`, so work that
-  needs any capability here belongs in a route or a tool the trigger drives.
+- A **trigger** handler receives `{ tenantId, db, triggerName }` plus the three
+  deployment-static capabilities above — `init.fsSource`, `init.stt`, `init.tts` — on
+  exactly the terms a `handler`-kind route gets them, so a handler that works over
+  HTTP does the same work when a trigger fires it. It receives none of the others:
+  work that needs `init.blob`, `init.mintPlayToken`, `init.enqueue` or `init.emit`
+  belongs in a route or a tool the trigger drives.
 
 #### `init.stt` — transcription
 

@@ -111,9 +111,10 @@
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * DISPATCH — both action kinds (the named consumer `nightly-digest` is a HANDLER, not an agent run).
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- *  - `handler` → `invokeTriggerHandler(handler.fn, forTenant(db, tenantId), productTables, name)` —
+ *  - `handler` → `invokeTriggerHandler(handler.fn, forTenant(db, tenantId), productTables, name, …)` —
  *    the invocation point, which opens its OWN `tdb.transaction()` (the GUC seam). This is the
- *    build-now path (`nightly-digest`).
+ *    build-now path (`nightly-digest`). The trailing arguments are the deployment-static handler
+ *    capabilities (`fsSourceFactory`/`stt`/`tts`), passed through from the deps below.
  *  - `agent`   → `enqueueAgentRun(...)` onto the `DurableExecutor` (`runAgentJob`), with a
  *    DETERMINISTIC runId derived from the firing key (so a double-fire dedups at the engine too).
  *
@@ -160,6 +161,16 @@ import type { PgTable } from 'drizzle-orm/pg-core';
  * is the platform's `TriggerHandler` type without this engine package importing `@rayspec/handler-sdk`.
  */
 type TriggerHandlerFn = Parameters<typeof InvokeTriggerHandlerFn>[0];
+
+/**
+ * The three DEPLOYMENT-STATIC handler capabilities a fired trigger handler receives, taken from the
+ * platform's `invokeTriggerHandler` signature for the SAME reason `TriggerHandlerFn` is — the shapes
+ * are handler-SDK types this engine package does not import. Passed straight through (this package
+ * neither builds nor inspects them); the composition root owns their construction.
+ */
+type TriggerFsSourceFactoryFn = Parameters<typeof InvokeTriggerHandlerFn>[4];
+type TriggerSttCapability = Parameters<typeof InvokeTriggerHandlerFn>[5];
+type TriggerTtsCapability = Parameters<typeof InvokeTriggerHandlerFn>[6];
 
 /** The `idempotency_keys` scope for a cron firing-instant marker (the tenant-scoped idempotency key). */
 export const TRIGGER_FIRE_SCOPE = 'trigger';
@@ -342,6 +353,19 @@ export interface CronSchedulerDeps {
    * GUC-tx handler-invocation seam — it stays the single source of truth in `@rayspec/platform`).
    */
   readonly invokeTriggerHandler: typeof InvokeTriggerHandlerFn;
+  /**
+   * The READ-ONLY, path-jailed fs-source factory a fired HANDLER action's `init.fsSource` is built
+   * from — the SAME deployment-static handle the request-served route inits carry, so a handler does
+   * the same work whether it is called over HTTP or fired by a trigger. OPTIONAL: absent ⇒ the
+   * capability is ABSENT on the init (no source root configured), never an `undefined`-valued key.
+   */
+  readonly fsSourceFactory?: TriggerFsSourceFactoryFn;
+  /** The speech-to-text capability a fired handler's `init.stt` transcribes through — same terms as
+   *  `fsSourceFactory`. OPTIONAL: absent ⇒ `init.stt` is ABSENT (no STT provider configured). */
+  readonly stt?: TriggerSttCapability;
+  /** The text-to-speech capability a fired handler's `init.tts` synthesizes through — same terms as
+   *  `fsSourceFactory`. OPTIONAL: absent ⇒ `init.tts` is ABSENT (no TTS provider configured). */
+  readonly tts?: TriggerTtsCapability;
   /**
    * Does the deployment tenant currently EXIST as a usable org? Asked BEFORE every firing (see
    * `#fire`), never cached — the whole point is that the answer may flip from false to true while this
@@ -708,6 +732,12 @@ export class DbosCronScheduler {
         forTenant(db, tenantId),
         this.#deps.productTables,
         descriptor.name,
+        // The deployment-static capabilities, passed through exactly as they were injected — an
+        // unwired one arrives `undefined` and the platform spreads it ABSENT off the init, which is
+        // the same absence a request-served init has for it.
+        this.#deps.fsSourceFactory,
+        this.#deps.stt,
+        this.#deps.tts,
       );
       // A handler dispatch carries no runId — the handler IS the dispatch; there is no off-request
       // run to follow.
