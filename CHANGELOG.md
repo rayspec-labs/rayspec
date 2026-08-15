@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The workforce reference orchestration: policy-aware turns, recall, an operator tree, and an
+  end-to-end acceptance story** (all behind `RAYSPEC_EXPERIMENTAL_WORKFORCE`, exactly as before —
+  a document without the section parses byte-identically, and one with it is still refused typed
+  at every entry point that has not opted in).
+  A declared workforce now THINKS between the mechanisms the engine already enforced. Goals get a
+  production intake: `POST /v1/workforce/:workforceId/goals` (and `rayspec workforce submit`)
+  turns one submitted goal into durable `planned` tasks through the orchestration-strategy seam —
+  the shipped default hands the whole goal to the declared orchestrator seat, atomically, with a
+  refused plan creating zero rows. Every dispatched turn runs on a deterministic, byte-budgeted
+  seven-section context assembly (identity, role frame, policies in force, the task, child
+  results keyed by id, recent messages, recall): one pure function, byte-identical output for
+  identical inputs, marked per-item truncation, whole sections dropping highest-numbered-first
+  under pressure — and **the goal is never trimmed**; a goal that cannot fit is a typed refusal
+  that takes the declared fail fate. The scaffolding computes every fact the runtime can answer
+  before the model is invoked — legal delegation targets, the review and approval rules covering
+  the seat (through the same predicates the engine matches with, so a turn is never told it may
+  do what the runtime will refuse), budget headroom and remaining depth — and the model's one
+  judgment call per turn (which turn-ending tool) is journaled as `classification` on
+  `turn_ended`, derived server-side from the typed collected intent, never from model prose.
+  Recall is real: the shipped memory provider ranks the tenant's own prior completed results and
+  journaled decisions by recency plus keyword match, scoped to the employee and their department
+  through constructor-injected trusted data, bounded by row scan, a 30-day window, hit-text and
+  hit-count caps — no embeddings, no second store, **no migration** (it reads the tables the
+  engine already writes).
+  Operators get the tree: `GET /v1/workforce/tasks/:id/tree` (one indexed subtree read, hard
+  500-row cap with the truncation header, no per-node walk) and `rayspec workforce tasks --tree`
+  rendering it as text — per-node status, park reason, confidence and settled cost with a goal
+  line dividing the subtree's dollars by the declared per-task ceiling (`--json` keeps the
+  machine shape). `cost --by employee|department` groups server-side, each grouping naming its
+  basis honestly (`budget_ledger` settlement buckets vs `task_rows` windowed by creation time).
+  Two examples ship — `examples/workforce-starter/` (two departments, one team, one review
+  policy, one approval) and `examples/workforce-maintainers/` (three departments, nine
+  employees) — both parse-and-lint pinned in CI, and the spec reference's worked example is the
+  starter's own `workforce:` block byte-for-byte under a drift test. Four documentation pages
+  land drift-locked the same way (`spec-reference` workforce section, `workforce-architecture`,
+  `workforce-events`, `workforce-tools`): every enumerable claim set-compares against the
+  exported vocabulary it documents.
+  The whole stack is pinned by `workforce-story-e2e.db.test.ts`: the shipped starter file
+  deployed byte-for-byte, a goal POSTed, both departments fanned out in one classified turn, the
+  review loop rejecting and accepting, the approval parking the growth stream, a real SIGKILL
+  with the task table proven identical after reboot, the decision through the built CLI, an
+  id-keyed synthesis, and the rendered tree byte-stable with exact costs. A manual live path
+  (`examples/workforce-starter/live-story.sh`) runs the same story on a real model backend and
+  self-skips without credentials — it never runs in CI.
+  **Nothing already shipped changed shape**: the task list route and its cursor contract, the
+  events replay, the approvals/reviews/control surfaces and the engine's tables are
+  byte-unchanged; there is no schema migration; every other CLI subcommand still prints exactly
+  one JSON object (`tasks --tree`'s text rendering is the group's one documented exception); and
+  the `turn_ended` journal payload gains only the optional `classification` field, documented in
+  the vocabulary's first published statement.
 - **`lintSuppress` now docks on a `triggers[]` and a `handlers[]` node too.** The key arrived (see
   below) on agents, stores and api routes; on a trigger or a handler it was not ignored but a hard
   parse error (`unknown_field`) that broke the document — which put the two advisories an author is
