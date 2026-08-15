@@ -251,6 +251,24 @@ jobs:
       - name: Skill-drift gate
         run: pnpm gate:skill-drift
 
+      # The public-API report gate: a package that promises a surface to code built outside this repo
+      # declares its report file in its own manifest ("rayspecPublicApi"), and this re-derives that
+      # report from the package's BUILT type declarations and byte-compares it. A change to the surface
+      # therefore lands as a reviewable diff instead of an invisible source edit. Runs after Build (it
+      # reads dist). A package without the marker is not scanned, so zero declared packages passes.
+      - name: Public-API report gate
+        run: pnpm gate:api-report
+
+      # A checked-in report nobody can make go red is worth nothing, and the gate also has an unusual
+      # PASS (an empty declared set) that has to stay pinned. This standalone regression drives the REAL
+      # gate from throwaway trees and proves all five arms: an empty declared set passes and says so, a
+      # declared and up-to-date package passes with its coverage reported, a surface change AND a
+      # hand-edited report are both detected, a declared package with no report fails CLOSED, and an
+      # unbuilt one fails CLOSED rather than being recorded as an empty surface.
+      # DB-free / secret-free → lane 1.
+      - name: Public-API report gate regression
+        run: pnpm test:gate-api-report
+
       # The third-party inventory backing THIRD-PARTY-NOTICES.md must describe the lockfile that
       # actually ships. Hashes pnpm-lock.yaml and compares it to the hash the SBOM recorded, so a pin
       # that moves without a regenerated SBOM fails here instead of silently invalidating a legal
