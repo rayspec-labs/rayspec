@@ -1,12 +1,18 @@
 /**
- * The reserved `managed:` top-level key — accepted, carried verbatim, read by nothing.
+ * The reserved `managed:` top-level key — accepted and carried verbatim.
  *
  * The top level of the document grammar is `.strict()`, so every key it does not name is a parse
- * error. `managed:` is the one exception the grammar OWNER reserves for itself: it parses, it
- * survives into the validated document unchanged, and no runtime path reads it. These tests pin all
- * three facts plus the two properties the reservation must not cost — a document that omits the key
+ * error. `managed:` is the one exception the grammar OWNER reserves for itself: it parses, and it
+ * survives into the validated document unchanged. These tests pin those two facts at the parse
+ * boundary, plus the two properties the reservation must not cost — a document that omits the key
  * still parses without it (no default is invented), and every OTHER unknown top-level key is refused
  * exactly as before.
+ *
+ * The THIRD fact — that carrying the key changes no runtime behaviour — cannot be pinned from this
+ * package, which sits below every consumer. It is pinned where the one predicate that enumerates
+ * top-level keys lives: `static-profile.test.ts` and `boot-env-demands.test.ts` in `@rayspec/server`
+ * assert that a frontend-only document carrying `managed:` is still a static profile and still
+ * demands none of the three platform secrets.
  */
 import { describe, expect, it } from 'vitest';
 import { parseSpec } from './parse.js';

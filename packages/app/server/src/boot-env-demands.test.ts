@@ -482,6 +482,21 @@ describe('checkBootEnv — the static profile is exempt from the three', () => {
     expect(report.ok).toBe(true);
     expect(report.notChecked.join(' ')).toContain('reads NONE of the three platform secrets');
   });
+
+  it('stays exempt when the doc carries the reserved `managed:` key', async () => {
+    // The reserved key is opaque: writing it must not cost a frontend-only deployment its exemption.
+    // Fail-the-fix: drop 'managed' from STATIC_PROFILE_KNOWN_KEYS and this report becomes profile
+    // 'rayspec' with all three secrets required AND missing.
+    const report = await checkBootEnv(
+      '/s.yaml',
+      `${STATIC_SPEC}managed: { owner: platform }\n`,
+      {},
+    );
+    expect(report.profile).toBe('static');
+    expect(report.required).toEqual([]);
+    expect(report.missing).toEqual([]);
+    expect(report.ok).toBe(true);
+  });
 });
 
 describe('checkBootEnv — the <VAR>_FILE mount is honoured without opening the file', () => {

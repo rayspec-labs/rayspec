@@ -48,10 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A reserved `managed:` top-level key in the backend grammar.** The top level of that grammar is
   `.strict()` and stays that way — every key it does not name is still a parse error — and `managed:`
   is the one exception the grammar owner reserves for itself. It takes an arbitrary mapping, carries
-  it into the validated document unchanged, and nothing in the runtime reads it: a reservation held by
-  the platform, not a surface an extension pack may claim. It is `.optional()` with no default, so a
+  it into the validated document unchanged, and no runtime path reads its contents: a reservation held
+  by the platform, not a surface an extension pack may claim. It is `.optional()` with no default, so a
   document that omits it parses exactly as before, and reserving one name buys no general passthrough
-  (another unknown top-level key is refused with the same `unknown_field` it always was). Two of the
+  (another unknown top-level key is refused with the same `unknown_field` it always was). Writing the
+  key costs a deployment nothing either: the boot-profile classifier fail-closes on any top-level key
+  it has not reasoned about, so it was taught this one, and a frontend-only document that carries
+  `managed:` still boots as a static site with none of the three platform secrets demanded. Two of the
   three checked-in schema artifacts move with it — `spec.schema.json` and the backend arm of
   `version-1.0.schema.json`; `product.schema.json` is untouched, because the key is backend-profile
   only.

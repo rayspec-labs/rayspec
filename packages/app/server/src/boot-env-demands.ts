@@ -414,6 +414,14 @@ export function declaredAgentBackends(
  * parsed doc carrying it has a key OUTSIDE this set and `isStaticProfile` returns false (⇒ the normal
  * boot with full auth, the safe direction). A new ROUTE-BEARING grammar field MUST be added here (and
  * emptiness-checked in `isStaticProfile`) or it can never silently pass the static gate.
+ *
+ * The tripwire fires in BOTH directions, and the other one is a real cost: leaving a new NON-route
+ * bearing key out of this set does not fail safe, it fails LOUD on the one profile the key is meant to
+ * serve — a frontend-only document that writes it stops being static and starts demanding a database
+ * and two secrets it must not have. So such a key is added here too, WITHOUT an emptiness check,
+ * stating why it cannot smuggle anything past the gate. `managed` is that case: an opaque reserved
+ * mapping the grammar carries through and no runtime path reads the contents of, bearing no
+ * store/api/agent/tooling/trigger/handler/extension of its own.
  */
 const STATIC_PROFILE_KNOWN_KEYS: ReadonlySet<string> = new Set([
   'version',
@@ -427,6 +435,7 @@ const STATIC_PROFILE_KNOWN_KEYS: ReadonlySet<string> = new Set([
   'extensions',
   'deployment',
   'frontend',
+  'managed',
 ]);
 
 /**
@@ -444,7 +453,9 @@ const STATIC_PROFILE_KNOWN_KEYS: ReadonlySet<string> = new Set([
  *   - a doc that does not parse as a valid backend RaySpec is not static (the normal path then surfaces
  *     the real parse error rather than silently serving a doc that never validated);
  *   - a doc carrying ANY top-level section outside `STATIC_PROFILE_KNOWN_KEYS` is not static (the
- *     future-grammar-field tripwire);
+ *     future-grammar-field tripwire) — `managed` IS in that set and therefore changes nothing here:
+ *     the reserved key is opaque, bears no route/DB/agent/handler of its own, and a frontend-only doc
+ *     that writes it stays static;
  *   - EVERY route/DB/agent/handler-bearing section must be empty — `extensions` INCLUDED, because
  *     `mergeExtensions` concatenates each pack's stores/handlers/tooling/api/agents onto the spec
  *     before deploy, so a non-empty `extensions[]` would smuggle in every route-bearing field the

@@ -790,9 +790,14 @@ export const RaySpec = z
     /**
      * RESERVED for the platform: this key is held by the grammar owner and is never available for an
      * extension pack to claim. Opaque and inert — an arbitrary mapping the parser accepts and carries
-     * through unchanged, which nothing in the runtime reads. `.optional()` (NOT a default) so a spec
-     * that omits it parses byte-identically; the strict top level still rejects every other unknown
-     * key, so reserving this one buys no general passthrough.
+     * through unchanged, whose contents no runtime path reads. Inertness is not free, and one place
+     * had to be taught the name: `isStaticProfile` (`@rayspec/server`) fail-closes on any top-level
+     * key it has not reasoned about, so it names this one too. Without that entry writing `managed:`
+     * into a frontend-only document would flip it off the static boot and demand a database and two
+     * secrets such a deployment must not have — so a future reserved key belongs in that allowlist as
+     * well. `.optional()` (NOT a default) so a spec that omits it parses byte-identically; the strict
+     * top level still rejects every other unknown key, so reserving this one buys no general
+     * passthrough.
      */
     managed: z.record(z.string(), z.unknown()).optional(),
   })
