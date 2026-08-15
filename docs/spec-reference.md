@@ -1615,14 +1615,15 @@ live UI reads back, instead of every product growing its own polled events table
 is present only when the deployment enabled the bus
 ([`deployment.eventBus`](#deployment)), and it reaches **`handler`-kind routes and
 the tools of an in-request agent run** only: a `stream`-kind route init and a trigger
-init do not carry it (the same boundary the rest of this table draws), and neither
-does the init of a tool an **enqueued** run drives — `async: true`, or any trigger
-whose action is `kind: agent`, since a trigger fires its agent through the same
-durable worker. The worker runs a whole run inside one transaction, and allocating a
-sequence number there would hold the tenant's stream lock until that run committed,
-so the capability is left off rather than made to behave differently off-request. So
-work that must emit belongs in a `handler`-kind route, or in a tool of an agent run
-the request itself drives.
+init do not carry it (unlike the deployment-static `init.fsSource` / `init.stt` /
+`init.tts`, which a trigger init does carry), and neither does the init of a tool
+an **enqueued** run drives — `async: true`, or any trigger whose action is
+`kind: agent`, since a trigger fires its agent through the same durable worker. The
+worker runs a whole run inside one transaction, and allocating a sequence number
+there would hold the tenant's stream lock until that run committed, so the
+capability is left off rather than made to behave differently off-request. So work
+that must emit belongs in a `handler`-kind route, or in a tool of an agent run the
+request itself drives.
 
 The **tenant is engine-bound**: the capability has no tenant parameter, so a handler
 cannot emit into another tenant — there is nowhere to name one. That is the same

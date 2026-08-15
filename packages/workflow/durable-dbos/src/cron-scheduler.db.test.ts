@@ -39,6 +39,13 @@
  *     (at-most-once). 9. CATCH-UP is BOUNDED: a replay older than the look-back window is reserved
  *     (consumed) but NOT dispatched (fail-the-fix). 10. an active-and-firing deployment is UNAFFECTED
  *     (a non-catch-up scheduled fire is never bounded; an active fire of a catch-up trigger dispatches).
+ * 11. HANDLER CAPABILITIES: the deployment-static `fsSource`/`stt`/`tts` handles the scheduler was
+ *     built with REACH the fired handler's init — and NONE of them reaches it on a scheduler built
+ *     without them. Measured in both directions on ground truth (the fired handler writes what it
+ *     observed into `cron_marks`, and each handle is USED, not merely counted), because the dispatch
+ *     is the only thing that carries the deps to `invokeTriggerHandler`: the arguments are optional,
+ *     so dropping them typechecks and lints clean, and a signature nobody hands them to is a
+ *     capability no deployment ever receives.
  *
  * HONEST SCOPE: like the spine test, this drives the firing path via the DETERMINISTIC
  * `fireNow` seam (the SAME reserve→dispatch path as a scheduled fire — production fires on the crontab,
@@ -47,7 +54,8 @@
  * executor's pre-launch hook; we do NOT wait for a real 2am wall-clock tick (non-deterministic). The
  * firing-key/reserve invariant — the load-bearing exactly-once property — IS behaviorally proven here.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AgentSpec } from '@rayspec/core';
@@ -55,9 +63,15 @@ import { type Db, forTenant, schema, TENANT_GUC } from '@rayspec/db';
 import { buildProductTables, makeDbWithSchema, registerScopedTables } from '@rayspec/db/testing';
 import {
   invokeTriggerHandler,
+  makeFsSourceFactory,
   type ResolvedHandler,
   type RunJob,
+  type SttCapability,
+  type SttTranscribeOptions,
+  type SttTranscriptionResult,
   type TriggerDescriptor,
+  type TtsCapability,
+  type TtsSynthesisResult,
 } from '@rayspec/platform';
 import type { StoreSpec } from '@rayspec/spec';
 import { config as loadDotenv } from 'dotenv';
@@ -145,6 +159,120 @@ const cronHandlerFn: ResolvedHandler & { kind: 'trigger' } = {
     await init.db.insert('cron_marks', { note: `fired:${init.triggerName}` });
   },
 };
+
+// ── The DEPLOYMENT-STATIC handler capabilities a fired trigger receives (item 11) ────────────────
+
+/** The root-relative file the fired handler reads through `init.fsSource`, and its EXACT bytes. */
+const SOURCE_FILE = 'digest-source.txt';
+const SOURCE_MARKER = 'trigger-capability-marker';
+/** The audio the fired handler hands `init.stt` (opaque bytes — the recorder never decodes them). */
+const TRIGGER_AUDIO = new Uint8Array([0x4f, 0x67, 0x67, 0x53, 0x00, 0x02, 0x7f]);
+/** The text the fired handler hands `init.tts`, and the tone the recorder answers with. */
+const TRIGGER_TEXT = 'the digest is ready';
+const TRIGGER_TONE = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0x00]);
+
+/**
+ * A REAL read-only, path-jailed fs source over a throwaway root (not a re-implementation — the same
+ * factory the composition root builds from `RAYSPEC_FS_SOURCE_ROOT`). Built at module scope so the
+ * root exists whether or not the DB-gated suite below runs; the file-level `afterAll` removes it.
+ */
+const capsRoot = mkdtempSync(join(tmpdir(), 'rayspec-cron-caps-'));
+writeFileSync(join(capsRoot, SOURCE_FILE), SOURCE_MARKER, 'utf8');
+const capsFsSourceFactory = makeFsSourceFactory(capsRoot);
+afterAll(() => rmSync(capsRoot, { recursive: true, force: true }));
+
+/**
+ * A recording stand-in `SttCapability`: it echoes what it was handed into the transcript's `full_text`,
+ * so an assertion sees the EXACT bytes + options that crossed the dispatch seam rather than merely that
+ * a handle was present. (The neutral transcript envelope is the port's contract, proven where the real
+ * adapters are — here only the pass-through matters, so the envelope is a sentinel.)
+ */
+function recordingStt(): SttCapability & {
+  readonly calls: Array<{ bytes: Uint8Array; opts?: SttTranscribeOptions }>;
+} {
+  const calls: Array<{ bytes: Uint8Array; opts?: SttTranscribeOptions }> = [];
+  return {
+    calls,
+    async transcribe(
+      bytes: Uint8Array,
+      opts?: SttTranscribeOptions,
+    ): Promise<SttTranscriptionResult> {
+      calls.push({ bytes, opts });
+      return {
+        status: 'completed',
+        transcript: { full_text: `${bytes.length} bytes/${opts?.contentType ?? '-'}` },
+      } as unknown as SttTranscriptionResult;
+    },
+  };
+}
+
+/** The egress twin: records the text it was handed and answers a fixed tone (same sentinel posture). */
+function recordingTts(): TtsCapability & { readonly calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    async synthesize(text: string): Promise<TtsSynthesisResult> {
+      calls.push(text);
+      return { bytes: TRIGGER_TONE, contentType: 'audio/wav', durationSeconds: null };
+    },
+  };
+}
+
+/** What the capability-reporting handler wrote into `cron_marks.note` (read back as ground truth). */
+interface CapabilityReport {
+  readonly present: { readonly fsSource: boolean; readonly stt: boolean; readonly tts: boolean };
+  readonly sourceText: string | null;
+  readonly transcript: string | null;
+  readonly spokenBytes: number | null;
+}
+
+/**
+ * A trigger HANDLER that REPORTS which deployment-static capabilities its init carried and then USES
+ * each one it got, writing the report into `cron_marks` so the assertion reads DB ground truth rather
+ * than a harness variable. Presence is read with the `in` idiom — an `undefined`-valued key would read
+ * as present and let a half-threaded dispatch pass.
+ */
+const capabilityHandlerFn: ResolvedHandler & { kind: 'trigger' } = {
+  kind: 'trigger',
+  fn: async (init) => {
+    const present = {
+      fsSource: 'fsSource' in init,
+      stt: 'stt' in init,
+      tts: 'tts' in init,
+    };
+    let sourceText: string | null = null;
+    if (init.fsSource) {
+      const read = await init.fsSource.read(SOURCE_FILE);
+      sourceText = 'bytes' in read ? new TextDecoder().decode(read.bytes).trim() : null;
+    }
+    let transcript: string | null = null;
+    if (init.stt) {
+      const result = await init.stt.transcribe(TRIGGER_AUDIO, { contentType: 'audio/ogg' });
+      transcript = result.status === 'completed' ? result.transcript.full_text : null;
+    }
+    let spokenBytes: number | null = null;
+    if (init.tts) {
+      const speech = await init.tts.synthesize(TRIGGER_TEXT);
+      spokenBytes = speech.bytes.length;
+    }
+    const report: CapabilityReport = { present, sourceText, transcript, spokenBytes };
+    await init.db.insert('cron_marks', { note: JSON.stringify(report) });
+  },
+};
+
+/** A cron→handler descriptor whose handler is the capability reporter above. */
+function capabilityDescriptor(name: string): TriggerDescriptor {
+  return {
+    name,
+    kind: 'cron',
+    schedule: '0 3 * * *',
+    action: {
+      kind: 'handler',
+      handlerId: 'capability_report_handler',
+      handler: capabilityHandlerFn,
+    },
+  };
+}
 
 function handlerDescriptor(name: string): TriggerDescriptor {
   return {
@@ -309,6 +437,20 @@ async function countCronMarks(tenant: string): Promise<number> {
   return rows.length;
 }
 
+/**
+ * Read back the SINGLE `cron_marks` note the capability-reporting handler wrote — the capability report
+ * as DB ground truth (it crossed the handler's own tenant transaction to get there). Fails loudly on
+ * anything but exactly one row, so a dispatch that never ran can never read as an empty report.
+ */
+async function readCapabilityReport(tenant: string): Promise<CapabilityReport> {
+  const rows = await db.$client.unsafe<Array<{ note: string }>>(
+    'SELECT note FROM cron_marks WHERE tenant_id = $1',
+    [tenant],
+  );
+  expect(rows.length).toBe(1);
+  return JSON.parse(String(rows[0]?.note)) as CapabilityReport;
+}
+
 /** Count the `runs` header rows for a runId — the durable exactly-once artifact (idempotent upsert). */
 async function countRunHeaders(runId: string): Promise<number> {
   const rows = await db.$client.unsafe('SELECT 1 FROM runs WHERE run_id = $1', [runId]);
@@ -445,6 +587,69 @@ describe.skipIf(!hasDb)(
       expect(capturedGuc.value).toBeNull(); // the handler was NOT invoked again (no tx opened)
       expect(await countFireMarkers(TENANT, key)).toBe(1); // still exactly ONE reserve row
       expect(await countCronMarks(TENANT)).toBe(1); // still exactly ONE handler row — no re-fire
+    });
+
+    it('HANDLER CAPABILITIES: the deployment-static fsSource/stt/tts the scheduler was wired with REACH the fired handler init, and each one WORKS', async () => {
+      // A scheduler built the way the composition root builds one for a deployment that configured a
+      // source root and both speech providers. FAIL-THE-FIX: the three arguments the handler dispatch
+      // passes to `invokeTriggerHandler` are OPTIONAL, so dropping them typechecks and lints clean —
+      // only this arm turns that into a red. Without them the presence flags below read false and the
+      // three "it worked" assertions fail.
+      const stt = recordingStt();
+      const tts = recordingTts();
+      const wired = new DbosCronScheduler([capabilityDescriptor('caps-digest')], {
+        db: wrapDb(db),
+        tenantId: TENANT,
+        executor,
+        productTables,
+        invokeTriggerHandler,
+        tenantExists,
+        fsSourceFactory: capsFsSourceFactory,
+        stt,
+        tts,
+      });
+
+      const instant = new Date('2026-06-24T03:00:00.000Z');
+      expect(await wired.fireNow('caps-digest', instant)).toBe(true);
+      expect(capturedGuc.value).toBe(TENANT); // the report was written in the GUC-populated tenant tx
+
+      const report = await readCapabilityReport(TENANT);
+      // PRESENT — read with the `in` idiom, so an `undefined`-valued key cannot pass as a capability.
+      expect(report.present).toEqual({ fsSource: true, stt: true, tts: true });
+      // …and each handle did REAL work. A present-but-inert handle satisfies a flag; it cannot produce
+      // the root's own bytes, the byte count the transcriber was handed, or the tone's length.
+      expect(report.sourceText).toBe(SOURCE_MARKER);
+      expect(report.transcript).toBe(`${TRIGGER_AUDIO.length} bytes/audio/ogg`);
+      expect(report.spokenBytes).toBe(TRIGGER_TONE.length);
+      // The EXACT bytes + the plain option record crossed the dispatch seam (a re-derived copy would
+      // not be byte-equal), and the text reached the synthesizer verbatim.
+      expect(stt.calls).toEqual([{ bytes: TRIGGER_AUDIO, opts: { contentType: 'audio/ogg' } }]);
+      expect(tts.calls).toEqual([TRIGGER_TEXT]);
+    });
+
+    it('HANDLER CAPABILITIES, the other direction: a scheduler wired with NONE of the three fires a handler whose init carries none of them (ABSENT, not undefined)', async () => {
+      // The ACCEPT CONTROL for the arm above: the SAME descriptor, the SAME handler, a scheduler built
+      // WITHOUT the three deps — the deployment that configured no source root and no speech provider.
+      // Each capability must be ABSENT from the init object rather than present with an `undefined`
+      // value, which is what keeps a handler that needs one fail-closing loudly on the missing handle.
+      const bare = new DbosCronScheduler([capabilityDescriptor('caps-digest-bare')], {
+        db: wrapDb(db),
+        tenantId: TENANT,
+        executor,
+        productTables,
+        invokeTriggerHandler,
+        tenantExists,
+      });
+
+      const instant = new Date('2026-06-24T03:00:00.000Z');
+      expect(await bare.fireNow('caps-digest-bare', instant)).toBe(true);
+      expect(capturedGuc.value).toBe(TENANT); // the handler DID run — this is an absence, not a no-fire
+
+      const report = await readCapabilityReport(TENANT);
+      expect(report.present).toEqual({ fsSource: false, stt: false, tts: false });
+      expect(report.sourceText).toBeNull();
+      expect(report.transcript).toBeNull();
+      expect(report.spokenBytes).toBeNull();
     });
 
     it('AGENT action: a cron→agent fire enqueues runAgentJob exactly once (off-request) → header+journal persist; a refire enqueues nothing new', async () => {

@@ -391,10 +391,11 @@ export async function invokeStreamRouteHandler(
  * `tts` — are threaded here on the SAME terms: none of them is request-derived (the fs-source root is
  * a shared read root, the speech handles take the bytes/text the handler holds), so a handler that
  * works over HTTP does the same work when a trigger fires it. Each is spread-when-wired, so a
- * deployment that configured none builds the byte-identical init this took before. The REQUEST-BUILT
- * capabilities are NOT threaded here and this seam is unchanged for them: `blob`, `mintPlayToken`,
- * `enqueue` and `emit` are assembled per request by the api interpreter (the mint from the authed
- * caller, the emit as a buffer against the route transaction it flushes into).
+ * deployment that configured none builds the byte-identical init this took before. Nothing ELSE is
+ * threaded here and this seam is unchanged for the rest: `mintPlayToken`, `enqueue` and `emit` are
+ * assembled PER REQUEST by the api interpreter (the mint from the authed caller, the emit as a buffer
+ * against the route transaction it flushes into), and `blob` is the byte-moving handle a `stream`-kind
+ * route and a tool get — `invokeRouteHandler` never carries it either.
  */
 export async function invokeTriggerHandler(
   fn: TriggerHandler,

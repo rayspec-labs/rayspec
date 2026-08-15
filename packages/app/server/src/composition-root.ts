@@ -526,7 +526,7 @@ export interface ServerConfig {
    */
   mediaSigningKey?: string;
   /**
-   * The speech-to-text provider a route/tool handler's `init.stt` transcribes through — set via
+   * The speech-to-text provider a route, tool or trigger handler's `init.stt` transcribes through — set via
    * STT_PROVIDER (`deepgram | fake`, the SAME env contract the product profile's audio pipeline uses).
    * OPTIONAL: unset ⇒ no STT capability is wired (`init.stt` is absent; a handler that needs it
    * fail-closes loudly) — never a boot error, since no spec signal says a handler transcribes. Carried
@@ -541,7 +541,7 @@ export interface ServerConfig {
    */
   deepgramApiKey?: string;
   /**
-   * The text-to-speech provider a route/tool handler's `init.tts` synthesizes through — set via
+   * The text-to-speech provider a route, tool or trigger handler's `init.tts` synthesizes through — set via
    * TTS_PROVIDER (`openai | fake`). OPTIONAL: unset ⇒ no TTS capability is wired (`init.tts` is
    * absent; a handler that needs it fail-closes loudly) — never a boot error, since no spec signal
    * says a handler synthesizes speech. Carried RAW here; an unsupported value is fail-closed-refused
@@ -2627,7 +2627,7 @@ async function deployDeclaredSpec(
   }
 
   // ── The SPEECH-TO-TEXT capability build (`init.stt`) ───────────────────────
-  // A route/tool handler transcribes audio bytes through the provider the deployment selected with
+  // A route, tool or trigger handler transcribes audio bytes through the provider the deployment selected with
   // STT_PROVIDER. Purely deploy-config-gated (no route KIND requires it, unlike the stream→blob
   // guard, and no spec signal says a handler transcribes): build the capability when a provider is
   // configured, else leave it undefined (`init.stt` is then ABSENT and a handler that reads it
