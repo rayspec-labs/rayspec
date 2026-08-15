@@ -44,6 +44,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never published. It declares `"rayspecPublishTarget": true` in its own manifest, the packer honours
   that declaration (the closure is unchanged for everything else), and the release guard fails if the
   declaration goes missing.
+
+- **The safe-identifier rule is its own module.** `SafeIdentifier`, `assertSafeIdentifier`, the
+  pattern and the 63-character bound moved out of `grammar.ts` into a leaf module that imports
+  nothing but zod, so a grammar the document grammar itself imports can share the rule instead of
+  closing an import cycle back onto it. `grammar.ts` re-exports the identical bindings, so every
+  existing import keeps working and there is still exactly one definition of the rule; the regex, the
+  message and the thrown error are unchanged. A test asserts the leaf module names no sibling module
+  at all, because a cycle here would compile and resolve and surface only as a schema that is
+  `undefined` while a module-level `z.object` evaluates — a load-order accident no behaviour test can
+  pin.
+
 ### Fixed
 
 - **A trigger handler now receives `init.fsSource`, `init.stt` and `init.tts`.** Those three
