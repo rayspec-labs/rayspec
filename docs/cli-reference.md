@@ -665,12 +665,14 @@ Against an existing organization, skip steps 1–2 entirely and set
 
 ```
 rayspec workforce status --workforce <id> [transport flags]
-rayspec workforce tasks [--status <s>] [--owner <o>] [--workforce <id>] [--tree] [transport flags]
+rayspec workforce submit --workforce <id> --goal <text> [--description <text>] [--priority <p>] [transport flags]
+rayspec workforce tasks [--status <s>] [--owner <o>] [--workforce <id>] [transport flags]
+rayspec workforce tasks --tree [--root <task-id>] [--json] [--workforce <id>] [transport flags]
 rayspec workforce task <id> [transport flags]
 rayspec workforce approvals list [transport flags]
 rayspec workforce approvals approve <id> [--reason <text>] [transport flags]
 rayspec workforce approvals reject <id> --reason <text> [transport flags]
-rayspec workforce cost [--window 24h|7d] [transport flags]
+rayspec workforce cost [--window 24h|7d] [--by employee|department] [transport flags]
 rayspec workforce events <task-id> [transport flags]
 rayspec workforce pause [--drain] --workforce <id> [transport flags]
 rayspec workforce resume --workforce <id> [transport flags]
@@ -693,8 +695,8 @@ fail-closed at every step:
 - **Authentication**: an API key from `--api-key` or `RAYSPEC_API_KEY`, sent
   exactly as the HTTP API expects it. Read commands (`status`, `tasks`, `task`,
   `approvals list`, `cost`, `events`) need **`store:read`**; every mutating
-  command (`approvals approve`/`reject`, `pause`/`resume`/`halt`, a cancel)
-  needs **`store:write`**, matching the route permissions. A key without the
+  command (`submit`, `approvals approve`/`reject`, `pause`/`resume`/`halt`, a
+  cancel) needs **`store:write`**, matching the route permissions. A key without the
   permission gets the route's 403 verbatim — the CLI adds **no local
   authorization logic of its own**, because two authorization implementations
   is one too many.
@@ -706,13 +708,29 @@ fail-closed at every step:
   is a `tenant_required` error, and a `--tenant` that differs from the active
   organization is a `tenant_mismatch` error.
 
-Every reply is one JSON object on stdout (`ok`, `command`, and the payload).
+Every reply is one JSON object on stdout (`ok`, `command`, and the payload) —
+**except `tasks --tree`**, the group's one console view: it renders the whole
+subtree as text (a goal line with the subtree's cost against the per-task
+ceiling and turns, then every node with its status, its reason when parked,
+its confidence when a result carries one, and its settled cost), reading the
+bounded subtree endpoint. Pass `--json` for the machine shape (the flat rows
+plus the resolved budgets). Without `--root`, exactly one root task is the
+unambiguous pick; zero or several is an error naming the options. `--status`
+and `--owner` stay with the flat list — a filtered tree would render holes as
+work that never happened.
+
+`submit` hands one goal to the declared workforce (`--priority` takes `low`,
+`normal`, `high` or `urgent`); the deployment's orchestration strategy shapes
+it into tasks and the reply lists them. `cost --by employee|department` groups
+the roll-up server-side, and the payload names its basis honestly:
+`department` reads the enforcing ledger's settlement buckets, while `employee`
+aggregates task rows by owner and therefore windows by task creation time.
 A route refusal is `ok:false` with the server's error envelope untranslated
-(exit 1); a usage or transport-resolution problem is exit 2. `tasks --tree`
-emits the same rows nested by parent (`children: []` on each node); `events`
-replays the task's journal as parsed JSON events, each carrying `v: 1`. A
-deployment with no durable worker answers `NOT_IMPLEMENTED` (501) for the whole
-group — the task engine dispatches nothing without one, fail-closed.
+(exit 1); a usage or transport-resolution problem is exit 2. `events` replays
+the task's journal as parsed JSON events, each carrying `v: 1`. A deployment
+with no durable worker answers `NOT_IMPLEMENTED` (501) for the whole group —
+the task engine dispatches nothing without one, fail-closed; goal submission
+additionally requires a DECLARED workforce, for the same reason.
 
 ---
 
