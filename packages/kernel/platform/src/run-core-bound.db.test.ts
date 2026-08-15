@@ -410,8 +410,10 @@ describe('per-run wall-clock bound', () => {
     setBound('120');
     const backend = new SilentBackend();
     open.push(backend);
-    // The other way a job reaches the durable executor: the cron scheduler's agent action enqueues
-    // straight onto the executor without writing a header first (cron-scheduler.ts, `AGENT action`).
+    // The header-less shape, constructed BY HAND here: nothing wrote a pre-enqueue header for this
+    // runId. It is the shape run-core must survive, not a claim about how a job arrives — both
+    // enqueue paths (the API's async run surface and the trigger fire path) write that header today,
+    // so this is the residual case where the write was skipped, not the cron path.
     // run-core's own header write is inside the run transaction, so the rejection rolls it back and
     // nothing about this run is left in `runs` — there is no header to test for terminality.
     await expect(

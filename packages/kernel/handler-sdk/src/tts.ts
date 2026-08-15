@@ -44,7 +44,8 @@ export interface TtsSynthesizeOptions {
   /**
    * The provider voice id (e.g. `onyx`). The adapter validates MEMBERSHIP against its own closed list
    * — an unknown voice comes back as a rejected promise carrying `unsupported_option`, never a silent
-   * fallback to a default voice the caller did not ask for. Absent ⇒ the adapter's default voice.
+   * fallback to a default voice the caller did not ask for. A blank string is an unknown voice, not an
+   * absent one, and is rejected the same way. Absent ⇒ the adapter's default voice.
    */
   readonly voice?: string;
   /**

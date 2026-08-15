@@ -95,8 +95,8 @@ function buildApp(mounts: FrontendSpec[], specDir: string): Hono {
   return app;
 }
 
-const spaMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: true };
-const plainMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: false };
+const spaMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: true, cleanUrls: false };
+const plainMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: false, cleanUrls: false };
 /** The specDir is `webDir/../..` (the temp root), so `web/dist` resolves back to webDir. */
 function specDir(): string {
   return join(webDir, '..', '..');
@@ -233,8 +233,8 @@ describe('mountFrontend — non-root mount + longest-route-first ordering', () =
       mountFrontend(
         app,
         [
-          { route: '/', dir: 'web/dist', spa: true },
-          { route: '/admin', dir: 'admin', spa: false },
+          { route: '/', dir: 'web/dist', spa: true, cleanUrls: false },
+          { route: '/admin', dir: 'admin', spa: false, cleanUrls: false },
         ],
         root,
       );
@@ -671,8 +671,8 @@ describe('mountFrontend — custom 404.html page', () => {
     mountFrontend(
       app,
       [
-        { route: '/docs', dir: 'docs', spa: false },
-        { route: '/', dir: 'app', spa: true },
+        { route: '/docs', dir: 'docs', spa: false, cleanUrls: false },
+        { route: '/', dir: 'app', spa: true, cleanUrls: false },
       ],
       root,
     );
@@ -709,6 +709,9 @@ describe('mountFrontend — cleanUrls (extensionless resolution, opt-in)', () =>
   const TYPED_SIBLING_SENTINEL = 'CLEAN-URL-TYPED-SIBLING-SENTINEL';
   const TYPED_ASSET_SENTINEL = 'CLEAN-URL-TYPED-ASSET-SENTINEL';
   const DOTTED_DIR_SENTINEL = 'CLEAN-URL-DOTTED-DIR-SENTINEL';
+  const DECODED_NAME_SENTINEL = 'CLEAN-URL-DECODED-NAME-SENTINEL';
+  const PERCENT_NAME_SENTINEL = 'CLEAN-URL-PERCENT-NAME-SENTINEL';
+  const PERCENT_ONLY_SENTINEL = 'CLEAN-URL-PERCENT-ONLY-SENTINEL';
 
   const tempRoots: string[] = [];
   let fixtureRoot = '';
@@ -727,6 +730,10 @@ describe('mountFrontend — cleanUrls (extensionless resolution, opt-in)', () =>
    *   guide/1.2/notes.html            a DOTTED directory on the way to an extensionless leaf
    *   .env                            a dotfile the guard must keep refusing
    *   leak.html                       a symlink OUT of the served dir (the `.html` candidate itself)
+   *   docs/decoy.html                 the page the GUARD clears for `/docs%2Fdecoy`  ┐ the two decoders
+   *   docs%2Fdecoy.html               the file `serveStatic` resolves for it         ┘ named side by side
+   *   docs%2Forphan.html              on disk ONLY under the escaped name — pins that the clean-URL
+   *                                   branch is decided on the DECODED one (`docs/orphan.html`)
    */
   beforeAll(() => {
     const root = mkdtempSync(join(tmpdir(), 'rayspec-clean-urls-'));
@@ -750,11 +757,23 @@ describe('mountFrontend — cleanUrls (extensionless resolution, opt-in)', () =>
     writeFileSync(join(dir, 'data.json.html'), page(TYPED_SIBLING_SENTINEL), 'utf8');
     writeFileSync(join(dir, 'real.js'), `console.log('${TYPED_ASSET_SENTINEL}');`, 'utf8');
     writeFileSync(join(dir, 'guide', '1.2', 'notes.html'), page(DOTTED_DIR_SENTINEL), 'utf8');
+    // The two names `/docs%2Fdecoy` resolves to, one per decoder: `decodeURIComponent` (the guard)
+    // yields `docs/decoy`, `decodeURI` (serveStatic) leaves the escape in the file name. Distinct
+    // sentinels, so the served bytes name which side resolved the request. `docs%2Forphan.html` has
+    // no decoded counterpart, which is what pins the guard's side of the same divergence.
+    writeFileSync(join(dir, 'docs', 'decoy.html'), page(DECODED_NAME_SENTINEL), 'utf8');
+    writeFileSync(join(dir, 'docs%2Fdecoy.html'), page(PERCENT_NAME_SENTINEL), 'utf8');
+    writeFileSync(join(dir, 'docs%2Forphan.html'), page(PERCENT_ONLY_SENTINEL), 'utf8');
     writeFileSync(join(dir, '.env'), `SECRET=${CLEAN_DOTFILE_SECRET}`, 'utf8');
     const outside = join(root, 'outside');
     mkdirSync(outside, { recursive: true });
     writeFileSync(join(outside, 'secret.html'), CLEAN_SYMLINK_SECRET, 'utf8');
     symlinkSync(join(outside, 'secret.html'), join(dir, 'leak.html'));
+    // The SAME escaping symlink under a name carrying a percent-encoded `/`. The two decoders
+    // disagree on `/docs%2Fgetting-started`: the guard sees `docs/getting-started` (a real, safe
+    // page in this fixture — which is what makes the request pass the gate at all), the file server
+    // resolves this literal name. Both spellings of the escape are pinned below.
+    symlinkSync(join(outside, 'secret.html'), join(dir, 'docs%2Fgetting-started.html'));
     fixtureRoot = root;
   });
 
@@ -764,6 +783,38 @@ describe('mountFrontend — cleanUrls (extensionless resolution, opt-in)', () =>
 
   const cleanMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: false, cleanUrls: true };
   const offMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: false, cleanUrls: false };
+  // The same two columns on an `spa: true` mount — where the SPA fallback precedes the `404.html`
+  // branch, so opting in changes a different thing about `/404`.
+  const spaPlainMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: true, cleanUrls: false };
+  const spaCleanMount: FrontendSpec = { route: '/', dir: 'web/dist', spa: true, cleanUrls: true };
+
+  // The guard runs on the name THIS handler decodes; the file server reads the name IT decodes. On a
+  // percent-encoded reserved character those differ, and before the fix the containment check ran on
+  // one name while the other was served — a symlink out of the mount came back 200 with its bytes.
+  // The plainly-spelled twin is the accept control: it must stay refused, proving the guard itself
+  // works and that these arms measure the divergence rather than a broken fixture.
+  it('a percent-encoded name that escapes the mount is refused, like its plainly-spelled twin', async () => {
+    for (const mount of [cleanMount, offMount]) {
+      const app = buildApp([mount], fixtureRoot);
+
+      // ACCEPT CONTROL — the same symlink, ordinary name: refused today and after.
+      const control = await app.request('/leak.html');
+      expect(control.status).toBe(404);
+      expect(await control.text()).not.toContain(CLEAN_SYMLINK_SECRET);
+
+      // The divergent spelling must reach the same verdict, on both mount shapes.
+      const escaped = await app.request('/docs%2Fgetting-started.html');
+      expect(escaped.status).toBe(404);
+      expect(await escaped.text()).not.toContain(CLEAN_SYMLINK_SECRET);
+    }
+
+    // And through the clean-URL rewrite, where the guard cleared `docs/getting-started` — a real,
+    // servable page — while the rewrite resolved the escaping literal name instead.
+    const clean = buildApp([cleanMount], fixtureRoot);
+    const viaRewrite = await clean.request('/docs%2Fgetting-started');
+    expect(viaRewrite.status).toBe(404);
+    expect(await viaRewrite.text()).not.toContain(CLEAN_SYMLINK_SECRET);
+  });
 
   it('cleanUrls:true — an extensionless link resolves to <path>.html (200 + that page)', async () => {
     const app = buildApp([cleanMount], fixtureRoot);
@@ -810,6 +861,87 @@ describe('mountFrontend — cleanUrls (extensionless resolution, opt-in)', () =>
     const body = await res.text();
     expect(body).toContain(BOTH_FILE_SENTINEL);
     expect(body).not.toContain(BOTH_INDEX_SENTINEL);
+  });
+
+  it('cleanUrls:true — /404 on a mount shipping a root 404.html serves that page with 200 (the second flip)', async () => {
+    // The SECOND visible change for a site that opts in, alongside the both-forms flip above:
+    // `404.html` is a `<name>.html` like any other, so `/404` becomes an extensionless path that
+    // resolves to it. That is parity with the hosts this option mirrors (Netlify / Vercel / GitHub
+    // Pages all serve `/404` as a page), so it is the documented behaviour, not a defect; this arm is
+    // what stops it changing unnoticed. WHAT it changes depends on `spa`, because the SPA fallback
+    // runs BEFORE the `404.html` branch, and both columns are pinned here so the docs' qualifier
+    // cannot rot: on `spa: false` the status flips (404 → 200) and the bytes are the same page; on
+    // `spa: true` the status was already 200 (the shell answered `/404`) and the DOCUMENT flips.
+    const on = buildApp([cleanMount], fixtureRoot);
+    const onRes = await on.request('/404');
+    expect(onRes.status).toBe(200);
+    expect(onRes.headers.get('content-type')).toMatch(/text\/html/);
+    expect(await onRes.text()).toContain(CLEAN_404_SENTINEL);
+
+    const off = buildApp([offMount], fixtureRoot);
+    const offRes = await off.request('/404');
+    expect(offRes.status).toBe(404);
+    expect(await offRes.text()).toContain(CLEAN_404_SENTINEL); // the SAME bytes, the other status
+
+    // spa:true, flag OFF — the fallback answers first, so `/404` is already a 200 and it is the SPA
+    // shell, not the 404 page.
+    const spaOff = buildApp([spaPlainMount], fixtureRoot);
+    const spaOffRes = await spaOff.request('/404');
+    expect(spaOffRes.status).toBe(200);
+    const spaOffBody = await spaOffRes.text();
+    expect(spaOffBody).toContain(CLEAN_INDEX_SENTINEL);
+    expect(spaOffBody).not.toContain(CLEAN_404_SENTINEL);
+
+    // spa:true, flag ON — the clean-URL resolution precedes the fallback, so the same 200 now
+    // carries the 404 page: on this mount the option changes the document, not the status.
+    const spaOn = buildApp([spaCleanMount], fixtureRoot);
+    const spaOnRes = await spaOn.request('/404');
+    expect(spaOnRes.status).toBe(200);
+    const spaOnBody = await spaOnRes.text();
+    expect(spaOnBody).toContain(CLEAN_404_SENTINEL);
+    expect(spaOnBody).not.toContain(CLEAN_INDEX_SENTINEL);
+  });
+
+  it('cleanUrls:true — a percent-encoded `/`: the guard clears the DECODED name, `serveStatic` resolves the LESS-DECODED one', async () => {
+    // The mount guard decodes with `decodeURIComponent` (`decodeOnce`), `serveStatic` with
+    // `decodeURI`, which leaves the reserved set encoded — so for `/docs%2Fdecoy` the two work on
+    // different strings. BOTH sides are pinned here, because pinning only the net status leaves the
+    // divergence free to disappear unnoticed:
+    //
+    //   (a) serveStatic's side — both names exist with distinct sentinels, so the served bytes say
+    //       which string was resolved: `docs%2Fdecoy.html`, not the `docs/decoy.html` the guard
+    //       cleared. Decode the rewrite's path the guard's way and the other sentinel comes back.
+    //   (b) the guard's side — `docs%2Forphan.html` exists ONLY under the escaped name, so the
+    //       clean-URL branch (which looks for `docs/orphan.html`, the decoded name) never runs and
+    //       the request misses. Stop the guard decoding and that file becomes reachable: 200.
+    //
+    // The consequence of (a) is that the dotfile / containment / symlink-escape checks in
+    // `isSafeStaticPath` ran on a name other than the one served — see the DECODING note in
+    // serve-static.ts for what that does and does not cost.
+    const app = buildApp([cleanMount], fixtureRoot);
+
+    const both = await app.request('/docs%2Fdecoy');
+    expect(both.status).toBe(200);
+    const bothBody = await both.text();
+    expect(bothBody).toContain(PERCENT_NAME_SENTINEL);
+    expect(bothBody).not.toContain(DECODED_NAME_SENTINEL);
+
+    const orphan = await app.request('/docs%2Forphan');
+    expect(orphan.status).toBe(404);
+    expect(await orphan.text()).not.toContain(PERCENT_ONLY_SENTINEL);
+
+    // The ordinary case — nothing on disk carries the less-decoded name, so the request misses.
+    // `/docs%2Fgetting-started` clears `docs/getting-started.html` and resolves
+    // `docs%2Fgetting-started.html`, which this fixture (like a normal build) has no file for.
+    const miss = await app.request('/docs%2Fgetting-started');
+    expect(miss.status).toBe(404);
+    expect(await miss.text()).not.toContain(CLEAN_PAGE_SENTINEL);
+
+    // ACCEPT CONTROL: the same page, spelled plainly, still serves — the 404 above is the encoding,
+    // not a broken fixture.
+    const plain = await app.request('/docs/getting-started');
+    expect(plain.status).toBe(200);
+    expect(await plain.text()).toContain(CLEAN_PAGE_SENTINEL);
   });
 
   it('cleanUrls:true — a TRAILING-SLASH request still resolves the directory index, never <path>.html', async () => {
@@ -1170,5 +1302,102 @@ describe('mountFrontend — securityHeaders stamps every response the mount serv
     const res = await buildApp([spaMount], specDir()).request('/');
     expect(res.status).toBe(200);
     expectUnstamped(res);
+  });
+});
+
+/**
+ * Every name the mount READS must have passed the guard — not only the one the request spelled.
+ *
+ * Two ways a name reached the disk unguarded. (1) DECODER DIVERGENCE: this module decodes with
+ * `decodeURIComponent`, `serve-static` with `decodeURI`, and on a MALFORMED escape the two fall back
+ * differently — this module to the raw string, `serve-static` to a per-run partial decode — so a
+ * third name could be read that neither guard string named. (2) APPENDED NAMES: `serve-static`
+ * resolves a directory to `<dir>/index.html`, and the SPA fallback names `/index.html`; neither
+ * string was ever guarded, so a symlink at either one escaped the mount without any exotic filename.
+ *
+ * Each arm carries the plainly-spelled twin as its accept control, so a broken fixture cannot make
+ * these pass.
+ */
+describe('mountFrontend — the guard covers every name the file server reads', () => {
+  const roots: string[] = [];
+  const OUTSIDE = 'SECRET_OUTSIDE_THE_MOUNT';
+  let root = '';
+
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), 'rayspec-read-names-'));
+    roots.push(root);
+    const dir = join(root, 'web', 'dist');
+    mkdirSync(join(dir, 'sub'), { recursive: true });
+    mkdirSync(join(dir, 'docs'), { recursive: true });
+    const outside = join(root, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'secret.html'), OUTSIDE, 'utf8');
+
+    writeFileSync(join(dir, 'index.html'), '<!doctype html>INSIDE_ROOT', 'utf8');
+    // The decoded name the guard clears, so the request gets past the gate at all.
+    writeFileSync(join(dir, 'docs', 'getting-started.html'), '<!doctype html>INSIDE_DOCS', 'utf8');
+    // (1) names only reachable through the two decoder fallbacks.
+    symlinkSync(join(outside, 'secret.html'), join(dir, 'docs%2Fgetting-started.html'));
+    symlinkSync(join(outside, 'secret.html'), join(dir, 'docs%2Fgetting-started.html%'));
+    // (2) an APPENDED name: an ordinary directory whose index.html points out of the mount.
+    symlinkSync(join(outside, 'secret.html'), join(dir, 'sub', 'index.html'));
+    // The accept control: the same target, plainly spelled.
+    symlinkSync(join(outside, 'secret.html'), join(dir, 'leak.html'));
+  });
+
+  afterAll(() => {
+    for (const r of roots) rmSync(r, { recursive: true, force: true });
+  });
+
+  const shapes: [string, FrontendSpec][] = [
+    ['cleanUrls', { route: '/', dir: 'web/dist', spa: false, cleanUrls: true }],
+    ['plain', { route: '/', dir: 'web/dist', spa: false, cleanUrls: false }],
+    ['mounted at /app', { route: '/app', dir: 'web/dist', spa: false, cleanUrls: true }],
+  ];
+
+  for (const [label, mount] of shapes) {
+    it(`${label}: no spelling of an escaping name is served, and the plain twin is the control`, async () => {
+      const app = buildApp([mount], root);
+      const p = (s: string): string => (mount.route === '/' ? s : `${mount.route}${s}`);
+
+      for (const path of [
+        '/leak.html', // ACCEPT CONTROL — refused before this change and after
+        '/docs%2Fgetting-started.html', // decodeURI leaves %2F: a name the guard never decoded
+        '/docs%2Fgetting-started', // the same, reached through the clean-URL rewrite
+        '/docs%252Fgetting-started.html%', // MALFORMED: both guards fall back, serve-static does not
+      ]) {
+        const res = await app.request(p(path));
+        expect(res.status, `${label} ${path}`).toBe(404);
+        expect(await res.text(), `${label} ${path}`).not.toContain(OUTSIDE);
+      }
+    });
+
+    it(`${label}: a directory whose index.html escapes the mount is not served`, async () => {
+      const app = buildApp([mount], root);
+      const p = (s: string): string => (mount.route === '/' ? s : `${mount.route}${s}`);
+      for (const path of ['/sub', '/sub/']) {
+        const res = await app.request(p(path));
+        expect(res.status, `${label} ${path}`).toBe(404);
+        expect(await res.text(), `${label} ${path}`).not.toContain(OUTSIDE);
+      }
+    });
+  }
+
+  it('spa:true — a root index.html that escapes the mount is not served as the shell', async () => {
+    const spaRoot = mkdtempSync(join(tmpdir(), 'rayspec-read-names-spa-'));
+    roots.push(spaRoot);
+    const dir = join(spaRoot, 'web', 'dist');
+    mkdirSync(dir, { recursive: true });
+    const outside = join(spaRoot, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'secret.html'), OUTSIDE, 'utf8');
+    symlinkSync(join(outside, 'secret.html'), join(dir, 'index.html'));
+
+    const app = buildApp([{ route: '/', dir: 'web/dist', spa: true, cleanUrls: false }], spaRoot);
+    for (const path of ['/', '/deep-link']) {
+      const res = await app.request(path);
+      expect(res.status, path).toBe(404);
+      expect(await res.text(), path).not.toContain(OUTSIDE);
+    }
   });
 });

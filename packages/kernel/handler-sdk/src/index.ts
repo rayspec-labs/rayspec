@@ -95,7 +95,14 @@ export type {
 // the provider-NEUTRAL text-to-speech port (no provider is named or imported there). Re-exported on
 // the same conduit as the transcript types above so a handler names the request/result types from the
 // ONE SDK package; TYPE-ONLY, so the SDK still ships no runtime.
+//
+// `TtsAdapterError` travels with them, exactly as `SttAdapterError` does above: `synthesize` rejects
+// with one, so a handler that wants to type its catch must be able to NAME it — and a handler may
+// import no other package. It is a CLASS in the port but crosses as a TYPE: the shape and `code` are
+// nameable, `instanceof` is not, because a value export would give this runtime-free SDK a runtime
+// edge to the port. `speech-error-typepin.ts` fails `tsc -b` if either name is dropped here.
 export type {
+  TtsAdapterError,
   TtsAudioFormat,
   TtsErrorCode,
   TtsSynthesisResult,
@@ -437,7 +444,13 @@ export interface HandlerInit {
  *    into another tenant — the closure has no path to one.
  *  - FAIL-CLOSED WHEN UNWIRED: the capability is ABSENT on a deployment that did not enable the bus —
  *    a handler that needs it fail-closes loudly on `undefined` (mirrors `blob`/`enqueue`), never a
- *    silent no-op that drops events on the floor.
+ *    silent no-op that drops events on the floor. It is ABSENT for one further reason a tool author
+ *    must know: the tools of an ENQUEUED run (`async: true`, or a trigger whose action is
+ *    `kind: 'agent'`) never carry it, however the bus is configured. Such a run executes inside ONE
+ *    transaction on the durable worker, and an emit allocated there would hold the tenant's sequence
+ *    lock until the whole run committed — so the deployment does not thread the bus into the worker's
+ *    tool inits at all. Work that must emit belongs in a `{handler}` route or in a tool of an
+ *    in-request agent run.
  *  - FAIL-CLOSED ON A MALFORMED CALL: a call whose first argument is not a non-empty string, or whose
  *    payload cannot be JSON-serialized, is refused with a clear error naming the expected
  *    `emit(topic, payload)` shape. A handler ships as an `.mjs` module, where the type below does not
@@ -452,8 +465,9 @@ export interface HandlerInit {
  *    reissues it, which is what makes a hole a REAL signal (retention) rather than noise.
  *  - ATOMIC WITH THE HANDLER'S OWN WRITES on a route handler: the engine appends the request's events
  *    as the last statement before its transaction commits, so a subscriber can never observe an event
- *    announcing a state change that is not yet readable. A tool handler has no outer transaction (by
- *    design — see `HandlerDb`), so there each emit is its own statement, durable as it returns.
+ *    announcing a state change that is not yet readable. A tool that carries `emit` is always one an
+ *    in-request run drives, and that surface hands a tool a plain handle with no outer transaction —
+ *    so there each emit is its own statement, durable as it returns.
  *  - `await` is the durability boundary a caller sees on a tool; on a route the call BUFFERS and the
  *    engine flushes at the transaction boundary — deliberately, because allocating at the call site
  *    would hold the tenant's counter lock for the rest of the handler and serialise the whole tenant

@@ -19,8 +19,8 @@
 // agent spec with no hand-written wrapper. The dev wrapper (examples/local-boot) is now only a
 // convenience (fresh DROP+CREATE dev-DB provisioning + the RAYSPEC_BOOT_UPDATE redeploy flow), NOT a
 // requirement for agents.
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { DeployError } from '@rayspec/api-auth';
@@ -38,38 +38,8 @@ import {
   loadStaticServerConfig,
 } from './composition-root.js';
 import { ProductBootError } from './product-boot.js';
+import { loadLocalDotenvIfPresent } from './read-env.js';
 import { assembleOptsFromEnv } from './serve-opts.js';
-
-/**
- * Local-development-only optional `.env` loader. A real deployment sets env via its orchestrator/secret
- * manager and this file is absent. We load the repo-root `.env` (gitignored) ONLY IF it exists, and
- * NEVER override an already-set process.env var (an explicit shell/orchestrator value always wins).
- * PEMs are stored with literal `\n` in this repo's `.env`; we unescape them so importPKCS8 accepts
- * the key. Disable entirely with RAYSPEC_SKIP_DOTENV=1 (e.g. to prove pure-ambient-env boot).
- */
-function loadLocalDotenvIfPresent(): void {
-  if (process.env.RAYSPEC_SKIP_DOTENV === '1') return;
-  // packages/server/src -> repo root.
-  const here = dirname(fileURLToPath(import.meta.url));
-  const envPath = resolve(here, '..', '..', '..', '..', '.env');
-  if (!existsSync(envPath)) return;
-  for (const rawLine of readFileSync(envPath, 'utf8').split('\n')) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    const eq = line.indexOf('=');
-    if (eq <= 0) continue;
-    const key = line.slice(0, eq).trim();
-    if (key in process.env) continue;
-    let value = line.slice(eq + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    process.env[key] = value.includes('\\n') ? value.replace(/\\n/g, '\n') : value;
-  }
-}
 
 /**
  * If RAYSPEC_SPEC_PATH names a STATIC-PROFILE (frontend-only) backend spec, return its resolved path +

@@ -148,27 +148,28 @@ export function bootBanner(server: BootedServer, base: string): string {
   // every `_`-prefixed key in `Span.toJSON` (`removePrivateFields`) before the exporter serializes it.
   // Function spans carry `input`/`output` unprefixed, so tool arguments and tool outputs DO leave.
   //
-  // WHY THE REMEDIATION HINT NAMES ITS TWO ENTRY POINTS. This banner has four call sites — serve.ts,
-  // the `deploy` command, examples/local-boot/serve.ts and deployments/acme-notes/serve.mts — and only
-  // the first two read RAYSPEC_AGENT_TRACING; the two dev-boot wrappers assemble the server themselves
-  // and never consult it. An unscoped "set RAYSPEC_AGENT_TRACING=…" would be an instruction that does
-  // nothing on half of them.
+  // WHY THE REMEDIATION HINT NAMES NO ENTRY POINT. This banner has four call sites — serve.ts, the
+  // `deploy` command, examples/local-boot/serve.ts and deployments/acme-notes/serve.mts — and every
+  // one of them applies a trace-export posture before it prints, so "set RAYSPEC_AGENT_TRACING=…" is
+  // an instruction that works wherever this line appears. It used to be true of only the first two,
+  // which is why the hint used to name them. What keeps the unqualified form honest is not a
+  // convention: wrapper-agent-tracing.test.ts DISCOVERS the `bootBanner(` call sites by reading the
+  // tree and requires each to apply a posture, so a fifth boot that printed this banner without
+  // reading the variable REDs there instead of quietly making this sentence false.
   lines.push('');
   lines.push('  Agent tracing (observed):');
   if (server.agentTracing === 'openai') {
     lines.push(
       '    Trace export:          EXPORTING TO OPENAI — agent traces leave this process: run metadata ' +
         'and, once an agent calls tools, its tool arguments and outputs (the agent SDK strips the ' +
-        "model prompt fields before export). Stop it with RAYSPEC_AGENT_TRACING=off on 'rayspec " +
-        "deploy' / 'rayspec-serve' — the dev-boot wrappers do not read that variable and follow the " +
-        'agent SDK default',
+        'model prompt fields before export). Stop it with RAYSPEC_AGENT_TRACING=off — every boot ' +
+        'that prints this banner reads it',
     );
   } else {
     lines.push(
       '    Trace export:          OFF — no agent trace (run metadata, and tool arguments and outputs ' +
         'once an agent calls tools) leaves this process. Export them to OpenAI with ' +
-        "RAYSPEC_AGENT_TRACING=openai on 'rayspec deploy' / 'rayspec-serve' — the dev-boot wrappers " +
-        'do not read that variable',
+        'RAYSPEC_AGENT_TRACING=openai — every boot that prints this banner reads it',
     );
   }
   lines.push(RULE);
@@ -202,7 +203,13 @@ export function staticBootBanner(server: StaticBootedServer, base: string): stri
   lines.push('');
   lines.push('  Served static frontend mounts:');
   for (const m of server.frontendMounts) {
-    lines.push(`    ${m.route.padEnd(12)} → ${m.dir}${m.spa ? '   (SPA fallback)' : ''}`);
+    // BOTH declared mount options, so this line and the `deploy --dry-run` verdict (which echoes each
+    // mount whole) agree on what is worth naming: `cleanUrls` decides how every extensionless path
+    // under the mount resolves, which is not something an operator should have to read the spec for.
+    const options = [m.spa ? '(SPA fallback)' : '', m.cleanUrls ? '(clean URLs)' : '']
+      .filter(Boolean)
+      .join(' ');
+    lines.push(`    ${m.route.padEnd(12)} → ${m.dir}${options === '' ? '' : `   ${options}`}`);
   }
   lines.push(RULE);
   lines.push('');

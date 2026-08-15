@@ -56,7 +56,7 @@ import {
   INLINE_ASSET_SCAN_REPORT_LIMIT,
 } from './serve-static.js';
 
-const SPA_MOUNT: FrontendSpec = { route: '/', dir: 'web/dist', spa: true };
+const SPA_MOUNT: FrontendSpec = { route: '/', dir: 'web/dist', spa: true, cleanUrls: false };
 /** All four blocked shapes on one page (an inline style, an inline script, `style=`, `onclick=`). */
 const ALL_FOUR = `<!doctype html><html><head><style>body{color:red}</style></head>
 <body><div style="color:blue" onclick="reload()">hi</div><script>console.log(1)</script></body></html>`;
@@ -350,7 +350,10 @@ describe("the walk's skips are the mount's refusals", () => {
     const warnings: string[] = [];
     const server = assembleStaticServer(
       loadStaticServerConfig({}),
-      { specPath: specPath(), frontend: [{ route: '/app', dir: 'web/dist', spa: false }] },
+      {
+        specPath: specPath(),
+        frontend: [{ route: '/app', dir: 'web/dist', spa: false, cleanUrls: false }],
+      },
       { bootWarn: (message) => warnings.push(message) },
     );
     expect(warnings).toHaveLength(1);
@@ -373,7 +376,7 @@ describe("the walk's skips are the mount's refusals", () => {
       loadStaticServerConfig({}),
       {
         specPath: specPath(),
-        frontend: [SPA_MOUNT, { route: '/app', dir: 'web/dist', spa: false }],
+        frontend: [SPA_MOUNT, { route: '/app', dir: 'web/dist', spa: false, cleanUrls: false }],
       },
       { bootWarn: (message) => warnings.push(message) },
     );
@@ -495,10 +498,14 @@ describe('the dock — the scan rides the boot pass, not the /health path', () =
 
   it('an unservable mount still reports `unavailable`, with the scan wired', () => {
     const warnings: string[] = [];
-    const readiness = frontendMountsReadiness([{ route: '/', dir: 'nope', spa: true }], root, {
-      csp: DEFAULT_FRONTEND_CSP,
-      warn: (m) => warnings.push(m),
-    });
+    const readiness = frontendMountsReadiness(
+      [{ route: '/', dir: 'nope', spa: true, cleanUrls: false }],
+      root,
+      {
+        csp: DEFAULT_FRONTEND_CSP,
+        warn: (m) => warnings.push(m),
+      },
+    );
     expect(readiness).toBe('unavailable');
     expect(warnings).toEqual([]);
   });
@@ -506,7 +513,7 @@ describe('the dock — the scan rides the boot pass, not the /health path', () =
   it('two mounts sharing one directory report each offending file once', () => {
     writeAsset('index.html', '<div style="x">');
     const warning = blockedInlineAssetWarning(
-      [SPA_MOUNT, { route: '/admin', dir: 'web/dist', spa: false }],
+      [SPA_MOUNT, { route: '/admin', dir: 'web/dist', spa: false, cleanUrls: false }],
       root,
       DEFAULT_FRONTEND_CSP,
     );

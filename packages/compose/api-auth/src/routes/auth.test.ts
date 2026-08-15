@@ -2,6 +2,7 @@
  * integration tests — register/login/me/refresh/logout + CSRF + enumeration resistance,
  * driven through the REAL Hono app against Postgres.
  */
+import { getApiKeyPepper, mintApiKey as mintRawApiKey } from '@rayspec/auth-core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { REFRESH_COOKIE_NAME } from '../http/cookies.js';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
@@ -151,6 +152,56 @@ describe('GET /v1/auth/me per principal kind', () => {
     });
     expect(meByKey.status).toBe(403);
     const body = await meByKey.json();
+    expect(body.error.code).toBe('FORBIDDEN');
+    expect(body.error.message).toBe(
+      'This endpoint answers a user identity; the authenticated key principal has none.',
+    );
+    expect(body.error.details).toBeUndefined();
+  });
+
+  it('answers an m2m CLIENT-CREDENTIAL principal the SAME 403 — the refusal is kind-agnostic', async () => {
+    // The sibling arm covers `apikey`. `m2m` is the OTHER key kind the bearer path can resolve to
+    // (middleware.ts maps `type === 'm2m_client'` → kind 'm2m'), and it reaches this route through the
+    // same `requireAuth()`; only the SHARED `!principal?.userId` guard keeps it out. Drive it.
+    const reg = await jsonRequest(h.app, 'POST', '/v1/auth/register', {
+      body: { email: 'm2m-holder@example.com', password: 'a-sufficiently-long-password' },
+    });
+    expect(reg.status).toBe(201);
+    const t0 = (await reg.json()).accessToken as string;
+
+    // Accept control on the SAME app+run: the user credential that owns the org still gets its 200.
+    // Without it a route that 403s everything would pass the assertion below.
+    const meByJwt = await jsonRequest(h.app, 'GET', '/v1/auth/me', {
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    expect(meByJwt.status).toBe(200);
+
+    const orgRes = await jsonRequest(h.app, 'POST', '/v1/orgs', {
+      body: { name: 'M2mCo' },
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    expect(orgRes.status).toBe(201);
+    const orgId = (await orgRes.json()).id as string;
+
+    // No management route mints an m2m client credential; mint one at the STORE SEAM with the same
+    // `type` the bearer resolution keys the m2m kind on. The plaintext is a real bearer credential —
+    // it authenticates through the unmodified middleware, so this arm exercises the live resolution.
+    const secret = mintRawApiKey(getApiKeyPepper());
+    await h.deps.apiKeyStore.mint({
+      orgId,
+      type: 'm2m_client',
+      keyPrefix: secret.prefix,
+      keyHash: secret.hash,
+      scopes: ['agent:run'],
+    });
+
+    const meByM2m = await jsonRequest(h.app, 'GET', '/v1/auth/me', {
+      headers: { authorization: `Bearer ${secret.plaintext}` },
+    });
+    // Authenticated (never 401 — no re-auth could help) but authorization-refused, with the SAME
+    // message the apikey kind gets: one kind-agnostic guard, not a per-kind branch that could drift.
+    expect(meByM2m.status).toBe(403);
+    const body = await meByM2m.json();
     expect(body.error.code).toBe('FORBIDDEN');
     expect(body.error.message).toBe(
       'This endpoint answers a user identity; the authenticated key principal has none.',

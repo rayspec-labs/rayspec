@@ -264,7 +264,9 @@ export class DbosWorkflowExecutor implements WorkflowEnqueuer {
     if (this.#launched) return;
     // `onConflict:'always_update'` for the same reason the agent queue sets it: with a per-document
     // `applicationVersion`, DBOS's default `update_if_latest_version` silently degrades this upsert to
-    // ON CONFLICT DO NOTHING for every process that is not the newest registered version.
+    // ON CONFLICT DO NOTHING for every process that is not the newest registered version. It carries
+    // the same limit too — the `queues` row is name-keyed and therefore SHARED across deployments on
+    // one system database; see the note on the agent queue in executor.ts.
     await DBOS.registerQueue(WORKFLOW_RUNS_QUEUE, {
       workerConcurrency: this.#workerConcurrency,
       onConflict: 'always_update',
@@ -284,6 +286,31 @@ export class DbosWorkflowExecutor implements WorkflowEnqueuer {
         // job. Journal the terminal outcome here, then RETHROW unchanged so the step still fails.
         // Scoped to the resolver ALONE: `engine.execute` keeps its own invariant that an invalid spec
         // never creates a run header, and widening this catch over it would quietly break that.
+        //
+        // KNOWN NARROW WINDOW — a crash BETWEEN the journal commit and the rethrow (documented, not
+        // closed here). `#journalResolveFailure` writes the `terminal_failure` header through a
+        // non-transactional `forTenant` handle, so it is COMMITTED the moment it returns; the
+        // `throw err` on the next line is what fails the DBOS step. A process that
+        // dies in between leaves the header committed and the step un-failed, so DBOS crash-recovery
+        // re-invokes this workflow. Should the resolver SUCCEED on that re-invocation, control reaches
+        // `engine.execute` below — which short-circuits on a pre-existing non-`running` header and
+        // returns it as-is (engine.ts, the `!created && run.status !== 'running'` dedup, pinned by
+        // engine.test.ts "DEDUP IS BLIND TO WHETHER ANYTHING RAN"). This body ignores that return
+        // value, so the step, and the workflow, complete SUCCESSFULLY having executed no node.
+        //
+        // WHAT BOUNDS IT: the resolver's verdict for a given job cannot change within one process.
+        // The only production `resolveWorkflowRun` closes over `composedProduct` in product-boot.ts,
+        // which is assigned exactly once and BEFORE `await executor.start()`, so every in-process
+        // recovery re-invocation of a job whose resolve failed fails identically — re-settling its own
+        // marked header (idempotent) and re-failing the step until `maxRecoveryAttempts` dead-letters
+        // it. Reaching the SUCCESS-without-executing outcome therefore needs a second condition on top
+        // of the sub-second crash: a LATER process whose composition does declare the workflow (a
+        // redeploy of the same document identity that re-adds it) recovering that same job.
+        //
+        // NOT closed by widening the short-circuit here: distinguishing a header this path settled
+        // (which attempted nothing) from one the ENGINE settled (which did) is a change to the
+        // engine's dedup contract, and re-running a run another writer settled is the worse failure.
+        // Tracked for a release that can carry that change.
         let resolved: ResolvedWorkflowRun;
         try {
           resolved = this.#deps.resolveWorkflowRun(job, tdb);

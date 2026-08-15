@@ -15,6 +15,7 @@
 import { serve } from '@hono/node-server';
 import { registerProductStores } from '@rayspec/db/composition';
 import {
+  applyServeAgentTracing,
   assembleServer,
   BootConfigError,
   bootBanner,
@@ -23,6 +24,14 @@ import {
 } from '@rayspec/server';
 
 async function main(): Promise<void> {
+  // Consult RAYSPEC_AGENT_TRACING before the secret-requiring config load, so this boot cannot ignore a
+  // stated intention while its banner reports the posture. EXPLICIT-ONLY: unset or blank leaves the
+  // agent SDK's own default (which exports) exactly as it was, `off` disables the export through the
+  // SDK's programmatic switch — the static import above has already built its trace provider, so an
+  // environment write alone would arrive too late — and an unsupported value aborts with the message
+  // the documented entrypoints use, clean-printed by the catch at the foot of this file.
+  await applyServeAgentTracing();
+
   const config = loadServerConfig();
   const server = await assembleServer(config, {
     // Register the built product tables through the SANCTIONED registrar (@rayspec/db/composition),

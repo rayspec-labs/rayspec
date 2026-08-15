@@ -19,7 +19,9 @@
  *    product-write permission — a fire dispatches a declared action that writes the tenant's product
  *    stores; live-membership rechecked for JWT principals, api-key-grantable with scope). Returns 202 +
  *    `{ name, fired }` — and, when the dispatched action was an AGENT action, `runId` + the
- *    `/v1/runs/{id}/events` path beside it (the same shape the async run surface's 202 advertises),
+ *    `/v1/runs/{id}/events` path beside it (the same `{ runId, events }` pairing the async run
+ *    surface's 202 carries; a FRESH async enqueue's 202 additionally carries `status:'enqueued'`,
+ *    this one never does),
  *    so the off-request run this fire enqueued is followable through the public API. A
  *    handler-action fire and a deduped no-op keep the plain shape (no runId — nothing this call
  *    started to follow). `fired:false` does NOT by itself mean the work already ran: it is EITHER a
@@ -97,9 +99,10 @@ export function registerTriggerRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): 
       });
 
       // An AGENT-action fire that dispatched hands back the enqueued run's id + the events path to
-      // follow it (the same shape the async run surface's 202 advertises — the firer wrote the run's
-      // pre-enqueue header, so the id resolves immediately). A handler-action fire and a deduped
-      // no-op keep today's plain shape: no runId key at all — there is no run THIS call started.
+      // follow it (the same `{ runId, events }` pairing the async run surface's 202 carries; a FRESH
+      // async enqueue's 202 additionally carries `status:'enqueued'`, this one never does. The firer
+      // wrote the run's pre-enqueue header, so the id resolves immediately). A handler-action fire
+      // and a deduped no-op keep today's plain shape: no runId key at all — no run THIS call started.
       if (result.fired && result.runId !== undefined) {
         return c.json(
           { name, fired: true, runId: result.runId, events: `/v1/runs/${result.runId}/events` },

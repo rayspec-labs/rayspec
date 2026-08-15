@@ -104,8 +104,8 @@ function toNumber(value: unknown): number {
  *
  * Runs on whatever handle it is given: inside a route handler's engine-opened transaction it is the
  * LAST statement before COMMIT, so the events are atomic with the handler's own writes (a subscriber
- * can never see an event announcing a state change that is not yet readable); on a tool handler's
- * plain handle — a tool has no outer transaction by design — it is a standalone statement.
+ * can never see an event announcing a state change that is not yet readable); on the plain handle a
+ * tool is given it is a standalone statement.
  *
  * The counter row is created by the same statement that bumps it (`ON CONFLICT DO UPDATE`), so a
  * tenant's first emit needs no seeding pass, and the conflict path takes the same row lock the update

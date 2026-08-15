@@ -159,6 +159,23 @@ describe('parseAuthRateMultiplier — the fail-closed dev/CI auth-bucket multipl
     }
   });
 
+  it('FAIL-CLOSES above the 1000 ceiling too — the scaled buckets stay a throttle', () => {
+    // The ceiling itself is allowed (boundary holds), and it is far above the documented 100:
+    // ×1000 turns register's 5/min into 5000/min, which no test harness exhausts.
+    expect(parseAuthRateMultiplier({ RAYSPEC_AUTH_RATE_MULTIPLIER: '1000' })).toBe(1000);
+    // One past it, and the values a typo or a copied "very large number" produces, abort the boot.
+    // Without a ceiling ×1e9 is accepted and scales register/login/refresh to 5e9/1e10/3e10 per
+    // minute — arithmetically a limiter, operationally none at all.
+    for (const v of ['1001', '100000', '1000000000']) {
+      expect(() => parseAuthRateMultiplier({ RAYSPEC_AUTH_RATE_MULTIPLIER: v })).toThrow(
+        BootConfigError,
+      );
+      expect(() => parseAuthRateMultiplier({ RAYSPEC_AUTH_RATE_MULTIPLIER: v })).toThrow(
+        `RAYSPEC_AUTH_RATE_MULTIPLIER='${v}'`,
+      );
+    }
+  });
+
   it('loadServerConfig surfaces the multiplier (default 1; a valid override threads through)', () => {
     const baseEnv: NodeJS.ProcessEnv = {
       DATABASE_URL: 'postgres://u:p@localhost:5432/app',

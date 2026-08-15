@@ -340,9 +340,12 @@ frontend:
         'utf8',
       );
       // The probe's verdict on this exact mount, from the shipped predicate — the boot must agree.
-      expect(frontendMountsReadiness([{ route: '/', dir: 'web/dist', spa: true }], tmpDir)).toBe(
-        'unavailable',
-      );
+      expect(
+        frontendMountsReadiness(
+          [{ route: '/', dir: 'web/dist', spa: true, cleanUrls: false }],
+          tmpDir,
+        ),
+      ).toBe('unavailable');
 
       process.env.RAYSPEC_SPEC_PATH = badSpecPath;
       const config = loadServerConfig();
