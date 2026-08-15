@@ -787,6 +787,14 @@ export const RaySpec = z
      * `metadata`) stays valid (frontend is omittable).
      */
     frontend: z.array(FrontendSpec).optional(),
+    /**
+     * RESERVED for the platform: this key is held by the grammar owner and is never available for an
+     * extension pack to claim. Opaque and inert — an arbitrary mapping the parser accepts and carries
+     * through unchanged, which nothing in the runtime reads. `.optional()` (NOT a default) so a spec
+     * that omits it parses byte-identically; the strict top level still rejects every other unknown
+     * key, so reserving this one buys no general passthrough.
+     */
+    managed: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
 export type RaySpec = z.infer<typeof RaySpec>;

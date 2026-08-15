@@ -873,6 +873,13 @@
         ],
         "additionalProperties": false
       }
+    },
+    "managed": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
     }
   },
   "required": [
