@@ -784,8 +784,12 @@ describe('/v1/workforce (the task-engine surface)', () => {
     });
     expect(res.status).toBe(200);
     expect(res.headers.get('X-Result-Truncated')).toBe('true');
-    const body = (await res.json()) as { tasks: unknown[]; budgets: unknown };
+    const body = (await res.json()) as { tasks: Array<{ taskId: string }>; budgets: unknown };
     expect(body.tasks).toHaveLength(500);
+    // THE ROOT ALWAYS RIDES A TRUNCATED PAGE: ids are random UUIDs, so the id-ordered window has
+    // no reason to contain it — and a goal line naming an arbitrary child would misread as that
+    // child's story. The route unions the root in whenever the page missed it.
+    expect(body.tasks.some((t) => t.taskId === root.taskId)).toBe(true);
     expect(body.budgets).toBeNull(); // no runtime row was ever created for 'wf' here
   });
 

@@ -144,9 +144,10 @@ const haltRequestSchema = z.strictObject({
 /**
  * The goal (and description) ceiling at the intake edge, in BYTES — the same unit the turn
  * input's section budgets use (a character cap would let a multibyte goal pass here and burst
- * the budget there). Half the assembly's task-section budget, so a goal accepted on this surface
- * can ALWAYS be rendered untrimmed into the owning employee's turns — the assembly's
- * goal-never-trimmed refusal then only ever fires on goals minted by code that bypassed it.
+ * the budget there). A fraction of the assembly's task-section budget (the assembly asserts the
+ * margin at module load), so a goal accepted on this surface can ALWAYS be rendered untrimmed
+ * into the owning employee's turns — the goal-never-trimmed refusal then only ever fires on
+ * goals minted by code that bypassed it.
  */
 const MAX_GOAL_BYTES = 16_384;
 const withinGoalBytes = (text: string) => Buffer.byteLength(text, 'utf8') <= MAX_GOAL_BYTES;
@@ -532,12 +533,18 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
         );
       }
 
+      // The per-scope default is a bounded page like every other list on this surface —
+      // deterministic order, hard cap, truncation header. `totalSettledUsd` sums the PAGE it
+      // returns, and the header is how a reader knows the page is not the whole window.
+      const ledger = schema.workforceBudgetLedger;
       const rows = (await tdb
-        .select(schema.workforceBudgetLedger)
-        .where(gte(schema.workforceBudgetLedger.updatedAt, since))) as Array<
-        typeof schema.workforceBudgetLedger.$inferSelect
-      >;
-      const scopes = rows.map((r) => ({
+        .select(ledger)
+        .where(gte(ledger.updatedAt, since))
+        .orderBy(asc(ledger.scopeKind), asc(ledger.scopeId), asc(ledger.windowStart))
+        .limit(MAX_PAGE + 1)) as Array<typeof schema.workforceBudgetLedger.$inferSelect>;
+      c.header('X-Result-Truncated', rows.length > MAX_PAGE ? 'true' : 'false');
+      const page = rows.slice(0, MAX_PAGE);
+      const scopes = page.map((r) => ({
         scopeKind: r.scopeKind,
         scopeId: r.scopeId,
         windowStart: r.windowStart.toISOString(),
@@ -545,7 +552,7 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
         settledUsd: r.settledUsd,
         settledTurns: r.settledTurns,
       }));
-      const totalSettledUsd = rows
+      const totalSettledUsd = page
         .filter((r) => r.scopeKind === 'task')
         .reduce((sum, r) => sum + Number(r.settledUsd), 0);
       return c.json({ window, totalSettledUsd, scopes }, 200);
@@ -596,13 +603,15 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
 
   // GET /v1/workforce/tasks/:id/tree — the WHOLE subtree the task belongs to, flat. `:id` may be
   // ANY member of the subtree; the read anchors on its root, so an operator can ask from
-  // whichever task id they are holding. Three bounded reads, no per-node walk: the anchor row,
-  // one indexed root scan, and the runtime row for the per-task ceiling (what the goal line of a
-  // rendered tree divides by — the ceiling that binds the SUBTREE scope, not the workforce
-  // window, which is `status`'s number). Rows come back flat in `task_id asc` (the parent
-  // pointers are on the rows; nesting is the caller's) and CAP at TREE_MAX_TASKS with the
-  // truncation header — an operator most needs the tree exactly when a subtree ran away, so a
-  // capped prefix with an explicit flag beats a refusal that blinds the console.
+  // whichever task id they are holding. At most four bounded reads, no per-node walk: the anchor
+  // row, one indexed root scan, the root's own row when the capped page happened to miss it (the
+  // root ALWAYS rides the response — the goal line is its), and the runtime row for the per-task
+  // ceiling (what the goal line of a rendered tree divides by — the ceiling that binds the
+  // SUBTREE scope, not the workforce window, which is `status`'s number). Rows come back flat in
+  // `task_id asc` (the parent pointers are on the rows; nesting is the caller's) and CAP at
+  // TREE_MAX_TASKS with the truncation header — an operator most needs the tree exactly when a
+  // subtree ran away, so a capped prefix with an explicit flag beats a refusal that blinds the
+  // console.
   app.get(
     '/v1/workforce/tasks/:id/tree',
     requireAuth(),
@@ -616,11 +625,26 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
         .where(eq(schema.workforceTasks.taskId, c.req.param('id')))) as TaskRow[];
       const anchor = anchorRows[0];
       if (!anchor) throw new ApiError('NOT_FOUND', 'Not found.');
-      const rows = (await tdb
+      const pageRows = (await tdb
         .select(schema.workforceTasks)
         .where(eq(schema.workforceTasks.rootTaskId, anchor.rootTaskId))
         .orderBy(asc(schema.workforceTasks.taskId))
         .limit(TREE_MAX_TASKS + 1)) as TaskRow[];
+      // THE ROOT ALWAYS RIDES THE RESPONSE. Task ids are random/hash UUIDs — id order is
+      // deterministic, not creation order — so a >cap subtree's id-ordered page has no reason to
+      // contain the root at all, and a tree whose goal line names an arbitrary child would
+      // misread as that child's story. When the page missed it, one more point read fetches it
+      // and it takes the first slot; the page yields one row to stay inside the cap.
+      let rows = pageRows;
+      if (!pageRows.some((row) => row.taskId === anchor.rootTaskId)) {
+        const rootRows =
+          anchor.taskId === anchor.rootTaskId
+            ? [anchor]
+            : ((await tdb
+                .select(schema.workforceTasks)
+                .where(eq(schema.workforceTasks.taskId, anchor.rootTaskId))) as TaskRow[]);
+        rows = [...rootRows, ...pageRows];
+      }
       const truncated = rows.length > TREE_MAX_TASKS;
       let budgets: { taskUsd: number | null; taskTurns: number | null } | null = null;
       if (anchor.workforceId !== null) {
@@ -803,7 +827,10 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
 
   // POST /v1/workforce/:workforceId/goals — submit a goal; the deployment's orchestration
   // strategy shapes it into durable tasks and the dispatcher picks them up. 202: the tasks exist
-  // `planned`; nothing has run yet, and the task list / tree is where progress reads.
+  // `planned`; nothing has run yet, and the task list / tree is where progress reads. EVERY CALL
+  // IS ITS OWN SUBMISSION — there is no idempotency key on this surface yet, so a client retry
+  // after a lost 202 creates a second root (documented in the CLI reference; the caller that
+  // needs exactly-once submission checks the task list before retrying).
   app.post(
     '/v1/workforce/:workforceId/goals',
     requireAuth(),
