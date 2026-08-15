@@ -18,6 +18,18 @@ export {
   TurnCollector,
 } from './collector.js';
 export {
+  assembleTurnInput,
+  CHILD_RESULT_MAX_BYTES,
+  ContextSectionOverflowError,
+  GoalExceedsContextBudgetError,
+  SECTION_BUDGETS,
+  SIGNAL_PAYLOAD_MAX_BYTES,
+  TURN_INPUT_MAX_BYTES,
+  type TurnInputFacts,
+  type TurnMessageFact,
+  type TurnSignalFact,
+} from './context.js';
+export {
   ApprovalEscalationTargetMissingError,
   DelegationTargetInvalidError,
   EscalationTargetMissingError,
@@ -27,6 +39,14 @@ export {
   TurnAlreadyEndedError,
   WorkforceToolError,
 } from './errors.js';
+export { type ApplicableReviewRuleFact, computeTurnFacts, type TurnFacts } from './facts.js';
+export {
+  DATA_BOUNDARY_LINE,
+  ROLE_GUIDANCE,
+  SECTION_HEADERS,
+  TURN_ENDING_REMINDER,
+  TURN_PROMPT_VERSION,
+} from './prompt.js';
 export {
   assertManagerMayTarget,
   type DelegationTarget,
@@ -34,7 +54,12 @@ export {
   type ResolvedTarget,
   resolveDelegationTarget,
 } from './resolve-target.js';
-export { type MatchedReviewPolicy, matchReviewPolicy } from './review-policy.js';
+export {
+  type MatchedApprovalRule,
+  type MatchedReviewPolicy,
+  matchApprovalRule,
+  matchReviewPolicy,
+} from './review-policy.js';
 export {
   EMPLOYEE_ROLES,
   type EmployeeRole,

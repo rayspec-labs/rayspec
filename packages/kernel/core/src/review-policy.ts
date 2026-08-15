@@ -81,7 +81,7 @@ export class DeclaredReviewPolicy implements ReviewPolicy {
 
   evaluate(task: ReviewSubject, result: ReviewedResult): Promise<ReviewDecision> {
     for (const rule of this.#rules) {
-      if (!appliesTo(rule, task)) continue;
+      if (!reviewRuleAppliesTo(rule, task)) continue;
       if (!requiresReview(rule, task, result)) continue;
       return Promise.resolve({
         required: true,
@@ -95,11 +95,20 @@ export class DeclaredReviewPolicy implements ReviewPolicy {
   }
 }
 
-function appliesTo(rule: DeclaredReviewRule, task: ReviewSubject): boolean {
-  if (rule.appliesTo.department !== undefined && rule.appliesTo.department === task.department) {
+/**
+ * Does a declared rule COVER this subject (owner / department match)? Exported so the turn
+ * scaffolding can present the rules in force as FACTS before a result exists —
+ * `DeclaredReviewPolicy` evaluates through this same predicate, so the facts a turn is shown and
+ * the match the engine enforces can never use two definitions of "applies".
+ */
+export function reviewRuleAppliesTo(
+  rule: DeclaredReviewRule,
+  subject: { readonly owner: string; readonly department: string | null },
+): boolean {
+  if (rule.appliesTo.department !== undefined && rule.appliesTo.department === subject.department) {
     return true;
   }
-  return rule.appliesTo.employee !== undefined && rule.appliesTo.employee === task.owner;
+  return rule.appliesTo.employee !== undefined && rule.appliesTo.employee === subject.owner;
 }
 
 function requiresReview(

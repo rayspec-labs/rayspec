@@ -46,6 +46,7 @@ import {
   parseDelegationTarget,
   resolveDelegationTarget,
 } from './resolve-target.js';
+import { matchApprovalRule } from './review-policy.js';
 import { TOOLSETS_BY_ROLE, type ToolName } from './roles.js';
 import type { WorkforceReadSnapshot } from './snapshot.js';
 
@@ -472,9 +473,9 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
       },
       handler: (args) => {
         const { question, options } = parseEnding(requestApprovalArgsSchema, args);
-        const rule = config.approvals.find((candidate) =>
-          candidate.capabilities.some((label) => employee.capabilities.includes(label)),
-        );
+        // The SHARED matcher (review-policy.ts) — the same predicate the turn scaffolding
+        // presents as a fact, so the rule a turn was told about is the rule its request gets.
+        const rule = matchApprovalRule(config, employee);
         const onTimeout = rule?.onTimeout ?? 'fail';
         // An escalate fate must NAME its target, and the reporting edge is the only supplier. A
         // seat with no superior (the orchestrator, by lint requirement) therefore cannot request an

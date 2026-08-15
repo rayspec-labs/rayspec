@@ -138,16 +138,22 @@ const haltRequestSchema = z.strictObject({
 });
 
 /**
- * The goal (and description) byte ceiling at the intake edge. Deliberately far under the turn
- * input's own section budget, so a goal accepted here can ALWAYS be rendered untrimmed into the
- * owning employee's turns — the assembly's goal-never-trimmed rule then only ever refuses goals
- * minted by code that bypassed this surface.
+ * The goal (and description) ceiling at the intake edge, in BYTES — the same unit the turn
+ * input's section budgets use (a character cap would let a multibyte goal pass here and burst
+ * the budget there). Half the assembly's task-section budget, so a goal accepted on this surface
+ * can ALWAYS be rendered untrimmed into the owning employee's turns — the assembly's
+ * goal-never-trimmed refusal then only ever fires on goals minted by code that bypassed it.
  */
-const MAX_GOAL_CHARS = 16_384;
+const MAX_GOAL_BYTES = 16_384;
+const withinGoalBytes = (text: string) => Buffer.byteLength(text, 'utf8') <= MAX_GOAL_BYTES;
 
 const goalRequestSchema = z.strictObject({
-  goal: z.string().min(1).max(MAX_GOAL_CHARS),
-  description: z.string().min(1).max(MAX_GOAL_CHARS).optional(),
+  goal: z.string().min(1).refine(withinGoalBytes, `goal must be at most ${MAX_GOAL_BYTES} bytes`),
+  description: z
+    .string()
+    .min(1)
+    .refine(withinGoalBytes, `description must be at most ${MAX_GOAL_BYTES} bytes`)
+    .optional(),
   priority: z.enum(TASK_PRIORITIES).optional(),
 });
 

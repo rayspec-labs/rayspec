@@ -4,8 +4,11 @@
  * excluded from the build.
  */
 import type { WorkforceConfig, WorkforceEmployeeConfig } from '@rayspec/spec';
-import type { TaskRecord } from '@rayspec/tasks';
+import { type TaskRecord, workforceBudgetsSchema } from '@rayspec/tasks';
 import type { WorkforceReadSnapshot } from '../snapshot.js';
+
+/** No declared ceilings — the parsed empty budgets object every snapshot carries by default. */
+const NO_BUDGETS = workforceBudgetsSchema.parse({});
 
 export function fixtureConfig(): WorkforceConfig {
   const employees: WorkforceEmployeeConfig[] = [
@@ -132,7 +135,10 @@ export function fixtureTask(over: Partial<Record<string, unknown>> = {}): TaskRe
   } as TaskRecord;
 }
 
-export function emptySnapshot(task: TaskRecord): WorkforceReadSnapshot {
+export function emptySnapshot(
+  task: TaskRecord,
+  over: Partial<WorkforceReadSnapshot> = {},
+): WorkforceReadSnapshot {
   return {
     task,
     parentTask: null,
@@ -141,5 +147,8 @@ export function emptySnapshot(task: TaskRecord): WorkforceReadSnapshot {
     workforceState: null,
     pendingReview: null,
     activeTeamIds: [],
+    budgets: NO_BUDGETS,
+    dependencyResults: null,
+    ...over,
   };
 }
