@@ -50,6 +50,7 @@ import {
   resolveWorkforceBudgets,
   resumeWorkforce,
   reviewVerdictSchema,
+  TASK_PRIORITIES,
   TASK_STATUSES,
   TaskNotFoundError,
   WorkforceDrainTimeoutError,
@@ -61,7 +62,7 @@ import {
 import { and, asc, eq, gt, gte, isNull, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { z } from 'zod';
-import type { AppDeps, AppEnv, WorkforceControl } from '../app-context.js';
+import type { AppDeps, AppEnv, WorkforceControl, WorkforceGoalIntake } from '../app-context.js';
 import { readBoundedJson } from '../http/bounded-body.js';
 import { replayJournalEventsAsSse, resolveLastEventId } from '../http/journal-replay.js';
 import { requireAuth, requirePermission, resolveTenant } from '../http/middleware.js';
@@ -136,6 +137,20 @@ const haltRequestSchema = z.strictObject({
   reason: z.string().min(1).max(500),
 });
 
+/**
+ * The goal (and description) byte ceiling at the intake edge. Deliberately far under the turn
+ * input's own section budget, so a goal accepted here can ALWAYS be rendered untrimmed into the
+ * owning employee's turns — the assembly's goal-never-trimmed rule then only ever refuses goals
+ * minted by code that bypassed this surface.
+ */
+const MAX_GOAL_CHARS = 16_384;
+
+const goalRequestSchema = z.strictObject({
+  goal: z.string().min(1).max(MAX_GOAL_CHARS),
+  description: z.string().min(1).max(MAX_GOAL_CHARS).optional(),
+  priority: z.enum(TASK_PRIORITIES).optional(),
+});
+
 const WINDOW_RE = /^(\d{1,3})([hd])$/;
 /** The widest cost window a single request may materialize (bounded read, like the task list). */
 const MAX_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
@@ -177,6 +192,17 @@ function requireWorkforce(deps: AppDeps): WorkforceControl {
     );
   }
   return deps.workforce;
+}
+
+/** The wired goal-intake seam, or the fail-closed 501 (intake needs a DECLARED workforce). */
+function requireGoalIntake(deps: AppDeps): WorkforceGoalIntake {
+  if (!deps.workforceGoalIntake) {
+    throw new ApiError(
+      'NOT_IMPLEMENTED',
+      'Goal submission requires a declared workforce. This deployment declares none, so no orchestrator seat can own the goal.',
+    );
+  }
+  return deps.workforceGoalIntake;
 }
 
 function tenantHandle(deps: AppDeps, tenantId: string | undefined): TenantDb {
@@ -619,6 +645,43 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       } catch (err) {
         mapEngineError(err);
       }
+    },
+  );
+
+  // POST /v1/workforce/:workforceId/goals — submit a goal; the deployment's orchestration
+  // strategy shapes it into durable tasks and the dispatcher picks them up. 202: the tasks exist
+  // `planned`; nothing has run yet, and the task list / tree is where progress reads.
+  app.post(
+    '/v1/workforce/:workforceId/goals',
+    requireAuth(),
+    resolveTenant(deps),
+    requirePermission(deps, 'store:write'),
+    async (c) => {
+      const workforce = requireWorkforce(deps);
+      const intake = requireGoalIntake(deps);
+      const workforceId = workforceIdParam(c);
+      const tenantId = c.get('tenantId');
+      if (!tenantId) throw new ApiError('NOT_FOUND', 'Not found.');
+      const body = goalRequestSchema.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
+      const result = await intake.submitGoal({
+        tenantId,
+        workforceId,
+        goal: body.goal,
+        ...(body.description !== undefined ? { description: body.description } : {}),
+        ...(body.priority !== undefined ? { priority: body.priority } : {}),
+        requestedBy: actorFrom(c),
+      });
+      if (result.outcome === 'not_found') throw new ApiError('NOT_FOUND', 'Not found.');
+      if (result.outcome === 'invalid_plan') {
+        // The strategy is deployment configuration, never client input — a refused plan is a
+        // server-side defect and says so, rather than hiding behind a 4xx the caller cannot fix.
+        throw new ApiError(
+          'INTERNAL',
+          `The orchestration strategy produced a plan the intake refused: ${result.detail}`,
+        );
+      }
+      workforce.kick();
+      return c.json({ workforceId, tasks: result.tasks }, 202);
     },
   );
 

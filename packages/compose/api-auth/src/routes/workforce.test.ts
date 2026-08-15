@@ -22,10 +22,19 @@ import {
 } from '@rayspec/tasks';
 import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import type { WorkforceGoalIntake, WorkforceGoalOutcome } from '../app-context.js';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
 
 let h: Harness;
 let kicks = 0;
+
+/** The goals route's stub intake: records what the route derived, answers what a test set. The
+ * REAL intake (strategy → rows) is the server composition's and is proven in its own DB suite —
+ * here the subject is the ROUTE's mapping: strict body, server-derived tenant + actor, outcome
+ * mapping, and the kick. */
+let goalSubmissions: Array<Parameters<WorkforceGoalIntake['submitGoal']>[0]> = [];
+const DEFAULT_GOAL_OUTCOME: WorkforceGoalOutcome = { outcome: 'created', tasks: [] };
+let nextGoalOutcome: WorkforceGoalOutcome = DEFAULT_GOAL_OUTCOME;
 
 const NO_BUDGETS = workforceBudgetsSchema.parse({});
 
@@ -135,11 +144,19 @@ describe('/v1/workforce (the task-engine surface)', () => {
           kicks++;
         },
       },
+      workforceGoalIntake: {
+        submitGoal: (input) => {
+          goalSubmissions.push(input);
+          return Promise.resolve(nextGoalOutcome);
+        },
+      },
       schema: 'rayspec_test_workforce',
     });
   });
   afterEach(async () => {
     kicks = 0;
+    goalSubmissions = [];
+    nextGoalOutcome = DEFAULT_GOAL_OUTCOME;
     await h.reset();
   });
   afterAll(async () => {
@@ -630,6 +647,86 @@ describe('/v1/workforce (the task-engine surface)', () => {
     const res = await jsonRequest(h.app, 'GET', '/v1/workforce/tasks', {});
     expect(res.status).toBe(401);
   });
+
+  it('submits a goal: server-derived tenant + verified actor reach the intake, 202 lists the tasks, the dispatcher is kicked', async () => {
+    const a = await principal('wf-goal@example.test', 'Org WF Goal');
+    nextGoalOutcome = {
+      outcome: 'created',
+      tasks: [{ taskId: 'task_plan_1', owner: 'lead', title: 'Ship the release.' }],
+    };
+    const res = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'Ship the release.', priority: 'high' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({
+      workforceId: 'wf',
+      tasks: [{ taskId: 'task_plan_1', owner: 'lead', title: 'Ship the release.' }],
+    });
+    expect(kicks).toBe(1);
+    expect(goalSubmissions).toHaveLength(1);
+    const seen = goalSubmissions[0] as (typeof goalSubmissions)[number];
+    expect(seen.tenantId).toBe(a.orgId); // the middleware chain's tenant, never a body field
+    expect(seen.workforceId).toBe('wf');
+    expect(seen.goal).toBe('Ship the release.');
+    expect(seen.priority).toBe('high');
+    expect(seen.requestedBy).toMatch(/^user:/); // the VERIFIED principal, never client-asserted
+  });
+
+  it('maps intake outcomes: not_found → uniform 404, invalid_plan → the 500 naming the defect; neither kicks', async () => {
+    const a = await principal('wf-goal-map@example.test', 'Org WF Goal Map');
+    nextGoalOutcome = { outcome: 'not_found' };
+    const missing = await jsonRequest(h.app, 'POST', '/v1/workforce/other/goals', {
+      body: { goal: 'For a workforce this deployment does not declare.' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(missing.status).toBe(404);
+
+    nextGoalOutcome = {
+      outcome: 'invalid_plan',
+      detail: "step 0 names owner 'ghost', which this workforce does not declare",
+    };
+    const refused = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'A goal the deployed strategy mishandles.' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(refused.status).toBe(500);
+    expect((await refused.json()).error.message).toContain("step 0 names owner 'ghost'");
+    expect(kicks).toBe(0); // no outcome above created any work to dispatch
+  });
+
+  it('refuses a goal outside the strict schema, a reserved workforce id, and a read-only key', async () => {
+    const a = await principal('wf-goal-refuse@example.test', 'Org WF Goal Refuse');
+    const auth = { authorization: `Bearer ${a.token}` };
+    const unknownKey = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'x', requestedBy: 'lead' }, // identity is server-derived — the key is refused
+      headers: auth,
+    });
+    expect(unknownKey.status).toBe(400);
+    const missingGoal = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { priority: 'high' },
+      headers: auth,
+    });
+    expect(missingGoal.status).toBe(400);
+    const reserved = await jsonRequest(h.app, 'POST', '/v1/workforce/tasks/goals', {
+      body: { goal: 'x' },
+      headers: auth,
+    });
+    expect(reserved.status).toBe(400);
+    expect(goalSubmissions).toHaveLength(0); // every refusal above precedes the seam
+
+    const mint = await jsonRequest(h.app, 'POST', `/v1/orgs/${a.orgId}/api-keys`, {
+      body: { name: 'read-only', scopes: ['store:read'] },
+      headers: auth,
+    });
+    const key = (await mint.json()).plaintext as string;
+    const write = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'x' },
+      headers: { authorization: `Bearer ${key}` },
+    });
+    expect(write.status).toBe(403);
+    expect((await write.json()).error.details).toEqual({ missing_permission: 'store:write' });
+  });
 });
 
 describe('/v1/workforce without a wired dispatcher', () => {
@@ -659,5 +756,47 @@ describe('/v1/workforce without a wired dispatcher', () => {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(res.status).toBe(501);
+    const goals = await jsonRequest(hNo.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'x' },
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(goals.status).toBe(501);
+  });
+});
+
+describe('/v1/workforce goals with a dispatcher but no declared workforce', () => {
+  let hNoIntake: Harness;
+  beforeAll(async () => {
+    // The engine-only posture: a durable worker dispatches (the control seam is wired) but the
+    // document declares no workforce, so no orchestrator seat exists to own a submitted goal.
+    hNoIntake = await createHarness({
+      workforce: { kick: () => {} },
+      schema: 'rayspec_test_workforce_no_intake',
+    });
+  });
+  afterAll(async () => {
+    await hNoIntake.close();
+  });
+
+  it('fail-closes goal submission with the 501 naming the missing declared workforce', async () => {
+    const reg = await jsonRequest(hNoIntake.app, 'POST', '/v1/auth/register', {
+      body: { email: 'wf-no-intake@example.test', password: 'a-long-enough-password' },
+    });
+    const t0 = (await reg.json()).accessToken as string;
+    const orgRes = await jsonRequest(hNoIntake.app, 'POST', '/v1/orgs', {
+      body: { name: 'Org WF No Intake' },
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    const orgId = (await orgRes.json()).id as string;
+    const switchRes = await jsonRequest(hNoIntake.app, 'POST', `/v1/orgs/${orgId}/switch`, {
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    const token = (await switchRes.json()).accessToken as string;
+    const res = await jsonRequest(hNoIntake.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'x' },
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(501);
+    expect((await res.json()).error.message).toContain('declared workforce');
   });
 });

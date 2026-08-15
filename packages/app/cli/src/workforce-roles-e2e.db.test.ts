@@ -28,8 +28,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { forTenant, makeDb } from '@rayspec/db';
-import { createRootTask } from '@rayspec/tasks';
+import { makeDb } from '@rayspec/db';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -436,15 +435,25 @@ describe.skipIf(!baseUrl)('workforce roles story — delegation, review loop, CL
     expect(mint.status).toBe(201);
     const apiKey = ((await mint.json()) as { plaintext: string }).plaintext;
 
-    // The root task, owned by the declared orchestrator.
-    const tdb = forTenant(engineDb as ReturnType<typeof makeDb>, TENANT);
-    const root = await createRootTask(tdb, {
-      workforceId: 'story_wf',
-      title: 'Produce the combined report',
-      goal: 'Split the report across departments, review the risky half, get a human sign-off.',
-      owner: 'lead',
-      requestedBy: 'user',
+    // The root task, through the PRODUCTION intake: POST the goal to the declared workforce and
+    // let the deployment's orchestration strategy hand it to the orchestrator seat — the same
+    // path an operator's submission takes, not a test-side row insert.
+    const submitted = await fetch(`${base}/v1/workforce/story_wf/goals`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        goal: 'Split the report across departments, review the risky half, get a human sign-off.',
+      }),
     });
+    expect(submitted.status).toBe(202);
+    const submittedBody = (await submitted.json()) as {
+      workforceId: string;
+      tasks: Array<{ taskId: string; owner: string; title: string }>;
+    };
+    expect(submittedBody.workforceId).toBe('story_wf');
+    expect(submittedBody.tasks).toHaveLength(1);
+    const root = { taskId: (submittedBody.tasks[0] as { taskId: string }).taskId };
+    expect((submittedBody.tasks[0] as { owner: string }).owner).toBe('lead');
 
     // ── phase A: the whole delegation + review story runs until the approval parks the root ──────
     await waitUntil('the approval parks the root with the whole subtree completed', async () => {

@@ -45,6 +45,8 @@ export type {
   SessionReprocessor,
   SessionReprocessResult,
   TenantEventWake,
+  WorkforceGoalIntake,
+  WorkforceGoalOutcome,
 } from './app-context.js';
 // the platform-generic, operator-gated, fail-closed tenant DATA-ERASURE (product rows via the
 // TenantDb chokepoint + blobs via BlobStore.deleteTenant). The composition root wires it as the

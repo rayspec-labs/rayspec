@@ -381,6 +381,62 @@ export interface WorkforceControl {
   kick(): void;
 }
 
+/**
+ * The outcome of a goal submission (opaque to api-auth):
+ *  - `{ outcome: 'not_found' }` — no declared workforce answers this (tenant, workforceId): an
+ *    unknown workforce id, OR a request tenant that is not the deployment task tenant. The route
+ *    maps it to a uniform 404 (no existence leak), mirroring the manual-trigger seam.
+ *  - `{ outcome: 'invalid_plan' }` — the deployment's orchestration strategy produced a plan the
+ *    intake refused (an undeclared owner, a bad dependency index). ZERO rows exist — the refusal
+ *    precedes the first insert — and the route surfaces it as the server-side defect it is (500):
+ *    the strategy is deployment configuration, never client input.
+ *  - `{ outcome: 'created' }` — every planned task exists, atomically, each born `planned` under
+ *    the deployment task tenant; `tasks` lists them in plan order.
+ */
+export type WorkforceGoalOutcome =
+  | { readonly outcome: 'not_found' }
+  | { readonly outcome: 'invalid_plan'; readonly detail: string }
+  | {
+      readonly outcome: 'created';
+      readonly tasks: readonly {
+        readonly taskId: string;
+        readonly owner: string;
+        readonly title: string;
+      }[];
+    };
+
+/**
+ * The OPTIONAL goal-intake seam (opt-in, injected — omit ⇒ the goals route fail-closes 501). Turns
+ * one submitted goal into durable `planned` tasks through the deployment's orchestration strategy;
+ * the dispatcher picks them up on its next pass.
+ *
+ * PRODUCT-AGNOSTIC from api-auth's view (opaque): the concrete implementation — wired by the
+ * composition root — owns the declared workforce configuration and the strategy, so api-auth
+ * carries no org-structure knowledge.
+ *
+ * TENANT-SCOPED BY CONSTRUCTION: `tenantId` is the caller's SERVER-DERIVED tenant (from the
+ * middleware chain); the intake NEVER derives its own tenant. It reconciles the request tenant
+ * against the deployment task tenant — the only tenant the dispatcher serves, so a task created
+ * anywhere else would be a stranded row — and a foreign tenant or unknown workforce yields
+ * `not_found` (→ the route's uniform 404).
+ */
+export interface WorkforceGoalIntake {
+  submitGoal(input: {
+    /** The caller's server-derived tenant (never client-supplied). */
+    readonly tenantId: string;
+    /** The declared workforce the goal is addressed to (path param; unknown → not_found). */
+    readonly workforceId: string;
+    /** The goal, verbatim — DATA for the owning employee's turns, never platform instructions. */
+    readonly goal: string;
+    /** Requester context, stamped on EVERY created task (all steps serve the same goal). */
+    readonly description?: string;
+    /** The goal's urgency, stamped on EVERY created task. Task titles stay the strategy's. */
+    readonly priority?: 'low' | 'normal' | 'high' | 'urgent';
+    /** The VERIFIED principal (the route's actor derivation), never a client-asserted name. */
+    readonly requestedBy: string;
+  }): Promise<WorkforceGoalOutcome>;
+}
+
 /** Everything the app needs, wired once at construction. */
 export interface AppDeps {
   db: Db;
@@ -477,6 +533,15 @@ export interface AppDeps {
    * latency, the scheduled tick is the guarantee. PRODUCT-AGNOSTIC: wired by the composition root.
    */
   workforce?: WorkforceControl;
+  /**
+   * the OPTIONAL goal-intake seam. When wired, `POST /v1/workforce/:workforceId/goals` turns a
+   * submitted goal into durable tasks through the deployment's orchestration strategy. When
+   * ABSENT, that route is a clean fail-closed 501 — intake needs a DECLARED workforce (the goal's
+   * owner comes from the declared orchestrator seat) on top of the dispatcher the `workforce`
+   * seam signals, and an engine-only deployment creates its tasks through its own composition.
+   * PRODUCT-AGNOSTIC: wired by the composition root.
+   */
+  workforceGoalIntake?: WorkforceGoalIntake;
   /**
    * OPTIONAL override for the per-request JSON/body byte cap the route interpreters enforce on
    * body-bearing routes (register/login, the declared `{handler}` + store CRUD routes, reprocess). A
