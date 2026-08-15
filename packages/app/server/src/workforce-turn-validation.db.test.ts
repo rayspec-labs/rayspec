@@ -58,6 +58,7 @@ const DECLARED = WorkforceSpec.parse({
     { id: 'dev', agent: 'a', title: 'D', department: 'eng', role: 'worker' },
     { id: 'qa', agent: 'a', title: 'Q', reportsTo: 'lead', role: 'reviewer' },
   ],
+  teams: [{ id: 'fix_team', lead: 'mgr', members: ['dev', 'qa'], maxSize: 3 }],
   reviewPolicies: [
     {
       id: 'eng_quality',
@@ -127,9 +128,19 @@ describe.skipIf(!hasDb)('the turn chain: dispatch validate-in → composition �
       ...(outcome.messages ? { messages: outcome.messages } : {}),
       ...(outcome.createdChildren ? { createdChildren: outcome.createdChildren } : {}),
       ...(outcome.reviewPolicy ? { reviewPolicy: outcome.reviewPolicy } : {}),
+      ...(outcome.classification ? { classification: outcome.classification } : {}),
       budgets: NO_BUDGETS,
     });
     return { outcome, applied };
+  }
+
+  /** The newest turn_ended journal payload for a task — where classification lands. */
+  async function turnEndedPayload(taskId: string): Promise<Record<string, unknown>> {
+    const rows = (await db.$client.unsafe(
+      `SELECT data FROM run_events WHERE run_id = '${taskId}' AND type = 'workforce.task.turn_ended'
+       ORDER BY seq::numeric DESC LIMIT 1;`,
+    )) as unknown as Array<{ data: Record<string, unknown> }>;
+    return (rows[0] as { data: Record<string, unknown> }).data;
   }
 
   async function workingTaskFor(owner: string): Promise<TaskRecord> {
@@ -286,5 +297,178 @@ describe.skipIf(!hasDb)('the turn chain: dispatch validate-in → composition �
     expect(outcome.intent).toEqual({ kind: 'yield' });
     expect(applied.plan?.kind).toBe('yield');
     expect(await rowOf(task.taskId)).toMatchObject({ status: 'queued' });
+  });
+
+  it('journals each decision class from the TYPED intent: direct, delegate, team, review, escalate', async () => {
+    // Every class through the REAL chain — scripted call → chokepoint → toolset → composition →
+    // engine — asserted on the turn_ended journal row, never on prose.
+    const direct = await workingTaskFor('lead');
+    await runTurn(direct, [
+      {
+        name: 'submit_result',
+        args: { status: 'completed', summary: 'Answered directly.', confidence: 0.9 },
+      },
+    ]);
+    expect(await turnEndedPayload(direct.taskId)).toMatchObject({
+      outcome: 'complete',
+      classification: 'direct',
+    });
+
+    const delegate = await workingTaskFor('lead');
+    await runTurn(delegate, [
+      {
+        name: 'delegate_task',
+        args: {
+          tasks: [{ target: 'department:eng', title: 'Engineering stream', goal: 'Own it.' }],
+        },
+      },
+    ]);
+    expect(await turnEndedPayload(delegate.taskId)).toMatchObject({
+      outcome: 'fan_out',
+      classification: 'delegate',
+    });
+
+    const team = await workingTaskFor('lead');
+    await runTurn(team, [
+      {
+        name: 'delegate_task',
+        args: { tasks: [{ target: 'team:fix_team', title: 'Team stream', goal: 'Fix it.' }] },
+      },
+    ]);
+    expect(await turnEndedPayload(team.taskId)).toMatchObject({
+      outcome: 'fan_out',
+      classification: 'team',
+    });
+
+    // The review class rides the MANAGER seat: the declared eng policy names 'qa' as a reviewer
+    // the manager may reach (the orchestrator seat is covered by no policy and reports to no one).
+    const review = await workingTaskFor('mgr');
+    await runTurn(review, [{ name: 'request_review', args: { reviewer: 'qa' } }]);
+    expect(await turnEndedPayload(review.taskId)).toMatchObject({
+      outcome: 'request_review_dispatch',
+      classification: 'review',
+    });
+
+    const escalate = await workingTaskFor('lead');
+    await runTurn(escalate, [
+      { name: 'request_approval', args: { question: 'May the announcement ship?' } },
+    ]);
+    expect(await turnEndedPayload(escalate.taskId)).toMatchObject({
+      outcome: 'request_approval',
+      classification: 'escalate',
+    });
+  });
+
+  it('a worker completion journals NO classification — the field belongs to decision seats', async () => {
+    const task = await workingTaskFor('dev');
+    await runTurn(task, [
+      {
+        name: 'submit_result',
+        args: { status: 'completed', summary: 'Just the work.', confidence: 0.95 },
+      },
+    ]);
+    const payload = await turnEndedPayload(task.taskId);
+    expect(payload).toMatchObject({ outcome: 'complete' });
+    expect('classification' in payload).toBe(false);
+  });
+
+  it('POLICY OVERRIDES CLASSIFICATION: the journal records the direct decision AND the enforced review', async () => {
+    // The manager decides `direct` (a completion); the declared rule fires anyway. The journal
+    // carries both facts — what the seat chose, and that the engine routed it to review no
+    // matter what the turn submitted.
+    const task = await workingTaskFor('mgr');
+    const { applied } = await runTurn(task, [
+      {
+        name: 'submit_result',
+        args: { status: 'completed', summary: 'The department half.', confidence: 0.5 },
+      },
+    ]);
+    expect(applied.plan?.kind).toBe('complete_with_review');
+    expect(await rowOf(task.taskId)).toMatchObject({
+      status: 'waiting_for_review',
+      status_reason: 'review_pending',
+    });
+    expect(await turnEndedPayload(task.taskId)).toMatchObject({
+      outcome: 'complete_with_review',
+      classification: 'direct',
+    });
+  });
+
+  it('a refused ending journals NO classification — model bytes never classify anything', async () => {
+    const task = await workingTaskFor('lead');
+    await runTurn(task, [
+      { name: 'submit_result', args: { kind: 'complete', result: { summary: 'forged' } } },
+    ]);
+    const payload = await turnEndedPayload(task.taskId);
+    expect(payload).toMatchObject({ outcome: 'invalid_intent' });
+    expect('classification' in payload).toBe(false);
+  });
+
+  it('assembles the sectioned turn input: facts as data, recall stamped, bounded bytes', async () => {
+    // Seed PRIOR completed work for dev, then capture what the model would actually see.
+    const prior = await workingTaskFor('dev');
+    await runTurn(prior, [
+      {
+        name: 'submit_result',
+        args: {
+          status: 'completed',
+          summary: 'Instrumented the onboarding funnel end to end.',
+          confidence: 0.9,
+        },
+      },
+    ]);
+
+    const inputs: string[] = [];
+    const backend = makeScriptedBackend('openai', (spec) => {
+      inputs.push(spec.input);
+      return [
+        {
+          name: 'submit_result',
+          args: { status: 'completed', summary: 'Done.', confidence: 0.9 },
+        },
+      ];
+    });
+    const resolve = buildWorkforceTurnHandlers({
+      db,
+      tenantId: TENANT,
+      config,
+      registry: () => registryFor(backend),
+      backendForEmployee: () => backend,
+    });
+    const task = await workingTaskFor('dev');
+    const handler = resolve('dev');
+    if (!handler) throw new Error('no handler');
+    const outcome = await handler({
+      task: { ...task, goal: 'Analyze the onboarding funnel.' },
+      childResults: null,
+      signals: [],
+      messages: [],
+    });
+    expect(outcome.intent).toMatchObject({ kind: 'complete' });
+
+    const rendered = inputs[0] as string;
+    expect(rendered.startsWith("You are 'dev' (D), role 'worker'.")).toBe(true);
+    expect(rendered).toContain('## 1. Identity');
+    expect(rendered).toContain('## 3. Policies in force');
+    // The declared review rule is stated as an enforced fact, through the same predicate the
+    // engine matches with — the prompt can never contradict the policy.
+    expect(rendered).toContain("eng_quality: reviewer 'qa'");
+    expect(rendered).toContain('fires on a submitted confidence below 0.75');
+    // Recall landed as section 7, stamped with the prior task's id and age.
+    expect(rendered).toContain('## 7. Recall');
+    expect(rendered).toContain(`[${prior.taskId} · <1h] Instrumented the onboarding funnel`);
+    expect(Buffer.byteLength(rendered, 'utf8')).toBeLessThanOrEqual(65_536);
+
+    // The orchestrator's frame states the workforce shape and its legal targets as facts.
+    const leadTask = await workingTaskFor('lead');
+    const leadHandler = resolve('lead');
+    if (!leadHandler) throw new Error('no handler');
+    await leadHandler({ task: leadTask, childResults: null, signals: [], messages: [] });
+    const leadRendered = inputs[1] as string;
+    expect(leadRendered).toContain('Workforce: Helpdesk.');
+    expect(leadRendered).toContain('- eng (Engineering): Own it.');
+    expect(leadRendered).toContain(
+      'Legal delegation targets: department:eng, team:fix_team, employee:mgr, employee:dev, employee:qa.',
+    );
   });
 });
