@@ -22,7 +22,7 @@
  * could be skipped, since policy matching keys on the intent this module COLLECTED and there was
  * none. See collector.ts.
  */
-import type { NeutralTool } from '@rayspec/core';
+import { isReservedWorkforceToolSpelling, type NeutralTool } from '@rayspec/core';
 import type { WorkforceConfig, WorkforceEmployeeConfig } from '@rayspec/spec';
 import {
   ESCALATION_REASONS,
@@ -61,15 +61,31 @@ export interface RoleToolsetInput {
   readonly collector: TurnCollector;
 }
 
-/** A declared agent tool may not carry a native name — natives win, so the collision is refused. */
+/**
+ * A declared agent tool may not carry a native name — natives win, so the collision is refused.
+ * The BRIDGED form is refused too: `isTurnEndingToolName` normalizes `mcp__<x>__<tool>` on the
+ * transcript (adapters disagree on the recorded form), so an agent tool named, say,
+ * `mcp__tracker__submit_result` would make a legal yield read as an ATTEMPTED ending and take
+ * the requeue-then-fail fate — with the fate differing by adapter. Refused up front instead.
+ */
 export function assertNoReservedCollisions(agentTools: readonly NeutralTool[]): void {
-  const nativeNames = new Set<string>(Object.values(TOOLSETS_BY_ROLE).flat());
   for (const tool of agentTools) {
-    if (nativeNames.has(tool.spec.name)) throw new ReservedToolNameError(tool.spec.name);
+    if (isReservedWorkforceToolSpelling(tool.spec.name)) {
+      throw new ReservedToolNameError(tool.spec.name);
+    }
   }
 }
 
 // ---- argument schemas (zod = source of truth; the JSON twin feeds the dispatch Ajv pass) --------
+
+/**
+ * The cap on a hand-off's goal and description — the message-body rationale one channel over: a
+ * delegated goal renders VERBATIM (and, by design, untrimmably) into the child's turn input, so
+ * an uncapped goal is a way to make a child's context whatever the delegating turn wants it to
+ * be, at a size nothing else in a turn may reach. Matches the HTTP intake's ceiling, so no
+ * hand-off can mint what the operator surface refuses.
+ */
+const MAX_HANDOFF_TEXT_CHARS = 16_384;
 
 const delegateArgsSchema = z.strictObject({
   tasks: z
@@ -77,8 +93,8 @@ const delegateArgsSchema = z.strictObject({
       z.strictObject({
         target: z.string().min(1),
         title: z.string().min(1).max(200),
-        goal: z.string().min(1),
-        description: z.string().min(1).optional(),
+        goal: z.string().min(1).max(MAX_HANDOFF_TEXT_CHARS),
+        description: z.string().min(1).max(MAX_HANDOFF_TEXT_CHARS).optional(),
         priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
       }),
     )
@@ -87,8 +103,8 @@ const delegateArgsSchema = z.strictObject({
 
 const createArgsSchema = z.strictObject({
   title: z.string().min(1).max(200),
-  goal: z.string().min(1),
-  description: z.string().min(1).optional(),
+  goal: z.string().min(1).max(MAX_HANDOFF_TEXT_CHARS),
+  description: z.string().min(1).max(MAX_HANDOFF_TEXT_CHARS).optional(),
   priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
 });
 
@@ -260,8 +276,8 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
                 properties: {
                   target: { type: 'string', minLength: 1 },
                   title: { type: 'string', minLength: 1, maxLength: 200 },
-                  goal: { type: 'string', minLength: 1 },
-                  description: { type: 'string', minLength: 1 },
+                  goal: { type: 'string', minLength: 1, maxLength: 16_384 },
+                  description: { type: 'string', minLength: 1, maxLength: 16_384 },
                   priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
                 },
                 required: ['target', 'title', 'goal'],
@@ -317,8 +333,8 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
           type: 'object',
           properties: {
             title: { type: 'string', minLength: 1, maxLength: 200 },
-            goal: { type: 'string', minLength: 1 },
-            description: { type: 'string', minLength: 1 },
+            goal: { type: 'string', minLength: 1, maxLength: 16_384 },
+            description: { type: 'string', minLength: 1, maxLength: 16_384 },
             priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
           },
           required: ['title', 'goal'],
@@ -353,8 +369,8 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
           properties: {
             target: { type: 'string', minLength: 1 },
             title: { type: 'string', minLength: 1, maxLength: 200 },
-            goal: { type: 'string', minLength: 1 },
-            description: { type: 'string', minLength: 1 },
+            goal: { type: 'string', minLength: 1, maxLength: 16_384 },
+            description: { type: 'string', minLength: 1, maxLength: 16_384 },
             priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
           },
           required: ['target', 'title', 'goal'],

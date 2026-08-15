@@ -23,6 +23,14 @@ import { isReservedWorkforceSegment, RESERVED_WORKFORCE_SEGMENTS } from './runti
 
 export const TASK_PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const;
 
+/**
+ * The bound on a task's goal and description at EVERY creation surface — defense in depth under
+ * the toolset's own hand-off cap and the HTTP intake's byte ceiling. A goal renders verbatim
+ * (and, for the goal, untrimmably) into the owner's turn input, and an uncapped one is a way to
+ * make a later turn's context whatever the creating caller wants it to be.
+ */
+export const MAX_TASK_TEXT_CHARS = 16_384;
+
 export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 
 /**
@@ -66,8 +74,8 @@ const workforceIdSchema = z
 export const createRootTaskInputSchema = z.strictObject({
   workforceId: workforceIdSchema,
   title: z.string().min(1).max(200),
-  goal: z.string().min(1),
-  description: z.string().min(1).nullable().default(null),
+  goal: z.string().min(1).max(MAX_TASK_TEXT_CHARS),
+  description: z.string().min(1).max(MAX_TASK_TEXT_CHARS).nullable().default(null),
   owner: z.string().min(1),
   requestedBy: z.string().min(1),
   department: z.string().min(1).nullable().default(null),
@@ -84,8 +92,8 @@ export type CreateRootTaskInput = z.input<typeof createRootTaskInputSchema>;
  */
 export const childTaskSpecSchema = z.strictObject({
   title: z.string().min(1).max(200),
-  goal: z.string().min(1),
-  description: z.string().min(1).nullable().default(null),
+  goal: z.string().min(1).max(MAX_TASK_TEXT_CHARS),
+  description: z.string().min(1).max(MAX_TASK_TEXT_CHARS).nullable().default(null),
   owner: z.string().min(1),
   department: z.string().min(1).nullable().default(null),
   priority: z.enum(TASK_PRIORITIES).default('normal'),

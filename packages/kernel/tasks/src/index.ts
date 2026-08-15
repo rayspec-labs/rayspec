@@ -72,6 +72,7 @@ export {
   delegationChildSpecSchema,
   insertChildTask,
   MAX_TASK_DEPENDENCIES,
+  MAX_TASK_TEXT_CHARS,
   TASK_PRIORITIES,
   type TaskPriority,
 } from './create-task.js';

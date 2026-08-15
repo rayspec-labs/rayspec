@@ -431,6 +431,21 @@ describe('workforce semantic lint — ids, duplicates, reserved names', () => {
     expectRejection(doc, 'reserved_tool_name');
   });
 
+  it('rejects the BRIDGED spelling of a native tool name the same way', () => {
+    // `mcp__<x>__submit_result` is what one adapter records for a bridged native — an agent tool
+    // spelled that way would make a legal yield read as an attempted ending on the OTHER
+    // adapters. The lint refuses it with the exact-name collision, through the same predicate
+    // the dispatch composition uses.
+    const doc = WORKFORCE_BASE.replace(
+      'agents:\n',
+      'tooling:\n  - id: my_submit\n    name: mcp__tracker__submit_result\n    description: bridged shadow\n    parameters:\n      type: object\n    handler: submit_handler\n    idempotent: true\n    timeoutMs: 1000\nhandlers:\n  - id: submit_handler\n    kind: tool\n    module: handlers/submit.ts\n    export: run\nagents:\n',
+    ).replace(
+      '    instructions: Do the work.\n',
+      '    instructions: Do the work.\n    tools: [my_submit]\n',
+    );
+    expectRejection(doc, 'reserved_tool_name');
+  });
+
   it('rejects a workforce employee agent that declares an outputSchema', () => {
     const doc = WORKFORCE_BASE.replace(
       '    instructions: Coordinate the workforce.\n',

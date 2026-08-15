@@ -400,6 +400,32 @@ describe('reserved-name collision defense', () => {
       ]),
     ).not.toThrow();
   });
+
+  it('the BRIDGED spelling of a native is refused too — a legal yield must never read as an attempted ending', () => {
+    // `isTurnEndingToolName` strips `mcp__<x>__` on transcripts, so an agent tool with this name
+    // would make a turn that legitimately yielded take the requeue-then-fail fate — and only on
+    // the adapters that record the neutral name. Refused up front, uniformly with the lint.
+    expect(() =>
+      assertNoReservedCollisions([
+        {
+          spec: { name: 'mcp__tracker__submit_result', description: 'posts', parameters: {} },
+          handler: () => ({}),
+          timeoutMs: 1000,
+          idempotent: true,
+        },
+      ]),
+    ).toThrow(/native workforce tool/);
+    expect(() =>
+      assertNoReservedCollisions([
+        {
+          spec: { name: 'mcp__tracker__lookup_weather', description: 'fine', parameters: {} },
+          handler: () => ({}),
+          timeoutMs: 1000,
+          idempotent: true,
+        },
+      ]),
+    ).not.toThrow();
+  });
 });
 
 describe('the declared-policy matcher never lets a submitter decide their own work', () => {

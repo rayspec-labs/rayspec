@@ -1138,6 +1138,21 @@ export async function applyTurnOutcome(
       if (absorbed) finalTask = await readTask(tx, task.taskId);
     }
 
+    // The classification journals ONLY where the decision it names actually stood: never beside
+    // a refused ending (`invalid_intent` — the caller's channel said 'delegate' about an intent
+    // this transaction rejected), never beside an outcome that refused or overrode the decision
+    // itself (`delegation_rejected`, a consumed `cancel`). `complete_with_review` keeps it — the
+    // decision stood and policy ADDED review, and the journal deliberately records both facts.
+    // The engine owns this presence rule so no caller, shipped or embedded, can journal a
+    // decision that never existed.
+    const journaledClassification =
+      classification !== null &&
+      parsedIntent.success &&
+      plan.kind !== 'invalid_intent' &&
+      plan.kind !== 'delegation_rejected' &&
+      plan.kind !== 'cancelled'
+        ? classification
+        : null;
     await appendTaskEvents(tx, task.taskId, [
       {
         type: 'workforce.task.turn_ended',
@@ -1147,9 +1162,9 @@ export async function applyTurnOutcome(
           turnNumber: input.turnNumber,
           outcome: plan.kind,
           costUsd: actualUsd,
-          // Present on decision-seat turns that ended with a typed intent; absent elsewhere
-          // (worker turns, refused endings) — the vocabulary's own presence rule.
-          ...(classification !== null ? { classification } : {}),
+          // Present on decision-seat turns whose typed intent was accepted and applied as that
+          // decision; absent elsewhere — the vocabulary's own presence rule.
+          ...(journaledClassification !== null ? { classification: journaledClassification } : {}),
         },
       },
     ]);

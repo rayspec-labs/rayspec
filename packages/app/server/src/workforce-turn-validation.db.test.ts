@@ -404,6 +404,41 @@ describe.skipIf(!hasDb)('the turn chain: dispatch validate-in → composition �
     expect('classification' in payload).toBe(false);
   });
 
+  it('an unbounded hand-off goal is refused at the schema — the context-stuffing channel is capped', async () => {
+    // The message-body rationale one channel over: a delegated goal renders verbatim (and
+    // untrimmably) into the child's turn input, so the cap must hold at the hand-off itself.
+    const task = await workingTaskFor('lead');
+    const { outcome, applied } = await runTurn(task, [
+      {
+        name: 'delegate_task',
+        args: {
+          tasks: [{ target: 'department:eng', title: 'Stuffed', goal: 'g'.repeat(16_385) }],
+        },
+      },
+    ]);
+    expect(outcome.intent).toEqual({ kind: 'malformed_turn_ending' });
+    expect(applied.plan?.kind).toBe('invalid_intent');
+    const children = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_tasks WHERE parent_task_id = '${task.taskId}';`,
+    );
+    expect(children[0]?.c).toBe(0); // nothing was minted from the oversized hand-off
+  });
+
+  it('the ENGINE suppresses a classification beside an intent it refused — no caller can journal a decision that never was', async () => {
+    const task = await workingTaskFor('lead');
+    await applyTurnOutcome(tdb(), {
+      taskId: task.taskId,
+      turnId: turnIdFor(task.taskId, 1),
+      turnNumber: 1,
+      intent: { kind: 'complete', result: { forged: true } }, // fails the engine's own parse
+      classification: 'direct', // a buggy embedder's channel — shipped compositions never do this
+      budgets: NO_BUDGETS,
+    });
+    const payload = await turnEndedPayload(task.taskId);
+    expect(payload).toMatchObject({ outcome: 'invalid_intent' });
+    expect('classification' in payload).toBe(false);
+  });
+
   it('assembles the sectioned turn input: facts as data, recall stamped, bounded bytes', async () => {
     // Seed PRIOR completed work for dev, then capture what the model would actually see.
     const prior = await workingTaskFor('dev');
