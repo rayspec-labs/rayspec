@@ -83,6 +83,10 @@ function actorFrom(c: Context<AppEnv>): string {
 const DEFAULT_PAGE = 50;
 const MAX_PAGE = 200;
 
+/** The tree read's hard row cap — the ceiling of RENDERABLE output, not a paging economics
+ * number. Past it the response is a truncated prefix with the header flag set. */
+const TREE_MAX_TASKS = 500;
+
 /** The approval rows' closed status vocabulary (the filter refuses free text, like the task list). */
 const APPROVAL_STATUSES = ['pending', 'approved', 'rejected', 'timed_out', 'escalated'] as const;
 
@@ -498,6 +502,61 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
         taskId,
         resolveLastEventId(c),
         serializeWorkforceEventData,
+      );
+    },
+  );
+
+  // GET /v1/workforce/tasks/:id/tree — the WHOLE subtree the task belongs to, flat. `:id` may be
+  // ANY member of the subtree; the read anchors on its root, so an operator can ask from
+  // whichever task id they are holding. Three bounded reads, no per-node walk: the anchor row,
+  // one indexed root scan, and the runtime row for the per-task ceiling (what the goal line of a
+  // rendered tree divides by — the ceiling that binds the SUBTREE scope, not the workforce
+  // window, which is `status`'s number). Rows come back flat in `task_id asc` (the parent
+  // pointers are on the rows; nesting is the caller's) and CAP at TREE_MAX_TASKS with the
+  // truncation header — an operator most needs the tree exactly when a subtree ran away, so a
+  // capped prefix with an explicit flag beats a refusal that blinds the console.
+  app.get(
+    '/v1/workforce/tasks/:id/tree',
+    requireAuth(),
+    resolveTenant(deps),
+    requirePermission(deps, 'store:read'),
+    async (c) => {
+      requireWorkforce(deps);
+      const tdb = tenantHandle(deps, c.get('tenantId'));
+      const anchorRows = (await tdb
+        .select(schema.workforceTasks)
+        .where(eq(schema.workforceTasks.taskId, c.req.param('id')))) as TaskRow[];
+      const anchor = anchorRows[0];
+      if (!anchor) throw new ApiError('NOT_FOUND', 'Not found.');
+      const rows = (await tdb
+        .select(schema.workforceTasks)
+        .where(eq(schema.workforceTasks.rootTaskId, anchor.rootTaskId))
+        .orderBy(asc(schema.workforceTasks.taskId))
+        .limit(TREE_MAX_TASKS + 1)) as TaskRow[];
+      const truncated = rows.length > TREE_MAX_TASKS;
+      let budgets: { taskUsd: number | null; taskTurns: number | null } | null = null;
+      if (anchor.workforceId !== null) {
+        try {
+          const runtime = await readWorkforceRuntime(tdb, anchor.workforceId);
+          const resolved = resolveWorkforceBudgets(runtime.budgets, anchor.workforceId);
+          budgets = {
+            taskUsd: resolved.task?.usd ?? null,
+            taskTurns: resolved.task?.turns ?? null,
+          };
+        } catch (err) {
+          // A bare engine-driven subtree may predate any runtime row — the tree still renders,
+          // with no ceiling to divide by. Anything else is a real error.
+          if (!(err instanceof WorkforceUnknownError)) throw err;
+        }
+      }
+      c.header('X-Result-Truncated', truncated ? 'true' : 'false');
+      return c.json(
+        {
+          rootTaskId: anchor.rootTaskId,
+          tasks: rows.slice(0, TREE_MAX_TASKS) as unknown as Record<string, unknown>[],
+          budgets,
+        },
+        200,
       );
     },
   );

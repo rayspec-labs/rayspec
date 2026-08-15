@@ -18,6 +18,7 @@ import {
   applyTurnOutcome,
   createRootTask,
   ensureWorkforceRuntime,
+  insertChildTask,
   workforceBudgetsSchema,
 } from '@rayspec/tasks';
 import { eq } from 'drizzle-orm';
@@ -646,6 +647,82 @@ describe('/v1/workforce (the task-engine surface)', () => {
   it('requires auth on every route', async () => {
     const res = await jsonRequest(h.app, 'GET', '/v1/workforce/tasks', {});
     expect(res.status).toBe(401);
+  });
+
+  it('the tree returns the whole subtree flat from ANY member id, with the per-task ceiling', async () => {
+    const a = await principal('wf-tree@example.test', 'Org WF Tree');
+    const tdb = forTenant(h.db, a.orgId);
+    await ensureWorkforceRuntime(tdb, 'wf', {
+      task: { usd: 2.5, turns: 20 },
+      // A usd ceiling is only coherent with a positive per-turn estimate (the budgets schema's
+      // own refinement) — the same pair a declared document derives.
+      execution: { estimateUsdPerTurn: 0.05 },
+    });
+    const root = await seedRoot(a.orgId, 'Tree root');
+    const childA = await insertChildTask(tdb, root, 1, 0, {
+      title: 'Left stream',
+      goal: 'Left half.',
+      owner: 'worker-a',
+    });
+    const grandchild = await insertChildTask(tdb, childA, 1, 0, {
+      title: 'Leaf',
+      goal: 'Leaf work.',
+      owner: 'worker-b',
+    });
+    await insertChildTask(tdb, root, 1, 1, {
+      title: 'Right stream',
+      goal: 'Right half.',
+      owner: 'worker-c',
+    });
+
+    // Anchored on a GRANDCHILD: the read climbs to the root and returns the whole subtree.
+    const res = await jsonRequest(h.app, 'GET', `/v1/workforce/tasks/${grandchild.taskId}/tree`, {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Result-Truncated')).toBe('false');
+    const body = (await res.json()) as {
+      rootTaskId: string;
+      tasks: Array<{ taskId: string }>;
+      budgets: { taskUsd: number; taskTurns: number } | null;
+    };
+    expect(body.rootTaskId).toBe(root.taskId);
+    expect(body.tasks).toHaveLength(4);
+    expect(body.tasks.map((t) => t.taskId)).toEqual(
+      [...body.tasks.map((t) => t.taskId)].sort(), // task_id asc — the deterministic order
+    );
+    expect(body.budgets).toEqual({ taskUsd: 2.5, taskTurns: 20 });
+  });
+
+  it('the tree caps at 500 rows with the truncation flag, and budgets are null without a runtime row', async () => {
+    const a = await principal('wf-tree-cap@example.test', 'Org WF Tree Cap');
+    const tdb = forTenant(h.db, a.orgId);
+    const root = await seedRoot(a.orgId, 'Runaway root');
+    for (let slot = 0; slot < 500; slot += 1) {
+      await insertChildTask(tdb, root, 1, slot, {
+        title: `Child ${slot}`,
+        goal: 'One of many.',
+        owner: 'worker-swarm',
+      });
+    }
+    const res = await jsonRequest(h.app, 'GET', `/v1/workforce/tasks/${root.taskId}/tree`, {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Result-Truncated')).toBe('true');
+    const body = (await res.json()) as { tasks: unknown[]; budgets: unknown };
+    expect(body.tasks).toHaveLength(500);
+    expect(body.budgets).toBeNull(); // no runtime row was ever created for 'wf' here
+  });
+
+  it('the tree is tenant-scoped: a foreign task id is a uniform 404', async () => {
+    const a = await principal('wf-tree-a@example.test', 'Org WF Tree A');
+    const b = await principal('wf-tree-b@example.test', 'Org WF Tree B');
+    const bTask = await seedRoot(b.orgId, 'Foreign tree');
+    const res = await jsonRequest(h.app, 'GET', `/v1/workforce/tasks/${bTask.taskId}/tree`, {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(404);
   });
 
   it('submits a goal: server-derived tenant + verified actor reach the intake, 202 lists the tasks, the dispatcher is kicked', async () => {
