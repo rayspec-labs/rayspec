@@ -16,7 +16,13 @@
  *     the whole array in ONE statement as the last thing before COMMIT. Allocating a sequence number
  *     at the call site instead would hold the tenant's counter lock for the remainder of the handler
  *     and serialise every request of that tenant behind its slowest run.
- *   - IMMEDIATE (tool): a tool has no outer transaction by design, so each emit is its own statement.
+ *   - IMMEDIATE (tool): the in-request run surface builds a run's tools on a plain `forTenant` handle
+ *     (`routes/runs.ts`), so there is no outer transaction to flush at and each emit is its own
+ *     statement. Read that as a constraint on the HANDLE, not as a property of tools: the durable
+ *     worker runs a whole run inside one `tdb.transaction(...)` and builds its tools from THAT handle,
+ *     so an immediate emit allocated there would hold the counter lock until the run committed — the
+ *     hazard the bullet above describes, for the length of a model call. That is why the bus is not
+ *     threaded into the worker's tool inits at all (see the composition root's worker registry).
  *
  * VALIDATION HAPPENS AT THE CALL, NOT AT THE FLUSH. A malformed topic or a payload that cannot be
  * JSON-serialized is refused by `emit()` itself, so the error surfaces where the handler made the

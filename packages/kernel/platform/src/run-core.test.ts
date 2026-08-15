@@ -1000,12 +1000,23 @@ class BatchToolBackend implements Backend {
 /**
  * Build the ordered-write tool pair + its trace for ONE batch run (a fresh gate per test).
  * The interleaving observation is STRUCTURAL, not timing-based: write_a's handler waits for
- * write_b's handler to START (or a 250ms timeout when nothing else can run). Under concurrent
- * dispatch `b:start` therefore ALWAYS lands between `a:start` and `a:end`; under serialized
- * dispatch write_b cannot start until write_a completed, so the timeout fires and the trace is
- * strictly ordered.
+ * write_b's handler to START, or for `deadlineMs` when nothing else can run. Under concurrent
+ * dispatch `b:start` therefore lands between `a:start` and `a:end`; under serialized dispatch
+ * write_b cannot start until write_a completed, so the deadline fires and the trace is strictly
+ * ordered.
+ *
+ * `deadlineMs` is per-caller because the two callers use the deadline for opposite purposes, and a
+ * single value cannot be right for both. Serialized, the deadline ALWAYS fires and is pure dead
+ * time, so it wants to be small. Concurrently it is only a hang-guard — `bStarted` resolves first
+ * whenever dispatch really is concurrent, and the run pays nothing — but if it fires early the
+ * accept-control reports "b did not start before a ended", i.e. it reports serialization, which is
+ * exactly the regression it exists to detect. A machine stalled long enough for write_b's dispatch
+ * pre-work (the `tool_called` emission and its journaling, both awaited before the handler) to
+ * outlast the deadline would therefore turn load into a false sequentialTools regression. It gets
+ * the generous value, kept clear of the 5000ms tool timeout so a genuine hang still fails as an
+ * assertion rather than as a tool timeout.
  */
-function orderedWritePair(): { trace: string[]; tools: NeutralTool[] } {
+function orderedWritePair(deadlineMs: number): { trace: string[]; tools: NeutralTool[] } {
   const trace: string[] = [];
   let releaseBStarted = () => {};
   const bStarted = new Promise<void>((resolve) => {
@@ -1019,7 +1030,7 @@ function orderedWritePair(): { trace: string[]; tools: NeutralTool[] } {
     },
     handler: async () => {
       trace.push('a:start');
-      await Promise.race([bStarted, new Promise((r) => setTimeout(r, 250))]);
+      await Promise.race([bStarted, new Promise((r) => setTimeout(r, deadlineMs))]);
       trace.push('a:end');
       return { wrote: 'a' };
     },
@@ -1046,7 +1057,8 @@ function orderedWritePair(): { trace: string[]; tools: NeutralTool[] } {
 
 describe('run-core sequentialTools (per-run FIFO width-1 queue in front of dispatchTool)', () => {
   it('executes a batch of two writing tools STRICTLY in emission order when sequentialTools is set', async () => {
-    const { trace, tools } = orderedWritePair();
+    // Serialized: the deadline always fires, so it is dead time this run pays in full — small.
+    const { trace, tools } = orderedWritePair(250);
     const backend = new BatchToolBackend();
     const seqSpec: AgentSpec = { ...spec, sequentialTools: true };
 
@@ -1060,7 +1072,10 @@ describe('run-core sequentialTools (per-run FIFO width-1 queue in front of dispa
   });
 
   it('ACCEPT-CONTROL: without the flag the batch still dispatches concurrently (today’s behavior)', async () => {
-    const { trace, tools } = orderedWritePair();
+    // Concurrent: `bStarted` wins the race whenever dispatch really is concurrent, so this run
+    // pays nothing for the larger number — it only bounds a genuine hang, and a stall shorter
+    // than it can no longer be read as a serialization regression.
+    const { trace, tools } = orderedWritePair(2000);
     const backend = new BatchToolBackend();
 
     const res = await runAgent(forTenant(db, TENANT_A), backend, spec, { tools });

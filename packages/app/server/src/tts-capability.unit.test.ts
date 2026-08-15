@@ -127,6 +127,30 @@ describe('the offline path REFUSES exactly what the live path refuses', () => {
       capability.synthesize('hallo', { voice: OPENAI_TTS_POLICY.voices[0] as string }),
     ).resolves.toBeDefined();
   });
+
+  it('REFUSES a NAMED but blank voice through the capability, not just through the port', async () => {
+    const capability = buildTtsCapability({ ttsProvider: 'fake' });
+    if (!capability) throw new Error('expected a capability');
+    for (const voice of ['', ' ']) {
+      await expect(capability.synthesize('hallo', { voice })).rejects.toMatchObject({
+        code: 'unsupported_option',
+      });
+    }
+  });
+
+  it('REFUSES a NAMED but blank format through the capability, not just through the port', async () => {
+    const capability = buildTtsCapability({ ttsProvider: 'fake' });
+    if (!capability) throw new Error('expected a capability');
+    // An untyped caller can reach this — dropping it here would resolve the adapter's default
+    // container for a caller who did name one, the same silent substitution a blank voice gets.
+    await expect(capability.synthesize('hallo', { format: '' as never })).rejects.toMatchObject({
+      code: 'unsupported_option',
+    });
+    // ACCEPT CONTROL: each container the port speaks still synthesizes offline.
+    for (const format of ['mp3', 'opus', 'wav'] as const) {
+      await expect(capability.synthesize('hallo', { format })).resolves.toBeDefined();
+    }
+  });
 });
 
 describe('AdapterTtsCapability — the option pass-through', () => {
@@ -174,6 +198,24 @@ describe('AdapterTtsCapability — the option pass-through', () => {
     const { adapter, calls } = recordingAdapter();
     await new AdapterTtsCapability(adapter).synthesize('hallo', { speed: 0 });
     expect(calls[0]?.speed).toBe(0);
+  });
+
+  it('carries a blank voice through rather than dropping it as falsy (the adapter refuses it)', async () => {
+    const { adapter, calls } = recordingAdapter();
+    await new AdapterTtsCapability(adapter).synthesize('hallo', { voice: '' });
+    // Dropping it here would turn a named-but-blank voice into an ABSENT one, which the adapter
+    // resolves to its default — the silent fallback the closed voice list exists to prevent.
+    expect('voice' in (calls[0] as object)).toBe(true);
+    expect(calls[0]?.voice).toBe('');
+  });
+
+  it('carries a blank format through rather than dropping it as falsy (the adapter refuses it)', async () => {
+    const { adapter, calls } = recordingAdapter();
+    await new AdapterTtsCapability(adapter).synthesize('hallo', { format: '' as never });
+    // Same rule as `voice` and `speed: 0`: what the caller EXPRESSED is forwarded, so the adapter
+    // refuses an unspeakable container instead of quietly substituting its default one.
+    expect('format' in (calls[0] as object)).toBe(true);
+    expect(calls[0]?.format).toBe('');
   });
 
   it('keeps CONCURRENT calls independent — each result belongs to its own text', async () => {

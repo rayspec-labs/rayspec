@@ -389,11 +389,15 @@ window knowingly, or scale the three buckets for the run:
 RAYSPEC_AUTH_RATE_MULTIPLIER=100   # scales max per bucket; default 1
 ```
 
-The multiplier is a positive integer and applies to exactly the three buckets
-above — the windows and every other limit are untouched. It is dev/CI-only by
-convention: any value other than 1 makes the boot log a loud one-line warning
+The multiplier is a positive integer up to 1000 and applies to exactly the three
+buckets above — the windows and every other limit are untouched. It is dev/CI-only
+by convention: any value other than 1 makes the boot log a loud one-line warning
 naming the variable and the value, so it cannot sit in a production environment
-silently, and a value that is not a positive integer aborts the boot outright.
+silently, and a value that is not a positive integer, or one above 1000, aborts
+the boot outright. The ceiling is the same fail-closed shape
+`RAYSPEC_ACCESS_TOKEN_TTL_SECONDS` has: this variable scales a throttle, so an
+unbounded value would switch it off by arithmetic rather than by configuration —
+and ×1000 already means 5000 registrations a minute.
 
 ---
 
@@ -729,11 +733,19 @@ rules, and what static serving does **not** do in v1. A ready-to-run example liv
 `default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'` — the
 same default a static profile emits (below), on this boot shape too. It names no
 `style-src` and no `script-src`, so an inline `<style>` or `<script>` in a served page
-is **blocked**. Nothing on the server side reports that: the response is a `200` with
+is **blocked** — and so are a `style="…"` attribute and an `on*=` handler, which fall
+back to the same `default-src`. No *request* reports that: the response is a `200` with
 the exact bytes, so `curl` and the deploy output look right, and only the rendered page
-differs — the inline CSS is not applied and the inline script never runs. Reference
+differs — the inline CSS is not applied and the inline script never runs. The **boot**
+does report it: the same pass that computes what `/health` says about the mounts scans
+their HTML against the policy this boot will actually emit, and warns once, naming the
+files. It is a warning and never a refusal — the boot proceeds either way — and it is
+bounded: at most 200 HTML files per boot, the first 1 MiB of any one file, the first 5
+offending files named, and the warning says so whenever a bound truncated it. Reference
 built `.css`/`.js` files by `href`/`src` instead (same-origin, which the default
-allows), or set `RAYSPEC_FRONTEND_CSP` to replace the baseline.
+allows), or set `RAYSPEC_FRONTEND_CSP` to replace the baseline — an override that
+permits the shape a page ships also silences the warning, because the scan judges the
+page against the policy in force rather than the default.
 
 ### A frontend-only (static) deployment
 

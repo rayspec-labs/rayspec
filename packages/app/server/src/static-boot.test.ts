@@ -32,7 +32,7 @@ const INDEX_SENTINEL = 'INDEX-HTML-SENTINEL-static-boot';
 const ASSET_SENTINEL = 'ASSET-JS-SENTINEL-static-boot';
 
 let root = ''; // the temp root; the spec "lives" at root/rayspec.yaml, assets under root/web/dist
-const SPA_MOUNT: FrontendSpec = { route: '/', dir: 'web/dist', spa: true };
+const SPA_MOUNT: FrontendSpec = { route: '/', dir: 'web/dist', spa: true, cleanUrls: false };
 
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), 'rayspec-static-boot-'));
@@ -124,6 +124,27 @@ describe('static boot — the banner agrees with what /health answers', () => {
     expect(banner).toContain('503 when a mount cannot be served');
     expect(banner).not.toMatch(/liveness/i);
   });
+
+  it('the mount list names BOTH declared mount options — `spa` and `cleanUrls`', () => {
+    // The banner is one of the two operator-visible echoes of a mount's declared options; the other
+    // is the `deploy --dry-run` verdict, which echoes each mount WHOLE (route, dir, spa, cleanUrls).
+    // Printing only one of the two options here left the two surfaces disagreeing about which options
+    // are worth naming — and `cleanUrls` changes how every extensionless path resolves.
+    const server = assembleStaticServer(loadStaticServerConfig({}), {
+      specPath: join(root, 'rayspec.yaml'),
+      frontend: [
+        { route: '/', dir: 'web/dist', spa: true, cleanUrls: true },
+        { route: '/plain', dir: 'web/dist', spa: false, cleanUrls: false },
+      ],
+    });
+    const banner = staticBootBanner(server, 'http://localhost:8080');
+    expect(banner).toContain('(SPA fallback)');
+    expect(banner).toContain('(clean URLs)');
+    // A mount that declares neither option carries neither marker.
+    const plainLine = banner.split('\n').find((l) => l.includes('/plain'));
+    expect(plainLine).toBeDefined();
+    expect(plainLine).not.toContain('(');
+  });
 });
 
 describe('static boot — the auth surface is NOT mounted (load-bearing security assertion)', () => {
@@ -208,7 +229,7 @@ describe('static boot — a custom 404.html page carries the security-header cha
     const config: StaticServerConfig = loadStaticServerConfig({});
     const { app } = assembleStaticServer(config, {
       specPath: join(customRoot, 'rayspec.yaml'),
-      frontend: [{ route: '/', dir: 'web/dist', spa: false }],
+      frontend: [{ route: '/', dir: 'web/dist', spa: false, cleanUrls: false }],
     });
     const res = await app.request('/no/such/deep/link');
     expect(res.status).toBe(404);

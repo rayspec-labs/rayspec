@@ -26,7 +26,9 @@ import {
   type BlobStoreFactory,
   makeFsBlobStoreFactory,
   type ResolvedHandler,
+  type StreamRouteHandlerInit,
 } from '@rayspec/platform';
+import type { RaySpec } from '@rayspec/spec';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
 import { ingestOnly, loadStreamPack } from '../test-support/stream-pack-support.js';
@@ -58,6 +60,43 @@ async function postChunk(
   });
 }
 
+/**
+ * A stream-ingest PROBE handler (test-only, injected inline). It reports the `init.principal` the
+ * platform injected AND writes one pointer row through the tenant-bound facade, returning that row's
+ * `created_by` stamp beside it — the two derive from the SAME resolved request principal, so an
+ * assertion that they agree pins the stream arm of the invariant the JSON `{handler}` route already
+ * pins. Fail-closed on an absent principal: it reports `null` rather than inventing one.
+ */
+const principalProbe = async (init: StreamRouteHandlerInit): Promise<Response> => {
+  const uploadId = init.params.upload_id ?? '';
+  const row = (await init.db.insert('blob_chunks', {
+    upload_id: uploadId,
+    chunk_index: 0,
+    chunk_ref: `${init.tenantId}:${uploadId}:principal-probe`,
+    storage_key: `${uploadId}/principal-probe`,
+    byte_len: 0,
+    content_type: null,
+  })) as Record<string, unknown>;
+  return new Response(
+    JSON.stringify({
+      principal: init.principal ?? null,
+      createdBy: (row.created_by as string | undefined) ?? null,
+    }),
+    { status: 200, headers: { 'content-type': 'application/json' } },
+  );
+};
+
+/** The probe handler's id, declared in the spec and injected into the boot-loaded handler map. */
+const PROBE_HANDLER_ID = 'principal_probe_handler';
+/** The probe's own stream-ingest route — a SECOND `{kind:'stream', mode:'ingest'}` route, not a fork. */
+const PROBE_PATH = '/probe/{upload_id}/principal';
+
+/** The probe's response shape (typed structurally — the test asserts exact values). */
+interface ProbeBody {
+  principal: { kind: string; id: string; role?: string } | null;
+  createdBy: string | null;
+}
+
 describe.skipIf(!hasDb)('stream INGEST primitive end-to-end', () => {
   let h: Harness;
   let handlers: ReadonlyMap<string, ResolvedHandler>;
@@ -70,13 +109,40 @@ describe.skipIf(!hasDb)('stream INGEST primitive end-to-end', () => {
     // uses). ingestOnly drops the playback route + its handler ref so the boot completes (the ingest
     // arm is what this suite exercises). This proves the pack mechanism carries the actual ingest surface.
     const merged = ingestOnly(await loadStreamPack());
-    handlers = merged.handlers;
+    // A SECOND stream-ingest route, declared beside the pack's own, whose handler reports the injected
+    // `init.principal`. The pack's ingest handler has no reason to surface it, so the probe carries
+    // that job; the ROUTE is the same `{kind:'stream', mode:'ingest'}` action on the same chain, so the
+    // interpreter path under test is the shipped one, not a copy.
+    const spec: RaySpec = {
+      ...merged.spec,
+      handlers: [
+        ...merged.spec.handlers,
+        {
+          id: PROBE_HANDLER_ID,
+          module: 'handlers/principal-probe.ts',
+          export: 'principalProbe',
+          kind: 'route',
+        },
+      ],
+      api: [
+        ...merged.spec.api,
+        {
+          method: 'POST',
+          path: PROBE_PATH,
+          action: { kind: 'stream', handler: PROBE_HANDLER_ID, mode: 'ingest' },
+        },
+      ],
+    };
+    handlers = new Map<string, ResolvedHandler>([
+      ...merged.handlers,
+      [PROBE_HANDLER_ID, { kind: 'route', fn: principalProbe as never }],
+    ]);
     // A per-suite temp dir for the fs blob backend — the SAME makeFsBlobStoreFactory the composition
     // root injects, over an isolated dir (cleaned in afterAll). This is the live blob injection path.
     blobDir = mkdtempSync(join(tmpdir(), 'rayspec-stream-ingest-'));
     blobFactory = makeFsBlobStoreFactory(blobDir);
     h = await createHarness({
-      engineSpec: merged.spec,
+      engineSpec: spec,
       engineHandlers: handlers,
       blobFactory,
       schema: 'rayspec_test_stream_ingest',
@@ -260,6 +326,58 @@ describe.skipIf(!hasDb)('stream INGEST primitive end-to-end', () => {
     // stream path built its facade with NO actor (2-arg makeHandlerDb), so created_by was NULL.
     const userId = await userIdByEmail(h, email);
     expect(await chunkCreatedBy(h, orgId, upl)).toBe(`user:${userId}`);
+  });
+
+  it('init.principal reaches a STREAM-ingest handler and agrees with the created_by stamp (JWT user)', async () => {
+    // The JSON `{handler}` route pins this roundtrip; the stream arm passes its own
+    // `handlerPrincipal(c.get('principal'))` into invokeStreamRouteHandler, and that arm was
+    // structurally mirrored but never driven. Drive it: the handler reports what it RECEIVED.
+    const email = 'stream-principal-user@example.com';
+    const { token } = await principal(email, 'StreamPrincipalUserOrg');
+
+    const res = await postChunk(
+      h.app,
+      '/probe/upl-principal-user/principal',
+      token,
+      new Uint8Array(),
+    );
+    expect(res.status).toBe(200);
+    const out = (await res.json()) as ProbeBody;
+
+    // The SERVER-side identity the caller never transmitted — so this is ground truth, not an echo.
+    const userId = await userIdByEmail(h, email);
+    // Plain values only, and the org-switched JWT carries the live org role ('owner' for its creator).
+    expect(out.principal).toEqual({ kind: 'user', id: userId, role: 'owner' });
+    // AGREEMENT: the row THIS request inserted names the SAME identity — one resolved principal feeds
+    // both, so they cannot drift.
+    expect(out.createdBy).toBe(`user:${userId}`);
+  });
+
+  it('init.principal on a STREAM-ingest route carries the api-key kind, never a fabricated user', async () => {
+    // The second kind the ingest chain can resolve. A hardcoded `{kind:'user', …}` would pass the arm
+    // above and fail here, so the pair proves the value is THREADED, not synthesized.
+    const { orgId, token } = await principal(
+      'stream-principal-key@example.com',
+      'StreamPrincipalKeyOrg',
+    );
+    const mintRes = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/api-keys`, {
+      body: { name: 'stream-principal-probe', scopes: ['store:write'] },
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(mintRes.status).toBe(201);
+    const minted = (await mintRes.json()) as { id: string; plaintext: string };
+
+    const res = await postChunk(
+      h.app,
+      '/probe/upl-principal-key/principal',
+      minted.plaintext,
+      new Uint8Array(),
+    );
+    expect(res.status).toBe(200);
+    const out = (await res.json()) as ProbeBody;
+    // A key principal has no role claim — the field is ABSENT, never invented.
+    expect(out.principal).toEqual({ kind: 'apikey', id: minted.id });
+    expect(out.createdBy).toBe(`key:${minted.id}`);
   });
 });
 

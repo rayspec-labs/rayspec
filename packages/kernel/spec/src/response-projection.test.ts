@@ -16,11 +16,15 @@
  *    a rename target that shadows ANOTHER column's author name — the author-named list query
  *    surface would actively mislead (`projection_query_shadow`) — and the kind/op coherence rules
  *    (`project` on a non-store route or a delete route is dead config → `schema_violation`);
- *  - the ALLOWED forms: the documented `rename: { id: companionId }` split parses + lints clean.
+ *  - the ALLOWED forms: the documented `rename: { id: companionId }` split parses + lints clean;
+ *  - the PROSE: the two documents that spell out which columns `omitInjected` drops are checked
+ *    against the injected set itself, so the next injected column reds a test instead of aging them.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { SpecError, SpecErrorCode } from './errors.js';
-import { lintSpec } from './lint.js';
+import { lintSpec, RESERVED_COLUMN_NAMES } from './lint.js';
 import { parseSpec } from './parse.js';
 
 /** A base spec with one store + one projected list route; each test builds a variant. */
@@ -293,5 +297,91 @@ api:
         ),
       ),
     ).toEqual([]);
+  });
+});
+
+/**
+ * The `omitInjected` PROSE lock.
+ *
+ * Two documents spell out, by name, which columns `omitInjected` drops: the `ResponseProjection`
+ * doc comment in grammar.ts and the `project` section of docs/spec-reference.md. Both were written
+ * by hand. The code that ENFORCES the rule derives the set instead — @rayspec/api-auth's
+ * `resolveResponseProjection` iterates `INJECTED_COLUMN_TS_NAMES`, built from @rayspec/db's
+ * generated `INJECTED_COLUMN_NAMES` — so a ninth injected column would change what the platform
+ * does and leave both documents quietly describing the old set.
+ *
+ * These tests are the mechanism that stops that. They read both documents off disk and compare the
+ * names they list to `RESERVED_COLUMN_NAMES` minus the spared `id`. `RESERVED_COLUMN_NAMES` is this
+ * package's copy of the injected set and cannot itself drift from the generated one: @rayspec/db's
+ * `generate-product-schema.test.ts` asserts `new Set(INJECTED_COLUMN_NAMES)` equals it. So the chain
+ * from the generated column list to both prose lists is closed by tests end to end, and adding an
+ * injected column turns this file RED until both documents name it.
+ *
+ * The extractors THROW when their marker sentence is gone: a rewrite that moves the list out of
+ * reach must fail loudly, not silently find nothing and pass.
+ */
+describe('omitInjected — the two prose lists cannot drift from the injected set', () => {
+  /** Read a repo file (this file lives at packages/kernel/spec/src/, four levels below the root). */
+  function repoFile(relFromRepoRoot: string): string {
+    return readFileSync(
+      fileURLToPath(new URL(`../../../../${relFromRepoRoot}`, import.meta.url)),
+      'utf8',
+    );
+  }
+
+  /**
+   * Pull the parenthesised column list out of a sentence of the form
+   * `… columns (a, b, c) from responses …`, tolerating line wrapping, doc-comment `*` gutters and
+   * markdown backticks. Throws unless the document carries EXACTLY ONE such sentence: zero means the
+   * list was reworded out of reach and this check would otherwise pass while reading nothing, and
+   * two means it is ambiguous which one is being checked.
+   */
+  function listedColumns(source: string, what: string): string[] {
+    const matches = [...source.matchAll(/columns \(([^)]*)\) from responses/g)];
+    if (matches.length !== 1) {
+      throw new Error(
+        `${what}: expected exactly ONE "columns (…) from responses" sentence naming the injected ` +
+          `columns, found ${matches.length} — if it was reworded or duplicated, update this ` +
+          'extractor with it',
+      );
+    }
+    return ((matches[0] as RegExpExecArray)[1] as string)
+      .replace(/[`*\s]+/g, '')
+      .split(',')
+      .filter((name) => name.length > 0);
+  }
+
+  /** The injected columns `omitInjected` drops: every injected column except the spared `id`. */
+  const droppable = [...RESERVED_COLUMN_NAMES].filter((name) => name !== 'id');
+
+  it('the grammar doc comment names exactly the droppable injected columns', () => {
+    const listed = listedColumns(repoFile('packages/kernel/spec/src/grammar.ts'), 'grammar.ts');
+    expect(listed.length).toBeGreaterThan(0);
+    expect([...listed].sort()).toEqual([...droppable].sort());
+    expect(listed).not.toContain('id');
+  });
+
+  it('the spec reference names exactly the droppable injected columns', () => {
+    const listed = listedColumns(repoFile('docs/spec-reference.md'), 'docs/spec-reference.md');
+    expect(listed.length).toBeGreaterThan(0);
+    expect([...listed].sort()).toEqual([...droppable].sort());
+    expect(listed).not.toContain('id');
+  });
+
+  it('`id` is spared by the enforced rule, which is why neither list names it', () => {
+    // The lint half of the membership rule (the runtime twin is `resolveResponseProjection`): with
+    // `omitInjected: true` and no `fields`, `id` survives and the other injected columns do not.
+    expect(RESERVED_COLUMN_NAMES.has('id')).toBe(true);
+    expect(
+      lintOf(specYaml({ routeProject: '{ omitInjected: true, fields: [id, name, role] }' })),
+    ).toEqual([]);
+    // Naming a dropped injected column in `fields` re-includes it — proof the set above is the set
+    // the linter actually applies, not a list this test agrees with by coincidence.
+    for (const dropped of droppable) {
+      expect(
+        lintOf(specYaml({ routeProject: `{ omitInjected: true, fields: [id, ${dropped}] }` })),
+        `'${dropped}' must be re-includable, so it is an injected column the projection knows`,
+      ).toEqual([]);
+    }
   });
 });

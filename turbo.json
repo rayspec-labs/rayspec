@@ -20,6 +20,7 @@
         "DATABASE_URL",
         "DATABASE_URL_FILE",
         "DEEPGRAM_API_KEY",
+        "DEEPGRAM_BASE_URL",
         "RAYSPEC_API_KEY_PEPPER",
         "RAYSPEC_API_KEY_PEPPER_FILE",
         "RAYSPEC_JWT_SIGNING_KEY",
@@ -30,6 +31,7 @@
         "RAYSPEC_REQUIRE_LIVE_TESTS",
         "RAYSPEC_REQUIRE_MEDIA_TESTS",
         "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
         "OPENAI_MODEL",
         "SHADOW_DATABASE_URL"
       ]

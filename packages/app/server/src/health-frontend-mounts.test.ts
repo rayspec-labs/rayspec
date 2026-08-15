@@ -48,13 +48,13 @@ vi.mock('node:fs', async (importOriginal) => {
 let root = ''; // the fixture root; each mount's `dir` is resolved relative to it
 
 /** A servable spa mount: a readable directory that carries a readable `index.html`. */
-const SPA_OK: FrontendSpec = { route: '/', dir: 'servable', spa: true };
+const SPA_OK: FrontendSpec = { route: '/', dir: 'servable', spa: true, cleanUrls: false };
 /** A NON-servable spa mount: the directory is readable, but it carries no `index.html`. */
-const SPA_NO_INDEX: FrontendSpec = { route: '/', dir: 'no-index', spa: true };
+const SPA_NO_INDEX: FrontendSpec = { route: '/', dir: 'no-index', spa: true, cleanUrls: false };
 /** A plain (non-spa) mount over the same index-less directory — servable, it needs no `index.html`. */
-const PLAIN_NO_INDEX: FrontendSpec = { route: '/', dir: 'no-index', spa: false };
+const PLAIN_NO_INDEX: FrontendSpec = { route: '/', dir: 'no-index', spa: false, cleanUrls: false };
 /** A mount whose directory does not exist at all. */
-const MISSING_DIR: FrontendSpec = { route: '/', dir: 'absent', spa: false };
+const MISSING_DIR: FrontendSpec = { route: '/', dir: 'absent', spa: false, cleanUrls: false };
 
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), 'rayspec-health-mounts-'));
@@ -124,9 +124,12 @@ describe('frontendMountsReadiness — what "servable" means for a mount', () => 
     // vacuous.
     if (typeof process.getuid === 'function' && process.getuid() === 0) ctx.skip();
     try {
-      expect(frontendMountsReadiness([{ route: '/', dir: 'unreadable', spa: false }], root)).toBe(
-        'unavailable',
-      );
+      expect(
+        frontendMountsReadiness(
+          [{ route: '/', dir: 'unreadable', spa: false, cleanUrls: false }],
+          root,
+        ),
+      ).toBe('unavailable');
     } finally {
       chmodSync(dir, 0o755);
     }
@@ -162,9 +165,12 @@ describe('mountUnservableReason — the one definition the boot guard and the pr
 
   it("a file where a directory is declared is reported as 'dir', not 'spa-index'", () => {
     // `no-index/app.js` is a regular file — statSync succeeds, isDirectory() is false.
-    expect(mountUnservableReason({ route: '/', dir: 'no-index/app.js', spa: true }, root)).toBe(
-      'dir',
-    );
+    expect(
+      mountUnservableReason(
+        { route: '/', dir: 'no-index/app.js', spa: true, cleanUrls: false },
+        root,
+      ),
+    ).toBe('dir');
   });
 
   it('the readiness the probe reports is exactly "no mount has a reason"', () => {

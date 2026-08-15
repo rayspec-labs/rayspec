@@ -39,7 +39,7 @@ curl -s http://127.0.0.1:8080/health
 | `PORT` | no | TCP port. Default `8080`. A non-numeric/out-of-range value fails closed. |
 | `RAYSPEC_SPEC_PATH` | no | Absolute path to a `rayspec.yaml` to deploy at boot (the declarative engine). The platform ships **none** — the deployer injects it. Absent ⇒ an **auth-only** boot. |
 | `RAYSPEC_HANDLER_ROOT` | no | The path-jail root for declared escape-hatch handlers. Defaults to the spec file's directory. |
-| `RAYSPEC_SKIP_DOTENV` | no | Set to `1` to skip the local-DX `.env` loader (prove a pure-ambient-env boot). |
+| `RAYSPEC_SKIP_DOTENV` | no | Set to `1` to skip the local-DX `.env` loader (prove a pure-ambient-env boot). That loader reads `$PWD/.env` first and the install-root `.env` second (the install root is resolved from the loader's own module location), per key, and never overrides a variable already set. |
 
 Missing `DATABASE_URL` / `RAYSPEC_JWT_SIGNING_KEY` / `RAYSPEC_API_KEY_PEPPER` → the boot aborts
 with an actionable message (fail-closed), never a partial start.

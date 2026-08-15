@@ -538,6 +538,16 @@ export type CapabilityDescriptor = z.infer<typeof CapabilityDescriptor>;
  *  - pi (@earendil-works/pi-coding-agent 0.79.9): NO native structured output (emulated via
  *    instructions + parse — the lone documented exception), tools, streaming, reasoning,
  *    API key only.
+ *
+ * WRITABLE ON PURPOSE, and not to be hardened without doing the work below first. Some fail-closed
+ * capability branches are UNSATISFIABLE against the descriptors shipped here — every wired backend
+ * honors `sequentialTools`, so nothing real violates it — and the two tests that keep those branches
+ * from becoming silent no-ops reach them by assigning a synthetic descriptor onto this table and
+ * restoring it in a `finally` (`neutral.test.ts`, and `parse.negative.test.ts` through the whole
+ * parse pipeline). Freezing the table makes both fail with a read-only assignment error rather than
+ * with a capability verdict. Reaching those branches without writing here needs a seam — the
+ * descriptor table injectable through `validateSpec`, and through `lintSpec`/`parseSpec` for the
+ * pipeline case — which is a change to this package's and the spec package's public shape.
  */
 export const CAPABILITIES: Record<BackendId, CapabilityDescriptor> = {
   openai: {

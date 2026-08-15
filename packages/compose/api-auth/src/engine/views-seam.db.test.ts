@@ -99,6 +99,48 @@ const STORES: StoreSpec[] = [
   },
 ];
 
+/**
+ * A SECOND, tiny product declaration mounted beside the golden fixture: one `single` view over
+ * `track_transcripts` whose `absent_state` is `not_found_404`.
+ *
+ * It lives here rather than in the shared golden fixture because the golden fixture is the neutral
+ * read surface the views-runtime unit suite pins byte-for-byte — adding a member to it would change
+ * those goldens. The member's END-TO-END answer was the untested part: the unit suite proves the
+ * interpreter RETURNS a branded 404, but whether a 404 survives the real route chain (the status
+ * clamp, the null-body-status set, the JSON serialization) had never been driven.
+ */
+const ABSENT_404_PRODUCT_YAML = `
+version: "1.0"
+product:
+  id: views_seam_absent_404
+  name: not_found_404 seam probe
+contracts:
+  views_seam_404.transcript_ref:
+    type: object
+    additional_properties: false
+    properties:
+      session_id: { type: string }
+      status: { type: string }
+    required: [session_id, status]
+views:
+  - id: transcript_or_404
+    route: { method: GET, path: "/probe-404/{session_id}/transcript" }
+    auth: bearer_tenant
+    params:
+      session_id: { in: path, shape: safe_id }
+    source: { kind: store, ref: track_transcripts }
+    absent_state: not_found_404
+    read:
+      mode: single
+      filter:
+        session_id: { param: session_id }
+      shape:
+        fields:
+          session_id: { kind: param, param: session_id }
+          status: { kind: column, column: status, type: string, default: unknown }
+    response_contract: views_seam_404.transcript_ref
+`;
+
 /** The ONE golden view-declaration fixture (shared with the views-runtime unit suite — no drift). */
 function loadViewsSpec() {
   const yaml = readFileSync(
@@ -128,11 +170,25 @@ describe.skipIf(!hasDb)('declared views through the REAL platform chain, DB-back
       stores: STORES,
       artifactBindings: new Map([['note_artifacts', { store: 'note_artifacts' }]]),
     });
+    // The `not_found_404` probe view, mounted through the SAME `mountProductViews` seam onto the SAME
+    // app — a second declaration, not a second code path.
+    const absent404 = parseProductSpec(ABSENT_404_PRODUCT_YAML);
+    if (!absent404.ok) {
+      throw new Error(`404 probe spec must parse:\n${JSON.stringify(absent404.errors, null, 2)}`);
+    }
+    const mounted404 = mountProductViews({
+      views: absent404.value.views,
+      contracts: absent404.value.contracts,
+      artifacts: absent404.value.artifacts,
+      capabilities: absent404.value.capabilities,
+      stores: STORES,
+    });
     // probe: a `{handler}` route that ECHOES its `init.headers` back — the ground-truth view
     // of exactly which request headers cross the platform seam into a product handler.
-    const handlers = new Map<string, ResolvedHandler>(
-      mounted.handlers as ReadonlyMap<string, ResolvedHandler>,
-    );
+    const handlers = new Map<string, ResolvedHandler>([
+      ...(mounted.handlers as ReadonlyMap<string, ResolvedHandler>),
+      ...(mounted404.handlers as ReadonlyMap<string, ResolvedHandler>),
+    ]);
     handlers.set('probe_headers', {
       kind: 'route',
       fn: async (init: RouteHandlerInit) => ({ headers: init.headers ?? null }),
@@ -143,6 +199,7 @@ describe.skipIf(!hasDb)('declared views through the REAL platform chain, DB-back
       stores: STORES,
       api: [
         ...mounted.api,
+        ...mounted404.api,
         {
           method: 'GET',
           path: '/probe-headers',
@@ -492,8 +549,41 @@ describe.skipIf(!hasDb)('declared views through the REAL platform chain, DB-back
     expect(headers['x-custom-header']).toBeUndefined();
   });
 
+  it('a not_found_404 view really answers 404 THROUGH the route chain, with a constant body', async () => {
+    const a = await principal('views-404@example.com', 'Views404');
+    await seedGoldenData(a.orgId);
+
+    // ACCEPT CONTROL first: the SAME route over a session that HAS a transcript row is a 200. Without
+    // it a route that 404s unconditionally (or was never mounted) would satisfy the assertion below.
+    const present = await get('/probe-404/s-c/transcript', a.token);
+    expect(present.status).toBe(200);
+    expect(await present.json()).toEqual({ session_id: 's-c', status: 'completed' });
+
+    // The member under test. `s-zzz` has no transcript row, so the read is ABSENT.
+    const missing = await get('/probe-404/s-zzz/transcript', a.token);
+    // The branded 404 SURVIVES the real chain: the interpreter's `httpResponse({status:404})` passes
+    // the route layer's 200-599 status clamp, and 404 is not a null-body status, so the body is served
+    // rather than dropped. That end-to-end fact is what no test held.
+    expect(missing.status).toBe(404);
+    const body = (await missing.text()) as string;
+    expect(JSON.parse(body)).toEqual({ error: 'not_found', detail: 'no such resource.' });
+
+    // NO-LEAK: the detail is a CONSTANT, and it has to be — this branded body is serialized verbatim
+    // by the route layer, so it never passes the error chokepoint that strips `details` from a 404.
+    // The caller's own reference must therefore not appear anywhere in the response.
+    expect(body).not.toContain('s-zzz');
+    expect(missing.headers.get('location')).toBeNull();
+  });
+
   it('DENY-BY-DEFAULT: unauthenticated requests to EVERY declared view are 401', async () => {
-    for (const path of ['/sessions', '/sessions/s-c/mic/transcript', '/sessions/s-c/notes']) {
+    // All FOUR declared views on this app: the golden fixture's three, plus the `not_found_404`
+    // probe declaration mounted beside them. A view added to either declaration belongs here.
+    for (const path of [
+      '/sessions',
+      '/sessions/s-c/mic/transcript',
+      '/sessions/s-c/notes',
+      '/probe-404/s-c/transcript',
+    ]) {
       const res = await get(path);
       expect(res.status, `expected 401 for unauthenticated ${path}`).toBe(401);
     }
