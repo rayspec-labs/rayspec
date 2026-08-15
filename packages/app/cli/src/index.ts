@@ -224,8 +224,12 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 Subcommands:
                                   status --workforce <id>       control state, counts, queue depth,
                                                                 current-window budget headroom
-                                  tasks [--status] [--owner] [--workforce <id>] [--tree]
-                                                                list tasks; --tree nests by parent
+                                  tasks [--status] [--owner] [--workforce <id>]
+                                                                flat task list
+                                  tasks --tree [--root <task-id>] [--json] [--workforce <id>]
+                                                                render one whole subtree as TEXT
+                                                                (status, confidence, cost per node;
+                                                                --json for the machine shape)
                                   task <id>                     one task
                                   approvals list                the pending inbox
                                   approvals approve <id> [--reason <text>]
@@ -236,8 +240,9 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                   resume --workforce <id>
                                   halt --reason <text> --workforce <id>
                                 Reads need a store:read credential; mutations need store:write. Every
-                                reply is ONE JSON object; a route refusal is ok:false carrying the
-                                server's error envelope untranslated.`,
+                                reply is ONE JSON object — except \`tasks --tree\`, which renders the
+                                subtree as text (pass --json for the machine shape); a route refusal
+                                is ok:false carrying the server's error envelope untranslated.`,
       },
     ],
   },
@@ -577,7 +582,13 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
         if (e instanceof WorkforceCliError) throw new CliError(e.message);
         throw e;
       }
-      await emit(result);
+      // `tasks --tree` is the ONE text-rendering command in the group (the tree is a console
+      // view; --json keeps the machine shape). Everything else stays one JSON object on stdout.
+      if (typeof result.rendering === 'string') {
+        await writeDrained(process.stdout, `${result.rendering}\n`);
+      } else {
+        await emit(result);
+      }
       return result.ok ? 0 : 1;
     }
     case 'dev': {

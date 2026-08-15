@@ -6,9 +6,11 @@
  * no unauthenticated fallback, no local authorization — a permission gap is the route's own 403,
  * surfaced verbatim).
  *
- * Commands (JSON on stdout, exit 0 ok / 1 not-ok / 2 usage):
+ * Commands (JSON on stdout — except `tasks --tree`, which renders TEXT unless --json;
+ * exit 0 ok / 1 not-ok / 2 usage):
  *   workforce status --workforce <id>          control state, task counts, queue depth, headroom
- *   workforce tasks [--status] [--owner] [--tree]   list tasks (--tree nests by parent)
+ *   workforce tasks [--status] [--owner]       flat task list
+ *   workforce tasks --tree [--root <task-id>] [--json]   render one whole subtree as text
  *   workforce task <id>                        one task
  *   workforce approvals list                   the pending inbox
  *   workforce approvals approve <id> [--reason]
@@ -21,6 +23,7 @@
  * Shared flags on every command: --url, --api-key, --deployment, --tenant.
  */
 import { parseArgs } from 'node:util';
+import { renderTaskTree, type TreeTaskRow } from './workforce/render-tree.js';
 import {
   errorsFrom,
   resolveTransport,
@@ -185,30 +188,84 @@ async function runTasks(args: readonly string[]): Promise<WorkforceResult> {
     owner: { type: 'string' },
     workforce: { type: 'string' },
     tree: { type: 'boolean' },
+    root: { type: 'string' },
+    json: { type: 'boolean' },
   });
-  const t = await transportFrom(values);
-  let query = '';
-  if (typeof values.status === 'string') query += `&status=${encodeURIComponent(values.status)}`;
-  if (typeof values.owner === 'string') query += `&owner=${encodeURIComponent(values.owner)}`;
-  if (typeof values.workforce === 'string') {
-    query += `&workforceId=${encodeURIComponent(values.workforce)}`;
+  if (values.tree !== true && (typeof values.root === 'string' || values.json === true)) {
+    throw new WorkforceCliError('--root and --json belong to `workforce tasks --tree`');
   }
-  const { rows, truncated, error } = await listAllTasks(t, query);
-  if (error) return outcome('workforce tasks', error, {});
+  const t = await transportFrom(values);
+
   if (values.tree !== true) {
+    let query = '';
+    if (typeof values.status === 'string') query += `&status=${encodeURIComponent(values.status)}`;
+    if (typeof values.owner === 'string') query += `&owner=${encodeURIComponent(values.owner)}`;
+    if (typeof values.workforce === 'string') {
+      query += `&workforceId=${encodeURIComponent(values.workforce)}`;
+    }
+    const { rows, truncated, error } = await listAllTasks(t, query);
+    if (error) return outcome('workforce tasks', error, {});
     return { ok: true, command: 'workforce tasks', tasks: rows, truncated };
   }
 
-  // --tree: nest by parentTaskId. A child whose parent fell outside the filter stays a root of its
-  // own subtree (never dropped, never re-parented).
-  const byId = new Map<string, TaskNode>(rows.map((r) => [r.taskId, { ...r, children: [] }]));
-  const roots: TaskNode[] = [];
-  for (const node of byId.values()) {
-    const parent = node.parentTaskId !== null ? byId.get(node.parentTaskId) : undefined;
-    if (parent) (parent.children as TaskNode[]).push(node);
-    else roots.push(node);
+  // --tree renders ONE WHOLE SUBTREE as text (the exception to the one-JSON-object contract;
+  // --json keeps the machine shape). Status/owner filters belong to the flat list — a filtered
+  // tree would render holes as work that never happened.
+  if (typeof values.status === 'string' || typeof values.owner === 'string') {
+    throw new WorkforceCliError(
+      '--tree renders one whole subtree; --status and --owner filters belong to the flat list',
+    );
   }
-  return { ok: true, command: 'workforce tasks', tree: roots, truncated };
+  let rootId = typeof values.root === 'string' ? values.root : undefined;
+  if (rootId === undefined) {
+    // No --root: exactly one root task is the unambiguous pick (the transport's own
+    // one-candidate rule); anything else is a fail-closed error naming the options.
+    let query = '';
+    if (typeof values.workforce === 'string') {
+      query += `&workforceId=${encodeURIComponent(values.workforce)}`;
+    }
+    const { rows, error } = await listAllTasks(t, query);
+    if (error) return outcome('workforce tasks', error, {});
+    const roots = rows.filter((row) => row.parentTaskId === null);
+    const first = roots[0];
+    if (roots.length !== 1 || first === undefined) {
+      throw new WorkforceCliError(
+        roots.length === 0
+          ? 'no root task exists to render — submit a goal first, or pass --root <task-id>'
+          : `several root tasks exist — pass --root <task-id>. Roots: ${roots
+              .slice(0, 20)
+              .map((row) => row.taskId)
+              .join(', ')}${roots.length > 20 ? ', …' : ''}`,
+      );
+    }
+    rootId = first.taskId;
+  }
+  const res = await workforceRequest(
+    t,
+    'GET',
+    `/v1/workforce/tasks/${encodeURIComponent(rootId)}/tree`,
+  );
+  if (res.status < 200 || res.status >= 300) return outcome('workforce tasks', res, {});
+  const body = res.body as {
+    rootTaskId: string;
+    tasks: TreeTaskRow[];
+    budgets: { taskUsd: number | null; taskTurns: number | null } | null;
+  };
+  const truncated = res.headers['x-result-truncated'] === 'true';
+  if (values.json === true) {
+    return {
+      ok: true,
+      command: 'workforce tasks',
+      tree: body.tasks,
+      budgets: body.budgets,
+      truncated,
+    };
+  }
+  return {
+    ok: true,
+    command: 'workforce tasks',
+    rendering: renderTaskTree(body.tasks, body.budgets, truncated),
+  };
 }
 
 async function runTask(args: readonly string[]): Promise<WorkforceResult> {
