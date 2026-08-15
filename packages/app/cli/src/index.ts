@@ -234,7 +234,9 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                   approvals list                the pending inbox
                                   approvals approve <id> [--reason <text>]
                                   approvals reject <id> --reason <text>
-                                  cost [--window 24h|7d]        per-scope settled/reserved roll-up
+                                  cost [--window 24h|7d] [--by employee|department]
+                                                                settled/reserved roll-up (grouped
+                                                                server-side when --by is given)
                                   events <task-id>              the task's journal replay
                                   pause [--drain] --workforce <id>
                                   resume --workforce <id>

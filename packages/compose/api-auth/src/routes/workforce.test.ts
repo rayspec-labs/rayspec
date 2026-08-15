@@ -649,6 +649,80 @@ describe('/v1/workforce (the task-engine surface)', () => {
     expect(res.status).toBe(401);
   });
 
+  it('cost --by department groups the LEDGER scope buckets; --by employee groups TASK rows and says its basis', async () => {
+    const a = await principal('wf-cost-by@example.test', 'Org WF Cost By');
+    const tdb = forTenant(h.db, a.orgId);
+    // Ledger rows: two department buckets across two windows — the grouping sums per scope id.
+    // (Read-side seeding; the WRITE invariants on these rows are the budget suite's.)
+    const windowA = new Date('2026-08-15T00:00:00Z');
+    const windowB = new Date('2026-08-15T01:00:00Z');
+    for (const [scopeId, windowStart, settled, turns] of [
+      ['eng', windowA, '0.30', 3],
+      ['eng', windowB, '0.20', 2],
+      ['growth', windowA, '0.10', 1],
+    ] as const) {
+      await tdb.insert(schema.workforceBudgetLedger, {
+        scopeKind: 'department',
+        scopeId,
+        windowStart,
+        reservedUsd: '0',
+        settledUsd: settled,
+        settledTurns: turns,
+      });
+    }
+    const byDepartment = await jsonRequest(h.app, 'GET', '/v1/workforce/cost?by=department', {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(byDepartment.status).toBe(200);
+    expect(await byDepartment.json()).toEqual({
+      window: '24h',
+      by: 'department',
+      basis: 'budget_ledger',
+      groups: [
+        { id: 'eng', settledUsd: 0.5, reservedUsd: 0, settledTurns: 5 },
+        { id: 'growth', settledUsd: 0.1, reservedUsd: 0, settledTurns: 1 },
+      ],
+    });
+
+    // Task rows for the employee grouping — settled cost lives on the rows the tree also reads.
+    const first = await seedRoot(a.orgId, 'Owned by alpha');
+    const second = await seedRoot(a.orgId, 'Also alpha');
+    const third = await seedRoot(a.orgId, 'Owned by beta');
+    await h.db.$client.unsafe(
+      `UPDATE workforce_tasks SET cost_usd = '0.40', turns_used = 2, owner = 'alpha' WHERE task_id = '${first.taskId}';
+       UPDATE workforce_tasks SET cost_usd = '0.10', turns_used = 1, owner = 'alpha' WHERE task_id = '${second.taskId}';
+       UPDATE workforce_tasks SET cost_usd = '0.20', turns_used = 1, owner = 'beta' WHERE task_id = '${third.taskId}';`,
+    );
+    const byEmployee = await jsonRequest(h.app, 'GET', '/v1/workforce/cost?by=employee', {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(byEmployee.status).toBe(200);
+    expect(await byEmployee.json()).toEqual({
+      window: '24h',
+      by: 'employee',
+      basis: 'task_rows',
+      groups: [
+        { id: 'alpha', settledUsd: 0.5, settledTurns: 3, tasks: 2 },
+        { id: 'beta', settledUsd: 0.2, settledTurns: 1, tasks: 1 },
+      ],
+    });
+
+    const unknown = await jsonRequest(h.app, 'GET', '/v1/workforce/cost?by=task-class', {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(unknown.status).toBe(400);
+    expect((await unknown.json()).error.details).toEqual({
+      allowed: ['employee', 'department'],
+    });
+
+    // The ungrouped default is byte-unchanged by the new parameter.
+    const plain = await jsonRequest(h.app, 'GET', '/v1/workforce/cost?window=24h', {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(plain.status).toBe(200);
+    expect(await plain.json()).toMatchObject({ window: '24h', totalSettledUsd: 0 });
+  });
+
   it('the tree returns the whole subtree flat from ANY member id, with the per-task ceiling', async () => {
     const a = await principal('wf-tree@example.test', 'Org WF Tree');
     const tdb = forTenant(h.db, a.orgId);

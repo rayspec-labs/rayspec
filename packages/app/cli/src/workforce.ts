@@ -15,7 +15,7 @@
  *   workforce approvals list                   the pending inbox
  *   workforce approvals approve <id> [--reason]
  *   workforce approvals reject <id> --reason <text>
- *   workforce cost [--window 24h]              per-scope settled/reserved roll-up
+ *   workforce cost [--window 24h] [--by employee|department]   settled/reserved roll-up
  *   workforce events <task-id>                 the task's journal replay (parsed SSE frames)
  *   workforce pause [--drain] --workforce <id>
  *   workforce resume --workforce <id>
@@ -319,10 +319,16 @@ async function runApprovals(args: readonly string[]): Promise<WorkforceResult> {
 }
 
 async function runCost(args: readonly string[]): Promise<WorkforceResult> {
-  const { values } = parse(args, { window: { type: 'string' } });
+  const { values } = parse(args, { window: { type: 'string' }, by: { type: 'string' } });
+  if (typeof values.by === 'string' && values.by !== 'employee' && values.by !== 'department') {
+    throw new WorkforceCliError("--by takes 'employee' or 'department'");
+  }
   const t = await transportFrom(values);
-  const query =
-    typeof values.window === 'string' ? `?window=${encodeURIComponent(values.window)}` : '';
+  const params = [
+    ...(typeof values.window === 'string' ? [`window=${encodeURIComponent(values.window)}`] : []),
+    ...(typeof values.by === 'string' ? [`by=${encodeURIComponent(values.by)}`] : []),
+  ];
+  const query = params.length > 0 ? `?${params.join('&')}` : '';
   const res = await workforceRequest(t, 'GET', `/v1/workforce/cost${query}`);
   return outcome('workforce cost', res, { cost: res.body });
 }

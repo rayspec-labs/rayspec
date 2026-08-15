@@ -433,7 +433,17 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
     },
   );
 
-  // GET /v1/workforce/cost?window=&workforceId= — settled/reserved roll-up per ledger scope.
+  // GET /v1/workforce/cost?window=&by= — settled/reserved roll-up. Default: per ledger scope,
+  // byte-unchanged. `?by=` groups server-side (a closed pair; anything else is a typed 400), and
+  // each grouping names its BASIS, because the two are honest about different things:
+  //   - by=department reads the ENFORCING LEDGER's department scope rows — real window semantics
+  //     (settlement buckets), the same rows the ceilings hold on;
+  //   - by=employee aggregates the TASK ROWS by owner (the ledger carries no employee scope) and
+  //     therefore windows by task CREATION time: a long-lived task's whole settled cost
+  //     attributes to the window it was created in. Stated structurally (`basis`), not glossed.
+  // Deliberately NOT supported: a workforceId filter — the ledger's scope ids are not uniformly
+  // workforce-keyed across kinds, and a filter that silently applied to some kinds and not
+  // others would misreport spend. One deployment tenant runs one declared workforce.
   app.get(
     '/v1/workforce/cost',
     requireAuth(),
@@ -444,6 +454,84 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       const tdb = tenantHandle(deps, c.get('tenantId'));
       const windowMs = parseWindowMs(c.req.query('window'));
       const since = new Date(Date.now() - windowMs);
+      const window = c.req.query('window') ?? '24h';
+      const by = c.req.query('by');
+      if (by !== undefined && by !== 'employee' && by !== 'department') {
+        throw new ApiError('VALIDATION_ERROR', "by must be 'employee' or 'department'.", {
+          allowed: ['employee', 'department'],
+        });
+      }
+
+      if (by === 'department') {
+        const ledger = schema.workforceBudgetLedger;
+        const rows = (await tdb
+          .select(ledger, {
+            id: ledger.scopeId,
+            settledUsd: sql<string>`sum(${ledger.settledUsd})`,
+            reservedUsd: sql<string>`sum(${ledger.reservedUsd})`,
+            settledTurns: sql<number>`sum(${ledger.settledTurns})::int`,
+          })
+          .where(and(eq(ledger.scopeKind, 'department'), gte(ledger.updatedAt, since)))
+          .groupBy(ledger.scopeId)
+          .orderBy(sql`sum(${ledger.settledUsd}) desc`, asc(ledger.scopeId))
+          .limit(MAX_PAGE + 1)) as Array<{
+          id: string;
+          settledUsd: string;
+          reservedUsd: string;
+          settledTurns: number;
+        }>;
+        c.header('X-Result-Truncated', rows.length > MAX_PAGE ? 'true' : 'false');
+        return c.json(
+          {
+            window,
+            by,
+            basis: 'budget_ledger',
+            groups: rows.slice(0, MAX_PAGE).map((row) => ({
+              id: row.id,
+              settledUsd: Number(row.settledUsd),
+              reservedUsd: Number(row.reservedUsd),
+              settledTurns: row.settledTurns,
+            })),
+          },
+          200,
+        );
+      }
+
+      if (by === 'employee') {
+        const tasks = schema.workforceTasks;
+        const rows = (await tdb
+          .select(tasks, {
+            id: tasks.owner,
+            settledUsd: sql<string>`sum(${tasks.costUsd})`,
+            settledTurns: sql<number>`sum(${tasks.turnsUsed})::int`,
+            tasks: sql<number>`count(*)::int`,
+          })
+          .where(gte(tasks.createdAt, since))
+          .groupBy(tasks.owner)
+          .orderBy(sql`sum(${tasks.costUsd}) desc`, asc(tasks.owner))
+          .limit(MAX_PAGE + 1)) as Array<{
+          id: string;
+          settledUsd: string;
+          settledTurns: number;
+          tasks: number;
+        }>;
+        c.header('X-Result-Truncated', rows.length > MAX_PAGE ? 'true' : 'false');
+        return c.json(
+          {
+            window,
+            by,
+            basis: 'task_rows',
+            groups: rows.slice(0, MAX_PAGE).map((row) => ({
+              id: row.id,
+              settledUsd: Number(row.settledUsd),
+              settledTurns: row.settledTurns,
+              tasks: row.tasks,
+            })),
+          },
+          200,
+        );
+      }
+
       const rows = (await tdb
         .select(schema.workforceBudgetLedger)
         .where(gte(schema.workforceBudgetLedger.updatedAt, since))) as Array<
@@ -460,7 +548,7 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       const totalSettledUsd = rows
         .filter((r) => r.scopeKind === 'task')
         .reduce((sum, r) => sum + Number(r.settledUsd), 0);
-      return c.json({ window: c.req.query('window') ?? '24h', totalSettledUsd, scopes }, 200);
+      return c.json({ window, totalSettledUsd, scopes }, 200);
     },
   );
 

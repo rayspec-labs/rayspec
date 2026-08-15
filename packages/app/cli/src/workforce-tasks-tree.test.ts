@@ -122,3 +122,21 @@ describe('workforce tasks --tree', () => {
     );
   });
 });
+
+describe('workforce cost --by', () => {
+  it('refuses anything outside the closed pair as usage, before any request', async () => {
+    stubFetch([]); // any fetch would throw 'unstubbed'
+    await expect(runWorkforce(['cost', '--by', 'task-class', ...FLAGS])).rejects.toThrow(
+      /--by takes 'employee' or 'department'/,
+    );
+  });
+
+  it('passes a legal --by through as the query parameter', async () => {
+    const seen = stubFetch([
+      { match: (url) => url.includes('/v1/workforce/cost'), body: { groups: [] } },
+    ]);
+    const result = await runWorkforce(['cost', '--by', 'employee', ...FLAGS]);
+    expect(result.ok).toBe(true);
+    expect(seen[0]).toContain('/v1/workforce/cost?by=employee');
+  });
+});
