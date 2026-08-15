@@ -1,0 +1,154 @@
+# A small declared workforce: two departments, one team, one review policy, one human approval.
+# EXPERIMENTAL: parsing this document requires RAYSPEC_EXPERIMENTAL_WORKFORCE=1 at every entry
+# point (doctor, plan, deploy, serve) — without it the `workforce:` section is refused, typed.
+#
+# The `workforce:` block is deliberately this file's FINAL top-level section: the spec reference
+# quotes it byte-for-byte from here (a CI test compares the two), so everything after the last
+# non-workforce section IS the worked example.
+version: '1.0'
+metadata:
+  name: workforce-starter
+  description: A small declared workforce - two departments, one team, one review policy, one human approval.
+deployment:
+  durableWorker: true
+agents:
+  - id: lead_agent
+    name: lead_agent
+    backend: openai
+    model: gpt-4o-mini
+    instructions: >-
+      You coordinate a small release workforce. Decompose goals along the declared departments,
+      keep streams parallel where they are independent, and synthesize your subordinates' results
+      into one direct answer for the requester.
+  - id: eng_mgr_agent
+    name: eng_mgr_agent
+    backend: openai
+    model: gpt-4o-mini
+    instructions: >-
+      You run the engineering department. Split work across your members by their titles, and
+      merge their structured results into one engineering answer.
+  - id: growth_mgr_agent
+    name: growth_mgr_agent
+    backend: openai
+    model: gpt-4o-mini
+    instructions: >-
+      You run the growth department. Route writing work to the copywriter and report one growth
+      answer upward.
+  - id: principal_agent
+    name: principal_agent
+    backend: openai
+    model: gpt-4o-mini
+    instructions: >-
+      You are the senior engineer. Do the analytical half of engineering work yourself and be
+      honest in your confidence numbers - a low number routes your work to review, which is what
+      it is for.
+  - id: devops_agent
+    name: devops_agent
+    backend: openai
+    model: gpt-4o-mini
+    instructions: You own pipelines and releases. Answer operational questions concretely.
+  - id: copy_agent
+    name: copy_agent
+    backend: openai
+    model: gpt-4o-mini
+    instructions: >-
+      You write public-facing copy. Anything meant for publication needs a human sign-off -
+      request approval before you commit to a public statement.
+  - id: qa_agent
+    name: qa_agent
+    backend: openai
+    model: gpt-4o-mini
+    instructions: >-
+      You review other employees' work. Accept only what you would ship; reject with concrete,
+      actionable required changes.
+workforce:
+  id: starter
+  name: Release Workforce
+  orchestrator: lead
+  budgets:
+    workforce:
+      usd: 25
+      window: daily
+    task:
+      usd: 2.5
+      turns: 20
+    delegation:
+      maxDepth: 3
+      maxPerTask: 4
+  execution:
+    maxConcurrentWorkers: 4
+    maxTaskWallClock: 30m
+    maxReviewRounds: 2
+  departments:
+    - id: eng
+      name: Engineering
+      manager: mgr_eng
+      mission: Build and verify the release.
+      members: [principal_eng, devops]
+    - id: growth
+      name: Growth
+      manager: mgr_growth
+      mission: Announce the release.
+      members: [copywriter]
+  employees:
+    - id: lead
+      agent: lead_agent
+      title: Lead
+      role: orchestrator
+    - id: mgr_eng
+      agent: eng_mgr_agent
+      title: Engineering Manager
+      department: eng
+      reportsTo: lead
+      role: manager
+    - id: mgr_growth
+      agent: growth_mgr_agent
+      title: Growth Manager
+      department: growth
+      reportsTo: lead
+      role: manager
+    - id: principal_eng
+      agent: principal_agent
+      title: Principal Engineer
+      department: eng
+      reportsTo: mgr_eng
+      role: worker
+    - id: devops
+      agent: devops_agent
+      title: DevOps Engineer
+      department: eng
+      reportsTo: mgr_eng
+      role: worker
+    - id: copywriter
+      agent: copy_agent
+      title: Copywriter
+      department: growth
+      reportsTo: mgr_growth
+      role: worker
+      capabilities: [public_statement]
+    - id: qa
+      agent: qa_agent
+      title: Quality Reviewer
+      reportsTo: lead
+      role: reviewer
+  teams:
+    - id: release_crew
+      lead: mgr_eng
+      members: [principal_eng, devops]
+      maxSize: 3
+  reviewPolicies:
+    - id: eng_quality
+      appliesTo:
+        department: eng
+      reviewer: qa
+      requireWhen:
+        confidenceBelow: 0.8
+      onReject: rework
+      maxRounds: 2
+  approvals:
+    - id: public_statement_signoff
+      requireWhen:
+        capabilities: [public_statement]
+      approver: user
+      timeout: 2h
+      onTimeout: fail
