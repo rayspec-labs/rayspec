@@ -10,9 +10,15 @@ it checks — a pattern bounded by a length — cannot be written as a type. Not
 re-exports an implementation, which is what keeps an internal refactor from becoming a
 silent break for every pack.
 
-A pack's **entry** module declares the pack against this package. A pack's **handler**
-modules run with injected capabilities and import only `@rayspec/handler-sdk`. The two
-surfaces are deliberately distinct.
+A pack's **entry** module builds its manifest with the platform's manifest helper — which
+typechecks the full document grammar at the pack's own edge — and names `DefinedPack` from
+this package for what it exports. A pack's **handler** modules run with injected
+capabilities and import only `@rayspec/handler-sdk`. The two surfaces are deliberately
+distinct.
+
+The fragment types here pin the fields a contribution is *addressed* by and leave the rest
+of each section body open, so they are deliberately **wider** than that grammar: they
+describe what a pack has already declared, and are not a second way to construct it.
 
 Part of [RaySpec](https://rayspec.dev) — **file-deployable AI infrastructure**: describe a
 product's backend in one declarative YAML file, and RaySpec stands up accounts and

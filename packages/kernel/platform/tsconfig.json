@@ -8,7 +8,8 @@
     { "path": "../core" },
     { "path": "../db" },
     { "path": "../spec" },
-    { "path": "../handler-sdk" }
+    { "path": "../handler-sdk" },
+    { "path": "../pack-sdk" }
   ],
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules", "**/*.test.ts", "src/test-support/**"]

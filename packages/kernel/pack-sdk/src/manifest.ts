@@ -137,10 +137,15 @@ export interface PackFragments {
  * platform's own capability contract, which the pack receives by injection and which travels with
  * the platform version the pack is pinned against — freezing a copy of it here would promise a
  * compatibility this surface cannot keep.
+ *
+ * It is `object` rather than an index signature (`{ readonly [k: string]: unknown }`), and that is
+ * load-bearing: TypeScript grants an implicit index signature to object TYPE ALIASES only, never to
+ * an INTERFACE. The platform's capability contract is an interface, so an index-signature target
+ * here would reject the very value the manifest helper returns — the annotation this package tells
+ * a pack author to write would not compile. `object` states the one thing this package is entitled
+ * to promise about the slot: something is there, and its keys are not ours to name.
  */
-export type PackCapabilities = {
-  readonly [capability: string]: unknown;
-};
+export type PackCapabilities = object;
 
 /**
  * One pack manifest — the value a pack's entry module default-exports.

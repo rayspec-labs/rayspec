@@ -23,7 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   What the fragment types pin is the fields a contribution is addressed by (a store's `name`, a
   handler's `id`/`module`/`export`/`kind`, a tool's `id`/`handler`, a route's `method`/`path`, an
   agent's `id`); the rest of each section body stays open and is validated, as before, by the
-  deployment's own fail-closed parse pass over the merged document.
+  deployment's own fail-closed parse pass over the merged document. The capability slot is left open
+  the same way, and is typed so that the platform's own capability contract — an `interface`, which
+  TypeScript never grants an implicit index signature — satisfies it.
+  Those addressing fields, and the brand a loader checks a pack entry's default export for, are held
+  by compile-time assertions in two places: inside the package, so narrowing one fails its own
+  typecheck; and in `@rayspec/platform`, where the value the manifest helper returns is asserted
+  assignable to the type this package tells a pack author to annotate it with. The second is the one
+  a re-expression needs — without it a shape the platform's own value could not satisfy compiles
+  cleanly on both sides and fails only in a pack author's repository. The fragment types stay
+  deliberately wider than the document grammar: they describe a manifest a pack has already built
+  with the platform's helper, and are not a second way to construct one.
   The exported surface is recorded in the checked-in `packages/kernel/pack-sdk/api-report.md`,
   derived from the package's built type declarations so it reports what a consumer actually compiles
   against, and the package README states what a minor release may change, what forces a major, and

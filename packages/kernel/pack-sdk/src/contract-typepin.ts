@@ -18,6 +18,7 @@
 import type {
   isSafeIdentifier,
   MAX_IDENTIFIER_LENGTH,
+  PackAgentFragment,
   PackApiRouteFragment,
   PackErrorCode,
   PackFragments,
@@ -51,7 +52,9 @@ type _SectionsKeepTheirIdentity = Assert<
   PackStoreFragment extends { name: string }
     ? PackToolFragment extends { id: string; handler: string }
       ? PackApiRouteFragment extends { method: string; path: string }
-        ? true
+        ? PackAgentFragment extends { id: string }
+          ? true
+          : false
         : false
       : false
     : false
