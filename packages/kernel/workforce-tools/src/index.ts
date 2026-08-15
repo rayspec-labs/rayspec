@@ -41,6 +41,17 @@ export {
 } from './errors.js';
 export { type ApplicableReviewRuleFact, computeTurnFacts, type TurnFacts } from './facts.js';
 export {
+  formatRecallAge,
+  RECALL_HIT_TEXT_MAX_CHARS,
+  RECALL_MAX_AGE_MS,
+  RECALL_MAX_HITS,
+  RECALL_SCAN_LIMIT,
+  type RecallScope,
+  scoreRecallCandidate,
+  TaskHistoryMemoryProvider,
+  tokenizeRecallQuery,
+} from './memory.js';
+export {
   DATA_BOUNDARY_LINE,
   ROLE_GUIDANCE,
   SECTION_HEADERS,
