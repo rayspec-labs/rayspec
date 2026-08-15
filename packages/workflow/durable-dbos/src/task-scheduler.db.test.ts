@@ -835,4 +835,103 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
     await pumpUntil(async () => (await taskRow(root.taskId)).status === 'completed');
     expect(await reservedUsd(root.taskId)).toBe(0);
   });
+
+  it('wall-clock and deadline ceilings enforce at the dispatch boundary: the pass parks, never kills', async () => {
+    // The per-task wall clock: a re-queued task whose first claim started long ago, against a
+    // 1-second ceiling — the next pass parks it blocked(deadline_exceeded) instead of dispatching.
+    await ensureWorkforceRuntime(tdb(), 'wf', { execution: { maxTaskWallClockMs: 1_000 } });
+    const walled = await newRoot('worker-walled');
+    await applyTransition(tdb(), {
+      taskId: walled.taskId,
+      expectedVersion: walled.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    // Age the durable start stamp — the fact the ceiling measures against (set by the first
+    // claim; a timestamp, not a status, so the write monopoly is untouched).
+    await db.$client.unsafe(
+      `UPDATE workforce_tasks SET started_at = now() - interval '1 hour' WHERE task_id = '${walled.taskId}';`,
+    );
+    const outcome = await scheduler.runReservePass();
+    expect(outcome.expired).toContain(walled.taskId);
+    expect(await taskRow(walled.taskId)).toMatchObject({
+      status: 'blocked',
+      status_reason: 'deadline_exceeded',
+    });
+    // No turn was dispatched and nothing was reserved for a task the ceiling already owns.
+    expect(outcome.dispatched.map((d) => d.taskId)).not.toContain(walled.taskId);
+    expect(await reservedUsd(walled.taskId)).toBe(0);
+
+    // The absolute deadline: same park, same door, from the row's own declared instant.
+    const dated = await newRoot('worker-dated', { deadlineAt: new Date(Date.now() - 60_000) });
+    await applyTransition(tdb(), {
+      taskId: dated.taskId,
+      expectedVersion: dated.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    const second = await scheduler.runReservePass();
+    expect(second.expired).toContain(dated.taskId);
+    expect(await taskRow(dated.taskId)).toMatchObject({
+      status: 'blocked',
+      status_reason: 'deadline_exceeded',
+    });
+  });
+
+  it('a waiting_for_user park consumes ZERO slots and ZERO cost — proven by a test that waits', async () => {
+    // One worker slot for the whole workforce: if the park held a slot, nothing else could run.
+    await ensureWorkforceRuntime(tdb(), 'wf', { execution: { maxConcurrentWorkers: 1 } });
+    handlers.set('asker', async () => ({
+      intent: {
+        kind: 'request_approval',
+        question: 'May it ship?',
+        options: [],
+        approver: 'user',
+        timeoutMs: 3_600_000,
+        onTimeout: 'fail',
+      },
+    }));
+    const asker = await newRoot('asker');
+    await applyTransition(tdb(), {
+      taskId: asker.taskId,
+      expectedVersion: asker.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await pumpUntil(async () => (await taskRow(asker.taskId)).status === 'waiting_for_user');
+    const parked = await taskRow(asker.taskId);
+    expect(parked).toMatchObject({ status: 'waiting_for_user', status_reason: 'approval_pending' });
+    const eventsBefore = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM run_events WHERE run_id = '${asker.taskId}';`,
+    );
+
+    // THE WAIT: keep running passes against the parked row. Nothing may move, reserve, or spend.
+    for (let pass = 0; pass < 5; pass++) {
+      await scheduler.runReservePass();
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const still = await taskRow(asker.taskId);
+    expect(still).toMatchObject({
+      status: 'waiting_for_user',
+      status_reason: 'approval_pending',
+      version: parked.version, // not even a version tick — the pass never touched the row
+    });
+    expect(await reservedUsd(asker.taskId)).toBe(0);
+    const eventsAfter = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM run_events WHERE run_id = '${asker.taskId}';`,
+    );
+    expect(eventsAfter[0]?.c).toBe(eventsBefore[0]?.c); // the journal is as parked as the row
+
+    // …and the ONE worker slot is demonstrably free: a fresh task dispatches and completes while
+    // the park stands, which it could not under a cap of 1 if the park held the slot.
+    const bystander = await newRoot('worker-bystander');
+    await applyTransition(tdb(), {
+      taskId: bystander.taskId,
+      expectedVersion: bystander.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await pumpUntil(async () => (await taskRow(bystander.taskId)).status === 'completed');
+    expect((await taskRow(asker.taskId)).status).toBe('waiting_for_user');
+  });
 });
