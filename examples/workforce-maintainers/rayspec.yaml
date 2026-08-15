@@ -1,0 +1,209 @@
+# A repository-maintenance workforce: three departments, nine employees. Issue triage,
+# release-notes drafting, docs review, and competitive monitoring — the recurring work a busy
+# repository accumulates, declared as an organization instead of a pile of scripts.
+# EXPERIMENTAL: parsing this document requires RAYSPEC_EXPERIMENTAL_WORKFORCE=1 at every entry
+# point (doctor, plan, deploy, serve) — without it the `workforce:` section is refused, typed.
+version: '1.0'
+metadata:
+  name: workforce-maintainers
+  description: A repository-maintenance workforce - issue triage, release notes, docs review, competitive monitoring.
+deployment:
+  durableWorker: true
+agents:
+  - id: lead_agent
+    name: lead_agent
+    backend: anthropic
+    model: claude-sonnet-5
+    instructions: >-
+      You coordinate a repository-maintenance workforce. Route incoming goals to the department
+      that owns them - triage work to triage, writing and docs work to docs, market questions to
+      watch - and synthesize the streams into one answer.
+  - id: triage_mgr_agent
+    name: triage_mgr_agent
+    backend: anthropic
+    model: claude-sonnet-5
+    instructions: >-
+      You run issue triage. Split incoming reports between analysis and reproduction, and report
+      one triage verdict per issue: severity, area, and whether it reproduces.
+  - id: docs_mgr_agent
+    name: docs_mgr_agent
+    backend: openai
+    model: gpt-4o-mini
+    instructions: >-
+      You run the documentation department. Route reference work to the docs writer and release
+      notes to the release-notes writer; hold both to the published style.
+  - id: watch_mgr_agent
+    name: watch_mgr_agent
+    backend: openai
+    model: gpt-4o-mini
+    instructions: >-
+      You run competitive monitoring. Turn watch requests into concrete comparison questions and
+      report findings with sources.
+  - id: issue_analyst_agent
+    name: issue_analyst_agent
+    backend: anthropic
+    model: claude-sonnet-5
+    instructions: >-
+      You analyze incoming issues: classify severity and affected area, and state what evidence
+      supports the classification.
+  - id: repro_engineer_agent
+    name: repro_engineer_agent
+    backend: openai
+    model: gpt-4o-mini
+    instructions: >-
+      You attempt minimal reproductions of reported issues and state exactly what you ran and
+      what happened. A reproduction claim you did not run is worse than no claim.
+  - id: docs_writer_agent
+    name: docs_writer_agent
+    backend: anthropic
+    model: claude-sonnet-5
+    instructions: >-
+      You keep the reference documentation precise: every stated guarantee names the mechanism
+      that enforces it.
+  - id: release_notes_agent
+    name: release_notes_agent
+    backend: openai
+    model: gpt-4o-mini
+    instructions: >-
+      You draft release notes for public consumption. Anything meant for publication needs a
+      human sign-off - request approval before you commit to public wording.
+  - id: market_watcher_agent
+    name: market_watcher_agent
+    backend: anthropic
+    model: claude-sonnet-5
+    instructions: >-
+      You track comparable tools and summarize movements that matter, with links, dates, and an
+      honest confidence.
+  - id: senior_reviewer_agent
+    name: senior_reviewer_agent
+    backend: anthropic
+    model: claude-sonnet-5
+    instructions: >-
+      You review the maintenance workforce's written output. Accept only what you would publish;
+      reject with concrete required changes.
+workforce:
+  id: maintainers
+  name: Repository Maintainers
+  orchestrator: lead
+  budgets:
+    workforce:
+      usd: 60
+      window: daily
+    task:
+      usd: 3
+      turns: 25
+    delegation:
+      maxDepth: 3
+      maxPerTask: 6
+  execution:
+    maxConcurrentWorkers: 6
+    maxTaskWallClock: 45m
+    maxReviewRounds: 3
+  departments:
+    - id: triage
+      name: Issue Triage
+      manager: mgr_triage
+      mission: Classify, reproduce, and route every incoming issue.
+      members: [issue_analyst, repro_engineer]
+    - id: docs
+      name: Documentation
+      manager: mgr_docs
+      mission: Keep the reference precise and draft the release notes.
+      members: [docs_writer, release_notes_writer]
+    - id: watch
+      name: Competitive Watch
+      manager: mgr_watch
+      mission: Track comparable tools and report movements that matter.
+      members: [market_watcher]
+      budgets:
+        usd: 5
+        window: daily
+  employees:
+    - id: lead
+      agent: lead_agent
+      title: Maintenance Lead
+      role: orchestrator
+    - id: mgr_triage
+      agent: triage_mgr_agent
+      title: Triage Manager
+      department: triage
+      reportsTo: lead
+      role: manager
+    - id: mgr_docs
+      agent: docs_mgr_agent
+      title: Documentation Manager
+      department: docs
+      reportsTo: lead
+      role: manager
+    - id: mgr_watch
+      agent: watch_mgr_agent
+      title: Watch Manager
+      department: watch
+      reportsTo: lead
+      role: manager
+    - id: issue_analyst
+      agent: issue_analyst_agent
+      title: Issue Analyst
+      department: triage
+      reportsTo: mgr_triage
+      role: worker
+    - id: repro_engineer
+      agent: repro_engineer_agent
+      title: Reproduction Engineer
+      department: triage
+      reportsTo: mgr_triage
+      role: worker
+      capabilities: [repro_required]
+    - id: docs_writer
+      agent: docs_writer_agent
+      title: Reference Writer
+      department: docs
+      reportsTo: mgr_docs
+      role: worker
+    - id: release_notes_writer
+      agent: release_notes_agent
+      title: Release Notes Writer
+      department: docs
+      reportsTo: mgr_docs
+      role: worker
+      capabilities: [public_statement]
+    - id: market_watcher
+      agent: market_watcher_agent
+      title: Market Watcher
+      department: watch
+      reportsTo: mgr_watch
+      role: worker
+    - id: senior_reviewer
+      agent: senior_reviewer_agent
+      title: Senior Reviewer
+      reportsTo: lead
+      role: reviewer
+  teams:
+    - id: release_notes_crew
+      lead: mgr_docs
+      members: [docs_writer, release_notes_writer, issue_analyst]
+      maxSize: 4
+  reviewPolicies:
+    - id: docs_quality
+      appliesTo:
+        department: docs
+      reviewer: senior_reviewer
+      requireWhen:
+        confidenceBelow: 0.85
+      onReject: rework
+      maxRounds: 3
+    - id: triage_repro
+      appliesTo:
+        department: triage
+      reviewer: senior_reviewer
+      requireWhen:
+        capabilities: [repro_required]
+      onReject: rework
+      maxRounds: 2
+  approvals:
+    - id: public_statement_signoff
+      requireWhen:
+        capabilities: [public_statement]
+      approver: user
+      timeout: 1d
+      onTimeout: escalate
