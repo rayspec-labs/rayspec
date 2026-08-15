@@ -49,6 +49,11 @@
  *       repository-relative destination and then hands the same string to the release-identity
  *       manifest and its verifier, which resolve it against the repository root — so a scattered
  *       pack leaves those two reading whatever that directory happened to already hold.
+ *   (S) A DECLARED TARGET SHIPS THOUGH NOTHING IMPORTS IT — the set is the runtime closure of the
+ *       bin packages, so a package that exists to be compiled against from OUTSIDE this repository
+ *       is reachable from no `dependencies` edge and drops out of it silently. Such a package
+ *       declares `"rayspecPublishTarget": true` and must then be in the set; a package that neither
+ *       declares it nor is imported must still stay out, or the declaration decides nothing.
  *   (P) THE POSITIVE CONTROL — a coherent checkout packs: the derived version is the reported one,
  *       every target is packed exactly once in dependency order, and the tree is byte-identical
  *       afterwards.
@@ -73,6 +78,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'publish.mjs');
+// The real repository — read by case (S), which asserts a declaration in the committed tree.
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const VERSION = '1.6.2';
 // The Node requirement. The fixture's root manifest is its ONE source, exactly as the repo-root
 // manifest is in the real repo; every publish target has to declare the same string.
@@ -102,14 +109,23 @@ process.stdout.write('fake pnpm: ' + argv.join(' ') + '\\n');
 
 /**
  * The fixture workspace: the publish closure in miniature (the launcher → cli → core chain plus
- * server), one RaySpec member that is NOT a publish target, and one `@spike/*` example fixture that
- * is versioned independently — the same shape the real repo has.
+ * server), one member that is a target only because it DECLARES itself one (nothing depends on it —
+ * the shape a contract package compiled against from another repository has), one RaySpec member
+ * that is NOT a publish target, and one `@spike/*` example fixture that is versioned independently —
+ * the same shape the real repo has.
  */
 const MEMBERS = [
   { dir: 'packages/app/rayspec', name: 'rayspec', deps: ['@rayspec/cli'], target: true },
   { dir: 'packages/app/cli', name: '@rayspec/cli', deps: ['@rayspec/core'], target: true },
   { dir: 'packages/app/server', name: '@rayspec/server', deps: ['@rayspec/core'], target: true },
   { dir: 'packages/kernel/core', name: '@rayspec/core', deps: [], target: true },
+  {
+    dir: 'packages/kernel/pack-sdk',
+    name: '@rayspec/pack-sdk',
+    deps: [],
+    target: true,
+    declared: true,
+  },
   { dir: 'packages/test/parity', name: '@rayspec/parity', deps: [], target: false },
   { dir: 'examples/spike-pack', name: '@spike/pack', deps: [], target: false, pinned: '1.0.0' },
 ];
@@ -171,6 +187,7 @@ function fixture({ rootVersion = VERSION, versions = {}, engines = {}, tags = []
       name: m.name,
       version: versions[m.name] ?? m.pinned ?? rootVersion,
       private: true,
+      ...(m.declared ? { rayspecPublishTarget: true } : {}),
       ...(engine === null ? {} : { engines: { node: engine } }),
       dependencies: Object.fromEntries(m.deps.map((d) => [d, 'workspace:*'])),
     });
@@ -508,6 +525,43 @@ try {
       `(O) the destination line must name the resolved absolute path: ${r.out}`,
     );
     console.log('ok (O) — a relative --out resolves once, to the one destination the run reports');
+  }
+
+  // ── (S) a package that DECLARES itself a target ships, though nothing imports it ───────────────
+  // Two arms, because either alone proves nothing. The fixture arm shows the DECLARATION is what
+  // puts a package in the set — and that a member which neither declares it nor is imported still
+  // stays out, so the closure boundary is intact. The tree arm shows the package that needs the
+  // declaration still carries it: a mechanism nothing in the repository declares would keep the
+  // first arm green forever while the package silently stopped shipping.
+  {
+    const fx = fixture({ tags: [{ name: 'v1.6.2', annotated: true }] });
+    const r = run(fx, ['--pack', '--out', join(fx.root, 'out'), '--json']);
+    assert.equal(r.code, 0, `(S) a coherent checkout must pack; got ${r.code}: ${r.err}`);
+    const { order } = JSON.parse(r.out);
+    assert.ok(
+      order.includes('@rayspec/pack-sdk'),
+      `(S) a declared target must be in the set though nothing depends on it: ${order}`,
+    );
+    assert.ok(
+      !order.includes('@rayspec/parity'),
+      `(S) a member that declares nothing and is imported by nothing must stay out: ${order}`,
+    );
+    assert.deepEqual(
+      packedOrder(r.calls, fx.root).filter((n) => n === '@rayspec/pack-sdk'),
+      ['@rayspec/pack-sdk'],
+      '(S) the declared target must be packed exactly once',
+    );
+
+    const committed = JSON.parse(
+      readFileSync(join(REPO_ROOT, 'packages', 'kernel', 'pack-sdk', 'package.json'), 'utf8'),
+    );
+    assert.equal(
+      committed.rayspecPublishTarget,
+      true,
+      '(S) packages/kernel/pack-sdk must DECLARE itself a publish target: it ships types only, so ' +
+        'no runtime dependency edge reaches it and the closure alone would never publish it',
+    );
+    console.log('ok (S) — a declared target ships, an undeclared one stays out');
   }
 
   // ── (P) the positive control: a coherent checkout packs, in dependency order, and restores ─────

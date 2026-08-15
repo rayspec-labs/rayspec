@@ -5,6 +5,36 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`@rayspec/pack-sdk` — the one surface an extension pack that ships in its own repository
+  compiles against.** A pack has to import *something* to build: the manifest types, the error
+  vocabulary a failed boot reports under, the identifier rule, the journal entries its work is
+  recorded as. Until now it reached into whichever internal package happened to export them, which
+  made every internal refactor a possible silent break for every pack and left "what may a pack rely
+  on" a matter of taste. The new package answers that question and promises nothing else: the
+  manifest types for all five contribution kinds (`stores`, `handlers`, `tooling`, `api`, `agents`),
+  the closed `PackErrorCode` vocabulary, the safe-identifier rule, and the shape of a journal entry.
+  It ships **types only**. A pack receives every runtime object by injection at boot, so the package
+  re-exports no implementation and adds no dependency to a pack's build — the single executable
+  export is `isSafeIdentifier`, because a pattern bounded by a length cannot be written as a type.
+  What the fragment types pin is the fields a contribution is addressed by (a store's `name`, a
+  handler's `id`/`module`/`export`/`kind`, a tool's `id`/`handler`, a route's `method`/`path`, an
+  agent's `id`); the rest of each section body stays open and is validated, as before, by the
+  deployment's own fail-closed parse pass over the merged document.
+  The exported surface is recorded in the checked-in `packages/kernel/pack-sdk/api-report.md`,
+  derived from the package's built type declarations so it reports what a consumer actually compiles
+  against, and the package README states what a minor release may change, what forces a major, and
+  that a member is frozen once it has shipped in a tagged release.
+  The package is a **declared** publish target. The release packer derives its publish set as the
+  runtime closure of the bin packages over production dependencies, and a package nothing imports at
+  runtime falls outside that closure — a contract package would have been built, versioned and then
+  never published. It declares `"rayspecPublishTarget": true` in its own manifest, the packer honours
+  that declaration (the closure is unchanged for everything else), and the release guard fails if the
+  declaration goes missing.
+
 ## [1.8.0] - 2026-08-15
 
 ### Added
