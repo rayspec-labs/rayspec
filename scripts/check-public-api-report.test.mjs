@@ -13,7 +13,7 @@
  * without touching this checkout. The throwaway packages carry `dist` and NO `src`, which is also how
  * this test pins the "derived from the built declarations, not from source" contract.
  *
- * Ten cases, so a pass means something:
+ * Eleven cases, so a pass means something:
  *
  *   (Z) NO package declares the marker — PASSES, and says the set was empty rather than staying quiet.
  *   (C) a declared, populated, up-to-date package PASSES, the count is reported, and the written
@@ -28,6 +28,10 @@
  *       a diff.
  *   (N) a namespace re-export of a module INSIDE the package is read through: a change to a member
  *       FAILS. One that leaves the package stays a single opaque line.
+ *   (I) a name bound by an IMPORT and re-exported by clause — the other spelling of the same promise,
+ *       and the one the compiler emits — is read through too: a change behind either an
+ *       `import * as ns` or a default import FAILS. A name the reader cannot reach inside the package
+ *       fails CLOSED rather than being recorded as living outside the closure.
  *   (S) a declaration file that opens with a `#!` line keeps every export, and a signature change in
  *       the first one FAILS.
  *   (U) a top-level export the parser cannot read FAILS CLOSED, naming the file and the statement —
@@ -385,6 +389,87 @@ export declare const CODE_B: 'b';
     assert.notEqual(changed.code, 0, '(N) a change INSIDE a local namespace re-export must FAIL');
     assert.match(changed.err, /CODE_B/, '(N) the changed member must appear in the diff');
     console.log('ok (N) — a local namespace re-export is read through, a foreign one stays opaque');
+  }
+
+  // ── (I) a name bound by an import and re-exported by clause is read through as well ────────────
+  // `export * as ns from './x.js'` is only ONE spelling of a grouped export. The compiler emits the
+  // other one whenever the source imports first and re-exports by name, and a reader that models only
+  // the first records the members of the second as a single line that never changes — which is worse
+  // than a missing section, because the line ASSERTS the members live outside the readable closure.
+  {
+    // The VERBATIM emit of the repo's TypeScript for
+    //
+    //     import * as codes from './codes.js';
+    //     import Kernel from './kernel.js';
+    //     export { codes };
+    //     export { Kernel };
+    //     export const TOP: string = 't';
+    //
+    // with `codes.ts` exporting two consts and `kernel.ts` a default class.
+    const INDEX = `import * as codes from './codes.js';
+import Kernel from './kernel.js';
+export { codes };
+export { Kernel };
+export declare const TOP: string;
+`;
+    const CODES = `export declare const CODE_A = "a";
+export declare const CODE_B = "b";
+`;
+    const KERNEL = `export default class Kernel {
+    readonly id: string;
+}
+`;
+    const { ws, script } = throwawayRepo(
+      treeWith({ 'index.d.ts': INDEX, 'codes.d.ts': CODES, 'kernel.d.ts': KERNEL }),
+    );
+    created.push(ws);
+    assert.equal(runGate(script, ['--write']).code, 0, '(I) --write must succeed');
+    const report = readFileSync(join(ws, PKG, 'api-report.md'), 'utf8');
+    assert.ok(
+      !report.includes('declared outside the readable declaration closure'),
+      '(I) a module inside the package is inside the closure — the report must not say otherwise',
+    );
+    assert.ok(
+      report.includes('#### `codes.CODE_A`') &&
+        report.includes('export declare const CODE_B = "b";'),
+      '(I) the members behind an `import * as` binding must be recorded',
+    );
+    assert.ok(
+      report.includes('### `Kernel` — `dist/kernel.d.ts`') &&
+        report.includes('readonly id: string;'),
+      '(I) the declaration behind a default import must be recorded',
+    );
+
+    // Each side has to be load-bearing: change a member behind the namespace binding…
+    const codesPath = join(ws, PKG, 'dist/codes.d.ts');
+    writeFileSync(codesPath, CODES.replace('CODE_B = "b"', 'CODE_B: string'));
+    const retyped = runGate(script);
+    assert.notEqual(retyped.code, 0, '(I) a change behind an `import * as` binding must FAIL');
+    assert.match(retyped.err, /CODE_B/, '(I) the changed member must appear in the diff');
+
+    // …and behind the default binding.
+    writeFileSync(codesPath, CODES);
+    writeFileSync(join(ws, PKG, 'dist/kernel.d.ts'), KERNEL.replace('id: string', 'id: number'));
+    const reshaped = runGate(script);
+    assert.notEqual(reshaped.code, 0, '(I) a change behind a default import must FAIL');
+    assert.match(reshaped.err, /id: number/, '(I) the changed member must appear in the diff');
+
+    // …and a name the reader cannot reach INSIDE the package fails closed rather than being recorded
+    // as living outside it — the bodiless line is reserved for a name another package really owns.
+    writeFileSync(join(ws, PKG, 'dist/kernel.d.ts'), KERNEL);
+    writeFileSync(
+      join(ws, PKG, 'dist/index.d.ts'),
+      `${INDEX}export { Absent } from './codes.js';\n`,
+    );
+    for (const args of [[], ['--write']]) {
+      const r = runGate(script, args);
+      assert.notEqual(r.code, 0, `(I) an unreachable name must fail CLOSED (args: ${args})`);
+      assert.match(r.err, /declares no such name/, '(I) the fail-closed reason must be named');
+      assert.match(r.err, /Absent/, '(I) the name must be quoted');
+    }
+    console.log(
+      'ok (I) — an imported binding is read through, and an unreachable name fails closed',
+    );
   }
 
   // ── (S) a declaration file that opens with a `#!` line ─────────────────────────────────────────

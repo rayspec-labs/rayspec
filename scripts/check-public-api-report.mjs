@@ -42,7 +42,11 @@
  *     an empty surface, which would otherwise let a `--write` erase the whole report;
  *   - a top-level `export …` statement NO branch of the parser understands FAILS, naming the file and
  *     the statement. There is no "dropped quietly" path: an export the gate cannot read would cost a
- *     section in the report and make every later change to it invisible.
+ *     section in the report and make every later change to it invisible;
+ *   - an exported name whose declaration is INSIDE the package but which the gate cannot reach FAILS.
+ *     A name listed without its declaration is worse than a missing section — the report would state
+ *     that the name lives outside the readable closure when it does not, and the gate would then hold
+ *     one line that never changes in place of a surface that does.
  *
  * DERIVED FROM `dist`, NOT FROM SOURCE. The report is read from the `.d.ts` files the build emits and
  * the manifest points at, so it records what a CONSUMER of the published package gets — including the
@@ -62,8 +66,11 @@
  * SCOPE BOUNDARY, stated rather than hidden: a re-export from ANOTHER package (`export * from
  * '@scope/pkg'`, `export * as ns from '@scope/pkg'`) cannot be enumerated from this package's own
  * declarations. It is recorded verbatim as an opaque re-export line, so the FACT is reviewable even
- * though the borrowed names are not listed. A namespace re-export of a module INSIDE the package is
- * readable, so it is read: its members are recorded under the namespace's section.
+ * though the borrowed names are not listed. A namespace of a module INSIDE the package is readable, so
+ * it is read: its members are recorded under the namespace's section — in BOTH spellings the compiler
+ * emits, `export * as ns from './local.js'` and `import * as ns from './local.js'; export { ns };`.
+ * The boundary is the PACKAGE, not the file: a name that resolves anywhere inside this package's own
+ * declarations is recorded with its declaration, or the gate fails saying it could not.
  *
  * NO DEPENDENCIES. Node builtins only, like the other gates under scripts/ — the type declarations are
  * read as text. A checked-in report is worth nothing if regenerating it needs a toolchain the gate had
@@ -324,7 +331,12 @@ const STAR_AS_RE = new RegExp(
 );
 const STAR_RE = /^export\s+(?:type\s+)?\*\s+from\s+['"]([^'"]+)['"]/;
 const CLAUSE_RE = /^export\s+(?:type\s+)?\{([^}]*)\}(?:\s*from\s*['"]([^'"]+)['"])?/;
-const IMPORT_CLAUSE_RE = /^import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/;
+// `import <clause> from '<module>';` — the clause is captured whole and split below, because a `.d.ts`
+// carries FOUR shapes of it and every one of them can be re-exported by name further down the file.
+// The `$` anchor forces the specifier to be the TRAILING string, so a binding literally named `from`
+// (`import { from } from './a.js'`) still reads as the clause rather than truncating it.
+const IMPORT_FROM_RE = /^import\s+(?:type\s+)?(.+?)\s*from\s*['"]([^'"]+)['"]\s*;?$/;
+const IMPORT_NAMESPACE_RE = new RegExp(`^\\*\\s+as\\s+(${NAME})$`);
 // `export default Kernel;` — the trailing `;` is part of the statement `topLevelStatements` cuts, and
 // it is what tsc emits, so the anchor has to allow it or the branch below is dead code.
 const DEFAULT_EXPORT_RE = new RegExp(`^export\\s+default\\s+(${NAME})\\s*;?\\s*$`);
@@ -345,6 +357,35 @@ function parseClause(body) {
       const local = alias[0].trim();
       return { local, exported: (alias[1] ?? local).trim() };
     });
+}
+
+/**
+ * The local bindings ONE import clause introduces, as `[{ local, via }]`. All four shapes a `.d.ts`
+ * can carry are read — `{ … }`, `* as N`, a default binding, and a default beside either of the other
+ * two — because a name imported here is routinely re-exported by name further down the file
+ * (`import * as codes from './codes.js'; export { codes };` is what tsc emits for a grouped export
+ * written that way). A binding the parser does not record resolves to NOTHING at the re-export, which
+ * would cost that name its declaration body while the report still listed it.
+ */
+function importBindings(clause) {
+  const bindings = [];
+  let rest = clause.trim();
+  const dflt = rest.match(new RegExp(`^(${NAME})\\s*(?:,\\s*)?`));
+  if (dflt) {
+    bindings.push({ local: dflt[1], via: { name: 'default' } });
+    rest = rest.slice(dflt[0].length).trim();
+  }
+  if (rest.startsWith('{')) {
+    for (const { local, exported } of parseClause(rest.slice(1, rest.lastIndexOf('}')))) {
+      // In an IMPORT clause the alias runs the other way: `{ A as B }` binds local `B` to `A`.
+      bindings.push({ local: exported, via: { name: local } });
+    }
+    return bindings;
+  }
+  const namespace = rest.match(IMPORT_NAMESPACE_RE);
+  // A namespace binding names the whole module, so it resolves like `export * as ns from '…'` does.
+  if (namespace) bindings.push({ local: namespace[1], via: { namespace: true } });
+  return bindings;
 }
 
 /**
@@ -396,12 +437,11 @@ function parseDeclarationFile(file) {
   };
   for (const statement of topLevelStatements(stripComments(stripShebang(raw)))) {
     const head = statement.replace(/\s+/g, ' ').trim();
-    if (head.startsWith('import')) {
-      const clause = head.match(IMPORT_CLAUSE_RE);
-      if (clause) {
-        for (const { local, exported } of parseClause(clause[1])) {
-          // In an IMPORT clause the alias runs the other way: `{ A as B }` binds local `B` to `A`.
-          mod.imports.set(exported, { module: clause[2], name: local });
+    if (/^import\b/.test(head)) {
+      const imported = head.match(IMPORT_FROM_RE);
+      if (imported) {
+        for (const { local, via } of importBindings(imported[1])) {
+          mod.imports.set(local, { ...via, module: imported[2] });
         }
       }
       continue;
@@ -543,20 +583,51 @@ function resolveOrigin(file, mod, origin, cache, open) {
         : (mod.imports.get(origin.local) ?? null);
     if (via) {
       const target = resolveDeclaration(file, via.module);
-      if (target === null) return { external: via.module, name: via.name };
+      if (target === null) {
+        return via.namespace
+          ? { external: via.module, note: 'namespace re-export' }
+          : { external: via.module, name: via.name };
+      }
       if (target === undefined) {
         die(
           `${rel(file)} re-exports from '${via.module}', which resolves to no declaration file.\n` +
             '  The surface cannot be read completely, so the report is not written.',
         );
       }
+      // A re-export cycle leaves the inner surface deliberately empty (see `surfaceOf`), which is not
+      // the same fact as "the module does not have this name" — so note it before the lookup.
+      const cyclic = open.has(target);
       const inner = surfaceOf(target, cache, open);
-      return inner.names.get(via.name) ?? { unresolved: via.name, from: rel(target) };
+      // `import * as ns from './local.js'; export { ns };` is the same promise as `export * as ns from
+      // './local.js'`, and tsc emits it for a grouped export written that way. It is inside this
+      // package's own readable closure, so it is read through rather than left as one unchanging line.
+      if (via.namespace) return { namespace: via.module, file: target, surface: inner };
+      const found = inner.names.get(via.name);
+      if (found) return found;
+      // The module is RELATIVE — inside the package — so a name it does not appear to have is either
+      // borrowed through an opaque star re-export (a real boundary, recorded as one) or a hole in this
+      // parser (not a boundary at all). Only the first is a legitimate bodiless line.
+      if (inner.opaque.length > 0 || cyclic) return { unresolved: via.name, from: rel(target) };
+      die(
+        `${rel(file)} re-exports '${via.name}' from '${via.module}', but ${rel(target)} declares no ` +
+          'such name and borrows none from another package.\n' +
+          '  The declaration cannot be recorded, so the report is not written — a name listed without ' +
+          'its declaration would make every later change to it invisible.',
+      );
     }
     const texts = mod.locals.get(origin.local);
     if (texts) return { file, name: origin.local, texts };
   }
-  return { unresolved: origin.local ?? origin.name ?? 'default', from: rel(file) };
+  // Nothing left to read: the file exports a name it neither declares nor binds in an import form this
+  // parser understands. That is a hole in the reader, not a package boundary — recording it as a
+  // bodiless line would state the opposite of the truth and let every later change to it pass — so it
+  // fails here, the same posture a `.d.ts` export statement no branch claims already has.
+  const name = origin.local ?? origin.name ?? 'default';
+  die(
+    `${rel(file)} exports '${name}', which it neither declares nor binds in a readable import.\n` +
+      '  The declaration cannot be recorded, so the report is not written. Teach the gate this form ' +
+      'rather than listing a name whose declaration nothing checks.',
+  );
 }
 
 // ─── the report ─────────────────────────────────────────────────────────────────────────────────
