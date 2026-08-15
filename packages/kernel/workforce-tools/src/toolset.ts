@@ -22,12 +22,14 @@
  * could be skipped, since policy matching keys on the intent this module COLLECTED and there was
  * none. See collector.ts.
  */
-import type { NeutralTool } from '@rayspec/core';
+import { isReservedWorkforceToolSpelling, type NeutralTool } from '@rayspec/core';
 import type { WorkforceConfig, WorkforceEmployeeConfig } from '@rayspec/spec';
 import {
   ESCALATION_REASONS,
   MAX_MESSAGE_BODY_CHARS,
   MAX_MESSAGES_PER_TURN,
+  MAX_TASK_TEXT_BYTES,
+  MAX_TASK_TITLE_CHARS,
   type TaskRecord,
   turnIntentSchema,
   workerResultSchema,
@@ -46,6 +48,7 @@ import {
   parseDelegationTarget,
   resolveDelegationTarget,
 } from './resolve-target.js';
+import { matchApprovalRule } from './review-policy.js';
 import { TOOLSETS_BY_ROLE, type ToolName } from './roles.js';
 import type { WorkforceReadSnapshot } from './snapshot.js';
 
@@ -60,24 +63,45 @@ export interface RoleToolsetInput {
   readonly collector: TurnCollector;
 }
 
-/** A declared agent tool may not carry a native name — natives win, so the collision is refused. */
+/**
+ * A declared agent tool may not carry a native name — natives win, so the collision is refused.
+ * The BRIDGED form is refused too: `isTurnEndingToolName` normalizes `mcp__<x>__<tool>` on the
+ * transcript (adapters disagree on the recorded form), so an agent tool named, say,
+ * `mcp__tracker__submit_result` would make a legal yield read as an ATTEMPTED ending and take
+ * the requeue-then-fail fate — with the fate differing by adapter. Refused up front instead.
+ */
 export function assertNoReservedCollisions(agentTools: readonly NeutralTool[]): void {
-  const nativeNames = new Set<string>(Object.values(TOOLSETS_BY_ROLE).flat());
   for (const tool of agentTools) {
-    if (nativeNames.has(tool.spec.name)) throw new ReservedToolNameError(tool.spec.name);
+    if (isReservedWorkforceToolSpelling(tool.spec.name)) {
+      throw new ReservedToolNameError(tool.spec.name);
+    }
   }
 }
 
 // ---- argument schemas (zod = source of truth; the JSON twin feeds the dispatch Ajv pass) --------
+
+/**
+ * The cap on a hand-off's goal and description — the message-body rationale one channel over: a
+ * delegated goal renders VERBATIM (and, by design, UNTRIMMABLY) into the child's turn input, so an
+ * uncapped goal is a way to make a child's context whatever the delegating turn wants it to be, at
+ * a size nothing else in a turn may reach. Enforced in BYTES via the SHARED `MAX_TASK_TEXT_BYTES`
+ * (@rayspec/tasks): the turn-input section budget is in bytes, so a CHAR cap here would let a ~15k
+ * CJK goal pass creation and then brick every dispatch on `GoalExceedsContextBudgetError`. Same
+ * constant the engine's own creation schema and the HTTP intake enforce, so no hand-off can mint
+ * what those surfaces refuse.
+ */
+const withinHandoffBytes = (text: string): boolean =>
+  Buffer.byteLength(text, 'utf8') <= MAX_TASK_TEXT_BYTES;
+const handoffBytesMessage = `must be at most ${MAX_TASK_TEXT_BYTES} bytes`;
 
 const delegateArgsSchema = z.strictObject({
   tasks: z
     .array(
       z.strictObject({
         target: z.string().min(1),
-        title: z.string().min(1).max(200),
-        goal: z.string().min(1),
-        description: z.string().min(1).optional(),
+        title: z.string().min(1).max(MAX_TASK_TITLE_CHARS),
+        goal: z.string().min(1).refine(withinHandoffBytes, handoffBytesMessage),
+        description: z.string().min(1).refine(withinHandoffBytes, handoffBytesMessage).optional(),
         priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
       }),
     )
@@ -85,9 +109,9 @@ const delegateArgsSchema = z.strictObject({
 });
 
 const createArgsSchema = z.strictObject({
-  title: z.string().min(1).max(200),
-  goal: z.string().min(1),
-  description: z.string().min(1).optional(),
+  title: z.string().min(1).max(MAX_TASK_TITLE_CHARS),
+  goal: z.string().min(1).refine(withinHandoffBytes, handoffBytesMessage),
+  description: z.string().min(1).refine(withinHandoffBytes, handoffBytesMessage).optional(),
   priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
 });
 
@@ -258,9 +282,9 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
                 type: 'object',
                 properties: {
                   target: { type: 'string', minLength: 1 },
-                  title: { type: 'string', minLength: 1, maxLength: 200 },
-                  goal: { type: 'string', minLength: 1 },
-                  description: { type: 'string', minLength: 1 },
+                  title: { type: 'string', minLength: 1, maxLength: MAX_TASK_TITLE_CHARS },
+                  goal: { type: 'string', minLength: 1, maxLength: MAX_TASK_TEXT_BYTES },
+                  description: { type: 'string', minLength: 1, maxLength: MAX_TASK_TEXT_BYTES },
                   priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
                 },
                 required: ['target', 'title', 'goal'],
@@ -315,9 +339,9 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
         parameters: {
           type: 'object',
           properties: {
-            title: { type: 'string', minLength: 1, maxLength: 200 },
-            goal: { type: 'string', minLength: 1 },
-            description: { type: 'string', minLength: 1 },
+            title: { type: 'string', minLength: 1, maxLength: MAX_TASK_TITLE_CHARS },
+            goal: { type: 'string', minLength: 1, maxLength: MAX_TASK_TEXT_BYTES },
+            description: { type: 'string', minLength: 1, maxLength: MAX_TASK_TEXT_BYTES },
             priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
           },
           required: ['title', 'goal'],
@@ -351,9 +375,9 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
           type: 'object',
           properties: {
             target: { type: 'string', minLength: 1 },
-            title: { type: 'string', minLength: 1, maxLength: 200 },
-            goal: { type: 'string', minLength: 1 },
-            description: { type: 'string', minLength: 1 },
+            title: { type: 'string', minLength: 1, maxLength: MAX_TASK_TITLE_CHARS },
+            goal: { type: 'string', minLength: 1, maxLength: MAX_TASK_TEXT_BYTES },
+            description: { type: 'string', minLength: 1, maxLength: MAX_TASK_TEXT_BYTES },
             priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
           },
           required: ['target', 'title', 'goal'],
@@ -472,9 +496,9 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
       },
       handler: (args) => {
         const { question, options } = parseEnding(requestApprovalArgsSchema, args);
-        const rule = config.approvals.find((candidate) =>
-          candidate.capabilities.some((label) => employee.capabilities.includes(label)),
-        );
+        // The SHARED matcher (review-policy.ts) — the same predicate the turn scaffolding
+        // presents as a fact, so the rule a turn was told about is the rule its request gets.
+        const rule = matchApprovalRule(config, employee);
         const onTimeout = rule?.onTimeout ?? 'fail';
         // An escalate fate must NAME its target, and the reporting edge is the only supplier. A
         // seat with no superior (the orchestrator, by lint requirement) therefore cannot request an

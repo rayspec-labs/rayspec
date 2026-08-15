@@ -31,10 +31,17 @@ export type TurnScript = readonly ScriptedToolCall[];
  * Build a scripted Backend for `id`. `script` maps (spec, ctx) → the turn's tool calls; it runs
  * once per `run()` and its calls dispatch IN ORDER (sequential by construction — "first" is
  * emission order).
+ *
+ * `opts.costUsdFor` prices the turn — a PURE function of the rendered spec, like the script
+ * itself (per-employee flat rates keyed off the input's first line are the intended shape), so a
+ * re-executed turn reports the identical cost. Absent ⇒ 0, byte-identical to every existing
+ * fixture. It exists so an acceptance story can assert that cost FLOWS — settlement → task row →
+ * endpoint → rendered bytes — instead of proving the rendering formats a constant.
  */
 export function makeScriptedBackend(
   id: BackendId,
   script: (spec: AgentSpec, ctx: RunContext) => TurnScript | Promise<TurnScript>,
+  opts: { readonly costUsdFor?: (spec: AgentSpec) => number } = {},
 ): Backend {
   return {
     id,
@@ -79,7 +86,7 @@ export function makeScriptedBackend(
                 { role: 'tool' as const, index: 1, parts: results },
               ],
         usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-        costUsd: 0,
+        costUsd: opts.costUsdFor?.(spec) ?? 0,
         stepCount: step,
       };
     },

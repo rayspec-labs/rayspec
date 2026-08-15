@@ -57,6 +57,7 @@ import {
   OrgStore,
   type PlannedMigration,
   runScheduledCleanup,
+  type WorkforceGoalIntake,
 } from '@rayspec/api-auth';
 import {
   createSigner,
@@ -66,7 +67,12 @@ import {
   scaledAuthPolicies,
   setBootSecrets,
 } from '@rayspec/auth-core';
-import type { Backend, BackendId } from '@rayspec/core';
+import {
+  type Backend,
+  type BackendId,
+  type OrchestrationStrategy,
+  SingleTaskPlanStrategy,
+} from '@rayspec/core';
 import {
   buildProductTables,
   classifyProductSchema,
@@ -161,6 +167,7 @@ import {
   ensureDeclaredWorkforceRuntime,
   releaseDepartedWorkforceDeclarations,
 } from './workforce-boot.js';
+import { buildWorkforceGoalIntake } from './workforce-goal-intake.js';
 import { buildWorkforceTurnHandlers } from './workforce-turn-handlers.js';
 
 /** The default local port (overridable via PORT). Local DX only — not a reserved well-known port. */
@@ -1898,6 +1905,13 @@ export async function assembleServer(
      */
     workforceTurnHandlers?: ResolveTurnHandler;
     /**
+     * The deployment's orchestration strategy — how a submitted goal becomes tasks. The same
+     * composition/test posture as `workforceTurnHandlers`: NOT reachable from
+     * `assembleOptsFromEnv`, so a production entrypoint always runs the shipped default
+     * (`SingleTaskPlanStrategy` — the whole goal as one root owned by the declared orchestrator).
+     */
+    orchestrationStrategy?: OrchestrationStrategy;
+    /**
      * The UPDATE flow: reviewed forward DELTA migration(s) to apply to an EXISTING
      * (the backend-profile RaySpec) schema, each carrying its own reviewed destructive-statement
      * allowlist (empty for a purely-additive delta). When present, the materialize/mount/
@@ -2121,6 +2135,7 @@ export async function assembleServer(
       ...(opts.updateMigrations ? { updateMigrations: opts.updateMigrations } : {}),
       ...(opts.moduleImporter ? { moduleImporter: opts.moduleImporter } : {}),
       ...(opts.workforceTurnHandlers ? { workforceTurnHandlers: opts.workforceTurnHandlers } : {}),
+      ...(opts.orchestrationStrategy ? { orchestrationStrategy: opts.orchestrationStrategy } : {}),
       ...(opts.bootWarn ? { bootWarn: opts.bootWarn } : {}),
     });
     app = deployed.app;
@@ -2398,6 +2413,8 @@ async function deployDeclaredSpec(
     moduleImporter?: ModuleImporter;
     /** The task dispatcher's owner→handler resolution seam. See the `assembleServer` opts docstring. */
     workforceTurnHandlers?: ResolveTurnHandler;
+    /** The goal-intake strategy seam. See the `assembleServer` opts docstring. */
+    orchestrationStrategy?: OrchestrationStrategy;
     /**
      * The boot's one-line WARNING sink, defaulting to `console.warn` — the same shape (and the same
      * reason) as `loadServerConfig`'s: it exists so a test can capture what the boot reported. EMIT-ONLY;
@@ -2783,6 +2800,10 @@ async function deployDeclaredSpec(
   // tenant (the same single-deployment posture as cron fires — RAYSPEC_CRON_TENANT_ID names the org
   // durable tasks run under). Without both, the /v1/workforce surface fail-closes 501 wholesale.
   let wiredTaskScheduler: DbosTaskScheduler | undefined;
+  // The goal intake is late-bound exactly like the dispatcher kick: it needs the WORKER pool and
+  // the derived workforce configuration, both of which exist only after deploy() — the injected
+  // seam below reads this ref at request time, and answers not_found until the wiring lands.
+  let wiredGoalIntake: WorkforceGoalIntake | undefined;
   const manualTriggerFirer: ManualTriggerFirer | undefined = hasManualTriggers
     ? {
         async fireManual({ tenantId: reqTenant, name }) {
@@ -3077,6 +3098,19 @@ async function deployDeclaredSpec(
             ...(durableExecutorInstance && config.cronTenantId
               ? { workforce: { kick: () => wiredTaskScheduler?.kick() } }
               : {}),
+            // Inject the goal-intake seam only for a DECLARED workforce on a dispatchable
+            // deployment — engine-only postures keep their 501 (they create tasks through their
+            // own composition). Reads the late-bound intake at request time, like the kick.
+            ...(durableExecutorInstance && config.cronTenantId && effectiveSpec.workforce
+              ? {
+                  workforceGoalIntake: {
+                    submitGoal: (input) =>
+                      wiredGoalIntake
+                        ? wiredGoalIntake.submitGoal(input)
+                        : Promise.resolve({ outcome: 'not_found' as const }),
+                  } satisfies WorkforceGoalIntake,
+                }
+              : {}),
           }) as App;
         },
       },
@@ -3296,11 +3330,21 @@ async function deployDeclaredSpec(
         forTenant(workerDbHandle as Db, taskTenantId),
         effectiveSpec.workforce,
       );
+      const workforceConfig = deriveWorkforceConfig(effectiveSpec.workforce);
       workforceResolver = buildWorkforceTurnHandlers({
         db: workerDbHandle as Db,
         tenantId: taskTenantId,
-        config: deriveWorkforceConfig(effectiveSpec.workforce),
+        config: workforceConfig,
         registry: () => workerAgentRegistry,
+      });
+      // The goal intake — `OrchestrationStrategy`'s production caller. The strategy seam mirrors
+      // `workforceTurnHandlers` (composition/test only, no env path); absent, the shipped default
+      // hands the whole goal to the declared orchestrator seat as one root task.
+      wiredGoalIntake = buildWorkforceGoalIntake({
+        db: workerDbHandle as Db,
+        tenantId: taskTenantId,
+        config: workforceConfig,
+        strategy: opts.orchestrationStrategy ?? new SingleTaskPlanStrategy(),
       });
     }
     const taskScheduler = new DbosTaskScheduler({

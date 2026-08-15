@@ -271,6 +271,7 @@ describe('a per-route budget bucket is DELIBERATELY not a registered policy', ()
       [
         'declared-route-principal',
         'declared-route-source',
+        'goal-submit',
         'invite-accept',
         'login',
         'oauth-token',

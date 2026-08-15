@@ -30,8 +30,8 @@ import {
   type AgentSpec,
   type BackendId,
   isReservedWorkforceSegment,
+  isReservedWorkforceToolSpelling,
   RESERVED_WORKFORCE_SEGMENTS,
-  RESERVED_WORKFORCE_TOOL_NAMES,
   validateSpec,
 } from '@rayspec/core';
 import { type SpecError, type SpecWarning, specError, specWarning } from './errors.js';
@@ -208,7 +208,7 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
     // silently shadowed. Scoped to agents a workforce employee actually runs.
     for (const toolId of agent.tools) {
       const tool = toolById.get(toolId);
-      if (tool !== undefined && RESERVED_WORKFORCE_TOOL_NAMES.has(tool.name)) {
+      if (tool !== undefined && isReservedWorkforceToolSpelling(tool.name)) {
         const ti = spec.tooling.findIndex((t) => t.id === toolId);
         errors.push(
           specError(

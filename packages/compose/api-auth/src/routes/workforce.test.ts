@@ -18,14 +18,24 @@ import {
   applyTurnOutcome,
   createRootTask,
   ensureWorkforceRuntime,
+  insertChildTask,
   workforceBudgetsSchema,
 } from '@rayspec/tasks';
 import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import type { WorkforceGoalIntake, WorkforceGoalOutcome } from '../app-context.js';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
 
 let h: Harness;
 let kicks = 0;
+
+/** The goals route's stub intake: records what the route derived, answers what a test set. The
+ * REAL intake (strategy → rows) is the server composition's and is proven in its own DB suite —
+ * here the subject is the ROUTE's mapping: strict body, server-derived tenant + actor, outcome
+ * mapping, and the kick. */
+let goalSubmissions: Array<Parameters<WorkforceGoalIntake['submitGoal']>[0]> = [];
+const DEFAULT_GOAL_OUTCOME: WorkforceGoalOutcome = { outcome: 'created', tasks: [] };
+let nextGoalOutcome: WorkforceGoalOutcome = DEFAULT_GOAL_OUTCOME;
 
 const NO_BUDGETS = workforceBudgetsSchema.parse({});
 
@@ -135,11 +145,19 @@ describe('/v1/workforce (the task-engine surface)', () => {
           kicks++;
         },
       },
+      workforceGoalIntake: {
+        submitGoal: (input) => {
+          goalSubmissions.push(input);
+          return Promise.resolve(nextGoalOutcome);
+        },
+      },
       schema: 'rayspec_test_workforce',
     });
   });
   afterEach(async () => {
     kicks = 0;
+    goalSubmissions = [];
+    nextGoalOutcome = DEFAULT_GOAL_OUTCOME;
     await h.reset();
   });
   afterAll(async () => {
@@ -630,6 +648,320 @@ describe('/v1/workforce (the task-engine surface)', () => {
     const res = await jsonRequest(h.app, 'GET', '/v1/workforce/tasks', {});
     expect(res.status).toBe(401);
   });
+
+  it('cost --by department groups the LEDGER scope buckets; --by employee groups TASK rows and says its basis', async () => {
+    const a = await principal('wf-cost-by@example.test', 'Org WF Cost By');
+    const tdb = forTenant(h.db, a.orgId);
+    // Ledger rows: two department buckets across two windows — the grouping sums per scope id.
+    // (Read-side seeding; the WRITE invariants on these rows are the budget suite's.)
+    const windowA = new Date('2026-08-15T00:00:00Z');
+    const windowB = new Date('2026-08-15T01:00:00Z');
+    for (const [scopeId, windowStart, settled, turns] of [
+      ['eng', windowA, '0.30', 3],
+      ['eng', windowB, '0.20', 2],
+      ['growth', windowA, '0.10', 1],
+    ] as const) {
+      await tdb.insert(schema.workforceBudgetLedger, {
+        scopeKind: 'department',
+        scopeId,
+        windowStart,
+        reservedUsd: '0',
+        settledUsd: settled,
+        settledTurns: turns,
+      });
+    }
+    const byDepartment = await jsonRequest(h.app, 'GET', '/v1/workforce/cost?by=department', {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(byDepartment.status).toBe(200);
+    expect(await byDepartment.json()).toEqual({
+      window: '24h',
+      by: 'department',
+      basis: 'budget_ledger',
+      groups: [
+        { id: 'eng', settledUsd: 0.5, reservedUsd: 0, settledTurns: 5 },
+        { id: 'growth', settledUsd: 0.1, reservedUsd: 0, settledTurns: 1 },
+      ],
+    });
+
+    // Task rows for the employee grouping — settled cost lives on the rows the tree also reads.
+    const first = await seedRoot(a.orgId, 'Owned by alpha');
+    const second = await seedRoot(a.orgId, 'Also alpha');
+    const third = await seedRoot(a.orgId, 'Owned by beta');
+    await h.db.$client.unsafe(
+      `UPDATE workforce_tasks SET cost_usd = '0.40', turns_used = 2, owner = 'alpha' WHERE task_id = '${first.taskId}';
+       UPDATE workforce_tasks SET cost_usd = '0.10', turns_used = 1, owner = 'alpha' WHERE task_id = '${second.taskId}';
+       UPDATE workforce_tasks SET cost_usd = '0.20', turns_used = 1, owner = 'beta' WHERE task_id = '${third.taskId}';`,
+    );
+    const byEmployee = await jsonRequest(h.app, 'GET', '/v1/workforce/cost?by=employee', {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(byEmployee.status).toBe(200);
+    expect(await byEmployee.json()).toEqual({
+      window: '24h',
+      by: 'employee',
+      basis: 'task_rows',
+      groups: [
+        { id: 'alpha', settledUsd: 0.5, settledTurns: 3, tasks: 2 },
+        { id: 'beta', settledUsd: 0.2, settledTurns: 1, tasks: 1 },
+      ],
+    });
+
+    const unknown = await jsonRequest(h.app, 'GET', '/v1/workforce/cost?by=task-class', {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(unknown.status).toBe(400);
+    expect((await unknown.json()).error.details).toEqual({
+      allowed: ['employee', 'department'],
+    });
+
+    // The ungrouped default is byte-unchanged by the new parameter.
+    const plain = await jsonRequest(h.app, 'GET', '/v1/workforce/cost?window=24h', {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(plain.status).toBe(200);
+    expect(await plain.json()).toMatchObject({ window: '24h', totalSettledUsd: 0 });
+  });
+
+  it('the tree returns the whole subtree flat from ANY member id, with the per-task ceiling', async () => {
+    const a = await principal('wf-tree@example.test', 'Org WF Tree');
+    const tdb = forTenant(h.db, a.orgId);
+    await ensureWorkforceRuntime(tdb, 'wf', {
+      task: { usd: 2.5, turns: 20 },
+      // A usd ceiling is only coherent with a positive per-turn estimate (the budgets schema's
+      // own refinement) — the same pair a declared document derives.
+      execution: { estimateUsdPerTurn: 0.05 },
+    });
+    const root = await seedRoot(a.orgId, 'Tree root');
+    const childA = await insertChildTask(tdb, root, 1, 0, {
+      title: 'Left stream',
+      goal: 'Left half.',
+      owner: 'worker-a',
+    });
+    const grandchild = await insertChildTask(tdb, childA, 1, 0, {
+      title: 'Leaf',
+      goal: 'Leaf work.',
+      owner: 'worker-b',
+    });
+    await insertChildTask(tdb, root, 1, 1, {
+      title: 'Right stream',
+      goal: 'Right half.',
+      owner: 'worker-c',
+    });
+
+    // Anchored on a GRANDCHILD: the read climbs to the root and returns the whole subtree.
+    const res = await jsonRequest(h.app, 'GET', `/v1/workforce/tasks/${grandchild.taskId}/tree`, {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Result-Truncated')).toBe('false');
+    const body = (await res.json()) as {
+      rootTaskId: string;
+      tasks: Array<{ taskId: string }>;
+      budgets: { taskUsd: number; taskTurns: number } | null;
+    };
+    expect(body.rootTaskId).toBe(root.taskId);
+    expect(body.tasks).toHaveLength(4);
+    expect(body.tasks.map((t) => t.taskId)).toEqual(
+      [...body.tasks.map((t) => t.taskId)].sort(), // task_id asc — the deterministic order
+    );
+    expect(body.budgets).toEqual({ taskUsd: 2.5, taskTurns: 20 });
+  });
+
+  it('C4: the tree caps at 500 rows and the ROOT rides even when it sorts PAST the page (union branch)', async () => {
+    const a = await principal('wf-tree-cap@example.test', 'Org WF Tree Cap');
+    const tdb = forTenant(h.db, a.orgId);
+    // The off-by-one this pins bites ONLY when the root sits INSIDE the +1 overflow probe at index
+    // 500 — inside the probe (so the old membership check saw it and skipped the union) yet dropped
+    // by the 500-row slice. That needs the root's id to sort at exactly position 500: 500 children
+    // whose ids sort BELOW it, and at least one whose id sorts ABOVE it (so the probe fills to 501
+    // and the root is its last, sliced-off row). A lexical-MAX root — every child below it — would
+    // instead land the root OUTSIDE the probe, where even the old code unioned it back and the
+    // assertion passed on the unfixed code. Ids are controlled directly here for that reason.
+    const rootId = '88888888-8888-4888-8888-888888888888'; // sorts after the 500 below, before the 2 above
+    const insertControlled = (taskId: string, title: string) =>
+      tdb.insert(schema.workforceTasks, {
+        taskId,
+        workforceId: 'wf',
+        parentTaskId: taskId === rootId ? null : rootId,
+        rootTaskId: rootId,
+        ancestryPath: taskId === rootId ? [] : [rootId],
+        title,
+        goal: 'Serve the route tests.',
+        description: null,
+        owner: taskId === rootId ? 'coordinator' : 'worker-swarm',
+        requestedBy: taskId === rootId ? 'user' : 'coordinator',
+        department: null,
+        priority: 'normal',
+        dependencies: [],
+        status: 'planned',
+      });
+    await insertControlled(rootId, 'Runaway root');
+    // 500 children that sort BELOW the root (prefix 00000000…): they fill the probe's first 500 slots.
+    for (let slot = 0; slot < 500; slot += 1) {
+      await insertControlled(
+        `00000000-0000-4000-8000-${slot.toString().padStart(12, '0')}`,
+        `Below ${slot}`,
+      );
+    }
+    // 2 children that sort ABOVE the root (prefix ffffffff…): they push the root to probe index 500.
+    await insertControlled('ffffffff-ffff-4fff-8fff-000000000001', 'Above 1');
+    await insertControlled('ffffffff-ffff-4fff-8fff-000000000002', 'Above 2');
+    const res = await jsonRequest(h.app, 'GET', `/v1/workforce/tasks/${rootId}/tree`, {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Result-Truncated')).toBe('true');
+    const body = (await res.json()) as {
+      rootTaskId: string;
+      tasks: Array<{ taskId: string }>;
+      budgets: unknown;
+    };
+    expect(body.tasks).toHaveLength(500);
+    // THE ROOT ALWAYS RIDES A TRUNCATED PAGE — checked against the SLICED page now, so it survives
+    // even when it sorts last and the probe never held it.
+    expect(body.tasks.some((t) => t.taskId === rootId)).toBe(true);
+    expect(body.rootTaskId).toBe(rootId);
+    expect(body.budgets).toBeNull(); // no runtime row was ever created for 'wf' here
+  });
+
+  it('the tree is tenant-scoped: a foreign task id is a uniform 404', async () => {
+    const a = await principal('wf-tree-a@example.test', 'Org WF Tree A');
+    const b = await principal('wf-tree-b@example.test', 'Org WF Tree B');
+    const bTask = await seedRoot(b.orgId, 'Foreign tree');
+    const res = await jsonRequest(h.app, 'GET', `/v1/workforce/tasks/${bTask.taskId}/tree`, {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('submits a goal: server-derived tenant + verified actor reach the intake, 202 lists the tasks, the dispatcher is kicked', async () => {
+    const a = await principal('wf-goal@example.test', 'Org WF Goal');
+    nextGoalOutcome = {
+      outcome: 'created',
+      tasks: [{ taskId: 'task_plan_1', owner: 'lead', title: 'Ship the release.' }],
+    };
+    const res = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'Ship the release.', priority: 'high' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({
+      workforceId: 'wf',
+      tasks: [{ taskId: 'task_plan_1', owner: 'lead', title: 'Ship the release.' }],
+    });
+    expect(kicks).toBe(1);
+    expect(goalSubmissions).toHaveLength(1);
+    const seen = goalSubmissions[0] as (typeof goalSubmissions)[number];
+    expect(seen.tenantId).toBe(a.orgId); // the middleware chain's tenant, never a body field
+    expect(seen.workforceId).toBe('wf');
+    expect(seen.goal).toBe('Ship the release.');
+    expect(seen.priority).toBe('high');
+    expect(seen.requestedBy).toMatch(/^user:/); // the VERIFIED principal, never client-asserted
+  });
+
+  it('maps intake outcomes: not_found → uniform 404, invalid_plan → the 500 naming the defect; neither kicks', async () => {
+    const a = await principal('wf-goal-map@example.test', 'Org WF Goal Map');
+    nextGoalOutcome = { outcome: 'not_found' };
+    const missing = await jsonRequest(h.app, 'POST', '/v1/workforce/other/goals', {
+      body: { goal: 'For a workforce this deployment does not declare.' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(missing.status).toBe(404);
+
+    nextGoalOutcome = {
+      outcome: 'invalid_plan',
+      detail: "step 0 names owner 'ghost', which this workforce does not declare",
+    };
+    const refused = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'A goal the deployed strategy mishandles.' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(refused.status).toBe(500);
+    // R5: the 500 body is STATIC — it never echoes the deployment shape the detail names (employee
+    // ids, department names, the strategy id). The detail stays server-side.
+    const refusedBody = (await refused.json()).error.message as string;
+    expect(refusedBody).not.toContain('ghost');
+    expect(refusedBody).toContain('server-side');
+    expect(kicks).toBe(0); // no outcome above created any work to dispatch
+  });
+
+  it('refuses a goal outside the strict schema, a reserved workforce id, and a read-only key', async () => {
+    const a = await principal('wf-goal-refuse@example.test', 'Org WF Goal Refuse');
+    const auth = { authorization: `Bearer ${a.token}` };
+    const unknownKey = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'x', requestedBy: 'lead' }, // identity is server-derived — the key is refused
+      headers: auth,
+    });
+    expect(unknownKey.status).toBe(400);
+    const missingGoal = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { priority: 'high' },
+      headers: auth,
+    });
+    expect(missingGoal.status).toBe(400);
+    const reserved = await jsonRequest(h.app, 'POST', '/v1/workforce/tasks/goals', {
+      body: { goal: 'x' },
+      headers: auth,
+    });
+    expect(reserved.status).toBe(400);
+
+    // R7: the goal cap is in BYTES — a >16 KiB multibyte goal is refused at the schema edge (a char
+    // cap would let it through and then brick the owner's dispatch).
+    const overSizedGoal = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'あ'.repeat(6_000) }, // 6000 × 3 bytes = 18_000 bytes > 16_384
+      headers: auth,
+    });
+    expect(overSizedGoal.status).toBe(400);
+    const overSizedDesc = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'ok', description: 'x'.repeat(16_385) }, // 16_385 bytes > 16_384
+      headers: auth,
+    });
+    expect(overSizedDesc.status).toBe(400);
+
+    // R1: the goals route does not honor Idempotency-Key yet — a supplied key is REFUSED (400),
+    // never silently ignored (which would double-bill on a retry after a lost 202).
+    const withIdemKey = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'Ship it.' },
+      headers: { ...auth, 'idempotency-key': 'client-supplied-key-1' },
+    });
+    expect(withIdemKey.status).toBe(400);
+    expect((await withIdemKey.json()).error.message).toContain('Idempotency-Key');
+
+    expect(goalSubmissions).toHaveLength(0); // every refusal above precedes the seam
+
+    const mint = await jsonRequest(h.app, 'POST', `/v1/orgs/${a.orgId}/api-keys`, {
+      body: { name: 'read-only', scopes: ['store:read'] },
+      headers: auth,
+    });
+    const key = (await mint.json()).plaintext as string;
+    const write = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'x' },
+      headers: { authorization: `Bearer ${key}` },
+    });
+    expect(write.status).toBe(403);
+    expect((await write.json()).error.details).toEqual({ missing_permission: 'store:write' });
+  });
+
+  it('C5: rate-limits repeated goal submissions of the SAME workforce (429 after the quota, before the intake)', async () => {
+    const a = await principal('wf-goal-quota@example.test', 'Org WF Goal Quota');
+    h.deps.rateLimiter.clearAll(); // deterministic: start the goal-submit bucket empty
+    // The default goal-submit quota is 30 per (tenant, workforce) per window — every call mints a
+    // fresh billed root run, the cost-DoS the two sibling routes throttle the same way.
+    for (let i = 0; i < 30; i += 1) {
+      const ok = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+        body: { goal: 'Ship it.' },
+        headers: { authorization: `Bearer ${a.token}` },
+      });
+      expect(ok.status).toBe(202);
+    }
+    const blocked = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'Ship it.' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(blocked.status).toBe(429);
+    expect((await blocked.json()).error.code).toBe('RATE_LIMITED');
+    expect(goalSubmissions).toHaveLength(30); // the 31st never reached the intake
+  });
 });
 
 describe('/v1/workforce without a wired dispatcher', () => {
@@ -659,5 +991,47 @@ describe('/v1/workforce without a wired dispatcher', () => {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(res.status).toBe(501);
+    const goals = await jsonRequest(hNo.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'x' },
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(goals.status).toBe(501);
+  });
+});
+
+describe('/v1/workforce goals with a dispatcher but no declared workforce', () => {
+  let hNoIntake: Harness;
+  beforeAll(async () => {
+    // The engine-only posture: a durable worker dispatches (the control seam is wired) but the
+    // document declares no workforce, so no orchestrator seat exists to own a submitted goal.
+    hNoIntake = await createHarness({
+      workforce: { kick: () => {} },
+      schema: 'rayspec_test_workforce_no_intake',
+    });
+  });
+  afterAll(async () => {
+    await hNoIntake.close();
+  });
+
+  it('fail-closes goal submission with the 501 naming the missing declared workforce', async () => {
+    const reg = await jsonRequest(hNoIntake.app, 'POST', '/v1/auth/register', {
+      body: { email: 'wf-no-intake@example.test', password: 'a-long-enough-password' },
+    });
+    const t0 = (await reg.json()).accessToken as string;
+    const orgRes = await jsonRequest(hNoIntake.app, 'POST', '/v1/orgs', {
+      body: { name: 'Org WF No Intake' },
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    const orgId = (await orgRes.json()).id as string;
+    const switchRes = await jsonRequest(hNoIntake.app, 'POST', `/v1/orgs/${orgId}/switch`, {
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    const token = (await switchRes.json()).accessToken as string;
+    const res = await jsonRequest(hNoIntake.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'x' },
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(501);
+    expect((await res.json()).error.message).toContain('declared workforce');
   });
 });

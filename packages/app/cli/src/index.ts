@@ -211,7 +211,7 @@ const HELP_SECTIONS: readonly HelpSection[] = [
     commands: [
       {
         name: 'workforce',
-        block: `  rayspec workforce <status|tasks|task|approvals|cost|events|pause|resume|halt> [flags]
+        block: `  rayspec workforce <status|submit|tasks|task|approvals|cost|events|pause|resume|halt> [flags]
                                 The operator console for the durable task engine, speaking to a
                                 RUNNING deployment over its authenticated HTTP API. Shared flags on
                                 every subcommand: --url <base> (else RAYSPEC_URL, else a single
@@ -224,20 +224,31 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 Subcommands:
                                   status --workforce <id>       control state, counts, queue depth,
                                                                 current-window budget headroom
-                                  tasks [--status] [--owner] [--workforce <id>] [--tree]
-                                                                list tasks; --tree nests by parent
+                                  submit --workforce <id> --goal <text> [--description <text>]
+                                         [--priority low|normal|high|urgent]
+                                                                submit a goal; the deployment's
+                                                                strategy shapes it into tasks
+                                  tasks [--status] [--owner] [--workforce <id>]
+                                                                flat task list
+                                  tasks --tree [--root <task-id>] [--json] [--workforce <id>]
+                                                                render one whole subtree as TEXT
+                                                                (status, confidence, cost per node;
+                                                                --json for the machine shape)
                                   task <id>                     one task
                                   approvals list                the pending inbox
                                   approvals approve <id> [--reason <text>]
                                   approvals reject <id> --reason <text>
-                                  cost [--window 24h|7d]        per-scope settled/reserved roll-up
+                                  cost [--window 24h|7d] [--by employee|department]
+                                                                settled/reserved roll-up (grouped
+                                                                server-side when --by is given)
                                   events <task-id>              the task's journal replay
                                   pause [--drain] --workforce <id>
                                   resume --workforce <id>
                                   halt --reason <text> --workforce <id>
                                 Reads need a store:read credential; mutations need store:write. Every
-                                reply is ONE JSON object; a route refusal is ok:false carrying the
-                                server's error envelope untranslated.`,
+                                reply is ONE JSON object — except \`tasks --tree\`, which renders the
+                                subtree as text (pass --json for the machine shape); a route refusal
+                                is ok:false carrying the server's error envelope untranslated.`,
       },
     ],
   },
@@ -577,7 +588,13 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
         if (e instanceof WorkforceCliError) throw new CliError(e.message);
         throw e;
       }
-      await emit(result);
+      // `tasks --tree` is the ONE text-rendering command in the group (the tree is a console
+      // view; --json keeps the machine shape). Everything else stays one JSON object on stdout.
+      if (typeof result.rendering === 'string') {
+        await writeDrained(process.stdout, `${result.rendering}\n`);
+      } else {
+        await emit(result);
+      }
       return result.ok ? 0 : 1;
     }
     case 'dev': {
@@ -596,7 +613,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
     }
     default:
       throw new CliError(
-        `unknown command ${JSON.stringify(command)} (expected \`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, \`tenant\`, or \`dev\`)`,
+        `unknown command ${JSON.stringify(command)} (expected \`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, \`tenant\`, \`workforce\`, or \`dev\`)`,
       );
   }
 }

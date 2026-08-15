@@ -47,3 +47,28 @@ export const RESERVED_WORKFORCE_TOOL_NAMES: ReadonlySet<string> = new Set([
   'submit_result',
   'submit_review',
 ]);
+
+/** The model-facing form an in-process MCP bridge gives a neutral tool: `mcp__<server>__<tool>`. */
+const BRIDGED_TOOL_NAME = /^mcp__[a-z0-9-]+__(?<tool>.+)$/;
+
+/**
+ * The CANONICAL bridged-name pattern SOURCE. The turn-ending detector one package over
+ * (`workforce-tools/roles.ts`) needs the SAME predicate (widening one alone reopens the bridged-
+ * spelling gap this closes), and there is no cross-package regex identity — so it asserts its own
+ * copy against THIS source at module load. Exported for that drift assert, not for re-compilation.
+ */
+export const BRIDGED_TOOL_NAME_SOURCE = BRIDGED_TOOL_NAME.source;
+
+/**
+ * Does a declared tool name SPELL a reserved native — exactly, or through the bridged
+ * `mcp__<x>__<tool>` form one adapter records verbatim on transcripts? The bridged spelling is
+ * refused with the exact one because the transcript check that detects attempted turn endings
+ * normalizes it: an agent tool named `mcp__tracker__submit_result` would make a legal yield read
+ * as a refused ending and take the requeue-then-fail fate, with the outcome differing by
+ * adapter. One predicate, two consumers (the lint at parse, the composition at dispatch), so the
+ * two doors can never disagree.
+ */
+export function isReservedWorkforceToolSpelling(name: string): boolean {
+  const neutral = BRIDGED_TOOL_NAME.exec(name)?.groups?.tool ?? name;
+  return RESERVED_WORKFORCE_TOOL_NAMES.has(neutral);
+}

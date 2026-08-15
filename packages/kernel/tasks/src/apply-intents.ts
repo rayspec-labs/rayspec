@@ -49,11 +49,13 @@ import { TaskNotFoundError, TaskRowCorruptError, TaskVersionConflictError } from
 import { appendTaskEvents } from './events.js';
 import { deterministicChildTaskId } from './ids.js';
 import {
+  classificationForIntent,
   invalidIntentPlan,
   MAX_MESSAGE_BODY_CHARS,
   MAX_MESSAGES_PER_TURN,
   planTurnOutcome,
   type TurnPlan,
+  turnClassificationSchema,
   turnIntentSchema,
 } from './intent-applier.js';
 import { joinPolicySchema } from './join.js';
@@ -193,6 +195,14 @@ export interface ApplyTurnInput {
    * deterministic child-id space belong to them; a same-turn fan-out's children continue after.
    */
   readonly createdChildren?: unknown;
+  /**
+   * The turn's CLASSIFICATION — which way a decision seat moved its task, derived by the
+   * dispatching composition from the TYPED collected intent (never from model prose; a refused
+   * or absent ending carries none). A TRUSTED channel like `reviewPolicy`: validated strictly
+   * against the closed vocabulary here, journaled on `turn_ended`, and a malformed value is a
+   * caller bug and a hard typed refusal.
+   */
+  readonly classification?: unknown;
   readonly budgets: WorkforceBudgets;
   /** The turn's actual cost; settled against the dispatch reservation. */
   readonly actualUsd?: number;
@@ -265,7 +275,7 @@ async function readReviewAssignment(
     .select(schema.workforceTasks)
     .where(eq(schema.workforceTasks.taskId, task.parentTaskId))) as TaskRecord[];
   const parent = rows[0];
-  if (!parent || parent.status !== 'waiting_for_review') return null;
+  if (parent?.status !== 'waiting_for_review') return null;
   const binding = joinPolicySchema.safeParse(parent.joinPolicy);
   if (!binding.success || binding.data.policy !== 'review') return null;
   if (binding.data.reviewTaskId !== task.taskId || binding.data.reviewId === undefined) return null;
@@ -340,6 +350,13 @@ export async function applyTurnOutcome(
     // The buffered creates ride a TRUSTED channel too — validated strictly before they can plan.
     const createdChildren = z.array(delegationChildSpecSchema).parse(input.createdChildren ?? []);
     const messages = turnMessagesSchema.parse(input.messages ?? []);
+    // The classification channel steers NOTHING — it is journaled truth about the decision the
+    // typed intent already carries — but a malformed value is the same caller bug its siblings
+    // refuse, so it validates the same way.
+    const classification =
+      input.classification === undefined
+        ? null
+        : turnClassificationSchema.parse(input.classification);
 
     // Everything the planner needs except the one input that can only be read under a lock. The
     // fields taken from `snapshot` here (owner, ancestry) are immutable for the row's lifetime.
@@ -1122,6 +1139,30 @@ export async function applyTurnOutcome(
       if (absorbed) finalTask = await readTask(tx, task.taskId);
     }
 
+    // The classification journals ONLY where the decision it names actually stood: never beside
+    // a refused ending (`invalid_intent` — the caller's channel said 'delegate' about an intent
+    // this transaction rejected), never beside an outcome that refused or overrode the decision
+    // itself (`delegation_rejected`, a consumed `cancel`). `complete_with_review` keeps it — the
+    // decision stood and policy ADDED review, and the journal deliberately records both facts.
+    //
+    // AND it must NAME the intent it rode with: the engine RE-DERIVES the classification from the
+    // typed intent it actually applied (`classificationForIntent`, the same map the composition's
+    // deriver uses) and suppresses a caller-supplied value that disagrees — so an embedded caller
+    // cannot journal `escalate` beside an accepted `complete`. Whether the caller derived correctly
+    // is not trusted; the presence AND the value are the engine's to own, so no caller can journal a
+    // decision that never existed. (The caller still gates non-decision seats to null.)
+    const derivedClassification = parsedIntent.success
+      ? classificationForIntent(parsedIntent.data)
+      : null;
+    const journaledClassification =
+      classification !== null &&
+      classification === derivedClassification &&
+      parsedIntent.success &&
+      plan.kind !== 'invalid_intent' &&
+      plan.kind !== 'delegation_rejected' &&
+      plan.kind !== 'cancelled'
+        ? classification
+        : null;
     await appendTaskEvents(tx, task.taskId, [
       {
         type: 'workforce.task.turn_ended',
@@ -1131,6 +1172,9 @@ export async function applyTurnOutcome(
           turnNumber: input.turnNumber,
           outcome: plan.kind,
           costUsd: actualUsd,
+          // Present on decision-seat turns whose typed intent was accepted and applied as that
+          // decision; absent elsewhere — the vocabulary's own presence rule.
+          ...(journaledClassification !== null ? { classification: journaledClassification } : {}),
         },
       },
     ]);

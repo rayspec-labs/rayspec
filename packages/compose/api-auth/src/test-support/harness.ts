@@ -537,6 +537,12 @@ export async function createHarness(
      */
     workforce?: AppDeps['workforce'];
     /**
+     * the OPTIONAL goal-intake seam wired into `deps.workforceGoalIntake` (the goals route's
+     * injected dependency). A suite injects a stub recording submissions; omit ⇒ the goals route
+     * fail-closes 501 (the undeclared-workforce posture).
+     */
+    workforceGoalIntake?: AppDeps['workforceGoalIntake'];
+    /**
      * trusted-proxy CIDRs wired into `deps.trustedProxies` (the rate-limiter client-identity
      * resolution). Default UNSET ⇒ no forwarding header is trusted (the socket peer is the identity).
      * A served-app suite behind loopback opts in (e.g. `['127.0.0.0/8', '::1/128']`) so an
@@ -689,6 +695,7 @@ export async function createHarness(
     ...(opts.sessionReprocessor ? { sessionReprocessor: opts.sessionReprocessor } : {}),
     ...(opts.manualTriggerFirer ? { manualTriggerFirer: opts.manualTriggerFirer } : {}),
     ...(opts.workforce ? { workforce: opts.workforce } : {}),
+    ...(opts.workforceGoalIntake ? { workforceGoalIntake: opts.workforceGoalIntake } : {}),
     ...(opts.trustedProxies !== undefined ? { trustedProxies: opts.trustedProxies } : {}),
     ...(opts.maxJsonBodyBytes !== undefined ? { maxJsonBodyBytes: opts.maxJsonBodyBytes } : {}),
   };

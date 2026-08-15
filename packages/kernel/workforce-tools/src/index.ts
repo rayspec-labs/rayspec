@@ -10,6 +10,8 @@
  * an employee's agent and applies the collected intent lives with the composition root, on the
  * other side of the gate.
  */
+
+export { classifyTurnIntent } from './classify.js';
 export {
   type BufferedCreatedChild,
   type BufferedMessage,
@@ -17,6 +19,19 @@ export {
   MALFORMED_TURN_ENDING,
   TurnCollector,
 } from './collector.js';
+export {
+  assembleTurnInput,
+  CHILD_RESULT_MAX_BYTES,
+  ContextInputOverflowError,
+  ContextSectionOverflowError,
+  GoalExceedsContextBudgetError,
+  SECTION_BUDGETS,
+  SIGNAL_PAYLOAD_MAX_BYTES,
+  TURN_INPUT_MAX_BYTES,
+  type TurnInputFacts,
+  type TurnMessageFact,
+  type TurnSignalFact,
+} from './context.js';
 export {
   ApprovalEscalationTargetMissingError,
   DelegationTargetInvalidError,
@@ -27,6 +42,25 @@ export {
   TurnAlreadyEndedError,
   WorkforceToolError,
 } from './errors.js';
+export { type ApplicableReviewRuleFact, computeTurnFacts, type TurnFacts } from './facts.js';
+export {
+  formatRecallAge,
+  RECALL_HIT_TEXT_MAX_CHARS,
+  RECALL_MAX_AGE_MS,
+  RECALL_MAX_HITS,
+  RECALL_SCAN_LIMIT,
+  type RecallScope,
+  scoreRecallCandidate,
+  TaskHistoryMemoryProvider,
+  tokenizeRecallQuery,
+} from './memory.js';
+export {
+  DATA_BOUNDARY_LINE,
+  ROLE_GUIDANCE,
+  SECTION_HEADERS,
+  TURN_ENDING_REMINDER,
+  TURN_PROMPT_VERSION,
+} from './prompt.js';
 export {
   assertManagerMayTarget,
   type DelegationTarget,
@@ -34,7 +68,12 @@ export {
   type ResolvedTarget,
   resolveDelegationTarget,
 } from './resolve-target.js';
-export { type MatchedReviewPolicy, matchReviewPolicy } from './review-policy.js';
+export {
+  type MatchedApprovalRule,
+  type MatchedReviewPolicy,
+  matchApprovalRule,
+  matchReviewPolicy,
+} from './review-policy.js';
 export {
   EMPLOYEE_ROLES,
   type EmployeeRole,

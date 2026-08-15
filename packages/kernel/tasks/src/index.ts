@@ -72,6 +72,8 @@ export {
   delegationChildSpecSchema,
   insertChildTask,
   MAX_TASK_DEPENDENCIES,
+  MAX_TASK_TEXT_BYTES,
+  MAX_TASK_TITLE_CHARS,
   TASK_PRIORITIES,
   type TaskPriority,
 } from './create-task.js';
@@ -95,6 +97,7 @@ export {
 } from './events.js';
 export { deterministicChildTaskId, newRootTaskId } from './ids.js';
 export {
+  classificationForIntent,
   DELEGATION_REJECTION_REASONS,
   type DelegationRejectionReason,
   ESCALATION_REASONS,
@@ -103,8 +106,11 @@ export {
   type PlanTurnInput,
   planTurnOutcome,
   type ToolErrorFate,
+  TURN_CLASSIFICATIONS,
+  type TurnClassification,
   type TurnIntent,
   type TurnPlan,
+  turnClassificationSchema,
   turnIntentSchema,
   type WorkerResult,
   workerResultSchema,

@@ -40,6 +40,30 @@ export interface MatchedReviewPolicy {
   readonly maxRounds: number;
 }
 
+export interface MatchedApprovalRule {
+  readonly id: string;
+  readonly timeoutMs: number;
+  readonly onTimeout: 'fail' | 'escalate';
+}
+
+/**
+ * The declared approval rule covering this employee's capabilities, or null. ONE predicate with
+ * two consumers — the `request_approval` handler (which binds the matched window and fate onto
+ * the intent) and the turn scaffolding (which presents the same rule as a fact before the model
+ * runs) — so what a turn is told and what its request gets can never diverge. First declared
+ * match wins, like the review rules.
+ */
+export function matchApprovalRule(
+  config: WorkforceConfig,
+  employee: WorkforceEmployeeConfig,
+): MatchedApprovalRule | null {
+  const rule = config.approvals.find((candidate) =>
+    candidate.capabilities.some((label) => employee.capabilities.includes(label)),
+  );
+  if (!rule) return null;
+  return { id: rule.id, timeoutMs: rule.timeoutMs, onTimeout: rule.onTimeout };
+}
+
 /** Evaluate the declared rules against a completing turn's result; null when no rule fires. */
 export async function matchReviewPolicy(
   config: WorkforceConfig,

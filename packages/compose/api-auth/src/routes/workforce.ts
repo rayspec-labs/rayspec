@@ -39,6 +39,7 @@ import {
   haltWorkforce,
   isReservedWorkforceSegment,
   isTaskStatus,
+  MAX_TASK_TEXT_BYTES,
   operatorSignalKindSchema,
   pauseWorkforce,
   RESERVED_WORKFORCE_SEGMENTS,
@@ -50,6 +51,7 @@ import {
   resolveWorkforceBudgets,
   resumeWorkforce,
   reviewVerdictSchema,
+  TASK_PRIORITIES,
   TASK_STATUSES,
   TaskNotFoundError,
   WorkforceDrainTimeoutError,
@@ -61,7 +63,7 @@ import {
 import { and, asc, eq, gt, gte, isNull, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { z } from 'zod';
-import type { AppDeps, AppEnv, WorkforceControl } from '../app-context.js';
+import type { AppDeps, AppEnv, WorkforceControl, WorkforceGoalIntake } from '../app-context.js';
 import { readBoundedJson } from '../http/bounded-body.js';
 import { replayJournalEventsAsSse, resolveLastEventId } from '../http/journal-replay.js';
 import { requireAuth, requirePermission, resolveTenant } from '../http/middleware.js';
@@ -81,6 +83,10 @@ function actorFrom(c: Context<AppEnv>): string {
 
 const DEFAULT_PAGE = 50;
 const MAX_PAGE = 200;
+
+/** The tree read's hard row cap — the ceiling of RENDERABLE output, not a paging economics
+ * number. Past it the response is a truncated prefix with the header flag set. */
+const TREE_MAX_TASKS = 500;
 
 /** The approval rows' closed status vocabulary (the filter refuses free text, like the task list). */
 const APPROVAL_STATUSES = ['pending', 'approved', 'rejected', 'timed_out', 'escalated'] as const;
@@ -136,6 +142,29 @@ const haltRequestSchema = z.strictObject({
   reason: z.string().min(1).max(500),
 });
 
+/**
+ * The goal (and description) ceiling at the intake edge, in BYTES — the SHARED `MAX_TASK_TEXT_BYTES`
+ * (@rayspec/tasks), the same constant and unit the engine's creation schema and the delegate/create
+ * toolset enforce (a character cap would let a multibyte goal pass here and burst the byte-denominated
+ * turn-input budget there). It is a fraction of the assembly's task-section budget — the assembly
+ * asserts THAT margin (`MAX_TASK_TEXT_BYTES` vs `SECTION_BUDGETS.task`) at module load (context.ts) —
+ * so a goal accepted on this surface can ALWAYS be rendered untrimmed into the owning employee's
+ * turns; the goal-never-trimmed refusal then only ever fires on goals minted by code that bypassed
+ * this cap.
+ */
+const MAX_GOAL_BYTES = MAX_TASK_TEXT_BYTES;
+const withinGoalBytes = (text: string) => Buffer.byteLength(text, 'utf8') <= MAX_GOAL_BYTES;
+
+const goalRequestSchema = z.strictObject({
+  goal: z.string().min(1).refine(withinGoalBytes, `goal must be at most ${MAX_GOAL_BYTES} bytes`),
+  description: z
+    .string()
+    .min(1)
+    .refine(withinGoalBytes, `description must be at most ${MAX_GOAL_BYTES} bytes`)
+    .optional(),
+  priority: z.enum(TASK_PRIORITIES).optional(),
+});
+
 const WINDOW_RE = /^(\d{1,3})([hd])$/;
 /** The widest cost window a single request may materialize (bounded read, like the task list). */
 const MAX_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
@@ -177,6 +206,17 @@ function requireWorkforce(deps: AppDeps): WorkforceControl {
     );
   }
   return deps.workforce;
+}
+
+/** The wired goal-intake seam, or the fail-closed 501 (intake needs a DECLARED workforce). */
+function requireGoalIntake(deps: AppDeps): WorkforceGoalIntake {
+  if (!deps.workforceGoalIntake) {
+    throw new ApiError(
+      'NOT_IMPLEMENTED',
+      'Goal submission requires a declared workforce. This deployment declares none, so no orchestrator seat can own the goal.',
+    );
+  }
+  return deps.workforceGoalIntake;
 }
 
 function tenantHandle(deps: AppDeps, tenantId: string | undefined): TenantDb {
@@ -397,7 +437,17 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
     },
   );
 
-  // GET /v1/workforce/cost?window=&workforceId= — settled/reserved roll-up per ledger scope.
+  // GET /v1/workforce/cost?window=&by= — settled/reserved roll-up. Default: per ledger scope,
+  // byte-unchanged. `?by=` groups server-side (a closed pair; anything else is a typed 400), and
+  // each grouping names its BASIS, because the two are honest about different things:
+  //   - by=department reads the ENFORCING LEDGER's department scope rows — real window semantics
+  //     (settlement buckets), the same rows the ceilings hold on;
+  //   - by=employee aggregates the TASK ROWS by owner (the ledger carries no employee scope) and
+  //     therefore windows by task CREATION time: a long-lived task's whole settled cost
+  //     attributes to the window it was created in. Stated structurally (`basis`), not glossed.
+  // Deliberately NOT supported: a workforceId filter — the ledger's scope ids are not uniformly
+  // workforce-keyed across kinds, and a filter that silently applied to some kinds and not
+  // others would misreport spend. One deployment tenant runs one declared workforce.
   app.get(
     '/v1/workforce/cost',
     requireAuth(),
@@ -408,12 +458,96 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       const tdb = tenantHandle(deps, c.get('tenantId'));
       const windowMs = parseWindowMs(c.req.query('window'));
       const since = new Date(Date.now() - windowMs);
+      const window = c.req.query('window') ?? '24h';
+      const by = c.req.query('by');
+      if (by !== undefined && by !== 'employee' && by !== 'department') {
+        throw new ApiError('VALIDATION_ERROR', "by must be 'employee' or 'department'.", {
+          allowed: ['employee', 'department'],
+        });
+      }
+
+      if (by === 'department') {
+        const ledger = schema.workforceBudgetLedger;
+        const rows = (await tdb
+          .select(ledger, {
+            id: ledger.scopeId,
+            settledUsd: sql<string>`sum(${ledger.settledUsd})`,
+            reservedUsd: sql<string>`sum(${ledger.reservedUsd})`,
+            settledTurns: sql<number>`sum(${ledger.settledTurns})::int`,
+          })
+          .where(and(eq(ledger.scopeKind, 'department'), gte(ledger.updatedAt, since)))
+          .groupBy(ledger.scopeId)
+          .orderBy(sql`sum(${ledger.settledUsd}) desc`, asc(ledger.scopeId))
+          .limit(MAX_PAGE + 1)) as Array<{
+          id: string;
+          settledUsd: string;
+          reservedUsd: string;
+          settledTurns: number;
+        }>;
+        c.header('X-Result-Truncated', rows.length > MAX_PAGE ? 'true' : 'false');
+        return c.json(
+          {
+            window,
+            by,
+            basis: 'budget_ledger',
+            groups: rows.slice(0, MAX_PAGE).map((row) => ({
+              id: row.id,
+              settledUsd: Number(row.settledUsd),
+              reservedUsd: Number(row.reservedUsd),
+              settledTurns: row.settledTurns,
+            })),
+          },
+          200,
+        );
+      }
+
+      if (by === 'employee') {
+        const tasks = schema.workforceTasks;
+        const rows = (await tdb
+          .select(tasks, {
+            id: tasks.owner,
+            settledUsd: sql<string>`sum(${tasks.costUsd})`,
+            settledTurns: sql<number>`sum(${tasks.turnsUsed})::int`,
+            tasks: sql<number>`count(*)::int`,
+          })
+          .where(gte(tasks.createdAt, since))
+          .groupBy(tasks.owner)
+          .orderBy(sql`sum(${tasks.costUsd}) desc`, asc(tasks.owner))
+          .limit(MAX_PAGE + 1)) as Array<{
+          id: string;
+          settledUsd: string;
+          settledTurns: number;
+          tasks: number;
+        }>;
+        c.header('X-Result-Truncated', rows.length > MAX_PAGE ? 'true' : 'false');
+        return c.json(
+          {
+            window,
+            by,
+            basis: 'task_rows',
+            groups: rows.slice(0, MAX_PAGE).map((row) => ({
+              id: row.id,
+              settledUsd: Number(row.settledUsd),
+              settledTurns: row.settledTurns,
+              tasks: row.tasks,
+            })),
+          },
+          200,
+        );
+      }
+
+      // The per-scope default is a bounded page like every other list on this surface —
+      // deterministic order, hard cap, truncation header. `totalSettledUsd` sums the PAGE it
+      // returns, and the header is how a reader knows the page is not the whole window.
+      const ledger = schema.workforceBudgetLedger;
       const rows = (await tdb
-        .select(schema.workforceBudgetLedger)
-        .where(gte(schema.workforceBudgetLedger.updatedAt, since))) as Array<
-        typeof schema.workforceBudgetLedger.$inferSelect
-      >;
-      const scopes = rows.map((r) => ({
+        .select(ledger)
+        .where(gte(ledger.updatedAt, since))
+        .orderBy(asc(ledger.scopeKind), asc(ledger.scopeId), asc(ledger.windowStart))
+        .limit(MAX_PAGE + 1)) as Array<typeof schema.workforceBudgetLedger.$inferSelect>;
+      c.header('X-Result-Truncated', rows.length > MAX_PAGE ? 'true' : 'false');
+      const page = rows.slice(0, MAX_PAGE);
+      const scopes = page.map((r) => ({
         scopeKind: r.scopeKind,
         scopeId: r.scopeId,
         windowStart: r.windowStart.toISOString(),
@@ -421,10 +555,10 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
         settledUsd: r.settledUsd,
         settledTurns: r.settledTurns,
       }));
-      const totalSettledUsd = rows
+      const totalSettledUsd = page
         .filter((r) => r.scopeKind === 'task')
         .reduce((sum, r) => sum + Number(r.settledUsd), 0);
-      return c.json({ window: c.req.query('window') ?? '24h', totalSettledUsd, scopes }, 200);
+      return c.json({ window, totalSettledUsd, scopes }, 200);
     },
   );
 
@@ -466,6 +600,84 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
         taskId,
         resolveLastEventId(c),
         serializeWorkforceEventData,
+      );
+    },
+  );
+
+  // GET /v1/workforce/tasks/:id/tree — the WHOLE subtree the task belongs to, flat. `:id` may be
+  // ANY member of the subtree; the read anchors on its root, so an operator can ask from
+  // whichever task id they are holding. At most four bounded reads, no per-node walk: the anchor
+  // row, one indexed root scan, the root's own row when the capped page happened to miss it (the
+  // root ALWAYS rides the response — the goal line is its), and the runtime row for the per-task
+  // ceiling (what the goal line of a rendered tree divides by — the ceiling that binds the
+  // SUBTREE scope, not the workforce window, which is `status`'s number). Rows come back flat in
+  // `task_id asc` (the parent pointers are on the rows; nesting is the caller's) and CAP at
+  // TREE_MAX_TASKS with the truncation header — an operator most needs the tree exactly when a
+  // subtree ran away, so a capped prefix with an explicit flag beats a refusal that blinds the
+  // console.
+  app.get(
+    '/v1/workforce/tasks/:id/tree',
+    requireAuth(),
+    resolveTenant(deps),
+    requirePermission(deps, 'store:read'),
+    async (c) => {
+      requireWorkforce(deps);
+      const tdb = tenantHandle(deps, c.get('tenantId'));
+      const anchorRows = (await tdb
+        .select(schema.workforceTasks)
+        .where(eq(schema.workforceTasks.taskId, c.req.param('id')))) as TaskRow[];
+      const anchor = anchorRows[0];
+      if (!anchor) throw new ApiError('NOT_FOUND', 'Not found.');
+      const pageRows = (await tdb
+        .select(schema.workforceTasks)
+        .where(eq(schema.workforceTasks.rootTaskId, anchor.rootTaskId))
+        .orderBy(asc(schema.workforceTasks.taskId))
+        .limit(TREE_MAX_TASKS + 1)) as TaskRow[];
+      // THE ROOT ALWAYS RIDES THE RESPONSE. Task ids are random/hash UUIDs — id order is
+      // deterministic, not creation order — so a >cap subtree's id-ordered page has no reason to
+      // contain the root at all, and a tree whose goal line names an arbitrary child would
+      // misread as that child's story. Membership is checked against the SLICED page — the rows we
+      // actually return — NOT the +1 overflow probe: when the root sorts at index 500 it is inside
+      // the 501-row probe yet dropped by the slice, so checking the probe let the slice strand it
+      // (the off-by-one). When the page missed it, one point read fetches it and it takes the first
+      // slot; the page yields its tail to stay inside the cap.
+      const truncated = pageRows.length > TREE_MAX_TASKS;
+      const page = pageRows.slice(0, TREE_MAX_TASKS);
+      let rows: TaskRow[];
+      if (page.some((row) => row.taskId === anchor.rootTaskId)) {
+        rows = page;
+      } else {
+        const rootRows =
+          anchor.taskId === anchor.rootTaskId
+            ? [anchor]
+            : ((await tdb
+                .select(schema.workforceTasks)
+                .where(eq(schema.workforceTasks.taskId, anchor.rootTaskId))) as TaskRow[]);
+        rows = [...rootRows, ...page].slice(0, TREE_MAX_TASKS);
+      }
+      let budgets: { taskUsd: number | null; taskTurns: number | null } | null = null;
+      if (anchor.workforceId !== null) {
+        try {
+          const runtime = await readWorkforceRuntime(tdb, anchor.workforceId);
+          const resolved = resolveWorkforceBudgets(runtime.budgets, anchor.workforceId);
+          budgets = {
+            taskUsd: resolved.task?.usd ?? null,
+            taskTurns: resolved.task?.turns ?? null,
+          };
+        } catch (err) {
+          // A bare engine-driven subtree may predate any runtime row — the tree still renders,
+          // with no ceiling to divide by. Anything else is a real error.
+          if (!(err instanceof WorkforceUnknownError)) throw err;
+        }
+      }
+      c.header('X-Result-Truncated', truncated ? 'true' : 'false');
+      return c.json(
+        {
+          rootTaskId: anchor.rootTaskId,
+          tasks: rows as unknown as Record<string, unknown>[], // already capped at TREE_MAX_TASKS
+          budgets,
+        },
+        200,
       );
     },
   );
@@ -619,6 +831,71 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       } catch (err) {
         mapEngineError(err);
       }
+    },
+  );
+
+  // POST /v1/workforce/:workforceId/goals — submit a goal; the deployment's orchestration
+  // strategy shapes it into durable tasks and the dispatcher picks them up. 202: the tasks exist
+  // `planned`; nothing has run yet, and the task list / tree is where progress reads. EVERY CALL
+  // IS ITS OWN SUBMISSION — there is no idempotency key on this surface yet, so a client retry
+  // after a lost 202 creates a second root (documented in the CLI reference; the caller that
+  // needs exactly-once submission checks the task list before retrying).
+  app.post(
+    '/v1/workforce/:workforceId/goals',
+    requireAuth(),
+    resolveTenant(deps),
+    requirePermission(deps, 'store:write'),
+    async (c) => {
+      const workforce = requireWorkforce(deps);
+      const intake = requireGoalIntake(deps);
+      const workforceId = workforceIdParam(c);
+      const tenantId = c.get('tenantId');
+      if (!tenantId) throw new ApiError('NOT_FOUND', 'Not found.');
+      // R1: this route does not honor Idempotency-Key yet (a retry after a lost 202 mints a SECOND
+      // billed root — a double-bill). The two sibling billed-work routes honor the header, so
+      // silently ignoring it here is a lost-write trap. Until real idempotency lands, REFUSE a
+      // supplied key (400) rather than accepting and dropping it.
+      if (c.req.header('Idempotency-Key') !== undefined) {
+        throw new ApiError(
+          'VALIDATION_ERROR',
+          'This route does not support Idempotency-Key yet: a retry after a lost 202 would mint a ' +
+            'second root. Omit the header and check the task list before retrying.',
+        );
+      }
+      // C5 QUOTA (cost-DoS bound): every call mints a FRESH billed root run with no dedupe, and
+      // budgets are optional (a document without `budgets:` has no backstop), so an authenticated
+      // store:write principal could loop-mint unbounded dispatched runs. Throttle one
+      // (tenant, workforce) via the SAME limiter triggers.ts/reprocess.ts use — BEFORE the body
+      // read, so an over-quota call reads and dispatches nothing.
+      const { allowed, retryAfterMs } = await deps.rateLimiter.checkAsync(
+        'goal-submit',
+        `${tenantId}:${workforceId}`,
+      );
+      if (!allowed) throw new ApiError('RATE_LIMITED', 'Too many requests.', { retryAfterMs });
+      const body = goalRequestSchema.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
+      const result = await intake.submitGoal({
+        tenantId,
+        workforceId,
+        goal: body.goal,
+        ...(body.description !== undefined ? { description: body.description } : {}),
+        ...(body.priority !== undefined ? { priority: body.priority } : {}),
+        requestedBy: actorFrom(c),
+      });
+      if (result.outcome === 'not_found') throw new ApiError('NOT_FOUND', 'Not found.');
+      if (result.outcome === 'invalid_plan') {
+        // The strategy is deployment configuration, never client input — a refused plan is a
+        // server-side defect and says so (500), not a 4xx the caller cannot fix. R5: the body is
+        // STATIC — `result.detail` names employee ids, department names and the strategy id
+        // (deployment shape), and this surface's rule is that a 5xx echoes no deployment config to
+        // the client. The detail stays server-side.
+        throw new ApiError(
+          'INTERNAL',
+          'The orchestration strategy produced a plan the intake refused — a server-side ' +
+            'configuration defect. See the server logs for detail.',
+        );
+      }
+      workforce.kick();
+      return c.json({ workforceId, tasks: result.tasks }, 202);
     },
   );
 

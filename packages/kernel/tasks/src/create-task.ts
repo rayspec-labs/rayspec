@@ -23,6 +23,22 @@ import { isReservedWorkforceSegment, RESERVED_WORKFORCE_SEGMENTS } from './runti
 
 export const TASK_PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const;
 
+/**
+ * The bound on a task's goal and description at EVERY creation surface, in BYTES — defense in depth
+ * under the toolset's own hand-off cap and the HTTP intake, all sharing THIS constant. The unit is
+ * BYTES, not chars, on purpose: a goal renders verbatim (and, for the goal, UNTRIMMABLY) into the
+ * owner's turn input whose section budget is in bytes, so a char cap would let a multibyte goal
+ * pass creation and then brick every dispatch on `GoalExceedsContextBudgetError`. The context
+ * assembly asserts this cap fits its task-section budget at module load (see context.ts).
+ */
+export const MAX_TASK_TEXT_BYTES = 16_384;
+const withinTaskTextBytes = (text: string): boolean =>
+  Buffer.byteLength(text, 'utf8') <= MAX_TASK_TEXT_BYTES;
+const goalBytesMessage = `must be at most ${MAX_TASK_TEXT_BYTES} bytes`;
+
+/** The bound on a task's title, in characters — the single source both creation surfaces mirror. */
+export const MAX_TASK_TITLE_CHARS = 200;
+
 export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 
 /**
@@ -65,9 +81,14 @@ const workforceIdSchema = z
 /** Strict creation surface for a ROOT task (no parent; the task anchors its own subtree). */
 export const createRootTaskInputSchema = z.strictObject({
   workforceId: workforceIdSchema,
-  title: z.string().min(1).max(200),
-  goal: z.string().min(1),
-  description: z.string().min(1).nullable().default(null),
+  title: z.string().min(1).max(MAX_TASK_TITLE_CHARS),
+  goal: z.string().min(1).refine(withinTaskTextBytes, goalBytesMessage),
+  description: z
+    .string()
+    .min(1)
+    .refine(withinTaskTextBytes, goalBytesMessage)
+    .nullable()
+    .default(null),
   owner: z.string().min(1),
   requestedBy: z.string().min(1),
   department: z.string().min(1).nullable().default(null),
@@ -83,9 +104,14 @@ export type CreateRootTaskInput = z.input<typeof createRootTaskInputSchema>;
  * are derived HERE, not caller-supplied, so no caller can fabricate a subtree.
  */
 export const childTaskSpecSchema = z.strictObject({
-  title: z.string().min(1).max(200),
-  goal: z.string().min(1),
-  description: z.string().min(1).nullable().default(null),
+  title: z.string().min(1).max(MAX_TASK_TITLE_CHARS),
+  goal: z.string().min(1).refine(withinTaskTextBytes, goalBytesMessage),
+  description: z
+    .string()
+    .min(1)
+    .refine(withinTaskTextBytes, goalBytesMessage)
+    .nullable()
+    .default(null),
   owner: z.string().min(1),
   department: z.string().min(1).nullable().default(null),
   priority: z.enum(TASK_PRIORITIES).default('normal'),

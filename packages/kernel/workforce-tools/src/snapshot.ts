@@ -9,6 +9,8 @@
  *   - managers see their subtree page plus their department's open tasks;
  *   - reviewers additionally see the PARENT task (the work under review, result included) and the
  *     pending review row their verdict targets;
+ *   - EVERY role gets the resolved budget ceilings (one runtime-row read) and the results of its
+ *     task's declared prerequisites — the facts the turn scaffolding states before the model runs;
  *   - nothing here can cross the tenant (every read runs on the caller's TenantDb) and nothing
  *     reaches outside the subtree/department the role earns.
  */
@@ -16,9 +18,12 @@ import { schema, type TenantDb } from '@rayspec/db';
 import type { WorkforceConfig, WorkforceEmployeeConfig } from '@rayspec/spec';
 import {
   joinPolicySchema,
+  type MergedChildResult,
+  mergeChildResults,
   readWorkforceRuntime,
   resolveWorkforceBudgets,
   type TaskRecord,
+  type WorkforceBudgets,
   windowStartFor,
 } from '@rayspec/tasks';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
@@ -71,6 +76,34 @@ export interface WorkforceReadSnapshot {
    * manager's authority over a led team's members is scoped to it (see `assertManagerMayTarget`).
    */
   readonly activeTeamIds: readonly string[];
+  /**
+   * The OWNERS of this task's ancestors (deduped, ancestry order) — the seats the engine's
+   * delegation-cycle rule refuses as targets from here. Read off the immutable ancestry ids
+   * (one bounded IN query, ≤ the delegation depth), so the scaffolding can subtract them from
+   * the legal-target facts instead of advertising a hand-off the planner will terminally refuse.
+   */
+  readonly ancestorOwners: readonly string[];
+  /**
+   * How many delegations THIS task has already opened — the planner's `existingDelegationCount`,
+   * the value it adds new hand-offs to before comparing to `maxPerTask`. Read here (one indexed
+   * count on `parentTaskId`) so the scaffolding can state the REMAINING fan-out allowance, not the
+   * static cap: a second delegating turn otherwise reads "up to M children" when M−k remain.
+   */
+  readonly delegationsFromTask: number;
+  /**
+   * The declared ceilings, resolved off the runtime row — every role, every turn (the scaffolding
+   * presents headroom and limits as facts before the model runs; a single-row read). The row
+   * exists for any declared workforce (boot upserts it) and for any dispatched one (the scheduler
+   * creates it on first dispatch).
+   */
+  readonly budgets: WorkforceBudgets;
+  /**
+   * The results of this task's declared prerequisites, keyed by task id in the same merged shape
+   * child results use — the context a task that WAITED on other work runs with. Null when the
+   * task declares no dependencies; a non-terminal prerequisite (possible on a re-queued task) is
+   * simply absent from the map.
+   */
+  readonly dependencyResults: Readonly<Record<string, MergedChildResult>> | null;
 }
 
 const TERMINAL = ['completed', 'failed', 'cancelled'];
@@ -94,6 +127,25 @@ export async function buildWorkforceSnapshot(
   task: TaskRecord,
   employee: WorkforceEmployeeConfig,
 ): Promise<WorkforceReadSnapshot> {
+  // The declared ceilings — read once, for every role (the state view below reuses them). The
+  // scaffolding renders these as facts, so a turn is never asked to guess its own limits.
+  const runtime = await readWorkforceRuntime(tdb, config.id);
+  const budgets = resolveWorkforceBudgets(runtime.budgets, config.id);
+
+  // The prerequisite results — the context a task that WAITED on other work runs with, in the
+  // same deterministic merged shape child results use (sorted keys, keyed by task id).
+  let dependencyResults: Readonly<Record<string, MergedChildResult>> | null = null;
+  const declaredDependencies = Array.isArray(task.dependencies)
+    ? (task.dependencies as string[])
+    : [];
+  if (declaredDependencies.length > 0) {
+    const rows = (await tdb
+      .select(schema.workforceTasks)
+      .where(inArray(schema.workforceTasks.taskId, declaredDependencies))) as TaskRecord[];
+    dependencyResults = mergeChildResults(
+      rows.filter((row) => TERMINAL.includes(row.status)),
+    ).byChildId;
+  }
   // The PARENT (the reviewed task) + the pending review row — for any role whose toolset carries
   // submit_review (reviewer, manager). Linkage is DERIVED, never model-supplied: the pending
   // review is named by the PARENT'S PARK BINDING — the durable linkage the engine wrote when it
@@ -118,9 +170,8 @@ export async function buildWorkforceSnapshot(
         ? joinPolicySchema.safeParse(parentTask.joinPolicy)
         : null;
     if (
-      parentTask !== null &&
-      binding !== null &&
-      binding.success &&
+      parentTask &&
+      binding?.success &&
       binding.data.policy === 'review' &&
       binding.data.reviewTaskId === task.taskId &&
       binding.data.reviewId !== undefined
@@ -181,8 +232,6 @@ export async function buildWorkforceSnapshot(
   // The workforce state view — orchestrators only. Counts aggregate IN the database.
   let workforceState: WorkforceStateView | null = null;
   if (employee.role === 'orchestrator') {
-    const runtime = await readWorkforceRuntime(tdb, config.id);
-    const budgets = resolveWorkforceBudgets(runtime.budgets, config.id);
     const grouped = (await tdb
       .select(schema.workforceTasks, {
         status: schema.workforceTasks.status,
@@ -238,6 +287,28 @@ export async function buildWorkforceSnapshot(
     };
   }
 
+  // THE CYCLE RULE'S SUBJECTS: who owns the chain above this task. The ancestry ids are
+  // immutable on the row; one bounded read resolves them to owners (ancestry order, deduped).
+  const ancestryIds = Array.isArray(task.ancestryPath) ? (task.ancestryPath as string[]) : [];
+  let ancestorOwners: readonly string[] = [];
+  if (ancestryIds.length > 0) {
+    const ancestorRows = (await tdb
+      .select(schema.workforceTasks, {
+        taskId: schema.workforceTasks.taskId,
+        owner: schema.workforceTasks.owner,
+      })
+      .where(inArray(schema.workforceTasks.taskId, ancestryIds))) as Array<{
+      taskId: string;
+      owner: string;
+    }>;
+    const ownerById = new Map(ancestorRows.map((row) => [row.taskId, row.owner]));
+    ancestorOwners = [
+      ...new Set(
+        ancestryIds.map((id) => ownerById.get(id)).filter((o): o is string => o !== undefined),
+      ),
+    ];
+  }
+
   // THE TEAM-WORK FACT. A `team:` delegation records its original target verbatim on the delegation
   // row, so the chain from this task up to the root says which team's work this is — and nothing
   // the model says can change it.
@@ -258,6 +329,15 @@ export async function buildWorkforceSnapshot(
     ),
   ].sort();
 
+  // THE FAN-OUT ALREADY SPENT FROM THIS TASK — the planner's `existingDelegationCount`, read the
+  // same way (`workforce_delegations` keyed by `parentTaskId`) but as an indexed COUNT (one row).
+  // Advisory: the enforcement re-reads it under the task lock; the scaffolding only needs it to
+  // state the remaining allowance honestly.
+  const delegationCount = (await tdb
+    .select(schema.workforceDelegations, { count: sql<number>`count(*)::int` })
+    .where(eq(schema.workforceDelegations.parentTaskId, task.taskId))) as Array<{ count: number }>;
+  const delegationsFromTask = delegationCount[0]?.count ?? 0;
+
   return {
     task,
     parentTask,
@@ -266,5 +346,9 @@ export async function buildWorkforceSnapshot(
     workforceState,
     pendingReview,
     activeTeamIds,
+    ancestorOwners,
+    delegationsFromTask,
+    budgets,
+    dependencyResults,
   };
 }
