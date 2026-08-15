@@ -507,7 +507,7 @@ export interface ServerConfig {
   blobRoot?: string;
   /**
    * The LOCAL filesystem ROOT the READ-ONLY `FsSource` capability reads under — the jail root a
-   * tool/route handler's `init.fsSource` is confined to (deployment-static assets: reference material,
+   * route, tool or trigger handler's `init.fsSource` is confined to (deployment-static assets: reference material,
    * templates, a static content directory the deployer placed on the box). Set via
    * RAYSPEC_FS_SOURCE_ROOT. OPTIONAL: unset ⇒ no fs-source is wired (`init.fsSource` is absent; a
    * handler that needs it fail-closes loudly). Unlike `blobRoot` no route KIND requires it — it is
