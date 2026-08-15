@@ -771,38 +771,42 @@ describe('/v1/workforce (the task-engine surface)', () => {
   it('C4: the tree caps at 500 rows and the ROOT rides even when it sorts PAST the page (union branch)', async () => {
     const a = await principal('wf-tree-cap@example.test', 'Org WF Tree Cap');
     const tdb = forTenant(h.db, a.orgId);
-    // A root whose id is the lexical MAXIMUM, so the id-ordered page never contains it — the union
-    // branch that unions the root back in MUST execute. The off-by-one this pins: the old code
-    // checked the +1 overflow PROBE for membership, not the SLICED page, so a root sitting at page
-    // index 500 passed the check yet was dropped by the slice, and the tree rendered an arbitrary
-    // child's story. 501 children + 1 root = 502 rows, so the 501-row probe is all children.
-    const rootId = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
-    const inserted = (await tdb
-      .insert(schema.workforceTasks, {
-        taskId: rootId,
+    // The off-by-one this pins bites ONLY when the root sits INSIDE the +1 overflow probe at index
+    // 500 — inside the probe (so the old membership check saw it and skipped the union) yet dropped
+    // by the 500-row slice. That needs the root's id to sort at exactly position 500: 500 children
+    // whose ids sort BELOW it, and at least one whose id sorts ABOVE it (so the probe fills to 501
+    // and the root is its last, sliced-off row). A lexical-MAX root — every child below it — would
+    // instead land the root OUTSIDE the probe, where even the old code unioned it back and the
+    // assertion passed on the unfixed code. Ids are controlled directly here for that reason.
+    const rootId = '88888888-8888-4888-8888-888888888888'; // sorts after the 500 below, before the 2 above
+    const insertControlled = (taskId: string, title: string) =>
+      tdb.insert(schema.workforceTasks, {
+        taskId,
         workforceId: 'wf',
-        parentTaskId: null,
+        parentTaskId: taskId === rootId ? null : rootId,
         rootTaskId: rootId,
-        ancestryPath: [],
-        title: 'Runaway root',
+        ancestryPath: taskId === rootId ? [] : [rootId],
+        title,
         goal: 'Serve the route tests.',
         description: null,
-        owner: 'coordinator',
-        requestedBy: 'user',
+        owner: taskId === rootId ? 'coordinator' : 'worker-swarm',
+        requestedBy: taskId === rootId ? 'user' : 'coordinator',
         department: null,
         priority: 'normal',
         dependencies: [],
         status: 'planned',
-      })
-      .returning()) as unknown as Parameters<typeof insertChildTask>[1][];
-    const root = inserted[0] as Parameters<typeof insertChildTask>[1];
-    for (let slot = 0; slot < 501; slot += 1) {
-      await insertChildTask(tdb, root, 1, slot, {
-        title: `Child ${slot}`,
-        goal: 'One of many.',
-        owner: 'worker-swarm',
       });
+    await insertControlled(rootId, 'Runaway root');
+    // 500 children that sort BELOW the root (prefix 00000000…): they fill the probe's first 500 slots.
+    for (let slot = 0; slot < 500; slot += 1) {
+      await insertControlled(
+        `00000000-0000-4000-8000-${slot.toString().padStart(12, '0')}`,
+        `Below ${slot}`,
+      );
     }
+    // 2 children that sort ABOVE the root (prefix ffffffff…): they push the root to probe index 500.
+    await insertControlled('ffffffff-ffff-4fff-8fff-000000000001', 'Above 1');
+    await insertControlled('ffffffff-ffff-4fff-8fff-000000000002', 'Above 2');
     const res = await jsonRequest(h.app, 'GET', `/v1/workforce/tasks/${rootId}/tree`, {
       headers: { authorization: `Bearer ${a.token}` },
     });

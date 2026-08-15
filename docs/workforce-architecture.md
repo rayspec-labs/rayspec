@@ -20,8 +20,9 @@ a re-applied turn a clean no-op, and the reaper releases the dead claim's reserv
 applied twice and no duplicate children are opened. The acceptance stories prove the park case
 directly (`workforce-story-e2e.db.test.ts` lands its SIGKILL at the approval park and the reboot
 oracle — status, version, transition count, turn-start count per task — is identical across the
-kill); the mid-turn re-execution/duplication guarantee is the receipt and reap suites'
-(`workforce-e2e.db.test.ts` inherits the Phase-1 mid-turn kill).
+kill); the mid-turn re-execution/duplication guarantee is proven by simulation — the
+receipt-idempotency and reaper suites — not by an empirical mid-turn process kill (both
+acceptance e2e tests land their SIGKILL at a park, never inside a running turn).
 
 ## One journal, one writer
 
@@ -235,9 +236,10 @@ drain, a second boot on the same database, and a snapshot oracle over every task
 version, transition count and turn-start count that must be identical across the kill. The
 workforce acceptance story's SIGKILL lands at a QUIESCENT PARK (the approval wait) — where "a wait
 is a row" makes the reboot a straight resume — which is the case that oracle pins byte-for-byte
-(`workforce-story-e2e.db.test.ts`). The harder MID-TURN kill (the turn body re-executes and the
-model re-runs, application still exactly-once) is inherited from the Phase-1 e2e
-(`workforce-e2e.db.test.ts`), and the no-duplication half is the receipt and reap suites'. The
+(`workforce-story-e2e.db.test.ts`). The harder MID-TURN case (the turn body re-executes and the
+model re-runs, application still exactly-once) is proven by simulation — the receipt-idempotency
+and reaper suites — rather than by an empirical mid-turn process kill; there is no such kill test,
+and both acceptance e2e tests land their SIGKILL at a park. The
 engine-level guards that make it all true: the workflow-id claim, the receipt idempotency, and the
 one-writer transition monopoly above.
 

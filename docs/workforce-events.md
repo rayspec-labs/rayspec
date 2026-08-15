@@ -58,12 +58,14 @@ The journal event vocabulary is:
   so what an event says and what a view shows can never come from two places.
 
 **Honest scope — what the shipped surface does NOT replay.** The only replay endpoint reads the
-TASK stream (`run_id = <taskId>`). The workforce-scoped **`workforce.control.*`** events
-(`paused`/`resumed`/`halted`, written under `run_id = workforce:<workforceId>`) and the root-scoped
-budget-escalation events are DURABLY WRITTEN with the same versioned vocabulary, but the reference
-orchestration ships no reader that replays the `workforce:<workforceId>` stream — a consumer that
-wants control history reads that `run_id` from `run_events` itself. Documenting the control vocabulary
-here is a forward contract for such a consumer, not a claim that a shipped endpoint serves it.
+TASK stream (`run_id = <taskId>`). The root-scoped budget-escalation events ARE replayable: they
+are written under `run_id = <rootTaskId>`, so the root task's own events endpoint serves them. What
+has no reader is the workforce-scoped **`workforce.control.*`** events (`paused`/`resumed`/`halted`,
+written under `run_id = workforce:<workforceId>`): they are DURABLY WRITTEN with the same versioned
+vocabulary, but the reference orchestration ships no reader that replays the `workforce:<workforceId>`
+stream — a consumer that wants control history reads that `run_id` from `run_events` itself.
+Documenting the control vocabulary here is a forward contract for such a consumer, not a claim that a
+shipped endpoint serves it.
 
 ## Notable semantics
 
