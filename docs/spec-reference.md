@@ -1906,6 +1906,339 @@ are described in
 and [concepts → serving a frontend](./concepts.md#serving-a-frontend). It is a boot
 behaviour selected by the spec's shape and the environment, not a new grammar field.
 
+## `workforce` (experimental)
+
+A `workforce:` section declares an ORGANIZATION of agent-backed employees — who exists, how they
+are organized into departments and teams, what they may spend, and which review and approval
+policies route their work — and hands it to the durable task engine: every unit of work is a
+task row in Postgres, every state change is a journaled transition, and a killed process resumes
+on restart with nothing lost (see [workforce architecture](./workforce-architecture.md) for the
+mechanics, [workforce tools](./workforce-tools.md) for what each role can do, and
+[workforce events](./workforce-events.md) for the journal vocabulary).
+
+**The section is EXPERIMENTAL and off by default.** Every entry point — `doctor`, `plan`,
+`deploy --dry-run`, and the server boot — refuses a document that declares `workforce:` unless
+`RAYSPEC_EXPERIMENTAL_WORKFORCE` is set (truthy spellings: `1`, `true`, `yes`; anything else is
+off). The refusal is the typed `experimental_section_disabled` error naming the section, never a
+silent ignore — an experimental section can never leak into a surface that has not chosen to
+carry it. A document WITHOUT the section parses byte-identically whether or not the flag is set.
+Declaring the section additionally requires a durable worker (`deployment.durableWorker: true`)
+and the deployment task tenant (`RAYSPEC_CRON_TENANT_ID`) at serve time; without them the boot
+aborts with a message naming both.
+
+At most ONE `workforce:` block per document. Ids everywhere in the section (`id`, employee,
+department and team ids) are safe identifiers (`[a-z_][a-z0-9_]*`): they land in URL path
+segments, in task-owner columns and in delegation target strings, and carry the same
+injection-guard posture store names do. Unknown keys are rejected at EVERY nesting level.
+
+### `id`, `name`, `orchestrator`
+
+- `id` — the workforce's own identifier. It may not be one of the surface's reserved path
+  segments (`tasks`, `approvals`, `reviews`, `cost`, and friends) — a workforce named after a
+  collection would be unreachable for control and reads, so it is refused at parse
+  (`reserved_workforce_id`) and again anywhere a task row could mint it.
+- `name` — the display name (the orchestrator's role frame renders it).
+- `orchestrator` — the ENTRY-POINT employee: every submitted goal becomes a task owned by this
+  seat. Exactly one employee holds role `orchestrator`, the `orchestrator` key must name them,
+  and they declare no `reportsTo` — the reporting chain roots AT the orchestrator
+  (`invalid_orchestrator` covers all three violations).
+
+### `budgets`
+
+Declared ceilings the ENGINE enforces at the dispatch boundary — the one place a unit of work
+can be denied without killing anything in flight. A denial parks the task
+`blocked(budget_exhausted)` with a typed reason and a journal event; nothing is spent and
+nothing is silently truncated. All tiers are optional; an absent tier means no ceiling.
+
+```yaml
+budgets:
+  workforce:
+    usd: 25            # whole-workforce ceiling per calendar window
+    window: daily      # hourly | daily | weekly (default: daily), UTC calendar windows
+  task:
+    usd: 2.5           # per-task ceiling …
+    turns: 20          # … BOTH members required together (see below)
+  delegation:
+    maxDepth: 3        # how deep delegation chains may nest
+    maxPerTask: 4      # how many children one task may open in total
+```
+
+`budgets.task` requires BOTH `usd` and `turns` whenever the object is present: the engine's
+per-turn reservation estimate derives from `usd / turns`, and a usd ceiling that cannot reserve
+per turn cannot bound concurrent dispatch — the engine refuses exactly that incoherence, so the
+grammar makes it unrepresentable. The lint additionally requires the `task` tier whenever ANY
+usd ceiling is declared anywhere in the section.
+
+### `execution`
+
+Operational ceilings beside the monetary ones:
+
+```yaml
+execution:
+  maxConcurrentWorkers: 4     # per workforce (departments may declare their own, below)
+  maxTaskWallClock: 30m       # durations: <n><s|m|h|d>, e.g. 45s, 30m, 2h, 1d
+  maxReviewRounds: 2          # review/rework cycles before a human decides
+  onBudgetExhausted: block    # block (default) | block_and_escalate
+```
+
+Concurrency is a QUEUE, not a state: a task at a saturated workforce simply stays `queued` — no
+transition, no reservation, no journal event — and is picked up when a slot frees.
+
+### `departments`
+
+```yaml
+departments:
+  - id: eng
+    name: Engineering
+    manager: mgr_eng          # an employee holding role `manager` (or the orchestrator seat)
+    mission: Build and verify the release.
+    members: [principal_eng, devops]
+    budgets:                  # optional per-department ceilings
+      usd: 5
+      window: daily
+      maxConcurrentWorkers: 2
+```
+
+A department resolves delegation addressed to it (`department:eng`) onto its `manager`, who
+answers FOR the department and is therefore never inside its own `members`
+(`manager_in_members`). Membership must cohere in both directions: an employee's declared
+`department` must list them, and a member's own `department` field must name the department
+(`department_mismatch`). Department budgets may only ever be TIGHTER than the workforce ceiling
+that contains them, compared per-hour-normalized across windows (`budget_widening`).
+
+### `employees`
+
+```yaml
+employees:
+  - id: principal_eng
+    agent: principal_agent    # a declared agents[].id — the model/backend this seat runs on
+    title: Principal Engineer
+    department: eng           # optional; reviewers and the orchestrator often have none
+    reportsTo: mgr_eng        # optional; defaults to the declared department's manager
+    role: worker              # orchestrator | manager | worker | reviewer (closed set)
+    capabilities: [public_statement]   # opaque policy labels — matched, never interpreted
+```
+
+The `role` determines which NATIVE toolset the employee receives at dispatch — and nothing else
+(see [workforce tools](./workforce-tools.md)). `capabilities` are opaque labels: review and
+approval rules match them for equality, and no runtime behavior ever interprets their spelling.
+The EFFECTIVE reporting edge is `reportsTo`, else the declared department's manager; the
+resulting graph must be acyclic (`reporting_cycle`) and every chain must reach the orchestrator
+(`orphan_employee`). An employee id may not be `user` — that is the human-owner sentinel every
+task-owner column reserves (`reserved_workforce_id`). Backends whose structured output is
+emulated rather than native may bind `worker` seats only: `orchestrator`, `manager` and
+`reviewer` turn output is parsed as a typed contract, and an employee in one of those roles
+bound to such a backend is rejected at validation (`capability_violation`), not at runtime.
+
+### `teams`
+
+```yaml
+teams:
+  - id: release_crew
+    lead: mgr_eng             # must hold role `manager`
+    members: [principal_eng, devops]
+    maxSize: 3                # required — a team is a bounded unit
+```
+
+A static, declared team. Delegation addressed to it (`team:release_crew`) resolves to its
+`lead`, who fans out to the members and takes the synthesis turn when the join wakes them —
+resolution never expands a team into N children by itself. Teams are deliberately
+cross-functional (members may come from different departments); the lead is never among their
+own members, the orchestrator is a member of nothing, and the member list may not exceed
+`maxSize`.
+
+### `reviewPolicies`
+
+```yaml
+reviewPolicies:
+  - id: eng_quality
+    appliesTo:
+      department: eng         # and/or `employee: <id>`; at least one selector required
+    reviewer: qa              # holds role `reviewer` or `manager`
+    requireWhen:
+      confidenceBelow: 0.8    # and/or `capabilities: [label, …]`
+    onReject: rework          # the one shipped rejection behavior
+    maxRounds: 2
+```
+
+Policy is runtime code over declared rules, never prompt text: when a covered employee submits a
+result, the FIRST matching rule (declaration order) routes it to independent review no matter
+what the turn asked for. The two triggers differ honestly: a `capabilities` rule matches the
+employee's DECLARED labels and fires on every covered completion, unconditionally; a
+`confidenceBelow` rule matches the confidence the SUBMITTER wrote, so it is a useful heuristic
+over self-report, not a control — a result claiming high confidence does not trip it. A
+rejection re-queues the task for rework until `maxRounds` is spent, at which point the task
+parks in `waiting_for_user` for a human. A rule whose reviewer would review their own submission
+falls to the human instead — a submitter never decides their own work.
+
+### `approvals`
+
+```yaml
+approvals:
+  - id: public_statement_signoff
+    requireWhen:
+      capabilities: [public_statement]
+    approver: user            # v1 pins approvals to the deployment's human operator surface
+    timeout: 2h
+    onTimeout: fail           # fail | escalate
+```
+
+The declared window and fate for `request_approval`: when a covered employee (first matching
+rule by declared capability) asks for sign-off, the task parks in
+`waiting_for_user(approval_pending)` at zero cost — no process attached, no budget consumed —
+until a human decides over the HTTP surface or `rayspec workforce approvals approve|reject`. A
+hung approval always has an enforced fate: the timeout sweep applies `onTimeout` (`fail`, or
+`escalate` up the requester's reporting edge — which is why an `escalate` rule covering the
+orchestrator seat, who reports to no one, is refused).
+
+### A worked example
+
+The worked example below is the workforce block of `examples/workforce-starter/rayspec.yaml`,
+byte-for-byte — the block is deliberately that file's final top-level section, and a CI test
+fails if the two ever differ. The same file is the document the workforce acceptance story
+deploys and drives end to end, so everything quoted here is executable truth:
+
+```yaml
+workforce:
+  id: starter
+  name: Release Workforce
+  orchestrator: lead
+  budgets:
+    workforce:
+      usd: 25
+      window: daily
+    task:
+      usd: 2.5
+      turns: 20
+    delegation:
+      maxDepth: 3
+      maxPerTask: 4
+  execution:
+    maxConcurrentWorkers: 4
+    maxTaskWallClock: 30m
+    maxReviewRounds: 2
+  departments:
+    - id: eng
+      name: Engineering
+      manager: mgr_eng
+      mission: Build and verify the release.
+      members: [principal_eng, devops]
+    - id: growth
+      name: Growth
+      manager: mgr_growth
+      mission: Announce the release.
+      members: [copywriter]
+  employees:
+    - id: lead
+      agent: lead_agent
+      title: Lead
+      role: orchestrator
+    - id: mgr_eng
+      agent: eng_mgr_agent
+      title: Engineering Manager
+      department: eng
+      reportsTo: lead
+      role: manager
+    - id: mgr_growth
+      agent: growth_mgr_agent
+      title: Growth Manager
+      department: growth
+      reportsTo: lead
+      role: manager
+    - id: principal_eng
+      agent: principal_agent
+      title: Principal Engineer
+      department: eng
+      reportsTo: mgr_eng
+      role: worker
+    - id: devops
+      agent: devops_agent
+      title: DevOps Engineer
+      department: eng
+      reportsTo: mgr_eng
+      role: worker
+    - id: copywriter
+      agent: copy_agent
+      title: Copywriter
+      department: growth
+      reportsTo: mgr_growth
+      role: worker
+      capabilities: [public_statement]
+    - id: qa
+      agent: qa_agent
+      title: Quality Reviewer
+      reportsTo: lead
+      role: reviewer
+  teams:
+    - id: release_crew
+      lead: mgr_eng
+      members: [principal_eng, devops]
+      maxSize: 3
+  reviewPolicies:
+    - id: eng_quality
+      appliesTo:
+        department: eng
+      reviewer: qa
+      requireWhen:
+        confidenceBelow: 0.8
+      onReject: rework
+      maxRounds: 2
+  approvals:
+    - id: public_statement_signoff
+      requireWhen:
+        capabilities: [public_statement]
+      approver: user
+      timeout: 2h
+      onTimeout: fail
+```
+
+### Validation
+
+Every rule above is enforced at parse/lint time with a typed error naming the violation; every
+code below has a failing-spec fixture in CI. The workforce validation codes are:
+
+- `experimental_section_disabled` — the document declares `workforce:` and this entry point did
+  not opt in via `RAYSPEC_EXPERIMENTAL_WORKFORCE`.
+- `invalid_orchestrator` — the entry-point rules: the named employee does not hold role
+  `orchestrator`, a second employee holds it, or the orchestrator declares `reportsTo`.
+- `invalid_manager` — a department `manager` holds neither role `manager` nor the orchestrator
+  seat.
+- `manager_in_members` — a department manager listed inside its own `members`.
+- `department_mismatch` — employee↔department membership incoherence in either direction.
+- `reporting_cycle` — the effective reporting graph contains a cycle (self included).
+- `orphan_employee` — an employee whose effective reporting chain never reaches the
+  orchestrator.
+- `invalid_reviewer` — a review policy's `reviewer` holds neither role `reviewer` nor `manager`.
+- `budget_widening` — a department budget out-rates the workforce ceiling that contains it
+  (per-hour-normalized across windows).
+- `reserved_workforce_id` — the workforce id is a reserved path segment, or an employee id is
+  `user`.
+- `reserved_tool_name` — an employee's agent declares a tool named after a native workforce
+  tool (natives are injected by role and always win; a shadowed tool is refused up front).
+
+Shared codes fire here too: `duplicate_name` (ids colliding across employees, departments and
+teams), `dangling_ref` (an employee's `agent`, a member, a lead, a reviewer or a selector naming
+nothing declared), and `capability_violation` (a decision role bound to a backend without native
+structured output). The advisory `workforce_capability_unheld` WARNING flags a review or
+approval rule keyed on a capability no employee holds — a rule that can never fire is usually a
+typo, but it is not an error.
+
+### Deploying and changing a workforce
+
+Org structure is never persisted — it derives fresh from the deployed document at every boot;
+only the derived budgets land on the per-workforce runtime row the engine reads ceilings from.
+One fail-closed redeploy rule protects live work: a new document may not remove or rename an
+employee, department, team, or the workforce itself while non-terminal tasks still reference it
+— the boot refuses with the task ids in the message. Pure additions always deploy.
+(`deploy --dry-run` has no database and cannot run this check; its output says so.)
+
+### What the built-in orchestration deliberately does not include
+
+No cross-run learning, no historical performance routing, no semantic memory (recall is recency
+plus keyword over this tenant's own rows), no cross-provider cost optimization, and no advanced
+context packing — each boundary and the mechanism behind it is stated in
+[workforce architecture](./workforce-architecture.md#honest-scope).
+
 ---
 
 # The product profile
@@ -2443,6 +2776,9 @@ deployment_overrides:
 ## See also
 
 - **[Concepts](./concepts.md)** — the vocabulary this reference formalizes.
+- **[Workforce architecture](./workforce-architecture.md)**, **[events](./workforce-events.md)**,
+  **[tools](./workforce-tools.md)** — the experimental `workforce` section's runtime, journal
+  contract, and role toolsets.
 - **[CLI reference](./cli-reference.md)** — `doctor`, `plan`, and `openapi`
   validate and preview a spec.
 - **[Architecture](./ARCHITECTURE.md)** — how a spec becomes a running backend.
