@@ -39,6 +39,7 @@ import {
   haltWorkforce,
   isReservedWorkforceSegment,
   isTaskStatus,
+  MAX_TASK_TEXT_BYTES,
   operatorSignalKindSchema,
   pauseWorkforce,
   RESERVED_WORKFORCE_SEGMENTS,
@@ -142,14 +143,16 @@ const haltRequestSchema = z.strictObject({
 });
 
 /**
- * The goal (and description) ceiling at the intake edge, in BYTES — the same unit the turn
- * input's section budgets use (a character cap would let a multibyte goal pass here and burst
- * the budget there). A fraction of the assembly's task-section budget (the assembly asserts the
- * margin at module load), so a goal accepted on this surface can ALWAYS be rendered untrimmed
- * into the owning employee's turns — the goal-never-trimmed refusal then only ever fires on
- * goals minted by code that bypassed it.
+ * The goal (and description) ceiling at the intake edge, in BYTES — the SHARED `MAX_TASK_TEXT_BYTES`
+ * (@rayspec/tasks), the same constant and unit the engine's creation schema and the delegate/create
+ * toolset enforce (a character cap would let a multibyte goal pass here and burst the byte-denominated
+ * turn-input budget there). It is a fraction of the assembly's task-section budget — the assembly
+ * asserts THAT margin (`MAX_TASK_TEXT_BYTES` vs `SECTION_BUDGETS.task`) at module load (context.ts) —
+ * so a goal accepted on this surface can ALWAYS be rendered untrimmed into the owning employee's
+ * turns; the goal-never-trimmed refusal then only ever fires on goals minted by code that bypassed
+ * this cap.
  */
-const MAX_GOAL_BYTES = 16_384;
+const MAX_GOAL_BYTES = MAX_TASK_TEXT_BYTES;
 const withinGoalBytes = (text: string) => Buffer.byteLength(text, 'utf8') <= MAX_GOAL_BYTES;
 
 const goalRequestSchema = z.strictObject({
@@ -633,19 +636,25 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       // THE ROOT ALWAYS RIDES THE RESPONSE. Task ids are random/hash UUIDs — id order is
       // deterministic, not creation order — so a >cap subtree's id-ordered page has no reason to
       // contain the root at all, and a tree whose goal line names an arbitrary child would
-      // misread as that child's story. When the page missed it, one more point read fetches it
-      // and it takes the first slot; the page yields one row to stay inside the cap.
-      let rows = pageRows;
-      if (!pageRows.some((row) => row.taskId === anchor.rootTaskId)) {
+      // misread as that child's story. Membership is checked against the SLICED page — the rows we
+      // actually return — NOT the +1 overflow probe: when the root sorts at index 500 it is inside
+      // the 501-row probe yet dropped by the slice, so checking the probe let the slice strand it
+      // (the off-by-one). When the page missed it, one point read fetches it and it takes the first
+      // slot; the page yields its tail to stay inside the cap.
+      const truncated = pageRows.length > TREE_MAX_TASKS;
+      const page = pageRows.slice(0, TREE_MAX_TASKS);
+      let rows: TaskRow[];
+      if (page.some((row) => row.taskId === anchor.rootTaskId)) {
+        rows = page;
+      } else {
         const rootRows =
           anchor.taskId === anchor.rootTaskId
             ? [anchor]
             : ((await tdb
                 .select(schema.workforceTasks)
                 .where(eq(schema.workforceTasks.taskId, anchor.rootTaskId))) as TaskRow[]);
-        rows = [...rootRows, ...pageRows];
+        rows = [...rootRows, ...page].slice(0, TREE_MAX_TASKS);
       }
-      const truncated = rows.length > TREE_MAX_TASKS;
       let budgets: { taskUsd: number | null; taskTurns: number | null } | null = null;
       if (anchor.workforceId !== null) {
         try {
@@ -665,7 +674,7 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       return c.json(
         {
           rootTaskId: anchor.rootTaskId,
-          tasks: rows.slice(0, TREE_MAX_TASKS) as unknown as Record<string, unknown>[],
+          tasks: rows as unknown as Record<string, unknown>[], // already capped at TREE_MAX_TASKS
           budgets,
         },
         200,
@@ -842,6 +851,27 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       const workforceId = workforceIdParam(c);
       const tenantId = c.get('tenantId');
       if (!tenantId) throw new ApiError('NOT_FOUND', 'Not found.');
+      // R1: this route does not honor Idempotency-Key yet (a retry after a lost 202 mints a SECOND
+      // billed root — a double-bill). The two sibling billed-work routes honor the header, so
+      // silently ignoring it here is a lost-write trap. Until real idempotency lands, REFUSE a
+      // supplied key (400) rather than accepting and dropping it.
+      if (c.req.header('Idempotency-Key') !== undefined) {
+        throw new ApiError(
+          'VALIDATION_ERROR',
+          'This route does not support Idempotency-Key yet: a retry after a lost 202 would mint a ' +
+            'second root. Omit the header and check the task list before retrying.',
+        );
+      }
+      // C5 QUOTA (cost-DoS bound): every call mints a FRESH billed root run with no dedupe, and
+      // budgets are optional (a document without `budgets:` has no backstop), so an authenticated
+      // store:write principal could loop-mint unbounded dispatched runs. Throttle one
+      // (tenant, workforce) via the SAME limiter triggers.ts/reprocess.ts use — BEFORE the body
+      // read, so an over-quota call reads and dispatches nothing.
+      const { allowed, retryAfterMs } = await deps.rateLimiter.checkAsync(
+        'goal-submit',
+        `${tenantId}:${workforceId}`,
+      );
+      if (!allowed) throw new ApiError('RATE_LIMITED', 'Too many requests.', { retryAfterMs });
       const body = goalRequestSchema.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
       const result = await intake.submitGoal({
         tenantId,
@@ -854,10 +884,14 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       if (result.outcome === 'not_found') throw new ApiError('NOT_FOUND', 'Not found.');
       if (result.outcome === 'invalid_plan') {
         // The strategy is deployment configuration, never client input — a refused plan is a
-        // server-side defect and says so, rather than hiding behind a 4xx the caller cannot fix.
+        // server-side defect and says so (500), not a 4xx the caller cannot fix. R5: the body is
+        // STATIC — `result.detail` names employee ids, department names and the strategy id
+        // (deployment shape), and this surface's rule is that a 5xx echoes no deployment config to
+        // the client. The detail stays server-side.
         throw new ApiError(
           'INTERNAL',
-          `The orchestration strategy produced a plan the intake refused: ${result.detail}`,
+          'The orchestration strategy produced a plan the intake refused — a server-side ' +
+            'configuration defect. See the server logs for detail.',
         );
       }
       workforce.kick();

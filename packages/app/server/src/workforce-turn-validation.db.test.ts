@@ -424,6 +424,47 @@ describe.skipIf(!hasDb)('the turn chain: dispatch validate-in → composition �
     expect(children[0]?.c).toBe(0); // nothing was minted from the oversized hand-off
   });
 
+  it('C7: a MULTIBYTE hand-off goal over the BYTE cap (but under a char cap) is refused too — no brick', async () => {
+    // 6_000 CJK chars = 18_000 bytes: UNDER a 16_384-CHAR cap (the old bug) but OVER the 16_384-BYTE
+    // cap. A char cap would let this pass creation and then brick every dispatch of the child on
+    // GoalExceedsContextBudgetError (the goal is never trimmed). The byte cap refuses it at the seam.
+    const task = await workingTaskFor('lead');
+    const { outcome, applied } = await runTurn(task, [
+      {
+        name: 'delegate_task',
+        args: { tasks: [{ target: 'department:eng', title: 'Stuffed', goal: 'あ'.repeat(6_000) }] },
+      },
+    ]);
+    expect(outcome.intent).toEqual({ kind: 'malformed_turn_ending' });
+    expect(applied.plan?.kind).toBe('invalid_intent');
+    const children = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_tasks WHERE parent_task_id = '${task.taskId}';`,
+    );
+    expect(children[0]?.c).toBe(0); // nothing was minted from the oversized multibyte hand-off
+  });
+
+  it('R2: the ENGINE suppresses a classification that DISAGREES with the accepted intent (defense in depth)', async () => {
+    // A buggy embedder journals `escalate` beside an ACCEPTED `complete` — the shipped composition
+    // never does this (it derives from the same map the engine re-derives from). The engine drops
+    // the mismatch: a journaled classification NAMES the intent it rode with, or it is absent. So no
+    // caller can journal a routing decision the turn did not make.
+    const task = await workingTaskFor('lead');
+    await applyTurnOutcome(tdb(), {
+      taskId: task.taskId,
+      turnId: turnIdFor(task.taskId, 1),
+      turnNumber: 1,
+      intent: {
+        kind: 'complete',
+        result: { status: 'completed', summary: 'Done.', confidence: 0.9 },
+      },
+      classification: 'escalate', // lies about a 'complete' — 'direct' is what it implies
+      budgets: NO_BUDGETS,
+    });
+    const payload = await turnEndedPayload(task.taskId);
+    expect(payload).toMatchObject({ outcome: 'complete' });
+    expect('classification' in payload).toBe(false); // the disagreeing value is dropped
+  });
+
   it('the ENGINE suppresses a classification beside an intent it refused — no caller can journal a decision that never was', async () => {
     const task = await workingTaskFor('lead');
     await applyTurnOutcome(tdb(), {

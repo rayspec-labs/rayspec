@@ -10,38 +10,22 @@
  * The `team` arm reads the resolver-written `delegatedTo` on the fan-out children — the trusted
  * record of what was ADDRESSED, which the resolver stamped and the model cannot rewrite.
  */
-import type { TurnClassification, TurnIntent } from '@rayspec/tasks';
+import { classificationForIntent, type TurnClassification, type TurnIntent } from '@rayspec/tasks';
 import type { EmployeeRole } from './roles.js';
 
 /**
  * The closed mapping. Null means "this turn carries no classification": a non-decision seat, a
  * verdict/housekeeping/failure ending, or no collected intent at all.
+ *
+ * The DECISION-SEAT gate lives here (the composition's concern); the intent→class map itself is
+ * `classificationForIntent` in @rayspec/tasks — the ONE source the engine re-derives from at journal
+ * time (apply-intents.ts), so what this deriver produces and what the engine will accept can never
+ * drift.
  */
 export function classifyTurnIntent(
   intent: TurnIntent,
   role: EmployeeRole,
 ): TurnClassification | null {
   if (role !== 'orchestrator' && role !== 'manager') return null;
-  switch (intent.kind) {
-    case 'complete':
-      return 'direct';
-    case 'fan_out':
-      // The resolver wrote `delegatedTo` from the validated target — `team:` there means a team
-      // was ADDRESSED, whoever ended up owning the child rows.
-      return intent.children.some((child) => child.delegatedTo?.startsWith('team:'))
-        ? 'team'
-        : 'delegate';
-    case 'request_review':
-      return 'review';
-    case 'request_approval':
-    case 'escalate':
-    case 'request_clarification':
-      // All three hand the decision upward — to a human, to the reporting line, or back to the
-      // requester. The exit class, whichever door.
-      return 'escalate';
-    default:
-      // submit_review (a verdict, journaled on its own event), cancel_task, yield, fail —
-      // housekeeping and failure endings classify nothing.
-      return null;
-  }
+  return classificationForIntent(intent);
 }

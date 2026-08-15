@@ -4,7 +4,7 @@
  * non-aggregation is this table plus the resolver keying on the task owner alone). The name
  * vocabulary is the reserved set in @rayspec/core (spec validation refuses collisions with it).
  */
-import { RESERVED_WORKFORCE_TOOL_NAMES } from '@rayspec/core';
+import { BRIDGED_TOOL_NAME_SOURCE, RESERVED_WORKFORCE_TOOL_NAMES } from '@rayspec/core';
 
 export const EMPLOYEE_ROLES = ['orchestrator', 'manager', 'worker', 'reviewer'] as const;
 export type EmployeeRole = (typeof EMPLOYEE_ROLES)[number];
@@ -43,8 +43,21 @@ export const TURN_ENDING_TOOLS: ReadonlySet<ToolName> = new Set([
  * The model-facing form an in-process MCP bridge gives a neutral tool: `mcp__<server>__<tool>`.
  * Anchored and narrow on purpose — it matches the bridged form and nothing else, so a name that
  * never went through a bridge cannot be mangled by it.
+ *
+ * This is the SAME predicate `isReservedWorkforceToolSpelling` (@rayspec/core) uses to refuse a
+ * bridged collision at parse: widening one alone (e.g. to accept `mcp_` with one underscore) would
+ * make the collision check and this turn-ending detector disagree, reopening exactly the bridged-
+ * spelling gap the PR closes. There is no cross-package regex identity, so the copy is pinned to the
+ * canonical source at module load — the same drift assert this file uses for the reserved set below.
  */
 const MCP_BRIDGED_TOOL_NAME = /^mcp__[a-z0-9-]+__(?<tool>.+)$/;
+if (MCP_BRIDGED_TOOL_NAME.source !== BRIDGED_TOOL_NAME_SOURCE) {
+  throw new Error(
+    `the bridged-tool-name pattern drifted: roles.ts has '${MCP_BRIDGED_TOOL_NAME.source}' but ` +
+      `@rayspec/core's canonical source is '${BRIDGED_TOOL_NAME_SOURCE}'. One predicate, two ` +
+      'consumers — keep them byte-identical. Fail-closed.',
+  );
+}
 
 /**
  * Does a tool name AS A BACKEND RECORDED IT on the transcript name a turn-ending tool?

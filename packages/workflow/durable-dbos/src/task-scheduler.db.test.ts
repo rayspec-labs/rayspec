@@ -252,6 +252,30 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
     expect(eventTypes.filter((t) => t === 'workforce.task.turn_started')).toHaveLength(1);
   });
 
+  it('C7: a turn handler that THROWS (e.g. a goal too large to assemble) fails the task ONCE — never an infinite requeue', async () => {
+    // The composition's `assembleTurnInput` throws `GoalExceedsContextBudgetError` for a goal that
+    // cannot fit its section (one minted by code that bypassed the byte cap). The finding: the
+    // scheduler's catch (#turnBody) is GENERIC, so whether such a throw takes the declared FAIL fate
+    // or requeues forever was unverified. Pin it: the throw becomes a `fail` intent, the task ends
+    // `failed`, and it is dispatched exactly ONCE — no deterministic free-retry loop.
+    let attempts = 0;
+    handlers.set('over-budget', async () => {
+      attempts += 1;
+      throw new Error(
+        "task 'x' carries a 99999-byte goal, but section 4 has 45000 bytes for it. The goal is the " +
+          'instruction and is never trimmed. Fail-closed. (GoalExceedsContextBudgetError)',
+      );
+    });
+    const root = await newRoot('over-budget');
+    await pumpUntil(async () => (await taskRow(root.taskId)).status === 'failed');
+    const row = await taskRow(root.taskId);
+    expect(row.status).toBe('failed');
+    // Give any spurious re-dispatch a chance to happen, then confirm it did NOT.
+    await scheduler.runReservePass();
+    await scheduler.runReservePass();
+    expect(attempts).toBe(1);
+  });
+
   it('runs the whole fan-out story: children as own workflows, join wakes the parent with keyed results', async () => {
     let secondTurnResults: Readonly<Record<string, MergedChildResult>> | null = null;
     handlers.set('coordinator', async (ctx: TaskTurnContext) => {

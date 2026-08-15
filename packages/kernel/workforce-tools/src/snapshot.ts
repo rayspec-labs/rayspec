@@ -84,6 +84,13 @@ export interface WorkforceReadSnapshot {
    */
   readonly ancestorOwners: readonly string[];
   /**
+   * How many delegations THIS task has already opened — the planner's `existingDelegationCount`,
+   * the value it adds new hand-offs to before comparing to `maxPerTask`. Read here (one indexed
+   * count on `parentTaskId`) so the scaffolding can state the REMAINING fan-out allowance, not the
+   * static cap: a second delegating turn otherwise reads "up to M children" when M−k remain.
+   */
+  readonly delegationsFromTask: number;
+  /**
    * The declared ceilings, resolved off the runtime row — every role, every turn (the scaffolding
    * presents headroom and limits as facts before the model runs; a single-row read). The row
    * exists for any declared workforce (boot upserts it) and for any dispatched one (the scheduler
@@ -163,9 +170,8 @@ export async function buildWorkforceSnapshot(
         ? joinPolicySchema.safeParse(parentTask.joinPolicy)
         : null;
     if (
-      parentTask !== null &&
-      binding !== null &&
-      binding.success &&
+      parentTask &&
+      binding?.success &&
       binding.data.policy === 'review' &&
       binding.data.reviewTaskId === task.taskId &&
       binding.data.reviewId !== undefined
@@ -323,6 +329,15 @@ export async function buildWorkforceSnapshot(
     ),
   ].sort();
 
+  // THE FAN-OUT ALREADY SPENT FROM THIS TASK — the planner's `existingDelegationCount`, read the
+  // same way (`workforce_delegations` keyed by `parentTaskId`) but as an indexed COUNT (one row).
+  // Advisory: the enforcement re-reads it under the task lock; the scaffolding only needs it to
+  // state the remaining allowance honestly.
+  const delegationCount = (await tdb
+    .select(schema.workforceDelegations, { count: sql<number>`count(*)::int` })
+    .where(eq(schema.workforceDelegations.parentTaskId, task.taskId))) as Array<{ count: number }>;
+  const delegationsFromTask = delegationCount[0]?.count ?? 0;
+
   return {
     task,
     parentTask,
@@ -332,6 +347,7 @@ export async function buildWorkforceSnapshot(
     pendingReview,
     activeTeamIds,
     ancestorOwners,
+    delegationsFromTask,
     budgets,
     dependencyResults,
   };

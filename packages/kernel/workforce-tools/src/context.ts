@@ -25,15 +25,24 @@
  * those from the snapshot on demand, and rendering them would spend the byte budget on what a
  * tool call can fetch precisely.
  *
+ * THE TRUST BOUNDARY IS ENFORCED IN CODE, not only asserted below the data-boundary line. Every
+ * value a MODEL, a REQUESTER or a PRIOR TURN authored — task title/goal/description, message body,
+ * recall hit text, signal payloads, child/dependency results — is UNTRUSTED and passes through
+ * `sanitizeUntrusted` (raw strings) or `escapeRawSeparators` (JSON values) before it renders, so no
+ * untrusted content can place a raw line break and forge a column-0 `## N.` section header or a
+ * second data-boundary line. Config-derived text (identity, role frame, policies) is deployer-
+ * authored — reviewed like code — and is trusted, so it renders as-is. See the helpers below.
+ *
  * The scripted-turn fixtures parse this rendering. The stable anchors, kept byte-compatible with
  * the pre-sectioned composition: line 1 (`You are '<id>' (<title>), role '<role>'.`), line 2
- * (`DATA_BOUNDARY_LINE`), the `Turn <n>.` sentence, the goal rendered VERBATIM on its own line,
- * section 5's header phrase `Completed child results`, and the `- <kind>: <payload>` signal
- * lines. Changing any of these is a fixture-lockstep change, not a wording tweak.
+ * (`DATA_BOUNDARY_LINE`), the `Turn <n>.` sentence, the goal rendered on its own line (verbatim but
+ * for the line-boundary/control chars the trust boundary neutralizes — a single-line goal is
+ * unchanged), section 5's header phrase `Completed child results`, and the `- <kind>: <payload>`
+ * signal lines. Changing any of these is a fixture-lockstep change, not a wording tweak.
  */
 import type { MemoryHit } from '@rayspec/core';
 import type { WorkforceEmployeeConfig } from '@rayspec/spec';
-import type { MergedChildResult, TaskRecord } from '@rayspec/tasks';
+import { MAX_TASK_TEXT_BYTES, type MergedChildResult, type TaskRecord } from '@rayspec/tasks';
 import type { TurnFacts } from './facts.js';
 import {
   DATA_BOUNDARY_LINE,
@@ -89,6 +98,21 @@ if (MANDATORY_CEILING + GUIDANCE_CEILING >= TURN_INPUT_MAX_BYTES) {
   );
 }
 
+// THE GOAL-CAP MARGIN. Every task-creation surface caps a goal/description at `MAX_TASK_TEXT_BYTES`
+// (@rayspec/tasks), and the goal is NEVER trimmed — so that cap plus section 4's fixed lines (header,
+// `Task <id>: <title>` with the title at its own char cap, the meta line, an optional deadline) must
+// fit `SECTION_BUDGETS.task`, or a legally-created goal would brick every dispatch on
+// `GoalExceedsContextBudgetError`. This is the assert the intake route's comment refers to: it is what
+// makes "a goal accepted anywhere always renders untrimmed" a proven fact rather than a hope.
+const TASK_SECTION_FIXED_OVERHEAD_BOUND = 2_048; // header + a max-length title + meta + deadline + joins
+if (MAX_TASK_TEXT_BYTES + TASK_SECTION_FIXED_OVERHEAD_BOUND > SECTION_BUDGETS.task) {
+  throw new Error(
+    `the goal byte cap (MAX_TASK_TEXT_BYTES=${MAX_TASK_TEXT_BYTES}) plus section 4's fixed overhead ` +
+      `does not fit SECTION_BUDGETS.task (${SECTION_BUDGETS.task}) — a legally-created goal could ` +
+      'not render untrimmed. Fix the constants.',
+  );
+}
+
 /** A mandatory, config-derived section outgrew its budget — a misconfigured workforce, refused. */
 export class ContextSectionOverflowError extends Error {
   readonly section: string;
@@ -114,6 +138,24 @@ export class GoalExceedsContextBudgetError extends Error {
     );
     this.name = 'GoalExceedsContextBudgetError';
     this.taskId = taskId;
+  }
+}
+
+/**
+ * The assembled input exceeded the whole-input ceiling even after every elastic section was dropped
+ * — unreachable while the module-load `MANDATORY_CEILING` assert holds (the mandatory sections plus
+ * guidance fit with room). Reaching it means that invariant was broken in code, so the assembler
+ * REFUSES typed rather than returning an over-ceiling string a caller believes is bounded: the one
+ * place the drop loop could fail open, closed.
+ */
+export class ContextInputOverflowError extends Error {
+  constructor(rendered: number, ceiling: number) {
+    super(
+      `the assembled turn input renders to ${rendered} bytes against the ${ceiling}-byte ceiling ` +
+        'with every elastic section already dropped — the mandatory-section budgets no longer fit ' +
+        'the ceiling. This is a broken module invariant, not a runtime input. Fail-closed.',
+    );
+    this.name = 'ContextInputOverflowError';
   }
 }
 
@@ -158,10 +200,50 @@ function truncateToBytes(text: string, maxBytes: number): string {
   while (sliced.length > 0 && bytesOf(sliced) > maxBytes) {
     sliced = sliced.slice(0, -1);
   }
+  // Never end on a split astral pair — a lone high surrogate is mangled text, not a shorter string
+  // (memory.ts's clampText carries the same guard). Dropping it only shrinks the result, so it stays
+  // inside the byte budget.
+  if (/[\uD800-\uDBFF]$/.test(sliced)) sliced = sliced.slice(0, -1);
   return sliced;
 }
 
 const TRUNCATED_MARKER = '…[truncated: byte budget]';
+
+/**
+ * THE TRUST BOUNDARY, ENFORCED IN CODE (not only asserted in prose). Every string below the
+ * data-boundary line that a MODEL, a REQUESTER or a PRIOR TURN authored — a task title/goal/
+ * description, a message body, a recall hit — is UNTRUSTED and renders inside a newline-delimited,
+ * `## N. <header>`-structured document. A raw line break in that content would let it start a new
+ * line and place a column-0 `## N.` section header or a forged data-boundary line, byte-
+ * indistinguishable from the platform's own. `sanitizeUntrusted` strips every line-boundary-class
+ * and control char (C0, DEL, C1 incl. U+0085 NEL, plus U+2028 LS / U+2029 PS) so untrusted text can
+ * never begin a line — the label before it (`Goal: `, `- from … : `, `- `) then keeps it off
+ * column 0. Config-derived text (identity, role frame, policies) is deployer-authored — reviewed
+ * like code — and is NOT untrusted, so it is rendered as-is.
+ *
+ * The three raw line-boundary chars `JSON.stringify` leaves UNescaped (U+0085/U+2028/U+2029 — the
+ * `assemble.ts` gotcha) are the residual for the JSON-serialized untrusted values (signal payloads,
+ * child/dependency results); `escapeRawSeparators` closes it on their stringify output, the same
+ * shape `conversation-runtime/assemble.ts` uses.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: neutralizing C0/DEL/C1/LS/PS in untrusted text is the point.
+const UNTRUSTED_STRUCTURE_CHARS = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g;
+function sanitizeUntrusted(text: string): string {
+  return text.replace(UNTRUSTED_STRUCTURE_CHARS, ' ');
+}
+const RAW_JSON_LINE_SEPARATORS = /[\u0085\u2028\u2029]/g;
+/** Escape the three line-boundary chars `JSON.stringify` leaves raw \u2014 lossless (`\uXXXX`), so the
+ * JSON stays valid and no untrusted string VALUE can smuggle a raw line break out of its quotes. */
+function escapeRawSeparators(json: string): string {
+  return json.replace(
+    RAW_JSON_LINE_SEPARATORS,
+    (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
+}
+/** One untrusted value as a single jailed JSON line (signal payloads). */
+function jsonData(value: unknown): string {
+  return escapeRawSeparators(JSON.stringify(value) ?? 'null');
+}
 
 function usd(value: number): string {
   return `$${value.toFixed(2)}`;
@@ -244,8 +326,10 @@ function renderPolicies(input: TurnInputFacts): string {
         ? `depth remaining ${facts.delegationDepthRemaining}`
         : 'no depth ceiling';
     const fanOutLabel =
-      facts.delegationsPerTaskLimit !== null
-        ? `up to ${facts.delegationsPerTaskLimit} children per task`
+      facts.delegationsPerTaskRemaining !== null
+        ? `up to ${facts.delegationsPerTaskRemaining} more ${
+            facts.delegationsPerTaskRemaining === 1 ? 'child' : 'children'
+          } from this task`
         : 'no per-task fan-out ceiling';
     lines.push(`Delegation: ${depthLabel}, ${fanOutLabel}.`);
     lines.push(`Legal delegation targets: ${facts.legalTargets.join(', ')}.`);
@@ -306,24 +390,29 @@ function renderPolicies(input: TurnInputFacts): string {
 /** One child/dependency entry, rendered whole when it fits and compacted (never invalid JSON)
  * when it does not — the compact form keeps the typed fields and slices only the summary. */
 function renderMergedResult(entry: MergedChildResult): string {
-  const whole = JSON.stringify(entry, null, 1);
+  // The result is a child's model-authored output — untrusted. JSON.stringify escapes ASCII control
+  // chars (incl. `\n`); `escapeRawSeparators` closes the U+0085/U+2028/U+2029 residual so no string
+  // VALUE inside can smuggle a raw line break that forges structure.
+  const whole = escapeRawSeparators(JSON.stringify(entry, null, 1));
   if (bytesOf(whole) <= CHILD_RESULT_MAX_BYTES) return whole;
   const summary =
     typeof entry.result === 'object' && entry.result !== null && 'summary' in entry.result
       ? String((entry.result as { summary: unknown }).summary)
       : null;
-  return JSON.stringify(
-    {
-      status: entry.status,
-      statusReason: entry.statusReason,
-      confidence: entry.confidence,
-      costUsd: entry.costUsd,
-      turnsUsed: entry.turnsUsed,
-      ...(summary !== null ? { summary: truncateToBytes(summary, 1_024) } : {}),
-      truncated: TRUNCATED_MARKER,
-    },
-    null,
-    1,
+  return escapeRawSeparators(
+    JSON.stringify(
+      {
+        status: entry.status,
+        statusReason: entry.statusReason,
+        confidence: entry.confidence,
+        costUsd: entry.costUsd,
+        turnsUsed: entry.turnsUsed,
+        ...(summary !== null ? { summary: truncateToBytes(summary, 1_024) } : {}),
+        truncated: TRUNCATED_MARKER,
+      },
+      null,
+      1,
+    ),
   );
 }
 
@@ -362,8 +451,13 @@ function renderKeyedResults(
 
 function renderTask(input: TurnInputFacts): string {
   const { task } = input;
-  const fixedTop = [SECTION_HEADERS.task, `Task ${task.taskId}: ${task.title}`];
-  const goalLine = `Goal: ${task.goal}`;
+  // Title/goal/description are model- or requester-authored (untrusted) — sanitize before rendering
+  // AND before measuring, so the bytes we budget against are the bytes we emit (see the trust
+  // boundary note above). `taskId`/`requestedBy`/`priority` are server-derived, never model prose.
+  const title = sanitizeUntrusted(task.title);
+  const goal = sanitizeUntrusted(task.goal);
+  const fixedTop = [SECTION_HEADERS.task, `Task ${task.taskId}: ${title}`];
+  const goalLine = `Goal: ${goal}`;
   const metaLine =
     `Requested by: ${task.requestedBy}. Priority: ${task.priority}. ` + `Turn ${input.turnNumber}.`;
   const deadlineLine =
@@ -375,10 +469,10 @@ function renderTask(input: TurnInputFacts): string {
   const fixedLines = [...fixedTop, goalLine, metaLine, ...(deadlineLine ? [deadlineLine] : [])];
   const fixedBytes = bytesOf(fixedLines.join('\n'));
   if (fixedBytes > SECTION_BUDGETS.task) {
-    const overhead = fixedBytes - bytesOf(task.goal);
+    const overhead = fixedBytes - bytesOf(goal);
     throw new GoalExceedsContextBudgetError(
       task.taskId,
-      bytesOf(task.goal),
+      bytesOf(goal),
       Math.max(SECTION_BUDGETS.task - overhead, 0),
     );
   }
@@ -387,12 +481,13 @@ function renderTask(input: TurnInputFacts): string {
   const lines = [...fixedTop, goalLine];
   if (task.description !== null) {
     const label = 'Description: ';
+    const sanitized = sanitizeUntrusted(task.description);
     const room = remaining - bytesOf(`\n${label}${TRUNCATED_MARKER}`);
     const description =
-      bytesOf(task.description) + bytesOf(`\n${label}`) <= remaining
-        ? task.description
+      bytesOf(sanitized) + bytesOf(`\n${label}`) <= remaining
+        ? sanitized
         : room > 0
-          ? truncateToBytes(task.description, room) + TRUNCATED_MARKER
+          ? truncateToBytes(sanitized, room) + TRUNCATED_MARKER
           : null;
     if (description !== null) {
       const line = `${label}${description}`;
@@ -414,29 +509,36 @@ function renderTask(input: TurnInputFacts): string {
   }
 
   if (input.signals.length > 0) {
-    // Signals render oldest-first; when over budget the OLDEST drop first (the wake that
-    // re-queued this turn is the newest and is the one the turn must not lose).
+    // Signals render oldest-first. THE NEWEST SIGNAL IS THE WAKE — the user_reply / approval_decided
+    // that re-queued this turn — and it is NEVER dropped: it is reserved and always rendered, even
+    // when the goal has left section 4 almost no room (its payload is byte-capped, so the overflow it
+    // may add is bounded — the whole-input ceiling has the slack). Older signals fill what remains,
+    // dropping OLDEST-first, and ANY drop is announced with a marker: silent unmarked loss is how a
+    // turn quietly runs on different facts than the operator thinks. Payloads are JSON via `jsonData`
+    // (escaped line-boundary chars — a signal payload can carry untrusted user-reply text).
     const rendered = input.signals.map((signal) => {
-      const payload = JSON.stringify(signal.payload) ?? 'null';
+      const payload = jsonData(signal.payload);
       const capped =
         bytesOf(payload) <= SIGNAL_PAYLOAD_MAX_BYTES
           ? payload
           : truncateToBytes(payload, SIGNAL_PAYLOAD_MAX_BYTES) + TRUNCATED_MARKER;
       return `- ${signal.kind}: ${capped}`;
     });
+    const newest = rendered[rendered.length - 1] as string;
+    const older = rendered.slice(0, -1);
     let dropped = 0;
     for (;;) {
-      const kept = rendered.slice(dropped);
+      const keptOlder = older.slice(dropped);
       const block = [
         'Signal history (oldest first):',
         ...(dropped > 0 ? [`[…${dropped} earlier signals omitted: byte budget]`] : []),
-        ...kept,
+        ...keptOlder,
+        newest,
       ].join('\n');
-      if (bytesOf(`\n\n${block}`) <= remaining || kept.length === 0) {
-        if (kept.length > 0) {
-          lines.push('', block);
-          remaining -= bytesOf(`\n\n${block}`);
-        }
+      // Fits, or nothing older is left to drop — either way render it: the newest always survives.
+      if (bytesOf(`\n\n${block}`) <= remaining || keptOlder.length === 0) {
+        lines.push('', block);
+        remaining -= bytesOf(`\n\n${block}`);
         break;
       }
       dropped += 1;
@@ -447,7 +549,11 @@ function renderTask(input: TurnInputFacts): string {
 
 function renderMessages(messages: readonly TurnMessageFact[]): string | null {
   if (messages.length === 0) return null;
-  const rendered = messages.map((m) => `- from ${m.sender} to ${m.recipient}: ${m.body}`);
+  // `sender`/`recipient` are validated ids; `body` is model-authored (untrusted) — sanitize it so a
+  // raw line break in a `send_message` body cannot forge a section header on its own line.
+  const rendered = messages.map(
+    (m) => `- from ${m.sender} to ${m.recipient}: ${sanitizeUntrusted(m.body)}`,
+  );
   let dropped = 0;
   for (;;) {
     const kept = rendered.slice(dropped);
@@ -470,7 +576,9 @@ function renderRecall(recall: readonly MemoryHit[]): string | null {
     const omitted = recall.length - kept;
     const block = [
       SECTION_HEADERS.recall,
-      ...recall.slice(0, kept).map((hit) => `- ${hit.text}`),
+      // Hit text is a prior turn's model-authored result/decision — untrusted; sanitize so it cannot
+      // forge a boundary/section line from inside the recall list.
+      ...recall.slice(0, kept).map((hit) => `- ${sanitizeUntrusted(hit.text)}`),
       ...(omitted > 0 ? [`[…${omitted} omitted: byte budget]`] : []),
     ].join('\n');
     if (bytesOf(block) <= SECTION_BUDGETS.recall) return block;
@@ -517,7 +625,11 @@ export function assembleTurnInput(input: TurnInputFacts): string {
       ...elastic.filter((s): s is string => s !== null),
       guidance,
     ].join('\n\n');
-    if (bytesOf(assembled) <= TURN_INPUT_MAX_BYTES || dropIndex < 0) return assembled;
+    if (bytesOf(assembled) <= TURN_INPUT_MAX_BYTES) return assembled;
+    // Every elastic section is gone and it still does not fit — refuse typed, never return an
+    // over-ceiling string (the module-load assert makes this unreachable; this closes the fail-open).
+    if (dropIndex < 0)
+      throw new ContextInputOverflowError(bytesOf(assembled), TURN_INPUT_MAX_BYTES);
     elastic[dropIndex] = null;
   }
 }

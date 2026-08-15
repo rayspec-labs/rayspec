@@ -2047,14 +2047,28 @@ mechanics, [workforce tools](./workforce-tools.md) for what each role can do, an
 off). The refusal is the typed `experimental_section_disabled` error naming the section, never a
 silent ignore — an experimental section can never leak into a surface that has not chosen to
 carry it. A document WITHOUT the section parses byte-identically whether or not the flag is set.
-Declaring the section additionally requires a durable worker (`deployment.durableWorker: true`)
-and the deployment task tenant (`RAYSPEC_CRON_TENANT_ID`) at serve time; without them the boot
-aborts with a message naming both.
+Declaring the section additionally requires a durable worker (`deployment.durableWorker: true`) —
+a document that declares `workforce:` without it is refused at PARSE/LINT with a typed
+`schema_violation` (the composition root also backstops the same coupling at boot). Separately, the
+durable worker needs the deployment task tenant to run under: an unset `RAYSPEC_CRON_TENANT_ID` at
+serve time ABORTS THE BOOT, and that abort names only that one variable — the two failures are
+different mechanisms at different times, not one message naming both.
 
 At most ONE `workforce:` block per document. Ids everywhere in the section (`id`, employee,
 department and team ids) are safe identifiers (`[a-z_][a-z0-9_]*`): they land in URL path
 segments, in task-owner columns and in delegation target strings, and carry the same
 injection-guard posture store names do. Unknown keys are rejected at EVERY nesting level.
+
+### The reserved `managed:` section
+
+Alongside `workforce:`, the document grammar accepts one more OPTIONAL top-level section, `managed:`
+— a free-form mapping (`{ [string]: unknown }`) that this engine **never interprets**. It is a
+reservation for a deployment MANAGER (a platform that owns the deploy) to keep its own
+platform-side configuration in the same file, so one document serves both the manager and the
+engine. It is round-tripped verbatim, requires no flag, and a document that omits it parses
+byte-identically to one that carries it (`managed` is `.optional()`, never defaulted). Unlike
+`workforce:`, it is NOT experimental — it is a stable, publicly-parseable no-op contract. `plan`
+notes its presence in one neutral line; nothing in the engine reads a key inside it.
 
 ### `id`, `name`, `orchestrator`
 
@@ -2107,7 +2121,14 @@ execution:
 ```
 
 Concurrency is a QUEUE, not a state: a task at a saturated workforce simply stays `queued` — no
-transition, no reservation, no journal event — and is picked up when a slot frees.
+transition, no reservation, no journal event — and is picked up when a slot frees. The cap is held
+by the reserve pass counting `working` rows plus its own dispatches, so it holds WITHIN a pass; it
+is NOT a hard cluster-wide ceiling. Across overlapping passes — and, unavoidably, across separate
+worker processes — a brief OVERSHOOT is possible (a task it dispatched is not `working` until its
+claim commits, so two passes in that window each admit up to the cap), so observed concurrency can
+reach roughly overlapping-passes × cap for one claim latency. What holds unconditionally is that no
+turn is lost and none is duplicated (the workflow-id dedupe and the claim's compare-and-swap); a
+truly hard cap would need a database-counted claim reservation per scope, not a tighter read.
 
 ### `departments`
 
@@ -2144,7 +2165,9 @@ employees:
     capabilities: [public_statement]   # opaque policy labels — matched, never interpreted
 ```
 
-The `role` determines which NATIVE toolset the employee receives at dispatch — and nothing else
+The `role` sets the NATIVE toolset an employee STARTS from at dispatch; the TASK can narrow it (a
+review task withholds `request_review`), and role also gates the classification journaling and the
+structured-output check — so it is not the ONLY thing role decides, just the largest
 (see [workforce tools](./workforce-tools.md)). `capabilities` are opaque labels: review and
 approval rules match them for equality, and no runtime behavior ever interprets their spelling.
 The EFFECTIVE reporting edge is `reportsTo`, else the declared department's manager; the
@@ -2344,8 +2367,10 @@ code below has a failing-spec fixture in CI. The workforce validation codes are:
 
 Shared codes fire here too: `duplicate_name` (ids colliding across employees, departments and
 teams), `dangling_ref` (an employee's `agent`, a member, a lead, a reviewer or a selector naming
-nothing declared), and `capability_violation` (a decision role bound to a backend without native
-structured output). The advisory `workforce_capability_unheld` WARNING flags a review or
+nothing declared), `capability_violation` (a decision role bound to a backend without native
+structured output), and `schema_violation` (a zod SHAPE failure that is not a pure unknown-key
+rejection — a wrong field type, an out-of-range number, an id carrying a metacharacter or over the
+length bound; the durable-worker coupling the same profile enforces surfaces this way too). The advisory `workforce_capability_unheld` WARNING flags a review or
 approval rule keyed on a capability no employee holds — a rule that can never fire is usually a
 typo, but it is not an error.
 

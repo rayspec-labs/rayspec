@@ -12,7 +12,12 @@ its own agent's declared tools, full stop.
 
 ## Toolsets by role
 
-A role determines which native toolset a seat receives — and nothing else. The four sets:
+A role determines which native toolset a seat STARTS from. It is not the only input: the TASK
+narrows the set too — a task dispatched to decide a review does not carry `request_review` (an
+independent review of a review is an unbounded chain, refused), and role also gates the
+server-derived classification journaling (decision seats only) and the structured-output result
+check. So a seat's effective tools are its role's set, minus what the task withholds. The four
+role sets:
 
 The orchestrator toolset is: `create_task`, `delegate_task`, `request_review`,
 `request_approval`, `submit_result`, `cancel_task`, `get_workforce_state`, `get_task`,
@@ -89,8 +94,13 @@ keyed by child task id — never summaries, never completion-ordered.
 2. A fresh task carries the escalation to the caller's effective superior (`reportsTo`, else the
    department's manager); the target is resolved from the declared edge, never from arguments.
 3. The escalating task re-queues when the superior answers, or is cancelled — it never resumes
-   on its own. Escalation always terminates at a human: the orchestrator seat, which reports to
-   no one, exits through `request_approval` instead.
+   on its own. What is ENFORCED is that the chain is FINITE and rooted at the orchestrator: each
+   escalation climbs one declared reporting edge, the orchestrator reports to no one (the lint
+   requires it), and `escalate` is not in the orchestrator's toolset — so the chain cannot climb
+   past that seat. Where it TERMINATES from there is the orchestrator's own turn: it may hand the
+   decision to a human with `request_approval`, or answer with `submit_result` and end the chain
+   itself. "Always terminates at a human" is a choice that seat can make, not a mechanism the
+   runtime imposes.
 
 ## See also
 

@@ -148,6 +148,7 @@ export function emptySnapshot(
     pendingReview: null,
     activeTeamIds: [],
     ancestorOwners: [],
+    delegationsFromTask: 0,
     budgets: NO_BUDGETS,
     dependencyResults: null,
     ...over,

@@ -30,6 +30,37 @@ describe('docs/workforce-events.md', () => {
     );
     expect(documented).toEqual(new Set(WORKFORCE_EVENT_TYPES));
   });
+
+  // The PAYLOAD-FIELD column (not just the event-type list) is what a consumer keys on, and it drifts
+  // silently. Lock the fields the engine actually emits for the events whose payloads are non-obvious
+  // — the two the field audit corrected: `queued.queueReason`'s full value set, and the TWO shapes of
+  // `budget.exceeded`. A row that drops one of these tokens fails here.
+  const rowFor = (page: string, type: string): string => {
+    const line = page.split('\n').find((l) => l.startsWith(`| \`${type}\``));
+    if (line === undefined) throw new Error(`no vocabulary row for '${type}'`);
+    return line;
+  };
+
+  it('locks queueReason to every value the engine emits (turn_yield/tool_error/turn_reaped/review_verdict)', () => {
+    const row = rowFor(read('docs/workforce-events.md'), 'workforce.task.queued');
+    for (const value of ['initial', 'turn_yield', 'tool_error', 'turn_reaped', 'review_verdict']) {
+      expect(row, `queued.queueReason omits '${value}'`).toContain(`\`${value}\``);
+    }
+  });
+
+  it('locks BOTH budget.exceeded payload shapes (the exceedance and the block_and_escalate root event)', () => {
+    const row = rowFor(read('docs/workforce-events.md'), 'workforce.budget.exceeded');
+    // shape 1 — the exceedance on the offending task
+    for (const field of ['ceiling', 'consumed', 'onBudgetExhausted']) {
+      expect(row, `budget.exceeded omits '${field}'`).toContain(`\`${field}\``);
+    }
+    // shape 2 — the escalation event on the root
+    for (const field of ['escalatedFrom', 'unblock']) {
+      expect(row, `budget.exceeded omits the block_and_escalate field '${field}'`).toContain(
+        `\`${field}\``,
+      );
+    }
+  });
 });
 
 describe('docs/workforce-tools.md (the result contract the engine owns)', () => {

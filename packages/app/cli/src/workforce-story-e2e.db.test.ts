@@ -4,17 +4,22 @@
  * the middle and every assertion on durable artifacts or real command output:
  *
  *   the goal is POSTed to the production intake route → the orchestrator's turn classifies and
- *   fans out to BOTH departments in one call (the classification journaled from the typed
- *   intent) → engineering splits across its workers → the principal's low-confidence submission
+ *   fans out to the engineering TEAM (`team:release_crew`) and the growth department in one call
+ *   (the classification 'team', journaled from the typed intent) → the team resolves to its lead,
+ *   which splits the work across the team's members → the principal's low-confidence submission
  *   trips the declared review policy → the reviewer REJECTS round 1 → the rework resubmits →
  *   accepted round 2 → the copywriter drafts the announcement and the GROWTH MANAGER (the seat
  *   holding both the public_statement label and the request_approval tool) hits the declared
- *   approval — the growth stream parks in waiting_for_user → the server is SIGKILLED and a
- *   fresh process boots on the same
- *   database (the whole task table proven byte-identical) → the approval is decided through the
- *   REAL CLI → the orchestrator wakes with its children's results KEYED BY ID and submits a
- *   synthesis that is a pure function of those ids → `rayspec workforce tasks --tree` renders
- *   the whole story from the task rows alone, byte-exact, costs included.
+ *   approval — the growth stream parks in waiting_for_user → the server is SIGKILLED here, at a
+ *   QUIESCENT PARK (nothing is mid-turn — a wait is a row), and a fresh process boots on the same
+ *   database, where the reboot ORACLE (each task's status, version, transition count and turn-start
+ *   count — not a whole-row byte compare, which timestamps would defeat) is identical across the
+ *   kill → the approval is decided through the REAL CLI → the orchestrator wakes with its
+ *   children's results KEYED BY ID and submits a synthesis that is a pure function of those ids →
+ *   `rayspec workforce tasks --tree` renders the whole story from the DURABLE `workforce_tasks`
+ *   rows (the engine's own projection — not "the journal alone"), byte-exact, costs included. The
+ *   byte-exactness rests on a DETERMINISTIC sibling order (createdAt, title, taskId): the random
+ *   task-id hashes never leak into the render, so a parallel fan-out reads the same every run.
  *
  * THE POLLS ASSERT NOTHING. Every fact a `waitUntil` predicate mentions is re-asserted
  * afterwards, and the waits fail FAST with the task table on a story that already cannot finish.
@@ -384,8 +389,9 @@ describe.skipIf(!baseUrl)(
       expect(tasksA).toHaveLength(8); // root + 2 department streams + 3 leaf tasks + 2 review tasks
       const root = tasksA.find((r) => r.task_id === rootId) as TaskRow;
 
-      // step 3 — ONE orchestrator turn fanned out to BOTH departments; the parent holds the join
-      // park with no process attached, and the classification is journaled from the TYPED intent.
+      // step 3 — ONE orchestrator turn fanned out to the engineering TEAM and the growth department;
+      // the parent holds the join park with no process attached, and the classification is journaled
+      // from the TYPED intent (see the team-leg assertions at step 9).
       expect(root).toMatchObject({ status: 'blocked', status_reason: 'awaiting_children' });
       const departmentTasks = tasksA.filter((r) => r.parent_task_id === rootId);
       expect(departmentTasks.map((r) => r.title).sort()).toEqual(['Engineering', 'Growth']);
@@ -407,7 +413,9 @@ describe.skipIf(!baseUrl)(
       expect(turnEnded[0]?.data).toMatchObject({
         v: 1,
         outcome: 'fan_out',
-        classification: 'delegate',
+        // The fan-out addressed a TEAM (team:release_crew) alongside a department, so the derived
+        // class is 'team' — read from the resolver-written delegatedTo, not from prose.
+        classification: 'team',
       });
 
       // steps 4–5 — the worker results and the whole review loop, on durable rows.
@@ -499,6 +507,37 @@ describe.skipIf(!baseUrl)(
       expect(Number(finalRoot.confidence)).toBeCloseTo(0.97, 5);
       expect(tasksZ.every((r) => r.status === 'completed')).toBe(true);
       expect(tasksZ.find((r) => r.title === 'Growth')).toMatchObject({ status: 'completed' });
+
+      // ── DoD-4: the TEAM leg, end to end ──────────────────────────────────────────────────────
+      // The orchestrator delegated the engineering work to team:release_crew; the run drove the
+      // whole `team:` path — resolution to the lead, the lead's member fan-out, and the join.
+      const engTask = tasksZ.find((r) => r.title === 'Engineering') as TaskRow;
+      const teamDelegation = (await (sql as ReturnType<typeof postgres>)`
+      SELECT delegated_to, resolved_owner, status FROM workforce_delegations
+        WHERE child_task_id = ${engTask.task_id}`) as unknown as Array<{
+        delegated_to: string;
+        resolved_owner: string;
+        status: string;
+      }>;
+      // (a) TEAM RESOLUTION: what was ADDRESSED is the team; it resolved to the team's lead. By this
+      // point in the story the engineering child has reached its terminal status, and
+      // `afterTaskTerminal` settles the opening delegation row to that status (settlementStatus),
+      // so the record reads 'completed' here — it was 'accepted' when the fan-out opened it at step 3.
+      expect(teamDelegation[0]).toMatchObject({
+        delegated_to: 'team:release_crew',
+        resolved_owner: 'mgr_eng',
+        status: 'completed',
+      });
+      // (b) the member FAN-OUT BINDING: the team lead opened tasks for the team's members.
+      const memberOwners = (await (sql as ReturnType<typeof postgres>)`
+      SELECT resolved_owner FROM workforce_delegations
+        WHERE parent_task_id = ${engTask.task_id} ORDER BY resolved_owner`) as unknown as Array<{
+        resolved_owner: string;
+      }>;
+      expect(memberOwners.map((d) => d.resolved_owner)).toEqual(['devops', 'principal_eng']);
+      // (c) the JOIN: the lead woke with BOTH members' results and completed on a synthesis turn.
+      expect(engTask).toMatchObject({ status: 'completed', turns_used: 2 });
+      expect(Number(engTask.confidence)).toBeCloseTo(0.95, 5);
 
       // The journal narrates the whole root lifecycle from one stream.
       const rootEvents = await eventTypes(rootId);

@@ -768,28 +768,56 @@ describe('/v1/workforce (the task-engine surface)', () => {
     expect(body.budgets).toEqual({ taskUsd: 2.5, taskTurns: 20 });
   });
 
-  it('the tree caps at 500 rows with the truncation flag, and budgets are null without a runtime row', async () => {
+  it('C4: the tree caps at 500 rows and the ROOT rides even when it sorts PAST the page (union branch)', async () => {
     const a = await principal('wf-tree-cap@example.test', 'Org WF Tree Cap');
     const tdb = forTenant(h.db, a.orgId);
-    const root = await seedRoot(a.orgId, 'Runaway root');
-    for (let slot = 0; slot < 500; slot += 1) {
+    // A root whose id is the lexical MAXIMUM, so the id-ordered page never contains it — the union
+    // branch that unions the root back in MUST execute. The off-by-one this pins: the old code
+    // checked the +1 overflow PROBE for membership, not the SLICED page, so a root sitting at page
+    // index 500 passed the check yet was dropped by the slice, and the tree rendered an arbitrary
+    // child's story. 501 children + 1 root = 502 rows, so the 501-row probe is all children.
+    const rootId = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+    const inserted = (await tdb
+      .insert(schema.workforceTasks, {
+        taskId: rootId,
+        workforceId: 'wf',
+        parentTaskId: null,
+        rootTaskId: rootId,
+        ancestryPath: [],
+        title: 'Runaway root',
+        goal: 'Serve the route tests.',
+        description: null,
+        owner: 'coordinator',
+        requestedBy: 'user',
+        department: null,
+        priority: 'normal',
+        dependencies: [],
+        status: 'planned',
+      })
+      .returning()) as unknown as Parameters<typeof insertChildTask>[1][];
+    const root = inserted[0] as Parameters<typeof insertChildTask>[1];
+    for (let slot = 0; slot < 501; slot += 1) {
       await insertChildTask(tdb, root, 1, slot, {
         title: `Child ${slot}`,
         goal: 'One of many.',
         owner: 'worker-swarm',
       });
     }
-    const res = await jsonRequest(h.app, 'GET', `/v1/workforce/tasks/${root.taskId}/tree`, {
+    const res = await jsonRequest(h.app, 'GET', `/v1/workforce/tasks/${rootId}/tree`, {
       headers: { authorization: `Bearer ${a.token}` },
     });
     expect(res.status).toBe(200);
     expect(res.headers.get('X-Result-Truncated')).toBe('true');
-    const body = (await res.json()) as { tasks: Array<{ taskId: string }>; budgets: unknown };
+    const body = (await res.json()) as {
+      rootTaskId: string;
+      tasks: Array<{ taskId: string }>;
+      budgets: unknown;
+    };
     expect(body.tasks).toHaveLength(500);
-    // THE ROOT ALWAYS RIDES A TRUNCATED PAGE: ids are random UUIDs, so the id-ordered window has
-    // no reason to contain it — and a goal line naming an arbitrary child would misread as that
-    // child's story. The route unions the root in whenever the page missed it.
-    expect(body.tasks.some((t) => t.taskId === root.taskId)).toBe(true);
+    // THE ROOT ALWAYS RIDES A TRUNCATED PAGE — checked against the SLICED page now, so it survives
+    // even when it sorts last and the probe never held it.
+    expect(body.tasks.some((t) => t.taskId === rootId)).toBe(true);
+    expect(body.rootTaskId).toBe(rootId);
     expect(body.budgets).toBeNull(); // no runtime row was ever created for 'wf' here
   });
 
@@ -846,7 +874,11 @@ describe('/v1/workforce (the task-engine surface)', () => {
       headers: { authorization: `Bearer ${a.token}` },
     });
     expect(refused.status).toBe(500);
-    expect((await refused.json()).error.message).toContain("step 0 names owner 'ghost'");
+    // R5: the 500 body is STATIC — it never echoes the deployment shape the detail names (employee
+    // ids, department names, the strategy id). The detail stays server-side.
+    const refusedBody = (await refused.json()).error.message as string;
+    expect(refusedBody).not.toContain('ghost');
+    expect(refusedBody).toContain('server-side');
     expect(kicks).toBe(0); // no outcome above created any work to dispatch
   });
 
@@ -868,6 +900,29 @@ describe('/v1/workforce (the task-engine surface)', () => {
       headers: auth,
     });
     expect(reserved.status).toBe(400);
+
+    // R7: the goal cap is in BYTES — a >16 KiB multibyte goal is refused at the schema edge (a char
+    // cap would let it through and then brick the owner's dispatch).
+    const overSizedGoal = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'あ'.repeat(6_000) }, // 6000 × 3 bytes = 18_000 bytes > 16_384
+      headers: auth,
+    });
+    expect(overSizedGoal.status).toBe(400);
+    const overSizedDesc = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'ok', description: 'x'.repeat(16_385) }, // 16_385 bytes > 16_384
+      headers: auth,
+    });
+    expect(overSizedDesc.status).toBe(400);
+
+    // R1: the goals route does not honor Idempotency-Key yet — a supplied key is REFUSED (400),
+    // never silently ignored (which would double-bill on a retry after a lost 202).
+    const withIdemKey = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'Ship it.' },
+      headers: { ...auth, 'idempotency-key': 'client-supplied-key-1' },
+    });
+    expect(withIdemKey.status).toBe(400);
+    expect((await withIdemKey.json()).error.message).toContain('Idempotency-Key');
+
     expect(goalSubmissions).toHaveLength(0); // every refusal above precedes the seam
 
     const mint = await jsonRequest(h.app, 'POST', `/v1/orgs/${a.orgId}/api-keys`, {
@@ -881,6 +936,27 @@ describe('/v1/workforce (the task-engine surface)', () => {
     });
     expect(write.status).toBe(403);
     expect((await write.json()).error.details).toEqual({ missing_permission: 'store:write' });
+  });
+
+  it('C5: rate-limits repeated goal submissions of the SAME workforce (429 after the quota, before the intake)', async () => {
+    const a = await principal('wf-goal-quota@example.test', 'Org WF Goal Quota');
+    h.deps.rateLimiter.clearAll(); // deterministic: start the goal-submit bucket empty
+    // The default goal-submit quota is 30 per (tenant, workforce) per window — every call mints a
+    // fresh billed root run, the cost-DoS the two sibling routes throttle the same way.
+    for (let i = 0; i < 30; i += 1) {
+      const ok = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+        body: { goal: 'Ship it.' },
+        headers: { authorization: `Bearer ${a.token}` },
+      });
+      expect(ok.status).toBe(202);
+    }
+    const blocked = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'Ship it.' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(blocked.status).toBe(429);
+    expect((await blocked.json()).error.code).toBe('RATE_LIMITED');
+    expect(goalSubmissions).toHaveLength(30); // the 31st never reached the intake
   });
 });
 

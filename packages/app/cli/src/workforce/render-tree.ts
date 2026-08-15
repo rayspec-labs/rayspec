@@ -5,8 +5,12 @@
  * it carries one, and its settled cost in an aligned column. This rendering IS the contract the
  * acceptance story pins byte-for-byte, so every formatting rule lives HERE and nowhere else:
  *
- *   - node order: children by task id ascending — DETERMINISTIC, not creation order (task ids
- *     are random/hash UUIDs, so id order carries no timeline);
+ *   - node order: siblings by (createdAt, title, taskId) — DETERMINISTIC and cross-run STABLE.
+ *     Task ids are random/hash UUIDs, so id order carries no timeline AND flips run to run (a
+ *     parallel fan-out then renders its departments in a different order each run — the flaky
+ *     proof). createdAt is the real timeline ACROSS turns; but siblings born in ONE fan-out share a
+ *     transaction, and Postgres `now()` stamps them IDENTICALLY, so a stable secondary key is
+ *     required — the operator-facing `title`, with the id only as the final tiebreaker;
  *   - labels: the root renders its OWNER (the seat the goal entered through), every other node
  *     its TITLE (what the delegation named the work);
  *   - annotations: `[status]`, or `[status: reason]` when a reason is set; then the confidence
@@ -29,6 +33,20 @@ export interface TreeTaskRow {
   readonly confidence: string | number | null;
   readonly costUsd: string | number;
   readonly turnsUsed: number;
+  /** Creation time (ISO-8601 UTC as the API serializes it) — the primary sibling-order key. */
+  readonly createdAt: string;
+}
+
+/**
+ * Total order over siblings: creation time first (the real timeline across turns), then the
+ * operator-facing title (the stable discriminator for siblings born in ONE fan-out, whose
+ * transaction-shared `now()` ties createdAt), then the task id as the final tiebreaker. Cross-run
+ * STABLE — no random-hash id order leaks into the render.
+ */
+function compareSiblings(a: TreeTaskRow, b: TreeTaskRow): number {
+  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
+  if (a.title !== b.title) return a.title < b.title ? -1 : 1;
+  return a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0;
 }
 
 export interface TreeBudgets {
@@ -36,6 +54,16 @@ export interface TreeBudgets {
 }
 
 const usd = (value: string | number): string => `$${Number(value).toFixed(2)}`;
+
+/**
+ * The node LABEL is model-authored — a delegating turn chooses the `title`, and the tree is the
+ * operator's audit view. A raw newline / carriage return / ESC in a title would let it forge a
+ * sibling node line (or drive a terminal escape) into the console. Strip them at the one place a
+ * label renders; `status` (a closed set) and `owner`/`statusReason` (validated) are safe.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping CR/LF/ESC from an untrusted label is the point.
+const LABEL_STRUCTURE_CHARS = /[\r\n\x1b]/g;
+const cleanLabel = (label: string): string => label.replace(LABEL_STRUCTURE_CHARS, ' ');
 
 interface Line {
   readonly prefix: string;
@@ -45,7 +73,7 @@ interface Line {
 function annotate(row: TreeTaskRow, label: string): string {
   const reason = row.statusReason !== null ? `: ${row.statusReason}` : '';
   const confidence = row.confidence !== null ? ` ${Number(row.confidence).toFixed(2)}` : '';
-  return `${label} [${row.status}${reason}]${confidence}`;
+  return `${cleanLabel(label)} [${row.status}${reason}]${confidence}`;
 }
 
 /** Render one subtree depth-first; `stem` accumulates the ancestor glyph columns. */
@@ -72,7 +100,7 @@ export function renderTaskTree(
   truncated: boolean,
 ): string {
   const byId = new Set(rows.map((row) => row.taskId));
-  const sorted = [...rows].sort((a, b) => (a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0));
+  const sorted = [...rows].sort(compareSiblings);
   const childrenOf = new Map<string, TreeTaskRow[]>();
   const topLevel: TreeTaskRow[] = [];
   for (const row of sorted) {
@@ -93,7 +121,7 @@ export function renderTaskTree(
   const subtreeCost = rows.reduce((sum, row) => sum + Number(row.costUsd), 0);
   const subtreeTurns = rows.reduce((sum, row) => sum + row.turnsUsed, 0);
   const ceiling = budgets?.taskUsd != null ? usd(budgets.taskUsd) : '—';
-  const header = `Goal: ${root.title}  (${root.taskId} · ${usd(subtreeCost)} / ${ceiling} · ${subtreeTurns} turns)`;
+  const header = `Goal: ${cleanLabel(root.title)}  (${root.taskId} · ${usd(subtreeCost)} / ${ceiling} · ${subtreeTurns} turns)`;
 
   const lines: Line[] = [];
   lines.push({ prefix: annotate(root, root.owner), cost: usd(root.costUsd) });

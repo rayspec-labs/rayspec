@@ -12,11 +12,16 @@ change without notice.
 
 **A wait is a row, never a process.** A task that is delegating, under review, or waiting for a
 human is a Postgres row with a status and no process attached. Resume is a fresh, journaled
-dispatch — nothing ever "continues" in memory across a decision, so killing the process at any
-point and restarting it on the same database changes no outcome
-(`workforce-e2e.db.test.ts` kills a real server mid-story with SIGKILL and proves the whole
-task table byte-identical after reboot; the workforce acceptance story does it again at the
-approval park).
+dispatch — nothing ever "continues" in memory across a decision. So a kill AT A PARK changes no
+outcome at all: the wait is already a row, and the reboot resumes it from that row. A kill
+MID-TURN is recovered differently — the turn body re-executes from the top and the model runs
+again (its transcript may differ), but the APPLICATION stays exactly-once: the turn's receipt makes
+a re-applied turn a clean no-op, and the reaper releases the dead claim's reservation, so no turn is
+applied twice and no duplicate children are opened. The acceptance stories prove the park case
+directly (`workforce-story-e2e.db.test.ts` lands its SIGKILL at the approval park and the reboot
+oracle — status, version, transition count, turn-start count per task — is identical across the
+kill); the mid-turn re-execution/duplication guarantee is the receipt and reap suites'
+(`workforce-e2e.db.test.ts` inherits the Phase-1 mid-turn kill).
 
 ## One journal, one writer
 
@@ -40,9 +45,12 @@ The only way back into execution is `queued`, so every resume is a fresh dispatc
 optimistic version and journaled before it returns.
 
 Enforced by: `scripts/check-state-machine-exhaustive.mjs` (a build gate that fails on a missing
-cell, a truthy terminal cell, a reason without a status rule, or ANY status write outside
-`applyTransition`), 100% branch coverage thresholds on the transition table and the pure intent
-planner, and a property suite driving random transition sequences
+cell, a truthy terminal cell, a reason without a status rule, or a status write outside
+`applyTransition` that it can SEE — it is a static source tripwire over the tracked engine files, a
+loud early warning rather than a runtime monopoly; a raw write the scan cannot reach is not caught
+by it, which is why the write path stays disciplined to the one function), 100% branch coverage
+thresholds on the transition table and the pure intent planner, and a property suite driving random
+transition sequences
 (`transitions.property.test.ts`).
 
 ## The turn lifecycle
@@ -205,16 +213,33 @@ fails without it (`workforce-turn-validation.db.test.ts` drives the whole chain)
   journal records both facts when they disagree (`classification: direct` beside
   `outcome: complete_with_review`).
 - **Everything model-authored renders as data.** Task fields, messages, child results and recall
-  render under a stated data/instruction boundary line, capped per item and per section.
+  render under a stated data/instruction boundary line, capped per item and per section — AND
+  neutralized: every line-boundary and control character is stripped (or, for JSON-serialized
+  values, escaped) before it renders, so no untrusted string can start a new line and forge a
+  `## N.` section header or a second boundary line (the two mandated forgery tests — a header via a
+  message body, a boundary via a recall hit — fail without it; `context.test.ts`).
+
+**The one place a model's self-report reaches control flow — stated honestly.** A `confidenceBelow`
+review rule fires on the confidence NUMBER the submitting turn wrote: a low self-report routes the
+result to review (which is what a low number is for), but a turn that reports `0.99` dodges that
+rule, and a `submit_result` with no confidence at all does not trip it (the rule keys on a present
+number below the threshold). This is the deliberate exception to "model output is never authority":
+the self-report is an INPUT to a declared rule, never a bypass of one — the reviewer, the max rounds
+and the reject→rework loop are all enforced regardless, and the `firesOnCapabilities` branch of the
+same policy fires UNCONDITIONALLY on the declared labels, with no number to dodge.
 
 ## Crash safety
 
 The acceptance stories are the proof, not a demo: a real spawned server, a real SIGKILL with no
 drain, a second boot on the same database, and a snapshot oracle over every task's status,
-version, transition count and turn-start count that must be identical across the kill
-(`workforce-e2e.db.test.ts`, `workforce-story-e2e.db.test.ts`). The engine-level guards that
-make it true: the workflow-id claim, the receipt idempotency, and the one-writer transition
-monopoly above.
+version, transition count and turn-start count that must be identical across the kill. The
+workforce acceptance story's SIGKILL lands at a QUIESCENT PARK (the approval wait) — where "a wait
+is a row" makes the reboot a straight resume — which is the case that oracle pins byte-for-byte
+(`workforce-story-e2e.db.test.ts`). The harder MID-TURN kill (the turn body re-executes and the
+model re-runs, application still exactly-once) is inherited from the Phase-1 e2e
+(`workforce-e2e.db.test.ts`), and the no-duplication half is the receipt and reap suites'. The
+engine-level guards that make it all true: the workflow-id claim, the receipt idempotency, and the
+one-writer transition monopoly above.
 
 ## Honest scope
 

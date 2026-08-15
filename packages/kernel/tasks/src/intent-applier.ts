@@ -82,6 +82,32 @@ export const TURN_CLASSIFICATIONS = ['direct', 'delegate', 'team', 'review', 'es
 
 export type TurnClassification = (typeof TURN_CLASSIFICATIONS)[number];
 
+/**
+ * The pure map from a TYPED intent to the classification it implies — the SINGLE SOURCE both the
+ * composition's role-gated deriver (`classifyTurnIntent`, which adds the decision-seat gate) and the
+ * engine's own journal-time re-derivation use, so the two can never disagree about what an intent
+ * classifies as. `null` for the endings that classify nothing (a verdict, housekeeping, failure).
+ * The `team` arm reads the resolver-written `delegatedTo` — the trusted record of what was ADDRESSED.
+ */
+export function classificationForIntent(intent: TurnIntent): TurnClassification | null {
+  switch (intent.kind) {
+    case 'complete':
+      return 'direct';
+    case 'fan_out':
+      return intent.children.some((child) => child.delegatedTo?.startsWith('team:'))
+        ? 'team'
+        : 'delegate';
+    case 'request_review':
+      return 'review';
+    case 'request_approval':
+    case 'escalate':
+    case 'request_clarification':
+      return 'escalate';
+    default:
+      return null;
+  }
+}
+
 export const turnClassificationSchema = z.enum(TURN_CLASSIFICATIONS);
 
 /** The one turn-ending intent a handler returns. Strict at every level. */

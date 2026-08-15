@@ -53,8 +53,14 @@ export interface TurnFacts {
   };
   /** Delegations from here may nest this many more levels; null when no ceiling is declared. */
   readonly delegationDepthRemaining: number | null;
-  /** How many children one task may open in total; null when no ceiling is declared. */
-  readonly delegationsPerTaskLimit: number | null;
+  /**
+   * How many MORE children this task may still open — the declared `maxPerTask` minus the fan-out
+   * already spent from it, so a second delegating turn (rework, post-join synthesis) is told the
+   * REMAINING allowance, never the static cap (the planner refuses `existing + created > maxPerTask`
+   * — R-3-of-#400). Stated as a remaining count exactly the way depth is; null when no ceiling is
+   * declared.
+   */
+  readonly delegationsPerTaskRemaining: number | null;
 }
 
 /**
@@ -78,10 +84,16 @@ function legalTargetsFor(
 ): readonly string[] {
   if (depthRemaining !== null && depthRemaining <= 0) return [];
   const ancestors = new Set(snapshot.ancestorOwners);
-  // The RESOLVED owner is what the cycle rule sees: a department resolves to its manager, a team
-  // to its lead — the same resolution `resolve-target.ts` applies.
-  const departmentLegal = (id: string): boolean =>
-    !ancestors.has(config.departments.get(id)?.manager ?? '');
+  // The RESOLVED owner is what the cycle AND self-delegation rules see: a department resolves to its
+  // manager, a team to its lead — the same resolution `resolve-target.ts` applies. The lint permits
+  // the ORCHESTRATOR to manage a department, so a department resolving to the caller itself is a
+  // `self_delegation` refusal and must be subtracted here too — the same `id !== self && !ancestor`
+  // test `employeeLegal` applies to a resolved owner (a team lead is always a manager, never the
+  // orchestrator, so `team:` can never resolve to the orchestrator caller — no self test needed).
+  const departmentLegal = (id: string): boolean => {
+    const manager = config.departments.get(id)?.manager ?? '';
+    return manager !== employee.id && !ancestors.has(manager);
+  };
   const teamLegal = (id: string): boolean => !ancestors.has(config.teams.get(id)?.lead ?? '');
   const employeeLegal = (id: string): boolean => id !== employee.id && !ancestors.has(id);
 
@@ -138,6 +150,7 @@ export function computeTurnFacts(input: {
   const budgets = snapshot.budgets;
   const stateBudget = snapshot.workforceState?.budget ?? null;
   const maxDepth = budgets.delegation?.maxDepth ?? null;
+  const maxPerTask = budgets.delegation?.maxPerTask ?? null;
   const ancestryDepth = Array.isArray(task.ancestryPath)
     ? (task.ancestryPath as string[]).length
     : 0;
@@ -156,6 +169,7 @@ export function computeTurnFacts(input: {
       taskCeilingTurns: budgets.task?.turns ?? null,
     },
     delegationDepthRemaining: depthRemaining,
-    delegationsPerTaskLimit: budgets.delegation?.maxPerTask ?? null,
+    delegationsPerTaskRemaining:
+      maxPerTask !== null ? Math.max(maxPerTask - snapshot.delegationsFromTask, 0) : null,
   };
 }

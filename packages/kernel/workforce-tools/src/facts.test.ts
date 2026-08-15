@@ -167,7 +167,8 @@ describe('computeTurnFacts', () => {
     });
     const facts = computeTurnFacts({ config, employee: employee('mgr'), task, snapshot });
     expect(facts.delegationDepthRemaining).toBe(1);
-    expect(facts.delegationsPerTaskLimit).toBe(4);
+    // No fan-out spent yet on this task → the full allowance remains.
+    expect(facts.delegationsPerTaskRemaining).toBe(4);
 
     const unbounded = computeTurnFacts({
       config,
@@ -176,7 +177,55 @@ describe('computeTurnFacts', () => {
       snapshot: emptySnapshot(task),
     });
     expect(unbounded.delegationDepthRemaining).toBeNull();
-    expect(unbounded.delegationsPerTaskLimit).toBeNull();
+    expect(unbounded.delegationsPerTaskRemaining).toBeNull();
+  });
+
+  it('C3a: states the REMAINING fan-out allowance (maxPerTask minus what this task already spent)', () => {
+    const task = fixtureTask({ owner: 'mgr', department: 'eng' });
+    // Three hand-offs already opened from this task, cap 4 → one child left, not "up to 4".
+    const partlySpent = computeTurnFacts({
+      config,
+      employee: employee('mgr'),
+      task,
+      snapshot: emptySnapshot(task, {
+        delegationsFromTask: 3,
+        budgets: { ...emptySnapshot(task).budgets, delegation: { maxPerTask: 4 } },
+      }),
+    });
+    expect(partlySpent.delegationsPerTaskRemaining).toBe(1);
+
+    // Spent past the cap (a re-queued turn) never advertises a negative allowance.
+    const overspent = computeTurnFacts({
+      config,
+      employee: employee('mgr'),
+      task,
+      snapshot: emptySnapshot(task, {
+        delegationsFromTask: 6,
+        budgets: { ...emptySnapshot(task).budgets, delegation: { maxPerTask: 4 } },
+      }),
+    });
+    expect(overspent.delegationsPerTaskRemaining).toBe(0);
+  });
+
+  it('C3b: does not advertise a department the ORCHESTRATOR itself manages (resolves to self)', () => {
+    // The lint permits the orchestrator to manage a department; `department:eng` then resolves to the
+    // orchestrator and the planner refuses it as self_delegation, so the fact list must omit it.
+    const managed = fixtureConfig();
+    const eng = managed.departments.get('eng') as NonNullable<
+      ReturnType<typeof managed.departments.get>
+    >;
+    managed.departments.set('eng', { ...eng, manager: 'lead' });
+    const task = fixtureTask({ owner: 'lead', department: null });
+    const facts = computeTurnFacts({
+      config: managed,
+      employee: managed.employees.get('lead') as NonNullable<
+        ReturnType<typeof managed.employees.get>
+      >,
+      task,
+      snapshot: emptySnapshot(task),
+    });
+    expect(facts.legalTargets).not.toContain('department:eng'); // resolves to self
+    expect(facts.legalTargets).toContain('department:growth'); // still legal
   });
 
   it('reports live workforce spend only where the snapshot carries the state view', () => {

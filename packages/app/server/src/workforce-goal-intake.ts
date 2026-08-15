@@ -24,7 +24,7 @@ import type { WorkforceGoalIntake, WorkforceGoalOutcome } from '@rayspec/api-aut
 import type { ExecutionPlan, OrchestrationStrategy } from '@rayspec/core';
 import { type Db, forTenant } from '@rayspec/db';
 import type { WorkforceConfig } from '@rayspec/spec';
-import { createRootTask } from '@rayspec/tasks';
+import { createRootTask, MAX_TASK_DEPENDENCIES, MAX_TASK_TITLE_CHARS } from '@rayspec/tasks';
 
 export interface WorkforceGoalIntakeDeps {
   /** The WORKER pool handle (never the HTTP pool) — the same pool the dispatcher runs on. */
@@ -36,10 +36,10 @@ export interface WorkforceGoalIntakeDeps {
   readonly strategy: OrchestrationStrategy;
 }
 
-/** The row bounds `createRootTask` enforces; pre-checked so a refusal is a typed plan refusal
- * with the step named, never a mid-transaction schema throw. */
-const MAX_STEP_TITLE_CHARS = 200;
-const MAX_STEP_DEPENDENCIES = 100;
+// The row bounds `createRootTask` enforces are pre-checked here so a refusal is a typed plan refusal
+// with the step named, never a mid-transaction schema throw — REFERENCING the same exported
+// constants (`MAX_TASK_TITLE_CHARS`, `MAX_TASK_DEPENDENCIES`) so this pre-check can never drift from
+// what the creation schema will actually accept.
 
 /**
  * Validate a returned plan against the declared workforce. Returns the refusal detail, or null
@@ -60,12 +60,12 @@ function planRefusal(plan: ExecutionPlan, config: WorkforceConfig): string | nul
         `declared department is ${employee.department === null ? 'none' : `'${employee.department}'`}`
       );
     }
-    if (step.title.length === 0 || step.title.length > MAX_STEP_TITLE_CHARS) {
-      return `step ${index} carries a title outside 1..${MAX_STEP_TITLE_CHARS} characters`;
+    if (step.title.length === 0 || step.title.length > MAX_TASK_TITLE_CHARS) {
+      return `step ${index} carries a title outside 1..${MAX_TASK_TITLE_CHARS} characters`;
     }
     if (step.goal.length === 0) return `step ${index} carries an empty goal`;
-    if (step.dependsOn.length > MAX_STEP_DEPENDENCIES) {
-      return `step ${index} declares ${step.dependsOn.length} dependencies (the row bound is ${MAX_STEP_DEPENDENCIES})`;
+    if (step.dependsOn.length > MAX_TASK_DEPENDENCIES) {
+      return `step ${index} declares ${step.dependsOn.length} dependencies (the row bound is ${MAX_TASK_DEPENDENCIES})`;
     }
     for (const dep of step.dependsOn) {
       if (!Number.isInteger(dep) || dep < 0 || dep >= index) {

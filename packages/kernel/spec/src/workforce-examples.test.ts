@@ -2,8 +2,14 @@
  * The shipped workforce examples are EXECUTABLE TRUTH, pinned in CI: both parse and lint clean
  * with the experimental section enabled (no errors, no warnings — a rule keyed on a capability
  * nobody holds would warn here), and both are refused typed without it, at the same entry point
- * an author's document takes. The acceptance story additionally DEPLOYS the starter file
- * byte-for-byte; this suite is what keeps the larger example honest too.
+ * an author's document takes. That is the FULL scope of what CI guarantees for BOTH examples —
+ * parse/lint clean, refused without the flag.
+ *
+ * The STARTER carries two gates the maintainers example does NOT: the acceptance story deploys it
+ * byte-for-byte end to end (`workforce-story-e2e.db.test.ts`), and the spec-reference doc quotes its
+ * `workforce:` block byte-for-byte (`workforce-docs-drift.test.ts`). The maintainers example is not
+ * quoted in the docs and is not driven end to end, so it has no docs byte-identity gate — and this
+ * header, not a byte comparison, is what says so.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';

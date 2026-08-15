@@ -7,7 +7,7 @@
 import type { ExecutionPlan, OrchestrationInput, OrchestrationStrategy } from '@rayspec/core';
 import type { Db } from '@rayspec/db';
 import { deriveWorkforceConfig, WorkforceSpec } from '@rayspec/spec';
-import { forTenant, makeTestDb, resetTaskSchema } from '@rayspec/tasks/test-support';
+import { makeTestDb, resetTaskSchema } from '@rayspec/tasks/test-support';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildWorkforceGoalIntake } from './workforce-goal-intake.js';
 

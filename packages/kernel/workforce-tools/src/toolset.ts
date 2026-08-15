@@ -28,6 +28,8 @@ import {
   ESCALATION_REASONS,
   MAX_MESSAGE_BODY_CHARS,
   MAX_MESSAGES_PER_TURN,
+  MAX_TASK_TEXT_BYTES,
+  MAX_TASK_TITLE_CHARS,
   type TaskRecord,
   turnIntentSchema,
   workerResultSchema,
@@ -80,21 +82,26 @@ export function assertNoReservedCollisions(agentTools: readonly NeutralTool[]): 
 
 /**
  * The cap on a hand-off's goal and description — the message-body rationale one channel over: a
- * delegated goal renders VERBATIM (and, by design, untrimmably) into the child's turn input, so
- * an uncapped goal is a way to make a child's context whatever the delegating turn wants it to
- * be, at a size nothing else in a turn may reach. Matches the HTTP intake's ceiling, so no
- * hand-off can mint what the operator surface refuses.
+ * delegated goal renders VERBATIM (and, by design, UNTRIMMABLY) into the child's turn input, so an
+ * uncapped goal is a way to make a child's context whatever the delegating turn wants it to be, at
+ * a size nothing else in a turn may reach. Enforced in BYTES via the SHARED `MAX_TASK_TEXT_BYTES`
+ * (@rayspec/tasks): the turn-input section budget is in bytes, so a CHAR cap here would let a ~15k
+ * CJK goal pass creation and then brick every dispatch on `GoalExceedsContextBudgetError`. Same
+ * constant the engine's own creation schema and the HTTP intake enforce, so no hand-off can mint
+ * what those surfaces refuse.
  */
-const MAX_HANDOFF_TEXT_CHARS = 16_384;
+const withinHandoffBytes = (text: string): boolean =>
+  Buffer.byteLength(text, 'utf8') <= MAX_TASK_TEXT_BYTES;
+const handoffBytesMessage = `must be at most ${MAX_TASK_TEXT_BYTES} bytes`;
 
 const delegateArgsSchema = z.strictObject({
   tasks: z
     .array(
       z.strictObject({
         target: z.string().min(1),
-        title: z.string().min(1).max(200),
-        goal: z.string().min(1).max(MAX_HANDOFF_TEXT_CHARS),
-        description: z.string().min(1).max(MAX_HANDOFF_TEXT_CHARS).optional(),
+        title: z.string().min(1).max(MAX_TASK_TITLE_CHARS),
+        goal: z.string().min(1).refine(withinHandoffBytes, handoffBytesMessage),
+        description: z.string().min(1).refine(withinHandoffBytes, handoffBytesMessage).optional(),
         priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
       }),
     )
@@ -102,9 +109,9 @@ const delegateArgsSchema = z.strictObject({
 });
 
 const createArgsSchema = z.strictObject({
-  title: z.string().min(1).max(200),
-  goal: z.string().min(1).max(MAX_HANDOFF_TEXT_CHARS),
-  description: z.string().min(1).max(MAX_HANDOFF_TEXT_CHARS).optional(),
+  title: z.string().min(1).max(MAX_TASK_TITLE_CHARS),
+  goal: z.string().min(1).refine(withinHandoffBytes, handoffBytesMessage),
+  description: z.string().min(1).refine(withinHandoffBytes, handoffBytesMessage).optional(),
   priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
 });
 
@@ -275,9 +282,9 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
                 type: 'object',
                 properties: {
                   target: { type: 'string', minLength: 1 },
-                  title: { type: 'string', minLength: 1, maxLength: 200 },
-                  goal: { type: 'string', minLength: 1, maxLength: 16_384 },
-                  description: { type: 'string', minLength: 1, maxLength: 16_384 },
+                  title: { type: 'string', minLength: 1, maxLength: MAX_TASK_TITLE_CHARS },
+                  goal: { type: 'string', minLength: 1, maxLength: MAX_TASK_TEXT_BYTES },
+                  description: { type: 'string', minLength: 1, maxLength: MAX_TASK_TEXT_BYTES },
                   priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
                 },
                 required: ['target', 'title', 'goal'],
@@ -332,9 +339,9 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
         parameters: {
           type: 'object',
           properties: {
-            title: { type: 'string', minLength: 1, maxLength: 200 },
-            goal: { type: 'string', minLength: 1, maxLength: 16_384 },
-            description: { type: 'string', minLength: 1, maxLength: 16_384 },
+            title: { type: 'string', minLength: 1, maxLength: MAX_TASK_TITLE_CHARS },
+            goal: { type: 'string', minLength: 1, maxLength: MAX_TASK_TEXT_BYTES },
+            description: { type: 'string', minLength: 1, maxLength: MAX_TASK_TEXT_BYTES },
             priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
           },
           required: ['title', 'goal'],
@@ -368,9 +375,9 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
           type: 'object',
           properties: {
             target: { type: 'string', minLength: 1 },
-            title: { type: 'string', minLength: 1, maxLength: 200 },
-            goal: { type: 'string', minLength: 1, maxLength: 16_384 },
-            description: { type: 'string', minLength: 1, maxLength: 16_384 },
+            title: { type: 'string', minLength: 1, maxLength: MAX_TASK_TITLE_CHARS },
+            goal: { type: 'string', minLength: 1, maxLength: MAX_TASK_TEXT_BYTES },
+            description: { type: 'string', minLength: 1, maxLength: MAX_TASK_TEXT_BYTES },
             priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
           },
           required: ['target', 'title', 'goal'],

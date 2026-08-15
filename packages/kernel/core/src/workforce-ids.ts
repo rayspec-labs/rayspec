@@ -52,6 +52,14 @@ export const RESERVED_WORKFORCE_TOOL_NAMES: ReadonlySet<string> = new Set([
 const BRIDGED_TOOL_NAME = /^mcp__[a-z0-9-]+__(?<tool>.+)$/;
 
 /**
+ * The CANONICAL bridged-name pattern SOURCE. The turn-ending detector one package over
+ * (`workforce-tools/roles.ts`) needs the SAME predicate (widening one alone reopens the bridged-
+ * spelling gap this closes), and there is no cross-package regex identity — so it asserts its own
+ * copy against THIS source at module load. Exported for that drift assert, not for re-compilation.
+ */
+export const BRIDGED_TOOL_NAME_SOURCE = BRIDGED_TOOL_NAME.source;
+
+/**
  * Does a declared tool name SPELL a reserved native — exactly, or through the bridged
  * `mcp__<x>__<tool>` form one adapter records verbatim on transcripts? The bridged spelling is
  * refused with the exact one because the transcript check that detects attempted turn endings

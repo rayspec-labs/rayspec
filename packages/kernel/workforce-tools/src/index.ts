@@ -22,6 +22,7 @@ export {
 export {
   assembleTurnInput,
   CHILD_RESULT_MAX_BYTES,
+  ContextInputOverflowError,
   ContextSectionOverflowError,
   GoalExceedsContextBudgetError,
   SECTION_BUDGETS,

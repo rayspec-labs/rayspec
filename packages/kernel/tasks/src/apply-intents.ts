@@ -49,6 +49,7 @@ import { TaskNotFoundError, TaskRowCorruptError, TaskVersionConflictError } from
 import { appendTaskEvents } from './events.js';
 import { deterministicChildTaskId } from './ids.js';
 import {
+  classificationForIntent,
   invalidIntentPlan,
   MAX_MESSAGE_BODY_CHARS,
   MAX_MESSAGES_PER_TURN,
@@ -274,7 +275,7 @@ async function readReviewAssignment(
     .select(schema.workforceTasks)
     .where(eq(schema.workforceTasks.taskId, task.parentTaskId))) as TaskRecord[];
   const parent = rows[0];
-  if (!parent || parent.status !== 'waiting_for_review') return null;
+  if (parent?.status !== 'waiting_for_review') return null;
   const binding = joinPolicySchema.safeParse(parent.joinPolicy);
   if (!binding.success || binding.data.policy !== 'review') return null;
   if (binding.data.reviewTaskId !== task.taskId || binding.data.reviewId === undefined) return null;
@@ -1143,10 +1144,19 @@ export async function applyTurnOutcome(
     // this transaction rejected), never beside an outcome that refused or overrode the decision
     // itself (`delegation_rejected`, a consumed `cancel`). `complete_with_review` keeps it — the
     // decision stood and policy ADDED review, and the journal deliberately records both facts.
-    // The engine owns this presence rule so no caller, shipped or embedded, can journal a
-    // decision that never existed.
+    //
+    // AND it must NAME the intent it rode with: the engine RE-DERIVES the classification from the
+    // typed intent it actually applied (`classificationForIntent`, the same map the composition's
+    // deriver uses) and suppresses a caller-supplied value that disagrees — so an embedded caller
+    // cannot journal `escalate` beside an accepted `complete`. Whether the caller derived correctly
+    // is not trusted; the presence AND the value are the engine's to own, so no caller can journal a
+    // decision that never existed. (The caller still gates non-decision seats to null.)
+    const derivedClassification = parsedIntent.success
+      ? classificationForIntent(parsedIntent.data)
+      : null;
     const journaledClassification =
       classification !== null &&
+      classification === derivedClassification &&
       parsedIntent.success &&
       plan.kind !== 'invalid_intent' &&
       plan.kind !== 'delegation_rejected' &&

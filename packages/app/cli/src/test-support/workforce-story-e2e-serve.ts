@@ -81,7 +81,11 @@ function scriptFor(spec: AgentSpec): TurnScript {
           args: {
             tasks: [
               {
-                target: 'department:eng',
+                // THE TEAM LEG (DoD-4): the engineering work goes to the declared TEAM, which
+                // resolves to its lead (mgr_eng) — the same seat department:eng would resolve to, so
+                // the tree and dollars are unchanged, but the run now drives `team:` end to end: the
+                // lead fans out to the team's members (policy all) and synthesizes on join.
+                target: 'team:release_crew',
                 title: 'Engineering',
                 goal: 'Analyze the onboarding friction and verify the fix.',
               },

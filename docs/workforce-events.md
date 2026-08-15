@@ -24,7 +24,7 @@ The journal event vocabulary is:
 | Event | Stream | Payload fields |
 | --- | --- | --- |
 | `workforce.task.created` | task | `taskId`, `parentTaskId`, `rootTaskId`, `owner`, `requestedBy`, `goal`, `priority` |
-| `workforce.task.queued` | task | `taskId`, `parentTaskId`, `owner`, `requestedBy`, `priority`, `queueReason` (`initial`, or the absorbing signal kind — WHY the task woke) |
+| `workforce.task.queued` | task | `taskId`, `parentTaskId`, `owner`, `requestedBy`, `priority`, `queueReason` — WHY the task (re)queued: `initial` (first queue), `turn_yield` (a turn ended without a turn-ending tool), `tool_error` (the one-retry re-queue after a refused ending), `turn_reaped` (a dead turn the sweeper re-queued), `review_verdict` (a reject→rework re-queue), or the absorbing SIGNAL KIND (`user_reply`, `approval_decided`, `budget_raised`, … — the wake that re-queued a parked task) |
 | `workforce.task.turn_started` | task | `taskId`, `turnNumber`, `turnId` (the dispatched workflow id — the claim), `owner` |
 | `workforce.task.turn_ended` | task | `taskId`, `turnId`, `turnNumber`, `outcome` (the applied plan kind), `costUsd`, `classification?` (`direct` \| `delegate` \| `team` \| `review` \| `escalate` — present on orchestrator and manager turns whose typed intent was accepted AND applied as that decision; absent on worker turns, refused endings, and outcomes that refused or overrode the decision itself — a rejected delegation, a consumed cancel. `complete_with_review` keeps it: the decision stood and policy added review. Derived server-side from the typed intent, never from model prose; the engine enforces the presence rule, so no caller can journal a decision that never existed) |
 | `workforce.task.transitioned` | task | `taskId`, `from`, `to`, `statusReason`, `actor` |
@@ -42,7 +42,7 @@ The journal event vocabulary is:
 | `workforce.delegation.rejected` | task (parent) | `parentTaskId`, `childTaskId`, `delegatedBy`, `delegatedTo`, `resolvedOwner`, `reason` (`depth_exceeded` \| `fanout_exceeded` \| `self_delegation` \| `delegation_cycle`), `detail` |
 | `workforce.budget.reserved` | task | `taskId`, `turnNumber`, `turnId`, `estimateUsd`, `reservedAt` — the claim's own durable reservation record; the reaper's release reads exactly this entry back |
 | `workforce.budget.settled` | task | `taskId`, `estimateUsd`, `actualUsd`, `turnNumber` |
-| `workforce.budget.exceeded` | task | `taskId`, `scopeKind` (`task` \| `root` \| `department` \| `workforce`), `scopeId`, `ceiling`, `consumed`, `onBudgetExhausted` |
+| `workforce.budget.exceeded` | task | TWO shapes. The exceedance itself, on the OFFENDING task: `taskId`, `scopeKind` (`task` \| `root` \| `department` \| `workforce`), `scopeId`, `ceiling`, `consumed`, `onBudgetExhausted`. On the `block_and_escalate` path a SECOND `budget.exceeded` lands on the ROOT: `taskId` (the root), `escalatedFrom` (the offending task), `scopeKind`, `scopeId`, `unblock` (the human-facing remedy) — and NOT `ceiling`/`consumed`/`onBudgetExhausted` |
 | `workforce.budget.escalation_deferred` | task (root) | `taskId`, `escalatedFrom`, `scopeKind`, `scopeId`, `park`, `surfacesWhen` — an exceedance whose escalation the root's park refused; for a structural park this event is the whole notification |
 | `workforce.control.paused` | workforce | `workforceId`, `actor`, `drain` |
 | `workforce.control.resumed` | workforce | `workforceId`, `actor` |
@@ -52,10 +52,18 @@ The journal event vocabulary is:
 
 ## Reading the journal
 
-- `GET /v1/workforce/tasks/:id/events` replays one task's stream as SSE, resumable by
+- `GET /v1/workforce/tasks/:id/events` replays one TASK's stream as SSE, resumable by
   `Last-Event-ID`; `rayspec workforce events <task-id>` is the same replay parsed to JSON.
 - The tree and cost views read the same durable rows — there is no shadow observability system,
   so what an event says and what a view shows can never come from two places.
+
+**Honest scope — what the shipped surface does NOT replay.** The only replay endpoint reads the
+TASK stream (`run_id = <taskId>`). The workforce-scoped **`workforce.control.*`** events
+(`paused`/`resumed`/`halted`, written under `run_id = workforce:<workforceId>`) and the root-scoped
+budget-escalation events are DURABLY WRITTEN with the same versioned vocabulary, but the reference
+orchestration ships no reader that replays the `workforce:<workforceId>` stream — a consumer that
+wants control history reads that `run_id` from `run_events` itself. Documenting the control vocabulary
+here is a forward contract for such a consumer, not a claim that a shipped endpoint serves it.
 
 ## Notable semantics
 
