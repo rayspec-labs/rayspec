@@ -13,7 +13,7 @@
  * without touching this checkout. The throwaway packages carry `dist` and NO `src`, which is also how
  * this test pins the "derived from the built declarations, not from source" contract.
  *
- * Eleven cases, so a pass means something:
+ * Twelve cases, so a pass means something:
  *
  *   (Z) NO package declares the marker — PASSES, and says the set was empty rather than staying quiet.
  *   (C) a declared, populated, up-to-date package PASSES, the count is reported, and the written
@@ -38,6 +38,10 @@
  *       an unreadable export is never dropped quietly.
  *   (O) a report whose package no longer declares the marker FAILS — a guard cannot retire itself by
  *       leaving its artifact behind.
+ *   (Y) a re-export CYCLE reached through one entry point does not blind another: the name behind it
+ *       keeps its declaration, retyping that declaration FAILS, and neither fact depends on which
+ *       entry point is read first. One cache is shared by all of a package's entry points, so a
+ *       surface truncated by a cycle break must not be memoised for the next reader.
  *
  * Standalone (no test framework is wired for the gate scripts): `node <thisfile>`; exit 0 = pass.
  */
@@ -534,6 +538,89 @@ export declare function run(): void;
       assert.match(r.err, /api-report\.md/, '(O) the orphaned report must be named');
     }
     console.log('ok (O) — a report whose package dropped the marker fails instead of rotting');
+  }
+
+  // ── (Y) a re-export cycle behind ONE entry point must not blind ANOTHER ───────────────────────
+  // One `cache` is shared by every entry point of a package. A surface computed while a cycle was
+  // open is truncated by that break, and the truncation is valid ONLY for the entry point that
+  // opened it. Caching it handed the truncation to the next reader: `A` — declared right there in
+  // `a.d.ts` — rendered as a bodiless "declared outside the readable declaration closure" line, and
+  // every later change to that declaration passed the gate GREEN. The declaration recorded for a
+  // name must not depend on which entry point happened to be read first.
+  {
+    const twoEntryPoints = (altFirst) =>
+      `${JSON.stringify(
+        {
+          name: '@throwaway/contract',
+          version: '0.0.0',
+          private: true,
+          type: 'module',
+          exports: altFirst
+            ? {
+                './alt': { types: './dist/alt.d.ts' },
+                '.': { types: './dist/index.d.ts' },
+              }
+            : {
+                '.': { types: './dist/index.d.ts' },
+                './alt': { types: './dist/alt.d.ts' },
+              },
+          rayspecPublicApi: 'api-report.md',
+        },
+        null,
+        2,
+      )}\n`;
+    const cyclicDist = (aType) => ({
+      'pnpm-workspace.yaml': WORKSPACE_YAML,
+      'package.json': ROOT_MANIFEST,
+      // `index` -> `a` -> `b` -> `a` is the cycle; `alt` -> `b` -> `a` reaches `A` acyclically.
+      [`${PKG}/dist/index.d.ts`]: "export { X } from './a.js';\n",
+      [`${PKG}/dist/a.d.ts`]: `export { X } from './b.js';\nexport declare const A: ${aType};\n`,
+      [`${PKG}/dist/b.d.ts`]: "export { A } from './a.js';\nexport declare const X: string;\n",
+      [`${PKG}/dist/alt.d.ts`]: "export { A } from './b.js';\n",
+    });
+    const BODILESS = 'declared outside the readable declaration closure';
+
+    for (const altFirst of [false, true]) {
+      const order = altFirst ? 'alt-first' : 'index-first';
+      const { ws, script } = throwawayRepo({
+        ...cyclicDist('string'),
+        [`${PKG}/package.json`]: twoEntryPoints(altFirst),
+      });
+      created.push(ws);
+      assert.equal(
+        runGate(script, ['--write']).code,
+        0,
+        `(Y) the cyclic fixture must regenerate (${order})`,
+      );
+      const report = readFileSync(join(ws, PKG, 'api-report.md'), 'utf8');
+      assert.ok(
+        !report.includes(BODILESS),
+        `(Y) no name declared inside the package may be recorded bodiless (${order})`,
+      );
+      assert.ok(
+        report.includes('export declare const A: string;'),
+        `(Y) the declaration behind the cycle must be recorded (${order})`,
+      );
+      assert.ok(
+        report.includes('export declare const X: string;'),
+        `(Y) the declaration on the cyclic path must be recorded too (${order})`,
+      );
+
+      // The accept control: retyping that declaration must be caught. This exited 0 before the fix.
+      writeFileSync(join(ws, PKG, 'dist/a.d.ts'), cyclicDist('number')[`${PKG}/dist/a.d.ts`]);
+      const changed = runGate(script, []);
+      assert.notEqual(
+        changed.code,
+        0,
+        `(Y) retyping a declaration reached through a cycle must FAIL (${order})`,
+      );
+      assert.match(
+        changed.err,
+        /const A/,
+        `(Y) the changed declaration must appear in the diff (${order})`,
+      );
+    }
+    console.log('ok (Y) — a cycle behind one entry point does not blind another');
   }
 
   console.log('\npublic-api-report gate regression: ALL CASES PASSED');

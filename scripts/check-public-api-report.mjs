@@ -520,12 +520,24 @@ function resolveDeclaration(fromFile, specifier) {
  * The exported surface of one declaration file: every name a consumer can import from it, resolved
  * through relative re-exports, plus the opaque star re-exports it forwards from other packages.
  * `cache` memoises per file; `open` breaks a re-export cycle.
+ *
+ * A surface computed WHILE a cycle was open is truncated by that break, and the truncation is only
+ * valid for the entry point that opened the cycle. One `cache` is shared by every entry point of a
+ * package, so caching such a surface would hand the truncation to a later, acyclic entry point:
+ * a name whose declaration sits inside the package would render as a bodiless "declared outside the
+ * readable declaration closure" line, and every later change to that declaration would pass the gate
+ * green. `truncated` therefore travels up the recursion, and a file whose computation consumed a
+ * break is recomputed for the next reader instead of memoised.
  */
-function surfaceOf(file, cache, open = new Set()) {
+function surfaceOf(file, cache, open = new Set(), truncated) {
   const cached = cache.get(file);
   if (cached) return cached;
-  if (open.has(file)) return { names: new Map(), opaque: [] };
+  if (open.has(file)) {
+    if (truncated) truncated.value = true;
+    return { names: new Map(), opaque: [] };
+  }
   open.add(file);
+  const mine = { value: false };
 
   const mod = parseDeclarationFile(file);
   const names = new Map();
@@ -545,23 +557,29 @@ function surfaceOf(file, cache, open = new Set()) {
           '  The surface cannot be read completely, so the report is not written.',
       );
     }
-    const inner = surfaceOf(target, cache, open);
+    const inner = surfaceOf(target, cache, open, mine);
     for (const [name, entry] of inner.names) names.set(name, entry);
     opaque.push(...inner.opaque);
   }
 
   for (const [exported, origin] of mod.exports) {
-    names.set(exported, resolveOrigin(file, mod, origin, cache, open));
+    names.set(exported, resolveOrigin(file, mod, origin, cache, open, mine));
   }
 
   open.delete(file);
   const surface = { names, opaque };
-  cache.set(file, surface);
+  // Memoise only a surface that no cycle break truncated (see the docblock); otherwise report the
+  // truncation upward so every consumer of it is left uncached too.
+  if (mine.value) {
+    if (truncated) truncated.value = true;
+  } else {
+    cache.set(file, surface);
+  }
   return surface;
 }
 
 /** Where one exported name is declared, and the declaration text to print for it. */
-function resolveOrigin(file, mod, origin, cache, open) {
+function resolveOrigin(file, mod, origin, cache, open, truncated) {
   if (origin.kind === 'namespace') {
     // `export * as ns from '…'` is opaque only when the module leaves the package. A RELATIVE
     // specifier is inside this package's own readable closure — treating it as foreign would hide
@@ -574,7 +592,11 @@ function resolveOrigin(file, mod, origin, cache, open) {
           'file.\n  The surface cannot be read completely, so the report is not written.',
       );
     }
-    return { namespace: origin.module, file: target, surface: surfaceOf(target, cache, open) };
+    return {
+      namespace: origin.module,
+      file: target,
+      surface: surfaceOf(target, cache, open, truncated),
+    };
   }
   if (origin.kind === 'from' || origin.kind === 'local') {
     const via =
@@ -597,7 +619,7 @@ function resolveOrigin(file, mod, origin, cache, open) {
       // A re-export cycle leaves the inner surface deliberately empty (see `surfaceOf`), which is not
       // the same fact as "the module does not have this name" — so note it before the lookup.
       const cyclic = open.has(target);
-      const inner = surfaceOf(target, cache, open);
+      const inner = surfaceOf(target, cache, open, truncated);
       // `import * as ns from './local.js'; export { ns };` is the same promise as `export * as ns from
       // './local.js'`, and tsc emits it for a grouped export written that way. It is inside this
       // package's own readable closure, so it is read through rather than left as one unchanging line.
