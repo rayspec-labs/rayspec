@@ -49,9 +49,12 @@ export type {
   StreamRouteHandlerInit,
   // The neutral speech-to-text CONTRACT (defined open-core in @rayspec/handler-sdk) — re-exported
   // here so a platform consumer (the api-auth declarative engine) types its stt-injection seam
-  // against the one @rayspec/platform package, exactly like the blob/fs-source contracts above.
+  // against the one @rayspec/platform package, exactly like the blob/fs-source contracts above. The
+  // RESULT type travels with it for the SAME reason the tts one does (just below): a consumer — or a
+  // test stand-in for the capability — can NAME what `transcribe` returns from this one package.
   SttCapability,
   SttTranscribeOptions,
+  SttTranscriptionResult,
   // The neutral text-to-speech CONTRACT (defined open-core in @rayspec/handler-sdk) — re-exported
   // here so a platform consumer (the api-auth declarative engine) types its tts-injection seam
   // against the one @rayspec/platform package, exactly like the stt contract above. The RESULT type

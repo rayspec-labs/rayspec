@@ -1,5 +1,6 @@
 /**
- * The BACKEND-profile speech-to-text capability — what a route/tool handler receives as `init.stt`.
+ * The BACKEND-profile speech-to-text capability — what a route, tool or trigger handler receives as
+ * `init.stt`.
  *
  * The neutral `SttAdapter` port is REFERENCE-keyed: `transcribeTrack` takes a finalized session/track
  * ref and the adapter asks its injected `SttMediaResolver` for the bytes (the product profile resolves
